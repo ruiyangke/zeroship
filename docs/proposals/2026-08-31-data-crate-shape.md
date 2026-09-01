@@ -290,6 +290,53 @@ which half.
   channel would not - two of the three upward calls are *pull queries* inside the drop loop,
   and a channel lets suppressed-window events queue past the guard.
 
+### ENGINE <-> SQLITE: a dedicated round, two answers in, one reviewer still out
+
+The two mechanisms the first round proposed - re-tier `broker.rs`, or port the call sites behind a
+`ChangeSink` - were put to three reviewers as a single question, with the correction below already
+supplied so nobody could re-derive it. **Both reviewers who have returned rejected BOTH mechanisms
+and proposed a third, and the two thirds are different from each other.** Codex is still running;
+this section is incomplete by construction and must not be read as settled.
+
+**The correction they were given.** "`broker.rs` is nearly a leaf" is true of broker and misleading
+as a re-tiering basis, because it stops one level short. `broker.rs`'s production `crate::` edges
+are exactly two - `error::DbError` (`:62`) and `read_set::ReadSetEntry` (`:63`) - but `read_set.rs`
+is not a leaf: `lower_operand` (`:346`, ungated production) calls `crud/mask_pass.rs:238`. So
+re-tiering broker drags masking down with it.
+
+**Both reviewers then found the same thing one level deeper, independently, and I verified it:**
+`read_set.rs:445` `record_if_active` is ungated production and its body at `:449-452` calls
+`zeroship_runtime::rpc::current_kind()`. That is a dependency on the **V8 runtime crate**, in an
+ENGINE-tier file, and it means `read_set.rs` can never sink below rank 2 regardless of masking.
+Mechanism 1 is not expensive, it is impossible. Tracked as #117; both censuses are structurally
+blind to it (one reads `crate::`-rooted paths only, the other reads signature text, and this is a
+foreign crate named in a body).
+
+| | opus | fable |
+| --- | --- | --- |
+| mechanism | **split `broker.rs`.** The suppression gate (two `std`-only statics + accessors) is a genuine leaf and moves to CORE; the subscriber registry stays ENGINE; only `publish` ports, behind `ChangeSink` | **sever one type edge, then sink the whole bus.** Replace `SubscriptionInner.read_set: Option<Vec<ReadSetEntry>>` (`broker.rs:205`) with an opaque `EventFilter(Box<dyn Fn(&ChangeEvent) -> bool + Send>)` built by `read_set.rs`; `broker.rs` is then a true leaf and re-tiers to CORE whole |
+| what moves | gate + both guards to CORE; `ChangeSink` port in CORE; `BrokerSink` impl in ENGINE | nothing but `broker.rs`'s tier label and one field's type |
+| `cdc.rs:543/:547/:646` | `:543`/`:547` collapse to one `delivery_verdict()` call (2N global mutex acquisitions per packet become N) | unchanged, byte for byte; they become downward references |
+| depends on #98? | yes - the port's `publish(&ChangeEvent)` must name the event type at CORE rank | **no** - once broker is CORE, `cdc.rs:86`'s import is already downward |
+
+**Where they agree, and it is the part that matters most.** Both independently found that the two
+pull queries are **dead on the SQLite path**: `cdc_lifecycle.rs:270` takes `SuppressGuard::activate`
+in the `BackendHandle::Postgres` arm and `:276-282` does not in the Sqlite arm, while
+`engage_schema_pending` and `pause_broker` have no production caller anywhere. I verified both.
+So the "preserves drop semantics" property that justified both original mechanisms **cannot
+discriminate between any of them today** - no current test can observe the difference. Tracked as
+#118. Whichever mechanism ships must wire the SQLite arm symmetrically in the same change, or the
+cycle gets broken around a check that never fires.
+
+**Fable additionally found a defect in the instrument, and it is fixed.** One of the eight
+`ENGINE -> SQLITE` down-edges came from `crud/mask_drift.rs`, whose sole declaration
+(`crud/mod.rs:91`) is one-arm gated at `:90` - test-only, in no production build. `prod()` had been
+taught to see an item-level `#[cfg]` inside a file (defect 4) but a per-file scan structurally
+cannot see a gate on the parent's `mod` line. **The true count is 7 down, not 8**, and the header's
+promise that its count is "a FLOOR" was wrong in that direction: for down-edges it could
+over-report. Fixed as defect 5, with the control pair proving a one-arm module's edges vanish and a
+two-arm module's survive; four files were excluded, not one.
+
 ### The security constraint, re-tested and restated
 
 The previous round's claim - that role application and statement must stay atomic in one
@@ -383,7 +430,46 @@ code did.
 
 ## What was decided
 
-Three choices, taken by the operator on 2026-08-31:
+### Two more, taken by the operator on 2026-09-01, and they bind everything below
+
+**4. NO RAW SQL IN THE ENGINE. It is vendor-neutral, and adding a database must require ZERO changes
+to `data-engine` - every statement goes through the query builder.**
+
+This is the acceptance test for decision 1, stated as an outcome rather than a task: if supporting a
+new vendor means editing `data-engine`, decision 1 has not landed. It also settles what
+`data-query-builder` is FOR - not a nicety, the only thing standing between the data plane and a
+second production dialect.
+
+**5. THE CORE AND EVERY OTHER NON-VENDOR CRATE NEVER EMBED A VENDOR DIRECTLY.**
+
+Not "should avoid" - never. This is already violated in the tree and the violation is filed (#97:
+`SchemaError.source` hands a `compio_postgres::Error` across a public field, which the manifest fence
+cannot catch because the type arrives by inference rather than by a path spelling). Decision 5 makes
+that a blocker rather than a finding.
+
+**The measured surface for decision 4, taken 2026-09-01 at `2e9178255`.** A naive grep for statement
+keywords in engine-tier files returns 57 hits. **Eight are production.** The rest sit past a
+column-0 `#[cfg(test)]` - all 24 in `exec.rs` (boundary `:605`), 19 of 20 in `transaction/mod.rs`
+(boundary `:1231`) - or inside `crud/mask_drift.rs`, whose module is one-arm gated at
+`crud/mod.rs:90`. Two further hits (`crud/system_fields_pass.rs:399`, `:428`) are ERROR MESSAGE
+STRINGS beginning "UPDATE patch attempted to overwrite...", not SQL; a keyword grep cannot tell the
+difference and neither could this document until someone opened the lines.
+
+| site | statement | disposition |
+| --- | --- | --- |
+| `crud/unmask.rs:540` / `:610` | fetch encrypted cell, PG `$1` / SQLite `?1` | query builder |
+| `crud/unmask.rs:675` / `:710` | fetch plaintext cell, PG / SQLite | query builder |
+| `crud/unmask.rs:854` / `:916` | append audit row, PG / SQLite | query builder |
+| `drop_namespace.rs:155` | `DROP SCHEMA IF EXISTS {schema} CASCADE` | **not the builder.** DDL, and decision 10 already removed DDL from the data plane. This one survived. |
+| `transaction/mod.rs:761` | `BEGIN ISOLATION LEVEL {upper}` | **not the builder.** Transaction control - SQLite has no such syntax. Belongs to the vendor's session capability. |
+
+So decision 4 is **three logical operations in `crud/unmask.rs`**, each written twice because each
+carries its own dialect, plus two sites that are not query-builder work at all. That is the whole
+job, and it is far smaller than the crate-wide framing implies - but note WHY it is small: the
+search family was ported to the IR under #12, and unmask was explicitly deferred then to avoid a
+collision. This is that deferral coming due.
+
+### Three earlier choices, taken by the operator on 2026-08-31:
 
 1. **Finish `data-plan`.** One query builder. Wire the typed IR into the data plane and delete the
    string builder it was written to replace. Not "leave both and revisit".
