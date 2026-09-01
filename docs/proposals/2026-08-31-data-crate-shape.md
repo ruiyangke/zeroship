@@ -2181,6 +2181,56 @@ is cancelled - but it is a redesign of how `env.db` returns results, not a file 
 `run_op` (`:138`) and `reject_op` (`:236`) are the two of the 39 that take only `v8::Global`, never a
 `PinScope`. They are the shape the rest should be converted TO, not more work to be done.
 
+#### And that sentence understated it: the inversion is already written, and most of the surface runs on it
+
+Measured 2026-09-01, and it revises the round-6 verdict downward. `run_op`'s signature **is** the
+protocol inversion both reviewers designed:
+
+```rust
+async fn run_op<R, EFut, Resolve>(
+    resolver: v8::Global<v8::PromiseResolver>,        // adapter handle, scope-free
+    request_id: Option<u64>,
+    build_result: Result<query::BuiltQuery, DbError>, // ENGINE data in
+    exec: impl FnOnce(query::BuiltQuery) -> EFut,     // ENGINE work
+    resolve: Resolve,                                 // ADAPTER lowering out
+) -> OpResult
+where
+    EFut: Future<Output = Result<R, DbError>>,        // engine returns Result<_, DbError>
+    Resolve: FnOnce(R) -> ResolveValue;               // adapter maps it to the runtime type
+```
+
+`EFut: Future<Output = Result<R, DbError>>` is "the engine returns `Result<DomainValue, DbError>`".
+`Resolve: FnOnce(R) -> ResolveValue` is "the adapter owns settlement". Both were proposed in round 6 as
+the redesign 0.1 needs; both have been in the tree the whole time.
+
+**Coverage, per dispatch:**
+
+```
+uses run_op (9)   delete_one, delete_many, purge_one, purge_many, restore_one,
+                  restore_many, aggregate, distinct, count
+hand-rolled (8)   find, insert, insert_many, update_one, update_many, upsert,
+                  search (5 futures), near (2)
+```
+
+So 0.1's CRUD half is **converting eight dispatches to a helper nine already use**, not authoring a
+protocol. Each conversion is independently compilable and independently testable, which is the
+opposite of the "rewrite no number prices" this document settled on hours earlier.
+
+**What that does NOT cover, and why the item is still real:**
+
+- **`dispatch_search` hand-rolls five futures and `dispatch_near` two**, because `run_op` takes a
+  single `build_result` and those dispatches reject on several distinct argument-shape failures before
+  they have a query to build. Either `run_op` grows a "reject early" arm or those rejections move into
+  the builder. That is a design choice, not a mechanical conversion.
+- **`transaction/mod.rs` is untouched by any of this.** Its `ResolveValue::Continuation` at `:407` is
+  built after two awaits and hands a closure back into V8; `run_op` has no shape for that. The
+  transaction half of 0.1 stands exactly as round 6 described it.
+
+**The lesson is about the review, not the code.** Three rounds and two reviewers characterised 0.1 as
+an unpriced rewrite, and one of them wrote the sentence above that says otherwise. Nobody counted how
+many dispatches already used the helper - the question "how much of this is already done" was never
+asked, of a surface everyone had read.
+
 **And the original item then collapses into a rounding error.** Every engine-tier `to_op_error` call
 site - **44 of 44, no exceptions** (43 as first counted, plus `crud/mask_policy.rs:449`, which the
 census's broken test boundary hid) - sits inside one of those V8-signature functions. `error.rs`
