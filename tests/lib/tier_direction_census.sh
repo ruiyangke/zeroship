@@ -106,6 +106,34 @@
 #      neighbour closed its body inline.
 #      Cost of the miss: two FALSE cycles and one false task.
 #
+#   5. TEST-ONLY MODULES WERE SCANNED AS PRODUCTION. Documented in full beside
+#      `declared_test_only()` below, because the fix IS that function.
+#
+#   6. A SELF-REFERENCE SKIP KEYED ON THE FIRST PATH SEGMENT, so every file
+#      under backend/ computed selfmod=backend and discarded every
+#      `crate::backend...` target - the exact region three open design tasks
+#      are about. Defect 2 had already re-keyed tier_of_file to the FULL path
+#      so backend/postgres.rs and backend/sqlite/* would land in different
+#      tiers; this line kept the old key, so the files were judged as three
+#      tiers while all their mutual references were thrown away as "self".
+#      It was also redundant: an intra-tier reference is already recorded as
+#      no edge and marked `ok`, which the default mode filters.
+#      FIX: the skip is deleted, and a CONTESTED target is now COUNTED and
+#      listable (`--dropped`) instead of silently discarded.
+#      MEASURED with a four-tree control, one variable apart. Removing the skip
+#      ALONE changed the violation count not at all (21 in all four trees) -
+#      the two mechanisms mask each other, and either fix alone reads as a
+#      no-op. Together they took the dropped count from 60 to 66; the six are
+#      backend/{postgres.rs,sqlite/{cdc,dialect,mod,spatial,vector}.rs}
+#      -> crate::backend.
+#      Cost of the miss: NOT a wrong verdict, but a blind one. The header's
+#      own peer rule - backend/sqlite/ must not name the Postgres decoder -
+#      was advertised and unenforced. It is clean today by luck.
+#      WHAT THE FIX REVEALS is larger than the defect: 66 references from
+#      tiered files reach SEVEN untiered targets, led by `crate::query` at 22
+#      and `crate::context` at 19. The query builder - the module decision 4
+#      routes ALL SQL through - has never been placed in the lattice at all.
+#
 # TIER CYCLES - the question a crate split actually asks.
 #   The per-edge verdict judges ONE edge at a time, so it structurally cannot
 #   see a cycle: ENGINE -> SQLITE is rank 3 -> 2 and therefore "ok", while
@@ -126,6 +154,7 @@
 #   tests/lib/tier_direction_census.sh              # violations + cycles
 #   tests/lib/tier_direction_census.sh --all        # every cross-tier edge
 #   tests/lib/tier_direction_census.sh --contested  # what is not being judged
+#   tests/lib/tier_direction_census.sh --dropped    # refs INTO what is not judged
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -269,7 +298,8 @@ declared_test_only() {
 }
 
 EDGES="$(mktemp)"
-trap 'rm -f "$EDGES"' EXIT
+DROPPED="$(mktemp)"
+trap 'rm -f "$EDGES" "$DROPPED"' EXIT
 
 n_test_only=0
 printf '%-9s %-34s %-10s %-26s %s\n' FROM FILE TO TARGET VERDICT
@@ -281,13 +311,42 @@ while read -r f; do
   # Defect 5: a module gated one-arm in its PARENT is in no production build.
   declared_test_only "$rel" && { n_test_only=$((n_test_only + 1)); continue; }
   sr=$(rank "$st")
-  # Own module name, for skipping self-references.
-  case "$rel" in */*) selfmod="${rel%%/*}" ;; *) selfmod="${rel%.rs}" ;; esac
 
+  # DEFECT 6, 2026-09-01. There used to be a self-reference skip here:
+  #
+  #     case "$rel" in */*) selfmod="${rel%%/*}" ;; *) selfmod="${rel%.rs}" ;; esac
+  #     [ "${tpath%%::*}" = "$selfmod" ] && continue
+  #
+  # It keyed on the FIRST PATH SEGMENT, so every file under `backend/` yielded
+  # `selfmod=backend` and silently discarded every `crate::backend...` target -
+  # in BOTH directions. Defect 2 re-keyed `tier_of_file` to the full path
+  # precisely so `backend/postgres.rs` and `backend/sqlite/*` would land in
+  # DIFFERENT tiers; this line was left on the old key, so the fix was half
+  # applied and the files were judged as three tiers while all their mutual
+  # references were thrown away as "self".
+  #
+  # IT WAS ALSO REDUNDANT. Its stated job - not reporting intra-module
+  # references - is already done below: `:301` records an edge only when
+  # `$st != $tt`, and the verdict marks same-tier as `ok`, which the default
+  # mode filters. Removing it changes nothing for a file referencing its own
+  # tier, and restores every cross-tier edge inside `backend/`.
+  #
+  # THAT IS WHAT MAKES THE HEADER'S OWN RULE ENFORCEABLE. This script claims to
+  # stop `backend/sqlite/` naming the Postgres WAL decoder; with the skip in
+  # place a `crate::backend::sqlite::...` reference from `backend/postgres.rs`
+  # was dropped, so the rule was advertised and unguarded. It is clean today by
+  # luck, not by measurement.
   prod "$f" | grep -oP 'crate::\K[A-Za-z_0-9]+(::[a-z_0-9]+)?' | sort -u | while read -r tpath; do
-    [ "${tpath%%::*}" = "$selfmod" ] && continue
     tt=$(tier_of_target "$tpath")
-    [ "$tt" = CONTESTED ] && continue
+    # A CONTESTED target is dropped, and until 2026-09-01 that was silent too.
+    # Count it: an unplaced target is a HOLE IN THE MEASUREMENT, and the reader
+    # needs its size to know what a clean run is worth. `crate::backend::X` with
+    # an uppercase item lands here, because the extractor's second segment is
+    # lowercase-only and the capture degrades to bare `backend`.
+    if [ "$tt" = CONTESTED ]; then
+      printf '%s -> crate::%s\n' "$rel" "$tpath" >> "$DROPPED"
+      continue
+    fi
     if [ "$tt" = UNRESOLVED ]; then
       printf '%-9s %-34s %-10s %-26s %s\n' "$st" "$rel" "UNRESOLVED" "crate::$tpath" "** UNRESOLVED - tier it **"
       continue
@@ -349,7 +408,10 @@ n_contested=$(
   done | sort -u | grep -c . || true
 )
 echo
-if [ "$MODE" = "--contested" ]; then
+if [ "$MODE" = "--dropped" ]; then
+  echo "Tiered-source references to an untiered target ($(sort -u "$DROPPED" | wc -l)):"
+  sort -u "$DROPPED" | sed 's/^/  /'
+elif [ "$MODE" = "--contested" ]; then
   echo "Files with no settled tier ($n_contested; neither judged nor trusted):"
   find . -name '*.rs' | LC_ALL=C sort | while read -r f; do
     [ "$(tier_of_file "$f")" = CONTESTED ] && echo "  ${f#./}"
@@ -363,6 +425,14 @@ else
   echo "  Every edge into or out of them is absent from the table above. Run"
   echo "  '$0 --contested' to list them. A file added without a tier_of_file arm"
   echo "  lands here, and a skipped file prints exactly what a clean file prints."
+  echo
+  n_dropped=$(sort -u "$DROPPED" 2>/dev/null | wc -l)
+  echo "DROPPED: $n_dropped reference(s) from a TIERED file to an UNTIERED target."
+  echo "  These are the edges the table cannot judge from the OTHER side: the"
+  echo "  source has a tier, the target does not, so the row is discarded. Until"
+  echo "  2026-09-01 that discard was silent, which is defect 6 - the census could"
+  echo "  report zero violations while dropping every edge in the region under"
+  echo "  active design. Run '$0 --dropped' to list them."
 fi
 echo
 echo "Every verdict is relative to tier_of_file/tier_of_target above, which are a"
