@@ -297,10 +297,24 @@ dependencies. Judged against THAT, `data-core` as specified fails on three conte
   `PgSqlExecutor`'s driver-typed bound as a blocker while waving this one through; they are two
   instances of one defect.
 - **Everything proposed transitively links V8.** `error.rs:67` imports
-  `zeroship_runtime::state::OpError`, `zeroship-runtime` declares `v8`, the encryption modules all
-  use `crate::error::DbError`, and `backend/mod.rs` names `DbError` 48 times. So `data-core` would
-  link V8, and `data-cdc-server` would inherit it - **the relay whose entire justification is that it
-  does not execute creator code would link the V8 runtime.** Solvable, but unnamed work.
+  `zeroship_runtime::state::OpError`, `zeroship-runtime` declares `v8` (`Cargo.toml:94`), the
+  encryption modules all use `crate::error::DbError`, and `backend/mod.rs` names `DbError` 48 times.
+  So `data-core` would link V8, and `data-cdc-server` would inherit it - **the relay whose entire
+  justification is that it does not execute creator code would link the V8 runtime.**
+
+  **The remedy is much smaller than that framing suggests - measured 2026-08-31.** The V8 edge is
+  carried by EXACTLY ONE METHOD: `DbError::to_op_error` (`error.rs:408`, body at `:421-429`), which
+  converts a `DbError` into the V8 op error type. That is a boundary-crossing conversion and belongs
+  at the V8 seam by rights, not in a contract crate. **`DbError` itself needs no V8.**
+
+  Moving it to an extension trait defined in `plugin-db` (the V8 tier) touches **73 call sites across
+  11 files** - and the call SYNTAX does not change, so the edit is one `use` per file plus relocating
+  the method. That is 11 meaningful edits, not 73.
+
+  So of the three reasons `data-core` cannot hold its proposed contents yet, this one has a cheap and
+  obviously-correct fix. The other two - row-to-JSON being two vendor converters, and `encryption`
+  carrying `PluginDbConsumer` - do not, and neither does the absent `data-core -> data-query-builder`
+  edge.
 - **Even `encryption`, the one genuinely neutral content, carries a plugin identity.**
   `encryption/keys.rs:318` declares its column-key env family against `crate::PluginDbConsumer`,
   whose `target` is bound to the cargo package name at `lib.rs:74`. Moving it either drags a
