@@ -13,7 +13,9 @@ use compio_postgres::error::SqlState;
 use compio_postgres::{CancelToken, Client, Config, Error, NoTls, Pool};
 use futures_util::{SinkExt, StreamExt};
 use std::cell::RefCell;
+use std::future::Future;
 use std::rc::Rc;
+use std::task::Poll;
 use std::time::Duration;
 
 #[allow(unused_imports)]
@@ -400,6 +402,38 @@ async fn running_query_cancel_returns_57014_and_preserves_session() {
     assert_client_still_works(&client).await;
 }
 
+#[compio::test]
+async fn pool_cancel_query_interrupts_a_running_query_and_preserves_the_session() {
+    const MARKER: &str = "cpg_pool_cancel_running_query";
+    const QUERY: &str = "SELECT pg_sleep(30) /* cpg_pool_cancel_running_query */";
+
+    let url = plaintext_url();
+    let pool = Pool::connect(&url, 1)
+        .await
+        .expect("connect one-slot cancellation pool");
+    let client = Box::pin(pool.get())
+        .await
+        .expect("borrow the pool cancellation target");
+    let observer = connect(&url).await.expect("connect cancellation observer");
+    let pid = client.process_id();
+    let token = client.cancel_token();
+
+    let cancel = async {
+        wait_until_pg_sleep_is_running(&observer, pid, MARKER).await;
+        pool.cancel_query(&token).await
+    };
+    let (query_result, cancel_result) = compio::time::timeout(
+        OPERATION_TIMEOUT,
+        futures_util::future::join(client.batch_execute(QUERY), cancel),
+    )
+    .await
+    .expect("pool cancellation did not finish before the test deadline");
+
+    cancel_result.expect("the pool did not deliver its CancelRequest");
+    assert_query_canceled(query_result);
+    assert_client_still_works(&client).await;
+}
+
 #[cfg(feature = "suite-over-tls")]
 #[compio::test]
 async fn a_pool_can_cancel_tls_with_its_private_policy_lineage() {
@@ -546,7 +580,7 @@ async fn stale_cancel_token_completes_cleanly_without_hanging() {
 }
 
 #[compio::test]
-async fn a_token_from_a_returned_pool_lease_cannot_cancel_the_next_borrower() {
+async fn pool_cancel_query_refuses_a_token_from_a_returned_lease() {
     const MARKER: &str = "cpg_cancel_stale_pool_lease";
     const QUERY: &str = "SELECT pg_sleep(1) /* cpg_cancel_stale_pool_lease */";
 
@@ -554,26 +588,27 @@ async fn a_token_from_a_returned_pool_lease_cannot_cancel_the_next_borrower() {
     let pool = Pool::connect(&url, 1).await.expect("connect one-slot pool");
     let observer = connect(&url).await.unwrap();
 
-    let first = pool.get().await.expect("borrow first pool lease");
+    let first = Box::pin(pool.get()).await.expect("borrow first pool lease");
     let token = first.cancel_token();
     drop(first);
 
-    let second = pool.get().await.expect("borrow second pool lease");
+    let second = Box::pin(pool.get())
+        .await
+        .expect("borrow second pool lease");
     let second_pid = second.process_id();
-    let cancel_task = compio::runtime::spawn(async move {
+    let cancel = async {
         wait_until_pg_sleep_is_running(&observer, second_pid, MARKER).await;
-        token.cancel_query(common::suite_tls()).await
-    });
+        pool.cancel_query(&token).await
+    };
 
     let (query_result, cancel_result) = compio::time::timeout(
         OPERATION_TIMEOUT,
-        futures_util::future::join(second.batch_execute(QUERY), cancel_task),
+        futures_util::future::join(second.batch_execute(QUERY), cancel),
     )
     .await
     .expect("stale pool-token race did not finish before the test deadline");
-    let cancel_error = cancel_result
-        .expect("stale pool-token task panicked or was cancelled")
-        .expect_err("a token from the returned lease retained cancellation authority");
+    let cancel_error =
+        cancel_result.expect_err("a token from the returned lease retained cancellation authority");
 
     assert!(
         error_chain(&cancel_error).contains("pool lease has ended"),
@@ -582,6 +617,47 @@ async fn a_token_from_a_returned_pool_lease_cannot_cancel_the_next_borrower() {
     );
     query_result.expect("the stale token cancelled the next pool borrower's query");
     assert_client_still_works(&second).await;
+}
+
+#[compio::test]
+async fn pool_cancel_query_racing_return_retires_the_physical_session() {
+    let url = plaintext_url();
+    let pool = Pool::connect(&url, 1)
+        .await
+        .expect("connect one-slot cancellation pool");
+    let observer = connect(&url).await.expect("connect cancellation observer");
+    let first = Box::pin(pool.get())
+        .await
+        .expect("borrow the cancellation target");
+    let first_pid = first.process_id();
+    let token = first.cancel_token();
+    let evictions_before = pool.metrics.evictions.get();
+
+    let mut cancel = Box::pin(pool.cancel_query(&token));
+    futures_util::future::poll_fn(|context| match cancel.as_mut().poll(context) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(result) => {
+            panic!("pool cancellation completed before it could race lease return: {result:?}")
+        }
+    })
+    .await;
+
+    drop(first);
+    assert_eq!(pool.active_count(), 0);
+    assert_eq!(pool.idle_count(), 0);
+    assert_eq!(pool.total_count(), 0);
+    assert_eq!(pool.metrics.evictions.get(), evictions_before + 1);
+
+    compio::time::timeout(OPERATION_TIMEOUT, cancel)
+        .await
+        .expect("in-flight pool cancellation hung after lease return")
+        .expect("PostgreSQL did not consume the in-flight CancelRequest");
+    wait_until_backend_is_gone(&observer, first_pid).await;
+
+    let replacement = Box::pin(pool.get())
+        .await
+        .expect("retiring the raced session did not release pool capacity");
+    assert_client_still_works(&replacement).await;
 }
 
 #[compio::test]
