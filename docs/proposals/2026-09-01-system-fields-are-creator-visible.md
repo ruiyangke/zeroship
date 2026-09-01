@@ -490,11 +490,34 @@ This resolves all four problems at once, each in the layer that owns it:
 3. **`deleted_at`.** `check_keys_for_immutable_and_overrides` gains a
    `lifecycle` arm instead of falling through `_ => {}` (`:438`), so the
    `delete()` / `restore()` contract becomes real rather than documented.
-4. **Seven copies of the list.** `types.ts:174-182`, `types.ts:200-208`,
-   `collection.ts:208-216`, `install-schema.ts:249`, `render-env-db.ts:73-81`,
-   `zeroship-schema/src/query.rs:756`, `data-plan/src/projection.rs:58` all
-   become readers of one declared property. This is the part worth doing
-   properly; a fifth reviewer would otherwise find an eighth copy.
+4. **Nine copies of the list, not seven** - I predicted a reviewer would find an
+   eighth and then found two myself. The seven declared ones
+   (`types.ts:174-182`, `types.ts:200-208`, `collection.ts:208-216`,
+   `install-schema.ts:249`, `render-env-db.ts:73-81`,
+   `zeroship-schema/src/query.rs:756`, `data-plan/src/projection.rs:58`) all
+   become readers of one declared property.
+
+   **The two I missed are in PROSE, and they are the dangerous ones.**
+   `crates/zeroship-plugin-db/src/error.rs:728-731` spells all seven inside a
+   user-facing remediation string - *"System fields (id, created_at,
+   updated_at, created_by, updated_by, version, deleted_at) are managed by the
+   platform and cannot be overridden"* - and `:743-745` spells the write-once
+   three - *"Fields `id`, `created_at`, `created_by` are write-once and set
+   automatically on INSERT"*. Both go stale the moment `writeClass` reclassifies
+   `created_by` as `serverAuthored`, and **no grep for the constant will find
+   them**, because they are sentences. A creator would be told the platform
+   manages a field the platform had just stopped managing.
+
+   Count the tally as a FLOOR. The search that found these two keyed on files
+   naming `created_by`, `updated_by` and `deleted_at` together; a copy that
+   omits any one of the three is invisible to it.
+
+**The engine is already the shape this design proposes, and that is the
+strongest argument for it.** `table_shape.rs:360` iterates `&inject.columns`
+from a `ResolvedInject` (`:150`) rather than matching a hardcoded literal, so
+the migration engine already treats system columns as *data resolved once and
+passed in*. The proposal is not inventing a pattern; it is extending the one the
+authoritative layer already uses to the layers that hardcode instead.
 
 **Enforcement stays in Rust.** The descriptor is produced by the migration
 service and consumed by the worker, so `writeClass` is state a separate service
