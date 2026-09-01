@@ -125,88 +125,66 @@ reopened. `include_str!`-ing the same TOML into plugin-db closes it: the worker
 reads bindings from operator-shipped data and treats the descriptor as a mirror
 it can verify.
 
-### default, generator and update rule are THREE axes, not two
+### One property: an assignment rule
 
-| | Runs where | Applies to | Limited by |
-| --- | --- | --- | --- |
-| **default** | the database (DDL `DEFAULT`) | *any* insert omitting the column, including migration DML, CDC backfill, raw SQL | what SQL can express, per dialect |
-| **generator** | the platform, before the row is sent | only writes through the runtime | nothing; vendor-neutral, can mint a typed id |
-| **update rule** | the query builder, on later writes | UPDATE, not INSERT | - |
+An earlier draft of this section declared four properties per field - `default`,
+`generator`, `generatorRuns`, `updatable`. The operator rejected it as
+inelegant, correctly: it was an accumulation, one property added per problem,
+and `default = "NOW()"` beside `generator = "now"` wrote down the input and the
+output of the same thing.
 
-The third is easy to miss and the specification leans on it hardest: **`updated_at`
--> "NOW() every time" is not a default at all.** A DDL default fires only on
-INSERT; the re-stamp is emitted by the builder (`query.rs:6331`). Likewise
-`version`'s `1` is a default and its `+1` is an update rule.
+The concept underneath is single. **Who computes the value, and when.**
 
-They are independent, which today's tree proves. `inject_into_object` injects
-only `id`, `created_by`, `updated_by`; its comment says `created_at` /
-`updated_at` / `version` / `deleted_at` are "intentionally NOT injected - the DB
-default fires".
+```toml
+{ name = "created_at", assign = { by = "now",       on = "insert" } }
+{ name = "updated_at", assign = { by = "now",       on = "write"  } }
+{ name = "version",    assign = { by = "increment", on = "write"  } }
+{ name = "id",         assign = { by = "typedId",   on = "insert" } }
+{ name = "created_by", assign = { by = "actor",     on = "insert" } }
+{ name = "deleted_at", assign = { by = "now",       on = "delete" } }
+```
 
-| field | default (DDL) | generator | update rule |
-| --- | --- | --- | --- |
-| `created_at` | `NOW()` | - | immutable |
-| `updated_at` | `NOW()` | - | re-stamp |
-| `version` | `1` | - | increment |
-| `id` | **none** | `typedId` | immutable |
-| `created_by` | none (`NULL`) | `actor` | immutable |
-| `deleted_at` | none (`NULL`) | - | lifecycle |
+An ordinary creator column has no `assign`, and that absence is the whole of its
+description.
 
-`version` has a default and no generator; `id` has a generator and no default.
-Neither is describable on the other's axis - that is the proof they are separate.
+**Everything the earlier draft declared is a consequence:**
 
-Collapsing them costs something either way. Generators alone lose the backstop,
-since migration DML, CDC backfill and raw SQL never reach the runtime. Defaults
-alone force every value to be SQL-expressible per dialect, which `typedId` is
-not, and which keeps #134 alive because `NOW()` and `CURRENT_TIMESTAMP` render
-differently.
+| declared before | derived from |
+| --- | --- |
+| `updatable: false` | the field has an `assign` - the platform owns it |
+| `immutable` | `on = "insert"` |
+| not required of the caller | the field has an `assign` |
+| `default = "NOW()"` | render `by` per dialect - **the machinery exists** |
 
-So they are LAYERS: **generator is the normal path, default is the backstop**,
-which is already how `created_by` works. Moving the timestamps to
-runtime-assigned therefore ADDS a generator; it does not replace the default.
+That last row is what proves the old shape wrong. `crates/zeroship-migrate-backend/src/dml.rs:1215`
+is `SynthFn::Now => ctx.backend.synth_now()`, and the charter's own comment says
+the spellings "produce the identical `SynthFn::Now` IR, and the dialect-aware
+render localizes THAT to `CURRENT_TIMESTAMP` for SQLite". The DDL default is a
+RENDERING of the assignment rule, not a second declaration of it.
 
-**For the SDK the distinction does not matter.** Both mean "the caller need not
-supply this" and "the client must not materialise a value", so `validateDoc` can
-test for either and treat them identically. The distinction matters to the
-producer (which goes in the DDL) and the runtime (which one it executes).
+`typedId` has no SQL rendering, so it yields no DDL default - the absence falls
+out instead of needing a rule.
 
-### `updatable` plus `generatorRuns`, not an update enum
+**It dissolves the coupling bug rather than guarding against it.** The previous
+draft split `updatable` from `generatorRuns` specifically to stop a creator value
+suppressing the platform's rule, because `query.rs:6313` reads
+`if !doc_has_version { version = COALESCE(version,0) + 1 }` and `:6331` has the
+same shape for `updated_at`. Under `assign`, **a creator value in an assigned
+column is not a concept**, so there is nothing for `doc_has_version` to consult
+and no guard to design. The earlier split was defending against a coupling that
+only existed because the column had been left writable.
 
-A boolean alone cannot carry it: `created_at` and `updated_at` are both
-un-writable by the creator and differ entirely in what the platform does.
+**The DDL backstop survives**, and for free. Migration DML, CDC backfill and raw
+SQL never reach the runtime, so they still need the column to default itself -
+and it does, because the DDL default is generated from `assign` rather than
+declared beside it. The charter says the rule once and both consumers read it.
 
-But an enum (`immutable | restamp | increment`) is worse, because it answers TWO
-questions with one value - may the creator write it, and what does the platform
-do. **That conflation is already a live bug.** `query.rs:6313` reads
-`if !doc_has_version { version = COALESCE(version,0) + 1 }`, so a creator-supplied
-`version` SUPPRESSES the platform's increment; `updated_at` has the same shape at
-`:6331` via `doc_has_updated_at`. Permission and mechanism share one flag, so
-exercising one disables the other. An enum reproduces that coupling one layer up.
+**Cost:** `on` needs a small closed vocabulary - `insert`, `write`, `delete`,
+`restore`. `deleted_at` stops being the awkward case the earlier draft flagged;
+it is `on = "delete"`, the same shape as everything else.
 
-Two independent properties instead:
-
-- **`updatable`** - may creator code write this? A permission. Drives generated
-  types and error messages.
-- **`generatorRuns`** - when does the platform compute it? A mechanism. Drives
-  the write pipeline.
-
-| field | `updatable` | generator | runs on |
-| --- | --- | --- | --- |
-| `created_at` | false | `now` | insert |
-| `updated_at` | false | `now` | insert, update |
-| `version` | false | `increment` | insert, update |
-| `id` | false | `typedId` | insert |
-| `created_by` | false | `actor` | insert |
-| ordinary column | true | - | - |
-
-`created_at` and `updated_at` now differ in exactly one cell. And because the two
-properties are separate, a creator-supplied value can never silently switch the
-platform's rule off - there is no shared flag to overload.
-
-**Unresolved:** `deleted_at` is written by neither insert nor update - it is set
-by `delete()` and cleared by `restore()`. So `generatorRuns` needs operation
-names rather than the two write verbs, or `deleted_at` needs a third answer.
-Worth settling now rather than when soft-delete is first switched on.
+Naming is open (`assign` / `by` / `on` are placeholders). The shape is not: one
+property, two parts, everything else inferred.
 
 ### Does this need the descriptor extended? Almost not at all.
 
