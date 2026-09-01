@@ -13,8 +13,8 @@ use serde::Deserialize;
 use crate::knob::{KnobDef, KnobKey, KnobKind, KnobValue, ObjectModel, Polarity};
 use crate::registry::PolicyRegistry;
 use crate::rule::{
-    AuthorPkPolicy, InjectCollation, InjectColumn, InjectIndex, InjectSpec, NameGlob, Rule,
-    RuleKind, ValidatePredicate,
+    Assignment, AuthorPkPolicy, InjectCollation, InjectColumn, InjectIndex, InjectSpec, NameGlob,
+    Rule, RuleKind, ValidatePredicate,
 };
 use crate::scope::normalize_object_name;
 use crate::value_order::leq_value;
@@ -25,22 +25,23 @@ use crate::{Pattern, Scope, ScopeError};
 pub const SUPPORTED_POLICY_VERSION: u32 = 1;
 
 /// The layer a document is being loaded AS. Two axes it governs:
-/// - **`mandatory` injects** are `RootCharter`-only; any non-root layer that carries
-///   one is rejected (`MandatoryInjectOnNonRootLayer`, II.4.2).
+/// - **`mandatory` injects** and injected-column **`assign` policies** are
+///   `RootCharter`-only; any non-root layer that carries either is rejected
+///   (`MandatoryInjectOnNonRootLayer` / `AssignOnNonRootLayer`, II.4.2).
 /// - **`extends`** is TRUSTED-only (H-1): the `RootCharter` and trusted catalog
 ///   entries may inherit a trusted base; an untrusted creator DRAFT that carries
 ///   `extends` is a hard load error (`ExtendsForbiddenInDraft`, II.7).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum LoadContext {
-    /// The host's root charter - the only layer allowed a mandatory inject; trusted,
-    /// so `extends` is permitted.
+    /// The host's root charter - the only layer allowed a mandatory inject or an
+    /// injected-column assignment; trusted, so `extends` is permitted.
     RootCharter,
     /// A TRUSTED, non-root catalog entry (a `ProfileCatalog` `env` fragment): no
-    /// mandatory inject, but `extends` IS permitted (resolved against the trusted
-    /// catalog).
+    /// mandatory inject or injected-column assignment, but `extends` IS permitted
+    /// (resolved against the trusted catalog).
     TrustedCatalogEntry,
-    /// An UNTRUSTED creator draft (submitted to `admit`): no mandatory inject, and
-    /// `extends` is a hard load error (H-1).
+    /// An UNTRUSTED creator draft (submitted to `admit`): no mandatory inject, no
+    /// injected-column assignment, and `extends` is a hard load error (H-1).
     NonRootLayer,
 }
 
@@ -186,6 +187,8 @@ pub enum LoadError {
     ValidatePredicateNotEnforced { kind: String },
     /// A `mandatory = true` inject rule on a non-root layer (II.4.2).
     MandatoryInjectOnNonRootLayer,
+    /// An injected column carries `assign` on a non-root layer.
+    AssignOnNonRootLayer,
     /// A single document both injects a column X and forbids X (or forbids the
     /// inject's own required table name) on overlapping scope (II.4.4).
     SelfContradictoryInjectValidate { detail: String },
@@ -328,6 +331,8 @@ struct WireColumn {
     nullable: bool,
     #[serde(default)]
     default: Option<String>,
+    #[serde(default)]
+    assign: Option<Assignment>,
     /// A closed token, so an operator who misspells the intent is told at LOAD,
     /// with the TOML line, rather than shipping a charter that silently pins
     /// nothing. `deny_unknown_fields` above already refuses an unknown KEY; this
@@ -557,6 +562,14 @@ impl PolicyDoc {
             // mandatory-on-non-root gate.
             if inj.mandatory && ctx != LoadContext::RootCharter {
                 return Err(LoadError::MandatoryInjectOnNonRootLayer);
+            }
+            // Assignment is operator authority, not ordinary union-up inject content.
+            // PolicyDoc does not retain a rule's LoadContext, so this provenance fence
+            // must run while the wire layer and its context are still paired.
+            if ctx != LoadContext::RootCharter
+                && inj.columns.iter().any(|column| column.assign.is_some())
+            {
+                return Err(LoadError::AssignOnNonRootLayer);
             }
             let scope = resolve_content_scope(inj.scope.take(), &default_scope)?;
             let spec = resolve_inject(inj)?;
@@ -951,6 +964,7 @@ fn resolve_inject(inj: WireInject) -> Result<InjectSpec, LoadError> {
             ty: c.ty,
             nullable: c.nullable,
             default: c.default,
+            assign: c.assign,
             collation: c.collation.map(|collation| match collation {
                 WireCollation::Bytewise => InjectCollation::Bytewise,
             }),

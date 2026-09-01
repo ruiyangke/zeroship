@@ -4,9 +4,9 @@
 //! name-normalization cases. Composition is not exercised here.
 
 use zeroship_migrate_policy::{
-    AuthorPkPolicy, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, LoadContext, LoadError,
-    LoadWarning, ObjectModel, Polarity, PolicyDoc, PolicyRegistry, RuleKind, Scope,
-    ValidatePredicate,
+    AssignmentEvent, AssignmentGenerator, AuthorPkPolicy, Enforcement, KnobDef, KnobKey, KnobKind,
+    KnobValue, LoadContext, LoadError, LoadWarning, ObjectModel, Polarity, PolicyDoc,
+    PolicyRegistry, RuleKind, Scope, TrustedDoc, ValidatePredicate,
 };
 
 // -- registry fixtures ------------------------------------------------------------
@@ -480,6 +480,92 @@ columns = [ { name = "created_at", type = "timestamptz", nullable = false } ]
     )
     .unwrap();
     assert_eq!(doc.rules.len(), 1);
+}
+
+#[test]
+fn assigned_inject_on_draft_rejects_at_load() {
+    let error = load_draft(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [
+  { name = "created_at", type = "timestamptz", nullable = false, assign = { by = "now", on = "insert" } },
+]
+"#,
+    )
+    .expect_err("an untrusted layer must not declare assignment policy");
+    assert_eq!(error, LoadError::AssignOnNonRootLayer);
+}
+
+#[test]
+fn assigned_inject_on_trusted_non_root_layer_rejects_at_load() {
+    let error = TrustedDoc::register_catalog_entry(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [
+  { name = "created_at", type = "timestamptz", nullable = false, assign = { by = "now", on = "insert" } },
+]
+"#,
+        &registry(),
+    )
+    .expect_err("root-only means trusted catalog layers are excluded too");
+    assert_eq!(error, LoadError::AssignOnNonRootLayer);
+}
+
+#[test]
+fn root_assignment_invocations_are_parsed_once_into_typed_values() {
+    let doc = load_root(
+        r#"policy_version = 1
+[[inject]]
+scope = "all"
+columns = [
+  { name = "id",         type = "text",        assign = { by = "typedId",      on = "insert" } },
+  { name = "created_at", type = "timestamptz", assign = { by = "now",          on = "insert" } },
+  { name = "version",    type = "integer",     assign = { by = "increment(1)", on = "write"  } },
+  { name = "deleted_at", type = "timestamptz", assign = { by = "now",          on = "delete" } },
+]
+"#,
+    )
+    .expect("the root charter owns assignment policy");
+    let RuleKind::Inject { spec } = &doc.rules[0].kind else {
+        panic!("expected inject rule");
+    };
+    let parsed: Vec<_> = spec
+        .columns
+        .iter()
+        .map(|column| {
+            let assign = column.assign.as_ref().expect("assigned fixture column");
+            (assign.by, assign.on)
+        })
+        .collect();
+    assert_eq!(
+        parsed,
+        vec![
+            (AssignmentGenerator::TypedId, AssignmentEvent::Insert),
+            (AssignmentGenerator::Now, AssignmentEvent::Insert),
+            (AssignmentGenerator::Increment(1), AssignmentEvent::Write),
+            (AssignmentGenerator::Now, AssignmentEvent::Delete),
+        ]
+    );
+}
+
+#[test]
+fn restore_is_not_an_assignment_event() {
+    let error = load_root(
+        r#"policy_version = 1
+[[inject]]
+scope = "all"
+columns = [
+  { name = "deleted_at", type = "timestamptz", assign = { by = "now", on = "restore" } },
+]
+"#,
+    )
+    .expect_err("restore clears delete-assigned fields; it is not an assignment event");
+    assert!(
+        matches!(error, LoadError::Parse { .. }),
+        "the closed event vocabulary must reject restore while parsing: {error:?}"
+    );
 }
 
 // -- gate: pinned primary key without an author-PK policy -----------------------
@@ -990,7 +1076,11 @@ scope = { include = ["App_*"] }
     match &doc.rules[0].scope {
         Scope::Of { include, .. } => {
             // The folded schema glob is app_* (matches app_x).
-            assert!(include[0].matches(&zeroship_migrate_policy::ObjectName::schema(b"app_x".to_vec())));
+            assert!(
+                include[0].matches(&zeroship_migrate_policy::ObjectName::schema(
+                    b"app_x".to_vec()
+                ))
+            );
         }
         other => panic!("expected Of, got {other:?}"),
     }
@@ -1010,9 +1100,15 @@ scope = { include = ["\"App_x\""] }
     .unwrap();
     match &doc.rules[0].scope {
         Scope::Of { include, .. } => {
-            assert!(include[0].matches(&zeroship_migrate_policy::ObjectName::schema(b"App_x".to_vec())));
             assert!(
-                !include[0].matches(&zeroship_migrate_policy::ObjectName::schema(b"app_x".to_vec()))
+                include[0].matches(&zeroship_migrate_policy::ObjectName::schema(
+                    b"App_x".to_vec()
+                ))
+            );
+            assert!(
+                !include[0].matches(&zeroship_migrate_policy::ObjectName::schema(
+                    b"app_x".to_vec()
+                ))
             );
         }
         other => panic!("expected Of, got {other:?}"),
@@ -1038,7 +1134,9 @@ scope = { include = ["\"a.b\""] }
             let obj = zeroship_migrate_policy::normalize_object_name("\"a.b\"").unwrap();
             assert!(include[0].matches(&obj));
             // The unrelated schema `a` object is NOT matched.
-            assert!(!include[0].matches(&zeroship_migrate_policy::ObjectName::schema(b"a".to_vec())));
+            assert!(
+                !include[0].matches(&zeroship_migrate_policy::ObjectName::schema(b"a".to_vec()))
+            );
         }
         other => panic!("expected Of, got {other:?}"),
     }

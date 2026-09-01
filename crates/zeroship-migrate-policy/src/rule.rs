@@ -7,6 +7,12 @@
 //! document loader (`crate::document`) parses the wire form, normalizes scope
 //! patterns (II.2.7), and validates against the registry before producing them.
 
+use std::fmt;
+use std::str::FromStr;
+
+use schemars::JsonSchema;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
 use crate::knob::{KnobKey, KnobValue};
 use crate::scope::{Pattern, Scope, SegGlob};
 
@@ -70,7 +76,8 @@ pub struct InjectSpec {
 }
 
 /// One injected column: enough to drive the resolver + the II.2.6b conformance
-/// check (name/type/nullable/default/collation). The `ty` is an opaque type token.
+/// check (name/type/nullable/default/assign/collation). The `ty` is an opaque type
+/// token.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct InjectColumn {
     /// The column's (normalized) name.
@@ -81,6 +88,12 @@ pub struct InjectColumn {
     pub nullable: bool,
     /// An optional default expression (opaque token), if any.
     pub default: Option<String>,
+    /// Platform assignment policy for this column, when present.
+    ///
+    /// The generator is already parsed into a closed invocation. Consumers never
+    /// re-parse the charter spelling, and the DDL default remains an independent
+    /// slot rather than being derived from this value.
+    pub assign: Option<Assignment>,
     /// An optional collation INTENT for the column.
     ///
     /// Unlike `ty` this is NOT an opaque token, and the difference is deliberate.
@@ -90,6 +103,154 @@ pub struct InjectColumn {
     /// refuse an unknown spelling at charter-load time, which is where an operator
     /// can still fix it, instead of at render time on a deploy.
     pub collation: Option<InjectCollation>,
+}
+
+/// A platform-computed column value: which generator runs, and on which write event.
+///
+/// This is distinct from a DDL `default`. An assignment is non-overridable policy;
+/// a default is a database fallback whose caller-supplied value wins.
+#[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct Assignment {
+    /// The closed generator invocation.
+    pub by: AssignmentGenerator,
+    /// The event that activates the generator.
+    pub on: AssignmentEvent,
+}
+
+/// The closed assignment-event vocabulary.
+///
+/// Restore is deliberately absent: restore is the inverse of delete and clears
+/// fields assigned on [`Self::Delete`].
+#[derive(
+    Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Serialize, Deserialize, JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum AssignmentEvent {
+    /// Assign while inserting a row.
+    Insert,
+    /// Assign on every write, including insert/update/delete paths.
+    Write,
+    /// Assign while soft-deleting a row.
+    Delete,
+}
+
+/// A parsed invocation of one of the platform's closed assignment generators.
+///
+/// The charter spells this as a string (`now`, `typedId`, `increment(1)`), but the
+/// string exists only at the serialization boundary. In memory, arguments are typed
+/// and no consumer can reinterpret the invocation differently.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum AssignmentGenerator {
+    /// Use the current timestamp.
+    Now,
+    /// Mint a typed id. Its per-collection prefix is resolved separately and is not
+    /// charter data.
+    TypedId,
+    /// Use the authenticated actor, or the generator's anonymous-write result.
+    Actor,
+    /// Increment the existing integer by this charter-level constant.
+    Increment(i64),
+    /// Let the column's own DDL identity assign the value; the runtime emits nothing.
+    Identity,
+}
+
+impl JsonSchema for AssignmentGenerator {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        "AssignmentGenerator".into()
+    }
+
+    fn json_schema(_generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        // The wire spelling remains compact, but it is not an arbitrary string.
+        // Keep the fixed invocations closed and constrain the one parameterized
+        // invocation to a signed decimal integer. Deserialize performs the final
+        // i64 range check.
+        schemars::json_schema!({
+            "description": "A closed platform assignment-generator invocation.",
+            "oneOf": [
+                { "const": "now" },
+                { "const": "typedId" },
+                { "const": "actor" },
+                { "const": "identity" },
+                {
+                    "type": "string",
+                    "pattern": "^increment\\(-?(0|[1-9][0-9]*)\\)$"
+                }
+            ]
+        })
+    }
+}
+
+impl fmt::Display for AssignmentGenerator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Now => f.write_str("now"),
+            Self::TypedId => f.write_str("typedId"),
+            Self::Actor => f.write_str("actor"),
+            Self::Increment(amount) => write!(f, "increment({amount})"),
+            Self::Identity => f.write_str("identity"),
+        }
+    }
+}
+
+impl FromStr for AssignmentGenerator {
+    type Err = AssignmentGeneratorParseError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        let invocation = raw.trim();
+        match invocation {
+            "now" => Ok(Self::Now),
+            "typedId" => Ok(Self::TypedId),
+            "actor" => Ok(Self::Actor),
+            "identity" => Ok(Self::Identity),
+            _ => {
+                let Some(argument) = invocation
+                    .strip_prefix("increment(")
+                    .and_then(|rest| rest.strip_suffix(')'))
+                else {
+                    return Err(AssignmentGeneratorParseError::UnknownInvocation {
+                        invocation: raw.to_string(),
+                    });
+                };
+                let amount = argument.trim().parse::<i64>().map_err(|_| {
+                    AssignmentGeneratorParseError::InvalidIncrementArgument {
+                        argument: argument.to_string(),
+                    }
+                })?;
+                Ok(Self::Increment(amount))
+            }
+        }
+    }
+}
+
+impl Serialize for AssignmentGenerator {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        serializer.serialize_str(&self.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for AssignmentGenerator {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        raw.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+/// A malformed assignment-generator invocation at the policy boundary.
+#[derive(Clone, PartialEq, Eq, Debug, thiserror::Error)]
+pub enum AssignmentGeneratorParseError {
+    /// The generator name or invocation shape is outside the closed vocabulary.
+    #[error("unknown assignment generator invocation {invocation:?}")]
+    UnknownInvocation { invocation: String },
+    /// `increment(...)` did not carry exactly one signed integer constant.
+    #[error("increment argument must be a signed integer constant, got {argument:?}")]
+    InvalidIncrementArgument { argument: String },
 }
 
 /// The CLOSED collation-intent vocabulary an `[[inject]]` column may pin.
