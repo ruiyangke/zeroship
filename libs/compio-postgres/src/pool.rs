@@ -2914,12 +2914,15 @@ impl std::fmt::Debug for PooledClient<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::codec::FrontendMessage;
+    use crate::client::ResponseMessages;
+    use crate::codec::{BackendMessages, FrontendMessage};
     use crate::config::{SslMode, SslNegotiation};
     use crate::connection::{Request, RequestMessages};
+    use bytes::BytesMut;
     use compio::buf::{IoBuf, IoBufMut};
     use compio::io::{AsyncRead, AsyncWrite};
     use futures_channel::mpsc;
+    use futures_util::StreamExt;
     use std::io::{ErrorKind, Read, Write};
     use std::net::TcpListener;
     use std::sync::Arc;
@@ -2938,6 +2941,61 @@ mod tests {
                 None,
             ),
             receiver,
+        )
+    }
+
+    fn backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(body.len() + 5);
+        frame.push(tag);
+        frame.extend_from_slice(&(u32::try_from(body.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    fn one_int4_row_description(name: &str) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u16.to_be_bytes());
+        body.extend_from_slice(name.as_bytes());
+        body.push(0);
+        body.extend_from_slice(&0u32.to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body.extend_from_slice(&crate::types::Type::INT4.oid().to_be_bytes());
+        body.extend_from_slice(&4i16.to_be_bytes());
+        body.extend_from_slice(&(-1i32).to_be_bytes());
+        body.extend_from_slice(&0u16.to_be_bytes());
+        body
+    }
+
+    fn one_field_data_row(value: &[u8]) -> Vec<u8> {
+        let mut body = Vec::new();
+        body.extend_from_slice(&1u16.to_be_bytes());
+        body.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
+        body.extend_from_slice(value);
+        body
+    }
+
+    fn raw_request_bytes(request: &Request) -> &[u8] {
+        match &request.messages {
+            RequestMessages::Single(FrontendMessage::Raw(bytes)) => bytes,
+            _ => panic!("expected one buffered frontend request"),
+        }
+    }
+
+    fn deliver_response(request: &mut Request, bytes: Vec<u8>) {
+        request
+            .sender
+            .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                BytesMut::from(bytes.as_slice()),
+            )))
+            .expect("deliver scripted PostgreSQL response");
+    }
+
+    fn pool_accounting(pool: &Pool) -> (usize, usize, usize, usize) {
+        (
+            pool.idle_count(),
+            pool.active_count(),
+            pool.total_count(),
+            pool.pending_count(),
         )
     }
 
@@ -5581,6 +5639,140 @@ mod tests {
             Some(false),
             "the replaced waker was destroyed while the pool held its slot \
              borrowed (None means the destructor never ran at all)"
+        );
+    }
+
+    #[compio::test]
+    async fn pool_query_runs_the_statement_and_restores_pool_accounting() {
+        const SQL: &str = "SELECT 42::int4 AS pool_query_wrapper_answer";
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (client, mut receiver) = fake_client(101);
+        let tx_status = client.tx_status_handle();
+        let in_flight = client.in_flight_requests_handle();
+        let entry = PoolEntry::new(client, config.max_lifetime);
+        let pool = test_pool(config, vec![entry], 0, 1);
+        let before = pool_accounting(&pool);
+        assert_eq!(before, (1, 0, 1, 0), "the fixture did not start idle");
+
+        let query = pool.query(SQL, &[]);
+        let respond = async {
+            let mut prepare = receiver
+                .next()
+                .await
+                .expect("Pool::query did not enqueue its Parse/Describe request");
+            assert!(
+                raw_request_bytes(&prepare)
+                    .windows(SQL.len())
+                    .any(|window| window == SQL.as_bytes()),
+                "Pool::query did not pass the caller's SQL to Client::query"
+            );
+            prepare
+                .prepare_cleanup
+                .as_ref()
+                .expect("the query prepare omitted its cleanup observer")
+                .observe(true);
+
+            let mut prepare_response = Vec::new();
+            prepare_response.extend_from_slice(&backend_frame(b'1', b""));
+            prepare_response.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+            prepare_response.extend_from_slice(&backend_frame(
+                b'T',
+                &one_int4_row_description("pool_query_wrapper_answer"),
+            ));
+            prepare_response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            deliver_response(&mut prepare, prepare_response);
+            tx_status.store(b'I', Ordering::Release);
+            in_flight.store(0, Ordering::Release);
+
+            let mut execute = receiver
+                .next()
+                .await
+                .expect("Pool::query prepared the SQL but never executed it");
+            assert_eq!(
+                raw_request_bytes(&execute).first(),
+                Some(&b'B'),
+                "Pool::query did not use the extended-query execution path"
+            );
+            let mut execute_response = Vec::new();
+            execute_response.extend_from_slice(&backend_frame(b'2', b""));
+            execute_response.extend_from_slice(&backend_frame(
+                b'D',
+                &one_field_data_row(&42i32.to_be_bytes()),
+            ));
+            execute_response.extend_from_slice(&backend_frame(b'C', b"SELECT 1\0"));
+            execute_response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            deliver_response(&mut execute, execute_response);
+            tx_status.store(b'I', Ordering::Release);
+            in_flight.store(0, Ordering::Release);
+        };
+
+        let (rows, ()) = futures_util::join!(query, respond);
+        let rows = rows.expect("Pool::query rejected the scripted successful response");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get::<_, i32>(0), 42);
+        assert_eq!(
+            pool_accounting(&pool),
+            before,
+            "Pool::query did not return its lease to the pool"
+        );
+    }
+
+    #[compio::test]
+    async fn pool_batch_execute_runs_the_batch_and_restores_pool_accounting() {
+        const SQL: &str =
+            "SET cpg_pool.batch_first = 'first'; SET cpg_pool.batch_second = 'second'";
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (client, mut receiver) = fake_client(102);
+        let tx_status = client.tx_status_handle();
+        let in_flight = client.in_flight_requests_handle();
+        let entry = PoolEntry::new(client, config.max_lifetime);
+        let pool = test_pool(config, vec![entry], 0, 1);
+        let before = pool_accounting(&pool);
+        assert_eq!(before, (1, 0, 1, 0), "the fixture did not start idle");
+
+        let batch = pool.batch_execute(SQL);
+        let respond = async {
+            let mut request = receiver
+                .next()
+                .await
+                .expect("Pool::batch_execute did not enqueue a simple-query request");
+            let bytes = raw_request_bytes(&request);
+            assert_eq!(
+                bytes.first(),
+                Some(&b'Q'),
+                "Pool::batch_execute did not use the simple-query protocol"
+            );
+            assert_eq!(
+                &bytes[5..bytes.len() - 1],
+                SQL.as_bytes(),
+                "Pool::batch_execute did not pass the caller's complete batch"
+            );
+
+            let mut response = Vec::new();
+            response.extend_from_slice(&backend_frame(b'C', b"SET\0"));
+            response.extend_from_slice(&backend_frame(b'C', b"SET\0"));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            deliver_response(&mut request, response);
+            tx_status.store(b'I', Ordering::Release);
+            in_flight.store(0, Ordering::Release);
+        };
+
+        let (result, ()) = futures_util::join!(batch, respond);
+        result.expect("Pool::batch_execute rejected the scripted successful response");
+        assert_eq!(
+            pool_accounting(&pool),
+            before,
+            "Pool::batch_execute did not return its lease to the pool"
         );
     }
 
