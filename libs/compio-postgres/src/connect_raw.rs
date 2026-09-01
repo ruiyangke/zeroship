@@ -2024,6 +2024,33 @@ mod tests {
         );
     }
 
+    /// The same "password missing" refusal exists on three auth methods -
+    /// cleartext, MD5 and SASL. Two are covered; the MD5 one was not, which is
+    /// the shape where a rule gets applied to some call sites and not others.
+    /// A server may still request MD5, and without a password the driver must
+    /// say which thing is absent rather than hash an empty one.
+    #[compio::test]
+    async fn md5_authentication_without_a_password_is_refused() {
+        let config = plaintext_config();
+        let mut body = 5i32.to_be_bytes().to_vec(); // AuthenticationMD5Password
+        body.extend_from_slice(&[0xde, 0xad, 0xbe, 0xef]); // salt
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: frame(b'R', &body),
+            offset: 0,
+            output: vec![],
+        });
+        let mut handshake = Handshake::new(stream, &config);
+        handshake.phase = HandshakePhase::Authenticating;
+
+        let error = authenticate(&mut handshake, &config, "scripted-user")
+            .await
+            .expect_err("MD5 authentication cannot proceed without a password");
+        assert!(
+            probe_error_chain(&error).contains("password missing"),
+            "the refusal named the wrong thing: {error}"
+        );
+    }
+
     /// The eight-byte minimum guards peer-controlled input, and it had never
     /// run. Dropping it panics the connection task instead of failing the
     /// handshake - MEASURED, because the mechanism is not the one the code's
