@@ -4716,8 +4716,11 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
 
     // ----- WRITE (real pipeline, introspected metadata) -----
+    // No `id`: the write pipeline refuses a creator-supplied one. The
+    // `psn_round_trip_1` literal below belongs to the test's OWN raw INSERT,
+    // which writes a different row to exercise the read path - the two were
+    // never the same id.
     let mut docs = json!([{
-        "id": "psn_round_trip_1",
         "name": "Ada",
         "ssn": "123-45-6789",
         "phone": "415-555-0142",
@@ -4950,8 +4953,11 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
 
     // ----- WRITE via the real pipeline (descriptor metadata) -----
+    // No `id`: the write pipeline refuses a creator-supplied one, and this doc
+    // goes through the real pipeline. The `psn_p5_1` literal below belongs to
+    // the test's OWN raw INSERT, which is a different row written to assert the
+    // read path - the two were never the same id.
     let mut docs = json!([{
-        "id": "psn_p5_1",
         "name": "Grace",
         "ssn": "987-65-4321",
         "phone": "650-555-0199",
