@@ -5,8 +5,8 @@
 //! - the **migration engine** (`zeroship-migrate`) — write / diff / generate
 //!   (engine adoption is not yet wired up; this crate is currently
 //!   engine-free);
-//! - **plugin-db's data plane** — read / introspect, which needs the same
-//!   sentinel codec + metadata types to learn column behaviour at runtime.
+//! - **plugin-db's data plane** — consumes the same sentinel codec + metadata
+//!   types while its vendor tiers populate them from their own catalogs.
 //!
 //! That shared need is *why* this is a leaf crate rather than two files
 //! moved into the engine: the data plane and the engine both depend on the
@@ -19,9 +19,8 @@
 //!   constraints; vector / geoPoint / encrypted-column / mask-sibling; the
 //!   system-field columns; [`query::SqlDialect`]). Dual-dialect (PG + SQLite).
 //! - [`diff`] — the **diff classifier** ([`diff::compute_diff`],
-//!   [`diff::ChangeKind`], [`diff::ChangeClass`]), the live **introspection**
-//!   ([`diff::read_live_schema`], [`diff::estimate_row_count`]), and the
-//!   schema **metadata types** ([`diff::MaskMeta`], [`diff::EncryptionMeta`],
+//!   [`diff::ChangeKind`], [`diff::ChangeClass`]) and the vendor-neutral schema
+//!   **metadata types** ([`diff::MaskMeta`], [`diff::EncryptionMeta`],
 //!   [`diff::MaskKind`], [`diff::Classification`], [`diff::WrappedType`],
 //!   [`diff::LiveSchema`], [`diff::ColumnInfo`], …).
 //! - [`mask_codec`] — the **sentinel CODEC** ([`mask_codec::build_mask_sentinel`]
@@ -29,24 +28,22 @@
 //!   layer (writes the sentinel into DDL) and the data plane (reads it back).
 //! - [`descriptors`] — the schema-shape **enums** ([`descriptors::VectorMetric`],
 //!   [`descriptors::EncryptionMode`]) + [`descriptors::GeoPoint`].
-//! - [`error`] — leaf-crate error types ([`error::SchemaError`],
-//!   [`error::MaskSentinelError`]) that this crate returns instead of
-//!   plugin-db's runtime-coupled `DbError`.
+//! - [`error`] — the leaf-crate sentinel error
+//!   ([`error::MaskSentinelError`]).
 //!
 //! ## What does NOT live here (the *transform* layer — stays in plugin-db)
 //!
-//! AEAD encrypt/decrypt, the mask read-pass, the backfill *runner*
-//! (`run_mask_backfill` / `run_mask_rewrite`), CRUD / transactions /
-//! `SET LOCAL ROLE` and metering. Those are the data
-//! plane; they call *into* this crate for any DDL / diff / introspection /
-//! codec they need.
+//! Vendor catalog introspection, AEAD encrypt/decrypt, the mask read-pass, the
+//! backfill *runner* (`run_mask_backfill` / `run_mask_rewrite`), CRUD /
+//! transactions / `SET LOCAL ROLE`, and metering. Those are data-plane or
+//! vendor-tier concerns; they call *into* this crate for neutral schema values,
+//! DDL, diffing, and codecs.
 //!
 //! ## Leaf purity
 //!
-//! Deps: `serde_json` + `compio-postgres` + `zeroship-core` (+ the `tracing`
-//! observability facade). **No v8, no `zeroship-runtime`, no crypto
-//! (aes/hkdf/hmac), no `zeroship-metering`.** The trust domain is preserved:
-//! nothing in this crate can touch a key, an isolate, or a usage counter.
+//! **No database driver, v8, `zeroship-runtime`, crypto (aes/hkdf/hmac), or
+//! `zeroship-metering`.** Nothing in this crate can touch a database connection,
+//! a key, an isolate, or a usage counter.
 
 // **Inherited lint posture.** `query.rs` and `diff.rs`
 // were relocated *verbatim* out of `zeroship-plugin-db` (a pure refactor: the
@@ -58,13 +55,6 @@
 // logic to satisfy a style lint would dilute the "behaviour-identical"
 // guarantee this refactor is judged on). The list is exactly the deny-level
 // lints the verbatim move trips; nothing broader is silenced.
-// `diff::read_live_schema` is a long async fn whose generated future nests
-// deeply enough that computing its layout exceeds rustc's default query depth:
-// on rustc 1.94.0 this crate does not compile at all without the raise, in
-// either profile, and the error names this crate and this function. Six crates
-// here already carry the same line for the same reason (plugin-db, migrated,
-// auth, gateway, and two test targets).
-#![recursion_limit = "256"]
 #![allow(
     clippy::collapsible_if,
     clippy::doc_lazy_continuation,

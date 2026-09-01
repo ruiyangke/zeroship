@@ -130,16 +130,7 @@ zeroship-plugin-db/context.rs
 zeroship-plugin-db/drop_namespace.rs
 zeroship-plugin-db/lib.rs
 zeroship-plugin-db/service.rs
-zeroship-schema/error.rs
-zeroship-schema/diff.rs
 "
-# zeroship-schema/error.rs is #97 itself, and adding the second root is what
-# made it visible. `pub source: compio_postgres::Error` at :31 sits in the crate
-# the proposal places `data-core` ON (#101) - the violation at its most
-# load-bearing point, one crate BELOW everything this gate previously scanned.
-# 6f3a482f6 moved its only CONSUMER into the PG tier (pg_error.rs:175); the
-# DEFINITION is untouched, so #97 is half done and the entry stays until the
-# field is gone.
 # exec.rs              5  Pool + Vec<Row> - the unsettled row vocabulary. Blocked on
 #                         the neutral-row decision; see roled_rows in pg_autocommit.
 # backend/mod.rs       4  BackendHandle names BOTH vendors, which is why this file

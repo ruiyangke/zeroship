@@ -128,15 +128,15 @@ pub mod cross_app_fk;
 pub(crate) mod crud;
 #[cfg(feature = "test-helpers")]
 pub mod crud;
-// The diff classifier (`compute_diff`,
-// `ChangeKind`, `ChangeClass`, `DiffOp`), the live introspection
-// (`read_live_schema`, `estimate_row_count`), and the schema metadata
-// types (`MaskMeta`, `EncryptionMeta`, `MaskKind`, `Classification`,
-// `WrappedType`, `LiveSchema`, `ColumnInfo`) were extracted into the leaf
-// crate `zeroship-schema`. plugin-db re-exports the module so every
-// `crate::diff::…` reference resolves unchanged. The original `pub(crate)`
-// vs `pub` (under `test-helpers`) visibility is preserved by the cfg gate;
-// the integration suites reach `diff::{…}` only under `test-helpers`.
+// The diff classifier (`compute_diff`, `ChangeKind`, `ChangeClass`, `DiffOp`)
+// and vendor-neutral schema metadata (`MaskMeta`, `EncryptionMeta`, `MaskKind`,
+// `Classification`, `WrappedType`, `LiveSchema`, `ColumnInfo`) live in the leaf
+// crate `zeroship-schema`. plugin-db re-exports that neutral module so every
+// `crate::diff::…` reference resolves unchanged. PostgreSQL catalog reads live
+// separately in `backend::pg_introspect`; no old schema-crate path is retained.
+// The original `pub(crate)` vs `pub` (under `test-helpers`) visibility is
+// preserved by the cfg gate; integration suites reach neutral `diff::{…}`
+// values only under `test-helpers`.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) use zeroship_schema::diff;
 #[cfg(feature = "test-helpers")]

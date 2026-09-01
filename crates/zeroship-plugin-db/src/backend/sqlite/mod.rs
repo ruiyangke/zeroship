@@ -1759,7 +1759,7 @@ fn parse_encryption_sentinels(
 /// kind, unknown classification, malformed body) is logged via
 /// `tracing::warn!` and skipped — the parent column then reads as
 /// unmasked, and a re-deploy regenerates the sentinel. This mirrors
-/// the PG arm's treatment in `crate::diff::read_live_schema` so both
+/// the PG arm's treatment in `crate::backend::pg_introspect::read_live_schema` so both
 /// arms surface the same "loud-but-recoverable" failure shape.
 ///
 /// Same hand-rolled walker pattern as
