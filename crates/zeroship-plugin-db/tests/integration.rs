@@ -3708,10 +3708,13 @@ async fn vector_search_returns_k_nearest() {
 
     let app = "vector_topk";
     let coll = "docs";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+    // Provision the per-app ROLE, not just the schema. `vector_search` resolves
+    // the binding before it plans, and a schema without its role fails closed
+    // with `schema_not_provisioned` - which is what this test did from the day
+    // it was written until 2026-09-01. It never surfaced because the test was
+    // statically `#[ignore]`d, so a setup gap looked like a missing extension.
+    let _role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
     // The six non-`id` platform system columns are part of every real creator
@@ -3760,6 +3763,13 @@ async fn vector_search_returns_k_nearest() {
         let parts: Vec<String> = v.iter().map(|x| x.to_string()).collect();
         format!("[{}]", parts.join(","))
     }
+
+    // The per-app role gets NO table privileges from provisioning alone - the
+    // grants are explicit and per-column, which is the same fact production
+    // carries (a create-plus-migrate leaves the runtime role unable to read its
+    // own tables until the grants run). Without this the search fails closed
+    // with `permission denied for table docs`, correctly.
+    support::grant_all_runtime_table_columns(&pool, app, coll).await;
 
     let dims = 8usize;
     for i in 0..100usize {
@@ -3949,10 +3959,10 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 
     let app = "vector_dim_mismatch";
     let coll = "docs";
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
-        .await
-        .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+    // Same provisioning gap as `vector_search_returns_k_nearest`: a schema
+    // without its per-app role fails closed before the insert is ever attempted.
+    let _role = provision_app_with_role(&pool, app).await;
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
         .unwrap();
     pool.execute(
@@ -3980,7 +3990,14 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
         )
         .await;
     let err = result.expect_err("256-d into vector(128) column must fail");
-    let msg = format!("{err}");
+    // `{err}` is NOT enough: `compio_postgres::Error`'s Display renders the bare
+    // string "db error" and puts the server's message only in the source chain,
+    // so this assertion was checking a constant. Measured 2026-09-01 - the
+    // server sends "expected 128 dimensions, not 256" and `{err}` shows none of
+    // it. Production is unaffected because `DbError::from_pg` walks the chain
+    // (`walk_pg_chain`) rather than formatting; anything that formats a driver
+    // error with `{}` for an operator loses the cause.
+    let msg = format!("{err:?}");
     // pgvector messages vary across versions; assert on the digits 256
     // and 128 (both should appear) and on "vector" anchor.
     assert!(
