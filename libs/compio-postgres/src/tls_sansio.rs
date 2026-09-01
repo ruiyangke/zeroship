@@ -1671,6 +1671,43 @@ mod tests {
         handshaken_pair_with_store(None)
     }
 
+    /// Only the FIRST `take_close_notify` may serialize an alert. The struct
+    /// comment says both release guards can reach it, and the loser must not
+    /// queue a second `close_notify` behind the first - that would put a record
+    /// after the terminal alert, which the peer may reject outright.
+    ///
+    /// `concurrent_tls_release_guards_do_not_cut_off_close_notify` drives the
+    /// race between the two guards, but the losing guard is stopped earlier by
+    /// the shared `close_notify_out` flag and never re-enters here. So this
+    /// in-struct guard - the defence that survives if that flag is ever moved
+    /// or reordered - had no test at all.
+    #[test]
+    fn a_second_close_notify_is_refused_by_the_session_itself() {
+        let (client, _server) = handshaken_pair();
+        let mut session = TlsSession::new(client);
+
+        let first = session
+            .take_close_notify()
+            .expect("the first close_notify must serialize");
+        assert!(
+            !first.is_empty(),
+            "the first close_notify serialized no ciphertext"
+        );
+
+        let error = session
+            .take_close_notify()
+            .expect_err("a second close_notify must be refused");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::AlreadyExists,
+            "the second attempt reported the wrong kind: {error}"
+        );
+        assert!(
+            error.to_string().contains("already been serialized"),
+            "the refusal must say the alert was already serialized: {error}"
+        );
+    }
+
     /// `close_notify` is the end of the record stream. A lease taken after it
     /// could encrypt another record behind the peer's terminal alert, which is
     /// a protocol violation the peer is entitled to reject outright.
