@@ -2410,21 +2410,30 @@ async fn compio_temporal_format_observations(cases: &[RawCase]) -> Vec<FormatObs
     compio_format_observations(cases).await
 }
 
+/// Whether the server takes `interval 'infinity'`, and what it answers.
+///
+/// This is a server-version fork, not a driver difference: the server gained
+/// interval infinity after 16, so the same query is a syntax error on one
+/// supported server and a value on another. Recording the OUTCOME rather than
+/// asserting a refusal keeps the differential claim - both drivers say the
+/// same thing - independent of which server is answering.
 fn tokio_interval_infinity_states(url: String) -> Vec<String> {
     on_tokio(url, |client| async move {
         let mut states = Vec::new();
         for expression in ["'infinity'::interval", "'-infinity'::interval"] {
-            let error = client
-                .query_one(&format!("SELECT {expression}"), &[])
+            match client
+                .query_one(&format!("SELECT ({expression})::text"), &[])
                 .await
-                .expect_err("PostgreSQL 16 accepted interval infinity");
-            states.push(
-                error
-                    .code()
-                    .expect("interval infinity refusal had no SQLSTATE")
-                    .code()
-                    .to_owned(),
-            );
+            {
+                Ok(row) => states.push(format!("ok:{}", row.get::<_, String>(0))),
+                Err(error) => states.push(format!(
+                    "err:{}",
+                    error
+                        .code()
+                        .expect("interval infinity refusal had no SQLSTATE")
+                        .code()
+                )),
+            }
         }
         states
     })
@@ -2435,17 +2444,19 @@ async fn compio_interval_infinity_states() -> Vec<String> {
     let client = compio_client().await;
     let mut states = Vec::new();
     for expression in ["'infinity'::interval", "'-infinity'::interval"] {
-        let error = client
-            .query_one(&format!("SELECT {expression}"), &[])
+        match client
+            .query_one(&format!("SELECT ({expression})::text"), &[])
             .await
-            .expect_err("PostgreSQL 16 accepted interval infinity");
-        states.push(
-            error
-                .code()
-                .expect("interval infinity refusal had no SQLSTATE")
-                .code()
-                .to_owned(),
-        );
+        {
+            Ok(row) => states.push(format!("ok:{}", row.get::<_, String>(0))),
+            Err(error) => states.push(format!(
+                "err:{}",
+                error
+                    .code()
+                    .expect("interval infinity refusal had no SQLSTATE")
+                    .code()
+            )),
+        }
     }
     states
 }
@@ -2537,8 +2548,25 @@ async fn both_drivers_agree_on_temporal_text_and_binary_codecs() {
 
     let theirs = tokio_interval_infinity_states(common::plaintext_url());
     let ours = compio_interval_infinity_states().await;
-    assert_eq!(ours, theirs);
-    assert_eq!(ours, ["22007", "22007"]);
+    assert_eq!(
+        ours, theirs,
+        "the drivers disagreed about interval infinity"
+    );
+
+    // PostgreSQL 17 introduced interval infinity. Below that the literal is a
+    // syntax error; at or above it, it is a value. Measured on both servers
+    // this suite runs against: 160014 refuses, 180004 renders "infinity".
+    let server: i32 = compio_client()
+        .await
+        .query_one_scalar("SELECT current_setting('server_version_num')::int4", &[])
+        .await
+        .expect("read server_version_num");
+    let expected: [String; 2] = if server < 170_000 {
+        ["err:22007".to_owned(), "err:22007".to_owned()]
+    } else {
+        ["ok:infinity".to_owned(), "ok:-infinity".to_owned()]
+    };
+    assert_eq!(ours, expected, "server_version_num={server}");
 }
 
 const TYPED_TEMPORAL_SQL: &str = "SELECT \
@@ -2557,6 +2585,7 @@ const TYPED_TEMPORAL_REBOUND_SQL: &str = "SELECT \
      $7::timestamp::text, $8::timestamp::text, \
      $9::timestamptz::text, $10::timestamptz::text";
 
+#[cfg(all(feature = "with-chrono-0_4", feature = "with-time-0_3"))]
 #[derive(Debug, PartialEq, Eq)]
 struct TypedTemporalObservation {
     chrono_rebound: Vec<String>,
@@ -2565,6 +2594,7 @@ struct TypedTemporalObservation {
     time_time_24: ValueOutcome<String>,
 }
 
+#[cfg(all(feature = "with-chrono-0_4", feature = "with-time-0_3"))]
 fn tokio_typed_temporal_observation(url: String) -> TypedTemporalObservation {
     on_tokio(url, |client| async move {
         client
@@ -2657,6 +2687,7 @@ fn tokio_typed_temporal_observation(url: String) -> TypedTemporalObservation {
     })
 }
 
+#[cfg(all(feature = "with-chrono-0_4", feature = "with-time-0_3"))]
 #[allow(clippy::future_not_send)]
 async fn compio_typed_temporal_observation() -> TypedTemporalObservation {
     let client = compio_client().await;
@@ -2747,6 +2778,7 @@ async fn compio_typed_temporal_observation() -> TypedTemporalObservation {
     }
 }
 
+#[cfg(all(feature = "with-chrono-0_4", feature = "with-time-0_3"))]
 /// Upstream aliases `PostgreSQL` 24:00 to midnight; this port refuses the loss.
 #[compio::test]
 async fn time_24_refusal_matches_the_server_instead_of_tokio() {
