@@ -115,4 +115,9 @@ def main():
     for n in nodata:
         print(f"  unjudged: {n}")
 
-main()
+
+# Guarded so the span helpers can be imported for other coverage questions -
+# ranking PARTIALLY dead functions, for one - without this file's own report
+# running as a side effect of the import.
+if __name__ == "__main__":
+    main()
