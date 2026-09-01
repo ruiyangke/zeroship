@@ -83,6 +83,7 @@ pub use knob::{
 };
 pub use registry::{PolicyRegistry, RegistryError};
 pub use rule::{
+    Assignment, AssignmentEvent, AssignmentGenerator, AssignmentGeneratorParseError,
     AuthorPkPolicy, InjectCollation, InjectColumn, InjectIndex, InjectSpec, NameGlob, Rule,
     RuleKind, ValidatePredicate,
 };
