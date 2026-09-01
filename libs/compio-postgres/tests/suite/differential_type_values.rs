@@ -1,9 +1,9 @@
 //! Differential value-codec tests against `tokio-postgres` 0.7.18.
 //!
-//! Both drivers talk to the same live PostgreSQL server. Values cross the
-//! extended protocol in binary form, come back through `FromSql`, are rebound
-//! through `ToSql`, and come back a second time. Only plain Rust data crosses
-//! the runtime boundary.
+//! Both drivers talk to the same live `PostgreSQL` server. Values cross the
+//! extended protocol in binary form and the simple protocol in text form;
+//! binary and explicitly text-formatted Bind parameters rebound each value.
+//! Only plain Rust data crosses the runtime boundary.
 //!
 //! The stock type crate has no Rust carrier for NUMERIC, INTERVAL, ranges,
 //! multiranges, or records. Its `Vec<T>` carrier also rejects multiple
@@ -40,6 +40,69 @@ const RANGE_LB_INF: u8 = 0x08;
 const RANGE_UB_INF: u8 = 0x10;
 
 type BoxError = Box<dyn Error + Send + Sync>;
+
+/// UTF-8 bytes explicitly tagged as a text-format Bind parameter.
+///
+/// The two drivers use separate copies of `postgres-types`, so this carrier
+/// implements both copies of `ToSql`. A built-in value would choose binary;
+/// returning `Format::Text` here is what makes the text-encode arm exercise
+/// the protocol format code rather than merely cast a binary parameter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TextWire(String);
+
+impl compio_types::ToSql for TextWire {
+    fn to_sql(
+        &self,
+        _: &compio_types::Type,
+        out: &mut compio_types::private::BytesMut,
+    ) -> Result<compio_types::IsNull, BoxError> {
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(compio_types::IsNull::No)
+    }
+
+    fn accepts(_: &compio_types::Type) -> bool {
+        true
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &compio_types::Type,
+        out: &mut compio_types::private::BytesMut,
+    ) -> Result<compio_types::IsNull, BoxError> {
+        <Self as compio_types::ToSql>::to_sql(self, ty, out)
+    }
+
+    fn encode_format(&self, _: &compio_types::Type) -> compio_types::Format {
+        compio_types::Format::Text
+    }
+}
+
+impl tokio_types::ToSql for TextWire {
+    fn to_sql(
+        &self,
+        _: &tokio_types::Type,
+        out: &mut tokio_types::private::BytesMut,
+    ) -> Result<tokio_types::IsNull, BoxError> {
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(tokio_types::IsNull::No)
+    }
+
+    fn accepts(_: &tokio_types::Type) -> bool {
+        true
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &tokio_types::Type,
+        out: &mut tokio_types::private::BytesMut,
+    ) -> Result<tokio_types::IsNull, BoxError> {
+        <Self as tokio_types::ToSql>::to_sql(self, ty, out)
+    }
+
+    fn encode_format(&self, _: &tokio_types::Type) -> tokio_types::Format {
+        tokio_types::Format::Text
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Wire(Vec<u8>);
@@ -163,6 +226,304 @@ impl RawCase {
             expression: expression.to_owned(),
             parameter_type: parameter_type.to_owned(),
         }
+    }
+}
+
+/// One value observed through all four protocol format/direction cells.
+///
+/// Extended queries request binary results in both drivers. The text decode
+/// therefore comes from the simple protocol, while `TextWire` selects a text
+/// Bind parameter for the text encode. Every rebound still returns in binary,
+/// which lets the server's parser prove that text and binary name one value.
+#[derive(Debug, PartialEq, Eq)]
+struct FormatObservation {
+    name: String,
+    binary_decoded: Wire,
+    binary_decoded_text: String,
+    text_decoded: String,
+    binary_encoded: Wire,
+    binary_encoded_text: String,
+    text_encoded: Wire,
+    text_encoded_text: String,
+}
+
+fn tokio_simple_value(
+    messages: Vec<tokio_postgres::SimpleQueryMessage>,
+    case_name: &str,
+) -> String {
+    let mut values = messages.into_iter().filter_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => Some(
+            row.get(0)
+                .unwrap_or_else(|| panic!("{case_name}: tokio text result was NULL"))
+                .to_owned(),
+        ),
+        _ => None,
+    });
+    let value = values
+        .next()
+        .unwrap_or_else(|| panic!("{case_name}: tokio text decode returned no row"));
+    assert!(
+        values.next().is_none(),
+        "{case_name}: tokio text decode returned more than one row"
+    );
+    value
+}
+
+fn compio_simple_value(
+    messages: Vec<compio_postgres::SimpleQueryMessage>,
+    case_name: &str,
+) -> String {
+    let mut values = messages.into_iter().filter_map(|message| match message {
+        compio_postgres::SimpleQueryMessage::Row(row) => Some(
+            row.get(0)
+                .unwrap_or_else(|| panic!("{case_name}: compio text result was NULL"))
+                .to_owned(),
+        ),
+        _ => None,
+    });
+    let value = values
+        .next()
+        .unwrap_or_else(|| panic!("{case_name}: compio text decode returned no row"));
+    assert!(
+        values.next().is_none(),
+        "{case_name}: compio text decode returned more than one row"
+    );
+    value
+}
+
+const FORMAT_RENDERING_SQL: &str = "SET TIME ZONE 'UTC'; \
+     SET DateStyle = 'ISO, YMD'; \
+     SET IntervalStyle = 'postgres'";
+
+fn tokio_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    on_tokio(url, move |client| async move {
+        client
+            .batch_execute(FORMAT_RENDERING_SQL)
+            .await
+            .expect("set deterministic rendering on tokio-postgres");
+
+        let mut observations = Vec::with_capacity(cases.len());
+        for case in cases {
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT {0} AS value, ({0})::text AS rendered",
+                        case.expression
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: tokio binary decode: {}",
+                        case.name,
+                        common::error_chain(&error)
+                    )
+                });
+            let binary_decoded: Wire = row.get("value");
+            let binary_decoded_text: String = row.get("rendered");
+
+            let messages = client
+                .simple_query(&format!("SELECT {}", case.expression))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: tokio text decode: {}",
+                        case.name,
+                        common::error_chain(&error)
+                    )
+                });
+            let text_decoded = tokio_simple_value(messages, &case.name);
+
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT $1::{0} AS value, ($1::{0})::text AS rendered",
+                        case.parameter_type
+                    ),
+                    &[&binary_decoded],
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: tokio binary encode: {}",
+                        case.name,
+                        common::error_chain(&error)
+                    )
+                });
+            let binary_encoded = row.get("value");
+            let binary_encoded_text = row.get("rendered");
+
+            let text_parameter = TextWire(text_decoded.clone());
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT $1::{0} AS value, ($1::{0})::text AS rendered",
+                        case.parameter_type
+                    ),
+                    &[&text_parameter],
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: tokio text encode: {}",
+                        case.name,
+                        common::error_chain(&error)
+                    )
+                });
+            observations.push(FormatObservation {
+                name: case.name,
+                binary_decoded,
+                binary_decoded_text,
+                text_decoded,
+                binary_encoded,
+                binary_encoded_text,
+                text_encoded: row.get("value"),
+                text_encoded_text: row.get("rendered"),
+            });
+        }
+        observations
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    let client = compio_client().await;
+    client
+        .batch_execute(FORMAT_RENDERING_SQL)
+        .await
+        .expect("set deterministic rendering on compio-postgres");
+
+    let mut observations = Vec::with_capacity(cases.len());
+    for case in cases {
+        let row = client
+            .query_one(
+                &format!(
+                    "SELECT {0} AS value, ({0})::text AS rendered",
+                    case.expression
+                ),
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: compio binary decode: {}",
+                    case.name,
+                    common::error_chain(&error)
+                )
+            });
+        let binary_decoded: Wire = row.get("value");
+        let binary_decoded_text: String = row.get("rendered");
+
+        let messages = client
+            .simple_query(&format!("SELECT {}", case.expression))
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: compio text decode: {}",
+                    case.name,
+                    common::error_chain(&error)
+                )
+            });
+        let text_decoded = compio_simple_value(messages, &case.name);
+
+        let row = client
+            .query_one(
+                &format!(
+                    "SELECT $1::{0} AS value, ($1::{0})::text AS rendered",
+                    case.parameter_type
+                ),
+                &[&binary_decoded],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: compio binary encode: {}",
+                    case.name,
+                    common::error_chain(&error)
+                )
+            });
+        let binary_encoded = row.get("value");
+        let binary_encoded_text = row.get("rendered");
+
+        let text_parameter = TextWire(text_decoded.clone());
+        let row = client
+            .query_one(
+                &format!(
+                    "SELECT $1::{0} AS value, ($1::{0})::text AS rendered",
+                    case.parameter_type
+                ),
+                &[&text_parameter],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: compio text encode: {}",
+                    case.name,
+                    common::error_chain(&error)
+                )
+            });
+        observations.push(FormatObservation {
+            name: case.name.clone(),
+            binary_decoded,
+            binary_decoded_text,
+            text_decoded,
+            binary_encoded,
+            binary_encoded_text,
+            text_encoded: row.get("value"),
+            text_encoded_text: row.get("rendered"),
+        });
+    }
+    observations
+}
+
+fn assert_format_differential(
+    cases: &[RawCase],
+    ours: &[FormatObservation],
+    theirs: &[FormatObservation],
+) {
+    assert_eq!(
+        ours.len(),
+        cases.len(),
+        "compio-postgres answered the wrong number of format cases"
+    );
+    assert_eq!(
+        theirs.len(),
+        cases.len(),
+        "tokio-postgres answered the wrong number of format cases"
+    );
+
+    for (case, (ours, theirs)) in cases.iter().zip(ours.iter().zip(theirs)) {
+        assert_eq!(
+            ours, theirs,
+            "{}: the drivers disagreed across text/binary encode/decode",
+            case.name
+        );
+        assert_eq!(
+            ours.binary_decoded, ours.binary_encoded,
+            "{}: binary decode/encode changed the wire value",
+            case.name
+        );
+        assert_eq!(
+            ours.binary_decoded, ours.text_encoded,
+            "{}: text decode/encode changed the binary value",
+            case.name
+        );
+        assert_eq!(
+            ours.text_decoded, ours.binary_decoded_text,
+            "{}: text and binary decode rendered different values",
+            case.name
+        );
+        assert_eq!(
+            ours.text_decoded, ours.binary_encoded_text,
+            "{}: binary rebound rendered a different value",
+            case.name
+        );
+        assert_eq!(
+            ours.text_decoded, ours.text_encoded_text,
+            "{}: text rebound rendered a different value",
+            case.name
+        );
     }
 }
 
@@ -591,6 +952,84 @@ fn decode_interval(bytes: &[u8]) -> Result<IntervalWire, BoxError> {
     };
     reader.finish()?;
     Ok(interval)
+}
+
+fn float_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new("float4-nan", "'NaN'::float4", "float4"),
+        RawCase::new("float4-positive-infinity", "'Infinity'::float4", "float4"),
+        RawCase::new("float4-negative-infinity", "'-Infinity'::float4", "float4"),
+        RawCase::new("float4-negative-zero", "'-0'::float4", "float4"),
+        RawCase::new(
+            "float4-positive-subnormal",
+            "'1.401298464324817e-45'::float4",
+            "float4",
+        ),
+        RawCase::new(
+            "float4-negative-subnormal",
+            "'-1.401298464324817e-45'::float4",
+            "float4",
+        ),
+        RawCase::new("float8-nan", "'NaN'::float8", "float8"),
+        RawCase::new("float8-positive-infinity", "'Infinity'::float8", "float8"),
+        RawCase::new("float8-negative-infinity", "'-Infinity'::float8", "float8"),
+        RawCase::new("float8-negative-zero", "'-0'::float8", "float8"),
+        RawCase::new(
+            "float8-positive-subnormal",
+            "'4.9406564584124654e-324'::float8",
+            "float8",
+        ),
+        RawCase::new(
+            "float8-negative-subnormal",
+            "'-4.9406564584124654e-324'::float8",
+            "float8",
+        ),
+        RawCase::new("float8-17-digit", "'1.0000000000000002'::float8", "float8"),
+    ]
+}
+
+fn tokio_float_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_float_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+/// Both drivers preserve every required float through text and binary.
+#[compio::test]
+async fn both_drivers_agree_on_float_text_and_binary_codecs() {
+    let cases = float_format_cases();
+    let theirs = tokio_float_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_float_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let expected = [
+        ("float4-nan", "NaN", "7fc00000"),
+        ("float4-positive-infinity", "Infinity", "7f800000"),
+        ("float4-negative-infinity", "-Infinity", "ff800000"),
+        ("float4-negative-zero", "-0", "80000000"),
+        ("float4-positive-subnormal", "1e-45", "00000001"),
+        ("float4-negative-subnormal", "-1e-45", "80000001"),
+        ("float8-nan", "NaN", "7ff8000000000000"),
+        ("float8-positive-infinity", "Infinity", "7ff0000000000000"),
+        ("float8-negative-infinity", "-Infinity", "fff0000000000000"),
+        ("float8-negative-zero", "-0", "8000000000000000"),
+        ("float8-positive-subnormal", "5e-324", "0000000000000001"),
+        ("float8-negative-subnormal", "-5e-324", "8000000000000001"),
+        ("float8-17-digit", "1.0000000000000002", "3ff0000000000001"),
+    ];
+    assert_eq!(ours.len(), expected.len());
+    for (observation, (name, text, binary_hex)) in ours.iter().zip(expected) {
+        assert_eq!(observation.name, name);
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        assert_eq!(
+            hex(&observation.binary_decoded.0),
+            binary_hex,
+            "{name}: server binary"
+        );
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
