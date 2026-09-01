@@ -3869,6 +3869,62 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_an_assigned_waiter_after_close_discards_the_unowned_handoff() {
+        let config = PoolConfig {
+            max_size: 2,
+            min_idle: 0,
+            validation_bypass: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let pool = test_pool(config, Vec::new(), 2, 2);
+        let (handoff_client, mut handoff_receiver) = fake_client(14);
+        let handed = PooledClient {
+            entry: Some(PoolEntry::new(handoff_client, pool.config.max_lifetime)),
+            pool: &pool,
+        };
+        let (survivor_client, _survivor_receiver) = fake_client(15);
+        let survivor = PooledClient {
+            entry: Some(PoolEntry::new(survivor_client, pool.config.max_lifetime)),
+            pool: &pool,
+        };
+        let mut waiter = Box::pin(Waiter::new(&pool));
+
+        assert!(poll_once(waiter.as_mut()).is_pending());
+        drop(handed);
+        assert_eq!(pool.active_count(), 1);
+        assert_eq!(pool.total_count(), 2);
+        assert_eq!(pool.idle_count(), 0);
+        assert_eq!(pool.handoffs.borrow().len(), 1);
+        assert!(matches!(
+            handoff_receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        // Model re-entry after close has published its linearization bit but
+        // before begin_close has drained the assigned-handoff registry.
+        pool.closed.set(true);
+        drop(waiter);
+
+        assert_eq!(pool.active_count(), 1, "handoff reclaim touched a borrower");
+        assert_eq!(pool.total_count(), 1, "unowned handoff kept its slot");
+        assert_eq!(pool.idle_count(), 0, "closed pool republished the handoff");
+        assert_eq!(pool.handoffs.borrow().len(), 0);
+        assert_eq!(
+            pool.metrics.evictions.get(),
+            0,
+            "shutdown discard was counted as an eviction"
+        );
+        assert!(
+            matches!(handoff_receiver.try_recv(), Err(mpsc::TryRecvError::Closed)),
+            "discarding the unowned handoff did not destroy its Client"
+        );
+
+        drop(survivor);
+        assert_eq!(pool.active_count(), 0);
+        assert_eq!(pool.total_count(), 0);
+    }
+
+    #[test]
     fn clean_recent_handoff_skips_validation() {
         let config = PoolConfig {
             max_size: 1,
