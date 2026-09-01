@@ -261,7 +261,11 @@ census answered the question it could ask rather than the question that was bein
 So the honest cost of "gate the dev backend" is unknown but larger than a 13-file relocation, and the
 first thing any implementer must do is settle where `BackendHandle` lives.
 
-### What to build NOW: three moves, not five crates
+### What to build NOW: three moves, whatever the final count is
+
+*(This section predates the thin-adapter decision and survives it unchanged. Thin-adapter fixes the
+DESTINATION; it does not argue that everything moves at once, and the sequencing below is about what
+can move FIRST without prerequisites.)*
 
 **`data-cdc-server` needs neither `data-core` nor `data-postgres`, and that is measured, not
 argued.** Counting `crate::<module>` reach out of the three modules that move (`wal_consumer.rs`,
@@ -302,9 +306,28 @@ Reviewed 2026-08-31 by three reviewers with different lenses. They landed on thr
 
 | lens | lands on | the difference |
 | --- | --- | --- |
-| operator | five | as proposed |
+| operator, first proposal | five | as originally proposed |
 | architecture | **three** | `data-core`/`-postgres`/`-sqlite` are a destination, not a plan; build the rename, the CDC tier, and the in-place feature gate |
-| dependency graph | **six** | splits `data-encryption` out of `data-core`, so the core stays comparable to `migrate-backend` and the CDC tier never inherits crypto |
+| dependency graph | **six** | splits `data-encryption` OUT of `data-core`, so the core stays comparable to `migrate-backend` and the CDC tier never inherits crypto |
+| operator, after the thin-adapter decision | **six** | adds `data-engine`, because a thin `plugin-db` leaves ~23,000 lines of pipeline and reducer with nowhere else to go |
+
+**THE TWO SIXES ARE NOT THE SAME SIX, and that matters when the destination is finally drawn.** The
+dependency-graph reviewer's sixth crate is `data-encryption`, split DOWNWARD out of the core. The
+operator's sixth is `data-engine`, added UPWARD between the core and the adapter. They solve
+different problems and neither subsumes the other, so **taking both arguments yields SEVEN**:
+
+```
+  plugin-db          thin adapter
+  data-engine        crud, transactions, exec, broker      <- operator's sixth
+  data-core          contract, shared vocabulary
+  data-encryption    AEAD, keys, AAD, wire framing         <- reviewer's sixth
+  data-postgres  data-sqlite
+  data-query-builder
+  data-cdc-server    separate process
+```
+
+Seven is not obviously wrong - the engine's family is nine - but it should be arrived at
+deliberately rather than by accepting two independent "make it six" arguments in sequence.
 
 **All three agree on the two things that decide the first move:**
 
