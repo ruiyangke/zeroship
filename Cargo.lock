@@ -1128,6 +1128,7 @@ dependencies = [
  "serde_json",
  "sha1",
  "sha2 0.10.9",
+ "smol_str 0.1.24",
  "socket2",
  "tempfile",
  "time",
@@ -4428,6 +4429,7 @@ dependencies = [
  "postgres-protocol",
  "serde_core",
  "serde_json",
+ "smol_str 0.1.24",
  "time",
  "uuid",
 ]
