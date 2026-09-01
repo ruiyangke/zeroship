@@ -427,3 +427,29 @@ Two things to carry:
   What caught it was the standing habit of probing before acting, not the note.
   Prefer changing the TOOL over recording the hazard: `--show-missing-lines`
   cannot be misread the way raw segments can.
+
+## The insertion hazard has a second form: doc comments, not just attributes
+
+The `#[test]`-stealing case above has a sibling. An agent extracted an inline
+`map_err` closure into a named helper so it could be unit-tested - a good move,
+since the arm needs a 2 GiB allocation to reach live - and inserted it directly
+above `pub async fn execute_text_params`. That function's twelve-line contract,
+describing the whole NULL-aware text-format coercion model, was immediately
+above it. The helper took the docs; `execute_text_params` was left undocumented.
+
+Nothing failed. It compiles, `cargo doc` is happy, and the suite is green,
+because a doc comment attaching to the wrong item is not an error - it is just
+wrong.
+
+**Both forms have one cause and one mechanical guard.** Anything that binds to
+what FOLLOWS it - `#[test]`, `#[cfg]`, `///`, `#[derive]` - is stolen by an
+insertion placed above the item it belongs to. So an insertion helper should
+refuse the anchor rather than trusting the author to notice:
+
+    assert not lines[anchor - 1].lstrip().startswith(("///", "//!", "#["))
+
+That is the whole check. Anchor on the doc block's FIRST line, or on the
+attribute, and never on the bare `fn`. The two detections are different -
+`--list` counts catch a stolen attribute, and only reading catches a stolen doc
+comment - which is the argument for preventing both at the insertion point
+instead of hunting them afterwards.
