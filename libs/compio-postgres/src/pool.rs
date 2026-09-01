@@ -4940,6 +4940,29 @@ mod tests {
     }
 
     #[compio::test]
+    async fn housekeeping_recent_idle_stop_commits_prior_unusable_eviction() {
+        let config = PoolConfig {
+            max_size: 2,
+            min_idle: 0,
+            idle_timeout: Duration::from_secs(60),
+            ..PoolConfig::default()
+        };
+        let (expired_client, _expired_receiver) = fake_client(455);
+        let (recent_client, _recent_receiver) = fake_client(456);
+        let expired = PoolEntry::new(expired_client, Duration::ZERO);
+        let recent = PoolEntry::new(recent_client, config.max_lifetime);
+        let pool = Rc::new(test_pool(config, vec![expired, recent], 0, 2));
+        let weak = Rc::downgrade(&pool);
+
+        assert!(Pool::housekeep(&weak).await);
+        let idle = pool.idle.borrow();
+        assert_eq!(idle.len(), 1);
+        assert_eq!(idle[0].client.process_id(), 456);
+        assert_eq!(pool.total_count(), 1);
+        assert_eq!(pool.metrics.evictions.get(), 1);
+    }
+
+    #[compio::test]
     async fn housekeeping_stops_when_eviction_cleanup_drops_the_pool() {
         let config = PoolConfig {
             max_size: 1,
