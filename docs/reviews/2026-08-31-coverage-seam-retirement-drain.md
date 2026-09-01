@@ -387,3 +387,43 @@ A suite total is not enough. It moved by the expected +1 in both the broken and
 the correct version; only the distinct-name count told them apart. Any tooling
 that inserts tests should anchor on the attribute, or on a doc-comment line
 above it, and never on the bare `fn`.
+
+## Reading segments per line was wrong AGAIN, and this time I had already written it down
+
+The rule recorded above - aggregate over a function span, never read a segment
+per line - was followed for the DEAD-function list and then quietly abandoned
+for the PARTIAL-function ranking, which listed individual zero-count segments as
+"unexecuted lines". Those line attributions are not sound, and they picked the
+target for a session's work.
+
+`connect_raw.rs:1344` was listed as unexecuted:
+
+    if mechanism != sasl::SCRAM_SHA_256_PLUS {
+        handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
+
+A `panic!` there fails **552 of 1531 tests**. The line runs on essentially every
+password connection. Nothing was wrong with the code or the profile - the
+reading was wrong. A zero-count segment marks a region boundary at a
+(line, column); it does not mean the line never executed.
+
+**The fix is to stop interpreting segments and ask llvm-cov for line counts:**
+
+    cargo llvm-cov report --package compio-postgres --show-missing-lines
+
+That prints, per file, the lines with zero coverage. For `connect_raw.rs` it
+lists 145 lines and **1344 is not among them**, agreeing with the probe. The
+same output gives the genuinely uncovered auth branches this ranking was meant
+to find - `1306-1308`, the `channel_binding=require` refusal when the backend
+cannot produce a binding, and `1359-1360` / `1377-1378`, the SASL frame-order
+refusals.
+
+Two things to carry:
+
+- **The aggregate zero-region COUNT per function is still a fair ranking
+  signal** - "15 of 127 regions unexecuted" points at a function worth looking
+  at. It is only the mapping from that count to specific LINES that is invalid.
+- **A documented trap does not stop you walking into it.** This one was written
+  up in this very file, and the ranking that violated it was built afterwards.
+  What caught it was the standing habit of probing before acting, not the note.
+  Prefer changing the TOOL over recording the hazard: `--show-missing-lines`
+  cannot be misread the way raw segments can.
