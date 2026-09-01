@@ -2638,7 +2638,14 @@ expensive way and is why a gate landed before any move did.
 | - | gate decision 5 BEFORE moving anything | `b2263ebc9` | 2 arms + floors, 3 controls, mutation-proved |
 | 1 | PG error classification out of `error.rs` into `backend/pg_error.rs` | `6f3a482f6` | `error.rs` names a vendor 0 times in production; 84 live PG, 694 lib, run by me |
 | - | extend the gate to `zeroship-schema` | `e96849f0a` | found a second bearer nobody had recorded |
-| 2 | PG introspection out of `zeroship-schema` into `backend/pg_introspect.rs` | in flight | acceptance is the MANIFEST, not the source |
+| 2 | PG introspection out of `zeroship-schema` into `backend/pg_introspect.rs` | `fffa857b0` | `zeroship-schema/Cargo.toml` declares no vendor; gate 12 passed, 2 arms, 0 refusals, 65 files vs floor 25 |
+
+**Remaining decision-5 surface, measured 2026-09-01 by running the gate:** 21
+occurrences across 11 files, ALL inside `zeroship-plugin-db` - `exec.rs` (5),
+`backend/mod.rs` (4), `transaction/driver.rs` (2), `auth/bootstrap.rs` (2),
+`backend/lock_guard.rs` (2), and one each in `transaction/mod.rs`,
+`transaction/cancel.rs`, `context.rs`, `drop_namespace.rs`, `lib.rs`,
+`service.rs`. The floor crate is clean, which was the point of doing it first.
 
 **THE CAVEAT THAT REORDERED EVERYTHING.** `git mv`-ing a file that NAMES a vendor into a new crate
 does not fail. Cargo simply wants the dependency declared; you declare it, and the build goes GREEN
