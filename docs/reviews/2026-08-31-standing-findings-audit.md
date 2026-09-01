@@ -2,8 +2,10 @@
 
 Every cycle of this pilot has carried the same six open findings forward. They
 were re-derived against `ef05cc94e` by reading the code they name, not by
-re-reading the list. **Five of the six are no longer true.** Four were fixed by
-work that landed since the list was written; one was never true as stated.
+re-reading the list. **None of the six is still true.** Four were fixed by work
+that landed since the list was written, two were never true as stated, and the
+one carried as "unverified" turns out to be guarded on both arms with a test
+naming the behaviour.
 
 The list also carried stale line numbers - it pointed at `connect_raw.rs:993`
 and `tls_sansio.rs:750`, neither of which is the code described. A finding whose
@@ -76,11 +78,41 @@ call. `:174-176` also notes that no cancellation point separates `unsplit` from
 
 ## 5. `copy_in` poll_ready/poll_flush treat the sink's own close as a lost connection
 
-**STILL OPEN, and still unverified.** This is the one item that survives. It was
-recorded as needing a reachability decision first - whether `poll_flush`'s
-`sender.is_closed()` is reachable from our own `poll_close` - and that question
-has not been answered. Answer it before writing a fix; a fix for an unreachable
-branch is churn.
+**HANDLED on both arms, and one of them is bound by a test.**
+
+The finding asked for a reachability decision first - is `poll_flush`'s
+`sender.is_closed()` reachable from our own `poll_close`? It is, and the code
+already distinguishes the two ways of getting there.
+
+`poll_flush` does not test `is_closed()` alone. It carries the sink's own state
+into the decision (`copy_in.rs:537, 569`):
+
+    let closed_by_sink = matches!(self.state, SinkState::ReadingAfterClose);
+    ...
+    Poll::Ready(Ok(())) if disconnected && !closed_by_sink =>
+        self.poll_disconnected_diagnosis(cx),
+
+So a disconnect that the sink caused by closing its own producer is not
+diagnosed as a lost connection. The other order - the sender closing while the
+state is still `Active`, before `ReadingAfterClose` is set - is caught one level
+up in `poll_finish` (`:362-369`), which converts a `closed` error into
+`SinkState::Reading` and continues, with the reason stated: the connection can
+close the COPY producer only after publishing any decoded backend messages, so
+a queued ErrorResponse is the better diagnosis than the local symptom.
+
+Neither arm drains away `CommandComplete` + `ReadyForQuery`, which was the
+consequence the finding predicted.
+
+`flush_after_cancelled_close_preserves_copy_completion` (`:1192`) binds exactly
+this: it asserts the first `poll_close` returns `Pending`, that the sink has
+left `Active`/`Closing`/`Finished` for response reading, that it has closed its
+own sender, and that CopyDone + Sync still reached the wire as
+`[b'c',0,0,0,4,b'S',0,0,0,4]`.
+
+**What is verified here is the state machine and the test, by reading.** No
+mutation was run against this arm on this cycle, so "the guard exists and a test
+names the behaviour" is the claim - not "the test would fail if the guard were
+removed."
 
 ## 6. The TLS split discards unconsumed ciphertext
 
@@ -96,6 +128,13 @@ it, and `BufStream::try_into_split` (`buf_stream.rs:724`) carries `read_buf` and
 Re-deriving all six took about half an hour of reading. Carrying them unverified
 cost more than that: each cycle re-asserted them as live, and one of them named a
 function that no longer has a caller.
+
+The failure is not that the findings were wrong when written - most were right,
+and the work that fixed them was real. It is that **nothing retired them**. A
+finding is created with evidence and then survives on repetition alone, so the
+list drifts from a description of the code into a description of the past.
+That is the same defect as a stale comment, with the same cause and the same
+fix: re-derive, or delete.
 
 **A findings list needs the commit it was true at.** These carried none, so
 there was no cheap way to tell "fixed" from "still broken" short of re-deriving
