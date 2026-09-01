@@ -1365,6 +1365,124 @@ async fn native_one_dimensional_arrays_round_trip_identically() {
     );
 }
 
+fn numeric_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new(
+            "numeric-zero-scale-40",
+            "'0.0000000000000000000000000000000000000000'::numeric",
+            "numeric",
+        ),
+        RawCase::new("numeric-trailing-zeros", "'123.450000'::numeric", "numeric"),
+        RawCase::new(
+            "numeric-large-positive-weight",
+            "'1e1000'::numeric",
+            "numeric",
+        ),
+        RawCase::new(
+            "numeric-large-negative-weight",
+            "'1e-1000'::numeric",
+            "numeric",
+        ),
+        RawCase::new(
+            "numeric-beyond-float-precision",
+            "'1234567890123456789012345678901234567890.123456789012345678901234567890'::numeric",
+            "numeric",
+        ),
+        RawCase::new("numeric-nan-format", "'NaN'::numeric", "numeric"),
+        RawCase::new(
+            "numeric-positive-infinity-format",
+            "'Infinity'::numeric",
+            "numeric",
+        ),
+        RawCase::new(
+            "numeric-negative-infinity-format",
+            "'-Infinity'::numeric",
+            "numeric",
+        ),
+    ]
+}
+
+fn tokio_numeric_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_numeric_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+/// Both drivers preserve NUMERIC's scale, weight, signs, and exact digits.
+#[compio::test]
+async fn both_drivers_agree_on_numeric_text_and_binary_codecs() {
+    let cases = numeric_format_cases();
+    let theirs = tokio_numeric_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_numeric_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let positive_weight_text = format!("1{}", "0".repeat(1000));
+    let negative_weight_text = format!("0.{}1", "0".repeat(999));
+    let expected = [
+        (
+            "numeric-zero-scale-40",
+            "0.0000000000000000000000000000000000000000",
+            "0000000000000028",
+        ),
+        (
+            "numeric-trailing-zeros",
+            "123.450000",
+            "0002000000000006007b1194",
+        ),
+        (
+            "numeric-large-positive-weight",
+            positive_weight_text.as_str(),
+            "000100fa000000000001",
+        ),
+        (
+            "numeric-large-negative-weight",
+            negative_weight_text.as_str(),
+            "0001ff06000003e80001",
+        ),
+        ("numeric-nan-format", "NaN", "00000000c0000000"),
+        (
+            "numeric-positive-infinity-format",
+            "Infinity",
+            "00000000d0000020",
+        ),
+        (
+            "numeric-negative-infinity-format",
+            "-Infinity",
+            "00000000f0000020",
+        ),
+    ];
+    for (name, text, binary_hex) in expected {
+        let observation = ours
+            .iter()
+            .find(|observation| observation.name == name)
+            .unwrap_or_else(|| panic!("no numeric observation named {name}"));
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        assert_eq!(
+            hex(&observation.binary_decoded.0),
+            binary_hex,
+            "{name}: server binary"
+        );
+    }
+
+    let precise = ours
+        .iter()
+        .find(|observation| observation.name == "numeric-beyond-float-precision")
+        .expect("numeric precision observation");
+    assert_eq!(
+        precise.text_decoded,
+        "1234567890123456789012345678901234567890.123456789012345678901234567890"
+    );
+    let precise_wire =
+        decode_numeric(&precise.binary_decoded.0).expect("decode precise NUMERIC wire value");
+    assert_eq!(precise_wire.weight, 9);
+    assert_eq!(precise_wire.display_scale, 30);
+    assert_eq!(precise_wire.digits.len(), 18);
+    assert!(precise_wire.digits.iter().all(|digit| *digit < 10_000));
+}
+
 /// NUMERIC is base-10000 digits plus explicit sign and display scale.
 #[compio::test]
 async fn numeric_values_round_trip_with_exact_scale_and_special_signs() {
