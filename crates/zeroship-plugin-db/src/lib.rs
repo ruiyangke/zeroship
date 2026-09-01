@@ -543,56 +543,18 @@ mod runtime_descriptor_binding_tests {
     }
 }
 
-/// **Bench-only**: thin wrapper around `backend::pg_row_json::row_to_json` so the
-/// `bench_row_to_json` Criterion harness in `benches/` can measure the
-/// row-to-json index-lookup path without the bench having to live
-/// inside `v8_bridge` itself.
-///
-/// `#[doc(hidden)]` keeps this off the public docs surface; the function
-/// is still `pub` because Criterion benches link against the crate as an
-/// external dependency and cannot reach `pub(crate)` items.
-/// `compio_postgres::test_utils::row_for_test` (doc-hidden there, and always
-/// compiled) is the matching `Row` synthesiser — see
-/// `crates/plugin-db/benches/bench_row_to_json.rs` for the wiring.
+// The two bench entry points live in `backend::pg_row_json`, beside the decoders
+// they measure, and are re-exported here so `zeroship_plugin_db::…_for_bench`
+// keeps resolving for the Criterion targets and the integration test.
+//
+// They were DEFINED here until 2026-09-01, which put `&compio_postgres::Row`
+// into two always-compiled `pub fn` signatures in the crate whose whole claim is
+// that it is a thin Rust/V8 seam - a seam cannot link a database driver. A
+// `pub use` names no type, so the re-export costs the adapter nothing. When
+// `pg_row_json` becomes `data-postgres`, the benches move with it and this line
+// is deleted rather than rewritten.
 #[doc(hidden)]
-#[must_use]
-pub fn row_to_json_for_bench(row: &compio_postgres::Row) -> serde_json::Value {
-    backend::pg_row_json::row_to_json(row)
-}
-
-/// **Bench-only**: the full `&[Row] → JSON-string` path the SDK sees on
-/// a `find().first()` (or any other `first_row_or_null`-resolving) call. Runs
-/// both halves the dispatcher executes between Postgres and V8:
-///
-/// 1. `backend::pg_row_json::rows_to_json_value` — decode every `Row` into a
-///    `serde_json::Value` (the same work `bench_row_to_json` covers
-///    for a single row).
-/// 2. `crud::first_row_or_null` — take the first element, fall back
-///    to `Value::Null`, and serialise once for `ResolveValue::Json`.
-///
-/// This composed path is a bottleneck: at wide rows (50 columns) the
-/// JSON string + V8 `JSON.parse` tail dominates the read budget. The
-/// matching Criterion harness is
-/// `crates/plugin-db/benches/bench_first_row_or_null.rs`.
-///
-/// Returns the raw JSON string (without going through `ResolveValue`) so
-/// the bench measures the Rust-side cost in isolation. The remaining V8
-/// `JSON.parse` cost is structural and lives in `zeroship-runtime`; it
-/// is not part of this microbench.
-///
-/// Same visibility rationale as [`row_to_json_for_bench`]: `pub` so the
-/// external bench target can link against it, `#[doc(hidden)]` so it
-/// does not leak into the public surface.
-#[doc(hidden)]
-#[must_use]
-pub fn first_row_or_null_for_bench(rows: &[compio_postgres::Row]) -> String {
-    let values = backend::pg_row_json::rows_to_json_value(rows);
-    values
-        .into_iter()
-        .next()
-        .unwrap_or(serde_json::Value::Null)
-        .to_string()
-}
+pub use backend::pg_row_json::{first_row_or_null_for_bench, row_to_json_for_bench};
 
 /// **Test-only**: install this thread's DB resources directly, bypassing the
 /// usual `DbService` → `DbPlugin::register()` path. Used by integration tests
@@ -1338,13 +1300,11 @@ mod journal_schema_derivations_agree {
         let ids = [
             Uuid::nil(),
             Uuid::max(),
-            Uuid::parse_str("0198f0a1-0000-7000-8000-0123456789ab")
-                .expect("fixed uuid parses"),
+            Uuid::parse_str("0198f0a1-0000-7000-8000-0123456789ab").expect("fixed uuid parses"),
             Uuid::new_v4(),
         ];
         for id in ids {
-            let writer =
-                zeroship_migrate_server::provisioning::workflow_journal_schema_name(&id);
+            let writer = zeroship_migrate_server::provisioning::workflow_journal_schema_name(&id);
             let reader = zeroship_plugin_workflow::store::pg::app_schema_for(&id);
             assert_eq!(
                 writer, reader,
