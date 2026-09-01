@@ -447,13 +447,22 @@ or an explicit decision", AND 782 LINES WERE NEVER MENTIONED** - found by adding
 rather than waiting for a reviewer to do it:
 
 ```
-  adapter        5,679      contested      8,681
-  engine        26,791      ---
+  adapter        5,821      contested      8,681      (was 5,679; +142 tx_scope.rs)
+  engine        26,649      ---                       (was 26,791; -142 tx_scope.rs)
   encryption     1,591      accounted     56,645
   postgres       1,477      tree total    57,427
   sqlite         9,485      UNACCOUNTED      782
   cdc-server     2,941
 ```
+
+**And this table went stale within hours of being held up as the fix for staleness.** When
+`tx_scope.rs` moved to the adapter (`:165`), its 142 lines were struck from the placement table and
+left in the arithmetic here: `5,679 = 3,455 + 867 + 1,357` counts no `tx_scope`, while
+`26,791 = 26,649 + 142` counts it. One module, two inventories, edited independently - **the exact
+failure this section exists to record**, recurring inside the correction for it, in the numbers offered
+as proof that "totals are checked by adding, not by asserting". The 782 is unaffected; the two rows
+above it were wrong for as long as the fix was in place. Corrected 2026-08-31 by a reviewer, not by the
+addition.
 
 The 782:
 
@@ -1791,6 +1800,17 @@ That is the runtime's op-dispatch layer, sitting in a module this document assig
    that shows this is a real distinction rather than a grep artefact.       <- NOT A VALID CONTROL
 ```
 
+**That control is void, and it failed in the one way a control must not.** `exec.rs`'s single `v8::`
+token is a `//!` doc comment at `:36`; it has **zero** production V8, so it is cleaner than claimed.
+But it reaches the adapter twice - `:63 use crate::v8_bridge::rows_to_json_value` and
+`:386 crate::v8_bridge::typed_rows_to_json_value(&typed)` - and `v8_bridge.rs` is adapter-tier with 58
+`v8::` references. It is V8-free in **spelling** while pointing **upward**.
+
+A control exists to show the instrument discriminates. This one was selected *by* the instrument, on
+the instrument's own blind axis, so it could only ever return "clean". **A control chosen by the
+measurement it is meant to validate is not independent** - it is the measurement, run twice. The
+correct control would have been a module known by other means to be engine-only, then checked.
+
 #### Round 5 corrected every number in that block. Two reviewers, independently, agree.
 
 The census that produced those figures had four defects. Both round-5 reviewers found the first two
@@ -1899,14 +1919,30 @@ is cancelled - but it is a redesign of how `env.db` returns results, not a file 
 `run_op` (`:138`) and `reject_op` (`:236`) are the two of the 39 that take only `v8::Global`, never a
 `PinScope`. They are the shape the rest should be converted TO, not more work to be done.
 
-**And the original item then collapses into a rounding error.** Every one of the 43 engine-tier
-`to_op_error` call sites - **43 of 43, no exceptions** - sits inside one of those V8-signature
-functions. Relocate the dispatch surface and the calls travel with it, landing adapter-side where the
-extension trait can legally serve them. What remains of 0.1 afterwards is *relocating one method and
-adding one `use`* - the 53-call-site figure was never the cost of the change, it was the cost of doing
-it in the wrong order. `error.rs` carries exactly one production runtime edge to begin with
-(`:67`, `use zeroship_runtime::state::OpError`), which is why the item looked cheap from the type side
-and was never checked from the caller side.
+**And the original item then collapses into a rounding error.** Every engine-tier `to_op_error` call
+site - **44 of 44, no exceptions** (43 as first counted, plus `crud/mask_policy.rs:449`, which the
+census's broken test boundary hid) - sits inside one of those V8-signature functions. `error.rs`
+carries exactly one production runtime edge to begin with (`:67`), which is why the item looked cheap
+from the type side and was never checked from the caller side.
+
+> **THE SENTENCE THAT USED TO FOLLOW WAS THE LOAD-BEARING ONE, AND IT WAS WRONG.** It read:
+> *"Relocate the dispatch surface and the calls travel with it, landing adapter-side where the
+> extension trait can legally serve them. What remains of 0.1 afterwards is relocating one method and
+> adding one `use`."*
+>
+> Classified by position, **36 of the 43 sit inside the `async move` future, not the V8 prologue** -
+> `crud/mod.rs` 31, `crud/unmask.rs` 4, `transaction/mod.rs` 1. Only 6 are in `PinScope`-bearing code
+> (`crud/mod.rs:2134`, `:2339`; `transaction/mod.rs:661`, `:850`, `:1181`, `:1193`); the 7th,
+> `crud/mod.rs:243`, is inside `reject_op`, a helper the futures call.
+>
+> **So "the calls travel with it" depends entirely on where you cut.** Cut at the `v8::` signature -
+> where the census points - and 36 of 43 stay engine-side, still needing `OpError`, and the extension
+> trait is still unreachable from below. The only cut that carries them is moving the whole function
+> body, which moves `crud/mod.rs:617-2479` into the adapter and leaves "engine" meaning the sibling
+> modules.
+>
+> The refutation of 0.1 was itself refuted on its own remedy. See the move-or-rewrite section above:
+> the answer is a protocol inversion, and "one method and one `use`" is not the residue of anything.
 
 **Two instrument failures produced this, and both are worth naming.** First, the check that was run
 instead of this one: *"if production relay code called `to_op_error`, an adapter-owned trait would drag
@@ -1938,19 +1974,41 @@ crate the module's assigned tier is forbidden to depend on?** Run across all fou
 (`v8`, `zeroship_runtime`, `compio_postgres`, `rusqlite`), comments stripped, `#[cfg(test)]` regions
 excluded:
 
+The table this section first printed is kept below **struck through**, because what it got wrong is
+more useful than what it got right. Every figure in it is superseded by the repaired instrument:
+
 ```
-TIER     FILE                       MARKER             SIGS
-ENGINE   crud/mod.rs                v8                   19
-ENGINE   transaction/mod.rs         v8                   10
-ENGINE   tx_scope.rs                v8                    4
-ENGINE   crud/unmask.rs             v8                    2
-ENGINE   tx_route.rs                v8                    1
-ENGINE   transaction/mod.rs         zeroship_runtime      1
-CORE     error.rs                   compio_postgres       6     <- NEW, not V8
-ENGINE   exec.rs                    compio_postgres       4     <- NEW, not V8
-ENGINE   transaction/mod.rs         compio_postgres       1
-ENGINE   transaction/driver.rs      compio_postgres       1
-                                                  total   49
+SUPERSEDED - do not plan against this
+TIER     FILE                       MARKER             SIGS      corrected
+ENGINE   crud/mod.rs                v8                   19      19
+ENGINE   transaction/mod.rs         v8                   10      10
+ENGINE   tx_scope.rs                v8                    4      6, and it is ADAPTER - not reported
+ENGINE   crud/unmask.rs             v8                    2      2
+ENGINE   tx_route.rs                v8                    1      1
+ENGINE   transaction/mod.rs         zeroship_runtime      1      3
+CORE     error.rs                   compio_postgres       6      7   (+ impl header at :797, uncounted)
+ENGINE   exec.rs                    compio_postgres       4      5
+ENGINE   transaction/mod.rs         compio_postgres       1      1
+ENGINE   transaction/driver.rs      compio_postgres       1      1
+                                                  total   49      80  (see the corrected run below)
+```
+
+Current, from `tests/lib/tier_signature_census.sh` at `e81ff8783`:
+
+```
+ENGINE   crud/mod.rs           v8 19, zeroship_runtime 7, upward 2
+ENGINE   transaction/mod.rs    v8 10, zeroship_runtime 3, compio_postgres 1, upward 2
+ENGINE   crud/unmask.rs        v8 2,  upward 4
+ENGINE   crud/mask_policy.rs   v8 1,  upward 2
+ENGINE   exec.rs               compio_postgres 5, upward 2
+ENGINE   transaction/driver.rs compio_postgres 1
+ENGINE   crud/system_fields_pass.rs   zeroship_runtime 1
+ENGINE   auth/bootstrap.rs     compio_postgres 1
+CORE     error.rs              compio_postgres 7, zeroship_runtime 1   <- to_op_error itself
+ADAPTER  v8_bridge.rs          compio_postgres 3                        <- names BOTH drivers
+SQLITE   backend/sqlite/mod.rs upward 3
+PG       backend/postgres.rs   upward 2
+                                                            total 80
 ```
 
 **Two of these are new findings that have nothing to do with V8, and four review rounds did not
@@ -2014,6 +2072,15 @@ possible outcome because it looks like success. The tests move too, or 0.1 is no
 costs one. That is not a reason to re-estimate them now - it is a reason to *count the tests* when
 each is actually planned, and to treat "the lib compiles without the dependency" as a partial result
 rather than the finish line.
+
+**A test-only edge is harmless and binding at the same time, and the two must be said separately.**
+Cargo permits dev-dependency cycles, and `cargo build --release --bins` never activates
+dev-dependencies - so for the **shipped trust boundary** ("the worker must not link the relay") a
+test-only edge proves nothing and costs nothing. For the **workspace build graph** it binds fully: the
+crate must still declare the dependency, and `cargo test -p <crate>` links it. This document argues
+both, correctly, in two places - Phase 0.2 moves `auth/util.rs` on the second ground, and the retracted
+cycle correction leaned on the first. Whenever either is invoked, say which question is being answered,
+or the two read as a contradiction and one of them gets "fixed".
 
 ### Phase 0.5 - three audits that must precede ANY crate boundary
 
