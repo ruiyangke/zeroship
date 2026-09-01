@@ -4920,6 +4920,67 @@ async fn execute_text_params_against(
     outcome
 }
 
+/// The `query_text_params` peer of `execute_text_params_against`. Same script,
+/// different entry point, so the two portal-describing siblings can be held to
+/// the same message-order rule.
+async fn query_text_params_against(
+    process_id: i32,
+    response: Vec<u8>,
+) -> Result<(), compio_postgres::Error> {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+        expect_frontend_until_sync(&mut stream);
+        stream
+            .write_all(&response)
+            .expect("write scripted query_text_params response");
+        stream
+            .flush()
+            .expect("flush scripted query_text_params response");
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    let (client, connection) = stub_config(server.addr)
+        .connect(common::suite_tls())
+        .await
+        .expect("connect to scripted PostgreSQL peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let outcome = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        client.query_text_params("SELECT value FROM scripted", &[]),
+    )
+    .await
+    .expect("query_text_params hung on a complete scripted response");
+
+    drop(client);
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    server.finish();
+    outcome.map(|_| ())
+}
+
+/// `query_text_params` describes a PORTAL, so ParameterDescription - which only
+/// a STATEMENT Describe produces - must be refused rather than ignored. Its
+/// sibling `execute_text_params` was tightened first; this is the same rule
+/// applied to the other half of the pair, so the two cannot drift apart.
+#[compio::test]
+async fn query_text_params_rejects_parameter_description_for_its_portal() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut out_of_order = backend_frame(b'1', b"");
+        out_of_order.extend_from_slice(&backend_frame(b'2', b""));
+        out_of_order.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        out_of_order.extend_from_slice(&backend_frame(b'n', b""));
+        out_of_order.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let error = query_text_params_against(306, out_of_order)
+            .await
+            .expect_err("query_text_params accepted ParameterDescription for a portal");
+        assert_eq!(error.to_string(), "unexpected message from server");
+    }))
+    .await
+    .expect("query_text_params message-order test exceeded its outer watchdog");
+}
+
 /// Drive `prepare` against a peer that answers with `response`, and require the
 /// same three properties the simple-query helper does.
 async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> String {
