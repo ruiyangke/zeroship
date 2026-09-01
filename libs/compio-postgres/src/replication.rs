@@ -4078,6 +4078,76 @@ mod tests {
         assert_eq!(ruled_on, 19, "the complete legal tag set must be ruled on");
     }
 
+    /// `StreamAbort` carries an OPTIONAL 16-byte tail (abort LSN plus abort
+    /// timestamp), and the decoder selects it by matching `cur.len()` exactly.
+    /// Every existing fixture uses the 0-byte form, so the 16-byte arm was
+    /// unbound: widening its guard to also admit 8 bytes, or defaulting the
+    /// timestamp, changed nothing that any test observed. Both are proved by
+    /// this test now.
+    ///
+    /// The exactness matters beyond decoding a value. The arm reads with
+    /// `Buf::get_u64`, which PANICS rather than erroring when short, so the
+    /// length match is the only thing standing between a truncated tail and a
+    /// panicked replication task; a partial tail must reach `TrailingData`.
+    #[test]
+    fn stream_abort_decodes_its_optional_tail_and_refuses_a_partial_one() {
+        const ABORT_LSN: u64 = 0x0102_0304_0506_0708;
+        const ABORT_TS: i64 = 0x1112_1314_1516_1718;
+
+        let mut full = vec![b'A'];
+        full.extend_from_slice(&7u32.to_be_bytes()); // xid
+        full.extend_from_slice(&9u32.to_be_bytes()); // subxid
+        full.extend_from_slice(&ABORT_LSN.to_be_bytes());
+        full.extend_from_slice(&ABORT_TS.to_be_bytes());
+
+        let mut decoder = pgoutput::Decoder::new();
+        decoder
+            .decode(&[b'S', 0, 0, 0, 7, 1])
+            .expect("StreamStart opens the block");
+        decoder
+            .decode(&[b'E'])
+            .expect("StreamStop closes it, as StreamAbort requires");
+        match decoder
+            .decode(&full)
+            .expect("a 16-byte tail is well formed")
+        {
+            pgoutput::PgOutputMessage::StreamAbort {
+                xid,
+                subxid,
+                abort_lsn,
+                abort_timestamp,
+            } => {
+                assert_eq!((xid, subxid), (7, 9));
+                assert_eq!(abort_lsn, Some(ABORT_LSN), "abort LSN was not decoded");
+                assert_eq!(
+                    abort_timestamp,
+                    Some(ABORT_TS),
+                    "abort timestamp was not decoded"
+                );
+            }
+            other => panic!("expected StreamAbort, got {other:?}"),
+        }
+
+        // Half a tail must be refused, not read past. Eight bytes is exactly
+        // the width that a widened guard would wrongly admit.
+        let partial = full[..full.len() - 8].to_vec();
+        let mut decoder = pgoutput::Decoder::new();
+        decoder
+            .decode(&[b'S', 0, 0, 0, 7, 1])
+            .expect("StreamStart opens the block");
+        decoder
+            .decode(&[b'E'])
+            .expect("StreamStop closes it, as StreamAbort requires");
+        let error = decoder
+            .decode(&partial)
+            .expect_err("a half-written abort tail is not a complete message");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("StreamAbort") && rendered.contains("trailing"),
+            "the refusal must name the message and the leftover: {rendered}"
+        );
+    }
+
     /// Required pgoutput fields must reject a frame ending at each field
     /// boundary, including the two-phase and streaming variants that a normal
     /// round trip rarely emits. Use the stateful decoder because the public
