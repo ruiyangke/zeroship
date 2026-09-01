@@ -2924,6 +2924,46 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Wake;
 
+    /// Every `PoolConfig` getter must return its OWN field.
+    ///
+    /// Four of the five are `Duration`. Any permutation among those four type
+    /// checks and hands back a plausible value, so a getter wired to the wrong
+    /// field is silent: callers see a real timeout, just not theirs. The five
+    /// values below are distinct for exactly that reason - equal values would
+    /// let every permutation pass.
+    #[test]
+    fn every_pool_config_getter_returns_its_own_field() {
+        let mut config = PoolConfig::new();
+        config
+            .max_size(11)
+            .max_lifetime(Duration::from_secs(101))
+            .idle_timeout(Duration::from_secs(202))
+            .acquire_timeout(Duration::from_secs(303))
+            .validation_bypass(Duration::from_secs(404));
+
+        assert_eq!(config.get_max_size(), 11, "get_max_size");
+        assert_eq!(
+            config.get_max_lifetime(),
+            Duration::from_secs(101),
+            "get_max_lifetime"
+        );
+        assert_eq!(
+            config.get_idle_timeout(),
+            Duration::from_secs(202),
+            "get_idle_timeout"
+        );
+        assert_eq!(
+            config.get_acquire_timeout(),
+            Duration::from_secs(303),
+            "get_acquire_timeout"
+        );
+        assert_eq!(
+            config.get_validation_bypass(),
+            Duration::from_secs(404),
+            "get_validation_bypass"
+        );
+    }
+
     fn fake_client(process_id: i32) -> (Client, mpsc::UnboundedReceiver<Request>) {
         let (sender, receiver) = mpsc::unbounded();
         (
