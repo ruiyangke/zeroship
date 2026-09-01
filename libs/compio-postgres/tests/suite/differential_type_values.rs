@@ -3953,6 +3953,14 @@ async fn native_geo_types_codecs_cover_geometry_wires_and_shared_limits() {
 
 /// Desired invariant blocked by both `Rect` codecs emitting BOX corners in
 /// the reverse of the server's binary order.
+/// Severity, measured against the server rather than inferred: NOT corruption.
+/// `box '(1,2),(3,4)'` is sent by PostgreSQL as high corner first, 3,4,1,2, and
+/// even its text form normalises to `(3,4),(1,2)`. We send 1,2,3,4. Feeding
+/// BOTH orders back through `COPY ... FROM STDIN (FORMAT binary)` stores
+/// `(3,4),(1,2)` either way and both compare `=` to the original, because
+/// `box_recv` normalises the corners on receipt. So this is wire
+/// nonconformance only - the same class as the CIDR `is_cidr` flag - and a
+/// claim that it loses or swaps a value would be wrong.
 #[cfg(feature = "with-geo-types-0_7")]
 #[ignore = "both geo-types Rect codecs emit PostgreSQL BOX corners in reverse order"]
 #[compio::test]
