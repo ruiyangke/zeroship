@@ -695,6 +695,38 @@ binds one.
 supplied key is **removed unconditionally**, and then the actor - or nothing -
 replaces it. "Overwrite" is not a sufficient instruction.
 
+## There is a SECOND door into the audit columns, and it is not `env.db`
+
+**Creator migrations can write DML, and the runtime pass never sees it.** The
+third reviewer found this and neither of the others did.
+
+`@zeroship/migrate` exposes direct `insert` / `update` / `backfill`.
+`normalizeInsertRows` (`sdks/migrate/src/ops.ts:3572-3599`) takes arbitrary row
+objects and forwards `Object.keys(rows[0])` as the column list, with no
+destination-field check. The fold then ignores them entirely -
+`crates/zeroship-migrate-core/src/render/fold.rs:3031`:
+
+```rust
+// DML: schema no-ops (rows, not shape).
+Op::Insert { .. } | Op::Update { .. } | Op::Delete { .. } | Op::Backfill { .. } => {}
+```
+
+So a migration containing `table("posts").insert({ created_by: "usr_VICTIM" })`
+is executed by the migration service, under `Approval::None`, straight into the
+column. **`serverAuthored` enforced in `system_fields_pass.rs` fences the
+`env.db` path only.**
+
+The obvious objection is that the migrator *is* the separate privileged service
+the invariant asks for. That objection fails, and the reviewer's phrasing is
+exactly right: **a trusted process executing an unchecked creator value does not
+make that value server-authored.** The privilege lives in the process; the value
+came from the tenant.
+
+Consequence: `serverAuthored` needs a destination-column check in the migration
+apply path too, or the class is decorative. This is a materially larger scope
+than "flip an inject guard", and it was invisible from the `env.db` side where
+all three earlier designs were looking.
+
 ## The gate must DELETE the key, not skip the check
 
 A second implementation constraint, from the same review.
@@ -707,6 +739,12 @@ So a gate that merely *skips the required check* lets a creator-supplied
 `created_at: null` ride the wire as an explicit NULL into a `NOT NULL` column
 (`query.rs:212` emits `created_at TIMESTAMPTZ NOT NULL`), turning today's silent
 drop into a 23502 at the database. The gate must remove the key from `result`.
+
+**The third reviewer found the sharper instance: `{ id: null }`.**
+`inject_into_object:257` mints only `if !obj.contains_key("id")`, and
+`contains_key` is **true** for an explicit null. So a supplied `id: null`
+suppresses minting *and* survives to storage - a null primary key rather than a
+missing timestamp. Same root cause, worse column.
 
 ## And criterion 5 would silently delete `| null` from three columns
 
@@ -749,6 +787,55 @@ in a migration; the engine refuses that at `table_shape.rs:361-376` and this
 proposal does not touch the engine. Criterion 1 is therefore scoped to the SDK
 surface until a separate change decides whether creators may re-declare a system
 column at all.
+
+## What actually ships: drop `writeClass`, change behaviour not the data model
+
+Three rounds killed three designs. The synthesis is smaller than any of them,
+and it follows from one observation: **the descriptor cannot hold the fence, and
+once you accept that, the descriptor property buys nothing.**
+
+The reasoning chain:
+
+1. The fence must be hardcoded in Rust, because the descriptor is creator-
+   authored (`apply.rs:61-65`).
+2. The SDK gate is ergonomics, not a fence - so it may equally use a hardcoded
+   list, and one already exists at `install-schema.ts:249`.
+3. Therefore no consumer that matters needs `writeClass`, and its producer cost
+   is entirely wasted: the charter (`policies/confined-system-shape.inject.toml`),
+   the IR, `FieldDescriptor`, nine committed `schema.runtime.json` files, the
+   92-row golden set, the byte-identity gate, every `descriptor_sha256`
+   precondition, and a v3 bump - all to ship a property the security layer is
+   obliged to ignore.
+
+**So: no descriptor change. No version bump. No regeneration.** The change is
+four behavioural edits plus one precondition:
+
+| # | Edit | Site |
+| --- | --- | --- |
+| 1 | Fix the timestamp round-trip so a read value can be written back | `validate.ts:277-284` (task #132) - **precondition** |
+| 2 | In the `missing` arm, for a system field: **delete the key** and skip both the default-fill and the required check | `validate.ts:507-515` |
+| 3 | For `created_by`/`updated_by`: **remove the supplied key unconditionally**, then stamp the actor if one is bound | `system_fields_pass.rs:263-273` |
+| 3b | Refuse `serverAuthored` destination columns in creator migration DML | migration apply path - **scope not yet sized** |
+| 4 | Give `deleted_at` a real arm instead of `_ => {}` | `system_fields_pass.rs:438` |
+| 5 | Relax `RowInput`'s bans for `id`/`created_at` only | `types.ts:200-208` |
+
+Edit 2 covers the whole `missing` arm, not just `:511`, which is what stops both
+the `version` upsert reset and the supplied-null-into-NOT-NULL. Edit 3 is
+unconditional removal, which is what closes the anonymous arm. Neither is
+expressible as "skip a check".
+
+**Criterion 5 is withdrawn.** It rested on the premise that the generated types
+hide system fields; they do not (`Row<S>` carries all seven), and un-eliding
+would silently erase `| null` from three columns. `render-env-db.ts` stays as it
+is, and its elision comment at `:67-72` is already the correct explanation.
+
+**The nine-plus duplicate lists stay duplicated, and gain a gate instead of a
+merge.** The repo already has the pattern: `tests/inject_policy_mirror_gate.sh`
+proves the injection charter is written once and mirrored faithfully. A sibling
+gate proving the system-field lists agree is the right instrument - it catches
+drift without making a security decision depend on a shared value the tenant
+authors. Merging them was the wrong instinct: **a fence list must be duplicated
+in the trusted layer; only the ergonomic ones may be derived.**
 
 ## Acceptance
 
