@@ -113,11 +113,39 @@ That body passes a live `compio_postgres::Error` into a Postgres classifier, and
 compiles it, because type inference never needs the path. The impl block carries no `cfg`, so it
 compiles in every production build regardless of whether any caller is test-gated.
 
-`data-core` must declare `zeroship-schema`: it owns `DbError` and three `From` impls over
-`zeroship-schema` types, and at least one has a production root (`crud/mask_backfill.rs:89`, inside
-the unconditional `pub mod mask_backfill;`). So the floor is
-`data-core -> zeroship-schema -> compio-postgres`, and constraint 2 is violated by the boundary this
-document proposes, not by any code that can be cleaned up under it.
+`data-core` must declare `zeroship-schema`, because it owns `DbError` and two **unconditional `impl`
+blocks** over `zeroship-schema` types (`error.rs:942`, `:956`). An `impl` block with no `cfg`
+compiles in every build whether or not anything calls it, so the manifest edge exists regardless of
+liveness. The floor is therefore `data-core -> zeroship-schema -> compio-postgres`, and constraint 2
+is violated by the boundary this document proposes rather than by code that can be tidied under it.
+
+> **CORRECTED 2026-09-01. The first version of this paragraph said the edge was forced by a
+> PRODUCTION CALLER, and that was wrong - I asserted it from a reviewer's report without checking it,
+> then repeated it in three separate review briefs.**
+>
+> The claim was that `From<MaskSentinelError>` has a live caller at `crud/mask_backfill.rs:89` inside
+> an unconditional `pub mod mask_backfill;`. The module is **gated**:
+>
+> ```rust
+> // crud/mod.rs:83-84
+> #[cfg(any(test, feature = "test-helpers"))]
+> pub mod mask_backfill;
+> ```
+>
+> The cfg sits on the line ABOVE the `pub mod`, and a citation of `:84` alone does not show it. There
+> is exactly one declaration of the module in the crate, and it is in no production build.
+>
+> **Why it is an easy mistake, and worth naming:** the comment at `crud/mod.rs:81` says *"Same
+> visibility pattern"* as its neighbours, and it is not. `mask_policy` (`:72-75`) and
+> `system_fields_pass` (`:98-101`) use the **two-arm** pattern - `cfg(not(test-helpers))` ->
+> `pub(crate)`, `cfg(test-helpers)` -> `pub` - which IS compiled in production. `mask_backfill`
+> (`:83-84`) and `mask_drift` (`:90-91`) use the **one-arm** `cfg(any(test, test-helpers))` pattern,
+> which is not. The comment asserts sameness across the one difference that matters.
+>
+> **The conclusion survives and the reason does not, and the difference decides the design.** Dead
+> weight carrying a manifest edge can be DELETED. A live production caller is a REQUIREMENT that must
+> be split or abstracted around. Those get different fixes, and the deletion option only exists
+> because the call graph is dead.
 
 **The fix is a boundary change, not a lint.** Split `zeroship-schema` on the same line as everything
 else: the DDL builders, descriptors, `MaskKind` and sentinel codec are driver-free and belong in
