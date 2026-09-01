@@ -141,7 +141,7 @@ tier_of_file() {
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
     ./crud/*|./transaction/*|./exec.rs|./broker.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs|./cross_app_fk.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
-    ./backend/postgres.rs|./backend/pg_row_json.rs)      echo PG ;;
+    ./backend/postgres.rs|./backend/pg_row_json.rs|./backend/pg_session_sql.rs) echo PG ;;
     ./backend/sqlite/*)                                  echo SQLITE ;;
     ./encryption/*)                                      echo ENCRYPT ;;
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
@@ -156,7 +156,7 @@ tier_of_file() {
 tier_of_target() {
   case "$1" in
     backend::sqlite)                                     echo SQLITE ;;
-    backend::postgres|backend::pg_row_json)              echo PG ;;
+    backend::postgres|backend::pg_row_json|backend::pg_session_sql) echo PG ;;
     v8_classes*|v8_bridge*|tx_scope*)                    echo ADAPTER ;;
     crud*|transaction*|exec*|broker*|read_set*|tx_route*|drop_namespace*|cross_app_fk*) echo ENGINE ;;
     auth::bootstrap)                                     echo ENGINE ;;
