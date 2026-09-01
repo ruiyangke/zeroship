@@ -2287,8 +2287,28 @@ is cancelled - but it is a redesign of how `env.db` returns results, not a file 
 > work bodies, not rejection arms - the 9 rejection arms were converted to `spawn_rejection`. The
 > blocker that remains is the one this section names correctly: **V8 in the SIGNATURE.** 22 dispatch
 > entry points take `&mut v8::PinScope`; 4 do not. The 4 V8-free ones carry **27 test call sites**
-> between them; the 22 carry **zero**. That is the cost of 0.1 stated as coverage rather than as file
-> count, and it is why the extraction is worth doing on its own terms.
+> between them; the 22 carry **zero**.
+>
+> **THAT CORRELATION IS REAL AND ITS OBVIOUS READING IS WRONG. Do not repeat it as "V8 in the
+> signature makes a dispatch untestable" - it was written that way here first, and refuted the same
+> day.** The two groups differ in **two** variables, not one, and the second is a perfect confound:
+>
+> | | signature | visibility | test call sites |
+> | --- | --- | --- | --- |
+> | `dispatch_unmask`, `dispatch_bulk_unmask`, `dispatch_unmask_for_query`, `dispatch_set_mask_policy` | V8-free | **`pub`** | 27 |
+> | the 17 in `crud/mod.rs`, plus `crud/unmask.rs:1452`/`:1555`, `crud/mask_policy.rs:431` | `&mut v8::PinScope` | **`pub(crate)`** | 0 |
+>
+> `crates/zeroship-plugin-db/tests/` is a **separate crate**, so a `pub(crate)` fn is `E0603` there
+> whether or not its signature mentions V8. Visibility alone is sufficient to produce the zero.
+> And V8 is demonstrably not a barrier: `crates/zeroship-plugin-db/tests/db_v8_class.rs` stands up a
+> `PinScope` in four places today.
+>
+> **The defensible chain is causal, not mechanical:** V8 in the signature raised the cost of writing
+> the test enough that nobody wrote one; with no test to serve, nobody had reason to widen past
+> `pub(crate)`; the visibility then locked the absence in. That is still an argument for lifting the
+> dispatch surface - it just is not the compiler-level one, and a reviewer who checks visibility will
+> say so. The in-crate `#[cfg(test)] mod tests` in `crud/mod.rs` calls **zero** `dispatch_*` either, so
+> there is no "covered in-crate instead" escape.
 
 `run_op` (`:138`) and `reject_op` (`:236`) are the two of the 39 that take only `v8::Global`, never a
 `PinScope`. They are the shape the rest should be converted TO, not more work to be done.
