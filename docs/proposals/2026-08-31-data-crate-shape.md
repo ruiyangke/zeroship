@@ -3,6 +3,40 @@
 Status: **planned, not started.** Every number here was measured on 2026-08-31 at `1bf9fdce4`.
 Line counts are `find src -name '*.rs' -exec cat {} + | wc -l`.
 
+## The governing principle, settled 2026-08-31
+
+**The goal is a maintainable system under clean architecture. The crate split is the consequence, not
+the objective.** One rule decides every question in this document:
+
+> **Source dependencies point INWARD.** Domain types know nothing of use cases; use cases know nothing
+> of adapters; adapters know nothing of each other. Frameworks and drivers - V8, `compio-postgres`,
+> `rusqlite` - are the outermost ring and nothing inner may name them.
+
+```
+    frameworks & drivers   V8 · compio-postgres · rusqlite
+    adapters               plugin-db (Rust<->V8)  ·  data-postgres · data-sqlite
+    use cases              crud pipeline · transaction reducer · masking policy
+    domain                 DbError · TypedCell/TypedRows · ChangeEvent/ChangeOp · descriptor
+```
+
+**Six review rounds found ~100 separate defects. Under this rule they are one defect in five places -
+a dependency pointing outward:**
+
+| finding | the violation |
+| --- | --- |
+| `DbError` names `compio_postgres` in 8 signatures | domain -> driver |
+| `to_op_error` returns `zeroship_runtime::OpError` from the core | domain -> delivery mechanism |
+| `crud/`, `transaction/` return `OpResult`/`ResolveValue` | use case -> delivery mechanism |
+| both backends call `crate::v8_bridge` for row decode | adapter -> a *different* adapter |
+| `crud/mod.rs:554` stores a V8 fn pointer chosen on a data predicate | use case -> adapter internals |
+
+This is why the answer is a **refactor, not a file move**, and why three of the six open decisions
+turned out to be redesigns. It is also the test to apply to anything this document does not cover:
+*does this make a dependency point inward?* If not, it is not the fix.
+
+`tests/lib/tier_signature_census.sh` is the instrument for exactly this rule - its `upward` marker
+measures adapter-inward violations directly, and its per-tier markers measure the rest.
+
 ## How to read this document
 
 **It is written correction-in-place: where a claim was wrong, the wrong claim is QUOTED and then
