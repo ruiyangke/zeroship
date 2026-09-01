@@ -194,6 +194,64 @@ precisely the defect that produced six of this document's contradictions.
 creator-controlled, masking is a hygiene feature rather than a containment boundary, and
 database-enforced column grants are not built. That is what ungates Track A's writes.
 
+## The boundary question, answered by three independent reviews (2026-09-01)
+
+Three reviewers - opus, fable and codex - were given the SAME question, read-only, with no sight of
+each other: given that `data-core -> zeroship-schema -> compio-postgres` is forced, what is the
+correct boundary? Each had to produce three distinct options, recommend one, name the condition that
+would flip it, and self-refute.
+
+**They converge.** All three dissolve `zeroship-schema` rather than abstracting it, and all three
+reject minting a small companion crate for the driver-bound half. The port-inversion option - wrap
+the driver behind a neutral `SqlSession` trait - was independently constructed and independently
+rejected by two of them, on the same ground: it pays a rewrite to preserve code nothing calls.
+
+**They disagree on one thing, and it is the whole decision:**
+
+| | driver-bound region (`diff.rs:632-945`, `SchemaError`) |
+| --- | --- |
+| opus | **DELETE.** It is production-dead; a dependency that does not exist cannot point the wrong way. |
+| fable | **DELETE**, sequenced behind Step 0. `SchemaError` disappears rather than being translated. |
+| codex | **RELOCATE** into `data-postgres`, keeping it as that adapter's own vendor surface. |
+
+**The disagreement resolves on one question of fact, and the answer is already settled in this
+project.** Codex's stated flip condition was "a real second production consumer". There is not a
+first one:
+
+- `read_live_schema` has exactly ONE call site workspace-wide, `backend/postgres.rs:348`, inside an
+  impl gated at `:338`. Every other occurrence is a comment.
+- The SQLite introspector is gated too, at `backend/sqlite/mod.rs:800`.
+- **D7 of the binding design forecloses it outright**
+  (`docs/proposals/2026-08-26-runtime-db-binding-design.md:106`): *"The data plane performs NO live
+  introspection - the descriptor is the sole authority for schema and the data plane never reads the
+  catalog."* D11 at `:110` does the same for DDL.
+
+So the production question is closed: **delete.** What survives is a narrower question the reviewers
+surfaced and this document had not asked.
+
+### The one open question, and it is an operator call
+
+Live introspection is dead as a PRODUCTION capability. Its TEST-ORACLE role may not be: D12
+(`runtime-db-binding-design.md:111`) lands the masking storage flip as "a second line of defence",
+and the drift/backfill/introspect cluster is the instrument that would verify it.
+
+- If that oracle is wanted -> keep the ~320 lines, gated, inside `data-postgres` at its birth. Cheap
+  to delete later.
+- If the flip's verification is built on the migration engine's own introspection instead -> delete
+  now, and the boundary question dissolves with it.
+
+The regret is asymmetric in favour of keeping it: deleting 320 test-gated lines later is trivial;
+rebuilding an introspection oracle from nothing is not.
+
+### One constraint that binds every option, found only by codex
+
+**`LiveSchema` must NOT travel with the PostgreSQL introspection.** It reads as PG-specific and is
+documented in `pg_catalog` language, but the SQLite backend deliberately reuses the same snapshot:
+`backend/sqlite/mod.rs:800-804` pins the same associated type so "the diff engine consumes a uniform
+`LiveSchema` shape". Moving it PG-side forces either `data-sqlite -> data-postgres` or a duplicate
+snapshot DTO. It stays inward under every option. This is why all three reviewers insist the split is
+**by symbol, not by file** - a file-granularity move of `diff.rs` gets this wrong by construction.
+
 ## What was decided
 
 Three choices, taken by the operator on 2026-08-31:
