@@ -34,6 +34,33 @@
 #   design relies on, so each hit is a placement decision that must be made
 #   deliberately rather than discovered after the split does not compile.
 #
+# DEFECTS FOUND IN THIS SCRIPT WITHIN AN HOUR OF IT LANDING, BOTH FIXED.
+# It reported 5. The true count is 4. Read every number here as a FLOOR.
+#
+#   1. THE CALLER SCAN DID NOT STRIP COMMENTS (found by a reviewer).
+#      The source collector skipped comment lines; the caller matcher did not.
+#      It reported
+#          ADAPTER   lib.rs   ensure_pool
+#      where lib.rs's four `ensure_pool` mentions are ALL comments, and :276
+#      reads "The synchronous `ensure_pool(scope)` helper that used to live here
+#      HAS BEEN REMOVED". The only real caller is replication_ops.rs:23, which is
+#      correctly skipped as CONTESTED. The false row sat in the ADAPTER line, the
+#      one a reader is least likely to question. Both halves now run through
+#      prod(), which strips comments AND cfg-gated items.
+#
+#   2. `grep -q` UNDER `set -o pipefail` SILENTLY DROPPED THE LARGEST FILES
+#      (found by me, by disbelieving an implausible count).
+#      The test was `prod "$f" | grep -qE ...`. `grep -q` exits on the FIRST
+#      match, which SIGPIPEs the upstream awk; with `pipefail` the pipeline
+#      status becomes 141, so the `if` read FALSE on a file that had matched.
+#      It only bites when grep matches before awk finishes - i.e. on big files -
+#      so it kept transaction/cancel.rs (156 lines) and silently discarded
+#      exec.rs (1769) and crud/unmask.rs (2260). The count read 1 instead of 4,
+#      and the drop was invisible: no error, no warning, just absent rows.
+#      A size-dependent silent filter is the worst shape a census can have.
+#      FIX: `grep -c`, which reads to EOF and cannot SIGPIPE.
+#      After the fix the count is 4, matching an independent hand-derivation.
+#
 # KNOWN LIMITS, stated so the count is read as a FLOOR
 #   - Multi-line signatures ARE handled (the collector joins to the `{` or `;`),
 #     which a one-line `fn .* -> .*vendor` grep is not: it misses
@@ -49,6 +76,39 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC="$ROOT/crates/zeroship-plugin-db/src"
 cd "$SRC" || { echo "no such tree: $SRC" >&2; exit 1; }
+
+# Production region of one file: no comments, no cfg-gated items. Same rule as
+# tier_direction_census.sh, and it must be applied to the CALLER scan as well as
+# the source collection.
+#
+# DEFECT, found 2026-09-01 by a reviewer within an hour of this file landing: the
+# collector stripped comments but the caller matcher did not, so a mention inside
+# a `//` comment counted as a call. It reported
+#     ADAPTER   lib.rs   ensure_pool
+# where lib.rs's four mentions are ALL comments and :276 reads "The synchronous
+# `ensure_pool(scope)` helper that used to live here HAS BEEN REMOVED". The only
+# real caller is replication_ops.rs:23, correctly skipped as CONTESTED.
+# The reported count was 5; the true count is 4, and the false row sat in the
+# ADAPTER line a reader is least likely to question. Exactly the "a grep counts
+# text" failure this file's own header was written to escape.
+prod() {
+  awk '
+    /^[[:space:]]*(\/\/\/|\/\/!|\/\/)/ { next }
+    /^#\[cfg\(not\(/ { pend=0; print; next }
+    !intest && /^#\[cfg\(/ && /(^|[^A-Za-z_])test([^A-Za-z_]|$)/ { pend=1; next }
+    pend && /^#\[/ { next }
+    pend && /^[[:space:]]*$/ { next }
+    pend && /^[a-zA-Z]/ { pend=0; seek=1 }
+    seek {
+      if ($0 ~ /;[[:space:]]*$/) { seek=0; next }
+      if ($0 ~ /\{/ && $0 ~ /\}/) { seek=0; next }
+      if ($0 ~ /\{[[:space:]]*$/) { seek=0; intest=1; next }
+      next
+    }
+    { pend=0 }
+    intest { if ($0 == "}") intest=0; next }
+    { print }' "$1"
+}
 
 tier_of_file() {
   case "$1" in
@@ -160,7 +220,18 @@ while read -r fn; do
     # Skip the file that DEFINES it - a definition is a signature, which the
     # signature census already rules on.
     grep -qE "(^|[^A-Za-z_])fn ${fn}\b" "$f" && continue
-    if grep -qE "(^|[^A-Za-z_])${fn}\(" "$f"; then
+    # Scan the PRODUCTION region, not the raw file: a mention in a comment or a
+    # cfg-gated item is not a call. See the prod() header.
+    #
+    # `grep -c`, NOT `grep -q`. Under `set -o pipefail` (line 1), `grep -q`
+    # exits on the first match, SIGPIPEs the upstream awk, and the pipeline's
+    # status becomes 141 - so the `if` reads FALSE on a file that DID match.
+    # It bites only where grep matches before awk finishes, i.e. large files, so
+    # it silently dropped exec.rs (1769 lines) and crud/unmask.rs (2260) while
+    # keeping transaction/cancel.rs (156). `grep -c` reads to EOF and cannot
+    # SIGPIPE. See defect 2 in the header.
+    n=$(prod "$f" | grep -cE "(^|[^A-Za-z_])${fn}\(")
+    if [ "${n:-0}" -gt 0 ]; then
       printf '%-9s %-34s %s\n' "$t" "$rel" "$fn"
       echo "$t" >> "$HITS"
     fi
