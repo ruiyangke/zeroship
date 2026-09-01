@@ -377,6 +377,22 @@ green through it, because its input never had the key.
    (the `autoFields` loop overwrites the declared mapping), not at
    `install-schema.ts:308`, and `normalizeSchema` has no access to the naming
    strategy - so the check must move to where the strategy is known.
+
+   **The platform trips this guard itself, and that must be fixed first.**
+   Verified 2026-09-01: `sdks/bootstrap/src/install-schema.ts:569-571` injects a
+   **camelCase** `deletedAt` when soft delete is on -
+   `normalized.deletedAt = { type: "date", required: false }` - while
+   `collection.ts`'s `autoFields` list carries the **snake_case** `deleted_at`.
+   Under `naming.snakeCase` both resolve to the column `deleted_at`, the second
+   loop overwrites `colToField["deleted_at"]`, and the injected field loses its
+   read mapping. So the platform already performs the exact collision this
+   criterion forbids, and a guard added naively fires on the platform's own
+   soft-delete path rather than on creator code.
+
+   The fix is not to special-case it. Under this design `deleted_at` is
+   charter-injected with `assign = { by = "now", on = "delete" }`, so the ad-hoc
+   JS injection should not exist at all - it is a second producer of a column the
+   charter already owns. Delete it as part of step 6, before the guard lands.
 5. Generated types carry all seven, with assigned fields unassignable in an
    insert payload. Note `Row<S>` already carries them (`types.ts:195`); the work
    is `render-env-db.ts:73-81`/`:129` and `RowInput`'s bans (`types.ts:200-208`).
