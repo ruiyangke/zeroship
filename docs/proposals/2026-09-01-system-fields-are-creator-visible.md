@@ -812,7 +812,7 @@ four behavioural edits plus one precondition:
 
 | # | Edit | Site |
 | --- | --- | --- |
-| 1 | Fix the timestamp round-trip so a read value can be written back | `validate.ts:277-284` (task #132) - **precondition** |
+| 1 | Fix the timestamp round-trip so a read value can be written back | `validate.ts:277-284` (task #132) - **precondition, see below** |
 | 2 | In the `missing` arm, for a system field: **delete the key** and skip both the default-fill and the required check | `validate.ts:507-515` |
 | 3 | For `created_by`/`updated_by`: **remove the supplied key unconditionally**, then stamp the actor if one is bound | `system_fields_pass.rs:263-273` |
 | 3b | Refuse `serverAuthored` destination columns in creator migration DML | migration apply path - **scope not yet sized** |
@@ -823,6 +823,30 @@ Edit 2 covers the whole `missing` arm, not just `:511`, which is what stops both
 the `version` upsert reset and the supplied-null-into-NOT-NULL. Edit 3 is
 unconditional removal, which is what closes the anonymous arm. Neither is
 expressible as "skip a check".
+
+### Which side of the timestamp asymmetry is wrong: the validator
+
+Edit 1 had no design. The tree settles the direction: **`query.rs:2738-2739`
+states the contract in its own words** - `t.calendarDate()` is a date "distinct
+from `t.date()` (**TIMESTAMPTZ stored as Unix-ms numbers at the SDK layer**)".
+
+So Unix-ms numbers *are* the declared SDK representation of a `date` field. The
+read path honours it (`read_pipeline.rs:262-275` passes numbers through and
+converts ISO strings **into** numbers), the types honour it
+(`types.ts:175-176`), and `validate.ts:277-284` - which refuses a number and
+demands a `Date` or ISO string - is the **only** layer contradicting it. The fix
+therefore points at the validator, not at the read path: narrowing reads to ISO
+strings would break the stated contract, `Row<S>`, and every creator already
+reading these as numbers.
+
+**UNVERIFIED, and it decides whether this is cheap or not:** I have not traced
+whether the PG write path can bind a Unix-ms number into a `TIMESTAMPTZ` column.
+Greps for `to_timestamp` / `epoch` / a ms conversion in `zeroship-schema`'s
+builder returned nothing, and a grep that matches nothing proves nothing. If no
+conversion exists, widening the validator merely moves the failure from the SDK
+to the driver, and edit 1 additionally needs a number-to-timestamp conversion on
+the write path. **Round 4 is asked to settle exactly this**, and no
+implementation should start until it is answered.
 
 **Criterion 5 is withdrawn.** It rested on the premise that the generated types
 hide system fields; they do not (`Row<S>` carries all seven), and un-eliding
