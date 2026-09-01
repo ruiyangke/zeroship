@@ -81,8 +81,23 @@
 #   UNRESOLVED and is counted - a future crate-root item must not be silently
 #   mis-tiered the way defect 2 mis-tiered these two.
 #
+# TIER CYCLES - the question a crate split actually asks.
+#   The per-edge verdict judges ONE edge at a time, so it structurally cannot
+#   see a cycle: ENGINE -> SQLITE is rank 3 -> 2 and therefore "ok", while
+#   SQLITE -> ENGINE is a violation, and a MUTUAL dependency prints as one
+#   stray violation instead of as the hard blocker it is. Two crates that
+#   reference each other cannot be separated at all - cargo has no way to
+#   express it. Every run now ends with the cycle list.
+#   Measured 2026-09-01, first run: FIVE cycles, where the per-edge table had
+#   read as a scatter of 25 unrelated violations.
+#     ADAPTER <-> ENGINE   (17 up / 7 down)  the dispatch surface
+#     ENGINE  <-> SQLITE   (4 up / 8 down)   the broker publish path
+#     ENGINE  <-> PG       (1/1)             backend/postgres.rs -> crate::exec
+#     ADAPTER <-> ENCRYPT  (1/1)  }  BOTH are crate::PluginDbConsumer reaching
+#     ADAPTER <-> SQLITE   (1/1)  }  up from below - ONE fix collapses two.
+#
 # USAGE
-#   tests/lib/tier_direction_census.sh              # violations
+#   tests/lib/tier_direction_census.sh              # violations + cycles
 #   tests/lib/tier_direction_census.sh --all        # every cross-tier edge
 #   tests/lib/tier_direction_census.sh --contested  # what is not being judged
 set -uo pipefail
@@ -158,6 +173,9 @@ prod() {
     { print }' "$1"
 }
 
+EDGES="$(mktemp)"
+trap 'rm -f "$EDGES"' EXIT
+
 printf '%-9s %-34s %-10s %-26s %s\n' FROM FILE TO TARGET VERDICT
 echo "----------------------------------------------------------------------------------------------"
 while read -r f; do
@@ -177,6 +195,12 @@ while read -r f; do
       continue
     fi
     tr=$(rank "$tt")
+    # Record EVERY cross-tier edge, ok or not. The verdict below judges one edge
+    # at a time and so cannot see a cycle: ENGINE -> SQLITE is rank 3 -> 2 and
+    # therefore "ok", while SQLITE -> ENGINE is a violation, so a mutual
+    # dependency prints as one stray violation rather than as the hard blocker
+    # it is. Two crates that reference each other cannot be split at all.
+    [ "$st" != "$tt" ] && echo "$st $tt" >> "$EDGES"
     if [ "$tr" -lt "$sr" ]; then v=ok
     elif [ "$tr" -eq "$sr" ] && [ "$st" = "$tt" ]; then v=ok
     else v="** VIOLATION **"
@@ -187,6 +211,31 @@ while read -r f; do
 done < <(find . -name '*.rs' | LC_ALL=C sort)
 
 echo "----------------------------------------------------------------------------------------------"
+
+# TIER CYCLES. A pair of tiers with edges in BOTH directions cannot become two
+# crates - cargo has no way to express it. This is strictly stronger than the
+# per-edge verdict above and is the question a crate split actually asks.
+if [ -s "$EDGES" ]; then
+  echo
+  echo "TIER CYCLES (both directions present - these pairs CANNOT be separate crates):"
+  sort -u "$EDGES" | while read -r a b; do
+    # Print each unordered pair once.
+    [ "$a" \> "$b" ] && continue
+    if grep -qx "$b $a" "$EDGES"; then
+      fwd=$(grep -cx "$a $b" "$EDGES")
+      rev=$(grep -cx "$b $a" "$EDGES")
+      printf '  %-9s <-> %-9s   %s edges one way, %s the other\n' "$a" "$b" "$fwd" "$rev"
+    fi
+  done
+  if [ -z "$(sort -u "$EDGES" | while read -r a b; do [ "$a" \> "$b" ] && continue; grep -qx "$b $a" "$EDGES" && echo x; done)" ]; then
+    echo "  none - every tier pair references in one direction only"
+  fi
+  echo
+  echo "  A cycle is a HARD blocker; a lone upward edge is a design smell. The"
+  echo "  per-edge table above reports only the upward half of each cycle, which"
+  echo "  is why they were read as scattered violations rather than as pairs."
+fi
+
 if [ "$MODE" = "--contested" ]; then
   echo "Files with no settled tier (neither judged nor trusted):"
   find . -name '*.rs' | LC_ALL=C sort | while read -r f; do
