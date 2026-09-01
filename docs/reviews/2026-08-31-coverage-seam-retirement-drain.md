@@ -500,12 +500,18 @@ Two cautions that come with the tool:
 
 The flush rewrite (`fe29cc1f7`, 57 production lines) shipped with six tests and
 recorded reachability and behaviour proofs for each. A mutation audit scoped to
-exactly its changed lines found **three unbound sites**, all of the same kind,
+exactly its changed lines found **five unbound sites**, all of the same kind,
 and each is now bound and independently re-proved:
 
     copy_error_may_owe_extra_ready forwarded into flush dispatch
     terminal_server_error          forwarded into flush dispatch
     the retirement poison ORDERED before the reader acknowledgement
+    response_count            the already-flushed prefix a retirement drains
+    include_tail_after_flush  whether the tail is drained once flush completes
+
+The last two are fields of the `FlushRetirement` the loop builds. Pinning
+`response_count` to 0, or `include_tail_after_flush` to false, each failed
+exactly one test out of 1546 - and neither failed anything before this work.
 
 The six original tests exercised the branches inside
 `flush_with_read_draining`. What none of them observed was whether the function
