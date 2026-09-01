@@ -462,23 +462,19 @@ pub(crate) async fn get_type(client: &Arc<InnerClient>, oid: Oid) -> Result<Type
     get_type_inner(client, oid, &mut in_flight).await
 }
 
-/// Resolve a type OID, threading an `in_flight` set through the recursion
-/// to detect cycles. A cycle can occur when a domain type is defined over
-/// itself, or a composite type transitively references its own row type.
-/// Without this guard, resolution recurses forever because `client.cached_type`
-/// only returns `Some` after `set_type` fires - so any OID currently
-/// being resolved is invisible to nested callers.
+/// Resolve a type OID, threading an `in_flight` set through the recursion to
+/// detect cycles. Without this guard, resolution recurses forever because
+/// `client.cached_type` only returns `Some` after `set_type` fires - so any OID
+/// currently being resolved is invisible to nested callers.
 ///
-/// THERE IS NO LIVE TEST FOR THIS, AND THAT IS NOT AN OVERSIGHT. A well-behaved
-/// server will not serve a catalog containing such a cycle: PostgreSQL refuses
-/// to build one, transitively. MEASURED 2026-08-26 on 16.15 - a composite
-/// gaining an attribute of its own type, of an ARRAY of its own type, and a
-/// mutual cycle across two composites are each rejected with `composite type
-/// <t> cannot be made a member of itself`, and a domain over itself cannot be
-/// created because the name does not exist yet. So this guard defends against a
-/// hostile or corrupted catalog rather than an ordinary one, in the same spirit
-/// as `tests/suite/hostile_peer.rs`, and reaching it from live DDL is not
-/// possible. Do not go looking for the missing test.
+/// `PostgreSQL` rejects ordinary composite, domain, array, range, and multirange
+/// cycles, but valid custom base-type DDL can still expose one here. A base type
+/// may name a composite as its `ELEMENT` while using a non-array subscript
+/// handler, and that composite may then gain an attribute of the base type.
+/// `PostgreSQL`'s containment check does not treat that `typelem` as a true array
+/// edge, while this resolver follows every nonzero `pg_type.typelem`, producing
+/// base -> composite -> base. The live
+/// `accepted_custom_element_cycle_is_reported` test drives that graph.
 async fn get_type_inner(
     client: &Arc<InnerClient>,
     oid: Oid,

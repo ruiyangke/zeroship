@@ -144,6 +144,77 @@ async fn query_typed_preserves_the_outer_error_when_type_resolution_fails() {
     assert_eq!(value, 1);
 }
 
+/// `PostgreSQL`'s recursive containment check follows `typelem` only for true
+/// arrays. A custom base type can therefore advertise a composite as its
+/// element while using a different subscript handler, and that composite can
+/// contain the base type. The catalog is healthy and the values are usable,
+/// but this resolver follows raw `typelem` and sees base -> composite -> base.
+#[compio::test]
+async fn accepted_custom_element_cycle_is_reported() {
+    compio::time::timeout(Duration::from_secs(10), async {
+        let url = test_url();
+        let client = connect(&url)
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        let composite = common::test_object_name("cpg_cycle_composite");
+        let base = common::test_object_name("cpg_cycle_base");
+        let input = common::test_object_name("cpg_cycle_input");
+        let output = common::test_object_name("cpg_cycle_output");
+
+        client
+            .batch_execute(&format!(
+                "CREATE TYPE pg_temp.{composite} AS (n int4); \
+                 CREATE TYPE pg_temp.{base}; \
+                 CREATE FUNCTION pg_temp.{input}(cstring) \
+                     RETURNS pg_temp.{base} AS 'jsonb_in' \
+                     LANGUAGE internal IMMUTABLE STRICT; \
+                 CREATE FUNCTION pg_temp.{output}(pg_temp.{base}) \
+                     RETURNS cstring AS 'jsonb_out' \
+                     LANGUAGE internal IMMUTABLE STRICT; \
+                 CREATE TYPE pg_temp.{base} ( \
+                     INPUT = pg_temp.{input}, \
+                     OUTPUT = pg_temp.{output}, \
+                     INTERNALLENGTH = variable, \
+                     STORAGE = extended, \
+                     ELEMENT = pg_temp.{composite}, \
+                     SUBSCRIPT = pg_catalog.jsonb_subscript_handler \
+                 ); \
+                 ALTER TYPE pg_temp.{composite} \
+                     ADD ATTRIBUTE b pg_temp.{base}"
+            ))
+            .await
+            .expect("PostgreSQL rejected its valid custom-element cycle");
+
+        let oid: i64 = client
+            .query_one(
+                &format!("SELECT 'pg_temp.{base}'::regtype::oid::int8"),
+                &[],
+            )
+            .await
+            .expect("read the custom base type OID without resolving its shape")
+            .get(0);
+        let failure = client
+            .prepare(&format!("SELECT NULL::pg_temp.{base}"))
+            .await
+            .expect_err("the recursive type graph was accepted as acyclic");
+        assert_eq!(
+            common::error_chain(&failure),
+            format!(
+                "error parsing response from server: cycle detected resolving postgres type with OID {oid}"
+            )
+        );
+
+        let value: i32 = client
+            .query_one("SELECT 1", &[])
+            .await
+            .expect("cycle detection left the session reusable")
+            .get(0);
+        assert_eq!(value, 1);
+    })
+    .await
+    .expect("custom-element cycle test exceeded its watchdog");
+}
+
 async fn assert_stale_helpers_are_retired(
     client: &Client,
     ddl: &str,
