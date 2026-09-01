@@ -483,13 +483,6 @@ where
         }
     }
 
-    /// Consume the buffer, returning the underlying stream. Any unflushed
-    /// writes and unparsed reads are discarded.
-    #[allow(dead_code)]
-    pub fn into_inner(self) -> S {
-        self.inner
-    }
-
     /// Borrow the underlying stream mutably (used for TLS upgrade).
     #[allow(dead_code)]
     pub fn get_mut(&mut self) -> &mut S {
