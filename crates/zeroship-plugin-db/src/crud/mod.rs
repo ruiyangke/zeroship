@@ -135,6 +135,45 @@ pub use write_pipeline::{
 /// `resolve` lowers the exec's success value to the V8-bound
 /// `ResolveValue` shape (typically `Json` for arrays/objects, `F64`
 /// for counts).
+/// Settle one dispatch: run the engine's work, then let the ADAPTER decide how
+/// its result reaches V8.
+///
+/// This is the whole of the completion protocol, and the shape every dispatch
+/// should have. `work` is engine code - it returns `Result<R, DbError>` and
+/// names no runtime type. `resolve` is adapter code - it is the only thing that
+/// may build a `ResolveValue`. Nothing in between knows about V8.
+///
+/// [`run_op`] is the special case where the query can be built synchronously in
+/// the prologue, before the future starts. Nine dispatches are shaped that way.
+/// The other eight cannot be: they `await` before a query exists - `insert_many`
+/// prepares documents, `find` resolves a descriptor - so a `build_result`
+/// computed up front is not available to them. That is the only reason they
+/// hand-rolled `OpResult` construction, and this is what they hand-rolled it
+/// INTO, badly: every one of them repeated the same three-arm match over
+/// `Ok`/`Err` and rebuilt `OpResult::JsValue` by hand.
+///
+/// Prefer this over `run_op` in new code. `run_op` is expressible in terms of it
+/// and is kept only because nine call sites read well with the build/exec split.
+async fn settle<R, Fut, Resolve>(
+    resolver: v8::Global<v8::PromiseResolver>,
+    request_id: Option<u64>,
+    work: Fut,
+    resolve: Resolve,
+) -> OpResult
+where
+    Fut: Future<Output = Result<R, DbError>>,
+    Resolve: FnOnce(R) -> ResolveValue,
+{
+    match work.await {
+        Ok(v) => OpResult::JsValue {
+            resolver,
+            value: resolve(v),
+            request_id,
+        },
+        Err(e) => reject_op(resolver, request_id, e),
+    }
+}
+
 async fn run_op<R, EFut, Resolve>(
     resolver: v8::Global<v8::PromiseResolver>,
     request_id: Option<u64>,
@@ -827,65 +866,31 @@ pub(crate) fn dispatch_insert_many<'s>(
     let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let mut docs = docs;
-        if let Err(e) =
+    state.borrow_mut().spawned_ops.push(Box::pin(settle(
+        resolver,
+        request_id,
+        async move {
+            let mut docs = docs;
             prepare_insert_many_docs_for_binding(&mut docs, &binding, &coll, actor_id.as_deref())
-                .await
-        {
-            return reject_op(resolver, request_id, e);
-        }
-        let schema = match crate::descriptor::collection_schema(&binding, &coll) {
-            Ok(schema) => schema,
-            Err(e) => return reject_op(resolver, request_id, e),
-        };
-        maybe_lower_sqlite_boolean_docs(&schema, &mut docs);
+                .await?;
+            let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+            maybe_lower_sqlite_boolean_docs(&schema, &mut docs);
 
-        let built = query::build_insert_many_with_dialect(
-            &app,
-            &coll,
-            &schema,
-            &docs,
-            current_sql_dialect(),
-        );
-        let result = match built {
-            Ok(bq) => {
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await
-            }
-            Err(e) => Err(DbError::from(e)),
-        };
-        match result {
-            Ok(rows) => {
-                let result = match read_pipeline::apply(
-                    &binding,
-                    &coll,
-                    rows,
-                    read_pipeline::ApplyOptions::default(),
-                )
+            let bq = query::build_insert_many_with_dialect(
+                &app,
+                &coll,
+                &schema,
+                &docs,
+                current_sql_dialect(),
+            )
+            .map_err(DbError::from)?;
+            let rows =
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Insert).await?;
+            read_pipeline::apply(&binding, &coll, rows, read_pipeline::ApplyOptions::default())
                 .await
-                {
-                    Ok(result) => result,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                OpResult::JsValue {
-                    resolver,
-                    value: crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
-                    request_id,
-                }
-            }
-            Err(e) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
+        },
+        |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
+    )));
 
     promise
 }
