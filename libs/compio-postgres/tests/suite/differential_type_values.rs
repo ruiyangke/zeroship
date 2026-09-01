@@ -1697,6 +1697,286 @@ async fn both_drivers_agree_on_byte_and_string_text_and_binary_codecs() {
     assert_eq!(ours.decoded_strings, ours.rebound_strings);
 }
 
+#[cfg(feature = "with-smol_str-01")]
+const SMOL_STR_INLINE_23: &str = "abcdefghijklmnopqrstuvw";
+#[cfg(feature = "with-smol_str-01")]
+const SMOL_STR_HEAP_24: &str = "abcdefghijklmnopqrstuvwx";
+#[cfg(feature = "with-smol_str-01")]
+const SMOL_STR_DECOMPOSED_UNICODE: &str = "e\u{301}/\u{754c}/\u{1f680}";
+
+#[cfg(feature = "with-smol_str-01")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeSmolStrObservation {
+    decoded: [String; 5],
+    decoded_heap_allocated: [bool; 5],
+    server_text: [String; 5],
+    server_wires: [Wire; 5],
+    outbound: [String; 5],
+    outbound_heap_allocated: [bool; 5],
+    outbound_wires: [Vec<u8>; 5],
+    rebound: [String; 5],
+    rebound_heap_allocated: [bool; 5],
+    rebound_text: [String; 5],
+    rebound_wires: [Wire; 5],
+}
+
+#[cfg(feature = "with-smol_str-01")]
+const NATIVE_SMOL_STR_DECODE_SQL: &str = "SELECT \
+    ''::text, ''::text, (''::text)::text, \
+    'abcdefghijklmnopqrstuvw'::text, 'abcdefghijklmnopqrstuvw'::text, \
+        ('abcdefghijklmnopqrstuvw'::text)::text, \
+    'abcdefghijklmnopqrstuvwx'::text, 'abcdefghijklmnopqrstuvwx'::text, \
+        ('abcdefghijklmnopqrstuvwx'::text)::text, \
+    $cpg$e\u{301}/\u{754c}/\u{1f680}$cpg$::text, \
+        $cpg$e\u{301}/\u{754c}/\u{1f680}$cpg$::text, \
+        ($cpg$e\u{301}/\u{754c}/\u{1f680}$cpg$::text)::text, \
+    'xy'::char(5), 'xy'::char(5), ('xy'::char(5))::text";
+
+#[cfg(feature = "with-smol_str-01")]
+const NATIVE_SMOL_STR_REBOUND_SQL: &str = "SELECT \
+    $1::text, $1::text, ($1::text)::text, \
+    $2::text, $2::text, ($2::text)::text, \
+    $3::text, $3::text, ($3::text)::text, \
+    $4::text, $4::text, ($4::text)::text, \
+    $5::char(5), $5::char(5), ($5::char(5))::text";
+
+#[cfg(feature = "with-smol_str-01")]
+fn smol_str_inputs() -> [smol_str::SmolStr; 5] {
+    [
+        smol_str::SmolStr::new(""),
+        smol_str::SmolStr::new(SMOL_STR_INLINE_23),
+        smol_str::SmolStr::new(SMOL_STR_HEAP_24),
+        smol_str::SmolStr::new(SMOL_STR_DECOMPOSED_UNICODE),
+        smol_str::SmolStr::new("xy"),
+    ]
+}
+
+#[cfg(feature = "with-smol_str-01")]
+fn smol_str_strings(values: &[smol_str::SmolStr; 5]) -> [String; 5] {
+    values.each_ref().map(|value| value.as_str().to_owned())
+}
+
+#[cfg(feature = "with-smol_str-01")]
+fn smol_str_heap_flags(values: &[smol_str::SmolStr; 5]) -> [bool; 5] {
+    values.each_ref().map(|value| value.is_heap_allocated())
+}
+
+#[cfg(feature = "with-smol_str-01")]
+fn tokio_smol_str_wire(value: &smol_str::SmolStr, ty: &tokio_types::Type) -> Vec<u8> {
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres native SmolStr encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-smol_str-01")]
+fn compio_smol_str_wire(value: &smol_str::SmolStr, ty: &compio_types::Type) -> Vec<u8> {
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres native SmolStr encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-smol_str-01")]
+fn tokio_native_smol_str_observation(url: String) -> NativeSmolStrObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_SMOL_STR_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native SmolStr decode");
+        let decoded = [row.get(0), row.get(3), row.get(6), row.get(9), row.get(12)];
+        let outbound = smol_str_inputs();
+        let outbound_wires = [
+            tokio_smol_str_wire(&outbound[0], &tokio_types::Type::TEXT),
+            tokio_smol_str_wire(&outbound[1], &tokio_types::Type::TEXT),
+            tokio_smol_str_wire(&outbound[2], &tokio_types::Type::TEXT),
+            tokio_smol_str_wire(&outbound[3], &tokio_types::Type::TEXT),
+            tokio_smol_str_wire(&outbound[4], &tokio_types::Type::BPCHAR),
+        ];
+        let rebound = client
+            .query_one(
+                NATIVE_SMOL_STR_REBOUND_SQL,
+                &[
+                    &outbound[0],
+                    &outbound[1],
+                    &outbound[2],
+                    &outbound[3],
+                    &outbound[4],
+                ],
+            )
+            .await
+            .expect("tokio-postgres native SmolStr encode");
+        let rebound_values = [
+            rebound.get(0),
+            rebound.get(3),
+            rebound.get(6),
+            rebound.get(9),
+            rebound.get(12),
+        ];
+
+        NativeSmolStrObservation {
+            decoded: smol_str_strings(&decoded),
+            decoded_heap_allocated: smol_str_heap_flags(&decoded),
+            server_text: [row.get(2), row.get(5), row.get(8), row.get(11), row.get(14)],
+            server_wires: [row.get(1), row.get(4), row.get(7), row.get(10), row.get(13)],
+            outbound: smol_str_strings(&outbound),
+            outbound_heap_allocated: smol_str_heap_flags(&outbound),
+            outbound_wires,
+            rebound: smol_str_strings(&rebound_values),
+            rebound_heap_allocated: smol_str_heap_flags(&rebound_values),
+            rebound_text: [
+                rebound.get(2),
+                rebound.get(5),
+                rebound.get(8),
+                rebound.get(11),
+                rebound.get(14),
+            ],
+            rebound_wires: [
+                rebound.get(1),
+                rebound.get(4),
+                rebound.get(7),
+                rebound.get(10),
+                rebound.get(13),
+            ],
+        }
+    })
+}
+
+#[cfg(feature = "with-smol_str-01")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_smol_str_observation() -> NativeSmolStrObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_SMOL_STR_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native SmolStr decode");
+    let decoded = [row.get(0), row.get(3), row.get(6), row.get(9), row.get(12)];
+    let outbound = smol_str_inputs();
+    let outbound_wires = [
+        compio_smol_str_wire(&outbound[0], &compio_types::Type::TEXT),
+        compio_smol_str_wire(&outbound[1], &compio_types::Type::TEXT),
+        compio_smol_str_wire(&outbound[2], &compio_types::Type::TEXT),
+        compio_smol_str_wire(&outbound[3], &compio_types::Type::TEXT),
+        compio_smol_str_wire(&outbound[4], &compio_types::Type::BPCHAR),
+    ];
+    let rebound = client
+        .query_one(
+            NATIVE_SMOL_STR_REBOUND_SQL,
+            &[
+                &outbound[0],
+                &outbound[1],
+                &outbound[2],
+                &outbound[3],
+                &outbound[4],
+            ],
+        )
+        .await
+        .expect("compio-postgres native SmolStr encode");
+    let rebound_values = [
+        rebound.get(0),
+        rebound.get(3),
+        rebound.get(6),
+        rebound.get(9),
+        rebound.get(12),
+    ];
+
+    NativeSmolStrObservation {
+        decoded: smol_str_strings(&decoded),
+        decoded_heap_allocated: smol_str_heap_flags(&decoded),
+        server_text: [row.get(2), row.get(5), row.get(8), row.get(11), row.get(14)],
+        server_wires: [row.get(1), row.get(4), row.get(7), row.get(10), row.get(13)],
+        outbound: smol_str_strings(&outbound),
+        outbound_heap_allocated: smol_str_heap_flags(&outbound),
+        outbound_wires,
+        rebound: smol_str_strings(&rebound_values),
+        rebound_heap_allocated: smol_str_heap_flags(&rebound_values),
+        rebound_text: [
+            rebound.get(2),
+            rebound.get(5),
+            rebound.get(8),
+            rebound.get(11),
+            rebound.get(14),
+        ],
+        rebound_wires: [
+            rebound.get(1),
+            rebound.get(4),
+            rebound.get(7),
+            rebound.get(10),
+            rebound.get(13),
+        ],
+    }
+}
+
+/// Native `SmolStr` codecs preserve UTF-8 and the inline/heap boundary.
+#[cfg(feature = "with-smol_str-01")]
+#[compio::test]
+async fn native_smol_str_codecs_cover_storage_boundary_and_char_padding() {
+    let theirs = tokio_native_smol_str_observation(common::plaintext_url());
+    let ours = compio_native_smol_str_observation().await;
+    assert_eq!(ours, theirs);
+
+    let expected_outbound = [
+        "",
+        SMOL_STR_INLINE_23,
+        SMOL_STR_HEAP_24,
+        SMOL_STR_DECOMPOSED_UNICODE,
+        "xy",
+    ];
+    let expected_decoded = [
+        "",
+        SMOL_STR_INLINE_23,
+        SMOL_STR_HEAP_24,
+        SMOL_STR_DECOMPOSED_UNICODE,
+        "xy   ",
+    ];
+    let expected_heap_allocated = [false, false, true, false, false];
+    let expected_server_wires = [
+        "",
+        "6162636465666768696a6b6c6d6e6f7071727374757677",
+        "6162636465666768696a6b6c6d6e6f707172737475767778",
+        "65cc812fe7958c2ff09f9a80",
+        "7879202020",
+    ];
+    let expected_outbound_wires = [
+        "",
+        "6162636465666768696a6b6c6d6e6f7071727374757677",
+        "6162636465666768696a6b6c6d6e6f707172737475767778",
+        "65cc812fe7958c2ff09f9a80",
+        "7879",
+    ];
+
+    assert_eq!(ours.outbound, expected_outbound);
+    assert_eq!(ours.decoded, expected_decoded);
+    assert_eq!(ours.rebound, expected_decoded);
+    assert_eq!(ours.server_text, expected_outbound);
+    assert_eq!(ours.rebound_text, expected_outbound);
+    assert_eq!(ours.outbound_heap_allocated, expected_heap_allocated);
+    assert_eq!(ours.decoded_heap_allocated, expected_heap_allocated);
+    assert_eq!(ours.rebound_heap_allocated, expected_heap_allocated);
+    assert_eq!(
+        ours.outbound.each_ref().map(|value| value.len()),
+        [0, 23, 24, 12, 2]
+    );
+    assert_eq!(
+        ours.decoded.each_ref().map(|value| value.len()),
+        [0, 23, 24, 12, 5]
+    );
+    assert_eq!(
+        ours.rebound.each_ref().map(|value| value.len()),
+        [0, 23, 24, 12, 5]
+    );
+    for (index, expected_wire) in expected_server_wires.into_iter().enumerate() {
+        assert_eq!(hex(&ours.server_wires[index].0), expected_wire);
+        assert_eq!(hex(&ours.rebound_wires[index].0), expected_wire);
+        assert_eq!(
+            hex(&ours.outbound_wires[index]),
+            expected_outbound_wires[index]
+        );
+    }
+}
+
 const JSON_KEY_ORDER_SOURCE: &str = r#"{"zz":0,"a":1,"bbb":2,"aa":3}"#;
 const JSON_KEY_ORDER_JSONB_TEXT: &str = r#"{"a": 1, "aa": 3, "zz": 0, "bbb": 2}"#;
 const JSON_UNICODE_SOURCE: &str =

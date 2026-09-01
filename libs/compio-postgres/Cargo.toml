@@ -42,7 +42,10 @@ with-jiff-0_2 = [
     "postgres-types/with-jiff-0_2",
     "tokio-postgres/with-jiff-0_2",
 ]
-with-smol_str-01 = ["postgres-types/with-smol_str-01"]
+with-smol_str-01 = [
+    "postgres-types/with-smol_str-01",
+    "tokio-postgres/with-smol_str-01",
+]
 with-cidr-0_3 = [
     "postgres-types/with-cidr-0_3",
     "tokio-postgres/with-cidr-0_3",
@@ -227,6 +230,7 @@ bit-vec = "0.9"
 serde_json = "1"
 geo-types = "0.7"
 jiff = { version = "0.2", default-features = false, features = ["std"] }
+smol_str = { version = "0.1", default-features = false }
 compio = { workspace = true }
 criterion = { workspace = true }
 # Integration tests consume the LISTEN/NOTIFY async-message stream
