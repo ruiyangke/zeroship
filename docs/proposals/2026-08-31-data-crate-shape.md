@@ -632,10 +632,39 @@ the hidden third leg of the `ENGINE <-> SQLITE` cycle - `ENGINE -> SQLITE -> bac
 ENGINE` - that opus reached independently from the other direction. Inverting the downcasts to
 `as_vector_index() -> Option<&dyn VectorIndex>` is what unblocks tiering that file.
 
-**Both #119 and #122 are blocked on #112**, and this is the part that turns a cleanup into a
-prerequisite: `Backend` itself and four of the thirteen capability traits are `cfg`-gated
-(`backend/mod.rs:567`, `:626`, `:800`, `:1216`, `:1457`). **You cannot dispatch through traits a
-release build does not compile.**
+**That paragraph said "#119 and #122 are blocked on #112 - you cannot dispatch through traits a
+release build does not compile." IT WAS WRONG, and the correction is worth more than the claim.**
+
+Verified at `cddaa3731`: **all eight traits on the dispatch path are UNGATED** - `SqlExecutor`
+(`:132`), `LockManager` (`:339`), `DialectBuilder` (`:714`), `PgSqlExecutor` (`:774`),
+`ChangeStream` (`:850`), `VectorIndex` (`:1023`), `SpatialIndex` (`:1071`), `EncryptedColumn`
+(`:1144`). The five gated ones are not on it, and `Backend` is gated ON PURPOSE -
+`backend/mod.rs:1457-1460` says so: *"a conformance marker, not the production abstraction: nothing
+takes `dyn Backend` ... this trait exists so tests can assert the concrete backends implement the
+whole sub-trait set."* The production abstraction is `BackendHandle`, the enum.
+
+**And the fix proposed above - `as_vector_index() -> Option<&dyn VectorIndex>` - is refused by this
+codebase for MEASURED reasons** (`backend/mod.rs:1470-1483`):
+
+1. These are `async fn`-in-trait. Object safety needs `Box<dyn Future>` **per call** - "a
+   per-CRUD-op allocation on a hot path that runs ~200K times/sec under load."
+2. The associated types (`Client = compio_postgres::OwnedPooledClient`, `LiveSchema`) **cannot be
+   erased** behind `dyn` without losing the concrete client that
+   `LockManager::acquire_advisory_lock` and the audit-row helpers take by `&Self::Client`.
+3. The backend set is CLOSED (PG, SQLite). 4. An enum is the canonical shape for a closed sum.
+
+So the enum is a defended choice and `dyn` would trade a measured hot-path cost for tidiness.
+
+**The underlying problem still stands and needs a different answer.** `BackendHandle` names both
+vendors (`:1499` and its Sqlite sibling), so `backend/mod.rs` cannot sit in any single tier - which
+is why it is among the eleven unjudged files and why it forms the hidden leg
+`ENGINE -> SQLITE -> backend/mod.rs -> ENGINE`. **Split the FILE, not the dispatch:** the eight
+vendor-free capability traits go to core; the closed sum `BackendHandle` is composition and belongs
+where composition may name vendors - the adapter, or the `backend_selection.rs` that `cddaa3731`
+introduced. Monomorphised dispatch is preserved, not replaced.
+
+That shape is UNPROVEN and should go to a review round before implementation. This document has now
+been wrong once about this file, by proposing a fix its own doc comment refuses.
 
 ### Three earlier choices, taken by the operator on 2026-08-31:
 
