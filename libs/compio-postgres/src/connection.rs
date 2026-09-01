@@ -7522,6 +7522,18 @@ mod tests {
         flushes: usize,
     }
 
+    #[derive(Default)]
+    struct SerializedTeardownObservation {
+        writes: Vec<u8>,
+        events: Vec<&'static str>,
+    }
+
+    struct SerializedTeardownProbe {
+        chunks: VecDeque<Vec<u8>>,
+        observed: Rc<Mutex<SerializedTeardownObservation>>,
+        flush_fails: bool,
+    }
+
     /// A serialized peer whose clean-shutdown call fails after accepting every
     /// frontend write. The call counter makes the teardown path observable.
     struct SerializedShutdownFailure {
@@ -7575,6 +7587,40 @@ mod tests {
         }
 
         async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncRead for SerializedTeardownProbe {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            read_scripted(&mut self.chunks, &mut None, buf).await
+        }
+    }
+
+    impl AsyncWrite for SerializedTeardownProbe {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            let mut observed = self.observed.lock();
+            observed.events.push("write");
+            observed.writes.extend_from_slice(buf.as_init());
+            drop(observed);
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.observed.lock().events.push("flush");
+            if self.flush_fails {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "scripted final flush failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.observed.lock().events.push("shutdown");
             Ok(())
         }
     }
@@ -7643,6 +7689,36 @@ mod tests {
             },
             receiver,
         )
+    }
+
+    fn serialized_teardown_probe(
+        prebuffer: &[u8],
+        flush_fails: bool,
+    ) -> (
+        Connection<SerializedTeardownProbe, SerializedTeardownProbe>,
+        Rc<Mutex<SerializedTeardownObservation>>,
+    ) {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        drop(request_sender);
+        let observed = Rc::new(Mutex::new(SerializedTeardownObservation::default()));
+        let mut stream = BufStream::new(MaybeTlsStream::Raw(SerializedTeardownProbe {
+            chunks: VecDeque::new(),
+            observed: Rc::clone(&observed),
+            flush_fails,
+        }));
+        stream.write(prebuffer);
+        let connection = Connection::new(
+            stream,
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_receiver,
+            Arc::new(AtomicU8::new(b'I')),
+            Arc::default(),
+            Arc::default(),
+            None,
+        );
+        (connection, observed)
     }
 
     /// An in-flight read has already delivered the awaited response when the
@@ -7718,6 +7794,19 @@ mod tests {
             result.is_ok(),
             "idle housekeeping write escaped: {result:?}"
         );
+    }
+
+    #[compio::test]
+    async fn serialized_teardown_attempts_a_failing_final_flush_before_shutdown() {
+        let (connection, observed) = serialized_teardown_probe(b"prebuffered sentinel", true);
+
+        connection
+            .run_serialized()
+            .await
+            .expect("final flush failure escaped serialized teardown");
+
+        let observed = observed.lock();
+        assert_eq!(observed.events.as_slice(), ["write", "flush", "shutdown"]);
     }
 
     /// Socket shutdown is best effort after the client has gone. An unusual
