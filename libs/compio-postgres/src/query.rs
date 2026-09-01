@@ -256,6 +256,25 @@ pub async fn query_text_params(
 /// A `None` param is a SQL NULL (sent with no bytes). The op.* DML executor uses
 /// this so a creator `insert`/`update` value coerces to the column type without
 /// the assembler knowing the schema (names-are-strings, section 3.3).
+fn map_execute_text_bind_error(error: frontend::BindError) -> Error {
+    match error {
+        frontend::BindError::Serialization(io_err) => {
+            // The names and format counts are fixed and bounded. The one
+            // remaining route is a Bind body above `i32::MAX`, which needs
+            // more than 2 GiB of caller-owned text to construct. Keep the
+            // resource-bound refusal without a suite-sized allocation.
+            Error::encode(io_err)
+        }
+        frontend::BindError::Conversion(boxed) => {
+            // `bind` shares the serializer's boxed error type with its
+            // values-count encoder. More than `u16::MAX` values therefore
+            // reaches this arm even though both serializer arms return
+            // `Ok`; the bind-count test pins that upstream classification.
+            Error::encode(std::io::Error::other(format!("bind: {boxed}")))
+        }
+    }
+}
+
 pub async fn execute_text_params(
     client: &Arc<InnerClient>,
     query: &str,
@@ -282,22 +301,7 @@ pub async fn execute_text_params(
             std::iter::once(1i16), // results: binary (no rows for a DML, but keep uniform)
             buf,
         )
-        .map_err(|e| match e {
-            frontend::BindError::Serialization(io_err) => {
-                // The names and format counts are fixed and bounded. The one
-                // remaining route is a Bind body above `i32::MAX`, which needs
-                // more than 2 GiB of caller-owned text to construct. Keep the
-                // resource-bound refusal without a suite-sized allocation.
-                Error::encode(io_err)
-            }
-            frontend::BindError::Conversion(boxed) => {
-                // `bind` shares the serializer's boxed error type with its
-                // values-count encoder. More than `u16::MAX` values therefore
-                // reaches this arm even though both serializer arms return
-                // `Ok`; the bind-count test pins that upstream classification.
-                Error::encode(std::io::Error::other(format!("bind: {boxed}")))
-            }
-        })?;
+        .map_err(map_execute_text_bind_error)?;
         // These fixed-size messages use the literal empty portal name. Their
         // encoders can only fail for an interior NUL or an overflowing message
         // body, neither of which those inputs can contain.
@@ -917,7 +921,7 @@ pub async fn sync(client: &InnerClient) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_bind, query_text_params};
+    use super::{encode_bind, map_execute_text_bind_error, query_text_params};
     use crate::Statement;
     use crate::client::Client;
     use crate::codec::FrontendMessage;
@@ -1067,5 +1071,23 @@ mod tests {
         let error = encode_bind(&statement, params, "", &mut buf).unwrap_err();
 
         assert_eq!(error.to_string(), "error encoding message to server");
+    }
+
+    #[test]
+    fn execute_text_bind_serialization_preserves_its_encode_error_source() {
+        let error = map_execute_text_bind_error(
+            postgres_protocol::message::frontend::BindError::Serialization(std::io::Error::other(
+                "sentinel serialization",
+            )),
+        );
+
+        assert_eq!(error.to_string(), "error encoding message to server");
+        assert_eq!(
+            error
+                .source()
+                .expect("serialization error lost its source")
+                .to_string(),
+            "sentinel serialization"
+        );
     }
 }
