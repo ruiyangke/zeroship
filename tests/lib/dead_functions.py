@@ -41,12 +41,38 @@ def test_spans(src):
                 spans.append((i + 1, len(src)))
     return spans
 
+def has_body(src, i):
+    """True if the `fn` starting at 1-based line `i` has a body.
+
+    A trait's bodyless declaration ends in `;`, and the brace scan below cannot
+    see that: with no `{` of its own it keeps counting until the enclosing
+    `trait` block closes, so every declaration in `GenericClient` was spanned
+    from its own line to line 118 and picked up no regions. All sixteen then
+    reported as "no coverage data" for a file llvm-cov measured at 100%.
+
+    Decide on the first `{` or `;` that appears at bracket depth zero, so a
+    `;` inside a parameter type - `[u8; 4]` - does not read as a declaration.
+    """
+    depth = 0
+    for j in range(i - 1, len(src)):
+        for ch in src[j]:
+            if ch in "([":
+                depth += 1
+            elif ch in ")]":
+                depth -= 1
+            elif depth <= 0:
+                if ch == "{":
+                    return True
+                if ch == ";":
+                    return False
+    return False
+
 def fn_spans(src, tspans):
     in_test = lambda n: any(a <= n <= b for a, b in tspans)
     out = []
     for i, l in enumerate(src, 1):
         m = FN.match(l)
-        if not m or in_test(i):
+        if not m or in_test(i) or not has_body(src, i):
             continue
         depth = 0; started = False; end = i
         for j in range(i - 1, len(src)):
