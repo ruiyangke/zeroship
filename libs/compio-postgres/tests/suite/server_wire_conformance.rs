@@ -2190,3 +2190,355 @@ async fn test_only_named_composite_wire_matches_and_enforces_metadata() {
         .await
         .expect("drop record conformance types");
 }
+
+#[allow(clippy::future_not_send)]
+async fn assert_scalar_cases<T, const N: usize>(
+    client: &compio_postgres::Client,
+    ty: &Type,
+    cases: [(&str, &str, T); N],
+) where
+    T: ToSql,
+{
+    assert!(T::accepts(ty), "carrier rejects scalar type {ty}");
+    for (name, expression, value) in cases {
+        assert_server_wire(client, name, expression, &value, ty).await;
+    }
+}
+
+/// Native booleans, integer widths, the internal one-byte `char`, and OIDs
+/// match the server at their representable endpoints and around zero.
+#[compio::test]
+async fn native_integral_scalar_wire_matches_binary_copy() {
+    let client = compio_client().await;
+    assert_scalar_cases(
+        &client,
+        &Type::BOOL,
+        [
+            ("bool false", "false::bool", false),
+            ("bool true", "true::bool", true),
+        ],
+    )
+    .await;
+    assert_scalar_cases(
+        &client,
+        &Type::CHAR,
+        [
+            ("internal char A", "'A'::\"char\"", 65_i8),
+            ("internal char Z", "'Z'::\"char\"", 90_i8),
+        ],
+    )
+    .await;
+    assert_scalar_cases(
+        &client,
+        &Type::INT2,
+        [
+            ("int2 minimum", "(-32768)::int2", i16::MIN),
+            ("int2 negative one", "(-1)::int2", -1_i16),
+            ("int2 zero", "0::int2", 0_i16),
+            ("int2 one", "1::int2", 1_i16),
+            ("int2 maximum", "32767::int2", i16::MAX),
+        ],
+    )
+    .await;
+    assert_scalar_cases(
+        &client,
+        &Type::INT4,
+        [
+            ("int4 minimum", "(-2147483648)::int4", i32::MIN),
+            ("int4 negative one", "(-1)::int4", -1_i32),
+            ("int4 zero", "0::int4", 0_i32),
+            ("int4 one", "1::int4", 1_i32),
+            ("int4 maximum", "2147483647::int4", i32::MAX),
+        ],
+    )
+    .await;
+    assert_scalar_cases(
+        &client,
+        &Type::INT8,
+        [
+            ("int8 minimum", "(-9223372036854775808)::int8", i64::MIN),
+            ("int8 negative one", "(-1)::int8", -1_i64),
+            ("int8 zero", "0::int8", 0_i64),
+            ("int8 one", "1::int8", 1_i64),
+            ("int8 maximum", "9223372036854775807::int8", i64::MAX),
+        ],
+    )
+    .await;
+    assert_scalar_cases(
+        &client,
+        &Type::OID,
+        [
+            ("oid zero", "0::oid", 0_u32),
+            ("oid one", "1::oid", 1_u32),
+            ("oid maximum", "4294967295::oid", u32::MAX),
+        ],
+    )
+    .await;
+}
+
+/// Native floats match the server for signed zero, subnormals, finite extrema,
+/// infinities, and each width's canonical quiet NaN.
+#[compio::test]
+async fn native_float_scalar_wire_matches_binary_copy() {
+    let client = compio_client().await;
+    assert_scalar_cases(
+        &client,
+        &Type::FLOAT4,
+        [
+            (
+                "float4 negative infinity",
+                "'-Infinity'::float4",
+                f32::NEG_INFINITY,
+            ),
+            ("float4 negative zero", "'-0'::float4", -0.0_f32),
+            (
+                "float4 negative minimum subnormal",
+                "'-1.401298464324817e-45'::float4",
+                -f32::from_bits(1),
+            ),
+            ("float4 zero", "0::float4", 0.0_f32),
+            (
+                "float4 minimum subnormal",
+                "'1.401298464324817e-45'::float4",
+                f32::from_bits(1),
+            ),
+            (
+                "float4 maximum",
+                "'3.4028234663852886e38'::float4",
+                f32::MAX,
+            ),
+            ("float4 NaN", "'NaN'::float4", f32::NAN),
+            ("float4 infinity", "'Infinity'::float4", f32::INFINITY),
+        ],
+    )
+    .await;
+    assert_scalar_cases(
+        &client,
+        &Type::FLOAT8,
+        [
+            (
+                "float8 negative infinity",
+                "'-Infinity'::float8",
+                f64::NEG_INFINITY,
+            ),
+            ("float8 negative zero", "'-0'::float8", -0.0_f64),
+            (
+                "float8 negative minimum subnormal",
+                "'-4.9406564584124654e-324'::float8",
+                -f64::from_bits(1),
+            ),
+            ("float8 zero", "0::float8", 0.0_f64),
+            (
+                "float8 minimum subnormal",
+                "'4.9406564584124654e-324'::float8",
+                f64::from_bits(1),
+            ),
+            (
+                "float8 next after one",
+                "'1.0000000000000002'::float8",
+                f64::from_bits(1.0_f64.to_bits() + 1),
+            ),
+            (
+                "float8 maximum",
+                "'1.7976931348623157e308'::float8",
+                f64::MAX,
+            ),
+            ("float8 NaN", "'NaN'::float8", f64::NAN),
+            ("float8 infinity", "'Infinity'::float8", f64::INFINITY),
+        ],
+    )
+    .await;
+}
+
+/// IEEE NaN payloads are legitimately non-unique. `PostgreSQL`'s text input
+/// emits its canonical NaN, while binary COPY accepts and preserves Rust's
+/// custom quiet-NaN payload and considers it SQL-equal to NaN.
+#[compio::test]
+async fn custom_nan_payloads_are_valid_and_preserved() {
+    let client = compio_client().await;
+    let float4 = f32::from_bits(0x7fc0_0042);
+    let float4_wire = outbound_wire(&float4, &Type::FLOAT4);
+    let float4_server = server_wire(&client, "'NaN'::float4").await;
+    assert_ne!(float4_wire, float4_server);
+    let float4_feedback = copy_feedback(
+        &client,
+        "float4_nan_payload",
+        "float4",
+        &float4_wire,
+        "'NaN'::float4",
+    )
+    .await;
+    assert!(float4_feedback.equal);
+    assert_eq!(float4_feedback.stored_text, "NaN");
+    assert_eq!(float4_feedback.stored_wire, float4_wire);
+
+    let float8 = f64::from_bits(0x7ff8_0000_0000_0042);
+    let float8_wire = outbound_wire(&float8, &Type::FLOAT8);
+    let float8_server = server_wire(&client, "'NaN'::float8").await;
+    assert_ne!(float8_wire, float8_server);
+    let float8_feedback = copy_feedback(
+        &client,
+        "float8_nan_payload",
+        "float8",
+        &float8_wire,
+        "'NaN'::float8",
+    )
+    .await;
+    assert!(float8_feedback.equal);
+    assert_eq!(float8_feedback.stored_text, "NaN");
+    assert_eq!(float8_feedback.stored_wire, float8_wire);
+}
+
+/// Native BYTEA, TEXT, VARCHAR, and NAME carriers copy their complete payload
+/// without escaping, truncation, or character re-encoding.
+#[compio::test]
+async fn native_byte_and_string_scalar_wire_matches_binary_copy() {
+    let client = compio_client().await;
+    let empty = Vec::<u8>::new();
+    assert_server_wire(
+        &client,
+        "empty bytea",
+        "decode('', 'hex')",
+        &empty,
+        &Type::BYTEA,
+    )
+    .await;
+
+    let every_byte: Vec<u8> = (0..=u8::MAX).collect();
+    let bytea_expression = format!("decode('{}', 'hex')", hex(&every_byte));
+    assert_server_wire(
+        &client,
+        "all byte values",
+        &bytea_expression,
+        &every_byte,
+        &Type::BYTEA,
+    )
+    .await;
+
+    let empty_text = "";
+    assert_server_wire(&client, "empty text", "''::text", &empty_text, &Type::TEXT).await;
+    let hostile_text = "line one\r\nline two\t\\'\" / e\u{301} / 😀 / 🚀 / \u{2028}";
+    let text_expression = format!("$cpg${hostile_text}$cpg$::text");
+    assert_server_wire(
+        &client,
+        "hostile UTF-8 text",
+        &text_expression,
+        &hostile_text,
+        &Type::TEXT,
+    )
+    .await;
+
+    let varchar = "trailing spaces  / é / 🚀  ".to_owned();
+    let varchar_expression = format!("$cpg${varchar}$cpg$::varchar");
+    assert_server_wire(
+        &client,
+        "unconstrained varchar",
+        &varchar_expression,
+        &varchar,
+        &Type::VARCHAR,
+    )
+    .await;
+
+    let name = "Alpha_42".to_owned();
+    assert_server_wire(&client, "name", "'Alpha_42'::name", &name, &Type::NAME).await;
+}
+
+/// BPCHAR carries no typmod in `Type`, so a pre-padded Rust value can match a
+/// declared `char(n)` value exactly.
+#[compio::test]
+async fn padded_bpchar_scalar_wire_matches_binary_copy() {
+    let client = compio_client().await;
+    assert_server_wire(
+        &client,
+        "ASCII char(8)",
+        "'xy'::char(8)",
+        &"xy      ",
+        &Type::BPCHAR,
+    )
+    .await;
+    assert_server_wire(
+        &client,
+        "Unicode char(4)",
+        "'é'::char(4)",
+        &"é   ",
+        &Type::BPCHAR,
+    )
+    .await;
+}
+
+/// An ordinary unpadded Rust string differs from `char(8)`'s canonical bytes.
+/// Binary COPY accepts it, SQL equality holds, and storage adds the padding.
+#[compio::test]
+async fn unpadded_bpchar_is_valid_but_server_padded() {
+    let client = compio_client().await;
+    let ours = outbound_wire(&"xy", &Type::BPCHAR);
+    let server = server_wire(&client, "'xy'::char(8)").await;
+    assert_eq!(ours, b"xy");
+    assert_eq!(server, b"xy      ");
+    assert_ne!(ours, server);
+
+    let feedback = copy_feedback(
+        &client,
+        "unpadded_bpchar",
+        "char(8)",
+        &ours,
+        "'xy'::char(8)",
+    )
+    .await;
+    assert!(feedback.equal, "unpadded BPCHAR changed value");
+    assert_eq!(feedback.stored_text, "xy");
+    assert_eq!(feedback.stored_wire, server);
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MoneyWireFixture(i64);
+
+impl ToSql for MoneyWireFixture {
+    fn to_sql(&self, _: &Type, out: &mut types::private::BytesMut) -> Result<IsNull, BoxError> {
+        out.extend_from_slice(&self.0.to_be_bytes());
+        Ok(IsNull::No)
+    }
+
+    fn accepts(ty: &Type) -> bool {
+        *ty == Type::MONEY
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &Type,
+        out: &mut types::private::BytesMut,
+    ) -> Result<IsNull, BoxError> {
+        <Self as ToSql>::to_sql(self, ty, out)
+    }
+}
+
+/// The test-only MONEY fixture matches the server's signed 64-bit minor-unit
+/// representation at zero, one cent in both directions, and both endpoints.
+#[compio::test]
+async fn test_only_money_wire_matches_binary_copy() {
+    let client = compio_client().await;
+    assert_scalar_cases(
+        &client,
+        &Type::MONEY,
+        [
+            ("money zero", "'0.00'::money", MoneyWireFixture(0)),
+            ("money one cent", "'0.01'::money", MoneyWireFixture(1)),
+            (
+                "money negative one cent",
+                "'-0.01'::money",
+                MoneyWireFixture(-1),
+            ),
+            (
+                "money maximum",
+                "'92233720368547758.07'::money",
+                MoneyWireFixture(i64::MAX),
+            ),
+            (
+                "money minimum",
+                "'-92233720368547758.08'::money",
+                MoneyWireFixture(i64::MIN),
+            ),
+        ],
+    )
+    .await;
+}
