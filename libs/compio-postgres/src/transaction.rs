@@ -6,19 +6,15 @@
 // rollback-on-drop only after enqueue, handles failed nested commits and
 // COMMIT-as-ROLLBACK, and tracks pooled-session dirtiness.
 
-use crate::Socket;
 use crate::copy_out::CopyOutStream;
 use crate::portal::PortalScope;
 use crate::query::RowStream;
-use crate::tls::MakeTlsConnect;
-use crate::tls::TlsConnect;
 use crate::types::{BorrowToSql, ToSql, Type};
 use crate::{
     CancelToken, Client, CopyInSink, Error, Portal, Row, SimpleQueryMessage, Statement,
     ToStatement, bind, query, slice_iter,
 };
 use bytes::Buf;
-use compio::io::{AsyncRead, AsyncWrite};
 use futures_util::TryStreamExt;
 
 /// A representation of a PostgreSQL database transaction.
@@ -482,27 +478,6 @@ impl<'a> Transaction<'a> {
     /// Like `Client::cancel_token`.
     pub fn cancel_token(&self) -> CancelToken {
         self.client.cancel_token()
-    }
-
-    /// Like `Client::cancel_query`.
-    #[deprecated(since = "0.6.0", note = "use Transaction::cancel_token() instead")]
-    pub async fn cancel_query<T>(&self, tls: T) -> Result<(), Error>
-    where
-        T: MakeTlsConnect<Socket>,
-    {
-        #[allow(deprecated)]
-        self.client.cancel_query(tls).await
-    }
-
-    /// Like `Client::cancel_query_raw`.
-    #[deprecated(since = "0.6.0", note = "use Transaction::cancel_token() instead")]
-    pub async fn cancel_query_raw<S, T>(&self, stream: S, tls: T) -> Result<(), Error>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-        T: TlsConnect<S>,
-    {
-        #[allow(deprecated)]
-        self.client.cancel_query_raw(stream, tls).await
     }
 
     /// Like `Client::transaction`, but creates a nested transaction via a

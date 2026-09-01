@@ -16,15 +16,14 @@ use crate::keepalive::KeepaliveConfig;
 use crate::query::RowStream;
 use crate::release::ConnectionRelease;
 use crate::simple_query::SimpleQueryStream;
-use crate::tls::{MakeTlsConnect, ServerVerification, TlsConnect, TlsPolicyIdentity};
+use crate::tls::{ServerVerification, TlsPolicyIdentity};
 use crate::types::{Oid, ToSql, Type};
 use crate::{
-    CancelToken, Error, Row, SimpleQueryMessage, Socket, Statement, ToStatement, Transaction,
+    CancelToken, Error, Row, SimpleQueryMessage, Statement, ToStatement, Transaction,
     TransactionBuilder, copy_in, copy_out, error::DbError, prepare, query, simple_query,
     slice_iter,
 };
 use bytes::{Buf, Bytes, BytesMut};
-use compio::io::{AsyncRead, AsyncWrite};
 use fallible_iterator::FallibleIterator;
 use futures_channel::mpsc;
 use futures_util::{StreamExt, TryStreamExt};
@@ -3269,30 +3268,6 @@ impl Client {
                 Arc::downgrade(&self.inner),
             )),
         }
-    }
-
-    /// Attempts to cancel an in-progress query.
-    ///
-    /// Success means PostgreSQL consumed and closed the dedicated cancellation
-    /// connection, not that the target query was necessarily cancelled. An
-    /// effective cancel is reported as SQLSTATE `57014` on this connection.
-    #[deprecated(since = "0.6.0", note = "use Client::cancel_token() instead")]
-    pub async fn cancel_query<T>(&self, tls: T) -> Result<(), Error>
-    where
-        T: MakeTlsConnect<Socket>,
-    {
-        self.cancel_token().cancel_query(tls).await
-    }
-
-    /// Like `cancel_query`, but uses a stream which is already connected to the server rather than opening a new
-    /// connection itself.
-    #[deprecated(since = "0.6.0", note = "use Client::cancel_token() instead")]
-    pub async fn cancel_query_raw<S, T>(&self, stream: S, tls: T) -> Result<(), Error>
-    where
-        S: AsyncRead + AsyncWrite + Unpin,
-        T: TlsConnect<S>,
-    {
-        self.cancel_token().cancel_query_raw(stream, tls).await
     }
 
     /// Clears the client's type information cache.
