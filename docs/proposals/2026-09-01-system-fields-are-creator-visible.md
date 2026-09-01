@@ -130,8 +130,48 @@ arms instead of asserting one is what surfaced it.
 ## The design
 
 **Expose all seven on the Collection.** Delete `stripRuntimeSystemFields`
-(`:192`) and its call site (`:1072`). System fields appear in generated types,
-in query results, in filters and in sorts, like every other column.
+(`:192`) and its call site (`:1072`).
+
+~~System fields appear in generated types, in query results, in filters and in
+sorts, like every other column.~~ **All four clauses are false, and a reviewer
+refuted every one.** They are already in query results (the read path passes
+them through, above), already in `Row<S>` (`types.ts:195`), and therefore
+already in `Filter<S>` (`types.ts:285-291`) for filtering and sorting. Generated
+`env.db.ts` omits them for an unrelated reason in an unrelated file:
+`render-env-db.ts` keeps its **own private copy** of the seven names at `:73-81`
+and elides them at `:129`, reading `schema.runtime.json` at build time and never
+consulting the strip at all. Its comment at `:67-72` states the intent - they
+are elided *because* `@zeroship/db` already infers them onto every row.
+
+So the two edits above deliver exactly one observable change: system fields
+reach the INSERT wire. Everything else the first draft promised was already
+true. **This is an INSERT-write-classification change, not a visibility change**,
+and it must be scoped, reviewed and sequenced as one.
+
+**Three further edits the first draft missed**, each in a different file:
+
+- `model()` still injects `deletedAt` at `install-schema.ts:582-584` under the
+  guard `!normalized.deletedAt`, while the descriptor supplies `deleted_at`.
+  With the strip gone, **both spellings land in `_schema`**, and under the
+  default `naming.asIs` the camelCase one maps to a column that does not exist.
+  The injections at `:582-589` must be deleted or re-keyed. (This also corrects
+  defect 2's explanation: `version` is spelled identically to the system name,
+  so the strip *does* remove it - it survives only because the injection runs
+  afterwards. Only `deletedAt` escapes by spelling.)
+- The `createdAt`/`created_at` collision is built in `collection.ts:203-221`,
+  **not** at `install-schema.ts:308`: the schema loop maps declared fields, then
+  the `autoFields` loop overwrites with the system names. Fixing the refusal
+  alone does not fix it, and the overwrite means the creator's declared field is
+  unreachable on read as well as on write.
+- `RowInput<S>` bans the write-once fields with `id?: never` / `deleted_at?:
+  never` (`types.ts:200-208`). The `writeOnce` class requires relaxing those.
+
+**The system-field list exists in SEVEN places.** `zeroship-schema/src/query.rs:756`,
+`zeroship-data-plan/src/projection.rs:58`, `install-schema.ts:249`,
+`types.ts:174-182`, `types.ts:200-208`, `collection.ts:208-216`,
+`render-env-db.ts:73-81` - plus the three-name subset at
+`system_fields_pass.rs:46`. "Named in one place" is the right goal; this
+proposal must state that there are seven to reconcile, not assume one.
 
 **Replace the declaration refusal with a write classification.** Three tiers,
 named in one place and enforced on both sides of the V8 boundary:
@@ -181,31 +221,72 @@ each through `_toField`, which falls back to the identity
 already reach creator code today**; what the strip removes is the declaration
 that says so.
 
-So the strip costs exactly three things, and only the third is a real loss:
+**The strip costs exactly ONE thing, and both other candidates were my errors.**
 
-1. **The type surface.** `Row<S>` does not declare the seven fields, so creators
-   reading `row.created_at` are working against the types even though the value
-   is there.
-2. **Input validation.** `_knownFields` (`sdks/db/src/collection.ts:222`) is
-   built from the stripped schema and gates `distinct()`
-   (`sdks/db/src/collection/crud.ts:722`), so `distinct("created_at")` is
-   refused as an unknown field. It is the only reader of `_knownFields` in the
-   package.
-3. **Silent discard on write.** The `validateDoc` chain above. This is not a
-   visibility question at all - it is data loss, and it is why #130 is worth
-   doing beyond ergonomics.
+1. ~~The type surface.~~ **WRONG, and a reviewer refuted it.** `Row<S>` is
+   `InferSchema<S> & SystemFields` (`sdks/db/src/types.ts:195`), and
+   `SystemFields` (`:174-182`) declares all seven unconditionally. Its own doc
+   comment says "system fields are always present at read time". They are
+   already typed, and `Filter<S>` keys on `keyof Row<S>` (`types.ts:285-291`),
+   so they are already filterable and sortable too. The strip never touched any
+   of this.
+2. ~~Input validation.~~ **ALSO WRONG, and mine.** I wrote that `_knownFields`
+   is built from the stripped schema, so `distinct("created_at")` would be
+   refused. It is not: `collection.ts:208-221` re-adds all seven to
+   `fieldToCol` / `colToField` unconditionally, *after* the schema loop, and
+   `_knownFields` is built from the result at `:222`. `distinct` works today.
+3. **Silent discard on write** - the `validateDoc` chain above. This is the
+   whole of it.
 
-## Why this is safe to widen
+**That single remaining cost is on the INSERT path, and it cuts both ways.**
+`validateDoc` is not only dropping the `id` a creator wanted to set; it is the
+only thing stopping a creator setting `created_by`. See the safety section
+below, which the first draft got backwards.
 
-Exposure adds no write capability that does not already exist. The runtime
-accepts `version` / `updated_at` / `updated_by` from creator code today and
-refuses `id` / `created_at` / `created_by` today; neither changes. What changes
-is that creators can **read** their own audit columns without a raw escape
-hatch, and that the type surface stops lying about what the row contains.
+## This is NOT safe to widen on its own. The first draft had it backwards.
 
-The narrowing this removes was never a security boundary. It was a schema-
-authoring fence enforced in the SDK, and `system_fields_pass.rs` is the fence
-that actually holds.
+The section this replaces said "exposure adds no write capability that does not
+already exist" and "creators can already do so today, so this proposal does not
+open the hole". **Both sentences are false, and a reviewer refuted them with a
+measurement.** They confused *what the Rust layer accepts* with *what creator
+code can reach*.
+
+The Rust layer accepts creator values for all seven on INSERT - that part was
+right. But creator code cannot get them there, because `validateDoc` drops
+every key absent from `_schema`, and the strip is what removes them from
+`_schema`. The reviewer's two arms, differing only in whether the seven are in
+the field map handed to `model()`:
+
+```
+ARM A (today, strip applied):  system fields on the wire: []
+ARM B (strip deleted):         system fields on the wire: all seven, including
+                               "created_by":"usr_VICTIM" and "id":"post_FORGED"
+```
+
+So deleting the strip **is** a write-capability change, on `insert`,
+`insertMany` and `upsert` (`crud.ts:200`, `:216`, `:416`). And there is no
+second line of defence: `apply_system_fields_on_insert` returns `()`
+(`system_fields_pass.rs:177-183`) and therefore **has no refusal arm at all**,
+unlike its UPDATE sibling which returns `Result<_, DbError>` (`:340-344`). The
+INSERT fence count goes from one weak in-process gate to **zero**.
+
+`created_by` is the one that matters. It is the only value the platform stamps
+from the request actor (`system_fields_pass.rs:153-162`), so a creator-nameable
+`created_by` is a forgeable audit signal - the same shape as the DB-3 counter-
+example in AGENTS.md.
+
+**Consequence for sequencing.** The `created_by` narrowing that the last section
+defers is not optional follow-up work; it is a precondition. `inject_into_object`
+must stop honouring a creator-supplied `created_by` (and `id`, unless #126 is
+deliberately granted) **in the same change** that removes the strip. Widening
+first and narrowing later leaves a window in which the audit column is forgeable
+by design, and "pre-launch" is not a reason to open it - the ground rules put
+security first and forbid intermediate states built to be thrown away.
+
+What remains true: the strip was never a *security* boundary by design - it is
+an accident that it functions as one, and an accidental fence in code the worker
+executes is exactly what the privilege invariant says not to rely on. The answer
+is to build the real fence in Rust, not to keep the accidental one.
 
 ## This also explains task #126
 
@@ -251,35 +332,70 @@ mechanism is not a passing test.
    reads return the platform's value. (`t.date` does not exist - the date-ish
    builders are `t.timestamp()` and `t.calendarDate()`.)
 2. An UPDATE patch naming `created_at` is refused by the runtime, with the
-   error surfacing through the SDK.
+   error surfacing through the SDK. **REGRESSION GUARD ONLY - it cannot fail.**
+   `checkPartial` skips unknown keys (`validate.ts:613-614`, `if (!def)
+   continue`), so the patch already reaches Rust today and `system_fields_pass.rs:425`
+   already refuses it. Keep it; do not count it as evidence for the change.
 3. An UPDATE patch naming `updated_at` is accepted and the supplied value wins
-   over the auto-bump - the behaviour `creator_supplied_updated_at` already
-   selects.
+   over the auto-bump. **ALSO CANNOT FAIL**, for the same reason. Same status.
 4. Under `naming.snakeCase`, a creator declaring `createdAt` is refused as a
-   collision. This test fails on today's code (defect 1) and is the regression
-   guard for it.
+   collision. Fails on today's code (defect 1, measured), but **not passable as
+   written**: `normalizeSchema` has no access to the naming strategy - `model()`
+   takes it at `:559` and calls `normalizeSchema(schema)` at `:579` without it.
+   The check must move to where the strategy is known
+   (`collection.ts:203-221`, where the collision is actually built), which is a
+   signature change this proposal must specify rather than assume.
 5. Generated types for a collection include all seven system fields, with the
    three `writeOnce` ones accepted in an INSERT payload and rejected in an
-   UPDATE patch at the type level.
+   UPDATE patch at the type level. **Not passable from the two edits named**:
+   the row type already has all seven (`types.ts:195`), so the work is
+   `render-env-db.ts:73-81`/`:129` for the generated literal and
+   `types.ts:200-208` for the `RowInput` bans.
 6. `insert({ id: "post_abc..." })` round-trips: the row is stored under the
-   supplied id and `find` returns it. This is #126, and it must be shown
-   failing before the change and passing after - the proposal argues the
-   mechanism is the SDK, and an untraced argument is not evidence.
+   supplied id and `find` returns it. This is #126. Mechanism traced above;
+   still to be demonstrated end to end.
+7. **NEW, and the one that must gate the change.** `insert({ created_by:
+   "usr_SOMEONE_ELSE" })` is **refused**, or the value is overwritten by the
+   request actor. This must pass in the same change that removes the strip.
+   Without it, criteria 1-6 can all pass while the audit column becomes
+   forgeable - which is the state the first draft would have shipped.
 
 ## Where the safety argument is weakest
 
 Widening a surface is easy to justify one field at a time and hard to justify
 in aggregate, so state the residual plainly: after this change, creator code
-can set `created_at` and `created_by` to any value on INSERT. It can already
-do so today (`system_fields_pass.rs:268` injects the actor only when the key is
-absent), so this proposal does not open the hole - but it does make it
-discoverable, and a discoverable hole gets used.
+can set `created_at` and `created_by` to any value on INSERT.
 
-The question that follows is whether `created_by` should be *server-authored*
-rather than write-once: the actor is known to the runtime, and letting app code
-name a different one makes the column unusable as an audit signal. That is a
-real decision and this proposal does not make it. It preserves current
-behaviour and surfaces it; if the answer is that `created_by` must be
-server-authored, that is a change to `inject_into_object`'s INSERT arm - a
-narrowing, and one worth doing separately so it is not smuggled in under a
-proposal whose stated purpose is to widen.
+~~It can already do so today, so this proposal does not open the hole - but it
+does make it discoverable.~~ **Refuted. It cannot do so today, and this proposal
+DOES open the hole.** `system_fields_pass.rs:267` injects the actor only when
+the key is absent, but the key can never be present, because `validateDoc`
+removed it upstream. The distinction between "the Rust function would accept it"
+and "creator code can deliver it" is the whole of the safety question, and the
+first draft collapsed the two.
+
+**The decision this forces, which the first draft deferred and must not.**
+`created_by` should be *server-authored*, not `writeOnce`. The actor is known to
+the runtime (`system_fields_pass.rs:153-162`), and letting app code name a
+different one makes the column unusable as an audit signal. The first draft
+argued this was separable - "worth doing separately so it is not smuggled in
+under a proposal whose stated purpose is to widen". That reasoning was sound
+only under the false premise that the hole was already open. It is not open, so
+the narrowing is not a tidy-up that can follow; it is the precondition for the
+widening being safe at all.
+
+Revised classification, and the reason the table above lists `created_by` under
+`writeOnce` with a caveat: `id` and `created_at` are genuinely write-once and
+carry no trust; `created_by` is a platform assertion about identity and belongs
+in a fourth class:
+
+| Class | Fields | Creator may |
+| --- | --- | --- |
+| `serverAuthored` | `created_by` | read, filter, sort - never write |
+
+`inject_into_object` must therefore **overwrite** `created_by` from the actor
+rather than injecting only when absent, in the same change that removes the
+strip. `updated_by` deserves the same treatment and the same argument; it is
+listed as `defaulted` today only because the UPDATE path already honours a
+creator value, which is a pre-existing hole this proposal should close rather
+than inherit.
