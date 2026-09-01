@@ -388,9 +388,29 @@ one. Phase 0 is still worth doing first and is still individually shippable; **i
 
 - **Step 0's deletion**, once its prerequisite lands: migrate the live security tests off the dead DDL
   builders onto the engine's renderer.
-- **`data-cdc-server`**, which needs neither `data-core` nor `data-postgres` (measured: zero
-  `crate::backend`, zero `crate::encryption`). Its cost is four edits, of which the suppression
-  handshake is the hard one - three brackets with an overlap invariant.
+- **`data-cdc-server`.** ~~Needs neither `data-core` nor `data-postgres`.~~ **THAT PRECONDITION NO
+  LONGER HOLDS, and a move listed in "What has shipped" is what broke it.** Re-measured 2026-09-01:
+  `replication.rs:36` and `slot_reaper.rs:25` both carry `use crate::backend::pg_error;` - real
+  imports, not doc comments. `pg_error` is the module move 1 created, and `git show --stat 6f3a482f6`
+  lists both CDC files among its edits, so that move rewired them off `crate::error` and onto the
+  vendor tier. The original "zero `crate::backend`" reading was correct when taken and was
+  invalidated by work this same document sequences.
+
+  Its cost is still four edits, of which the suppression handshake is the hard one - three brackets
+  with an overlap invariant. But it is no longer dependency-free, and the fix is a design question
+  rather than a cleanup:
+
+  1. **CDC depends on `data-postgres`.** Honest, since CDC is Postgres-only by nature - but it drags
+     `data-core` and `data-query-builder` behind it, and the point of a separate relay service is
+     that it does not link the worker's data plane.
+  2. **Extract the classifier lower**, somewhere both `data-postgres` and `data-cdc-server` reach.
+     This fights the settled error design, which places the vendor translator in `data-postgres`
+     precisely because it is vendor-bound.
+  3. **CDC carries its own error handling** and shares no classifier.
+
+  **The general lesson outlasts the instance.** A precondition stated in one section was falsified by
+  a move executed under another, in the same document, and nothing re-measured it. Treat every "needs
+  no prerequisites" claim here as current only up to the last landed move.
 
 ### Phase 2 - the crates
 
