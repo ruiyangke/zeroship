@@ -175,9 +175,9 @@ had no home until someone enumerated, and enumerating found seven more like it.
 | --- | --- | --- |
 | `backend/mod.rs` | 2,201 | **must be split, and the split is now settled - see below.** |
 | `error.rs` | 1,703 | **must be split.** `DbError` is core; `to_op_error` links V8 and belongs in the adapter. 11 files, measured. |
-| `context.rs` | 1,688 | holds a `BackendHandle` per isolate, so it inherits whatever `BackendHandle` decides. Isolate-scoped, which argues adapter; vendor-typed, which argues not. |
+| ~~`context.rs`~~ | 1,688 | **RESOLVED by the `BackendHandle` finding.** It holds `Option<BackendHandle>` (`:422`) and constructs both variants (`:561`, `:587`), so it follows the enum UP into `data-engine`. |
 | `auth/` | 1,459 | session setup and `SET LOCAL ROLE`. Runs per connection, so engine - but it is also a security fence, which argues for a home where it cannot be bypassed. |
-| `service.rs` | 606 | `DbService::new` parses the runtime URL and selects a backend. Construction, so it sits wherever backend selection ends up. |
+| `service.rs` | 606 | **it straddles, and its own header proves it.** |
 | `cdc_lifecycle.rs` | 523 | bridges V8 subscription leases to one consumer per process. Stays worker-side (established), but adapter or engine is open. |
 | `change_stream_pg.rs` | 315 | **orphaned by Full.** It is "the single ownership path for provisioning, starting, stopping and cleaning up a worker's logical-decoding consumer" - and the consumer it owns moves to the relay. |
 | `replication_ops.rs` | 47 | a V8 bridge that calls `replication::watchdog_query` (`:33`), which moves. Becomes a cross-process call, or the diagnostic goes away. |
@@ -185,6 +185,26 @@ had no home until someone enumerated, and enumerating found seven more like it.
 The last two are consequences of the Full decision and did not exist as problems before it. Neither
 is large; both are load-bearing, because they are the seam where the worker used to own its own
 stream and now must ask another process about it.
+
+#### `service.rs` straddles two tiers, and its own header is the evidence
+
+`DbService` is "process-wide ownership of the `env.db` primitive", constructed "at worker / CLI
+composition, BEFORE any V8 isolate exists" (`service.rs:1-4`). It then lists the five things it owns,
+and they do not belong to one crate:
+
+| owned | tier |
+| --- | --- |
+| validated configuration - "Backend selection happens ONCE" | engine (it must know the vendors) |
+| the plugin prototype | adapter (a `plugin-db` concept) |
+| the stable thread-resource key | adapter (isolates and OS threads) |
+| the process-wide live-metadata cache | engine |
+| the neutral operator-lifecycle handle | engine (owns an operator pool) |
+
+**It is a composition root, and composition roots straddle by nature** - that is what composing is.
+The resolution is either to split it along the table above, or to leave it in the adapter and have
+the adapter call an engine-side selector. What must NOT happen is assigning it wholesale on the
+strength of one of its five jobs; I did exactly that a section ago, writing "it sits wherever backend
+selection ends up", and a grep found it names no `BackendHandle` at all.
 
 #### `BackendHandle` goes UP, not down - settled by measurement, 2026-08-31
 
