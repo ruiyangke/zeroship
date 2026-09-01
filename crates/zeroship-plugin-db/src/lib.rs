@@ -331,6 +331,21 @@ pub struct DbPlugin {
     /// The backend the service selected at composition. Carried so lazy pool
     /// init reads a decision rather than re-parsing the URL.
     backend: BackendUrl,
+    /// The operator's assignment authority, parsed once at composition.
+    ///
+    /// Held here rather than re-parsed per request, and held on the PROTOTYPE
+    /// rather than per-isolate, because it is identical for every app this
+    /// process serves - it is compiled into the binary, not derived from any
+    /// app's descriptor.
+    ///
+    /// NOT YET READ BY ANY CONSUMER, deliberately and visibly. Parsing it here
+    /// already buys one thing - a malformed authority fails at composition
+    /// rather than inside the first write - but the pass that iterates these
+    /// bindings instead of naming fields is a later step. The `allow` is
+    /// scoped to this field so the day that pass lands, deleting the attribute
+    /// is the whole change.
+    #[allow(dead_code, reason = "read once the write pass iterates the charter")]
+    system_shape_charter: zeroship_migrate_policy::RootCharter,
 }
 
 impl std::fmt::Debug for DbPlugin {
@@ -351,6 +366,7 @@ impl DbPlugin {
         meter: Option<std::sync::Arc<zeroship_metering::Meter>>,
         resource_key: service::DbResourceKey,
         backend: BackendUrl,
+        system_shape_charter: zeroship_migrate_policy::RootCharter,
     ) -> Self {
         Self {
             url,
@@ -358,7 +374,18 @@ impl DbPlugin {
             meter,
             resource_key,
             backend,
+            system_shape_charter,
         }
+    }
+
+    /// The operator's assignment authority for this process.
+    ///
+    /// Every consumer that needs to know who assigns a column's value reads it
+    /// from here. It deliberately has no setter and no descriptor-derived
+    /// alternative: the descriptor is creator-authored, so it may mirror this
+    /// but may never replace it.
+    pub(crate) fn system_shape_charter(&self) -> &zeroship_migrate_policy::RootCharter {
+        &self.system_shape_charter
     }
 }
 

@@ -289,6 +289,10 @@ impl DbService {
     /// inside the first database operation an app happens to run.
     pub fn new(config: DbServiceConfig) -> Result<Arc<Self>, DbError> {
         let backend = select_backend(&config.url)?;
+        // Parse the operator charter HERE, for the same reason the backend is
+        // selected here: a malformed authority fails at composition rather than
+        // inside the first write an app happens to run.
+        let system_shape_charter = crate::system_shape_charter::load()?;
         let resource_key = DbResourceKey::for_url(&config.url);
         let plugin = Arc::new(DbPlugin::new(
             config.url.clone(),
@@ -296,6 +300,7 @@ impl DbService {
             config.meter,
             resource_key,
             backend.clone(),
+            system_shape_charter,
         ));
         Ok(Arc::new(Self {
             url: config.url,
