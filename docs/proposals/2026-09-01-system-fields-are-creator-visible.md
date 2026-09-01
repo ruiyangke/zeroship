@@ -32,19 +32,23 @@ schema declaring one of `SYSTEM_FIELD_NAMES` (`:249`), with a single sanctioned
 exception for `id: t.id("prefix")`. And `:1072` strips all seven out of the
 descriptor-derived field list before it reaches `model()`.
 
-**The strip is not a policy. It is a workaround for the refusal.** `model()`
-(`:555`) passes its field record straight to `normalizeSchema()` (`:579`), and
-`normalizeSchema` is where the refusal at `:308` lives. The platform's own
-generated descriptor contains all seven system fields; without the strip, the
-runtime's own descriptor would throw `RESERVED_SYSTEM_FIELD_NAME` on boot. So
-`stripRuntimeSystemFields` exists to stop the refusal firing on the platform's
-own data, and its side effect - system fields absent from the creator-visible
-Collection - is what makes them invisible.
+**The strip is an intentional visibility policy, and the refusal is a separate
+mechanism.** An earlier draft of this proposal claimed the strip was merely a
+workaround - that without it the platform's own descriptor would throw
+`RESERVED_SYSTEM_FIELD_NAME` on boot, because `model()` (`:555`) feeds
+`normalizeSchema()` (`:579`) where the refusal lives. **That was false, and a
+reviewer refuted it from the code.** `normalizeSchema` copies any raw `FieldDef`
+and `continue`s at `:297-300`, *before* the refusal at `:308`, and the comment
+at `:288-292` says exactly why: descriptor fields "legitimately carry system
+fields ... so they bypass the creator-facing system-field fence below". Remove
+the strip and nothing throws.
 
-The two are one coupled mechanism. Narrowing the refusal removes the need for
-the strip, and removing the strip is what exposes the fields.
+The correction makes the work **simpler**, not harder: the strip and the refusal
+are independent edits, not one coupled mechanism. Removing the strip exposes the
+fields; narrowing the refusal lets creators declare them. Both are still needed
+for the acceptance criteria, but neither forces the other.
 
-## Two defects found while establishing the above
+## Three defects found while establishing the above
 
 **1. The refusal is keyed on the declared field name, not the resolved column.**
 `:308` tests `SYSTEM_FIELD_NAMES.includes(key)` against the name as authored.
@@ -60,6 +64,33 @@ collide. Whatever policy replaces it must key on the **resolved column name**.
 `:588` when versioning is on. `SYSTEM_FIELD_NAMES` is snake_case, so `deletedAt`
 never collides with the `deleted_at` in the strip list. Creators can already see
 and write two system fields today; the hiding is not even uniform.
+
+**3. The refusal is bypassable by shape, so it is not a fence at all.** The
+descriptor bypass at `:297` is gated on `!isTypeBuilder(rawVal) &&
+isFieldDef(rawVal)`, and `isFieldDef` (`:233`) is *purely structural*:
+
+```ts
+function isFieldDef(value: unknown): value is FieldDef {
+  return isPlainRecord(value) && typeof value.type === "string";
+}
+```
+
+There is no provenance marker distinguishing a platform-generated descriptor
+field from a creator-authored object literal. A creator who writes
+`created_at: { type: "date" }` instead of `created_at: t.date()` takes the
+bypass and is **never refused**. The comment at `:294-297` asserts the guard
+keeps "user schemas on the strict path", but it only does so for users who
+happen to use the `t.*` API.
+
+This reframes the whole proposal. The restriction being removed **is not a
+restriction**: it stops well-behaved creators and waves through anyone who types
+a plain object. Removing it costs nothing that was being enforced, and the
+argument for exposure no longer has to weigh against a real fence - because
+there isn't one. The only real fence is `system_fields_pass.rs`, which is where
+this proposal says it belongs.
+
+Found by a reviewer, not by me, and it is the most valuable finding in the
+round.
 
 ## The design
 
