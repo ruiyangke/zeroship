@@ -837,6 +837,7 @@ four behavioural edits plus one precondition:
 | --- | --- | --- |
 | 1 | Fix the timestamp round-trip so a read value can be written back | `validate.ts:277-284` (task #132) - **precondition, see below** |
 | 2 | In the `missing` arm, for a system field: **delete the key** and skip both the default-fill and the required check | `validate.ts:507-515` |
+| 2b | `insertMany` needs batch-shape handling - deletion alone is **not** sufficient, see below | `query.rs:4390-4445` |
 | 3 | For `created_by`/`updated_by`: **remove the supplied key unconditionally**, then stamp the actor if one is bound | `system_fields_pass.rs:263-273` |
 | 3b | Refuse `serverAuthored` destination columns in creator migration DML | migration apply path - **scope not yet sized** |
 | 4a | **Route soft-delete through the native op** - delete the `if (self._softDelete)` branches | `crud.ts:513-532`, `:556-573` |
@@ -847,6 +848,42 @@ Edit 2 covers the whole `missing` arm, not just `:511`, which is what stops both
 the `version` upsert reset and the supplied-null-into-NOT-NULL. Edit 3 is
 unconditional removal, which is what closes the anonymous arm. Neither is
 expressible as "skip a check".
+
+### Edit 2 is NOT safe for `insertMany`, and two reviewers disagreed about it
+
+One round-4 reviewer ruled Edit 2 "safe for every caller". A second refuted it,
+and the code settles it against the first.
+
+`build_insert_many` **unions the column set across all documents** - the comment
+at `query.rs:4390` says so - and then binds every missing cell explicitly:
+
+```rust
+let val = obj.get(*key).unwrap_or(&Value::Null);   // query.rs:4445
+```
+
+Deleting the key in `validateDoc` is **per document**, and the union is computed
+**after**, across documents. So a batch where one row supplies `created_at` and
+another omits it puts `created_at` in the column list and binds an explicit
+`NULL` for the second row - into `created_at TIMESTAMPTZ NOT NULL`
+(`query.rs:212`). Today's strip hides this by removing the key from every row
+uniformly; Edit 2 removes it only where it was absent, which is exactly the
+non-uniform case.
+
+Edit 2 therefore needs a batch-shape rule: normalise the rows to a common shape,
+group by shape, or emit `DEFAULT` rather than `NULL` for a missing cell. This is
+the fifth round in a row in which the specified edit was narrower than the
+defect, and it is worth naming the pattern: **every design so far has been
+written against the single-row path and broken on a sibling path that shares the
+builder.**
+
+### The lifecycle fence is also incomplete for upsert
+
+Even with 4a and 4b, `upsert` runs the **INSERT** pass (`write_pipeline.rs:159`),
+which leaves `deleted_at` untouched (`system_fields_pass.rs:275`), and the
+conflict-update excludes only `id | created_at | created_by`
+(`query.rs:6295-6297`). So a supplied `deleted_at` can insert a **pre-deleted
+row**, or soft-delete an existing one through `DO UPDATE`. The `lifecycle` class
+needs an arm on the upsert path too, not only on `check_keys_for_immutable_and_overrides`.
 
 ### Edit 4 must be TWO edits in order, or it refuses the platform's own delete()
 
@@ -1013,13 +1050,31 @@ hide system fields; they do not (`Row<S>` carries all seven), and un-eliding
 would silently erase `| null` from three columns. `render-env-db.ts` stays as it
 is, and its elision comment at `:67-72` is already the correct explanation.
 
-**The nine-plus duplicate lists stay duplicated, and gain a gate instead of a
-merge.** The repo already has the pattern: `tests/inject_policy_mirror_gate.sh`
-proves the injection charter is written once and mirrored faithfully. A sibling
-gate proving the system-field lists agree is the right instrument - it catches
-drift without making a security decision depend on a shared value the tenant
-authors. Merging them was the wrong instinct: **a fence list must be duplicated
-in the trusted layer; only the ergonomic ones may be derived.**
+**The duplicate lists stay duplicated, and gain a gate instead of a merge.**
+Merging them was the wrong instinct: **a fence list must be duplicated in the
+trusted layer; only the ergonomic ones may be derived.** The repo has the
+pattern in `tests/inject_policy_mirror_gate.sh`.
+
+**But "prove the 24+ lists agree" is not a truthful specification, and round 4
+refuted it.** The lists encode **different projections**, and are not supposed to
+be equal: all seven names (`query.rs:756`), the three timestamp fields
+(`read_pipeline.rs:162`), the immutable subset (`system_fields_pass.rs:46`), a
+second unnamed copy of that subset (`query.rs:6296`), the indexed subset
+(`query.rs:227`), DDL type/default/nullability tuples (`query.rs:208`, `:322`,
+`:449`), row types (`types.ts:174`), and two English sentences
+(`error.rs:728`, `:743`). A gate asserting equality across them would be wrong
+about most of them.
+
+The gate must instead define **named semantic contracts** - `all_names`,
+`injected_shape`, `server_authored`, `immutable_on_update`, `lifecycle_owned`,
+`timestamp_valued`, `indexed` - and register each known mirror against exactly
+one. Full membership can key on the trusted Rust constant or the operator policy
+fragment; the behavioural subsets need a test-owned classification matrix,
+because no trusted artifact carries those classes today.
+
+And it must state its limits as its sibling does (`inject_policy_mirror_gate.sh:55-89`):
+it proves agreement, not correctness; it cannot see a list assembled at runtime;
+and prose is compared only as a pinned snapshot.
 
 ## Acceptance
 
