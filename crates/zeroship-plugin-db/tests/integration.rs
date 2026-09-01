@@ -2909,7 +2909,7 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
     let app = "c1_emit_app";
     let sub = zeroship_plugin_db::broker::subscribe(app, "messages");
 
-    zeroship_plugin_db::wal_consumer::emit_local(
+    zeroship_plugin_db::broker::emit_local(
         app,
         "messages",
         zeroship_plugin_db::broker::ChangeOp::Insert,
@@ -3435,9 +3435,8 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
 /// still produce a local-emit broker event.
 #[test]
 fn p8a2_per_app_emit_suppression_integration() {
-    use zeroship_plugin_db::broker::{ChangeOp, SubscriptionMessage};
-    use zeroship_plugin_db::wal_consumer::{
-        emit_local, is_app_suppressed, suppress_app, unsuppress_app,
+    use zeroship_plugin_db::broker::{
+        emit_local, is_app_suppressed, suppress_app, unsuppress_app, ChangeOp, SubscriptionMessage,
     };
 
     zeroship_plugin_db::broker::drop_app(None);

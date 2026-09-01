@@ -267,7 +267,7 @@ async fn start_on_current_isolate(app_id: &str) -> Result<RunningConsumer, DbErr
             // startup window are represented by that snapshot. The consumer
             // installs its own overlapping guard before it reports ready;
             // the overlap prevents a local-plus-WAL duplicate-delivery gap.
-            let startup_suppression = crate::wal_consumer::SuppressGuard::activate(app_id);
+            let startup_suppression = crate::broker::SuppressGuard::activate(app_id);
             let handle = change_stream.spawn_consumer(app_id, &worker_id).await;
             drop(startup_suppression);
             let handle = handle?;

@@ -335,7 +335,7 @@ pub struct ThreadDbContext {
     /// While an app has a tx parked in [`Self::tx_conns`], every
     /// successful CRUD mutation pushes its `ChangeEvent` here (under the
     /// event's own `app_id`) instead of calling
-    /// [`crate::wal_consumer::emit_local`] directly. The transaction
+    /// [`crate::broker::emit_local`] directly. The transaction
     /// settle path (the native `Db.transaction(fn)` orchestrator) drains
     /// the owning app's queue and either fires every event through
     /// `emit_local` on COMMIT or clears it on ROLLBACK. This closes the

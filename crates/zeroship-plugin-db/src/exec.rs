@@ -392,7 +392,7 @@ async fn exec_sqlite_json(
     result
 }
 
-/// Execute a mutation, then emit a [`crate::wal_consumer::emit_local`]
+/// Execute a mutation, then emit a [`crate::broker::emit_local`]
 /// event into the in-process broker on success.
 ///
 /// This is the coarse-grained reactive-query bridge: every
@@ -445,7 +445,7 @@ fn backend_publishes_committed_changes() -> bool {
 ///
 /// Two gates, both cheap:
 ///
-///   1. `wal_consumer::is_app_suppressed(app_id)` — when the WAL
+///   1. `broker::is_app_suppressed(app_id)` — when the WAL
 ///      consumer is running for this app, it owns the publish path for
 ///      events this isolate writes. The corresponding `emit_local` call
 ///      would be a no-op, so building the tuple is pure waste. In
@@ -482,7 +482,7 @@ fn emit_for_rows(rows: &[Value], route: &TxRoute, collection: &str, op: crate::b
         // publisher and produces duplicate identical live snapshots.
         return;
     }
-    if crate::wal_consumer::is_app_suppressed(app_id)
+    if crate::broker::is_app_suppressed(app_id)
         || !crate::broker::has_subscribers(app_id, collection)
     {
         return;
@@ -554,7 +554,7 @@ fn queue_or_emit(
     // belongs to a different unit of work (previously it was both routed
     // onto and queued behind a stranger's transaction).
     if !route.in_tx() {
-        crate::wal_consumer::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
+        crate::broker::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
         return;
     }
     let ev = crate::broker::ChangeEvent {
@@ -585,7 +585,7 @@ pub(crate) fn drain_pending_emits_on_commit(app_id: &str) {
     let queued: Vec<crate::broker::ChangeEvent> =
         context::with_mut(|c| c.drain_pending_emits_for(app_id));
     for ev in queued {
-        crate::wal_consumer::emit_local(
+        crate::broker::emit_local(
             &ev.app_id,
             &ev.collection,
             ev.op,
@@ -741,7 +741,7 @@ mod tests {
     fn reset_world(app_id: &str) {
         crate::broker::drop_app(Some(app_id));
         context::with_mut(|c| c.clear_pool());
-        crate::wal_consumer::unsuppress_app(app_id);
+        crate::broker::unsuppress_app(app_id);
         reset_counter();
         reset_sqlite_route();
     }
@@ -764,13 +764,13 @@ mod tests {
 
         // Stand in for a test running concurrently on another thread.
         let their_sub = crate::broker::subscribe(theirs, "messages");
-        crate::wal_consumer::suppress_app(theirs);
+        crate::broker::suppress_app(theirs);
 
         // Our cleanup fires while they are mid-test.
         reset_world(mine);
 
         assert!(
-            crate::wal_consumer::is_app_suppressed(theirs),
+            crate::broker::is_app_suppressed(theirs),
             "reset_world cleared another app's suppression",
         );
         assert!(
@@ -778,7 +778,7 @@ mod tests {
             "reset_world dropped another app's broker subscription",
         );
 
-        crate::wal_consumer::unsuppress_app(theirs);
+        crate::broker::unsuppress_app(theirs);
         drop(their_sub);
         reset_world(theirs);
         reset_world(mine);
@@ -821,7 +821,7 @@ mod tests {
         // Register a subscriber so the only thing keeping us out of
         // the build is the suppression flag.
         let sub = crate::broker::subscribe("app_suppressed", "messages");
-        crate::wal_consumer::suppress_app("app_suppressed");
+        crate::broker::suppress_app("app_suppressed");
 
         let rows = vec![synthetic_row()];
         emit_for_rows(
@@ -892,7 +892,7 @@ mod tests {
     // tests/integration.rs).
 
     /// In autocommit mode (`has_tx() == false`), `queue_or_emit` must
-    /// route the event directly to `wal_consumer::emit_local`, which
+    /// route the event directly to `broker::emit_local`, which
     /// publishes to the broker. The subscriber's queue receives the
     /// event without any explicit drain.
     #[test]

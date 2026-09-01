@@ -127,7 +127,7 @@ pub(crate) struct PendingEvent {
     pub(crate) table: String,
     /// SQLite's stable per-row identifier. For an UPDATE we capture the
     /// new rowid (the post-image — same convention as the WAL consumer
-    /// emits in [`crate::wal_consumer::emit_local`]).
+    /// emits in [`crate::broker::emit_local`]).
     pub(crate) pk: Option<String>,
     /// Positional values for the new tuple (INSERT / UPDATE). `None`
     /// for DELETE.
@@ -518,7 +518,7 @@ async fn publisher_loop(
         // (plan §5 + §7). The publisher runs on the compio thread and
         // owns the broker-side; it is THE chokepoint where suppression
         // applies for the SQLite arm (the PG arm uses the legacy
-        // `wal_consumer::is_app_suppressed` rail inside `emit_local`).
+        // `broker::is_app_suppressed` rail inside `emit_local`).
         //
         // Suppression is keyed by `app_id` and the dispatcher derives
         // the per-event `app_id` from the preupdate hook's `db_name`
@@ -540,7 +540,7 @@ async fn publisher_loop(
         let mut delivered: Vec<PendingEvent> = Vec::with_capacity(packet.events.len());
         for ev in packet.events {
             let app_id = ev.db_name.as_str();
-            if crate::wal_consumer::is_app_suppressed(app_id) {
+            if crate::broker::is_app_suppressed(app_id) {
                 suppressed_count += 1;
                 continue;
             }
