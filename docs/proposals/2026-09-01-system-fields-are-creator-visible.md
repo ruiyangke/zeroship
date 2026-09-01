@@ -50,15 +50,37 @@ A field declares **who computes its value, and when**:
 { name = "created_at", assign = { by = "now",          on = "insert" } }
 { name = "updated_at", assign = { by = "now",          on = "write"  } }
 { name = "version",    assign = { by = "increment(1)", on = "write"  } }
-{ name = "id",         assign = { by = "typedId(...)", on = "insert" } }
+{ name = "id",         assign = { by = "typedId",      on = "insert" } }
 { name = "created_by", assign = { by = "actor",        on = "insert" } }
 { name = "updated_by", assign = { by = "actor",        on = "write"  } }
 { name = "deleted_at", assign = { by = "now",          on = "delete" } }
 ```
 
-`by` is a generator **invocation**, not a bare name: `typedId` needs a prefix and
-`increment` needs a seed. `on` is a closed vocabulary: `insert`, `write`,
-`delete`.
+`on` is a closed vocabulary: `insert`, `write`, `delete`.
+
+### What `by` may carry, and what it may not
+
+**`by` names a generator and may carry CHARTER-LEVEL CONSTANT arguments only.**
+`increment(1)` is legal: the seed `1` is one value for every table of every app,
+which is exactly what a `scope = "all"` inject can attest.
+
+**Per-collection creator data is never a charter argument.** An earlier draft
+wrote `typedId(...)`, implying the prefix rides in the charter. It cannot, and
+the contradiction was internal to this document: the inject rule is
+`scope = "all"` (`confined-system-shape.inject.toml:60-64`), one identical line
+for every table, while the prefix is per-collection creator data folded in by the
+resolver (`crates/zeroship-migrate-core/src/model/table_shape.rs:357`). This
+document said both things in two places and reconciled them nowhere. It killed
+the first implementation attempt at the design stage, which is where it was
+cheapest.
+
+So the charter writes bare `typedId`. What it attests is the **generator identity
+and its timing** - this column is minted by the typed-id generator on insert -
+and nothing about the prefix. The prefix stays per-collection input, resolved at
+generation time and validated at the pass boundary against
+`RESERVED_ID_PREFIXES`, which is the gap documented below. That division is not a
+concession: it is the same one the charter already makes, and the reason the
+prefix needs its own fence rather than a charter line.
 
 **`restore` is not an assignment event.** An earlier draft listed it as a fourth,
 which forced the vocabulary to contain an event no generator could serve -
@@ -176,6 +198,17 @@ nullability and default but DIFFERENT `assign` do not collide: they union, and
 one wins arbitrarily. That is the attack, and it survives a comparator that is
 never taught the new field. `PolicyDoc` retains rules but not their originating
 `LoadContext`, so the check cannot be deferred - it belongs at load.
+
+**That comparator is already wrong today, before `assign` exists.** `InjectColumn`
+carries a `collation` (`rule.rs:92`), the charter pins it on three columns
+(`id`, `created_by`, `updated_by` are `collation = "bytewise"`), and the
+comparator does not compare it. Two injects on one column differing ONLY in
+collation therefore union rather than collide - and for a typed-id column,
+collation is what keeps base62 byte order equal to creation order. The doc
+comment directly above the type claims otherwise: `rule.rs:73` describes the
+check as "(name/type/nullable/default/collation)". The code checks three of those
+five. Fix the live bug in the same change that teaches it `assign`, and treat the
+stale comment as the warning it is - a comparator's doc is not its behaviour.
 
 **2. The worker has no charter today.** Only migrate-server does. If plugin-db
 takes bindings from the descriptor alone, a hand-edited `.zship` re-points them.
