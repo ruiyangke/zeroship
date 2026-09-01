@@ -1485,8 +1485,8 @@ pub(crate) fn check_inject_collisions(
 /// A collision is a CONFLICT, not a mere co-occurrence: two injects that contribute
 /// the SAME column identically are not a conflict at the leaf level (the resolver's
 /// total order lays them out; identical duplicates are benign). We flag:
-/// - a shared column name with DIVERGENT type/nullable/default (same-name, same-shape
-///   is benign);
+/// - a shared column name with DIVERGENT type/nullable/default/collation/assign
+///   (same-name, same-shape is benign);
 /// - conflicting PK pins (both pin, but to different column lists);
 /// - `author_primary_key` Allow-vs-Forbid when BOTH pin a PK (a genuine policy
 ///   conflict on the same anchored PK);
@@ -1495,9 +1495,7 @@ fn inject_specs_collide(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
     // Column-name collision with divergent shape.
     for ca in &a.columns {
         for cb in &b.columns {
-            if names_match(&ca.name, &cb.name)
-                && (ca.ty != cb.ty || ca.nullable != cb.nullable || ca.default != cb.default)
-            {
+            if names_match(&ca.name, &cb.name) && inject_columns_diverge(ca, cb) {
                 return Some(format!(
                     "column `{}` injected with divergent shape",
                     ca.name
@@ -1534,13 +1532,21 @@ fn inject_specs_collide(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
 // The three split conflict predicates the FINALIZE gate uses (they classify a
 // charter-vs-charter inject collision into its precise `FinalizeError` variant).
 
-/// Two injects share a column name with a DIVERGENT shape (type/nullable/default)?
+/// Do two same-name injected columns carry divergent policy or storage shape?
+fn inject_columns_diverge(a: &crate::rule::InjectColumn, b: &crate::rule::InjectColumn) -> bool {
+    a.ty != b.ty
+        || a.nullable != b.nullable
+        || a.default != b.default
+        || a.collation != b.collation
+        || a.assign != b.assign
+}
+
+/// Two injects share a column name with a DIVERGENT shape
+/// (type/nullable/default/collation/assign)?
 fn inject_column_conflict(a: &InjectSpec, b: &InjectSpec) -> Option<String> {
     for ca in &a.columns {
         for cb in &b.columns {
-            if names_match(&ca.name, &cb.name)
-                && (ca.ty != cb.ty || ca.nullable != cb.nullable || ca.default != cb.default)
-            {
+            if names_match(&ca.name, &cb.name) && inject_columns_diverge(ca, cb) {
                 return Some(format!(
                     "column `{}` injected with divergent shape",
                     ca.name

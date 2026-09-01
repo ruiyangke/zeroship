@@ -1196,6 +1196,74 @@ columns = [ { name = "created_at", type = "text", nullable = true } ]
 }
 
 #[test]
+fn charter_injects_differing_only_in_collation_collide() {
+    use zeroship_migrate_policy::FinalizeError;
+    let reg = registry();
+    let a = TrustedDoc::register_catalog_entry(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [ { name = "id", type = "text", nullable = false, collation = "bytewise" } ]
+"#,
+        &reg,
+    )
+    .unwrap();
+    let b = TrustedDoc::register_catalog_entry(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_main"] }
+columns = [ { name = "id", type = "text", nullable = false } ]
+"#,
+        &reg,
+    )
+    .unwrap();
+    let assembled = restrict(&a, &b, &reg).unwrap();
+    assert!(
+        matches!(
+            finalize_charter(assembled),
+            Err(FinalizeError::CharterInjectColumnConflict { .. })
+        ),
+        "collation changes comparison semantics and must be part of collision identity"
+    );
+}
+
+#[test]
+fn root_injects_differing_only_in_assignment_collide() {
+    use zeroship_migrate_policy::FinalizeError;
+    let reg = registry();
+    let a = RootCharter::parse_toml(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_*"] }
+columns = [
+  { name = "stamp", type = "timestamptz", nullable = false, assign = { by = "now", on = "insert" } },
+]
+"#,
+        &reg,
+    )
+    .unwrap();
+    let b = RootCharter::parse_toml(
+        r#"policy_version = 1
+[[inject]]
+scope = { include = ["app_main"] }
+columns = [
+  { name = "stamp", type = "timestamptz", nullable = false, assign = { by = "now", on = "write" } },
+]
+"#,
+        &reg,
+    )
+    .unwrap();
+    let assembled = restrict(a.as_trusted(), b.as_trusted(), &reg).unwrap();
+    assert!(
+        matches!(
+            finalize_charter(assembled),
+            Err(FinalizeError::CharterInjectColumnConflict { .. })
+        ),
+        "assignment timing is policy shape and must be part of collision identity"
+    );
+}
+
+#[test]
 fn creatable_escaping_mandatory_inject_rejects_at_finalize() {
     use zeroship_migrate_policy::FinalizeError;
     let reg = registry();

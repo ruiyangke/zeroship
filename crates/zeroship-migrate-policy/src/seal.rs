@@ -482,10 +482,11 @@ fn write_seg(b: &mut Vec<u8>, g: &SegGlob) {
     write_bytes(b, g.suffix_bytes());
 }
 
-/// Canonical inject-spec encoding: columns (name/ty/nullable/default/collation) in
-/// doc order, indexes (name/columns), the pinned PK, the author-PK policy, and the
-/// mandatory flag. Column/index ORDER is preserved (it is load-bearing - the sealed
-/// layout order, II.4.4), unlike the set-valued scope/StrSet fields.
+/// Canonical inject-spec encoding: columns
+/// (name/ty/nullable/default/assign/collation) in doc order, indexes
+/// (name/columns), the pinned PK, the author-PK policy, and the mandatory flag.
+/// Column/index ORDER is preserved (it is load-bearing - the sealed layout order,
+/// II.4.4), unlike the set-valued scope/StrSet fields.
 ///
 /// EVERY field of an injected column belongs here, and the collation is the reason
 /// to say so: it changes the DDL the resolver emits, so two charters that differ
@@ -504,6 +505,27 @@ fn write_inject(b: &mut Vec<u8>, spec: &crate::rule::InjectSpec) {
                 write_str(b, d);
             }
             None => b.push(0x00),
+        }
+        match &c.assign {
+            None => b.push(0x00),
+            Some(assign) => {
+                b.push(0x01);
+                match assign.by {
+                    crate::rule::AssignmentGenerator::Now => b.push(0x00),
+                    crate::rule::AssignmentGenerator::TypedId => b.push(0x01),
+                    crate::rule::AssignmentGenerator::Actor => b.push(0x02),
+                    crate::rule::AssignmentGenerator::Increment(amount) => {
+                        b.push(0x03);
+                        b.extend_from_slice(&amount.to_be_bytes());
+                    }
+                    crate::rule::AssignmentGenerator::Identity => b.push(0x04),
+                }
+                b.push(match assign.on {
+                    crate::rule::AssignmentEvent::Insert => 0x00,
+                    crate::rule::AssignmentEvent::Write => 0x01,
+                    crate::rule::AssignmentEvent::Delete => 0x02,
+                });
+            }
         }
         match &c.collation {
             None => b.push(0x00),
