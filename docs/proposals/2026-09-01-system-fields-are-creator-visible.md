@@ -155,6 +155,29 @@ and a fast error message; the fence stays `system_fields_pass.rs`. Per the
 privilege invariant, a check that only exists in code the worker executes is not
 a boundary - the TS side is ergonomics, the Rust side is the rule.
 
+## What the strip actually costs, measured
+
+The read path is **unaffected**. `mapResultDoc` (`sdks/db/src/utils.ts:28-34`)
+iterates `Object.keys(doc)` - every key the native layer returned - and renames
+each through `_toField`, which falls back to the identity
+(`sdks/db/src/collection.ts:224`). It filters nothing. **System field values
+already reach creator code today**; what the strip removes is the declaration
+that says so.
+
+So the strip costs exactly three things, and only the third is a real loss:
+
+1. **The type surface.** `Row<S>` does not declare the seven fields, so creators
+   reading `row.created_at` are working against the types even though the value
+   is there.
+2. **Input validation.** `_knownFields` (`sdks/db/src/collection.ts:222`) is
+   built from the stripped schema and gates `distinct()`
+   (`sdks/db/src/collection/crud.ts:722`), so `distinct("created_at")` is
+   refused as an unknown field. It is the only reader of `_knownFields` in the
+   package.
+3. **Silent discard on write.** The `validateDoc` chain above. This is not a
+   visibility question at all - it is data loss, and it is why #130 is worth
+   doing beyond ergonomics.
+
 ## Why this is safe to widen
 
 Exposure adds no write capability that does not already exist. The runtime
@@ -177,12 +200,33 @@ The discard therefore happens ABOVE Rust, in the SDK - and the only thing in the
 SDK that removes system fields from a collection's shape is the refusal/strip
 pair this proposal deletes.
 
-That makes #126 a likely side-effect fix rather than separate work, and it is
-the strongest practical argument for the change: the current design does not
-merely hide the audit columns, it silently drops a value the creator supplied.
-Acceptance criterion 6 below pins it, and it must be demonstrated rather than
-assumed - "likely" is not "measured", and the SDK payload path has not yet been
-traced end to end.
+**The path has now been traced end to end, and it is four steps with no gap.**
+
+1. `stripRuntimeSystemFields` removes the seven system fields from the field
+   record handed to `model()` (`install-schema.ts:1072`), so the `Collection`'s
+   `_schema` does not contain `id`.
+2. `insert()` calls `validateDoc(row, self._schema)` at
+   `sdks/db/src/collection/crud.ts:200`.
+3. `validateDoc` iterates **the schema, not the document**
+   (`sdks/db/src/validate.ts:497`), under a comment that states the intent
+   outright at `:496`: *"Only copy schema-defined fields - unknown fields are
+   stripped for safety"*. A supplied `id` is not in the schema, so it is
+   dropped here, silently and with no error.
+4. `mapDocOutbound` (`crud.ts:201`) therefore never sees `id`, the native call
+   never receives it, and `inject_into_object:257` mints a fresh one precisely
+   because the key is absent.
+
+Neither mapping function can be the culprit: `_toColumn` and `_toField`
+(`sdks/db/src/collection.ts:223-224`) both fall back to the identity
+(`?? field`), and `mapResultDoc` (`sdks/db/src/utils.ts:28-34`) iterates every
+key of the returned row. Nothing else in the chain drops a key.
+
+So #126 is a **side-effect fix of removing the strip**, by mechanism rather than
+by hope: put the system fields back in `_schema` and step 3 stops dropping them.
+This is the strongest practical argument for the change - the current design does
+not merely hide the audit columns, it silently discards a value the creator
+supplied. Acceptance criterion 6 still demonstrates it end to end; a traced
+mechanism is not a passing test.
 
 ## Acceptance
 
