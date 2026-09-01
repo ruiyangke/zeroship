@@ -364,9 +364,42 @@ mirror against one, and state its limits as
 | #134 | the SQLite spelling schism | the DDL default writes `CURRENT_TIMESTAMP` (space-separated, `query.rs:323`) and creator values arrive as `toISOString()` (a `T`, `v8_bridge.rs:263-281`); TEXT comparison is bytewise, so a row stamped `23:59:59` sorts **before** one written at midnight the same day. Measured. Moving timestamps to runtime-assigned dissolves it - one writer, one spelling - so the conversion and the DDL default must land on one spelling in one change. |
 | #135 | the live PG fixture | declares the timestamps nullable where production is `NOT NULL`; a regression test written on it passes while production raises `23502`. Fixed in `b2515127d`. |
 
-**Then, in this order:**
+**Then, in this order.** Steps 1-3 have landed on `feat/dbbind-impl`; what
+follows each is what was actually verified, not what was intended.
 
-1. **Charter gains `assign`**, root-only at load. Cost, sized: `WireColumn` is
+**1-3 DONE.**
+
+- **Step 1** - the charter declares all seven bindings beside their existing
+  `default` and `collation`, and the loader fences `assign` to the root layer.
+  Verified: `cargo test -p zeroship-migrate-policy` green across every target;
+  `cargo test -p zeroship-migrate-server` green, which is the oracle that
+  matters because it `include_str!`s the shipped charter and parses at startup;
+  `tests/inject_policy_mirror_gate.sh` **caught real drift** in the generated
+  TypeScript view, regenerated via `policies/codegen.mjs`, then 4 arms / 0
+  refusals. The collision comparator also learned `collation`, which it had
+  never compared despite its own doc comment claiming it did.
+- **Step 2** - the worker compiles the charter in and parses it once in
+  `DbService::new`, beside `select_backend`, so a malformed authority fails at
+  composition rather than inside an app's first write. `zeroship-migrate-policy`
+  was confirmed a genuine leaf (no zeroship dependencies) before the edge was
+  added, so it introduces no cycle.
+
+  **The field is parsed and retained but NOT YET READ**, marked with a scoped
+  `allow(dead_code)` naming step 5 as what removes it. Parsed-at-startup is live
+  behaviour; read-by-a-consumer is not yet, and conflating the two is how this
+  crate accumulated four other built-tested-unreferenced regions. The first
+  attempt at this step shipped a loader with **zero** production callers and a
+  commit message claiming otherwise.
+- **Step 3** - the descriptor-declared `typedId` prefix now routes through the
+  same validator as the derived path, with a red-first test that minted
+  `usr_034HQyaJ0C11GCzHMMrWwz` before the fix, a control proving ordinary
+  prefixes still mint, and coverage of every `RESERVED_ID_PREFIXES` entry rather
+  than `usr` alone.
+
+**Remaining, in this order:**
+
+1. ~~**Charter gains `assign`**, root-only at load.~~ **DONE.** Cost, as sized
+   before the work - every item held: `WireColumn` is
    `deny_unknown_fields` (`document.rs:321-337`) so every consumer breaks until
    they move together, including migrate-server which parses at startup and
    exits on failure (`main.rs:245-257`); `InjectColumn` maps only
@@ -377,14 +410,24 @@ mirror against one, and state its limits as
    (`table_shape.rs:150-201`); artifact projection discards synthesized defaults
    (`lower.rs:10066-10102`); plus regenerating the committed TS fragment
    (`policies/codegen.mjs`) and rebuilding the `.node` addon.
-2. **The worker takes the charter**, with the synthetic header, parsed once.
-3. **Validate the `typedId` prefix** at the pass boundary.
+2. ~~**The worker takes the charter**, with the synthetic header, parsed once.~~
+   **DONE.**
+3. ~~**Validate the `typedId` prefix** at the pass boundary.~~ **DONE.**
 4. **The descriptor carries the binding** as a mirror the worker verifies. Note
    this is a **v3** descriptor by the rule at `install-schema.ts:68-74`: a
    consumer that stops deriving something itself and depends on a property being
    present on every field is exactly the situation that moved v1 to v2.
 5. **`system_fields_pass.rs` stops naming fields** - it iterates and invokes.
    A supplied value for an assigned field is **removed**, not ignored.
+
+   **This is the next step, and step 2 unblocked it.** The pass can now iterate
+   the CHARTER the worker holds rather than the creator-authored descriptor,
+   which is the whole reason step 2 came first. It is also the step that closes
+   the half of the id fence step 3 left open: minting is conditional on `id`
+   being absent (`system_fields_pass.rs:256`), so a supplied `usr_`-prefixed id
+   is still written verbatim today. **The remaining half is the one an attacker
+   reaches without touching a generated file**, so treat this as security work,
+   not ergonomics.
 6. **The SDK stops requiring and stops materialising** for assigned fields, and
    `stripRuntimeSystemFields` goes.
 7. **Soft-delete routes through the native op** (`crud.ts:513-532`, `:556-573`)
