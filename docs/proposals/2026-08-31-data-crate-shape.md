@@ -1059,11 +1059,15 @@ Hazards this track inherits, all measured:
 - **#54** - the SQLite ATTACH alias is the app id, and CDC routing keys on it.
 - **#89** - archived apps retain their CDC.
 
-**Open, and not settled by the "own service" decision:** does the worker STOP DECODING WAL, or does
-it keep decoding its own stream while only the privileged and destructive parts move? Measured:
-`wal_consumer.rs:21-23` opens a `replication=database` connection and issues `START_REPLICATION SLOT
-... LOGICAL`, so REPLICATION is legitimately required today and moving the reaper ALONE does NOT let
-`db_posture.rs:123-126` narrow.
+**SETTLED BY THE OPERATOR 2026-08-31: FULL. The worker stops decoding WAL and loses `REPLICATION`.**
+This question - does the worker keep decoding its own stream while only the privileged and
+destructive parts move - was open through three review rounds. It is now closed, and the two options
+are kept below because the reasoning is what makes the four edits non-negotiable.
+
+Measured, and the reason Partial was rejected: `wal_consumer.rs:21-23` opens a `replication=database`
+connection and issues `START_REPLICATION SLOT ... LOGICAL`, so REPLICATION is legitimately required
+by today's design and moving the reaper ALONE does NOT let `db_posture.rs:123-126` narrow. The
+attribute is the capability; relocating code that uses it removes nothing.
 
 - **Partial** - only `slot_reaper` moves. The worker keeps REPLICATION and keeps decoding. It then
   still holds a privilege PostgreSQL cannot distinguish from "drop anyone's slot", so the only fence
@@ -1244,7 +1248,9 @@ them yet.
   (3,808) and workflow (10,847) stayed. Since `plugin-db` keeps its name, `AGENTS.md`'s "Adding a
   native primitive" table stays true and there is no asymmetry to declare. *The entry also said db is
   "15x kv"; 57,427/3,019 is 19.0. Fifteen is the db/storage ratio - two ratios, one sentence.*
-- **Whether the worker keeps decoding WAL** (above).
+- ~~**Whether the worker keeps decoding WAL.**~~ **SETTLED 2026-08-31: FULL.** The worker stops
+  decoding and its role becomes `NOREPLICATION`. Every "moves to the relay" row in Track B's table is
+  therefore unconditional now, and the four edits Full requires are committed work, not options.
 - **Feature-gating the SQLite backend** (above) - a decision, not a discovery: it removes 9,485 lines
   from the production worker and hardens a guard the worker already implements at runtime.
 - **`AGENTS.md:143`** needs correcting with this work, saying "present but uncalled" rather than
