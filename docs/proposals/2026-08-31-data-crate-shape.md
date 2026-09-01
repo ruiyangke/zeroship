@@ -3030,9 +3030,27 @@ or the two read as a contradiction and one of them gets "fixed".
   census, not a gate: it reports and does not rule, and it is deliberately not named `*_gate.sh` so
   `tests/gate_arm_census.sh` does not adopt it. It becomes a gate - with arms and floors - the moment
   the first crate boundary exists, so that "which crate may link V8" stops being a claim in a document
-  and becomes something CI rules on. **Its `tier()` map is a copy of the assignment table above, so
-  re-drawing any boundary invalidates every verdict it prints**; change both in the same commit or it
-  reports on a shape nobody proposed.
+  and becomes something a gate rules on. **Its `tier()` map is a copy of the assignment table above,
+  so re-drawing any boundary invalidates every verdict it prints**; change both in the same commit or
+  it reports on a shape nobody proposed.
+
+  **"CI rules on it" is not available, and this sentence used to say it was.** Measured 2026-09-01:
+  `origin/main` is **810 commits behind** this branch's HEAD, and the standing rule is commit-only,
+  never push. No pipeline has seen ANY of this work, so `.github/workflows/ci.yml` describes an
+  intent rather than an executed check. That is not a complaint about the rule - it is a statement
+  about what "gate" can mean here: **the local commands are the only oracles, and a gate nobody runs
+  is a census with a stricter name.**
+
+  Demonstrated twice on one day. The `-p zeroship` breakage (#93) sat inside `ci.yml` itself - the
+  file that would have caught it could not, because it never ran. And `tests/sqlite_integration.rs`
+  was RED at 131/2 for four days (#124) while `ci.yml:726` invoked it correctly, because the two
+  commands a person actually reaches for locally both exclude that target: `run_plugin_db_live_suite.sh`
+  by design (four targets, its own `:138-141` says so) and a bare `cargo test -p zeroship-plugin-db`
+  by `required-features`.
+
+  **Do not cite a `gh` 404 as evidence the repository is absent.** The `gh` account (`ryatsuger`)
+  differs from the remote's owner (`ruiyangke`), and GitHub returns 404 for private repositories the
+  caller cannot see. The 810-commit gap is the evidence; the 404 is not.
 
 ### Phase 1 - the two things that need no new prerequisites
 
