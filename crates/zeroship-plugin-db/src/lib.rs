@@ -159,6 +159,15 @@ pub(crate) mod descriptor;
 // the transaction driver derives BOTH backends' protocol deadline from one of
 // them. `pub` so the live suites can assert the guards they represent.
 pub mod budgets;
+// Raw usage metrics and the single emit point. The metric NAMES are a billing
+// contract shared with `zeroship-metering` and the control plane's pricing
+// catalog, not a detail of whichever module happens to run the statement; they
+// were private items in `exec.rs` until 2026-09-01, which silently made the
+// BILLED surface equal to "whatever flows through exec", and three operation
+// families do not. NO TIER IS CLAIMED: the names are core-shaped but
+// `emit_db_metric` reads `crate::context`, whose own destination is unsettled,
+// so the census reports this file as unjudged until that is decided.
+pub(crate) mod metrics;
 // Process-wide ownership of the `env.db` primitive: validated configuration,
 // the plugin prototype, the stable thread-resource key, and the neutral
 // operator-lifecycle handle.
