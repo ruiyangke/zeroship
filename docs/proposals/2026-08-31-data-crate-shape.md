@@ -1904,8 +1904,16 @@ and `data-sqlite -> plugin-db` while `plugin-db` depends on both: a cycle, not a
 It is the row-to-JSON finding (Phase 0.3) seen from the side that makes it structural. The engine rows
 include `crud/mod.rs:554`, where an **engine** function names an **adapter** function pointer whose type
 is `fn(&mut v8::PinScope, v8::Local<Value>) -> Option<v8::Local<Value>>` - behaviour crossing a boundary
-while spelling no marker at all. It sits on the masked read path, so masking structurally requires
-engine-to-adapter today.
+while spelling no marker at all.
+
+**Re-verified independently, and it is reached from twelve places, not eleven.** Eleven go through the
+two masked helpers `first_row_or_null_masked` (`:520`) and `rows_as_json_array_masked` (`:541`) -
+`crud/mod.rs:747, 844, 924, 1164, 1508, 1610, 1700, 1849, 2079, 2290, 2457`, every one inside a
+`dispatch_*` async body. The twelfth, `:1942` in `dispatch_distinct`, calls `maybe_rehydrate`
+**directly**, bypassing both helpers; the review that found this edge listed the eleven and missed it.
+So **every masked read in the crate routes through an adapter function pointer chosen by engine code**,
+and masking is load-bearing per `#45`. This is the single hardest thing in the way of a V8-free engine,
+and it is invisible to every text instrument in this document.
 
 **Two more field-position violations, in a module this document twice called settled:** `context.rs:80`
 and `:178` hold Postgres in enum/struct fields, and `transaction/cancel.rs:89`/`:90` hold
