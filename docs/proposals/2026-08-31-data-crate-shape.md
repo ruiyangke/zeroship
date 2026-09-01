@@ -83,7 +83,8 @@ zeroship-data-cdc-server        service tier: WAL stream, slot authority, reaper
                                 zeroship-migrate-server.
                                 -> compio-postgres, zeroship-core. NOT data-core, NOT data-postgres.
 zeroship-data-engine            the data plane's actual logic: crud pipeline, transactions, exec,
-                                broker. -> data-core
+                                broker. -> data-core, AND -> data-postgres + data-sqlite for as
+                                long as it owns BackendHandle. See the open question below.
 zeroship-plugin-db              THIN. The worker/runtime plugin ADAPTER ONLY. -> data-engine.
                                 NOT -> data-cdc-server; the worker must not link the relay.
 
@@ -431,6 +432,33 @@ the other stale - twice, for two modules, in consecutive rounds. The placement t
 ---
 
 ## Open
+
+- **Putting `BackendHandle` in ENGINE makes a use case depend on both adapters, and the governing
+  rule forbids exactly that.** Verified 2026-09-01: `backend/mod.rs:1494-1502` is
+  `Postgres(Rc<PostgresBackend>)` plus its Sqlite sibling, so the enum names both concrete vendor
+  types. Whichever crate owns it must declare `data-postgres` and `data-sqlite`. There is no cycle -
+  both vendors sit on `data-core`, so the graph is a diamond - but the ring diagram at the top of this
+  document puts adapters OUTSIDE use cases, and this points a use case outward at two of them.
+
+  This document asserted `data-engine -> data-core` in the target block while separately deciding
+  `BackendHandle` goes to ENGINE. Both statements were edited independently and cannot both be true;
+  the target block has been corrected rather than quietly reconciled.
+
+  Three resolutions, none free:
+
+  1. **Own it above ENGINE** - the adapter or a small selection crate. Rejected once already, on
+     measurement: eight ENGINE files consume `BackendHandle`, so this mints many new upward edges.
+  2. **Accept that `data-engine` is a composition layer** that may name vendors, and redraw the ring
+     so it sits above them. Coherent - what it names is a closed sum of backends, its own dispatch
+     mechanism - but it weakens the governing rule to a guideline, which deserves to be a decision
+     rather than a side effect of a placement.
+  3. **Make the engine generic over the backend.** This dodges every measured objection to `dyn`:
+     generics monomorphise, keep associated types, and add no per-call allocation. The cost is
+     different and real - `<B: Backend>` is viral across `crud/`, `transaction/` and `exec.rs`, and a
+     closed two-member set monomorphises the whole engine twice.
+
+  Option 2 is the working assumption because the enum is a defended choice, but the ring diagram is
+  this document's foundation and should not be amended as a consequence of a file placement.
 
 - **`context.rs`.** It carries Postgres in its **fields** - `TxConnection::Postgres(OwnedPooledClient)`
   and `pool: Option<Rc<Pool>>` - and field position is invisible to the module walk, the type walk AND
