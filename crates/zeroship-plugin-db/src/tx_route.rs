@@ -45,10 +45,10 @@
 //! ## Why a missed dispatch site cannot compile
 //!
 //! `TxRoute` has exactly ONE production constructor, [`TxRoute::capture`],
-//! and it takes `&mut v8::PinScope`. There is no `From<&str>`, no
-//! `Default`, no `new(app_id)`, and the fields are private, so a
-//! `TxRoute` cannot be conjured from an `app_id` anywhere but a live V8
-//! frame. Every exec entry point (`exec_query`, `exec_count`,
+//! and it takes the OBSERVED transaction frame - not an `app_id`, and not a
+//! `bool`. There is no `From<&str>`, no `Default`, no `new(app_id)`, and the
+//! fields are private, so a `TxRoute` cannot be conjured from an `app_id`.
+//! Every exec entry point (`exec_query`, `exec_count`,
 //! `exec_mutation`, `exec_mutation_with_emit`) takes `&TxRoute` instead of
 //! `app_id: &str`. A new dispatcher that forgets to capture therefore has
 //! nothing to pass and fails to compile — it cannot silently fall through
@@ -78,19 +78,29 @@ pub struct TxRoute {
 }
 
 impl TxRoute {
-    /// Freeze the routing decision for a dispatch starting in this V8
-    /// frame.
+    /// Freeze the routing decision for a dispatch.
     ///
-    /// The ONLY production constructor, and the reason it takes `scope`:
-    /// [`crate::tx_scope::current_tx_app`] is the structural test, and it
-    /// is only answerable while a V8 scope is live.
+    /// The ONLY production constructor. `current_tx_app` is whichever app
+    /// owns the transaction frame this dispatch started inside, as observed
+    /// at the dispatch boundary - `None` at top level.
     ///
-    /// SEC-1 is structural here rather than incidental: a co-resident
-    /// app's callback plants ITS app_id in the continuation slot, so the
-    /// comparison below fails and this app routes to its own pool
-    /// connection.
-    pub(crate) fn capture(scope: &mut v8::PinScope<'_, '_>, app_id: &str) -> Self {
-        let in_tx = crate::tx_scope::current_tx_app(scope).as_deref() == Some(app_id);
+    /// SEC-1 is structural here rather than incidental: a co-resident app's
+    /// callback plants ITS app_id in the continuation slot, so the comparison
+    /// below fails and this app routes to its own pool connection.
+    ///
+    /// **It takes the OBSERVATION, not the V8 scope, and that is the point.**
+    /// Until 2026-08-31 this read `crate::tx_scope::current_tx_app(scope)`
+    /// itself, which made a routing decision - engine vocabulary - depend on
+    /// the adapter that reads V8's context map. The comparison is the security
+    /// property and stays here; only the READING of the context moved out, to
+    /// [`crate::tx_scope::capture_route`], which is the one place a V8 scope is
+    /// in hand. This module now names no `v8::` type.
+    ///
+    /// Deliberately not a `bool` parameter: a caller cannot assert "I am in a
+    /// transaction", only report which app the frame belongs to. The
+    /// comparison that turns that into a route is not the caller's to make.
+    pub(crate) fn capture(current_tx_app: Option<&str>, app_id: &str) -> Self {
+        let in_tx = current_tx_app == Some(app_id);
         Self {
             app_id: app_id.to_string(),
             in_tx,
@@ -216,7 +226,7 @@ mod tests {
     #[test]
     fn top_level_dispatch_routes_to_the_pool() {
         in_scope!(let scope);
-        let route = TxRoute::capture(scope, "app_a");
+        let route = crate::tx_scope::capture_route(scope, "app_a");
         assert!(!route.in_tx(), "no transaction scope entered");
         assert_eq!(route.app_id(), "app_a");
     }
@@ -225,10 +235,10 @@ mod tests {
     fn dispatch_inside_the_callback_routes_to_the_transaction() {
         in_scope!(let scope);
         let prev = crate::tx_scope::enter(scope, "app_a");
-        assert!(TxRoute::capture(scope, "app_a").in_tx());
+        assert!(crate::tx_scope::capture_route(scope, "app_a").in_tx());
         crate::tx_scope::leave(scope, prev);
         assert!(
-            !TxRoute::capture(scope, "app_a").in_tx(),
+            !crate::tx_scope::capture_route(scope, "app_a").in_tx(),
             "leaving the scope must stop routing to the tx"
         );
     }
@@ -238,10 +248,10 @@ mod tests {
         in_scope!(let scope);
         let prev = crate::tx_scope::enter(scope, "app_other");
         assert!(
-            !TxRoute::capture(scope, "app_a").in_tx(),
+            !crate::tx_scope::capture_route(scope, "app_a").in_tx(),
             "SEC-1: app_a must not join app_other's transaction"
         );
-        assert!(TxRoute::capture(scope, "app_other").in_tx());
+        assert!(crate::tx_scope::capture_route(scope, "app_other").in_tx());
         crate::tx_scope::leave(scope, prev);
     }
 
@@ -256,7 +266,7 @@ mod tests {
         in_scope!(let scope);
         let prev = crate::tx_scope::enter(scope, "app_a");
         let ambient = crate::context::with(|c| c.has_tx_for("app_a"));
-        let captured = TxRoute::capture(scope, "app_a").in_tx();
+        let captured = crate::tx_scope::capture_route(scope, "app_a").in_tx();
         crate::tx_scope::leave(scope, prev);
         assert!(!ambient, "precondition: no transaction is parked for app_a");
         assert!(

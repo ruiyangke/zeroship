@@ -140,3 +140,18 @@ pub(crate) fn leave(scope: &mut v8::PinScope<'_, '_>, prev: Option<v8::Global<v8
     let local = v8::Local::new(scope, prev);
     scope.set_continuation_preserved_embedder_data(local);
 }
+
+/// Read the transaction frame out of V8 and freeze a [`TxRoute`] from it.
+///
+/// This is the whole of the V8 half of routing, and it lives here because this
+/// module is where the context map is. [`TxRoute::capture`] still owns the
+/// comparison that decides the route - it takes the observation, not the scope -
+/// so the SEC-1 property is stated once, in the type that carries it, and
+/// `tx_route.rs` names no `v8::` type.
+///
+/// Call this from a dispatch prologue while `scope` is live. The answer is only
+/// correct at the dispatch boundary: the runtime's continuation slot rotates on
+/// the next pump turn.
+pub(crate) fn capture_route(scope: &mut v8::PinScope<'_, '_>, app_id: &str) -> crate::tx_route::TxRoute {
+    crate::tx_route::TxRoute::capture(current_tx_app(scope).as_deref(), app_id)
+}

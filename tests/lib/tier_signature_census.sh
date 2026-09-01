@@ -149,7 +149,7 @@ region_filter() {   # $1 = file, $2 = "prod" | "test"
     # `use compio_postgres::{Client, NoTls}` into the production import set -
     # which then matched every mention of `Client`, including the SqlExecutor
     # ASSOCIATED TYPE, reporting 11 where the answer is 3.
-    !intest && /^#\[cfg\(.*(^|[^A-Za-z_])test([^A-Za-z_]|$).*\)\]/ { pend = 1; next }
+    !intest && /^#\[cfg\(/ && /(^|[^A-Za-z_])test([^A-Za-z_]|$)/ { pend = 1; next }
     pend && /^(pub )?mod [A-Za-z_]+ \{/ { pend = 0; intest = 1; if (WANT=="test") print; next }
     pend && /^[[:space:]]*$/ { next }
     { pend = 0 }

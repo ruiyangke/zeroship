@@ -654,7 +654,7 @@ pub(crate) fn dispatch_find<'s>(
 
     let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
     let coll = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -779,7 +779,7 @@ pub(crate) fn dispatch_insert<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
 
     // Read the request-bound actor id at the synchronous
     // boundary BEFORE the async tail starts. The runtime's
@@ -870,7 +870,7 @@ pub(crate) fn dispatch_insert_many<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
@@ -964,7 +964,7 @@ pub(crate) fn dispatch_update_one<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
 
     // Read actor at the sync boundary (same rationale as
     // `dispatch_insert`'s actor pin: the runtime's `executing_request_id`
@@ -1200,7 +1200,7 @@ pub(crate) fn dispatch_update_many<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
 
     // Actor read at sync boundary (mirrors
     // `dispatch_update_one`'s rationale).
@@ -1464,7 +1464,7 @@ pub(crate) fn dispatch_delete_one<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
     let autobump = query::SystemFieldAutoBump {
         actor_id: actor_id.as_deref(),
@@ -1527,7 +1527,7 @@ pub(crate) fn dispatch_delete_many<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
     let autobump = query::SystemFieldAutoBump {
         actor_id: actor_id.as_deref(),
@@ -1589,7 +1589,7 @@ pub(crate) fn dispatch_purge_one<'s>(
     });
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -1632,7 +1632,7 @@ pub(crate) fn dispatch_purge_many<'s>(
     });
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -1661,7 +1661,7 @@ pub(crate) fn dispatch_restore_one<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
     let autobump = query::SystemFieldAutoBump {
         dispatch_write: true,
@@ -1718,7 +1718,7 @@ pub(crate) fn dispatch_restore_many<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
     let autobump = query::SystemFieldAutoBump {
         dispatch_write: true,
@@ -1793,7 +1793,7 @@ pub(crate) fn dispatch_aggregate<'s>(
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
     let coll = collection.to_string();
     let group_fields = aggregate_group_fields(&pipeline);
     // The descriptor entry is the aggregate builder's identifier allowlist.
@@ -1876,7 +1876,7 @@ pub(crate) fn dispatch_distinct<'s>(
         .unwrap_or(false);
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
     let coll = collection.to_string();
     // A DISTINCT over a masked column returns MASKS - the column with the
     // field's own name is the one it selects, and that column holds the mask.
@@ -1972,7 +1972,7 @@ pub(crate) fn dispatch_count<'s>(
 
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
     let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
@@ -2015,7 +2015,7 @@ pub(crate) fn dispatch_upsert<'s>(
     let coll = collection.to_string();
     let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = TxRoute::capture(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, app_id);
 
     state.borrow_mut().spawned_ops.push(Box::pin(async move {
         let mut doc = doc;
