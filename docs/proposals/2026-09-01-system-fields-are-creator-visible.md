@@ -796,8 +796,21 @@ once you accept that, the descriptor property buys nothing.**
 
 The reasoning chain:
 
-1. The fence must be hardcoded in Rust, because the descriptor is creator-
-   authored (`apply.rs:61-65`).
+1. ~~The fence must be hardcoded in Rust, because the descriptor is creator-
+   authored.~~ **This reason is over-broad and round 4 refuted it.** "Descriptors
+   cannot hold a fence" is already violated in production:
+   `crud/mod.rs:2491-2496` decides whether to **encrypt** a column from
+   `def.get("encrypted")`, and `:2502-2515` decides masking from `def.mask.kind`
+   - both read from the same creator-authored blob. Deleting one JSON key writes
+   plaintext (task #133). Shipping the over-broad reason would be cited later to
+   justify moving `encrypted` too, or to leave it alone by symmetry.
+
+   **The reason that survives:** the seven names are a platform-wide
+   **constant**. `policies/confined-system-shape.inject.toml:60-63` declares the
+   rule `scope = "all"`, `mandatory = true` - every table of every app gets
+   exactly these seven columns. A per-field descriptor property encoding a set
+   that is identical everywhere is **a variable holding a constant**. That is
+   why `writeClass` should not exist, and it holds regardless of trust.
 2. The SDK gate is ergonomics, not a fence - so it may equally use a hardcoded
    list, and one already exists at `install-schema.ts:249`.
 3. Therefore no consumer that matters needs `writeClass`, and its producer cost
@@ -816,13 +829,44 @@ four behavioural edits plus one precondition:
 | 2 | In the `missing` arm, for a system field: **delete the key** and skip both the default-fill and the required check | `validate.ts:507-515` |
 | 3 | For `created_by`/`updated_by`: **remove the supplied key unconditionally**, then stamp the actor if one is bound | `system_fields_pass.rs:263-273` |
 | 3b | Refuse `serverAuthored` destination columns in creator migration DML | migration apply path - **scope not yet sized** |
-| 4 | Give `deleted_at` a real arm instead of `_ => {}` | `system_fields_pass.rs:438` |
-| 5 | Relax `RowInput`'s bans for `id`/`created_at` only | `types.ts:200-208` |
+| 4a | **Route soft-delete through the native op** - delete the `if (self._softDelete)` branches | `crud.ts:513-532`, `:556-573` |
+| 4b | Then give `deleted_at` a real arm instead of `_ => {}` | `system_fields_pass.rs:438` |
+| 5 | ~~Relax~~ **ADD** `id?` / `created_at?` to `RowInput` - relaxing alone does not work, measured below | `types.ts:200-208` |
 
 Edit 2 covers the whole `missing` arm, not just `:511`, which is what stops both
 the `version` upsert reset and the supplied-null-into-NOT-NULL. Edit 3 is
 unconditional removal, which is what closes the anonymous arm. Neither is
 expressible as "skip a check".
+
+### Edit 4 must be TWO edits in order, or it refuses the platform's own delete()
+
+Round 4 found that **the timestamp defect is already shipping**, in the SDK's own
+soft-delete. `sdks/db/src/collection/crud.ts:513-526` does not call the native
+soft-delete op when `softDelete` is on. It assembles a patch in JS:
+
+```ts
+const patch = augmentUpdateWithVersion({ [col]: Date.now() }, casVersion);
+await self._nativeCollection().update(mapped, patch);
+```
+
+`Date.now()` is a **number**, into `deleted_at`, through the ordinary update op -
+so it takes exactly the path measured below and fails `22008` on Postgres. It
+cannot be caught upstream: `deleteCollection` calls neither `validateDoc` nor
+`checkPartial`, and `apply_system_fields_on_update` lets `deleted_at` fall
+through `_ => {}` (`system_fields_pass.rs:438`).
+
+It is unexercised rather than dead: every committed descriptor sets
+`softDelete: false`, and `install-schema.test.ts:375-379` pins the routing
+against a mock that records op **names only, never the payload** - so the broken
+branch is intended behaviour, guarded by a test that cannot see the bug.
+
+**And Edit 4 as written would refuse it.** A `lifecycle` arm rejecting
+`deleted_at` on UPDATE rejects the SDK's own `delete()`, because that patch *is*
+an ordinary UPDATE naming `deleted_at`. There is no safe way to exempt it: the
+patch is built in creator-executable JS, so any "trusted caller" marker is
+forgeable - the shape the privilege invariant forbids.
+
+Hence 4a before 4b. Reversed, the change red-bars soft delete.
 
 ### Which side of the timestamp asymmetry is wrong: the validator
 
@@ -860,10 +904,61 @@ Edit 1 therefore has two halves, and the proposal previously named one:
    / 1000.0)` (or the driver must bind a real timestamp type) for a numeric
    value into a timestamp column.
 
-Half 2 is the load-bearing one and nothing in the tree does it today. SQLite
-stores timestamps as `TEXT` (`query.rs:1520`), so it needs its own arm and the
-two backends must be checked separately - a fix that satisfies one can silently
-break the other.
+Half 2 is the load-bearing one and nothing in the tree does it today. Round 4
+traced the absence edge by edge: `mapDocOutbound` copies verbatim
+(`utils.ts:37-43`), `WriteStages::any()` has no timestamp facet
+(`write_pipeline.rs:210-212`) and short-circuits at `:221-223` for a plain
+collection, `build_insert_with_dialect` emits a bare `$N`
+(`query.rs:3863-3890`), and `value_to_param_inner` renders the number as **text**
+(`query.rs:6168-6176`). The driver then sends Parse with an **empty OID list**
+(`libs/compio-postgres/src/query.rs:153-159`), so PG infers `timestamptz` and
+runs `timestamptz_in` on those digits.
+
+**And SQLite does not fail - it corrupts.** This is why the two backends had to
+be measured separately. SQLite binds every non-blob param as text
+(`backend/sqlite/session.rs:2450-2470`) into a `TEXT` column
+(`query.rs:322-332`), so `'1756709000000'` is simply *stored*. Two silent
+consequences: it sorts before every `CURRENT_TIMESTAMP` row forever, on columns
+that are indexed (`query.rs:333-340`); and on read it is neither parseable shape
+- `parse_timestamp_millis` needs `len >= 19` (`read_pipeline.rs:277-288`) - so
+`normalize_timestamp_value` leaves it a **string**, violating
+`SystemFields.created_at: number` with no error anywhere.
+
+So "widen the write side" is the worst of the three options as stated: **loud on
+Postgres, silently wrong in dev.**
+
+**The correct fix is the write-side mirror of `normalize_rows_on_read`, in
+Rust** - a `normalize_timestamps_on_write` stage in `write_pipeline.rs`, keyed on
+the descriptor's declared type exactly as `read_pipeline.rs:183` already is, plus
+the three system names as `:162` already does, emitting ISO-8601 so both dialects
+converge. It must be added to `WriteStages` as a **fifth facet** and to `any()`,
+or the pipeline short-circuits and the stage never runs on a plain collection -
+which is every committed example.
+
+It must be in Rust, not TypeScript, because **`validate.ts` is not on every write
+path**: `deleteCollection` and `deleteManyCollection` (`crud.ts:513-569`) call
+neither `validateDoc` nor `checkPartial`. `validate.ts` widens only as the
+ergonomic front end.
+
+### Edit 5 as specified does not work, and it was measured through `tsc`
+
+Removing `RowInput`'s `id?: never` ban does **not** make `id` writable - it makes
+it *unknown*, and TypeScript's object-literal freshness check refuses it with a
+worse message. Four arms through `tsc --strict`, differing only in the `RowInput`
+shape:
+
+| Arm | Result |
+| --- | --- |
+| A - today (`id?: never`) | `TS2322: Type 'string' is not assignable to type 'undefined'` |
+| B - **Edit 5 as specified** (ban removed) | `TS2353: Object literal may only specify known properties, and 'id' does not exist` |
+| C - ban removed **and** `id?: string; created_at?: number` added | **no error** |
+| D - arm B's type, assigned from a variable rather than a literal | **no error** |
+
+Arm D shows the half-fix is not merely insufficient but incoherent: the same
+object is refused as a literal and accepted through a variable. So Edit 5 is an
+**addition**, not a relaxation - and its `created_at` type cannot be written
+until Edit 1 decides the write-side timestamp representation. **Edit 1 is a
+precondition for Edit 5 as well as for Edit 2.**
 
 **Criterion 5 is withdrawn.** It rested on the premise that the generated types
 hide system fields; they do not (`Row<S>` carries all seven), and un-eliding
