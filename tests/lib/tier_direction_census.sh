@@ -141,7 +141,7 @@ tier_of_file() {
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
     ./crud/*|./transaction/*|./exec.rs|./broker.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs|./cross_app_fk.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
-    ./backend/postgres.rs|./backend/pg_row_json.rs|./backend/pg_session_sql.rs) echo PG ;;
+    ./backend/postgres.rs|./backend/pg_row_json.rs|./backend/pg_session_sql.rs|./backend/pg_autocommit.rs) echo PG ;;
     ./backend/sqlite/*)                                  echo SQLITE ;;
     ./encryption/*)                                      echo ENCRYPT ;;
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
@@ -156,7 +156,7 @@ tier_of_file() {
 tier_of_target() {
   case "$1" in
     backend::sqlite)                                     echo SQLITE ;;
-    backend::postgres|backend::pg_row_json|backend::pg_session_sql) echo PG ;;
+    backend::postgres|backend::pg_row_json|backend::pg_session_sql|backend::pg_autocommit) echo PG ;;
     v8_classes*|v8_bridge*|tx_scope*)                    echo ADAPTER ;;
     crud*|transaction*|exec*|broker*|read_set*|tx_route*|drop_namespace*|cross_app_fk*) echo ENGINE ;;
     auth::bootstrap)                                     echo ENGINE ;;
@@ -285,11 +285,31 @@ if [ -s "$EDGES" ]; then
   echo "  is why they were read as scattered violations rather than as pairs."
 fi
 
+# A CONTESTED file is skipped at `:233`, and until 2026-09-01 the default run
+# said nothing about that - the list was behind an opt-in `--contested` flag you
+# had to know to ask for. So a NEW file was invisible by default, and on
+# 2026-09-01 one was: `backend/pg_autocommit.rs` landed in f77ead1d8 carrying the
+# edge that commit exists to redirect, and every edge into and out of it was
+# dropped silently. The cycle verdict happened to survive - the upward half was
+# genuinely gone - but the instrument had been blinded by the same commit it was
+# being used to judge. An unjudged file is a HOLE IN THE MEASUREMENT and the
+# default output must say how big it is.
+n_contested=$(
+  find . -name '*.rs' | LC_ALL=C sort | while read -r f; do
+    [ "$(tier_of_file "$f")" = CONTESTED ] && echo "$f"
+  done | sort -u | grep -c . || true
+)
+echo
 if [ "$MODE" = "--contested" ]; then
-  echo "Files with no settled tier (neither judged nor trusted):"
+  echo "Files with no settled tier ($n_contested; neither judged nor trusted):"
   find . -name '*.rs' | LC_ALL=C sort | while read -r f; do
     [ "$(tier_of_file "$f")" = CONTESTED ] && echo "  ${f#./}"
   done | sort -u
+else
+  echo "UNJUDGED: $n_contested file(s) have no settled tier and were SKIPPED."
+  echo "  Every edge into or out of them is absent from the table above. Run"
+  echo "  '$0 --contested' to list them. A file added without a tier_of_file arm"
+  echo "  lands here, and a skipped file prints exactly what a clean file prints."
 fi
 echo
 echo "Every verdict is relative to tier_of_file/tier_of_target above, which are a"
