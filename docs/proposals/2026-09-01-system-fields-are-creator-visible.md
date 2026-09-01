@@ -424,10 +424,30 @@ follows each is what was actually verified, not what was intended.
    the CHARTER the worker holds rather than the creator-authored descriptor,
    which is the whole reason step 2 came first. It is also the step that closes
    the half of the id fence step 3 left open: minting is conditional on `id`
-   being absent (`system_fields_pass.rs:256`), so a supplied `usr_`-prefixed id
-   is still written verbatim today. **The remaining half is the one an attacker
-   reaches without touching a generated file**, so treat this as security work,
-   not ergonomics.
+   being absent, so a supplied `usr_`-prefixed id is still written verbatim
+   today. **The remaining half is the one an attacker reaches without touching a
+   generated file**, so treat this as security work, not ergonomics.
+
+   **THE REFUSAL CANNOT LIVE IN THE PASS, and this was measured by trying.**
+   Implementing it inside `inject_into_object` breaks three tests, and one of
+   them is an invariant rather than a stale expectation:
+   `insert_pass_is_idempotent`. The pass documents itself as idempotent -
+   "calling this twice on the same doc is a no-op the second time (every check
+   is field absent -> inject)" - and a refusal keyed on `id` being PRESENT
+   cannot distinguish a creator's value from one the pass minted on an earlier
+   call. Presence is the only signal available inside the function and it means
+   both things.
+
+   So the refusal belongs at the **caller boundary**, where "supplied by the
+   creator" is still knowable, and the pass keeps minting. The requirement is
+   pinned as an `#[ignore]`d test naming that boundary
+   (`insert_refuses_a_creator_supplied_id`), with a live control beside it so
+   the ignored case cannot quietly become unreachable.
+
+   **This is a correction to the constraint below, not an exception to it.**
+   "Strip at the pass" is right for `version`, whose hazard is two assignments
+   reaching one `DO UPDATE SET`. It is wrong for `id`, because the pass is the
+   one place that cannot tell whose value it is looking at.
 6. **The SDK stops requiring and stops materialising** for assigned fields, and
    `stripRuntimeSystemFields` goes.
 7. **Soft-delete routes through the native op** (`crud.ts:513-532`, `:556-573`)
@@ -448,6 +468,13 @@ unconditional while the key still reaches `build_upsert`, the generic loop emits
 second assignment to the same column (`:6313-6333`) - two assignments to one
 column in one `DO UPDATE SET`, which PostgreSQL refuses. Strip at the pass and
 make the bump unconditional as ONE change.
+
+**"At the pass" holds for `version` and NOT for `id`** - see step 5. `version`
+has no minting step whose output the pass could mistake for a caller's value;
+`id` does, and the pass is documented and tested as idempotent, so a
+presence-keyed refusal there rejects the pass's own earlier output. Removal and
+refusal want different homes: removal belongs where the value would otherwise
+reach the SQL builder, refusal belongs where provenance is still known.
 
 **`insertMany` needs a batch-shape rule.** `build_insert_many` unions the column
 set across all documents (`query.rs:4390`) then binds
