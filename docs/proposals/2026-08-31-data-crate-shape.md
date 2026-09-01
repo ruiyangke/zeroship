@@ -188,9 +188,16 @@ resolution:
    comes from owning the type, not from consuming it, so no consumer census can retire it.
 3. **The cut is to DELETE `pause_broker` and `engage_schema_pending`**, not to port them. No
    production caller; both impls are byte-identical self-less expressions; and the one production
-   pause consumer already routes around them - `cdc_lifecycle.rs:270` and `:287` call
-   `broker::SuppressGuard::activate` directly in BOTH arms. The surviving `ChangeStream` is then
-   genuinely core-safe.
+   pause consumer already routes around them - `cdc_lifecycle.rs` calls
+   `crate::broker::SuppressGuard::activate(app_id)` directly in BOTH the Postgres and the SQLite
+   arm. The surviving `ChangeStream` is then genuinely core-safe.
+
+   **The SQLite arm says why, and the reason is a behaviour difference rather than a preference** -
+   it takes "the startup-only suppression guard, whose Drop merely re-enables delivery; the general
+   pause guard emits a Resync on Drop and would add a synthetic first message to every SQLite
+   subscription." So the general guard is not merely unused here; using it would be a defect. That
+   is the strongest argument for deleting rather than porting, and it is recorded in the code the
+   deletion touches.
 
    **Where the deletion stops, because this is easy to over-cut.** What goes is the two *trait
    methods* on `ChangeStream` and their two impls (`change_stream_pg.rs`, `backend/sqlite/cdc.rs`).
