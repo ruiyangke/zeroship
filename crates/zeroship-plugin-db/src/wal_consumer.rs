@@ -46,122 +46,16 @@ use compio_postgres::replication::{
     pgoutput::{self, OldTuple, PgOutputMessage, TupleColumn, TupleData},
 };
 
-use crate::broker::{has_subscribers, publish, ChangeEvent, ChangeOp};
+use crate::broker::{
+    has_subscribers, publish, ChangeEvent, ChangeOp,
+    // Per-app emit suppression lives in the broker, not here: none of it
+    // decodes WAL. The consumer is a CONSUMER of the flag - it takes a
+    // SuppressGuard for the life of its decode loop so the mutation path
+    // stops emitting locally while WAL is authoritative.
+    SuppressGuard,
+};
 use crate::error::DbError;
 
-// ---------------------------------------------------------------------------
-// Per-app emit-suppression
-// ---------------------------------------------------------------------------
-//
-// When a WAL consumer is active for app A in this process, local-emit
-// for app A must become a no-op — the consumer publishes the same
-// event on the cross-worker path and emitting locally too would
-// double-deliver. Other apps on the same thread must continue to use
-// local-emit; a coarse thread-wide flag would silence their events as
-// well.
-//
-// Counts are process-wide because consumer and mutation tasks can run
-// on different isolate threads.
-
-/// Process-wide suppression counts keyed by app id.
-///
-/// A WAL consumer and mutations for the same app can run on different
-/// compio threads. Process scope is therefore required for the local
-/// fast path to see that WAL is authoritative. Counts, rather than a
-/// set, prevent one overlapping guard from unsuppressing another.
-static SUPPRESSED_APPS: LazyLock<Mutex<HashMap<String, usize>>> =
-    LazyLock::new(|| Mutex::new(HashMap::new()));
-
-fn suppressed_apps() -> std::sync::MutexGuard<'static, HashMap<String, usize>> {
-    SUPPRESSED_APPS.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-/// Suppress local-emit for `app_id` in this process. Mutation callbacks
-/// that produce events for this app will become no-ops until
-/// [`unsuppress_app`] is called (typically via the Drop guard returned
-/// by [`SuppressGuard::activate`]).
-pub fn suppress_app(app_id: &str) {
-    *suppressed_apps().entry(app_id.to_string()).or_default() += 1;
-}
-
-/// Inverse of [`suppress_app`]. Idempotent.
-pub fn unsuppress_app(app_id: &str) {
-    let mut apps = suppressed_apps();
-    if let Some(count) = apps.get_mut(app_id) {
-        *count -= 1;
-        if *count == 0 {
-            apps.remove(app_id);
-        }
-    }
-}
-
-/// True when the given app's local-emit path is suppressed on this
-/// thread (i.e. a [`WalConsumer`] is running for that app).
-pub fn is_app_suppressed(app_id: &str) -> bool {
-    suppressed_apps().contains_key(app_id)
-}
-
-/// RAII guard: suppresses local-emit for one app on construction,
-/// unsuppresses on drop (including panic-unwind). The consumer's run
-/// loop holds one of these for the duration of its decode loop.
-#[derive(Debug)]
-pub struct SuppressGuard {
-    app_id: String,
-}
-
-impl SuppressGuard {
-    /// Activate suppression for `app_id`. The guard's `Drop` impl
-    /// removes the app from the suppressed set, so even a panic inside
-    /// the consumer leaves local-emit re-enabled for that app.
-    pub fn activate(app_id: &str) -> Self {
-        suppress_app(app_id);
-        Self {
-            app_id: app_id.to_string(),
-        }
-    }
-}
-
-impl Drop for SuppressGuard {
-    fn drop(&mut self) {
-        unsuppress_app(&self.app_id);
-    }
-}
-
-/// Emit a local change event into the in-process broker.
-///
-/// Called from the mutation callbacks (`insert`, `update_one`,
-/// `delete_one`, ...) after a successful SQL run.
-///
-/// When this app is suppressed, this is a no-op. The WAL consumer is
-/// publishing the same event on the cross-worker path and emitting
-/// locally too would double-deliver.
-///
-/// The `new_tuple` is the row's post-image (or pre-image for
-/// DELETE) — used by the broker's read-set narrowing to test each
-/// subscriber's predicate. May be empty when the caller doesn't have a
-/// tuple snapshot to hand; predicate evaluation treats missing columns
-/// as non-matching (the conservative direction).
-pub fn emit_local(
-    app_id: &str,
-    collection: &str,
-    op: ChangeOp,
-    pk: Option<String>,
-    changed_columns: Vec<String>,
-    new_tuple: std::collections::HashMap<String, String>,
-) {
-    if is_app_suppressed(app_id) {
-        return;
-    }
-    publish(&ChangeEvent {
-        app_id: app_id.to_string(),
-        collection: collection.to_string(),
-        op,
-        pk,
-        changed_columns,
-        new_tuple,
-        old_tuple: None,
-    });
-}
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -849,6 +743,12 @@ pub(crate) async fn run_supervised_controlled(
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The emit-suppression tests below still live here rather than beside the
+    // code they exercise, which moved to `broker.rs` on 2026-08-31. They are
+    // left in place deliberately for this commit: relocating ~150 lines of test
+    // alongside a production move would make one commit prove two things, and
+    // the point of this one is that behaviour did not change.
+    use crate::broker::{emit_local, is_app_suppressed, suppress_app, unsuppress_app};
     use crate::broker::{Broker, SubscriptionMessage};
     use compio_postgres::replication::pgoutput;
 

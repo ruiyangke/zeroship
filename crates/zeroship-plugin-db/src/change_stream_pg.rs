@@ -264,7 +264,7 @@ impl ChangeStream for PgChangeStream {
     }
 
     /// Return a [`BrokerPauseGuard`] for `app_id`. Construction
-    /// suppresses the app via `wal_consumer::suppress_app`; the
+    /// suppresses the app via `broker::suppress_app`; the
     /// guard's `Drop` unsuppresses and emits a resync.
     fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard {
         BrokerPauseGuard::new(app_id.to_string())

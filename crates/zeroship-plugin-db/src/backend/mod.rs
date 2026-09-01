@@ -862,7 +862,7 @@ pub trait ChangeStream: 'static {
     /// and emits a `Resync` to every active subscriber (§16.7).
     ///
     /// The guard's `Drop` starts as a no-op (tracing::trace! only)
-    /// until it is wired through `wal_consumer::suppress_app` /
+    /// until it is wired through `broker::suppress_app` /
     /// `broker::resume_app_with_resync`.
     fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard;
 
@@ -884,14 +884,14 @@ pub trait ChangeStream: 'static {
 /// Wired body (plan §7 backfill pause):
 ///
 /// 1. `::new(app_id)` — calls
-///    [`crate::wal_consumer::suppress_app`] which sets the
+///    [`crate::broker::suppress_app`] which sets the
 ///    thread-local `SUPPRESSED_APPS` flag. While the flag is set, the
 ///    SQLite CDC publisher (`backend/sqlite/cdc.rs::publisher_loop`)
 ///    drops every packet whose `app_id` matches before the broker
 ///    fan-out, AND the legacy local-emit shim
-///    (`crate::wal_consumer::emit_local`) short-circuits to a no-op so
+///    (`crate::broker::emit_local`) short-circuits to a no-op so
 ///    the PG arm sees the same contract.
-/// 2. `::drop` — calls [`crate::wal_consumer::unsuppress_app`] to
+/// 2. `::drop` — calls [`crate::broker::unsuppress_app`] to
 ///    clear the suppression flag, then
 ///    [`crate::broker::Broker::resume_app_with_resync`] which pushes
 ///    one `Resync` message onto every active subscription registered
@@ -932,7 +932,7 @@ impl BrokerPauseGuard {
     /// arm); orchestrator code reaches the guard via
     /// `BackendHandle::as_change_stream_*().pause_broker(app_id)`.
     pub(crate) fn new(app_id: String) -> Self {
-        crate::wal_consumer::suppress_app(&app_id);
+        crate::broker::suppress_app(&app_id);
         Self { app_id }
     }
 }
@@ -941,7 +941,7 @@ impl Drop for BrokerPauseGuard {
     fn drop(&mut self) {
         // 1. Clear the suppression flag so subsequent CDC packets
         //    publish normally + the legacy local-emit shim re-enables.
-        crate::wal_consumer::unsuppress_app(&self.app_id);
+        crate::broker::unsuppress_app(&self.app_id);
         // 2. Push one `Resync` per active subscription on `app_id`.
         //    Subscribers refetch + continue catching up. The broker
         //    primitive is idempotent on closed entries (skipped) and
