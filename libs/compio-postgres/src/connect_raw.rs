@@ -1995,6 +1995,54 @@ mod tests {
         );
     }
 
+    /// `Handshake::new` reads the config but does not hold it, so a local one
+    /// is enough and the returned value borrows nothing.
+    fn empty_handshake() -> Handshake<HandshakeWriteSuccess, crate::tls::NoTlsStream> {
+        let config = plaintext_config();
+        let stream = MaybeTlsStream::<_, crate::tls::NoTlsStream>::Raw(HandshakeWriteSuccess {
+            input: Vec::new(),
+            offset: 0,
+            output: vec![],
+        });
+        Handshake::new(stream, &config)
+    }
+
+    /// `record_backend_key` reads the process ID with `body[..4]` and an
+    /// `expect` whose message names this very check as its justification. The
+    /// body is server-controlled, so without the length guard a short
+    /// BackendKeyData panics the connection task instead of failing it. The
+    /// guard had never run.
+    #[compio::test]
+    async fn a_short_backend_key_is_refused_rather_than_panicking() {
+        let mut handshake = empty_handshake();
+        let error = handshake
+            .record_backend_key(Bytes::from_static(&[0, 0, 0]))
+            .expect_err("a three-byte BackendKeyData has no complete process ID");
+        assert!(
+            probe_error_chain(&error).contains("without a complete process ID"),
+            "the refusal named the wrong thing: {error}"
+        );
+    }
+
+    /// PostgreSQL may only report protocol options it was asked about, and the
+    /// protocol reserves the `_pq_.` prefix for them. An option without it is a
+    /// peer inventing a name, which must be refused rather than recorded.
+    #[compio::test]
+    async fn a_protocol_option_without_the_pq_prefix_is_refused() {
+        let mut handshake = empty_handshake();
+        let mut body = 196608i32.to_be_bytes().to_vec(); // protocol 3.0
+        body.extend_from_slice(&1i32.to_be_bytes()); // one option
+        body.extend_from_slice(b"invented\0");
+
+        let error = handshake
+            .negotiate_protocol(Bytes::from(body))
+            .expect_err("an option without the _pq_. prefix must be refused");
+        assert!(
+            probe_error_chain(&error).contains("without the required `_pq_.` prefix"),
+            "the refusal named the wrong thing: {error}"
+        );
+    }
+
     /// One text column, which is the shape both target-session probes read.
     fn single_column_row_description(name: &str) -> Vec<u8> {
         let mut body = 1i16.to_be_bytes().to_vec();
