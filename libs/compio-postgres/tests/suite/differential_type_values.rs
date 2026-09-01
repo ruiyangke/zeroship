@@ -16,9 +16,9 @@
 //!
 //! The oracle enables its chrono and time codecs so the optional temporal
 //! carriers are genuinely compared when this crate's matching features are
-//! selected. UUID and JSON still use the exact wire carrier because their
-//! oracle features are not enabled. The deliberate 24:00 and `SystemTime`
-//! infinity differences remain explicit.
+//! selected. Other optional native codecs follow this crate's matching
+//! features, while UUID and JSON retain independent exact-wire coverage. The
+//! deliberate 24:00 and `SystemTime` infinity differences remain explicit.
 
 use std::error::Error;
 use std::future::Future;
@@ -1842,8 +1842,6 @@ async fn compio_extended_scalar_format_observations(cases: &[RawCase]) -> Vec<Fo
 
 #[derive(Debug, PartialEq, Eq)]
 struct NativeExtendedScalarObservation {
-    uuid_decoded: uuid::Uuid,
-    uuid_rebound: uuid::Uuid,
     inet4_decoded: IpAddr,
     inet4_server_text: String,
     inet4_server_mask: i32,
@@ -1863,7 +1861,6 @@ struct NativeExtendedScalarObservation {
 }
 
 const NATIVE_EXTENDED_SCALAR_DECODE_SQL: &str = "SELECT \
-    'ffffffff-0000-8000-8000-0123456789ab'::uuid, \
     '192.0.2.129/24'::inet, ('192.0.2.129/24'::inet)::text, \
         masklen('192.0.2.129/24'::inet), \
     '2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet, \
@@ -1872,10 +1869,9 @@ const NATIVE_EXTENDED_SCALAR_DECODE_SQL: &str = "SELECT \
     4294967295::oid";
 
 const NATIVE_EXTENDED_SCALAR_REBOUND_SQL: &str = "SELECT \
-    $1::uuid, \
+    $1::inet, ($1::inet)::text, masklen($1::inet), $1::inet, \
     $2::inet, ($2::inet)::text, masklen($2::inet), $2::inet, \
-    $3::inet, ($3::inet)::text, masklen($3::inet), $3::inet, \
-    $4::oid";
+    $3::oid";
 
 fn tokio_native_extended_scalar_observation(url: String) -> NativeExtendedScalarObservation {
     on_tokio(url, |client| async move {
@@ -1883,36 +1879,33 @@ fn tokio_native_extended_scalar_observation(url: String) -> NativeExtendedScalar
             .query_one(NATIVE_EXTENDED_SCALAR_DECODE_SQL, &[])
             .await
             .expect("tokio native extended-scalar decode");
-        let uuid_decoded = row.get(0);
-        let inet4_decoded = row.get(1);
-        let inet6_decoded = row.get(4);
-        let oid_decoded = row.get(7);
+        let inet4_decoded = row.get(0);
+        let inet6_decoded = row.get(3);
+        let oid_decoded = row.get(6);
         let rebound = client
             .query_one(
                 NATIVE_EXTENDED_SCALAR_REBOUND_SQL,
-                &[&uuid_decoded, &inet4_decoded, &inet6_decoded, &oid_decoded],
+                &[&inet4_decoded, &inet6_decoded, &oid_decoded],
             )
             .await
             .expect("tokio native extended-scalar encode");
         NativeExtendedScalarObservation {
-            uuid_decoded,
-            uuid_rebound: rebound.get(0),
             inet4_decoded,
-            inet4_server_text: row.get(2),
-            inet4_server_mask: row.get(3),
-            inet4_rebound: rebound.get(1),
-            inet4_rebound_text: rebound.get(2),
-            inet4_rebound_mask: rebound.get(3),
-            inet4_rebound_wire: rebound.get(4),
+            inet4_server_text: row.get(1),
+            inet4_server_mask: row.get(2),
+            inet4_rebound: rebound.get(0),
+            inet4_rebound_text: rebound.get(1),
+            inet4_rebound_mask: rebound.get(2),
+            inet4_rebound_wire: rebound.get(3),
             inet6_decoded,
-            inet6_server_text: row.get(5),
-            inet6_server_mask: row.get(6),
-            inet6_rebound: rebound.get(5),
-            inet6_rebound_text: rebound.get(6),
-            inet6_rebound_mask: rebound.get(7),
-            inet6_rebound_wire: rebound.get(8),
+            inet6_server_text: row.get(4),
+            inet6_server_mask: row.get(5),
+            inet6_rebound: rebound.get(4),
+            inet6_rebound_text: rebound.get(5),
+            inet6_rebound_mask: rebound.get(6),
+            inet6_rebound_wire: rebound.get(7),
             oid_decoded,
-            oid_rebound: rebound.get(9),
+            oid_rebound: rebound.get(8),
         }
     })
 }
@@ -1924,36 +1917,33 @@ async fn compio_native_extended_scalar_observation() -> NativeExtendedScalarObse
         .query_one(NATIVE_EXTENDED_SCALAR_DECODE_SQL, &[])
         .await
         .expect("compio native extended-scalar decode");
-    let uuid_decoded = row.get(0);
-    let inet4_decoded = row.get(1);
-    let inet6_decoded = row.get(4);
-    let oid_decoded = row.get(7);
+    let inet4_decoded = row.get(0);
+    let inet6_decoded = row.get(3);
+    let oid_decoded = row.get(6);
     let rebound = client
         .query_one(
             NATIVE_EXTENDED_SCALAR_REBOUND_SQL,
-            &[&uuid_decoded, &inet4_decoded, &inet6_decoded, &oid_decoded],
+            &[&inet4_decoded, &inet6_decoded, &oid_decoded],
         )
         .await
         .expect("compio native extended-scalar encode");
     NativeExtendedScalarObservation {
-        uuid_decoded,
-        uuid_rebound: rebound.get(0),
         inet4_decoded,
-        inet4_server_text: row.get(2),
-        inet4_server_mask: row.get(3),
-        inet4_rebound: rebound.get(1),
-        inet4_rebound_text: rebound.get(2),
-        inet4_rebound_mask: rebound.get(3),
-        inet4_rebound_wire: rebound.get(4),
+        inet4_server_text: row.get(1),
+        inet4_server_mask: row.get(2),
+        inet4_rebound: rebound.get(0),
+        inet4_rebound_text: rebound.get(1),
+        inet4_rebound_mask: rebound.get(2),
+        inet4_rebound_wire: rebound.get(3),
         inet6_decoded,
-        inet6_server_text: row.get(5),
-        inet6_server_mask: row.get(6),
-        inet6_rebound: rebound.get(5),
-        inet6_rebound_text: rebound.get(6),
-        inet6_rebound_mask: rebound.get(7),
-        inet6_rebound_wire: rebound.get(8),
+        inet6_server_text: row.get(4),
+        inet6_server_mask: row.get(5),
+        inet6_rebound: rebound.get(4),
+        inet6_rebound_text: rebound.get(5),
+        inet6_rebound_mask: rebound.get(6),
+        inet6_rebound_wire: rebound.get(7),
         oid_decoded,
-        oid_rebound: rebound.get(9),
+        oid_rebound: rebound.get(8),
     }
 }
 
@@ -2012,9 +2002,6 @@ async fn both_drivers_agree_on_extended_scalar_text_and_binary_codecs() {
     let theirs = tokio_native_extended_scalar_observation(common::plaintext_url());
     let ours = compio_native_extended_scalar_observation().await;
     assert_eq!(ours, theirs);
-    let expected_uuid = uuid::Uuid::parse_str("ffffffff-0000-8000-8000-0123456789ab").unwrap();
-    assert_eq!(ours.uuid_decoded, expected_uuid);
-    assert_eq!(ours.uuid_rebound, expected_uuid);
     assert_eq!(ours.oid_decoded, u32::MAX);
     assert_eq!(ours.oid_rebound, u32::MAX);
 
@@ -2662,6 +2649,143 @@ async fn native_bit_vec_codecs_cover_lengths_and_final_byte_padding() {
         assert_eq!(hex(&ours.rebound_wires[index].0), expected_wire);
     }
     assert_eq!(ours.outbound_wires[2][5] & 0b0000_0111, 0);
+}
+
+#[cfg(feature = "with-uuid-1")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeUuidObservation {
+    decoded: [uuid::Uuid; 3],
+    server_text: [String; 3],
+    server_wires: [Wire; 3],
+    outbound_wires: [Vec<u8>; 3],
+    rebound: [uuid::Uuid; 3],
+    rebound_text: [String; 3],
+    rebound_wires: [Wire; 3],
+}
+
+#[cfg(feature = "with-uuid-1")]
+const NATIVE_UUID_DECODE_SQL: &str = "SELECT \
+    '00000000-0000-0000-0000-000000000000'::uuid, \
+        '00000000-0000-0000-0000-000000000000'::uuid, \
+        ('00000000-0000-0000-0000-000000000000'::uuid)::text, \
+    'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid, \
+        'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid, \
+        ('ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)::text, \
+    'f81d4fae-7dec-4a0c-a765-00a0c91e6bf6'::uuid, \
+        'f81d4fae-7dec-4a0c-a765-00a0c91e6bf6'::uuid, \
+        ('f81d4fae-7dec-4a0c-a765-00a0c91e6bf6'::uuid)::text";
+
+#[cfg(feature = "with-uuid-1")]
+const NATIVE_UUID_REBOUND_SQL: &str = "SELECT \
+    $1::uuid, $1::uuid, ($1::uuid)::text, \
+    $2::uuid, $2::uuid, ($2::uuid)::text, \
+    $3::uuid, $3::uuid, ($3::uuid)::text";
+
+#[cfg(feature = "with-uuid-1")]
+fn tokio_uuid_wire(value: &uuid::Uuid) -> Vec<u8> {
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, &tokio_types::Type::UUID, &mut wire)
+        .expect("tokio-postgres native UUID encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-uuid-1")]
+fn compio_uuid_wire(value: &uuid::Uuid) -> Vec<u8> {
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, &compio_types::Type::UUID, &mut wire)
+        .expect("compio-postgres native UUID encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-uuid-1")]
+fn tokio_native_uuid_observation(url: String) -> NativeUuidObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_UUID_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native UUID decode");
+        let decoded = [row.get(0), row.get(3), row.get(6)];
+        let outbound_wires = decoded.each_ref().map(tokio_uuid_wire);
+        let rebound = client
+            .query_one(
+                NATIVE_UUID_REBOUND_SQL,
+                &[&decoded[0], &decoded[1], &decoded[2]],
+            )
+            .await
+            .expect("tokio-postgres native UUID encode");
+
+        NativeUuidObservation {
+            decoded,
+            server_text: [row.get(2), row.get(5), row.get(8)],
+            server_wires: [row.get(1), row.get(4), row.get(7)],
+            outbound_wires,
+            rebound: [rebound.get(0), rebound.get(3), rebound.get(6)],
+            rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+            rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+        }
+    })
+}
+
+#[cfg(feature = "with-uuid-1")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_uuid_observation() -> NativeUuidObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_UUID_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native UUID decode");
+    let decoded = [row.get(0), row.get(3), row.get(6)];
+    let outbound_wires = decoded.each_ref().map(compio_uuid_wire);
+    let rebound = client
+        .query_one(
+            NATIVE_UUID_REBOUND_SQL,
+            &[&decoded[0], &decoded[1], &decoded[2]],
+        )
+        .await
+        .expect("compio-postgres native UUID encode");
+
+    NativeUuidObservation {
+        decoded,
+        server_text: [row.get(2), row.get(5), row.get(8)],
+        server_wires: [row.get(1), row.get(4), row.get(7)],
+        outbound_wires,
+        rebound: [rebound.get(0), rebound.get(3), rebound.get(6)],
+        rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+        rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+    }
+}
+
+/// Native UUID carriers agree with the server's canonical text and exact wire.
+#[cfg(feature = "with-uuid-1")]
+#[compio::test]
+async fn native_uuid_codecs_match_server_text_and_wire() {
+    let theirs = tokio_native_uuid_observation(common::plaintext_url());
+    let ours = compio_native_uuid_observation().await;
+    assert_eq!(ours, theirs);
+
+    let expected_text = [
+        "00000000-0000-0000-0000-000000000000",
+        "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        "f81d4fae-7dec-4a0c-a765-00a0c91e6bf6",
+    ];
+    let expected_values = expected_text.map(|text| uuid::Uuid::parse_str(text).unwrap());
+    let expected_wires = [
+        "00000000000000000000000000000000",
+        "ffffffffffffffffffffffffffffffff",
+        "f81d4fae7dec4a0ca76500a0c91e6bf6",
+    ];
+
+    assert_eq!(ours.decoded, expected_values);
+    assert_eq!(ours.rebound, expected_values);
+    assert_eq!(ours.server_text, expected_text);
+    assert_eq!(ours.rebound_text, expected_text);
+    for (index, expected_wire) in expected_wires.into_iter().enumerate() {
+        assert_eq!(hex(&ours.server_wires[index].0), expected_wire);
+        assert_eq!(hex(&ours.outbound_wires[index]), expected_wire);
+        assert_eq!(hex(&ours.rebound_wires[index].0), expected_wire);
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
