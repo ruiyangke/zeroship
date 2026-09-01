@@ -28,15 +28,38 @@
 # `allowed()` in the same change, or the census reports on a shape nobody
 # proposed.
 #
+# TWO REGIONS, AND THE SECOND ONE IS NOT OPTIONAL READING.
+#   default   scans the PRODUCTION region (everything before the first
+#             #[cfg(test)]) for foreign crates in function SIGNATURES.
+#   --tests   scans the TEST region for foreign crates ANYWHERE, because a test
+#             body is not a signature and the question there is different: does
+#             this module's test build link something its crate may not?
+#
+# The test region matters for the same reason the proposal's Phase 0.2 gives for
+# moving auth/util.rs - "test-tier today, but test builds must compile". A module
+# whose tests use v8 makes `cargo test -p <its crate>` link V8 even when the
+# shipped lib does not. Measured 2026-08-31: 39 such refs, the sharpest being
+# error.rs, whose 16 zeroship_runtime references are all OpErrorKind matches
+# beside 17 to_op_error mentions - i.e. they ARE the tests for the one method
+# Phase 0.1 relocates. Move the method without them and data-core keeps a
+# dev-dependency on the V8 runtime.
+#
 # USAGE
-#   tests/lib/tier_signature_census.sh              # violations only
-#   tests/lib/tier_signature_census.sh --all        # every marker use, incl. ok
+#   tests/lib/tier_signature_census.sh              # production signatures, violations only
+#   tests/lib/tier_signature_census.sh --all        # production signatures, incl. ok rows
+#   tests/lib/tier_signature_census.sh --tests      # test-region marker use, violations only
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 SRC="$ROOT/crates/zeroship-plugin-db/src"
 SHOW_ALL=0
-[ "${1:-}" = "--all" ] && SHOW_ALL=1
+TEST_REGION=0
+case "${1:-}" in
+  --all)   SHOW_ALL=1 ;;
+  --tests) TEST_REGION=1 ;;
+  "")      ;;
+  *)       echo "tier_signature_census: unknown option '$1'" >&2; exit 2 ;;
+esac
 
 [ -d "$SRC" ] || { echo "tier_signature_census: no such tree: $SRC" >&2; exit 1; }
 cd "$SRC" || exit 1
@@ -67,14 +90,36 @@ allowed() {
   esac
 }
 
-printf '%-10s %-36s %-17s %5s   %s\n' TIER FILE MARKER SIGS VERDICT
+COL=$([ "$TEST_REGION" -eq 1 ] && echo TESTREFS || echo SIGS)
+printf '%-10s %-36s %-17s %5s   %s\n' TIER FILE MARKER "$COL" VERDICT
 echo "----------------------------------------------------------------------------------------"
 viol=0; rows=0
 while read -r f; do
   t=$(tier "$f")
-  # Production region only: everything before the first #[cfg(test)].
-  cut=$(awk '/#\[cfg\(test\)\]/{print NR; exit}' "$f"); [ -z "$cut" ] && cut=$(wc -l < "$f")
+  cut=$(awk '/#\[cfg\(test\)\]/{print NR; exit}' "$f")
+  if [ "$TEST_REGION" -eq 1 ]; then
+    # No test region means nothing to say about this file in this mode.
+    [ -z "$cut" ] && continue
+  else
+    # Production region: everything before the first #[cfg(test)].
+    [ -z "$cut" ] && cut=$(wc -l < "$f")
+  fi
   for m in v8 zeroship_runtime compio_postgres rusqlite; do
+    if [ "$TEST_REGION" -eq 1 ]; then
+      # Occurrences, not signatures: a test body has no signature to inspect,
+      # and the question is only whether the marker is linked at all.
+      n=$(tail -n +"$cut" "$f" | grep -vP '^\s*(///|//!|//)' | grep -cP "(^|[^a-zA-Z_])${m}::")
+      [ "$n" -eq 0 ] && continue
+      if allowed "$t" "$m"; then
+        [ "$SHOW_ALL" -eq 1 ] || continue
+        v="ok"
+      else
+        v="** VIOLATION **"; viol=$((viol+n))
+      fi
+      rows=$((rows+1))
+      printf '%-10s %-36s %-17s %5s   %s\n' "$t" "$f" "$m" "$n" "$v"
+      continue
+    fi
     # Signatures span lines, so collect from `fn` until the opening brace.
     # Whole-line comments are stripped FIRST: without that, a doc comment
     # mentioning the marker is absorbed into the collected signature and
@@ -100,8 +145,17 @@ while read -r f; do
 done < <(find . -name '*.rs' | LC_ALL=C sort)
 echo "----------------------------------------------------------------------------------------"
 echo "rows reported: $rows"
-echo "signature-position violations: $viol"
-echo
-echo "Baseline measured 2026-08-31 at e39699df8: 49 violations across 8 files."
+if [ "$TEST_REGION" -eq 1 ]; then
+  echo "test-region marker refs whose tier forbids them: $viol"
+  echo
+  echo "Baseline measured 2026-08-31 at 5f6e32f6d: 39 refs across 8 files."
+  echo "These are dev-dependency crossings, not shipped ones - and they still bind,"
+  echo "because a test build must compile. Anything moved by Phase 0 has a test tail"
+  echo "that must move with it or the vacated crate keeps the dependency."
+else
+  echo "signature-position violations: $viol"
+  echo
+  echo "Baseline measured 2026-08-31 at e39699df8: 49 violations across 8 files."
+fi
 echo "A LOWER number is not automatically progress - check that tier() still"
 echo "matches the proposal before reading any movement as a fix."

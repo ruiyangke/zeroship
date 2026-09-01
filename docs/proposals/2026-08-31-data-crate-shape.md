@@ -1824,6 +1824,39 @@ to 49 and removed the one finding that would have been briefed first. *An audit 
 class of error is not exempt from that class* - this one reported occurrences as signatures, which is
 the same failure it exists to find.
 
+#### The test tail, which the census excluded on purpose and should not have
+
+The census skips `#[cfg(test)]` regions. That exclusion is defensible for shipped-code questions and
+wrong for this one, because **a test build must compile** - and this document already argues exactly
+that in Phase 0.2, where `auth/util.rs` is moved on the grounds that it is "test-tier today, but test
+builds must compile". Applying the same standard to the test regions
+(`tier_signature_census.sh --tests`) finds **39 more marker references** in modules whose crate would
+forbid them:
+
+```
+CORE     error.rs             zeroship_runtime   16      <- all 16 are OpErrorKind matches
+CORE     error.rs             compio_postgres     6
+ENGINE   tx_route.rs          v8                  4
+ENGINE   read_set.rs          zeroship_runtime    4
+ENGINE   exec.rs              compio_postgres     3
+ENGINE   crud/mask_policy.rs  v8 + runtime        3
+ENGINE   transaction/mod.rs   zeroship_runtime    1
+CDC      replication.rs       zeroship_runtime    1
+                                          total  39
+```
+
+**The `error.rs` row lands directly on Phase 0.1 and nothing in this document accounts for it.** All
+16 of its `zeroship_runtime` references are `OpErrorKind::CodedError` pattern matches, sitting beside
+**17 `to_op_error` mentions** in the same region: they are the tests *for the one method 0.1
+relocates*. Move the method and leave them, and `data-core` still carries a dev-dependency on the V8
+runtime - the item completes and the edge it exists to cut survives, which is the most expensive
+possible outcome because it looks like success. The tests move too, or 0.1 is not done.
+
+**And this generalises past 0.1.** Every move in Phase 0 has a test tail, and none of the five items
+costs one. That is not a reason to re-estimate them now - it is a reason to *count the tests* when
+each is actually planned, and to treat "the lib compiles without the dependency" as a partial result
+rather than the finish line.
+
 ### Phase 0.5 - three audits that must precede ANY crate boundary
 
 - **The `pub(crate)` audit.** List every symbol that would go `pub(crate) -> pub`, and say for each
