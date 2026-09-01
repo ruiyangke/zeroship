@@ -5200,6 +5200,72 @@ mod tests {
     }
 
     #[compio::test]
+    async fn flush_encoding_retirement_poisons_before_reader_acknowledgement() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+            panic!("the yielding-write fixture did not split");
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        let (acknowledgement, mut acknowledged) = oneshot::channel();
+        assert!(
+            std::future::Future::poll(std::pin::Pin::new(&mut acknowledged), &mut context)
+                .is_pending(),
+            "the acknowledgement completed before dispatch"
+        );
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: unsupported_encoding_message(),
+                acknowledgement: Some(acknowledgement),
+            }))
+            .expect("queue the encoding change");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut VecDeque::new(),
+            &mut VecDeque::new(),
+            None,
+            &tx_status,
+            &AtomicUsize::new(0),
+            &Mutex::new(None),
+            &Cell::new(false),
+            false,
+        )
+        .await;
+
+        let error = write_result.expect_err("the unsupported encoding left the flush reusable");
+        assert!(error.is_config());
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+        acknowledged
+            .await
+            .expect("dispatch did not acknowledge the encoding retirement");
+        assert!(
+            recorder.observed.load(Ordering::Acquire),
+            "the acknowledgement did not wake its waiter"
+        );
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "encoding retirement acknowledged the reader before pool poison"
+        );
+    }
+
+    #[compio::test]
     async fn flush_retirement_stops_at_copy_input() {
         compio::time::timeout(Duration::from_secs(1), async {
             let write_started = Rc::new(Cell::new(false));
