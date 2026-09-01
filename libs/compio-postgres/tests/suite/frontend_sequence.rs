@@ -808,3 +808,149 @@ async fn statement_close_frames(process_id: i32) -> (String, Option<Vec<u8>>) {
         .map(|(_, body)| body.clone());
     (frames.iter().map(|(t, _)| *t as char).collect(), close)
 }
+
+/// Startup that accepts whatever protocol version the client asks for, so the
+/// same peer can record tokio-postgres as well as this driver.
+fn complete_startup_any_version(stream: &mut TcpStream, process_id: i32) -> [u8; 4] {
+    let mut length = [0u8; 4];
+    stream.read_exact(&mut length).expect("startup length");
+    let length = u32::from_be_bytes(length) as usize;
+    let mut body = vec![0u8; length - 4];
+    stream.read_exact(&mut body).expect("startup body");
+    let mut version = [0u8; 4];
+    version.copy_from_slice(&body[..4]);
+
+    let mut response = backend_frame(b'R', &0u32.to_be_bytes());
+    let mut key_data = Vec::with_capacity(8);
+    key_data.extend_from_slice(&process_id.to_be_bytes());
+    key_data.extend_from_slice(&1234i32.to_be_bytes());
+    response.extend_from_slice(&backend_frame(b'K', &key_data));
+    response.extend_from_slice(&backend_frame(b'Z', b"I"));
+    stream.write_all(&response).expect("startup response");
+    stream.flush().expect("flush startup response");
+    version
+}
+
+/// Both drivers spend the SAME two Sync round trips on a first-time query.
+///
+/// This started as a suspected efficiency defect. Our sequence is
+/// `P D S` then `B E S` - prepare, wait, execute, wait - and a driver that
+/// pipelined `P B D E S` into one round trip would halve the latency of every
+/// uncached query. Driving tokio-postgres against the same recording peer
+/// shows it sends `PDSBES` too, so the two-trip shape is upstream's design
+/// rather than something this port added. Recorded as a test because it is
+/// the kind of thing that regresses silently in either direction: we could
+/// drift to more trips, or fail to follow upstream if it ever pipelines.
+///
+/// The peer accepts any protocol version, which is load-bearing: this driver
+/// asks for 3.2 and tokio-postgres asks for 3.0, so a peer that insisted on
+/// 3.2 could not record tokio at all.
+#[compio::test]
+async fn both_drivers_spend_the_same_round_trips_on_a_first_query() {
+    let (tags_tx, tags_rx) = std::sync::mpsc::channel();
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup_any_version(&mut stream, 671);
+        serve_first_query(&mut stream, &tags_tx);
+    });
+    let url = stub_url(server.addr);
+    std::thread::spawn(move || {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("build the tokio runtime");
+        runtime.block_on(async move {
+            let (client, connection) = tokio_postgres::connect(&url, tokio_postgres::NoTls)
+                .await
+                .expect("tokio-postgres connect to the scripted peer");
+            tokio::spawn(async move {
+                let _ = connection.await;
+            });
+            let _ = client.query("SELECT n", &[]).await;
+        });
+    })
+    .join()
+    .expect("the tokio thread panicked");
+    server.finish();
+    let theirs: String = tags_rx
+        .try_iter()
+        .filter(|(t, _)| *t != b'X')
+        .map(|(t, _): (u8, Vec<u8>)| t as char)
+        .collect();
+
+    let (ours_tx, ours_rx) = std::sync::mpsc::channel();
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup_any_version(&mut stream, 672);
+        serve_first_query(&mut stream, &ours_tx);
+    });
+    let addr = server.addr;
+    let _ = Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async move {
+        let client = connect_scripted(addr).await;
+        let rows = client.query("SELECT n", &[]).await.expect("scripted query");
+        assert_eq!(rows.len(), 1, "the scripted peer returned one row");
+        drop(client);
+    }))
+    .await;
+    server.finish();
+    let ours: String = ours_rx
+        .try_iter()
+        .filter(|(t, _)| *t != b'X')
+        .map(|(t, _): (u8, Vec<u8>)| t as char)
+        .collect();
+
+    assert_eq!(
+        ours, theirs,
+        "the drivers disagree on the first-query round trips (ours {ours}, tokio {theirs})"
+    );
+    assert_eq!(ours, "PDSBES", "the first-query sequence changed shape");
+}
+
+fn serve_first_query(stream: &mut TcpStream, tags: &std::sync::mpsc::Sender<(u8, Vec<u8>)>) {
+    let mut pending: Vec<u8> = Vec::new();
+    loop {
+        let mut tag = [0u8; 1];
+        if stream.read_exact(&mut tag).is_err() {
+            return;
+        }
+        let mut length = [0u8; 4];
+        if stream.read_exact(&mut length).is_err() {
+            return;
+        }
+        let length = u32::from_be_bytes(length) as usize;
+        let mut body = vec![0u8; length - 4];
+        if stream.read_exact(&mut body).is_err() {
+            return;
+        }
+        let tag = tag[0];
+        let _ = tags.send((tag, body.clone()));
+        match tag {
+            b'P' => pending.extend_from_slice(&backend_frame(b'1', b"")),
+            b'B' => pending.extend_from_slice(&backend_frame(b'2', b"")),
+            b'D' => {
+                let mut p = Vec::new();
+                p.extend_from_slice(&0u16.to_be_bytes());
+                pending.extend_from_slice(&backend_frame(b't', &p));
+                pending.extend_from_slice(&one_int4_row_description());
+            }
+            b'E' => {
+                pending.extend_from_slice(&one_int4_data_row(b"1"));
+                pending.extend_from_slice(&command_complete(b"SELECT 1"));
+            }
+            b'C' => pending.extend_from_slice(&backend_frame(b'3', b"")),
+            b'S' => {
+                pending.extend_from_slice(&ready_for_query());
+                let _ = stream.write_all(&pending);
+                let _ = stream.flush();
+                pending.clear();
+            }
+            b'H' => {
+                let _ = stream.write_all(&pending);
+                let _ = stream.flush();
+                pending.clear();
+            }
+            b'X' => return,
+            _ => {}
+        }
+    }
+}
