@@ -320,6 +320,25 @@ twice: `plugin-db -> data-engine -> data-cdc-server` (via `exec.rs:485`, `:557`,
 `cdc_lifecycle.rs:270`) and `plugin-db -> data-engine -> data-core -> data-cdc-server` (via the
 guard above).
 
+> **CORRECTION, 2026-08-31: three of the four citations for the FIRST cycle are test-only, and the
+> paragraph presents them as production edges.** `exec.rs` opens its `#[cfg(test)]` region at
+> **`:370`** (file is 1,769 lines), so `:485`, `:557` and `:588` are all test code. The surviving
+> production citation is `cdc_lifecycle.rs:270` (its test region opens at `:485`), and the SECOND
+> cycle is unaffected - `backend/mod.rs:931`/`:940` sit far above its `:1684` boundary.
+>
+> **This is not a pedantic distinction, because a test-only edge is a different edge.** It makes
+> `data-cdc-server` a DEV-dependency of `data-engine`, which Cargo permits outright (dev-dependency
+> cycles are legal) and which never reaches a shipped binary. The stated harm - "the worker must not
+> link the relay" - does not follow from a dev-dependency: the worker links what its normal
+> dependencies pull in, and a test target is not the worker. So cycle 1 is real but rests on one
+> citation, not four, and its severity is a fraction of what is written above.
+>
+> Left standing rather than rewritten, because the paragraph's conclusion survives and the *way* it
+> failed is the point: **this document has now presented test-tier code as production in three
+> separate places** (here, the SQLite feature-gate census, and Phase 0.1's own earlier text). Every
+> instance was found by checking a line number against a `#[cfg(test)]` boundary - a check that costs
+> one `awk` and was not run for four rounds.
+
 **"What to build NOW" measured the wrong direction.** It established the relay's OUT-edges - "Zero
 `crate::backend`. Zero `crate::encryption`." - and concluded the tier extracts cleanly. It never
 measured the worker's IN-edges to `wal_consumer`, which are five live production sites.
