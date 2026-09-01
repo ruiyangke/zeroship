@@ -7809,6 +7809,19 @@ mod tests {
         assert_eq!(observed.events.as_slice(), ["write", "flush", "shutdown"]);
     }
 
+    #[compio::test]
+    async fn serialized_teardown_writes_the_postgres_terminate_frame() {
+        let (connection, observed) = serialized_teardown_probe(b"", false);
+
+        connection
+            .run_serialized()
+            .await
+            .expect("serialized teardown failed");
+
+        let observed = observed.lock();
+        assert_eq!(observed.writes.as_slice(), b"X\0\0\0\x04");
+    }
+
     /// Socket shutdown is best effort after the client has gone. An unusual
     /// error kind is traced, not promoted to an operation error that nobody is
     /// left to receive.
