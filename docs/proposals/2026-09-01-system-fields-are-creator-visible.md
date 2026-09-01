@@ -76,7 +76,45 @@ cheapest.
 
 So the charter writes bare `typedId`. What it attests is the **generator identity
 and its timing** - this column is minted by the typed-id generator on insert -
-and nothing about the prefix. The prefix stays per-collection input, resolved at
+and nothing about the prefix.
+
+### An integer identity `id` substitutes the generator, not the policy
+
+The resolver lets a creator-authored integer identity column REPLACE the injected
+`id` wholesale: `is_id_identity_replacement` accepts an `id` column carrying
+`identity` of `SmallInt | Int | BigInt`
+(`crates/zeroship-migrate-core/src/model/table_shape.rs:615-622`), and the fold
+then does `col = author_col.clone()` (`:380`), which drops any `assign` the
+charter put there. Read naively that is a creator overriding a non-overridable
+root binding, and it looks like it forces a choice between refusing the
+capability and abandoning the fence.
+
+**It forces neither, because `assign` declares two separable things:**
+
+| | what it declares | does identity replacement change it? |
+| --- | --- | --- |
+| policy | the value is platform-computed; a caller-supplied value is refused | **no** |
+| generator | `typedId` mints it | **yes** - the database's own sequence does |
+
+A creator writing `t.id()` as a bigserial is not asking to supply ids. They are
+asking a *different non-creator* to compute them. So the fold must **preserve the
+`assign` and rewrite its `by`**, not clone the column and lose it.
+
+The generator set therefore gains `identity`, meaning *this column is assigned by
+its own DDL identity; the runtime emits nothing for it*. Consequences, both
+required:
+
+- `system_fields_pass.rs:253` mints a typed-id string unconditionally when `id`
+  is absent. It must consult `by` instead - which is step 5's work anyway ("stops
+  naming fields; it iterates and invokes"). Under `by = "identity"` it emits no
+  column and lets the INSERT default fire.
+- The refusal of a caller-supplied `id` is unchanged in both shapes, because it
+  derives from the presence of an `assign`, not from which generator it names.
+
+This keeps a working creator capability, keeps the security property uniform, and
+costs one generator whose whole meaning is "not me". Refusing integer identity
+instead would delete a feature to make the charter tidier, which is the platform
+serving itself. The prefix stays per-collection input, resolved at
 generation time and validated at the pass boundary against
 `RESERVED_ID_PREFIXES`, which is the gap documented below. That division is not a
 concession: it is the same one the charter already makes, and the reason the
