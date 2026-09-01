@@ -1123,6 +1123,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "rustls-native-certs",
+ "serde_json",
  "sha1",
  "sha2 0.10.9",
  "socket2",
@@ -4421,6 +4422,8 @@ dependencies = [
  "eui48",
  "fallible-iterator 0.2.0",
  "postgres-protocol",
+ "serde_core",
+ "serde_json",
  "time",
  "uuid",
 ]

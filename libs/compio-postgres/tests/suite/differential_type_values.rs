@@ -2788,6 +2788,199 @@ async fn native_uuid_codecs_match_server_text_and_wire() {
     }
 }
 
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_JSON_SOURCE_TEXT: &str = r#"{"zz":0,"a":1,"bbb":2,"aa":3}"#;
+
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_SERDE_JSON_TEXT: &str = r#"{"a":1,"aa":3,"bbb":2,"zz":0}"#;
+
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_SERVER_JSONB_TEXT: &str = r#"{"a": 1, "aa": 3, "zz": 0, "bbb": 2}"#;
+
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_JSON_DECODE_SQL: &str = r#"WITH fixture(value) AS (
+    VALUES ($json${"zz":0,"a":1,"bbb":2,"aa":3}$json$::text)
+)
+SELECT
+    value::json, value::json, (value::json)::text,
+    value::jsonb, value::jsonb, (value::jsonb)::text
+FROM fixture"#;
+
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_JSON_REBOUND_SQL: &str =
+    "SELECT $1::json, ($1::json)::text, $2::jsonb, ($2::jsonb)::text";
+
+#[cfg(feature = "with-serde_json-1")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeJsonObservation {
+    decoded: [serde_json::Value; 2],
+    decoded_serialized: [String; 2],
+    server_text: [String; 2],
+    server_wires: [Wire; 2],
+    outbound_wires: [Vec<u8>; 2],
+    rebound_text: [String; 2],
+    rebound_wires: [Wire; 2],
+    version_two_error: String,
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn expected_jsonb_wire(text: &str) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(text.len() + 1);
+    wire.push(1);
+    wire.extend_from_slice(text.as_bytes());
+    wire
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn tokio_json_wire(value: &serde_json::Value, ty: &tokio_types::Type) -> Vec<u8> {
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres native JSON encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn compio_json_wire(value: &serde_json::Value, ty: &compio_types::Type) -> Vec<u8> {
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres native JSON encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn tokio_jsonb_version_two_error() -> String {
+    <serde_json::Value as tokio_types::FromSql>::from_sql(
+        &tokio_types::Type::JSONB,
+        &[2, b'{', b'}'],
+    )
+    .expect_err("tokio-postgres accepted JSONB version 2")
+    .to_string()
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn compio_jsonb_version_two_error() -> String {
+    <serde_json::Value as compio_types::FromSql>::from_sql(
+        &compio_types::Type::JSONB,
+        &[2, b'{', b'}'],
+    )
+    .expect_err("compio-postgres accepted JSONB version 2")
+    .to_string()
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn tokio_native_json_observation(url: String) -> NativeJsonObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_JSON_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native JSON decode");
+        let decoded = [row.get(0), row.get(3)];
+        let decoded_serialized = decoded.each_ref().map(|value| {
+            serde_json::to_string(value).expect("serialize tokio-postgres native JSON")
+        });
+        let outbound_wires = [
+            tokio_json_wire(&decoded[0], &tokio_types::Type::JSON),
+            tokio_json_wire(&decoded[1], &tokio_types::Type::JSONB),
+        ];
+        let rebound = client
+            .query_one(NATIVE_JSON_REBOUND_SQL, &[&decoded[0], &decoded[1]])
+            .await
+            .expect("tokio-postgres native JSON encode");
+
+        NativeJsonObservation {
+            decoded,
+            decoded_serialized,
+            server_text: [row.get(2), row.get(5)],
+            server_wires: [row.get(1), row.get(4)],
+            outbound_wires,
+            rebound_text: [rebound.get(1), rebound.get(3)],
+            rebound_wires: [rebound.get(0), rebound.get(2)],
+            version_two_error: tokio_jsonb_version_two_error(),
+        }
+    })
+}
+
+#[cfg(feature = "with-serde_json-1")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_json_observation() -> NativeJsonObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_JSON_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native JSON decode");
+    let decoded = [row.get(0), row.get(3)];
+    let decoded_serialized = decoded
+        .each_ref()
+        .map(|value| serde_json::to_string(value).expect("serialize compio-postgres native JSON"));
+    let outbound_wires = [
+        compio_json_wire(&decoded[0], &compio_types::Type::JSON),
+        compio_json_wire(&decoded[1], &compio_types::Type::JSONB),
+    ];
+    let rebound = client
+        .query_one(NATIVE_JSON_REBOUND_SQL, &[&decoded[0], &decoded[1]])
+        .await
+        .expect("compio-postgres native JSON encode");
+
+    NativeJsonObservation {
+        decoded,
+        decoded_serialized,
+        server_text: [row.get(2), row.get(5)],
+        server_wires: [row.get(1), row.get(4)],
+        outbound_wires,
+        rebound_text: [rebound.get(1), rebound.get(3)],
+        rebound_wires: [rebound.get(0), rebound.get(2)],
+        version_two_error: compio_jsonb_version_two_error(),
+    }
+}
+
+/// Native serde conversion exposes three distinct object-key orders: source
+/// JSON, `serde_json` serialization, and server-canonical JSONB.
+#[cfg(feature = "with-serde_json-1")]
+#[compio::test]
+async fn native_serde_json_codecs_cover_json_and_jsonb_wire_contracts() {
+    let theirs = tokio_native_json_observation(common::plaintext_url());
+    let ours = compio_native_json_observation().await;
+    assert_eq!(ours, theirs);
+
+    assert_eq!(ours.decoded[0], ours.decoded[1]);
+    assert_ne!(NATIVE_JSON_SOURCE_TEXT, NATIVE_SERDE_JSON_TEXT);
+    assert_ne!(NATIVE_SERDE_JSON_TEXT, NATIVE_SERVER_JSONB_TEXT);
+    assert_eq!(
+        ours.decoded_serialized,
+        [NATIVE_SERDE_JSON_TEXT, NATIVE_SERDE_JSON_TEXT]
+    );
+    assert_eq!(
+        ours.server_text,
+        [NATIVE_JSON_SOURCE_TEXT, NATIVE_SERVER_JSONB_TEXT]
+    );
+    assert_eq!(
+        ours.rebound_text,
+        [NATIVE_SERDE_JSON_TEXT, NATIVE_SERVER_JSONB_TEXT]
+    );
+
+    assert_eq!(ours.server_wires[0].0, NATIVE_JSON_SOURCE_TEXT.as_bytes());
+    assert_eq!(
+        ours.server_wires[1].0,
+        expected_jsonb_wire(NATIVE_SERVER_JSONB_TEXT)
+    );
+    assert_eq!(ours.outbound_wires[0], NATIVE_SERDE_JSON_TEXT.as_bytes());
+    assert_eq!(
+        ours.outbound_wires[1],
+        expected_jsonb_wire(NATIVE_SERDE_JSON_TEXT)
+    );
+    assert_eq!(ours.rebound_wires[0].0, NATIVE_SERDE_JSON_TEXT.as_bytes());
+    assert_eq!(
+        ours.rebound_wires[1].0,
+        expected_jsonb_wire(NATIVE_SERVER_JSONB_TEXT)
+    );
+    assert_eq!(ours.server_wires[1].0.first(), Some(&1));
+    assert_eq!(ours.outbound_wires[1].first(), Some(&1));
+    assert_eq!(ours.rebound_wires[1].0.first(), Some(&1));
+    assert_eq!(ours.version_two_error, "unsupported JSONB encoding version");
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ArrayObservation {
     empty: Vec<Option<String>>,
