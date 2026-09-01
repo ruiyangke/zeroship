@@ -139,12 +139,22 @@ moves down.
 | `backend/` | 13,560 | both drivers plus the shared trait |
 | `crud/` | 12,972 | the read/write pipeline |
 | `transaction/` | 8,592 | the SC-1 reducer and driver |
-| `v8_classes/` | 3,455 | Db, Collection, Subscription, Transaction |
+| `v8_classes/` | 3,455 | Db, Collection, DbPlatform, MaskedValue, Replication, Subscription |
 | `encryption/` | 1,591 | |
 | `auth/` | 1,459 | session setup, `SET LOCAL ROLE` |
 | top-level | 15,462 | broker 1,937, exec 1,769, error 1,703, context 1,688, wal_consumer 1,440, lib 1,357, replication 908, v8_bridge 867 |
 
 A genuine adapter is `lib.rs` + `v8_classes/` + `v8_bridge.rs` + `context.rs`, about **7,400 lines**.
+
+> **This line contradicts `:191` and `:1733`, which send `context.rs` (1,688 lines) to `data-engine`.
+> Flagged 2026-08-31; not silently reconciled, because the right answer is now in doubt.** `:191`
+> declares the question "RESOLVED by the `BackendHandle` finding", and a round-5 reviewer refuted that:
+> `context.rs` carries Postgres in its **fields**, not just in `BackendHandle` - `:80`
+> `TxConnection::Postgres(OwnedPooledClient)` and `:178` `pool: Option<Rc<Pool>>`. Field position is
+> invisible to the module walk, the type walk AND the signature census. A module holding a live PG
+> pool is not obviously engine and not obviously adapter; it is the per-isolate connection cache, and
+> where it lands is a real decision this document has twice recorded as already made. **Both claims
+> stay visible until it is actually decided.**
 So roughly **50,000 lines need a destination**, and the five-crate target had one for most of them and
 **none for the largest single block**: `crud/` + `transaction/` + `exec.rs` is **~23,000 lines** of
 pipeline and reducer that is not a contract, not a driver, not the grammar and not the relay. Putting
@@ -1769,8 +1779,8 @@ That is the runtime's op-dispatch layer, sitting in a module this document assig
 **v8-free engine crate**. Measured across every module assigned outside the adapter tier:
 
 ```
-  117   production `v8::` references          (comments and #[cfg(test)] excluded)
-   39   functions carrying `v8::` in their SIGNATURE
+  117   production `v8::` references          (comments and #[cfg(test)] excluded)   <- WRONG, see below
+   39   functions carrying `v8::` in their SIGNATURE                                 <- 33, see below
         crud/mod.rs         19   run_op, reject_op, and all 17 dispatch_*
         transaction/mod.rs  10   transaction_dispatch, the promise finalizer chain, resolve/reject
         tx_scope.rs          6   ALL SIX production functions - the file is 142 lines of V8 context-map
@@ -1778,8 +1788,116 @@ That is the runtime's op-dispatch layer, sitting in a module this document assig
         tx_route.rs          1   capture
         replication_ops.rs   1   already adapter-tier by nature; stays
    exec.rs holds 1 v8:: ref, none in a signature - it is genuinely engine, and is the control
-   that shows this is a real distinction rather than a grep artefact.
+   that shows this is a real distinction rather than a grep artefact.       <- NOT A VALID CONTROL
 ```
+
+#### Round 5 corrected every number in that block. Two reviewers, independently, agree.
+
+The census that produced those figures had four defects. Both round-5 reviewers found the first two
+without contact; on the headline `v8::` count they independently produced the *same* corrected number.
+All four are now fixed in `tests/lib/tier_signature_census.sh`.
+
+| figure as published | corrected | what was wrong |
+| --- | --- | --- |
+| `117` production `v8::` refs, "comments and `#[cfg(test)]` excluded" | **152** refs / 107 lines comment-stripped | 117 is *lines containing* `v8::` **with comments left in**. It did neither thing the label claims. Both reviewers reached 152 separately. |
+| `39` V8-signature functions | **39, different membership** | `replication_ops.rs:15` was counted but is contested and stays; `crud/mask_policy.rs:431` `dispatch_set_mask_policy_field` was missed. Swap them and 39 holds. Of those 39, **6 are `tx_scope.rs`** (moves whole, not split) and so **33 need lifting**. |
+| `43 of 43` engine `to_op_error` callers | **44 of 44** | `crud/mask_policy.rs:449` was hidden by the test-boundary defect. The claim survives *strengthened*: all 44 sit inside the corrected 39. |
+| `49` signature violations | **80** under the repaired instrument | 49 was right by CANCELLATION - an under-reading collector and a stale tier map erring in opposite directions. See below. |
+| `exec.rs` is "the control" | **not a valid control** | Its sole `v8::` token is a doc comment at `:36`; it has zero production V8. But `:63` and `:386` import from `crate::v8_bridge`, which is adapter-tier and holds 58 `v8::` refs. It is V8-free in *spelling* while pointing upward. A control chosen by the instrument under test is not independent. |
+
+**The four instrument defects, because each printed a plausible number:**
+
+1. **The test boundary was "the first `#[cfg(test)]` in the file"** - which is usually a test hook
+   inside a live function, not the test module. It discarded ~2,995 production lines across 8 files
+   and caused the retracted false correction earlier in this document.
+2. **Single-line signatures were never checked** - the collector's `fn` rule ended in `next`.
+3. **The last function in a file was never checked** - no flush at EOF. (2 and 3 made `tx_scope.rs`
+   report 4 while this document's prose correctly said 6, both printed in the same section.)
+4. **The runtime marker was blind to ordinary Rust.** It matched only `zeroship_runtime::`, but every
+   runtime type here is imported unqualified. It therefore missed `pub fn to_op_error(self) -> OpError`
+   at `error.rs:408` - **the single edge this entire investigation started from.**
+
+**And the position no instrument had: what a module hands UPWARD.** Four markers asked "what foreign
+crate does this module NAME?"; none asked "what tier does it REACH INTO?". Adding `crate::v8_bridge` /
+`crate::v8_classes` as a marker finds **17 upward references in 7 modules**:
+
+```
+ENGINE   crud/unmask.rs 4, crud/mod.rs 2, crud/mask_policy.rs 2, exec.rs 2, transaction/mod.rs 2
+SQLITE   backend/sqlite/mod.rs 3      <- :232, :1440, :1571  v8_bridge::typed_rows_to_json_value
+PG       backend/postgres.rs   2      <- :476, :572          v8_bridge::rows_to_json_value
+```
+
+**Both backends call up into the adapter to convert rows to JSON.** That is `data-postgres -> plugin-db`
+and `data-sqlite -> plugin-db` while `plugin-db` depends on both: a cycle, not a layering violation.
+It is the row-to-JSON finding (Phase 0.3) seen from the side that makes it structural. The engine rows
+include `crud/mod.rs:554`, where an **engine** function names an **adapter** function pointer whose type
+is `fn(&mut v8::PinScope, v8::Local<Value>) -> Option<v8::Local<Value>>` - behaviour crossing a boundary
+while spelling no marker at all. It sits on the masked read path, so masking structurally requires
+engine-to-adapter today.
+
+**Two more field-position violations, in a module this document twice called settled:** `context.rs:80`
+and `:178` hold Postgres in enum/struct fields, and `transaction/cancel.rs:89`/`:90` hold
+`Rc<Pool>` and `CancelToken`. See the flag at `:147`.
+
+**Still uncounted, and stated rather than silently missed:** `impl` headers.
+`error.rs:797 impl From<compio_postgres::Error> for DbError` is a real vendor edge in a CORE-tier
+module, and no `fn` line starts it. Both reviewers found it; the collector still cannot.
+
+**Clean, and worth recording as clean:** proc-macro expansion. All six `#[v8_class]` invocations are in
+`v8_classes/` (adapter). The macro generates 12 V8-bearing struct fields no source census can see, and
+every one is correctly adapter-owned. The brief's biggest suspected blind spot is empty. Type aliases,
+const/static types, `impl LocalTrait for ForeignType`, and `where` clauses past the collector's window
+are all **0**.
+
+#### Is 0.1 a MOVE or a REWRITE? It is a rewrite, and the seam is not where the census points
+
+This is the question the whole item turns on, and the answer is not the comfortable one.
+
+**The seam is real.** Every `dispatch_*` has the same shape: a short synchronous V8 prologue, then an
+`async move` block pushed onto `spawned_ops`. Measured by tracking brace depth from each `async move`:
+
+```
+crud/mod.rs         21 async blocks    0 v8/scope references inside them
+crud/unmask.rs       2 async blocks    0
+transaction/mod.rs   3 async blocks    2   <- both at :407-408, a single site
+tx_route.rs / exec.rs                  no async blocks
+```
+
+The `async move` future is `'static`, so it **cannot** hold a `v8::PinScope`. The compiler enforces the
+prologue/body split; it is not a convention. `crud/mod.rs:966` says so in a comment: the routing
+decision is "frozen HERE, while `scope` is live".
+
+**And the split still does not deliver a V8-free engine.** After cutting at `spawned_ops.push`, the
+engine half's signature is `async fn op_X(resolver: v8::Global<v8::PromiseResolver>, request_id, ...)
+-> OpResult`. `v8::Global` is a rooted, scope-free handle - the very thing this document blesses at
+`:219-221` as an ordinary downward dependency - but `data-engine` still *declares* `v8` and
+`zeroship-runtime`, which is exactly what 0.1 exists to prevent. **A clean cut in the wrong place
+completes the move and leaves the dependency.**
+
+So the residue is a **protocol inversion**: the engine returns `Result<DomainValue, DbError>` and the
+adapter maps it to `ResolveValue`. That is 47 early-return sites reshaped (43 in `crud/mod.rs`, 4 in
+`crud/unmask.rs`) across ~987 async-body lines - mechanical and type-directed. Two constructions
+currently run the wrong way and do not survive it:
+
+- **`transaction/mod.rs:407`** builds `ResolveValue::Continuation(Box::new(move |scope, state| ...))` -
+  a `Box<dyn FnOnce(&mut v8::PinScope, &SharedState)>`. The engine is *authoring V8 behaviour*, not
+  passing a handle down. The transaction begin re-enters V8 to call the creator's callback; the module
+  header at `:33` documents it.
+- **`crud/mod.rs:554`** stores `transform: crate::v8_classes::masked_value::rehydrate_masked_values`,
+  an adapter function pointer of V8 type, on the masked read path.
+
+Neither is plumbing. Both are the engine handing behaviour upward, and both need a design answer -
+most likely "the engine returns a description of what to continue with, the adapter builds the closure."
+
+**What this changes about the plan.** 0.1 is not "lift 33 functions", and it is not independently
+shippable in the strong sense - it rests on 0.3 (row-to-JSON below the vendors), because `exec.rs` and
+both backends reach `v8_bridge` for row conversion. **Sequence 0.3 before 0.1.** The honest description
+of 0.1 is *invert the op-completion protocol across 18 dispatch functions plus `run_op`*, and no figure
+in this document prices that. It is still worth doing first, and it is still worth doing if the split
+is cancelled - but it is a redesign of how `env.db` returns results, not a file move.
+
+`run_op` (`:138`) and `reject_op` (`:236`) are the two of the 39 that take only `v8::Global`, never a
+`PinScope`. They are the shape the rest should be converted TO, not more work to be done.
 
 **And the original item then collapses into a rounding error.** Every one of the 43 engine-tier
 `to_op_error` call sites - **43 of 43, no exceptions** - sits inside one of those V8-signature
