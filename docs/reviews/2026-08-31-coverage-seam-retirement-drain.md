@@ -461,3 +461,37 @@ the first line of each showed all 11 are ordinary cross-references
 connection identified by a pool lease's token"). Zero real thefts besides the
 one repaired here, which was introduced the same day by an agent insertion
 rather than being a long-standing pattern.
+
+## Two thirds of the "uncovered" lines are test scaffolding
+
+`--show-missing-lines` is authoritative about which lines never ran, but it
+reports every line, including mock sinks and scripted peers inside
+`#[cfg(test)]` modules. Chasing its output directly leads straight into
+`CountingSink::shutdown`.
+
+`tests/lib/missing_production_lines.py` intersects that list with the
+production spans, reusing the same predicate-matching `#[cfg(...test...)]` walk
+the dead-function tool uses so `#[cfg(all(test, unix))]` is not mistaken for
+production. Measured at `3ca40878e` over the three largest files:
+
+    connect_raw.rs    62 production of 144 uncovered
+    connection.rs     69 production of 281 uncovered
+    tls_sansio.rs     44 production of 102 uncovered
+    ------------------------------------------------
+    total            175 production of 527 uncovered
+
+**352 of 527 were scaffolding.** The genuine production gap in these files is
+about a third of what their coverage percentages suggest, and `tls_sansio.rs`
+at a reported 89.08% is the most distorted of the three - most of its shortfall
+is mock writers that exist to be dropped mid-write.
+
+Two cautions that come with the tool:
+
+- **It reads the profdata of the LAST `cargo llvm-cov` run, not the tree.**
+  Lines closed since that run still appear. The SASL frame-order arms at
+  `connect_raw.rs:1359-1360` and `:1377-1378` are in the table above and were
+  bound afterwards.
+- **Scaffolding being uncovered is not automatically fine.** A mock whose
+  `shutdown` never runs may mean the test never exercised shutdown, which is a
+  gap wearing a disguise. The split is a filter for ranking, not a licence to
+  ignore the right-hand column.
