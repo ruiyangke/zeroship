@@ -692,9 +692,31 @@ feature the creator relies on, so the test proving a range filter cannot narrow 
 test proving the feature works at all.
 
 **So Step 0 is not pure subtraction.** Its real first move is migrating those twelve tests' fixture
-onto a sanctioned provisioning path - the migration engine, or whatever `#95`'s work settles for
-provisioning a scratch app schema - and only then deleting the builders. Any costing of Step 0 as
-"delete N lines" is missing that step.
+off the dead builders, and only then deleting them. Any costing of Step 0 as "delete N lines" is
+missing that step.
+
+**The replacement path exists and is cheap - checked 2026-08-31, because the sentence above used to
+say "a sanctioned provisioning path" without establishing that one was available.**
+
+`zeroship-plugin-db` already declares `zeroship-migrate-server` as a DEV-dependency (`Cargo.toml:141`,
+under a comment noting "`zeroship-migrate-server` does not depend on plugin-db, so no cycle"), and
+`zeroship-migrate-server` in turn depends on `zeroship-migrate` (the facade) and
+`zeroship-migrate-postgres`. **So the engine and the PostgreSQL vendor are ALREADY in plugin-db's dev
+dependency graph, transitively.** Adding the facade as a direct dev-dependency adds no compilation
+weight and introduces no cycle: nothing in the migrate family depends on plugin-db.
+
+That makes the fixtures rewritable against the engine's own renderer -
+`zeroship_migrate::render_artifacts_from_descriptors` on `zeroship_migrate_postgres::DIALECT` - which
+is the same producer that writes creator DDL in production, so the fixture would exercise the
+shipped shape rather than a parallel one.
+
+**Do NOT copy `distributed_live.rs`'s approach, which solves the same problem badly.** That file
+avoids the dead builders by pasting in descriptor bytes generated OFFLINE by
+`render_artifacts_from_descriptors` (`:62-66`) beside a hand-written `EVENTS_DDL` constant (`:193`),
+and its own comment states the hazard: the two "must agree, column for column" and **"Nothing checks
+the descriptor against the catalog any more, so a field here that the table does not have surfaces as
+a Postgres `42703 column does not exist` at read time."** That trades a dead-builder dependency for
+an unchecked hand-maintenance burden. It is a workaround for the missing live call, not a model.
 
 **This qualifies #1 (decision 10, "remove all DDL from plugin-db").** The DDL left plugin-db's own
 source but stayed reachable through `zeroship-schema`, which plugin-db depends on and re-exports as
