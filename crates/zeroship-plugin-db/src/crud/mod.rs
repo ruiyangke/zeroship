@@ -1918,76 +1918,43 @@ pub(crate) fn dispatch_upsert<'s>(
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let mut doc = doc;
-        if let Err(e) = prepare_upsert_doc_for_write(
-            &mut doc,
-            &binding,
-            &route,
-            &coll,
-            actor_id.as_deref(),
-            &conflict_fields,
-        )
-        .await
-        {
-            return reject_op(resolver, request_id, e);
-        }
-        let schema = match crate::descriptor::collection_schema(&binding, &coll) {
-            Ok(schema) => schema,
-            Err(e) => return reject_op(resolver, request_id, e),
-        };
-        maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
-        let built = query::build_upsert_with_dialect(
-            &app,
-            &coll,
-            &schema,
-            &doc,
-            &conflict_fields,
-            current_sql_dialect(),
-        );
-        let result = match built {
-            Ok(bq) => {
-                // Upsert can be either INSERT (new row) or UPDATE (existing).
-                // We tag as Update because the subscriber's reaction is the
-                // same -- re-fetch. Finer-grained read-set narrowing could
-                // distinguish INSERT from UPDATE; this coarser tagging
-                // doesn't need to.
-                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await
-            }
-            Err(e) => Err(DbError::from(e)),
-        };
-        match result {
-            Ok(rows) => {
-                let result = match read_pipeline::apply(
-                    &binding,
-                    &coll,
-                    rows,
-                    read_pipeline::ApplyOptions::default(),
-                )
+    state.borrow_mut().spawned_ops.push(Box::pin(settle(
+        resolver,
+        request_id,
+        async move {
+            let mut doc = doc;
+            prepare_upsert_doc_for_write(
+                &mut doc,
+                &binding,
+                &route,
+                &coll,
+                actor_id.as_deref(),
+                &conflict_fields,
+            )
+            .await?;
+            let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+            maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
+            let bq = query::build_upsert_with_dialect(
+                &app,
+                &coll,
+                &schema,
+                &doc,
+                &conflict_fields,
+                current_sql_dialect(),
+            )
+            .map_err(DbError::from)?;
+            // Upsert can be either INSERT (new row) or UPDATE (existing).
+            // We tag as Update because the subscriber's reaction is the
+            // same -- re-fetch. Finer-grained read-set narrowing could
+            // distinguish INSERT from UPDATE; this coarser tagging
+            // doesn't need to.
+            let rows =
+                exec_mutation_with_emit(bq, &route, &coll, crate::broker::ChangeOp::Update).await?;
+            read_pipeline::apply(&binding, &coll, rows, read_pipeline::ApplyOptions::default())
                 .await
-                {
-                    Ok(result) => result,
-                    Err(e) => {
-                        return OpResult::JsValue {
-                            resolver,
-                            value: ResolveValue::RejectError(e.to_op_error()),
-                            request_id,
-                        };
-                    }
-                };
-                OpResult::JsValue {
-                    resolver,
-                    value: crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
-                    request_id,
-                }
-            }
-            Err(e) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
+        },
+        |result| crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
+    )));
 
     promise
 }
