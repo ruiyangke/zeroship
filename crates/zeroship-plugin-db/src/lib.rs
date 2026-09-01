@@ -116,6 +116,10 @@ pub(crate) mod backend_selection;
 #[cfg(feature = "test-helpers")]
 pub mod backend_selection;
 pub(crate) mod context;
+// The operator charter the worker parses once at construction. `pub(crate)`
+// because nothing outside the crate has business reading the assignment
+// authority - the descriptor mirror is what consumers verify against.
+pub(crate) mod system_shape_charter;
 // `cross_app_fk` is `pub` (not `pub(crate)`) because integration tests
 // in both `tests/integration.rs` (PG arm) and
 // `tests/sqlite_integration.rs` (SQLite arm) call the validator

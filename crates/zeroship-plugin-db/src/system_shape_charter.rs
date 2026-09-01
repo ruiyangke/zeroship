@@ -1,0 +1,111 @@
+//! The operator-owned assignment authority, compiled into the worker.
+//!
+//! **Why the worker carries this at all.** The runtime descriptor is
+//! creator-authored - `zeroship-migrate-server`'s `apply.rs` says so outright,
+//! that "a creator who hand-edits both generated files can make them agree about
+//! a lie". So the descriptor cannot be the authority for *who assigns a column's
+//! value*. The charter can, because it ships with the binary.
+//!
+//! **Why a synthetic header.** The `.toml` on disk is deliberately a fragment: it
+//! carries no `policy_version`, because migrate-server prefixes its own grants
+//! and the TypeScript ceiling prefixes its own header. The worker needs only the
+//! inject rule, so it prefixes the same header the TypeScript side does and
+//! parses with an empty knob registry - the narrowest truthful configuration.
+//!
+//! **Why `include_str!` rather than a file read.** There is no runtime path, no
+//! deployment step and no creator-controlled source: the bytes are in the binary.
+
+use zeroship_migrate_policy::{PolicyRegistry, RootCharter};
+
+use crate::error::DbError;
+
+/// The synthetic header, then the operator-shipped fragment.
+const SYSTEM_SHAPE_CHARTER_TOML: &str = concat!(
+    "policy_version = 1\n\n",
+    include_str!("../../../policies/confined-system-shape.inject.toml"),
+);
+
+/// Parse the compiled charter once, during database-service construction.
+///
+/// The parsed value is retained by the shared plugin prototype; request paths
+/// receive it and never re-parse this text.
+pub(crate) fn load() -> Result<RootCharter, DbError> {
+    RootCharter::parse_toml(SYSTEM_SHAPE_CHARTER_TOML, &PolicyRegistry::empty()).map_err(|source| {
+        DbError::config(
+            "system_shape_charter_invalid",
+            format!("the embedded system-shape charter is invalid: {source:?}"),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use zeroship_migrate_policy::RuleKind;
+
+    use super::*;
+
+    /// The fragment must receive exactly the header the TypeScript ceiling
+    /// prepends. If the two ever diverge, the worker and the build would be
+    /// reading the same file as two different documents.
+    #[test]
+    fn the_fragment_takes_the_same_synthetic_header_as_typescript() {
+        assert!(
+            SYSTEM_SHAPE_CHARTER_TOML.starts_with("policy_version = 1\n\n"),
+            "the compiled charter must open with the synthetic header",
+        );
+        // The fragment itself opens with its own prose banner, so this asserts
+        // the rule survives the concatenation rather than that it comes first.
+        assert!(
+            SYSTEM_SHAPE_CHARTER_TOML.contains("\n[[inject]]"),
+            "the concatenated charter must still carry the inject rule",
+        );
+        // The fragment must supply no version KEY of its own, or the synthetic
+        // header would be a duplicate. Assert this structurally: a substring
+        // count reads the fragment's own prose, which says "no policy_version"
+        // and would make a textual check pass or fail for the wrong reason.
+        let charter = load().expect("the compiled worker charter must parse");
+        assert_eq!(
+            charter.doc().policy_version,
+            zeroship_migrate_policy::SUPPORTED_POLICY_VERSION,
+            "the parsed version must be the one the synthetic header supplied",
+        );
+    }
+
+    /// This is the test that binds the design: every column the operator injects
+    /// carries a parsed assignment. A charter that parses but assigns nothing
+    /// would let the runtime fall back to trusting the descriptor, which is the
+    /// exact hole this module exists to close.
+    #[test]
+    fn every_injected_column_carries_a_parsed_assignment() {
+        let charter = load().expect("the compiled worker charter must parse");
+
+        let mut inject_rules = charter.doc().rules.iter().filter_map(|rule| {
+            let RuleKind::Inject { spec } = &rule.kind else {
+                return None;
+            };
+            Some(spec.columns.as_slice())
+        });
+
+        let columns = inject_rules
+            .next()
+            .expect("the worker charter must carry an inject rule");
+        assert!(
+            inject_rules.next().is_none(),
+            "the system-shape fragment declares exactly one inject authority",
+        );
+        assert!(
+            !columns.is_empty(),
+            "the inject authority must own at least one column",
+        );
+
+        let unassigned: Vec<&str> = columns
+            .iter()
+            .filter(|column| column.assign.is_none())
+            .map(|column| column.name.as_str())
+            .collect();
+        assert!(
+            unassigned.is_empty(),
+            "every operator-injected column must carry an assignment; these do not: {unassigned:?}",
+        );
+    }
+}

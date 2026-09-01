@@ -23,6 +23,11 @@ zeroship-core = { workspace = true }
 # neutral call sites resolve unchanged. PostgreSQL introspection stays here in
 # `backend::pg_introspect`; no vendor type crosses into the schema crate.
 zeroship-schema = { workspace = true }
+# The operator charter is the worker's assignment authority, and it must not
+# arrive from the creator-authored descriptor. `zeroship-migrate-policy` is a
+# leaf (serde/toml/sha2/hmac/hex/thiserror/schemars and nothing of ours), so
+# taking the parser here adds no cycle.
+zeroship-migrate-policy = { workspace = true }
 # Metering infrastructure: exec.rs emits a raw usage metric
 # (db_reads / db_writes / db_rows_written) in the success arm of each
 # query / mutation / count via a MeterHandle. Platform-measured,
