@@ -5085,6 +5085,35 @@ mod tests {
     }
 
     #[compio::test]
+    async fn idle_timeout_evicts_the_oldest_entry_not_the_first_slot() {
+        let config = PoolConfig {
+            max_size: 2,
+            min_idle: 1,
+            idle_timeout: Duration::from_secs(1),
+            ..PoolConfig::default()
+        };
+        let (recent_client, _recent_receiver) = fake_client(453);
+        let (oldest_client, _oldest_receiver) = fake_client(454);
+        let mut recent = PoolEntry::new(recent_client, config.max_lifetime);
+        let mut oldest = PoolEntry::new(oldest_client, config.max_lifetime);
+        recent.last_used = Instant::now();
+        oldest.last_used = Instant::now() - Duration::from_secs(2);
+
+        let pool = Rc::new(test_pool(config, vec![recent, oldest], 0, 2));
+        let weak = Rc::downgrade(&pool);
+
+        assert!(Pool::housekeep(&weak).await);
+        let idle = pool.idle.borrow();
+        assert_eq!(idle.len(), 1, "idle eviction crossed min_idle");
+        assert_eq!(
+            idle[0].client.process_id(),
+            453,
+            "idle eviction kept the oldest entry instead of the recent one"
+        );
+        assert_eq!(pool.metrics.evictions.get(), 1);
+    }
+
+    #[compio::test]
     async fn housekeeping_without_available_resource_does_not_wake_waiter() {
         let config = PoolConfig {
             max_size: 2,
