@@ -320,6 +320,18 @@ fn verifier_for(
             .build()
         {
             Ok(verifier) => verifier,
+            // The `is_some()` guard is provably redundant, and the `expect`
+            // below it therefore cannot fire. File CRLs are built ALONE above,
+            // and a rustls-rejected file CRL is CLEARED there rather than
+            // carried forward, so by the time this combined build runs the only
+            // possible source of `InvalidCrl` is the directory - which means a
+            // directory was configured. Established by reading, not by probe:
+            // this arm has zero executed coverage regions, because reaching it
+            // needs a CRL our own parser accepts and rustls rejects.
+            //
+            // Kept as defence rather than deleted: the argument depends on the
+            // earlier clear-on-reject staying where it is, and the `Err(error)`
+            // arm below already handles the case this guard excludes.
             Err(VerifierBuilderError::InvalidCrl(error)) if directory_path.is_some() => {
                 return Err(Error::tls(
                     format!(
