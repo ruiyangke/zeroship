@@ -114,6 +114,47 @@ async fn execute_of_copy_from_stdin_leaves_the_session_usable() {
     .expect("extended execute COPY resync test exceeded its watchdog");
 }
 
+/// `execute_text_params` owns a separate response loop from `execute`, even
+/// though both return an affected-row count. Its connection-owned producer must
+/// likewise abort a COPY it cannot feed and drain the server's diagnosis.
+#[compio::test]
+async fn execute_text_params_of_copy_from_stdin_leaves_the_session_usable() {
+    Box::pin(compio::time::timeout(TEST_TIMEOUT, async {
+        let url = test_url();
+        let client = connect_client(&url).await;
+        let table = probe_table(&client, "text_exec").await;
+
+        let failure = client
+            .execute_text_params(&format!("COPY {table} FROM STDIN"), &[])
+            .await
+            .expect_err("execute_text_params fed a COPY it has no data channel for");
+        assert_eq!(
+            failure.code(),
+            Some(&SqlState::QUERY_CANCELED),
+            "the copy was not aborted by this driver: {}",
+            common::error_chain(&failure)
+        );
+        assert!(
+            common::error_chain(&failure).contains(ABORT_MARKER),
+            "the failure did not carry this driver's copy-abort reason: {}",
+            common::error_chain(&failure)
+        );
+
+        let value: i32 = client
+            .query_one_scalar("SELECT 48::int4", &[])
+            .await
+            .expect("execute_text_params left the session desynchronised");
+        assert_eq!(value, 48);
+        assert_eq!(
+            client.transaction_status(),
+            Some(compio_postgres::TransactionStatus::Idle),
+            "the connection task's in-flight accounting did not come back to zero"
+        );
+    }))
+    .await
+    .expect("execute_text_params COPY resync test exceeded its watchdog");
+}
+
 /// Same claim for `query`, which drains through a different loop in `query.rs`
 /// and hands back a `RowStream` rather than a row count.
 #[compio::test]

@@ -1,7 +1,8 @@
 //! Runtime claims made by the query and COPY APIs.
 
 use bytes::Bytes;
-use compio_postgres::Client;
+use compio_postgres::error::SqlState;
+use compio_postgres::{Client, Pool};
 use futures_util::{SinkExt, TryStreamExt};
 use std::time::Duration;
 
@@ -95,6 +96,133 @@ async fn query_text_params_coerces_by_position_and_decodes_binary_results() {
 }
 
 #[compio::test]
+async fn pool_query_text_params_casts_text_values_to_column_types() {
+    compio::time::timeout(
+        TEST_WATCHDOG,
+        Box::pin(async {
+            let url = test_url();
+            let pool = Pool::connect(&url, 1)
+                .await
+                .expect("connect one-slot text-parameter pool");
+            let table = common::test_object_name("query_claims_pool_text_cast");
+            Box::pin(pool.batch_execute(&format!(
+                "CREATE TEMP TABLE {table} (n int4 NOT NULL, enabled bool NOT NULL)"
+            )))
+            .await
+            .expect("create pool query_text_params fixture");
+
+            let rows = Box::pin(pool.query_text_params(
+                &format!("INSERT INTO {table} (n, enabled) VALUES ($1, $2) RETURNING n, enabled"),
+                &["42", "true"],
+            ))
+            .await
+            .expect("pool text parameters did not cast to their target columns");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].get::<_, i32>("n"), 42);
+            assert!(rows[0].get::<_, bool>("enabled"));
+        }),
+    )
+    .await
+    .expect("pool query_text_params cast claim exceeded its watchdog");
+}
+
+#[compio::test]
+async fn pool_query_text_params_returns_its_lease() {
+    compio::time::timeout(
+        TEST_WATCHDOG,
+        Box::pin(async {
+            let url = test_url();
+            let pool = Pool::connect(&url, 1)
+                .await
+                .expect("connect one-slot text-parameter pool");
+
+            let rows =
+                Box::pin(pool.query_text_params(
+                    "SELECT pg_backend_pid() AS pid, $1::int4 AS value",
+                    &["42"],
+                ))
+                .await
+                .expect("query through the pool text-parameter wrapper");
+            assert_eq!(rows.len(), 1);
+            let process_id = rows[0].get::<_, i32>("pid");
+            assert_eq!(rows[0].get::<_, i32>("value"), 42);
+            assert_eq!(pool.active_count(), 0);
+            assert_eq!(pool.idle_count(), 1);
+            assert_eq!(pool.total_count(), 1);
+
+            let client = Box::pin(pool.get())
+                .await
+                .expect("the text-parameter wrapper did not return its lease");
+            assert_eq!(
+                client.process_id(),
+                process_id,
+                "the one-slot pool replaced rather than returned the queried session"
+            );
+        }),
+    )
+    .await
+    .expect("pool query_text_params lease claim exceeded its watchdog");
+}
+
+#[compio::test]
+async fn transaction_query_text_params_scopes_set_local_to_every_exit() {
+    compio::time::timeout(
+        TEST_WATCHDOG,
+        Box::pin(async {
+            const LOCAL_TIMEOUT: &str = "43210ms";
+
+            let mut client = connect().await;
+            let baseline: String = client
+                .query_one_scalar("SELECT current_setting('statement_timeout')", &[])
+                .await
+                .expect("read the session's statement_timeout baseline");
+            assert_ne!(
+                baseline, LOCAL_TIMEOUT,
+                "the test needs a local timeout distinct from the session baseline"
+            );
+
+            for exit in ["commit", "rollback", "drop"] {
+                let transaction = client.transaction().await.expect("begin transaction");
+                transaction
+                    .batch_execute(&format!("SET LOCAL statement_timeout = '{LOCAL_TIMEOUT}'"))
+                    .await
+                    .expect("set the transaction-local timeout");
+
+                let rows = transaction
+                    .query_text_params(
+                        "SELECT $1::int4 AS value, \
+                            current_setting('statement_timeout') AS local_timeout",
+                        &["42"],
+                    )
+                    .await
+                    .expect("query text parameters inside the transaction");
+                assert_eq!(rows.len(), 1);
+                assert_eq!(rows[0].get::<_, i32>("value"), 42);
+                assert_eq!(rows[0].get::<_, String>("local_timeout"), LOCAL_TIMEOUT);
+
+                match exit {
+                    "commit" => transaction.commit().await.expect("commit transaction"),
+                    "rollback" => transaction.rollback().await.expect("rollback transaction"),
+                    "drop" => drop(transaction),
+                    _ => unreachable!(),
+                }
+
+                let restored: String = client
+                    .query_one_scalar("SELECT current_setting('statement_timeout')", &[])
+                    .await
+                    .unwrap_or_else(|error| panic!("query after {exit} failed: {error}"));
+                assert_eq!(
+                    restored, baseline,
+                    "SET LOCAL statement_timeout survived transaction {exit}"
+                );
+            }
+        }),
+    )
+    .await
+    .expect("transaction query_text_params scope claim exceeded its watchdog");
+}
+
+#[compio::test]
 async fn execute_text_params_coerces_nulls_and_returns_the_affected_count() {
     compio::time::timeout(TEST_WATCHDOG, async {
         let client = connect().await;
@@ -126,6 +254,93 @@ async fn execute_text_params_coerces_nulls_and_returns_the_affected_count() {
     })
     .await
     .expect("execute_text_params claim exceeded its watchdog");
+}
+
+/// Bind's parameter count is a wire `u16`. The text adapter must surface that
+/// local serialization refusal as an encode error and leave its scratch buffer
+/// out of the next request.
+#[compio::test]
+async fn execute_text_params_reports_bind_count_overflow_without_poisoning_the_client() {
+    Box::pin(compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+        let process_id = client.process_id();
+        let params = vec![None::<String>; usize::from(u16::MAX) + 1];
+
+        let error = client
+            .execute_text_params("SELECT 1", &params)
+            .await
+            .expect_err("more than u16::MAX parameters were encoded");
+        assert_eq!(
+            error.to_string(),
+            "error encoding message to server",
+            "bind count overflow was classified as a server response: {}",
+            common::error_chain(&error)
+        );
+
+        let observed_process_id: i32 = client
+            .query_one_scalar("SELECT pg_backend_pid()", &[])
+            .await
+            .expect("bind overflow poisoned the next request");
+        assert_eq!(observed_process_id, process_id);
+    }))
+    .await
+    .expect("execute_text_params bind-overflow claim exceeded its watchdog");
+}
+
+/// A server-side cast refusal arrives through the response stream, not the
+/// frontend encoder. Preserve its SQLSTATE and drain through `ReadyForQuery` so
+/// the same physical session remains usable.
+#[compio::test]
+async fn execute_text_params_preserves_server_cast_errors() {
+    Box::pin(compio::time::timeout(TEST_WATCHDOG, async {
+        let client = connect().await;
+        let process_id = client.process_id();
+
+        let error = client
+            .execute_text_params("SELECT $1::int4", &[Some("not-an-int4".to_string())])
+            .await
+            .expect_err("PostgreSQL accepted invalid int4 text");
+        assert_eq!(
+            error.code(),
+            Some(&SqlState::INVALID_TEXT_REPRESENTATION),
+            "execute_text_params replaced the server's cast error: {}",
+            common::error_chain(&error)
+        );
+
+        let observed_process_id: i32 = client
+            .query_one_scalar("SELECT pg_backend_pid()", &[])
+            .await
+            .expect("server cast error poisoned the next request");
+        assert_eq!(observed_process_id, process_id);
+    }))
+    .await
+    .expect("execute_text_params cast-error claim exceeded its watchdog");
+}
+
+/// Dropping the unrun `Connection` closes the request receiver before this API
+/// can enqueue. That local closure must remain distinguishable from a protocol
+/// response error.
+#[compio::test]
+async fn execute_text_params_reports_a_closed_connection_before_enqueue() {
+    Box::pin(compio::time::timeout(TEST_WATCHDOG, async {
+        let url = test_url();
+        let (client, connection) = compio_postgres::connect(&url, common::suite_tls())
+            .await
+            .unwrap_or_else(|error| common::postgres_unreachable(&url, &error));
+        drop(connection);
+
+        let error = client
+            .execute_text_params("SELECT 1", &[])
+            .await
+            .expect_err("execute_text_params enqueued through a dropped Connection");
+        assert!(
+            error.is_closed(),
+            "a closed request channel was reported as {}",
+            common::error_chain(&error)
+        );
+    }))
+    .await
+    .expect("execute_text_params closed-connection claim exceeded its watchdog");
 }
 
 #[compio::test]

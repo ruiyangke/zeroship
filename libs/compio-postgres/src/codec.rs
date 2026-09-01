@@ -88,7 +88,6 @@ pub struct BackendMessages(BytesMut);
 impl BackendMessages {
     /// Construct an empty BackendMessages batch. Used by placeholder
     /// initialisations in `connection.rs`.
-    #[allow(dead_code)]
     pub fn empty() -> BackendMessages {
         BackendMessages(BytesMut::new())
     }
@@ -300,7 +299,6 @@ impl FallibleIterator for BackendMessages {
 /// This does not flush - callers batch multiple frontend messages
 /// (Parse + Bind + Describe + Execute + Sync) into one flush, matching
 /// tokio-postgres's `Framed::send` + `Sink::poll_flush` split.
-#[allow(dead_code)]
 pub fn write_frontend<S>(stream: &mut S, msg: FrontendMessage) -> Result<(), Error>
 where
     S: WriteFramer + ?Sized,
@@ -329,7 +327,6 @@ where
 /// On a Normal batch, the returned `BackendMessages` owns the underlying
 /// `BytesMut` slice - the stream's read buffer is drained exactly that
 /// many bytes via `split_to`, so subsequent reads start fresh.
-#[allow(dead_code)]
 pub async fn read_backend<S>(stream: &mut S) -> Result<BackendMessage, Error>
 where
     S: ReadFramer + ?Sized,

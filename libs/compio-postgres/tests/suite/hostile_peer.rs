@@ -1681,6 +1681,11 @@ fn sasl_initial_payload(body: &[u8]) -> &[u8] {
 enum ScramTerminalFrame {
     InvalidVerifier,
     AuthenticationOkBeforeFinal,
+    /// A frame that is neither SaslFinal, AuthenticationOk nor ErrorResponse
+    /// AND has no dedicated pre-auth guard. BackendKeyData does have one -
+    /// "PostgreSQL sent BackendKeyData before authentication completed" - so it
+    /// never reaches the generic arm this exercises.
+    ParseCompleteInsteadOfFinal,
 }
 
 /// Drive a valid bare-SCRAM exchange through the client's proof, then replace
@@ -1732,6 +1737,9 @@ fn scram_server_through_client_final(terminal: ScramTerminalFrame) -> StubServer
             ScramTerminalFrame::AuthenticationOkBeforeFinal => {
                 response.extend_from_slice(&backend_frame(b'R', &0i32.to_be_bytes()));
             }
+            ScramTerminalFrame::ParseCompleteInsteadOfFinal => {
+                response.extend_from_slice(&backend_frame(b'1', b""));
+            }
         }
 
         // For the early-Ok case this is a second AuthenticationOk. An
@@ -1750,6 +1758,84 @@ fn scram_server_through_client_final(terminal: ScramTerminalFrame) -> StubServer
             .expect("flush scripted SCRAM terminal sequence");
         thread::sleep(Duration::from_millis(100));
     })
+}
+
+/// Offer SCRAM, take the client's initial response, then answer the
+/// AuthenticationSaslContinue slot with a frame that does not belong there.
+fn scram_server_wrong_continue_frame() -> StubServer {
+    StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+        stream
+            .write_all(&authentication_sasl_frame(b"SCRAM-SHA-256\0\0"))
+            .expect("offer scripted SCRAM");
+        stream.flush().expect("flush scripted SCRAM offer");
+
+        let initial = expect_frontend_frame_from(&mut stream, b'p');
+        assert_sasl_initial_response(&initial, "SCRAM-SHA-256", b"n,,n=");
+
+        // ParseComplete where AuthenticationSaslContinue is required. It has no
+        // dedicated pre-auth guard, so it reaches the generic refusal.
+        stream
+            .write_all(&backend_frame(b'1', b""))
+            .expect("write the out-of-place frame");
+        stream.flush().expect("flush the out-of-place frame");
+        thread::sleep(Duration::from_millis(100));
+    })
+}
+
+async fn scram_refusal_chain(server: StubServer, what: &str) -> String {
+    let mut config = stub_config(server.addr);
+    config.password("scripted-password");
+    let result = compio::time::timeout(OPERATION_WATCHDOG, config.connect(compio_postgres::NoTls))
+        .await
+        .unwrap_or_else(|_| panic!("the {what} SCRAM exchange hung"));
+    server.finish();
+    match result {
+        Ok(pair) => {
+            drop(pair);
+            panic!("the driver accepted {what}")
+        }
+        Err(error) => common::error_chain(&error),
+    }
+}
+
+/// Both SASL slots refuse a frame that belongs to neither the exchange nor its
+/// documented alternatives. Each arm is a separate `Some(_)` in
+/// `authenticate_sasl`, and neither had ever run: a driver that fell through
+/// instead would carry an unauthenticated session forward.
+#[compio::test]
+async fn a_misplaced_frame_in_the_scram_continue_slot_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = scram_refusal_chain(
+            scram_server_wrong_continue_frame(),
+            "a misplaced frame in the SCRAM continue slot",
+        )
+        .await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "the continue slot reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("misplaced SCRAM continue test exceeded its outer watchdog");
+}
+
+#[compio::test]
+async fn a_misplaced_frame_in_the_scram_final_slot_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let chain = scram_refusal_chain(
+            scram_server_through_client_final(ScramTerminalFrame::ParseCompleteInsteadOfFinal),
+            "a misplaced frame in the SCRAM final slot",
+        )
+        .await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "the final slot reported the wrong error: {chain}"
+        );
+    }))
+    .await
+    .expect("misplaced SCRAM final test exceeded its outer watchdog");
 }
 
 #[compio::test]
@@ -4882,6 +4968,105 @@ fn expect_frontend_frame(stream: &mut TcpStream, expected_tag: u8) -> Vec<u8> {
     body
 }
 
+/// Drive `execute_text_params` against one complete scripted response.
+#[allow(clippy::future_not_send)]
+async fn execute_text_params_against(
+    process_id: i32,
+    response: Vec<u8>,
+) -> Result<u64, compio_postgres::Error> {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+        expect_frontend_until_sync(&mut stream);
+        stream
+            .write_all(&response)
+            .expect("write scripted execute_text_params response");
+        stream
+            .flush()
+            .expect("flush scripted execute_text_params response");
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    let (client, connection) = stub_config(server.addr)
+        .connect(common::suite_tls())
+        .await
+        .expect("connect to scripted PostgreSQL peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let outcome = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        client.execute_text_params("UPDATE scripted SET value = value", &[]),
+    )
+    .await
+    .expect("execute_text_params hung on a complete scripted response");
+
+    drop(client);
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    server.finish();
+    outcome
+}
+
+/// The `query_text_params` peer of `execute_text_params_against`. Same script,
+/// different entry point, so the two portal-describing siblings can be held to
+/// the same message-order rule.
+async fn query_text_params_against(
+    process_id: i32,
+    response: Vec<u8>,
+) -> Result<(), compio_postgres::Error> {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        complete_startup(&mut stream, process_id);
+        expect_frontend_until_sync(&mut stream);
+        stream
+            .write_all(&response)
+            .expect("write scripted query_text_params response");
+        stream
+            .flush()
+            .expect("flush scripted query_text_params response");
+        thread::sleep(Duration::from_millis(300));
+    });
+
+    let (client, connection) = stub_config(server.addr)
+        .connect(common::suite_tls())
+        .await
+        .expect("connect to scripted PostgreSQL peer");
+    let driver = compio::runtime::spawn(async move { connection.run().await });
+
+    let outcome = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        client.query_text_params("SELECT value FROM scripted", &[]),
+    )
+    .await
+    .expect("query_text_params hung on a complete scripted response");
+
+    drop(client);
+    let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+    server.finish();
+    outcome.map(|_| ())
+}
+
+/// `query_text_params` describes a PORTAL, so ParameterDescription - which only
+/// a STATEMENT Describe produces - must be refused rather than ignored. Its
+/// sibling `execute_text_params` was tightened first; this is the same rule
+/// applied to the other half of the pair, so the two cannot drift apart.
+#[compio::test]
+async fn query_text_params_rejects_parameter_description_for_its_portal() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut out_of_order = backend_frame(b'1', b"");
+        out_of_order.extend_from_slice(&backend_frame(b'2', b""));
+        out_of_order.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        out_of_order.extend_from_slice(&backend_frame(b'n', b""));
+        out_of_order.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let error = query_text_params_against(306, out_of_order)
+            .await
+            .expect_err("query_text_params accepted ParameterDescription for a portal");
+        assert_eq!(error.to_string(), "unexpected message from server");
+    }))
+    .await
+    .expect("query_text_params message-order test exceeded its outer watchdog");
+}
+
 /// Drive `prepare` against a peer that answers with `response`, and require the
 /// same three properties the simple-query helper does.
 async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> String {
@@ -4916,6 +5101,52 @@ async fn hostile_prepare_retires_session(process_id: i32, response: Vec<u8>) -> 
     drop(client);
     server.finish();
     common::error_chain(&error)
+}
+
+/// Command tags are server-owned C strings, but the affected-row parser still
+/// has to reject a body that is not UTF-8.
+#[compio::test]
+async fn execute_text_params_rejects_non_utf8_command_tags() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut invalid_tag = backend_frame(b'1', b"");
+        invalid_tag.extend_from_slice(&backend_frame(b'2', b""));
+        invalid_tag.extend_from_slice(&backend_frame(b'n', b""));
+        invalid_tag.extend_from_slice(&backend_frame(b'C', b"UPDATE \xff\0"));
+        invalid_tag.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let error = execute_text_params_against(304, invalid_tag)
+            .await
+            .expect_err("execute_text_params accepted a non-UTF-8 command tag");
+        assert_eq!(error.to_string(), "error parsing response from server");
+        assert!(
+            common::error_chain(&error).contains("invalid utf-8"),
+            "the malformed command tag reported the wrong parse error: {}",
+            common::error_chain(&error)
+        );
+    }))
+    .await
+    .expect("execute_text_params malformed-tag test exceeded its outer watchdog");
+}
+
+/// This API describes a portal, while `PostgreSQL` only sends
+/// `ParameterDescription` in answer to a statement description.
+#[compio::test]
+async fn execute_text_params_rejects_parameter_description_for_its_portal() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut out_of_order = backend_frame(b'1', b"");
+        out_of_order.extend_from_slice(&backend_frame(b'2', b""));
+        out_of_order.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        out_of_order.extend_from_slice(&backend_frame(b'n', b""));
+        out_of_order.extend_from_slice(&backend_frame(b'C', b"UPDATE 0\0"));
+        out_of_order.extend_from_slice(&backend_frame(b'Z', b"I"));
+
+        let error = execute_text_params_against(305, out_of_order)
+            .await
+            .expect_err("execute_text_params accepted ParameterDescription for a portal");
+        assert_eq!(error.to_string(), "unexpected message from server");
+    }))
+    .await
+    .expect("execute_text_params message-order test exceeded its outer watchdog");
 }
 
 /// A complete Parse/Describe prefix is not the outcome of the extended query

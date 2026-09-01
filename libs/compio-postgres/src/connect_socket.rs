@@ -22,7 +22,6 @@ use socket2::{SockRef, TcpKeepalive};
 use std::io;
 use std::time::Duration;
 
-#[allow(dead_code)]
 pub(crate) async fn connect_socket(
     addr: &Addr,
     port: u16,

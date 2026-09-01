@@ -384,7 +384,10 @@ struct CloseNotifySent;
 
 impl std::fmt::Debug for CloseNotifySent {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        std::fmt::Debug::fmt(CLOSE_NOTIFY_SENT_MESSAGE, formatter)
+        formatter
+            .debug_tuple("CloseNotifySent")
+            .field(&CLOSE_NOTIFY_SENT_MESSAGE)
+            .finish()
     }
 }
 
@@ -1103,6 +1106,20 @@ mod tests {
     use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
+    #[test]
+    fn close_notify_sent_debug_names_its_type() {
+        let debug = format!("{CloseNotifySent:?}");
+
+        assert!(
+            debug.starts_with("CloseNotifySent("),
+            "close-notify error Debug did not name its type: {debug}"
+        );
+        assert!(
+            debug.contains("close_notify"),
+            "close-notify error Debug lost its diagnostic message: {debug}"
+        );
+    }
+
     /// A peer that accepts every byte and answers every read with EOF.
     ///
     /// Enough to drive the handshake loop through one full iteration: the
@@ -1228,6 +1245,34 @@ mod tests {
         fn try_into_split(self) -> Result<(Self::ReadHalf, Self::WriteHalf), Self> {
             Ok((EofReadHalf, ShutdownCapture::default()))
         }
+    }
+
+    #[test]
+    fn tls_read_half_debug_names_its_type() {
+        let (client, _server) = handshaken_pair();
+        let read = TlsReadHalf {
+            reader: TlsReader::new(EofReadHalf, share(client)),
+        };
+
+        let debug = format!("{read:?}");
+
+        assert!(
+            debug.starts_with("TlsReadHalf {"),
+            "TLS read-half Debug did not name its type: {debug}"
+        );
+    }
+
+    #[test]
+    fn tls_write_half_debug_names_its_type() {
+        let (client, _server) = handshaken_pair();
+        let write = TlsWriteHalf::new(ShutdownCapture::default(), share(client));
+
+        let debug = format!("{write:?}");
+
+        assert!(
+            debug.starts_with("TlsWriteHalf {"),
+            "TLS write-half Debug did not name its type: {debug}"
+        );
     }
 
     impl AsyncWrite for ParkedWriter {
@@ -1624,6 +1669,43 @@ mod tests {
     /// only exists behind live keys.
     pub(crate) fn handshaken_pair() -> (ClientConnection, rustls::ServerConnection) {
         handshaken_pair_with_store(None)
+    }
+
+    /// Only the FIRST `take_close_notify` may serialize an alert. The struct
+    /// comment says both release guards can reach it, and the loser must not
+    /// queue a second `close_notify` behind the first - that would put a record
+    /// after the terminal alert, which the peer may reject outright.
+    ///
+    /// `concurrent_tls_release_guards_do_not_cut_off_close_notify` drives the
+    /// race between the two guards, but the losing guard is stopped earlier by
+    /// the shared `close_notify_out` flag and never re-enters here. So this
+    /// in-struct guard - the defence that survives if that flag is ever moved
+    /// or reordered - had no test at all.
+    #[test]
+    fn a_second_close_notify_is_refused_by_the_session_itself() {
+        let (client, _server) = handshaken_pair();
+        let mut session = TlsSession::new(client);
+
+        let first = session
+            .take_close_notify()
+            .expect("the first close_notify must serialize");
+        assert!(
+            !first.is_empty(),
+            "the first close_notify serialized no ciphertext"
+        );
+
+        let error = session
+            .take_close_notify()
+            .expect_err("a second close_notify must be refused");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::AlreadyExists,
+            "the second attempt reported the wrong kind: {error}"
+        );
+        assert!(
+            error.to_string().contains("already been serialized"),
+            "the refusal must say the alert was already serialized: {error}"
+        );
     }
 
     /// `close_notify` is the end of the record stream. A lease taken after it

@@ -807,6 +807,43 @@ two controls before trusting a zero:
 
 A tool that reports zero is only useful if you have watched it report non-zero.
 
+**THE TOOL DETECTS TEXT CHANGE, NOT BEHAVIOUR CHANGE, and the difference bit
+the same day.** Re-run at `70bb94b17` over the same base it reports **87**
+production lines across seven files. Nearly all of them are
+`unwrap()` -> `expect("named invariant")` rewrites plus one behaviour-preserving
+seam extraction (`read_private_key_file` delegating to
+`read_private_key_file_with_metadata(path, std::fs::File::metadata)`). Textually
+large, semantically nil.
+
+The tool cannot tell those apart, and it should not try: erring toward a re-run
+is the right default, because "I only changed messages" is exactly the claim
+that turns out to be wrong. Just do not read a non-zero count as evidence that
+behaviour moved - read it as "the cheap argument for skipping is unavailable,
+so spend the four minutes".
+
+Re-run accordingly at `70bb94b17`, 180s on the dedicated 5470:
+
+    counts pooled_queries=34635 pool_acquires=35227 pool_releases=35227
+           cancellations=592 cancellation_recoveries=592 total_operations=43125
+    rss_rule samples=37 rises=8 falls=4 delta_kib=188 verdict=stable
+    pool connections_created=101 evictions=96 acquire_timeouts=0
+    soak result=ok elapsed_ms=215470
+
+`pool_acquires == pool_releases` exactly, and `falls=4` again confirms the RSS
+rule was exercised rather than sitting in its degenerate flat-series mode.
+
+Chaos 1 re-run at the same commit, restart issued 40s into `phase=measure`:
+
+    soak result=failed: pooled query worker: run pooled scalar query failed: db error
+    live_connections_at_failure=0
+    watchdog messages: 0    panics: 0
+
+Identical to 2026-08-26, 08-27 and the earlier run today. The failure is the
+point - the soak's floors assume a stable server - and what matters is its
+shape: a db error reached the caller rather than a hang, the driver's live
+connection count was zero at the failure so connections were released rather
+than leaked, and the container came back healthy.
+
 Measured 2026-08-31, `5b11ab1fb..8df74effc` (about fifty commits): **0 production
 lines across all twelve changed files.** Every one of the 837 changed non-comment
 lines is inside a test span. So the soak, the three chaos scenarios and the

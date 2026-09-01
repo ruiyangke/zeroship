@@ -480,12 +480,19 @@ impl KeyProvider for ZeroizingAwsLcKeyProvider {
 static ZEROIZING_AWS_LC_KEY_PROVIDER: ZeroizingAwsLcKeyProvider = ZeroizingAwsLcKeyProvider;
 
 fn read_private_key_file(key_path: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
+    read_private_key_file_with_metadata(key_path, std::fs::File::metadata)
+}
+
+fn read_private_key_file_with_metadata(
+    key_path: &str,
+    inspect: impl FnOnce(&std::fs::File) -> io::Result<std::fs::Metadata>,
+) -> Result<Zeroizing<Vec<u8>>, Error> {
     use std::io::Read as _;
 
     let mut file = std::fs::File::open(key_path).map_err(|error| {
         Error::tls(format!("sslkey={key_path}: cannot read PEM: {error}").into())
     })?;
-    let metadata = file.metadata().map_err(|error| {
+    let metadata = inspect(&file).map_err(|error| {
         Error::tls(format!("sslkey={key_path}: cannot inspect private key file: {error}").into())
     })?;
     if !metadata.file_type().is_file() {
@@ -1850,6 +1857,89 @@ mod tests {
         );
     }
 
+    fn tls_error_source(error: &Error) -> String {
+        std::error::Error::source(error)
+            .expect("a TLS error must retain its specific source")
+            .to_string()
+    }
+
+    #[test]
+    fn sslkey_open_error_names_the_missing_temporary_path() {
+        let directory = tempfile::tempdir().expect("create an isolated sslkey directory");
+        let path = directory.path().join("missing.key");
+        assert!(
+            !path.exists(),
+            "the missing-file fixture unexpectedly exists"
+        );
+        let open_error = std::fs::File::open(&path)
+            .expect_err("the fixture path must independently fail to open");
+        let key_path = path.to_str().expect("temporary paths are valid UTF-8");
+
+        let error = read_private_key_file(key_path)
+            .expect_err("a missing sslkey cannot yield private key bytes");
+
+        assert_eq!(
+            tls_error_source(&error),
+            format!("sslkey={key_path}: cannot read PEM: {open_error}"),
+            "the open failure must be attributed to the exact sslkey path"
+        );
+    }
+
+    #[test]
+    fn sslkey_metadata_error_names_the_opened_temporary_path() {
+        let key = tempfile::NamedTempFile::new().expect("create a temporary regular sslkey");
+        let key_path = key
+            .path()
+            .to_str()
+            .expect("temporary paths are valid UTF-8");
+
+        let error = read_private_key_file_with_metadata(key_path, |file| {
+            assert!(
+                file.metadata()
+                    .expect("inspect the real fixture descriptor")
+                    .is_file(),
+                "the metadata-error fixture must first open a regular file"
+            );
+            Err(io::Error::other("forced metadata failure"))
+        })
+        .expect_err("an sslkey whose metadata cannot be inspected must be refused");
+
+        assert_eq!(
+            tls_error_source(&error),
+            format!("sslkey={key_path}: cannot inspect private key file: forced metadata failure"),
+            "the metadata failure must be attributed to the exact opened sslkey path"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sslkey_directory_is_named_as_not_a_regular_file() {
+        let directory = tempfile::tempdir().expect("create a temporary sslkey directory");
+        assert!(
+            directory
+                .path()
+                .metadata()
+                .expect("inspect the directory fixture")
+                .is_dir(),
+            "the non-regular sslkey fixture must be a directory"
+        );
+        std::fs::File::open(directory.path())
+            .expect("Unix must open the directory so the regular-file check decides");
+        let key_path = directory
+            .path()
+            .to_str()
+            .expect("temporary paths are valid UTF-8");
+
+        let error = read_private_key_file(key_path)
+            .expect_err("a directory cannot supply private key bytes");
+
+        assert_eq!(
+            tls_error_source(&error),
+            format!("sslkey={key_path}: private key is not a regular file"),
+            "the regular-file refusal must name the exact sslkey directory"
+        );
+    }
+
     #[cfg(unix)]
     fn generated_sslkey(mode: u32) -> tempfile::NamedTempFile {
         use std::io::Write as _;
@@ -1892,6 +1982,88 @@ mod tests {
         assert!(
             chain.contains("group or world access"),
             "the error must name the unsafe permissions: {chain}"
+        );
+    }
+
+    /// Write an embedded PEM to a 0600 temp file. `read_private_key_file`
+    /// refuses group- or world-readable keys, so a fixture committed at 0644
+    /// would fail on permissions before reaching the branch under test.
+    #[cfg(unix)]
+    fn sslkey_fixture(pem: &str) -> tempfile::NamedTempFile {
+        use std::io::Write as _;
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let mut key = tempfile::NamedTempFile::new().expect("create a private key fixture");
+        key.write_all(pem.as_bytes())
+            .expect("write the private key fixture");
+        std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o600))
+            .expect("set private key fixture permissions");
+        key
+    }
+
+    #[cfg(unix)]
+    fn sslkey_error_chain(error: &Error) -> String {
+        std::iter::successors(std::error::Error::source(error), |error| {
+            std::error::Error::source(*error)
+        })
+        .fold(format!("{error}"), |chain, error| {
+            format!("{chain}: {error}")
+        })
+    }
+
+    /// An encrypted key with no `sslpassword` must say so. This message is the
+    /// only guidance a creator gets after forgetting the setting, and nothing
+    /// executed it: the whole encrypted-key error surface was unreached, while
+    /// only the successful decrypt is covered by the live TLS suite.
+    #[cfg(unix)]
+    #[test]
+    fn encrypted_sslkey_without_a_password_names_sslpassword() {
+        let key = sslkey_fixture(include_str!("../tests/data/encrypted_pkcs8_key.pem"));
+        let error = private_key_from_config(key.path().to_str().unwrap(), None)
+            .expect_err("an encrypted key cannot load without a passphrase");
+        let chain = sslkey_error_chain(&error);
+        assert!(
+            chain.contains("encrypted private key requires a non-empty sslpassword"),
+            "the error must name the missing sslpassword: {chain}"
+        );
+    }
+
+    /// An empty `sslpassword` is the same case as none. libpq treats an empty
+    /// passphrase as absent, and the `filter` that implements this would be a
+    /// no-op if removed, which no other test would notice.
+    #[cfg(unix)]
+    #[test]
+    fn encrypted_sslkey_with_an_empty_password_names_sslpassword() {
+        let key = sslkey_fixture(include_str!("../tests/data/encrypted_pkcs8_key.pem"));
+        let error = private_key_from_config(key.path().to_str().unwrap(), Some(b""))
+            .expect_err("an empty passphrase cannot decrypt an encrypted key");
+        let chain = sslkey_error_chain(&error);
+        assert!(
+            chain.contains("encrypted private key requires a non-empty sslpassword"),
+            "an empty sslpassword must be treated as absent: {chain}"
+        );
+    }
+
+    /// A PEM that is not a private key at all must keep the rustls PEM error.
+    /// The comment above `private_key_from_config` states this outright -
+    /// "malformed plaintext keys must retain the existing rustls PEM error
+    /// instead of being misreported as a bad passphrase" - and nothing checked
+    /// it. Misreporting would send someone hunting for a wrong sslpassword when
+    /// the real fault is the file they pointed sslkey at.
+    #[cfg(unix)]
+    #[test]
+    fn a_certificate_given_as_sslkey_is_not_reported_as_a_passphrase_problem() {
+        let key = sslkey_fixture(include_str!("../tests/data/sha256_cert.pem"));
+        let error = private_key_from_config(key.path().to_str().unwrap(), None)
+            .expect_err("a certificate is not a private key");
+        let chain = sslkey_error_chain(&error);
+        assert!(
+            chain.contains("cannot read PEM"),
+            "the error must report a PEM problem: {chain}"
+        );
+        assert!(
+            !chain.contains("sslpassword"),
+            "a non-key PEM must not be blamed on the passphrase: {chain}"
         );
     }
 
@@ -1962,6 +2134,71 @@ mod tests {
             .with_no_client_auth();
         config.alpn_protocols = alpn_protocols;
         config
+    }
+
+    #[test]
+    fn rustls_connect_debug_redacts_config() {
+        const CONFIG_SECRET: &str = "rustls-connect-config-material-4a873f2c";
+
+        let secret = CONFIG_SECRET.as_bytes().to_vec();
+        let exposed = format!("{secret:?}");
+        let config = Arc::new(client_config(vec![secret]));
+        assert!(
+            format!("{config:?}").contains(&exposed),
+            "test sentinel is not exposed by raw ClientConfig Debug"
+        );
+        let connect = RustlsConnect {
+            config,
+            policy_identity: TlsPolicyIdentity::new(),
+            domain: "debug.example".to_owned(),
+            ssl_cert_mode: SslCertMode::Allow,
+            server_verification: ServerVerification::None,
+        };
+
+        let debug = format!("{connect:?}");
+
+        assert!(
+            debug.contains("RustlsConnect"),
+            "rustls connector Debug did not name its type: {debug}"
+        );
+        assert!(
+            debug.contains("config: \"<redacted>\""),
+            "rustls connector Debug did not mark the config redaction: {debug}"
+        );
+        assert!(
+            !debug.contains(&exposed) && !debug.contains(CONFIG_SECRET),
+            "rustls connector Debug leaked its client config: {debug}"
+        );
+    }
+
+    #[test]
+    fn rustls_stream_debug_redacts_tls_server_end_point() {
+        const BINDING_SECRET: &str = "rustls-stream-binding-material-b1357eca";
+
+        let secret = BINDING_SECRET.as_bytes().to_vec();
+        let exposed = format!("{secret:?}");
+        let (client, _server) = handshaken_pair();
+        let stream = RustlsStream {
+            inner: TlsStreamCore::new((), share(client)),
+            tls_server_end_point: Some(secret),
+            client_cert_status: ClientCertStatus::NotApplicable,
+            negotiated_alpn_protocol: None,
+        };
+
+        let debug = format!("{stream:?}");
+
+        assert!(
+            debug.contains("RustlsStream"),
+            "rustls stream Debug did not name its type: {debug}"
+        );
+        assert!(
+            debug.contains("tls_server_end_point: Some(\"<redacted>\")"),
+            "rustls stream Debug did not mark the channel binding redaction: {debug}"
+        );
+        assert!(
+            !debug.contains(&exposed) && !debug.contains(BINDING_SECRET),
+            "rustls stream Debug leaked TLS channel binding material: {debug}"
+        );
     }
 
     /// Start a real rustls server, connect the driver's rustls client to it,
@@ -2161,6 +2398,102 @@ mod tests {
         assert_eq!(hash, sha2::Sha224::digest(cert.as_ref()).to_vec());
     }
 
+    /// SHA-512 is the widest digest the signature table selects, and until this
+    /// test nothing chose it: `Digest::Sha512`, and the `sha2::Sha512` arm of
+    /// `Digest::hash`, had zero executed coverage regions. A server presenting a
+    /// SHA-512-signed certificate would have computed its SCRAM-PLUS channel
+    /// binding through code no test had run.
+    #[test]
+    fn end_point_hash_libpq_digest_rsa_sha512() {
+        let (cert, hash) = endpoint_hash_fixture(include_str!("../tests/data/sha512_cert.pem"));
+        assert_eq!(
+            hash.len(),
+            64,
+            "sha512WithRSAEncryption must select SHA-512"
+        );
+        assert_eq!(hash, sha2::Sha512::digest(cert.as_ref()).to_vec());
+    }
+
+    /// RSASSA-PSS reads its digest from AlgorithmIdentifier parameters through
+    /// `Digest::for_hash_oid`, a SECOND and separate table from the signature
+    /// OIDs above. Only its SHA-256 arm had ever run, so every other hash a PSS
+    /// certificate can name went through an unexecuted branch.
+    ///
+    /// `sha384_cert.pem` does NOT cover this: it is signed with
+    /// sha384WithRSAEncryption, which the signature table resolves directly and
+    /// which never consults `for_hash_oid` at all.
+    #[test]
+    fn end_point_hash_libpq_digest_rsa_pss_sha384() {
+        let (cert, hash) =
+            endpoint_hash_fixture(include_str!("../tests/data/rsa_pss_sha384_cert.pem"));
+        assert_eq!(
+            hash.len(),
+            48,
+            "PSS parameters naming SHA-384 must select it"
+        );
+        assert_eq!(
+            hash,
+            sha2::Sha384::digest(cert.as_ref()).to_vec(),
+            "RSASSA-PSS must take SHA-384 from its AlgorithmIdentifier parameters"
+        );
+    }
+
+    /// The RFC 5929 upgrade must also apply on the RSASSA-PSS path, which
+    /// reads its digest from AlgorithmIdentifier parameters through a SECOND
+    /// table, `Digest::for_hash_oid`. Its SHA-1 arm had zero executed regions,
+    /// so a PSS certificate naming SHA-1 went through an unexecuted branch to
+    /// reach a security-relevant decision.
+    ///
+    /// Both digests here are 32 bytes, so the length proves nothing; the
+    /// assertion compares the VALUE against SHA-256 of the DER.
+    #[test]
+    fn end_point_hash_upgrades_a_pss_sha1_signature_to_sha256() {
+        let (cert, hash) =
+            endpoint_hash_fixture(include_str!("../tests/data/rsa_pss_sha1_cert.pem"));
+        assert_eq!(
+            hash,
+            sha2::Sha256::digest(cert.as_ref()).to_vec(),
+            "PSS parameters naming SHA-1 must bind with SHA-256"
+        );
+    }
+
+    /// `sha512-256WithRSAEncryption` selects the truncated SHA-512/256, which
+    /// is NOT SHA-256 despite the matching 32-byte width. Both the table entry
+    /// and the `Digest::hash` arm were unexecuted, so nothing had ever proved
+    /// this picks the truncated variant rather than the one it looks like.
+    #[test]
+    fn end_point_hash_libpq_digest_rsa_sha512_256() {
+        let (cert, hash) = endpoint_hash_fixture(include_str!("../tests/data/sha512_256_cert.pem"));
+        assert_eq!(hash, sha2::Sha512_256::digest(cert.as_ref()).to_vec());
+        assert_ne!(
+            hash,
+            sha2::Sha256::digest(cert.as_ref()).to_vec(),
+            "SHA-512/256 must not be confused with SHA-256; both are 32 bytes"
+        );
+    }
+
+    /// RFC 5929 section 4.1 upgrades MD5 and SHA-1 signatures to SHA-256 for
+    /// `tls-server-end-point`, so a SHA-1-signed certificate must bind with a
+    /// 32-byte SHA-256 hash and never a 20-byte SHA-1 one. Binding the weaker
+    /// digest would let a peer that can forge SHA-1 forge the channel binding
+    /// SCRAM-PLUS rests on.
+    ///
+    /// **Coverage cannot see this gap.** `sha1WithRSAEncryption` shares its
+    /// match arm with `sha256WithRSAEncryption`, which is already covered, so
+    /// the arm reports as executed either way. Only removing the SHA-1 OID from
+    /// that arm distinguishes the two, which is exactly the mutation that
+    /// proves this test.
+    #[test]
+    fn end_point_hash_upgrades_a_sha1_signature_to_sha256() {
+        let (cert, hash) = endpoint_hash_fixture(include_str!("../tests/data/sha1_cert.pem"));
+        assert_eq!(
+            hash.len(),
+            32,
+            "a SHA-1 signature must bind with SHA-256, not its own digest"
+        );
+        assert_eq!(hash, sha2::Sha256::digest(cert.as_ref()).to_vec());
+    }
+
     /// An Ed25519 certificate names no hash in its signature OID. We must
     /// report "no binding" rather than defaulting to SHA-256, because the
     /// server would not compute one either.
@@ -2169,6 +2502,129 @@ mod tests {
         let pem = include_str!("../tests/data/ed25519_cert.pem");
         let cert = CertificateDer::from_pem_slice(pem.as_bytes()).unwrap();
         assert!(tls_server_end_point(&cert).is_none());
+    }
+
+    #[test]
+    fn crl_issuer_bmp_string_decodes_big_endian_two_byte_units() {
+        // BMPString stores each Unicode scalar as one two-byte, big-endian unit.
+        let encoded = [0x00, 0x61, 0x26, 0x03];
+        let value = Any::from_tag_and_data(Tag::BmpString, &encoded);
+
+        let canonical = openssl_canonical_string(&value)
+            .expect("a BMPString containing valid Unicode scalars must decode")
+            .expect("BMPString is an OpenSSL-canonical string type");
+
+        assert_eq!(
+            canonical,
+            "a☃".as_bytes(),
+            "two-byte big-endian BMPString units must become the scalar's UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    fn crl_issuer_bmp_string_rejects_an_odd_byte_count() {
+        // BMPString requires exactly two bytes per character, so no trailing byte is valid.
+        let encoded = [0x00, 0x61, 0x00];
+        let value = Any::from_tag_and_data(Tag::BmpString, &encoded);
+
+        let error = openssl_canonical_string(&value)
+            .expect_err("an odd-length BMPString cannot contain complete two-byte units");
+
+        assert_eq!(error, "odd-length BMPString in CRL issuer");
+    }
+
+    #[test]
+    fn crl_issuer_bmp_string_rejects_a_non_scalar_unit() {
+        // BMPString units are decoded independently; UTF-16 surrogate 0xd800 is not a scalar.
+        let encoded = [0xd8, 0x00];
+        let value = Any::from_tag_and_data(Tag::BmpString, &encoded);
+
+        let error = openssl_canonical_string(&value)
+            .expect_err("a BMPString surrogate unit is not a Unicode scalar value");
+
+        assert_eq!(error, "invalid BMPString scalar in CRL issuer");
+    }
+
+    #[test]
+    fn crl_issuer_universal_string_decodes_big_endian_four_byte_units() {
+        // UniversalString stores each Unicode scalar as one four-byte, big-endian unit.
+        let encoded = [0x00, 0x00, 0x00, 0x61, 0x00, 0x01, 0xf6, 0x42];
+        let value = Any::from_tag_and_data(Tag::UniversalString, &encoded);
+
+        let canonical = openssl_canonical_string(&value)
+            .expect("a UniversalString containing valid Unicode scalars must decode")
+            .expect("UniversalString is an OpenSSL-canonical string type");
+
+        assert_eq!(
+            canonical,
+            "a🙂".as_bytes(),
+            "four-byte big-endian UniversalString units must become the scalar's UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    fn crl_issuer_universal_string_rejects_a_partial_unit() {
+        // UniversalString requires exactly four bytes per character, so a fifth byte is invalid.
+        let encoded = [0x00, 0x00, 0x00, 0x61, 0x00];
+        let value = Any::from_tag_and_data(Tag::UniversalString, &encoded);
+
+        let error = openssl_canonical_string(&value)
+            .expect_err("a misaligned UniversalString ends with a partial four-byte unit");
+
+        assert_eq!(error, "misaligned UniversalString in CRL issuer");
+    }
+
+    #[test]
+    fn crl_issuer_universal_string_rejects_a_non_scalar_unit() {
+        // UniversalString 0x00110000 is above Unicode's largest scalar, U+10ffff.
+        let encoded = [0x00, 0x11, 0x00, 0x00];
+        let value = Any::from_tag_and_data(Tag::UniversalString, &encoded);
+
+        let error = openssl_canonical_string(&value)
+            .expect_err("a UniversalString unit above U+10ffff is not a Unicode scalar value");
+
+        assert_eq!(error, "invalid UniversalString scalar in CRL issuer");
+    }
+
+    #[test]
+    fn crl_issuer_teletex_string_maps_each_byte_to_the_same_value_character() {
+        // TeletexString byte 0xe9 maps to U+00e9, whose UTF-8 encoding is the two bytes c3 a9.
+        let encoded = [0x61, 0xe9];
+        let value = Any::from_tag_and_data(Tag::TeletexString, &encoded);
+
+        let canonical = openssl_canonical_string(&value)
+            .expect("every TeletexString byte denotes a same-value Unicode character")
+            .expect("TeletexString is an OpenSSL-canonical string type");
+
+        assert_eq!(
+            canonical,
+            "aé".as_bytes(),
+            "same-value TeletexString characters must then be emitted as UTF-8 bytes"
+        );
+    }
+
+    #[test]
+    fn der_tlv_uses_big_endian_long_form_lengths_above_127_bytes() {
+        // DER uses 0x80 | width followed by the content length in width big-endian bytes.
+        for (contents_len, expected_length) in
+            [(128, &[0x81, 0x80][..]), (256, &[0x82, 0x01, 0x00][..])]
+        {
+            let contents = vec![0x5a; contents_len];
+            let encoded = der_tlv(0x04, &contents);
+            let contents_start = 1 + expected_length.len();
+
+            assert_eq!(encoded[0], 0x04, "the TLV tag must be preserved");
+            assert_eq!(
+                &encoded[1..contents_start],
+                expected_length,
+                "a {contents_len}-byte value needs the minimal big-endian DER long-form length"
+            );
+            assert_eq!(
+                &encoded[contents_start..],
+                contents,
+                "the long-form length must not alter the TLV contents"
+            );
+        }
     }
 
     #[test]
@@ -2203,6 +2659,40 @@ mod tests {
         let error = distinct_crl_issuers(&loaded)
             .expect_err("the same issuer in r0 and r1 risks selecting a stale CRL");
         assert!(error.contains("same issuer"), "unexpected refusal: {error}");
+    }
+
+    /// The same-issuer check applies WITHIN `sslcrl` too, not only across
+    /// `sslcrl` and `sslcrldir`. rustls selects the first CRL matching an
+    /// issuer, so a second one for that issuer is silently unused and a newer
+    /// revocation could be missed. The cross-setting form is covered below;
+    /// this single-setting arm had never run, and it carries its own `sslcrl:`
+    /// prefix that nothing had produced.
+    #[test]
+    fn two_crls_for_one_issuer_inside_sslcrl_are_refused() {
+        let pem = include_str!("../tests/data/stale_guard_crl.pem");
+        let crl = CertificateRevocationListDer::from_pem_slice(pem.as_bytes())
+            .expect("parse the CRL fixture");
+        let error = verifier_for(
+            SslMode::VerifyFull,
+            roots_with(CA),
+            ConfiguredCrls {
+                file: vec![crl.clone(), crl],
+                directory: None,
+            },
+            &provider(),
+        )
+        .expect_err("a second CRL for the same issuer would be silently unused");
+        let cause = std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            cause.contains("sslcrl:"),
+            "the refusal must name the setting it came from: {cause}"
+        );
+        assert!(
+            cause.contains("same issuer"),
+            "the refusal must say why the second CRL is a problem: {cause}"
+        );
     }
 
     #[test]
@@ -2279,6 +2769,32 @@ mod tests {
         assert!(
             cause.contains("sslcrldir=") && cause.contains(directory),
             "the refusal must name the unusable setting: {cause}"
+        );
+    }
+
+    /// Pointing `sslrootcert` at a PEM that holds no CERTIFICATE block - a key
+    /// file, most plausibly - must be refused by name. The refusal existed but
+    /// had never been produced: the arm had zero executed coverage regions, so
+    /// the only guidance a creator gets after aiming the setting at the wrong
+    /// file was unproved text.
+    #[cfg(unix)]
+    #[test]
+    fn sslrootcert_without_a_certificate_block_is_refused_by_name() {
+        let pem = sslkey_fixture(include_str!("../tests/data/encrypted_pkcs8_key.pem"));
+        let path = pem.path().to_str().unwrap();
+        let config = format!("host=h sslmode=verify-ca sslrootcert={path}")
+            .parse::<Config>()
+            .unwrap();
+        let error = MakeRustlsConnect::from_config(&config)
+            .expect_err("a file with no CERTIFICATE block is not a trust anchor");
+        let chain = sslkey_error_chain(&error);
+        assert!(
+            chain.contains("sslrootcert=") && chain.contains(path),
+            "the refusal must name the setting and the file: {chain}"
+        );
+        assert!(
+            chain.contains("no CERTIFICATE blocks"),
+            "the refusal must say what the file lacked: {chain}"
         );
     }
 
