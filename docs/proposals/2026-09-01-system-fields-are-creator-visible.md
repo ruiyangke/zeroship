@@ -72,12 +72,39 @@ This is why the design needs no third property for override policy, and why
 fields carry an `assign`. Ordinary creator columns keep `default` and stay
 overridable, which is what `t.string().default("x")` already means.
 
-**`assign` is not a system-field concept.** The creator API already promises
+### "System field" stops being a concept
+
+This is the point of the change, and it is easy to miss while the document still
+says "the seven".
+
+`assign` is not a system-field property. The creator API already promises
 assignment on ordinary columns: `t.actor()` is documented as "available to
 creators who want their own actor-tracking columns (e.g. `last_edited_by`)"
 (`sdks/db/src/types.ts:1881-1886`), and `t.timestamp()` carries `.auto_now()` /
-`.auto_now_on_update()` (`:1044-1052`). One mechanism; the seven are ordinary
-columns whose `assign` is root-declared.
+`.auto_now_on_update()` (`:1044-1052`).
+
+So the boundary is no longer *system vs creator*. It is **assigned vs
+defaulted**, and both are available to both. No code branches on "is this a
+system field?"; it branches on "does this have an `assign`?".
+
+**What makes the platform's seven different is PROVENANCE, not identity.**
+`created_by` differs from a creator's own `last_edited_by` because its `assign`
+was declared in the root charter and the other's was not - which is exactly why
+`assign` must be root-only at load. The property is available to everyone; the
+authority to declare it on a platform column is not.
+
+**Three things survive, and pretending otherwise would be dishonest:**
+
+1. **The columns.** The charter still injects the same seven into every table
+   (`scope = "all"`, `mandatory = true`). That is a list - but one list, in one
+   operator-shipped file, which is the whole point.
+2. **A hardcoded list in the DDL emitters.** `zeroship-schema` is a declared leaf
+   with no TOML parser; the charter header says "THE SEVENTH PRODUCER CANNOT TAKE
+   THIS FILE" (`:47-51`) and the mirror gate repeats it. So the goal is never
+   "zero lists": it is collapse the ergonomic consumers, keep the trusted
+   producers, and gate that they agree.
+3. **A generated list in TypeScript**, since TS has no `include_str!` (charter
+   `:32-35`).
 
 ### What follows from `assign`, and what does not
 
@@ -189,7 +216,7 @@ mirror against one, and state its limits as
 
 | # | what | why it blocks |
 | --- | --- | --- |
-| #132 | the timestamp round-trip | reads emit Unix-ms (`crud/read_pipeline.rs:162`), writes demand a `Date` (`validate.ts:277-284`); measured on pg18, a 13-digit value errors `22008` and an 8-digit value is **silently accepted as a calendar date**. The conversion belongs in Rust: `validate.ts` is not on every write path, and filters bypass it entirely (`utils.ts:98-103`, `query.rs:5714-5744`). |
+| #132 | the timestamp round-trip - **scoped down: creator-declared timestamp columns only.** The read-side normalisation is TYPE-driven (`read_pipeline.rs:183`, `Some("date") \| Some("calendarDate")`), so a creator's own `t.timestamp()` column has the identical asymmetry; the platform's three are handled by assignment instead and never carry a caller value to the builder. **Route: convert in the emitted SQL per dialect**, not by a Rust value formatter - plugin-db declares no date library and hand-rolls (`session_minter.rs:393`), and its two existing parsers disagree about the accepted shape, so a third formatter is new correctness surface. `to_timestamp($n/1000.0)` on PG; `strftime` with an explicit T-form on SQLite, deliberately not `datetime()`, whose space-separated output IS #134. | reads emit Unix-ms (`crud/read_pipeline.rs:162`), writes demand a `Date` (`validate.ts:277-284`); measured on pg18, a 13-digit value errors `22008` and an 8-digit value is **silently accepted as a calendar date**. It cannot be fixed in `validate.ts`: that is not on every write path (`crud.ts:513-569` calls neither validator), and filters bypass it entirely (`utils.ts:98-103`, `query.rs:5714-5744`), so `find({created_at:{$gt: row.created_at}})` already fails today. |
 | #134 | the SQLite spelling schism | the DDL default writes `CURRENT_TIMESTAMP` (space-separated, `query.rs:323`) and creator values arrive as `toISOString()` (a `T`, `v8_bridge.rs:263-281`); TEXT comparison is bytewise, so a row stamped `23:59:59` sorts **before** one written at midnight the same day. Measured. Moving timestamps to runtime-assigned dissolves it - one writer, one spelling - so the conversion and the DDL default must land on one spelling in one change. |
 | #135 | the live PG fixture | declares the timestamps nullable where production is `NOT NULL`; a regression test written on it passes while production raises `23502`. Fixed in `b2515127d`. |
 
