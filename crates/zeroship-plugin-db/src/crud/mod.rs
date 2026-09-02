@@ -200,6 +200,39 @@ where
     }
 }
 
+/// The ENGINE composition behind the three row-returning mutation dispatches -
+/// `deleteOne`, `purgeOne`, `restoreOne`: execute, emit the change event, then
+/// run the read pipeline over the RETURNING rows.
+///
+/// It takes `binding`, `coll` and `route` BY VALUE, which is the point rather
+/// than an accident: it is handed to [`run_op`] as
+/// `move |bq| exec_mutation_then_read(binding, coll, route, bq, op)`, and
+/// `run_op`'s `EFut` cannot borrow from the closure it was produced by.
+///
+/// The three callers differ ONLY in `op` - Update, Delete, Update. Each was a
+/// separate copy of this body until 2026-09-02, and the copies were read against
+/// each other first: same `ApplyOptions::default()`, same
+/// `first_row_or_null_masked` resolve. The three-line dispatches that call this
+/// are NOT evidence the family is uniform elsewhere; `deleteMany`, `purgeMany`
+/// and `restoreMany` run no read pipeline at all and are deliberately not folded
+/// in here.
+pub(crate) async fn exec_mutation_then_read(
+    binding: DbBinding,
+    coll: String,
+    route: crate::tx_route::TxRoute,
+    bq: query::BuiltQuery,
+    op: zeroship_core::change_event::ChangeOp,
+) -> Result<read_pipeline::ApplyResult, DbError> {
+    let rows = exec_mutation_with_emit(bq, &route, &coll, op).await?;
+    read_pipeline::apply(
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions::default(),
+    )
+    .await
+}
+
 /// Record `(collection, filter)` into the active query's read-set.
 ///
 /// Resolves the descriptor entry the predicate has to be lowered against - a
@@ -1436,24 +1469,17 @@ pub(crate) fn dispatch_delete_one<'s>(
         resolver,
         request_id,
         built,
-        move |bq| async move {
-            // Tagged as Update because soft-delete IS an UPDATE
-            // setting `deleted_at`. Subscribers wanting to react
-            // to soft-deletes inspect `new_tuple.deleted_at`.
-            let rows = exec_mutation_with_emit(
+        // Tagged as Update because soft-delete IS an UPDATE
+        // setting `deleted_at`. Subscribers wanting to react
+        // to soft-deletes inspect `new_tuple.deleted_at`.
+        move |bq| {
+            exec_mutation_then_read(
+                binding,
+                coll,
+                route,
                 bq,
-                &route,
-                &coll,
                 zeroship_core::change_event::ChangeOp::Update,
             )
-            .await?;
-            read_pipeline::apply(
-                &binding,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions::default(),
-            )
-            .await
         },
         |result: read_pipeline::ApplyResult| {
             crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked)
@@ -1591,21 +1617,14 @@ pub(crate) fn dispatch_purge_one<'s>(
         resolver,
         request_id,
         built,
-        move |bq| async move {
-            let rows = exec_mutation_with_emit(
+        move |bq| {
+            exec_mutation_then_read(
+                binding,
+                coll,
+                route,
                 bq,
-                &route,
-                &coll,
                 zeroship_core::change_event::ChangeOp::Delete,
             )
-            .await?;
-            read_pipeline::apply(
-                &binding,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions::default(),
-            )
-            .await
         },
         |result: read_pipeline::ApplyResult| {
             crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked)
@@ -1729,21 +1748,14 @@ pub(crate) fn dispatch_restore_one<'s>(
         resolver,
         request_id,
         built,
-        move |bq| async move {
-            let rows = exec_mutation_with_emit(
+        move |bq| {
+            exec_mutation_then_read(
+                binding,
+                coll,
+                route,
                 bq,
-                &route,
-                &coll,
                 zeroship_core::change_event::ChangeOp::Update,
             )
-            .await?;
-            read_pipeline::apply(
-                &binding,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions::default(),
-            )
-            .await
         },
         |result: read_pipeline::ApplyResult| {
             crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked)
