@@ -107,6 +107,22 @@ fn flip_schema() -> Value {
     })
 }
 
+/// A masked column whose declared name is snake_case, so a camelCase hint has
+/// to travel through `resolve_schema_column`'s alias tolerance to be found.
+///
+/// `flip_schema` cannot express this: `ssn` is spelled identically in every
+/// case convention, so no alias resolution happens and the canonical name and
+/// the caller's name are the same string whatever the code does.
+fn alias_schema() -> Value {
+    json!({
+        "contact_email": {
+            "type": "string",
+            "mask": { "kind": "email", "classification": "pii" }
+        },
+        "nickname": { "type": "string" },
+    })
+}
+
 /// [`flip_schema`] with a SECOND masked column whose classification DIFFERS.
 ///
 /// The batch and query-hint paths authorise a REQUEST, not a cell, and the only
@@ -1732,6 +1748,89 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     let after = run_find(&pool, app, &json!({}), &schema).await;
     assert_eq!(after[0]["ssn"], json!("***"));
     assert_eq!(after[0]["email"], json!("g***@example.com"));
+
+    release_pg(pool).await;
+}
+
+/// A hint spelled in a different case convention from the descriptor must READ
+/// the column it AUTHORISED.
+///
+/// `resolve_schema_column` is alias-tolerant: `contactEmail` resolves to the
+/// declared `contact_email`, so the authorization half of the query hint
+/// succeeds. Its two siblings then adopt the resolved name - `dispatch_unmask`
+/// assigns `args.column = mask_meta.canonical_column`, and
+/// `dispatch_bulk_unmask` carries it through to the fetch. The query-hint path
+/// did neither: it kept only the classification, so the CALLER's spelling
+/// travelled on to `raw_column_name`, which is a bare prefix, and the read
+/// looked for `__zs_raw__contactEmail` - a column no migration ever created.
+///
+/// It fails CLOSED, so this is a consistency defect rather than a leak. It is
+/// still worth binding: three siblings doing two different things at one
+/// boundary is how the next divergence gets introduced, and the next one may
+/// not fail closed.
+///
+/// The two calls below are the exact sequence `crud::dispatch_find` runs - the
+/// fence, then the read, over the same `unmask_columns` slice.
+#[compio::test]
+async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
+    let url = require_pg().await;
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app = "flip_hint_alias";
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    let schema = alias_schema();
+    let email = "ada@example.com";
+    let person = audited_unmask_fixture_with(
+        &pool,
+        &url,
+        app,
+        &schema,
+        json!({ "contact_email": email, "nickname": "ada" }),
+        &[("contact_email", email)],
+    )
+    .await;
+
+    dispatch_set_mask_policy(app, json!({ "support": ["pii"] }))
+        .await
+        .expect("install the app's declared mask policy");
+    let actor = Some(json!({ "kind": "support", "id": "usr_support_3" }));
+    let reason = Some("mask_flip integration test".to_string());
+    // The caller's spelling: camelCase, where the descriptor declares snake.
+    let hinted = ["contactEmail".to_string()];
+
+    authorize_query_hint(
+        &DbBinding::cold_start(app),
+        "people",
+        &hinted,
+        &actor,
+        None,
+        &reason,
+    )
+    .await
+    .expect(
+        "the alias must AUTHORISE - `resolve_schema_column` accepts the camel \
+         spelling, so a failure here means the fixture is wrong rather than the \
+         defect being present",
+    );
+
+    let mut rows = vec![json!({
+        "id": person.id.clone(),
+        "contact_email": "a***@example.com",
+        "nickname": "ada",
+    })];
+    dispatch_unmask_for_query(&DbBinding::cold_start(app), "people", &hinted, &mut rows)
+        .await
+        .expect(
+            "the read must find the column the fence authorised. If this errors \
+             on a missing column, the hint authorised `contact_email` and then \
+             read `__zs_raw__contactEmail`: the caller's spelling survived \
+             because the query-hint path discarded the canonical name its two \
+             siblings adopt",
+        );
+    assert_eq!(
+        rows[0]["contact_email"],
+        json!(email),
+        "the promoted value lands under the DECLARED name: {rows:?}",
+    );
 
     release_pg(pool).await;
 }
