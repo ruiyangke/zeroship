@@ -3871,14 +3871,27 @@ async fn compio_native_geo_observation() -> NativeGeoObservation {
 }
 
 /// Native geometry carriers agree on coordinates. Direct bytes expose the
-/// shared BOX corner-order and closed PATH state losses; POLYGON stays raw
-/// because neither `geo-types` integration supplies a native polygon codec.
+/// closed PATH state loss, which is still shared, and the BOX corner order,
+/// which is NOT: the local encoder emits the server's order and upstream does
+/// not. POLYGON stays raw because neither `geo-types` integration supplies a
+/// native polygon codec.
+///
+/// `outbound_wires` is therefore compared against the SERVER rather than
+/// against tokio, and every other field is compared field-by-field. A blanket
+/// `assert_eq!(ours, theirs)` would now fail on the corner order alone and say
+/// nothing about the fields that must still agree.
 #[cfg(feature = "with-geo-types-0_7")]
 #[compio::test]
 async fn native_geo_types_codecs_cover_geometry_wires_and_shared_limits() {
     let theirs = tokio_native_geo_observation(common::plaintext_url());
     let ours = compio_native_geo_observation().await;
-    assert_eq!(ours, theirs);
+    assert_eq!(ours.decoded_point, theirs.decoded_point);
+    assert_eq!(ours.decoded_box, theirs.decoded_box);
+    assert_eq!(ours.decoded_paths, theirs.decoded_paths);
+    assert_eq!(ours.server_text, theirs.server_text);
+    assert_eq!(ours.server_wires, theirs.server_wires);
+    assert_eq!(ours.rebound_text, theirs.rebound_text);
+    assert_eq!(ours.rebound_wires, theirs.rebound_wires);
 
     let points = [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)];
     let expected_line = geo_types::LineString::from(points.to_vec());
@@ -3930,7 +3943,7 @@ async fn native_geo_types_codecs_cover_geometry_wires_and_shared_limits() {
         ours.outbound_wires.each_ref().map(Vec::as_slice),
         [
             point_wire.as_slice(),
-            codec_box_wire.as_slice(),
+            server_box_wire.as_slice(),
             open_path_wire.as_slice(),
             open_path_wire.as_slice(),
         ]
@@ -3946,23 +3959,40 @@ async fn native_geo_types_codecs_cover_geometry_wires_and_shared_limits() {
         ]
     );
 
-    assert_ne!(ours.outbound_wires[1], ours.server_wires[1].0);
+    assert_eq!(
+        ours.outbound_wires[1], ours.server_wires[1].0,
+        "our BOX encoder must emit the server's corner order"
+    );
+    // Upstream still writes the low corner first. Pinned so that upstream
+    // adopting the server's order shows up here as a failing expectation
+    // rather than silently making the local divergence redundant.
+    assert_eq!(
+        theirs.outbound_wires[1], codec_box_wire,
+        "upstream changed its BOX corner order; the local override can go"
+    );
+    // Every other outbound wire must still match upstream byte for byte.
+    assert_eq!(ours.outbound_wires[0], theirs.outbound_wires[0]);
+    assert_eq!(ours.outbound_wires[2], theirs.outbound_wires[2]);
+    assert_eq!(ours.outbound_wires[3], theirs.outbound_wires[3]);
     assert_ne!(ours.outbound_wires[3], ours.server_wires[3].0);
     assert_eq!(ours.outbound_wires[2], ours.outbound_wires[3]);
 }
 
-/// Desired invariant blocked by both `Rect` codecs emitting BOX corners in
-/// the reverse of the server's binary order.
+/// Desired invariant now HALF met: the local `Rect` codec emits the server's
+/// BOX corner order, upstream's still emits the reverse. The assertion on
+/// `ours` is covered by the wire test above; this one stays ignored solely for
+/// its second line, which rules on tokio.
+///
 /// Severity, measured against the server rather than inferred: NOT corruption.
 /// `box '(1,2),(3,4)'` is sent by PostgreSQL as high corner first, 3,4,1,2, and
-/// even its text form normalises to `(3,4),(1,2)`. We send 1,2,3,4. Feeding
-/// BOTH orders back through `COPY ... FROM STDIN (FORMAT binary)` stores
-/// `(3,4),(1,2)` either way and both compare `=` to the original, because
-/// `box_recv` normalises the corners on receipt. So this is wire
-/// nonconformance only - the same class as the CIDR `is_cidr` flag - and a
-/// claim that it loses or swaps a value would be wrong.
+/// even its text form normalises to `(3,4),(1,2)`. Upstream sends 1,2,3,4.
+/// Feeding BOTH orders back through `COPY ... FROM STDIN (FORMAT binary)`
+/// stores `(3,4),(1,2)` either way and both compare `=` to the original,
+/// because `box_recv` normalises the corners on receipt. So this was wire
+/// nonconformance only - the same class as the CIDR `is_cidr` flag, and fixed
+/// the same way - and a claim that it lost or swapped a value would be wrong.
 #[cfg(feature = "with-geo-types-0_7")]
-#[ignore = "both geo-types Rect codecs emit PostgreSQL BOX corners in reverse order"]
+#[ignore = "upstream geo-types Rect codec still emits PostgreSQL BOX corners in reverse order"]
 #[compio::test]
 async fn native_geo_rect_codecs_must_emit_server_box_order() {
     let theirs = tokio_native_geo_observation(common::plaintext_url());
