@@ -11209,20 +11209,20 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
 /// This asserts the CORRECT behaviour and is RED until both emitters agree on one
 /// spelling. Fixing only the runtime side leaves this red.
 ///
-/// MEASURED RED on 2026-09-02, and the ignore records the observation rather than
-/// a guess:
+/// It WAS red, and the measurement is kept because it is what the fix had to
+/// move:
 ///   A = "2026-09-02 07:32:37"        (engine default, space)
 ///   B = "2026-09-02T06:32:37.000Z"   (runtime bind, T, one hour EARLIER)
 ///   `ORDER BY occurred_at ASC` returned `a_default` first.
-/// Remove the `#[ignore]` in the same change that makes `synth_now()`
-/// (`zeroship-migrate-sqlite/src/dml.rs:839-841`) and `current_timestamp_expr()`
-/// (`zeroship-schema/src/query.rs:418-420`) emit one spelling. See task #134.
+/// Both emitters now spell it one way - `synth_now()`
+/// (`zeroship-migrate-sqlite/src/dml.rs`) and `SQLITE_NOW_EXPR`
+/// (`zeroship-schema/src/query.rs`). Reverting either one alone turns this red
+/// again, which is why the test drives both.
 #[test]
-#[ignore = "#134: RED by design - the engine writes 'YYYY-MM-DD HH:MM:SS' and the runtime writes \
-            'YYYY-MM-DDTHH:MM:SS.sssZ' into one column, so bytewise ORDER BY inverts same-day rows. \
-            Un-ignore with the fix that unifies both emitters."]
 fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
-    use zeroship_plugin_db::query::{SqlDialect, build_insert_with_dialect};
+    use zeroship_plugin_db::query::{
+        FkEmission, SqlDialect, build_create_table_with_fks_for_dialect, build_insert_with_dialect,
+    };
 
     run(async {
         let app = "t134_spelling";
@@ -11230,53 +11230,53 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
         let (backend, _dir) = fresh_backend();
         backend.attach_app_file(app).await.expect("attach app file");
 
-        // The shape the engine emits for a creator timestamp column with a
-        // `now()` default.
-        backend
-            .pool_exec(
-                &format!(
-                    "CREATE TABLE \"{app}\".\"{coll}\" (\
-                       id TEXT PRIMARY KEY, \
-                       occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
-                ),
-                &[],
-            )
-            .await
-            .expect("create the engine-shaped table");
+        // Build the DDL through the EMITTER, not by hand. An earlier draft of
+        // this test wrote `DEFAULT CURRENT_TIMESTAMP` as a literal, which meant
+        // it could never observe a change to the emitter it claimed to test -
+        // the comment asserted a mechanism the code did not drive.
+        let schema = serde_json::json!({ "occurred_at": { "type": "date" } });
+        let ddl = build_create_table_with_fks_for_dialect(
+            app,
+            coll,
+            &schema,
+            &FkEmission::Inline,
+            SqlDialect::Sqlite,
+        )
+        .expect("build DDL");
+        for stmt in ddl.split(";\n") {
+            let trimmed = stmt.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
+        }
 
-        // Row A: let the DEFAULT write it. Space-separated, stamped "now".
+        // The DDL default itself must already carry the ISO-T spelling. This
+        // catches a regression in the emitter without needing a row at all.
+        assert!(
+            ddl.contains("strftime('%Y-%m-%dT%H:%M:%fZ','now')"),
+            "the emitted system-field default must be the ISO-T spelling, got: {ddl}"
+        );
+
+        // Row A: id only, so `created_at` is written BY THE EMITTED DEFAULT.
         backend
             .pool_exec(
                 &format!("INSERT INTO \"{app}\".\"{coll}\" (id) VALUES ('a_default')"),
                 &[],
             )
             .await
-            .expect("insert row A via the column default");
+            .expect("insert row A via the emitted column default");
 
         let client = backend
             .acquire_dedicated_client(app)
             .await
             .expect("acquire client");
 
-        // Take "now" from the same clock the DEFAULT used, so row B is provably
-        // earlier without depending on the host wall clock.
-        let now_rows = client
-            .query("SELECT strftime('%s','now')", &[])
-            .await
-            .expect("read the database clock");
-        let now_secs: i64 = now_rows[0][0]
-            .as_deref()
-            .expect("strftime never returns null")
-            .parse()
-            .expect("epoch seconds parse");
-        let one_hour_earlier_ms = (now_secs - 3600) * 1000;
-
-        // Row B: through the RUNTIME's builder, which applies the Unix-ms
-        // conversion for a declared timestamp column.
-        let schema = serde_json::json!({ "occurred_at": { "type": "date" } });
+        // Row B: through the RUNTIME's builder, which converts a Unix-ms bind
+        // for a declared timestamp column.
         let doc = serde_json::json!({
             "id": "b_bind",
-            "occurred_at": one_hour_earlier_ms,
+            "occurred_at": 1_756_700_000_000_i64,
         });
         let bq = build_insert_with_dialect(app, coll, &schema, &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect");
@@ -11294,31 +11294,42 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
             .await
             .expect("insert row B through the runtime builder");
 
-        // Diagnostic: show the two spellings that actually landed.
-        let stored = client
+        let a_stamp = client
             .query(
-                &format!("SELECT id, occurred_at FROM \"{app}\".\"{coll}\" ORDER BY id"),
+                &format!(
+                    "SELECT created_at FROM \"{app}\".\"{coll}\" WHERE id = 'a_default'"
+                ),
                 &[],
             )
             .await
-            .expect("read both stamps");
-        let a_stamp = stored[0][1].clone().unwrap_or_default();
-        let b_stamp = stored[1][1].clone().unwrap_or_default();
-
-        let rows = client
+            .expect("read the emitter-defaulted stamp")[0][0]
+            .clone()
+            .expect("created_at is NOT NULL");
+        let b_stamp = client
             .query(
-                &format!("SELECT id FROM \"{app}\".\"{coll}\" ORDER BY occurred_at ASC"),
+                &format!("SELECT occurred_at FROM \"{app}\".\"{coll}\" WHERE id = 'b_bind'"),
                 &[],
             )
             .await
-            .expect("order by the timestamp column");
+            .expect("read the bind-written stamp")[0][0]
+            .clone()
+            .expect("occurred_at was written");
 
+        // The whole bug in one comparison: the DDL default and the runtime bind
+        // must agree on the date/time separator. They are compared BYTEWISE, and
+        // ' ' is 0x20 while 'T' is 0x54, so a disagreement inverts same-day
+        // ordering wherever both spellings reach one column.
+        let a_sep = a_stamp.as_bytes()[10] as char;
+        let b_sep = b_stamp.as_bytes()[10] as char;
         assert_eq!(
-            rows[0][0].as_deref(),
-            Some("b_bind"),
-            "row B is stamped an hour EARLIER than row A, so it must sort first. \
-             Got A={a_stamp:?} B={b_stamp:?} - if those differ at index 10 (' ' vs 'T') \
-             the two emitters still disagree and the comparison is bytewise"
+            a_sep, b_sep,
+            "the two emitters disagree on the separator: default wrote {a_stamp:?} \
+             (sep {a_sep:?}), runtime bind wrote {b_stamp:?} (sep {b_sep:?})"
+        );
+        assert_eq!(
+            a_sep, 'T',
+            "both must settle on the ISO-T spelling the data plane already binds; \
+             got {a_stamp:?}"
         );
     });
 }

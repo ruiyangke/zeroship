@@ -837,7 +837,18 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     fn synth_now(&self) -> String {
-        "CURRENT_TIMESTAMP".to_string()
+        // NOT `CURRENT_TIMESTAMP`, which SQLite renders space-separated
+        // ("YYYY-MM-DD HH:MM:SS"). The data plane writes the ISO-T spelling for
+        // every Unix-ms bind (`zeroship-schema/src/query.rs:3085`), and these
+        // columns are compared BYTEWISE - ' ' is 0x20, 'T' is 0x54 - so two
+        // spellings in one column invert same-day ordering.
+        //
+        // The parentheses are load-bearing in BOTH directions, and measured:
+        // SQLite REFUSES a bare function in a DEFAULT clause ("near \"(\":
+        // syntax error" without them), and accepts the parenthesized form in a
+        // SET clause, so one spelling serves `DEFAULT (...)` at
+        // `zeroship-migrate-backend/src/ddl.rs:576` and `col = (...)` alike.
+        "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))".to_string()
     }
 
     fn uuid_v4(&self) -> String {

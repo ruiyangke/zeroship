@@ -306,6 +306,20 @@ impl SchemaRenderer for PostgresSchemaRenderer {
     }
 }
 
+/// SQLite's "now", spelled to match what the data plane binds.
+///
+/// NOT `CURRENT_TIMESTAMP`: that renders "YYYY-MM-DD HH:MM:SS", space-separated,
+/// while every Unix-ms bind goes through `strftime('%Y-%m-%dT%H:%M:%fZ', ...)`
+/// (see [`RAW_COLUMN_PREFIX`]'s neighbourhood, the timestamp arm around line
+/// 3085). The three system timestamp columns carry no `COLLATE`, so comparison
+/// is bytewise and ' ' (0x20) sorts before 'T' (0x54) - two spellings in one
+/// column invert same-day ordering.
+///
+/// The parentheses are load-bearing in both directions, and measured: SQLite
+/// REFUSES a bare function in a `DEFAULT` clause and accepts the parenthesized
+/// form in a `SET` clause, so one spelling serves both call sites.
+const SQLITE_NOW_EXPR: &str = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
+
 impl SchemaRenderer for SqliteSchemaRenderer {
     fn dialect(&self) -> SqlDialect {
         SqlDialect::Sqlite
@@ -320,7 +334,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
     }
 
     fn system_field_columns(&self) -> Vec<String> {
-        let (ts_type, ts_default) = ("TEXT", "CURRENT_TIMESTAMP");
+        let (ts_type, ts_default) = ("TEXT", SQLITE_NOW_EXPR);
         vec![
             "id TEXT COLLATE BINARY PRIMARY KEY".to_string(),
             format!("created_at {ts_type} NOT NULL DEFAULT {ts_default}"),
@@ -416,7 +430,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
     }
 
     fn current_timestamp_expr(&self) -> &'static str {
-        "CURRENT_TIMESTAMP"
+        SQLITE_NOW_EXPR
     }
 
     fn column_comment_statements(
@@ -8477,8 +8491,8 @@ mod tests {
             q.sql
         );
         assert!(
-            q.sql.contains(r#""updated_at" = CURRENT_TIMESTAMP"#),
-            "SQLite upsert must stamp CURRENT_TIMESTAMP when updated_at omitted: {}",
+            q.sql.contains(r#""updated_at" = (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"#),
+            "SQLite upsert must stamp the ISO-T now expression when updated_at omitted: {}",
             q.sql
         );
     }
@@ -8994,8 +9008,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            q.sql.contains(r#""updated_at" = CURRENT_TIMESTAMP"#),
-            "SQLite dialect must emit CURRENT_TIMESTAMP: {}",
+            q.sql.contains(r#""updated_at" = (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"#),
+            "SQLite dialect must emit the ISO-T now expression: {}",
             q.sql,
         );
         assert!(
@@ -9278,8 +9292,8 @@ mod tests {
         )
         .unwrap();
         assert!(
-            q.sql.contains(r#""updated_at" = CURRENT_TIMESTAMP"#),
-            "SQLite-arm direct callers get CURRENT_TIMESTAMP: {}",
+            q.sql.contains(r#""updated_at" = (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"#),
+            "SQLite-arm direct callers get the ISO-T now expression: {}",
             q.sql,
         );
     }
@@ -11540,7 +11554,7 @@ mod tests {
         );
     }
 
-    /// SQLite: `created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP`.
+    /// SQLite: `created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))`.
     #[test]
     fn create_table_emits_created_at_default_current_timestamp_sqlite() {
         let schema = serde_json::json!({});
@@ -11553,12 +11567,12 @@ mod tests {
         )
         .expect("build ok");
         assert!(
-            sql.contains("created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "SQLite created_at must be TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP: {sql}"
+            sql.contains("created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"),
+            "SQLite created_at must be TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')): {sql}"
         );
         assert!(
-            sql.contains("updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "SQLite updated_at must be TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP: {sql}"
+            sql.contains("updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"),
+            "SQLite updated_at must be TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')): {sql}"
         );
         // SQLite arm must NEVER emit PG-specific tokens.
         assert!(
@@ -13410,11 +13424,11 @@ mod tests {
         )
         .unwrap();
         assert!(
-            q.sql.contains("\"deleted_at\" = CURRENT_TIMESTAMP"),
-            "SQLite must use CURRENT_TIMESTAMP: {}",
+            q.sql.contains("\"deleted_at\" = (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"),
+            "SQLite must use the ISO-T now expression: {}",
             q.sql
         );
-        assert!(q.sql.contains("\"updated_at\" = CURRENT_TIMESTAMP"));
+        assert!(q.sql.contains("\"updated_at\" = (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"));
     }
 
     #[test]
