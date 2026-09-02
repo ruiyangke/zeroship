@@ -22,6 +22,20 @@ pub(crate) const MAX_CANCEL_KEY_LEN: usize = 256;
 pub(crate) struct CancelKey(Bytes);
 
 impl CancelKey {
+    /// The length check below is SECOND-LINE defence, and coverage reports it
+    /// as never executed for that reason rather than because it is untested.
+    ///
+    /// On the wire the codec refuses a `BackendKeyData` frame whose declared
+    /// length is outside 12..=264 (`codec.rs`), and the key is that body less
+    /// eight bytes - exactly 4..=256 - so a malformed key never reaches here.
+    /// It is not dead code: with the codec check removed this one refuses, and
+    /// `a_cancel_key_outside_the_allowed_length_is_refused` accepts EITHER
+    /// wording. Measured 2026-09-01 - disabling either guard alone leaves that
+    /// test green, disabling both fails it, which is what a disjunctive
+    /// assertion over redundant guards looks like.
+    ///
+    /// So do not "clean up" this bound as unreachable; it is the backstop for
+    /// callers that do not come through the codec.
     pub(crate) fn new(bytes: Bytes) -> Result<Self, io::Error> {
         if !(MIN_CANCEL_KEY_LEN..=MAX_CANCEL_KEY_LEN).contains(&bytes.len()) {
             return Err(io::Error::new(
