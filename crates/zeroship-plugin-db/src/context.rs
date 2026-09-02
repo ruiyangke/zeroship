@@ -44,6 +44,72 @@ use zeroship_data_core::error::DbError;
 use crate::service::DbResourceKey;
 use zeroship_core::change_event::ChangeEvent;
 
+/// Everything true of one app's open transaction.
+///
+/// Created by `try_claim_tx` and dropped by `release_tx_claim`, which is the
+/// bracket the old `tx_claims` set stood for. Between those two points the
+/// reducer is admitted, a session is installed and taken and returned, a
+/// canceller is recorded, savepoints mark the emit queue, and the queue is
+/// drained or discarded - all of it keyed by one `app_id`, all of it ending
+/// together.
+///
+/// Every field is `Option` or a collection with a meaningful empty state,
+/// because a lane exists before it has any of them: `try_claim_tx` wins the
+/// race first and `BEGIN` runs after.
+#[derive(Default)]
+pub(crate) struct TxLane {
+    /// The SC-1 state machine. `None` between the claim and `admit_transaction`.
+    reducer: Option<crate::transaction::reducer::TxReducer>,
+
+    /// The pinned session, or `None` while a `TxClientSlotGuard` holds it out
+    /// of the lane across an await. "In transaction" is the lane existing, not
+    /// this being `Some`.
+    session: Option<TxConnection>,
+
+    /// How to reach the session out-of-band. Captured at install, because the
+    /// one moment forced cleanup needs it is the one moment it cannot borrow
+    /// the session.
+    canceller: Option<crate::transaction::cancel::TxCanceller>,
+
+    /// Parked on this lane ending, so a second top-level `transaction()` for
+    /// the same app waits instead of racing.
+    claim_waiters: Vec<std::task::Waker>,
+
+    /// Parked on [`Self::session`] refilling. Forced cleanup waits here for a
+    /// cancelled statement's holder to give the session back.
+    slot_waiters: Vec<std::task::Waker>,
+
+    /// One watermark per open savepoint: the emit-queue length when the frame
+    /// opened, so `ROLLBACK TO` truncates to it.
+    emit_marks: Vec<usize>,
+
+    /// Change events queued by this transaction, fired on COMMIT and discarded
+    /// on ROLLBACK. Only fills inside a transaction - the autocommit path emits
+    /// directly.
+    pending_emits: Vec<ChangeEvent>,
+}
+
+/// **A lane cannot outlive its session, and the disposition is destroy.**
+///
+/// Removing a lane drops whatever is still parked in it, and for PostgreSQL a
+/// plain drop is the WRONG disposition: `OwnedPooledClient::drop` returns the
+/// lease to the pool, which would publish a connection still inside its
+/// transaction block to the next borrower - on a worker thread that multiplexes
+/// co-resident apps, potentially a different tenant's.
+///
+/// Every settle path disposes of the session before the lane is released, so in
+/// practice this fires only on the paths that do not: a teardown, or a lane torn
+/// down out from under a holder. Making it structural rather than a rule every
+/// caller must remember is the point - see [`destroy_tx_connection`] for what
+/// "destroy" costs and why a drop does not achieve it.
+impl Drop for TxLane {
+    fn drop(&mut self) {
+        if let Some(session) = self.session.take() {
+            destroy_tx_connection(session);
+        }
+    }
+}
+
 /// Result of trying to claim the per-thread backend initialisation slot.
 pub(crate) enum BackendInitState {
     /// A backend is already installed; no work needed.
@@ -220,167 +286,63 @@ pub struct ThreadDbContext {
     /// different values.
     cdc_worker_id: Option<String>,
 
-    /// Active transaction clients, **keyed by owning `app_id`**.
+    /// Every app's open transaction, one entry each.
     ///
-    /// SEC-1: a worker OS thread multiplexes up to ~200 isolates (one
-    /// per app), and a creator's `env.db.transaction(async () => await
-    /// fetch(slow))` parks its tx client here across the `await`. If
-    /// this were a single per-thread slot, a co-resident app B's plain
-    /// `env.db.*` would run B's SQL on A's pinned connection — inside
-    /// A's transaction, snapshot, and per-app PG role. Keying by
-    /// `app_id` makes A's parked tx invisible and untouchable to B, and
-    /// lets A and B each hold their own concurrent tx without clobbering
-    /// (B's BEGIN does not abort A's).
+    /// **The entry IS the claim.** This map replaced nine parallel
+    /// `HashMap<String, _>` on 2026-09-02 - the session, the reducer, the
+    /// canceller, the withdrawal tombstone, two waiter lists, the savepoint
+    /// emit marks, the pending-emit queue, and a `tx_claims: HashSet<String>`
+    /// that existed only to say "one of these is in flight". They were created
+    /// together, mutated together and destroyed together, so they were one
+    /// entity written nine ways.
     ///
-    /// A given app has at most one entry — but that is enforced by
-    /// [`Self::tx_claims`], NOT by V8 being single-threaded. An earlier
-    /// version of this comment claimed the latter; it is false and it is
-    /// why two overlapping `transaction()` calls were able to reach
-    /// [`Self::install_tx_client`] together. Single-threaded means one
-    /// executing frame at a time, not one in-flight transaction.
+    /// What that buys, beyond the crate boundary it unblocks
+    /// (`docs/proposals/2026-09-02-thread-context-ownership.md`):
     ///
-    /// Postgres stores an owned pooled lease ([`OwnedPooledClient`]) rather than
-    /// `compio_postgres::Transaction<'_>` because the latter borrows the
-    /// former and cannot live in thread-local state. SQLite stores a
-    /// [`SqliteSessionHandle`] pointing at the single writer actor; the
-    /// actor outlives the handle, so rollback on reject must be explicit
-    /// rather than relying on handle drop.
-    tx_conns: HashMap<String, TxConnection>,
+    /// * "One top-level BEGIN per app" is now `HashMap::entry` - occupied or
+    ///   vacant - rather than an invariant two containers had to agree on. The
+    ///   window the old claim existed to cover, between taking it and filling
+    ///   the connection slot, is `TxLane { session: None, .. }`: representable.
+    ///   A session with no claim, which was a bug, is not.
+    /// * [`Self::retire_transaction`] was a hand-written destructor across
+    ///   three maps whose doc warned that "leaving the watermarks would let the
+    ///   next transaction's first savepoint pop a stale mark and truncate that
+    ///   transaction's buffer to an unrelated length". Dropping one struct
+    ///   cannot half-happen.
+    ///
+    /// SEC-1 is unchanged and still the reason for the key: a worker OS thread
+    /// multiplexes up to ~200 isolates, and a creator's
+    /// `env.db.transaction(async () => await fetch(slow))` parks its session
+    /// here across the `await`. Keying by `app_id` makes app A's lane invisible
+    /// and untouchable to co-resident app B, which would otherwise run B's SQL
+    /// inside A's transaction, snapshot and per-app role.
+    lanes: HashMap<String, TxLane>,
 
-    /// Apps that currently OWN the right to a top-level transaction,
-    /// **keyed by owning `app_id`**.
+    /// Apps whose transaction session was withdrawn: anything returning to the
+    /// slot is destroyed rather than parked.
     ///
-    /// Distinct from [`Self::tx_conns`], and the distinction is the point.
-    /// `tx_conns` is populated only once `BEGIN` has come back, so between
-    /// `transaction()` being called and its `BEGIN` completing the slot
-    /// reads EMPTY. Two `db.transaction()` calls in one JS turn both
-    /// landed in that window, both took the top-level path, and the second
-    /// `install_tx_client` evicted the first app's live connection
-    /// (measured on Postgres 2026-08-10: two `BEGIN`s, one dropped
-    /// mid-transaction client, one `COMMIT` covering both bodies).
+    /// **Thread-level, NOT per-lane, and the reason is the whole point of a
+    /// tombstone: it has to outlive the thing it marks.** SC-1 withdraws a
+    /// session and retires its lane in the same settle, but the session itself
+    /// can be out of the slot in another future's hands, and that future's
+    /// `Drop` returns it afterwards - to a lane that no longer exists. A flag
+    /// inside [`TxLane`] would die with the lane and let a session the protocol
+    /// condemned reach the pool, and from there the next borrower.
     ///
-    /// The claim is taken BEFORE the `BEGIN` runs and held until the
-    /// matching `COMMIT`/`ROLLBACK` has settled, so it covers the whole
-    /// lifetime rather than the connection's. A second top-level
-    /// transaction for the same app parks on [`Self::tx_waiters`] instead
-    /// of racing.
-    tx_claims: HashSet<String>,
-
-    /// Wakers parked on [`Self::tx_claims`], **keyed by owning `app_id`**.
-    ///
-    /// SEC-1: keyed by app for the same reason every other map here is —
-    /// app B releasing its transaction must not wake, or fail to wake,
-    /// app A's waiters. Woken en masse rather than one at a time: a waker
-    /// can be registered more than once across polls, so popping a single
-    /// entry risks waking a stale duplicate and leaving a live waiter
-    /// asleep forever. Each woken future re-checks the claim and re-parks
-    /// if it lost.
-    tx_waiters: HashMap<String, Vec<std::task::Waker>>,
-
-    /// The SC-1 transaction state machine for each app with an admitted
-    /// transaction, **keyed by owning `app_id`**.
-    ///
-    /// This replaced a `savepoint_depths: HashMap<String, u32>` counter whose
-    /// value was the `N` in a depth-derived savepoint name `zs_sp_<N>`. That
-    /// scheme reuses a name after the depth decrements, and PostgreSQL resolves
-    /// a savepoint name to the **most recently established** one while
-    /// `ROLLBACK TO SAVEPOINT` deliberately leaves the savepoint defined - so a
-    /// leftover savepoint shadowed an enclosing frame of the same name and sent
-    /// the enclosing rollback to the wrong scope. The reducer's
-    /// [`crate::transaction::reducer::frames::FrameStack`] mints names from a
-    /// monotonic sequence that is never reset and never reused, and it is the
-    /// same object that enforces
-    /// [`crate::transaction::MAX_SAVEPOINT_DEPTH`] on simultaneous opens.
-    ///
-    /// SEC-1: keyed by app for the same reason every other map here is - one
-    /// app's frame bookkeeping must be invisible and untouchable to another's.
-    transactions: HashMap<String, crate::transaction::reducer::TxReducer>,
+    /// Cleared by [`Self::admit_transaction`], never by retirement: the
+    /// tombstone belongs to the withdrawn session, not to the app.
+    withdrawn_tx_sessions: HashSet<String>,
 
     /// The backend generation stamped on the next installed transaction
     /// session, for SC-1's guard order step 4.
     ///
-    /// Monotonic for the life of the thread and never reset: a completion
-    /// naming a generation the current session does not carry is stale, and a
-    /// counter that restarted would let a stale completion authenticate against
-    /// a later session by arithmetic coincidence.
+    /// Thread-level, NOT per-lane, and that is why it did not move into
+    /// [`TxLane`]: monotonic for the life of the thread and never reset. A
+    /// completion naming a generation the current session does not carry is
+    /// stale, and a counter that restarted per lane would let a stale
+    /// completion authenticate against a later session by arithmetic
+    /// coincidence.
     backend_generation: u64,
-
-    /// Apps whose transaction session has been WITHDRAWN, **keyed by owning
-    /// `app_id`**.
-    ///
-    /// SC-1 [`Action::WithdrawSession`](crate::transaction::reducer::Action::WithdrawSession):
-    /// the physical connection is destroyed rather than returned, so no later
-    /// user can inherit it. A tombstone is needed as well as the destruction
-    /// itself because a withdrawal can land while another future holds the
-    /// session out of the slot behind a [`TxClientSlotGuard`], whose `Drop`
-    /// puts it back: [`Self::put_tx_client_for`] consults this set and destroys
-    /// anything returning under it. Without that, "withdrawn" would hold only
-    /// for the sessions that happened to be in the slot at the time.
-    withdrawn_tx_sessions: HashSet<String>,
-
-    /// The out-of-band canceller for each app's live transaction session,
-    /// **keyed by owning `app_id`**.
-    ///
-    /// Captured when the session is installed, because the moment it is needed
-    /// is the moment the session is NOT here: a forced cleanup usually arrives
-    /// while a slow statement holds the client out of [`Self::tx_conns`], and
-    /// PostgreSQL's `CancelRequest` needs a second connection rather than that
-    /// one. See [`crate::transaction::cancel`].
-    ///
-    /// Its safety does not rest on this map's lifetime. A `CancelToken` from a
-    /// pooled borrow carries that lease, and `Pool::return_client` revokes it,
-    /// so an entry that outlived its transaction refuses rather than cancelling
-    /// the next borrower's query.
-    tx_cancellers: HashMap<String, crate::transaction::cancel::TxCanceller>,
-
-    /// Wakers parked on a transaction session RETURNING to its slot,
-    /// **keyed by owning `app_id`**.
-    ///
-    /// Distinct from [`Self::tx_waiters`], which waits for the whole
-    /// *transaction* to end. This one waits for one take/put cycle: forced
-    /// cleanup that cancelled a running statement has to wait for that
-    /// statement's holder to give the session back before it can roll it back,
-    /// and polling for it would put a sleep on the cleanup path.
-    ///
-    /// Woken by [`Self::put_tx_client_for`] (the session came back) and by
-    /// [`Self::retire_transaction`] (it never will - the waiter's transaction
-    /// is over, and it must abandon rather than sit out its grace).
-    tx_slot_waiters: HashMap<String, Vec<std::task::Waker>>,
-
-    /// Per-app stack of `pending_emits` watermarks, one entry per open
-    /// savepoint frame: the length of that app's queued-event buffer at
-    /// the moment the savepoint opened.
-    ///
-    /// `ROLLBACK TO SAVEPOINT` truncates the buffer back to its frame's
-    /// watermark, so events for writes the database just discarded are
-    /// discarded with them. Without this the buffer was flat and
-    /// app-keyed, the nested settle arm never touched it, and the
-    /// top-level `COMMIT` drained *everything* - publishing a change
-    /// event for a row that had been rolled back and does not exist.
-    ///
-    /// `RELEASE SAVEPOINT` pops the watermark without truncating: those
-    /// events belong to the enclosing frame now, exactly as the rows do.
-    savepoint_emit_marks: HashMap<String, Vec<usize>>,
-
-    /// Broker events queued during an active transaction, **keyed by
-    /// owning `app_id`**.
-    ///
-    /// While an app has a tx parked in [`Self::tx_conns`], every
-    /// successful CRUD mutation pushes its `ChangeEvent` here (under the
-    /// event's own `app_id`) instead of calling
-    /// [`crate::broker::emit_local`] directly. The transaction
-    /// settle path (the native `Db.transaction(fn)` orchestrator) drains
-    /// the owning app's queue and either fires every event through
-    /// `emit_local` on COMMIT or clears it on ROLLBACK. This closes the
-    /// "emit-before-commit" dual-write window where a subscriber could
-    /// `find()` rows that don't yet exist on disk (or that a ROLLBACK is
-    /// about to undo).
-    ///
-    /// SEC-1: keying by `app_id` keeps app B's COMMIT from firing app
-    /// A's pre-commit events early (and B's ROLLBACK from silently
-    /// dropping A's). A missing entry means no events are queued for
-    /// that app.
-    pending_emits: HashMap<String, Vec<ChangeEvent>>,
 
     /// This thread's slice of THE schema authority: the runtime descriptor.
     ///
@@ -513,16 +475,9 @@ impl ThreadDbContext {
             pool: None,
             db_url: None,
             cdc_worker_id: None,
-            tx_conns: HashMap::new(),
-            tx_claims: HashSet::new(),
-            tx_waiters: HashMap::new(),
-            transactions: HashMap::new(),
-            backend_generation: 0,
+            lanes: HashMap::new(),
             withdrawn_tx_sessions: HashSet::new(),
-            tx_cancellers: HashMap::new(),
-            tx_slot_waiters: HashMap::new(),
-            savepoint_emit_marks: HashMap::new(),
-            pending_emits: HashMap::new(),
+            backend_generation: 0,
             schemas: HashMap::new(),
             resource_key: DbResourceKey::UNBOUND,
             backend_selection: None,
@@ -873,43 +828,63 @@ impl ThreadDbContext {
     /// a co-resident app falls through to its own autocommit path under
     /// its own role rather than executing inside the owner's tx.
     pub(crate) fn has_tx_for(&self, app_id: &str) -> bool {
-        self.tx_conns.contains_key(app_id)
+        self.lanes.get(app_id).is_some_and(|l| l.session.is_some())
     }
 
     /// Take `app_id`'s top-level-transaction claim if it is free.
     /// `true` means this caller now owns it and MUST release it via
     /// [`Self::release_tx_claim`] when its transaction settles.
     ///
-    /// Check-and-set in one `&mut self` borrow, which is what makes it
-    /// atomic: the isolate is single-threaded, so no other op can run
-    /// between the read and the write.
+    /// **Claiming IS opening the lane.** The check and the set are one
+    /// `HashMap::entry`, so the window that used to exist between them cannot:
+    /// a second `transaction()` for the same app finds the entry occupied and
+    /// parks, rather than racing to fill a slot both read as free.
     pub(crate) fn try_claim_tx(&mut self, app_id: &str) -> bool {
-        self.tx_claims.insert(app_id.to_string())
+        match self.lanes.entry(app_id.to_string()) {
+            std::collections::hash_map::Entry::Occupied(_) => false,
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                slot.insert(TxLane::default());
+                true
+            }
+        }
     }
 
     /// `true` if some top-level transaction for `app_id` is in flight —
     /// including one whose `BEGIN` has not landed yet, which is the
     /// window [`Self::has_tx_for`] cannot see.
     pub(crate) fn tx_claimed_by(&self, app_id: &str) -> bool {
-        self.tx_claims.contains(app_id)
+        self.lanes.contains_key(app_id)
     }
 
-    /// Release `app_id`'s claim and wake everything parked on it.
+    /// Close `app_id`'s lane and wake everything parked on it.
+    ///
+    /// The lane is REMOVED, which is the release: every field goes with it, so
+    /// no residue can outlive the transaction that owned it. The waiters are
+    /// taken out first and woken after, because they are about to re-claim.
+    ///
+    /// A session still in the lane at this point is DESTROYED by
+    /// [`TxLane::drop`], never returned to the pool - see that impl for why the
+    /// distinction is a security one rather than a tidiness one.
     pub(crate) fn release_tx_claim(&mut self, app_id: &str) {
-        self.tx_claims.remove(app_id);
-        if let Some(waiters) = self.tx_waiters.remove(app_id) {
-            for waker in waiters {
-                waker.wake();
-            }
+        let Some(mut lane) = self.lanes.remove(app_id) else {
+            return;
+        };
+        for waker in std::mem::take(&mut lane.claim_waiters) {
+            waker.wake();
         }
     }
 
-    /// Park a waker on `app_id`'s claim.
+    /// Park a waker on `app_id`'s lane closing.
+    ///
+    /// A no-op when there is no lane: the claim is already free, so the caller
+    /// will win it on its next poll rather than sleeping for a wake that has
+    /// no one to send it.
     pub(crate) fn push_tx_waiter(&mut self, app_id: &str, waker: std::task::Waker) {
-        self.tx_waiters
-            .entry(app_id.to_string())
-            .or_default()
-            .push(waker);
+        if let Some(lane) = self.lanes.get_mut(app_id) {
+            lane.claim_waiters.push(waker);
+        } else {
+            waker.wake();
+        }
     }
 
     /// Park a connection in `app_id`'s transaction slot. Returns the
@@ -923,7 +898,11 @@ impl ThreadDbContext {
         app_id: &str,
         client: TxConnection,
     ) -> Option<TxConnection> {
-        self.tx_conns.insert(app_id.to_string(), client)
+        self.lanes
+            .entry(app_id.to_string())
+            .or_default()
+            .session
+            .replace(client)
     }
 
     /// Take `app_id`'s transaction client out of the slot. The caller
@@ -933,7 +912,7 @@ impl ThreadDbContext {
     /// is parked for `app_id` — including when another app owns the only
     /// parked tx (SEC-1: app B cannot drain app A's client).
     pub(crate) fn take_tx_client_for(&mut self, app_id: &str) -> Option<TxConnection> {
-        self.tx_conns.remove(app_id)
+        self.lanes.get_mut(app_id)?.session.take()
     }
 
     /// Return a client previously taken via [`Self::take_tx_client_for`]
@@ -946,10 +925,22 @@ impl ThreadDbContext {
     /// check the restoration would hand a withdrawn session straight back to
     /// the pool.
     pub(crate) fn put_tx_client_for(&mut self, app_id: &str, client: TxConnection) {
+        // **Checked before the lane, because the tombstone outlives it.** A
+        // withdrawal retires its lane moments later, and the holder's `Drop`
+        // can land after that; consulting the lane first would find nothing and
+        // fall through to parking a session the protocol already condemned.
         if self.withdrawn_tx_sessions.contains(app_id) {
             destroy_tx_connection(client);
             return;
         }
+        // No lane and no tombstone means the transaction that owned this
+        // session settled normally and released it. There is nowhere to park it
+        // and nobody to serve it, so it is destroyed rather than resurrecting a
+        // closed lane.
+        let Some(lane) = self.lanes.get_mut(app_id) else {
+            destroy_tx_connection(client);
+            return;
+        };
         // **An occupied slot means this client is not the current session.**
         // The normal take/put cycle leaves the slot empty between the two calls,
         // so an occupant here can only be a LATER transaction's session - which
@@ -958,7 +949,7 @@ impl ThreadDbContext {
         // the guard's `Drop` runs. Without this arm the dead session would
         // overwrite the live one, and the tombstone alone cannot cover it
         // because it is cleared by exactly the admission that creates the race.
-        if self.tx_conns.contains_key(app_id) {
+        if lane.session.is_some() {
             tracing::warn!(
                 app_id,
                 "a transaction session returned to an occupied slot; destroying it \
@@ -967,7 +958,7 @@ impl ThreadDbContext {
             destroy_tx_connection(client);
             return;
         }
-        self.tx_conns.insert(app_id.to_string(), client);
+        lane.session = Some(client);
         // The session is back. Wake anything waiting to reclaim it - forced
         // cleanup that cancelled the statement this guard was running is
         // parked on exactly this moment.
@@ -982,7 +973,11 @@ impl ThreadDbContext {
 
     /// Wake everything parked on `app_id`'s transaction slot.
     fn wake_tx_slot_waiters(&mut self, app_id: &str) {
-        if let Some(waiters) = self.tx_slot_waiters.remove(app_id) {
+        if let Some(waiters) = self
+            .lanes
+            .get_mut(app_id)
+            .map(|lane| std::mem::take(&mut lane.slot_waiters))
+        {
             for waker in waiters {
                 waker.wake();
             }
@@ -996,11 +991,18 @@ impl ThreadDbContext {
     /// once per wake; without this the list would grow for the life of the
     /// wait.
     pub(crate) fn push_tx_slot_waiter(&mut self, app_id: &str, waker: &std::task::Waker) {
-        let waiters = self.tx_slot_waiters.entry(app_id.to_string()).or_default();
-        if waiters.iter().any(|parked| parked.will_wake(waker)) {
+        // No lane means no session is ever coming back to this slot, so the
+        // caller is woken to re-check rather than parked on a wake that has no
+        // sender. `retire_transaction` served that role before the lane owned
+        // its own waiters.
+        let Some(lane) = self.lanes.get_mut(app_id) else {
+            waker.wake_by_ref();
+            return;
+        };
+        if lane.slot_waiters.iter().any(|p| p.will_wake(waker)) {
             return;
         }
-        waiters.push(waker.clone());
+        lane.slot_waiters.push(waker.clone());
     }
 
     /// Record the canceller for the session just installed in `app_id`'s slot.
@@ -1009,7 +1011,7 @@ impl ThreadDbContext {
         app_id: &str,
         canceller: crate::transaction::cancel::TxCanceller,
     ) {
-        self.tx_cancellers.insert(app_id.to_string(), canceller);
+        self.lanes.entry(app_id.to_string()).or_default().canceller = Some(canceller);
     }
 
     /// Clone out `app_id`'s canceller.
@@ -1020,7 +1022,7 @@ impl ThreadDbContext {
         &self,
         app_id: &str,
     ) -> Option<crate::transaction::cancel::TxCanceller> {
-        self.tx_cancellers.get(app_id).cloned()
+        self.lanes.get(app_id).and_then(|lane| lane.canceller.clone())
     }
 
     /// Drop `app_id`'s canceller.
@@ -1041,7 +1043,7 @@ impl ThreadDbContext {
     /// [`Self::retire_transaction`] also drops it, as a backstop for the paths
     /// that never install a session.
     pub(crate) fn remove_tx_canceller(&mut self, app_id: &str) {
-        self.tx_cancellers.remove(app_id);
+        if let Some(lane) = self.lanes.get_mut(app_id) { lane.canceller = None; }
     }
 
     // ----- SC-1 TRANSACTION REDUCER -----------------------------------
@@ -1062,7 +1064,8 @@ impl ThreadDbContext {
     ) -> Vec<crate::transaction::reducer::Action> {
         let (reducer, actions) =
             crate::transaction::reducer::TxReducer::admit(expected, budgets, now, max_depth);
-        let previous = self.transactions.insert(app_id.to_string(), reducer);
+        let lane = self.lanes.entry(app_id.to_string()).or_default();
+        let previous = lane.reducer.replace(reducer);
         debug_assert!(
             previous.is_none(),
             "admit_transaction: a transaction is already admitted for this app",
@@ -1081,8 +1084,8 @@ impl ThreadDbContext {
         event: crate::transaction::reducer::TxEvent,
         now: std::time::Instant,
     ) -> Option<Vec<crate::transaction::reducer::Action>> {
-        self.transactions
-            .get_mut(app_id)
+        self.lanes
+            .get_mut(app_id).and_then(|lane| lane.reducer.as_mut())
             .map(|reducer| reducer.apply(event, now))
     }
 
@@ -1092,7 +1095,7 @@ impl ThreadDbContext {
         &self,
         app_id: &str,
     ) -> Option<&crate::transaction::reducer::TxReducer> {
-        self.transactions.get(app_id)
+        self.lanes.get(app_id).and_then(|lane| lane.reducer.as_ref())
     }
 
     /// The authority `app_id`'s transaction was admitted under, for the events
@@ -1101,7 +1104,7 @@ impl ThreadDbContext {
         &self,
         app_id: &str,
     ) -> Option<&crate::transaction::reducer::identity::ExpectedAuthority> {
-        self.transactions.get(app_id).map(|r| r.expected())
+        self.lanes.get(app_id).and_then(|lane| lane.reducer.as_ref()).map(|r| r.expected())
     }
 
     /// Drop `app_id`'s settled reducer and the frame watermarks that died with
@@ -1118,9 +1121,11 @@ impl ThreadDbContext {
     /// for is never coming, and it must be woken to discover that rather than
     /// sitting out its whole grace.
     pub(crate) fn retire_transaction(&mut self, app_id: &str) {
-        self.transactions.remove(app_id);
-        self.savepoint_emit_marks.remove(app_id);
-        self.tx_cancellers.remove(app_id);
+        if let Some(lane) = self.lanes.get_mut(app_id) {
+            lane.reducer = None;
+            lane.emit_marks.clear();
+            lane.canceller = None;
+        }
         self.wake_tx_slot_waiters(app_id);
     }
 
@@ -1133,11 +1138,14 @@ impl ThreadDbContext {
     /// SC-1 `Action::WithdrawSession`: mark `app_id`'s session withdrawn and
     /// hand the caller whatever is in the slot to destroy.
     ///
-    /// The tombstone outlives this call deliberately - see
-    /// [`Self::put_tx_client_for`].
+    /// The tombstone outlives this call deliberately, and **outlives the lane**
+    /// - see [`Self::put_tx_client_for`]. It is recorded beside the lanes
+    /// rather than inside one because its whole purpose is to describe a
+    /// session whose lane is gone: set here, cleared by the next
+    /// [`Self::admit_transaction`], never by retirement.
     pub(crate) fn withdraw_tx_session(&mut self, app_id: &str) -> Option<TxConnection> {
         self.withdrawn_tx_sessions.insert(app_id.to_string());
-        self.tx_conns.remove(app_id)
+        self.lanes.get_mut(app_id)?.session.take()
     }
 
     /// Has `app_id`'s transaction session been withdrawn?
@@ -1149,19 +1157,17 @@ impl ThreadDbContext {
 
     /// Record the queued-event watermark for a frame that just opened.
     pub(crate) fn push_frame_emit_mark(&mut self, app_id: &str) {
-        let mark = self.pending_emits.get(app_id).map_or(0, std::vec::Vec::len);
-        self.savepoint_emit_marks
-            .entry(app_id.to_string())
-            .or_default()
-            .push(mark);
+        let lane = self.lanes.entry(app_id.to_string()).or_default();
+        let mark = lane.pending_emits.len();
+        lane.emit_marks.push(mark);
     }
 
     /// Pop a released frame's watermark without truncating: those events belong
     /// to the enclosing frame now, exactly as its rows do.
     pub(crate) fn pop_frame_emit_mark(&mut self, app_id: &str) -> Option<usize> {
-        self.savepoint_emit_marks
+        self.lanes
             .get_mut(app_id)
-            .and_then(std::vec::Vec::pop)
+            .and_then(|lane| lane.emit_marks.pop())
     }
 
     /// Discard the events the current frame queued, truncating back to its
@@ -1181,13 +1187,12 @@ impl ThreadDbContext {
         // discard the ENCLOSING frame's events too, so leave the buffer alone:
         // over-publishing is a bug, but silently dropping a committed row's
         // event is a worse one.
-        let mark = self
-            .savepoint_emit_marks
-            .get(app_id)
-            .and_then(|marks| marks.last().copied());
-        if let (Some(mark), Some(buf)) = (mark, self.pending_emits.get_mut(app_id)) {
-            if mark <= buf.len() {
-                buf.truncate(mark);
+        let Some(lane) = self.lanes.get_mut(app_id) else {
+            return;
+        };
+        if let Some(mark) = lane.emit_marks.last().copied() {
+            if mark <= lane.pending_emits.len() {
+                lane.pending_emits.truncate(mark);
             }
         }
     }
@@ -1198,9 +1203,10 @@ impl ThreadDbContext {
     /// (keyed by the event's own `app_id`; the queue is allocated
     /// lazily on first push within that app's tx).
     pub(crate) fn push_pending_emit(&mut self, ev: ChangeEvent) {
-        self.pending_emits
+        self.lanes
             .entry(ev.app_id.clone())
             .or_default()
+            .pending_emits
             .push(ev);
     }
 
@@ -1209,7 +1215,10 @@ impl ThreadDbContext {
     /// COMMIT. SEC-1: only the committing app's events are returned, so
     /// one app's COMMIT cannot fire another's pre-commit events.
     pub(crate) fn drain_pending_emits_for(&mut self, app_id: &str) -> Vec<ChangeEvent> {
-        self.pending_emits.remove(app_id).unwrap_or_default()
+        self.lanes
+            .get_mut(app_id)
+            .map(|lane| std::mem::take(&mut lane.pending_emits))
+            .unwrap_or_default()
     }
 
     /// Clear `app_id`'s pending-emits queue without firing any events.
@@ -1217,7 +1226,9 @@ impl ThreadDbContext {
     /// `exec_begin` to drop any stale residue from an interrupted prior
     /// run. A different app's queue is untouched (SEC-1).
     pub(crate) fn clear_pending_emits_for(&mut self, app_id: &str) {
-        self.pending_emits.remove(app_id);
+        if let Some(lane) = self.lanes.get_mut(app_id) {
+            lane.pending_emits.clear();
+        }
     }
 }
 
@@ -1332,7 +1343,7 @@ mod tests {
         assert!(!ctx.tx_session_withdrawn("a"));
         // pending_emits starts empty (each app's queue is allocated
         // lazily on first push).
-        assert!(ctx.pending_emits.is_empty());
+        assert!(ctx.lanes.values().all(|lane| lane.pending_emits.is_empty()));
     }
 
     #[test]
@@ -1494,7 +1505,7 @@ mod tests {
         ctx.push_pending_emit(dummy_event("c1"));
         ctx.discard_frame_effects("app_t");
         assert_eq!(
-            ctx.pending_emits.get("app_t").map(std::vec::Vec::len),
+            ctx.lanes.get("app_t").map(|lane| lane.pending_emits.len()),
             Some(1),
             "a missing watermark must not discard the enclosing frame's events"
         );
@@ -1505,7 +1516,7 @@ mod tests {
         ctx.push_frame_emit_mark("app_t");
         ctx.push_pending_emit(dummy_event("c2"));
         ctx.discard_frame_effects("app_t");
-        let kept = ctx.pending_emits.get("app_t").expect("queue");
+        let kept = &ctx.lanes.get("app_t").expect("lane").pending_emits;
         assert_eq!(kept.len(), 1, "truncate to the frame's watermark");
         assert_eq!(
             kept[0].collection, "c1",
@@ -1559,17 +1570,17 @@ mod tests {
     #[test]
     fn pending_emits_start_empty() {
         let ctx = ThreadDbContext::new();
-        assert!(ctx.pending_emits.is_empty());
+        assert!(ctx.lanes.values().all(|lane| lane.pending_emits.is_empty()));
     }
 
     #[test]
     fn push_pending_emit_allocates_slot_lazily() {
         // dummy_event tags app_id "app_t"; the queue keys on that.
         let mut ctx = ThreadDbContext::new();
-        assert!(ctx.pending_emits.is_empty());
+        assert!(ctx.lanes.values().all(|lane| lane.pending_emits.is_empty()));
         ctx.push_pending_emit(dummy_event("c1"));
-        assert!(ctx.pending_emits.contains_key("app_t"));
-        assert_eq!(ctx.pending_emits.get("app_t").unwrap().len(), 1);
+        assert!(ctx.lanes.contains_key("app_t"));
+        assert_eq!(ctx.lanes.get("app_t").unwrap().pending_emits.len(), 1);
     }
 
     #[test]
@@ -1578,7 +1589,7 @@ mod tests {
         ctx.push_pending_emit(dummy_event("c1"));
         ctx.push_pending_emit(dummy_event("c2"));
         ctx.push_pending_emit(dummy_event("c3"));
-        let evs = ctx.pending_emits.get("app_t").unwrap();
+        let evs = &ctx.lanes.get("app_t").unwrap().pending_emits;
         assert_eq!(evs.len(), 3);
         assert_eq!(evs[0].collection, "c1");
         assert_eq!(evs[1].collection, "c2");
@@ -1594,7 +1605,7 @@ mod tests {
         assert_eq!(drained.len(), 2);
         // After drain the app's queue is cleared — subsequent pushes
         // re-allocate.
-        assert!(!ctx.pending_emits.contains_key("app_t"));
+        assert!(ctx.lanes.get("app_t").is_none_or(|lane| lane.pending_emits.is_empty()));
     }
 
     #[test]
@@ -1602,7 +1613,7 @@ mod tests {
         let mut ctx = ThreadDbContext::new();
         let drained = ctx.drain_pending_emits_for("app_t");
         assert!(drained.is_empty());
-        assert!(ctx.pending_emits.is_empty());
+        assert!(ctx.lanes.values().all(|lane| lane.pending_emits.is_empty()));
     }
 
     #[test]
@@ -1611,7 +1622,7 @@ mod tests {
         ctx.push_pending_emit(dummy_event("c1"));
         let _ = ctx.drain_pending_emits_for("app_t");
         ctx.push_pending_emit(dummy_event("c2"));
-        let evs = ctx.pending_emits.get("app_t").unwrap();
+        let evs = &ctx.lanes.get("app_t").unwrap().pending_emits;
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].collection, "c2");
     }
@@ -1622,7 +1633,7 @@ mod tests {
         ctx.push_pending_emit(dummy_event("c1"));
         ctx.push_pending_emit(dummy_event("c2"));
         ctx.clear_pending_emits_for("app_t");
-        assert!(!ctx.pending_emits.contains_key("app_t"));
+        assert!(ctx.lanes.get("app_t").is_none_or(|lane| lane.pending_emits.is_empty()));
         // A subsequent drain returns empty (queue is gone).
         assert!(ctx.drain_pending_emits_for("app_t").is_empty());
     }
@@ -1632,7 +1643,7 @@ mod tests {
         let mut ctx = ThreadDbContext::new();
         ctx.clear_pending_emits_for("app_t");
         ctx.clear_pending_emits_for("app_t");
-        assert!(ctx.pending_emits.is_empty());
+        assert!(ctx.lanes.values().all(|lane| lane.pending_emits.is_empty()));
     }
 
     // ----- SEC-1: per-app scoping of the tx / savepoint / emit slots

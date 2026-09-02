@@ -304,23 +304,37 @@ impl HeldSession {
     }
 }
 
-/// Retire `app_id`'s reducer and release its admission claim, **leaving the
-/// session slot exactly as it is**.
+/// Retire `app_id`'s transaction and hand its parked session to a **successor
+/// lane**, as the next caller's admission would.
 ///
-/// This reproduces a *timing*, in the same spirit as [`HeldSession`]: the two
-/// calls below are the two `Action::ReleaseAdmission` makes, so nothing here is
-/// a second implementation of anything. What it reproduces is a forced cleanup
-/// being retired out from under itself - which production reaches when the
-/// `CancellationSql` deadline fires in its own task while cleanup is still
+/// This reproduces a *timing*, in the same spirit as [`HeldSession`]: the retire
+/// and release below are the two `Action::ReleaseAdmission` makes, so nothing
+/// here is a second implementation of anything. What it reproduces is a forced
+/// cleanup being retired out from under itself - which production reaches when
+/// the `CancellationSql` deadline fires in its own task while cleanup is still
 /// waiting for a cancelled statement to hand the session back.
 ///
-/// It deliberately does NOT touch the slot, which is what distinguishes it from
-/// [`reset`]: the point of the arm that uses it is that a stale cleanup finds a
-/// session in the slot and must leave it alone.
+/// **The successor is the point, and it used to be faked.** A stale cleanup must
+/// find a filled slot it can no longer prove is its own; in production that
+/// session belongs to the NEXT transaction, because a claim is never released
+/// while its own session is parked - `settle_now` emits `WithdrawSession` or
+/// `ReleaseSession` immediately before every `ReleaseAdmission`, and there is no
+/// second emission site. This used to stand the retired transaction's own
+/// session in the slot, which is a state production cannot reach; re-homing it
+/// onto a successor lane models what actually happens and costs the arm nothing,
+/// since what it rules on is a filled slot plus a dead identity.
 pub fn abandon_reducer(app_id: &str) {
     crate::context::with_mut(|c| {
+        let session = c.take_tx_client_for(app_id);
         c.retire_transaction(app_id);
         c.release_tx_claim(app_id);
+        if let Some(session) = session {
+            assert!(
+                c.try_claim_tx(app_id),
+                "the successor must win the claim the release just freed"
+            );
+            c.install_tx_client(app_id, session);
+        }
     });
 }
 

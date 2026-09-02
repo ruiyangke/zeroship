@@ -2337,14 +2337,22 @@ mod sc1_driver {
     /// reducer's `(cancellation token, backend generation)` after the wait and
     /// refuses to act on a slot it can no longer prove is its own.
     ///
-    /// **What this fixture substitutes, and why that is honest.** It restores
-    /// the SAME session rather than provisioning a successor's. A genuine
-    /// successor cannot be reached deterministically: admitting one requires the
-    /// claim, releasing the claim is what wakes this waiter, and the waiter then
-    /// resolves before the successor's `BEGIN` has run. What the arm rules on is
-    /// unchanged by the substitution - a filled slot plus a dead identity - and
-    /// the observable is the one that matters: **the transaction in that slot is
-    /// still open on the server afterwards.**
+    /// **The session in the slot belongs to a SUCCESSOR, which is what
+    /// production reaches.** A claim is never released while its own session is
+    /// parked - `settle_now` emits `WithdrawSession` or `ReleaseSession`
+    /// immediately before every `ReleaseAdmission`, and there is no second
+    /// emission site - so the only way a stale cleanup finds a filled slot is
+    /// that the next caller filled it.
+    ///
+    /// This used to restore the SAME session and say so, on the grounds that a
+    /// genuine successor could not be reached deterministically: admitting one
+    /// by the ordinary route requires the claim, releasing the claim is what
+    /// wakes this waiter, and the waiter resolves before the successor's `BEGIN`
+    /// has run. `probe::abandon_reducer` now re-homes the session onto a
+    /// successor lane directly, which reaches the real state without the race.
+    /// What the arm rules on is unchanged - a filled slot plus a dead identity -
+    /// and so is the observable: **the transaction in that slot is still open on
+    /// the server afterwards.**
     ///
     /// **Mutation that reddens this arm:** delete the post-wait
     /// `identity.is_current(..)` check in `driver::cancel_and_reclaim`. The
