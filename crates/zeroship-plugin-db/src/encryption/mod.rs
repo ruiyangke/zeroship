@@ -71,7 +71,18 @@ pub mod wire;
 
 #[allow(unused_imports)] // consumed by crud/encryption_pass.rs
 pub use aad::canonical_aad;
+// `encrypt_randomised` and `encrypt_deterministic` LEFT THIS LIST on
+// 2026-09-02, under Phase 0.5's `pub(crate) -> pub` audit. Neither had a
+// qualified reader outside this module: `aead::encrypt` is the only caller,
+// and it picks between them from the column's `EncryptionMode`. The re-export
+// was the entire reason they were public, which is the audit's shape exactly -
+// an item public because of where it is listed, not because anything reads it.
+//
+// `AeadKey` stays public with ZERO named external readers, and that is correct
+// rather than an oversight: it is the return type of `keys::KeyStore::resolve`,
+// so callers obtain one by inference without ever writing the name. A
+// reader-count alone would have narrowed it and broken the public signature.
 #[allow(unused_imports)]
-pub use aead::{decrypt, encrypt_deterministic, encrypt_randomised, AeadKey};
+pub use aead::{decrypt, encrypt, AeadKey};
 #[allow(unused_imports)]
 pub use keys::{KeyStore, LocalKeySource, SuppliedRootKeys};

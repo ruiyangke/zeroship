@@ -30,7 +30,7 @@ use zeroship_data_core::error::DbError;
 ///
 /// Only this version is emitted today; the post-system-fields phase
 /// will introduce `0x02` alongside the version-bytes AAD extension.
-pub const WIRE_VERSION_V1: u8 = 0x01;
+pub(crate) const WIRE_VERSION_V1: u8 = 0x01;
 
 /// AES-GCM nonce length (RFC 5116 §5.3). The aes-gcm crate's
 /// `Nonce::from_slice` panics on anything else, so this is a
@@ -50,7 +50,7 @@ const GCM_TAG_LEN: usize = 16;
 /// minimum 16-byte tag — that's an invariant breach inside aes-gcm,
 /// not user input, so the variant choice is internal-error rather
 /// than validation.
-pub fn pack(nonce: &[u8; NONCE_LEN], ct_and_tag: &[u8]) -> Result<Vec<u8>, DbError> {
+pub(crate) fn pack(nonce: &[u8; NONCE_LEN], ct_and_tag: &[u8]) -> Result<Vec<u8>, DbError> {
     if ct_and_tag.len() < GCM_TAG_LEN {
         return Err(DbError::internal(format!(
             "wire::pack: ciphertext+tag too short ({} bytes, tag length is {})",
@@ -69,7 +69,7 @@ pub fn pack(nonce: &[u8; NONCE_LEN], ct_and_tag: &[u8]) -> Result<Vec<u8>, DbErr
 /// blobs shorter than `header + tag` and blobs with an unknown
 /// version flag, both as `encryption_aead_failed` validation errors
 /// (operator-visible at the SDK boundary).
-pub fn unpack(blob: &[u8]) -> Result<(&[u8; NONCE_LEN], &[u8]), DbError> {
+pub(crate) fn unpack(blob: &[u8]) -> Result<(&[u8; NONCE_LEN], &[u8]), DbError> {
     if blob.len() < HEADER_LEN + GCM_TAG_LEN {
         return Err(DbError::validation(
             "encryption_aead_failed",

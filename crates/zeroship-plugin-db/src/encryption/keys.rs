@@ -141,13 +141,16 @@ impl SuppliedRootKeys {
 
     /// Withdraw `key_id`. Returns whether a root was actually removed.
     pub fn remove(&self, key_id: &str) -> bool {
-        self.keys.borrow_mut().remove(&normalise_key_id(key_id)).is_some()
+        self.keys
+            .borrow_mut()
+            .remove(&normalise_key_id(key_id))
+            .is_some()
     }
 
     /// How many times a [`KeyStore`] has asked this source for bytes,
     /// hit or miss. Every [`Self::lookup`] bumps it.
     #[must_use]
-    pub fn consultations(&self) -> u64 {
+    pub(crate) fn consultations(&self) -> u64 {
         self.consultations.get()
     }
 
@@ -267,7 +270,7 @@ impl KeyStore {
     /// therefore the key) must never be touched.
     #[must_use]
     #[cfg(test)]
-    pub fn lookups_count(&self) -> u64 {
+    pub(crate) fn lookups_count(&self) -> u64 {
         self.lookups.get()
     }
 
@@ -305,10 +308,9 @@ impl KeyStore {
         }
         let root = Zeroizing::new(self.sourcing.lookup_root(key_id)?);
         let key = derive_key(&root, app_id)?;
-        self.cache.borrow_mut().insert(
-            (app_id.to_string(), key_id.to_string()),
-            key.clone(),
-        );
+        self.cache
+            .borrow_mut()
+            .insert((app_id.to_string(), key_id.to_string()), key.clone());
         Ok(key)
     }
 }
@@ -357,19 +359,24 @@ fn env_lookup_root(key_id: &str) -> Result<[u8; 32], DbError> {
 /// `code: "column_key_not_configured"`, the same code a missing key does,
 /// because the operator's fix is the same either way.
 pub(crate) fn parse_root_key(source: &str, hex: &str) -> Result<[u8; 32], DbError> {
-    let bytes = Zeroizing::new(hex_decode(hex).map_err(|e| DbError::Configuration {
-        code: "column_key_not_configured",
-        message: format!("{source}: hex decode failed: {e}"),
-        hint: Some("Value must be 64 hex characters (32 bytes). Generate via: openssl rand -hex 32".to_string()),
+    let bytes = Zeroizing::new(hex_decode(hex).map_err(|e| {
+        DbError::Configuration {
+            code: "column_key_not_configured",
+            message: format!("{source}: hex decode failed: {e}"),
+            hint: Some(
+                "Value must be 64 hex characters (32 bytes). Generate via: openssl rand -hex 32"
+                    .to_string(),
+            ),
+        }
     })?);
     if bytes.len() != 32 {
         return Err(DbError::Configuration {
             code: "column_key_not_configured",
-            message: format!(
-                "{source} must decode to 32 bytes, got {}",
-                bytes.len()
+            message: format!("{source} must decode to 32 bytes, got {}", bytes.len()),
+            hint: Some(
+                "Value must be 64 hex characters (32 bytes). Generate via: openssl rand -hex 32"
+                    .to_string(),
             ),
-            hint: Some("Value must be 64 hex characters (32 bytes). Generate via: openssl rand -hex 32".to_string()),
         });
     }
     let mut out = [0u8; 32];
@@ -417,7 +424,6 @@ fn hex_nibble(c: u8) -> Result<u8, String> {
     }
 }
 
-
 // These tests plant no environment. Malformed-input cases call
 // `parse_root_key` directly, and every case that needs a RESOLVABLE key
 // drives a real `KeyStore` over a `SuppliedRootKeys` source, so the
@@ -436,7 +442,10 @@ mod tests {
                 .with_hex(key_id, hex)
                 .expect("fixture root key must parse"),
         );
-        (KeyStore::new(LocalKeySource::supplied(Rc::clone(&keys))), keys)
+        (
+            KeyStore::new(LocalKeySource::supplied(Rc::clone(&keys))),
+            keys,
+        )
     }
 
     /// `derive_key` is deterministic: same `(root, app_id)` always
@@ -490,8 +499,7 @@ mod tests {
     fn missing_env_var_yields_typed_error() {
         // Use a key_id no test sets, so the env var is guaranteed
         // missing.
-        let err = env_lookup_root("missing_test_key_xyz")
-            .expect_err("missing env var must error");
+        let err = env_lookup_root("missing_test_key_xyz").expect_err("missing env var must error");
         match err {
             DbError::Configuration { code, hint, .. } => {
                 assert_eq!(code, "column_key_not_configured");
@@ -664,8 +672,12 @@ mod tests {
         let key_id = "multi_app_test";
         let (store, keys) = store_with_root(key_id, &"1".repeat(64));
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
-        let k1 = rt.block_on(async { store.resolve("app_a", key_id).await }).unwrap();
-        let k2 = rt.block_on(async { store.resolve("app_b", key_id).await }).unwrap();
+        let k1 = rt
+            .block_on(async { store.resolve("app_a", key_id).await })
+            .unwrap();
+        let k2 = rt
+            .block_on(async { store.resolve("app_b", key_id).await })
+            .unwrap();
         assert_ne!(k1.k_enc, k2.k_enc);
         // Two distinct cache keys, so the source was asked twice - the
         // per-app entries did not alias.
@@ -764,8 +776,7 @@ mod tests {
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
 
         // The source holds no roots at all, so this resolve cannot succeed.
-        let err = rt
-            .block_on(async { store.resolve("app_x", "absent_for_counter_test").await });
+        let err = rt.block_on(async { store.resolve("app_x", "absent_for_counter_test").await });
         assert!(err.is_err(), "absent root key must error");
         assert_eq!(
             store.lookups_count(),
