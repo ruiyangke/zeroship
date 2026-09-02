@@ -1179,6 +1179,76 @@ mod tests {
         );
     }
 
+    /// The COPY IN twin of `bind.rs`'s two
+    /// `..._invalidates_cached_statement` tests.
+    ///
+    /// Deleting the call left every lib and suite test green, measured
+    /// 2026-09-02. That is not redundancy: `bind.rs` asserts the same call on
+    /// its own two paths, so the behaviour is both observable and, by this
+    /// crate's own standard, worth asserting. A stale entry surviving here is
+    /// replayed against a statement the server has already dropped.
+    #[compio::test]
+    async fn a_stale_bind_error_invalidates_the_cached_copy_in_statement() {
+        use crate::codec::BackendMessages;
+        use std::num::NonZeroUsize;
+        use std::sync::Arc;
+
+        const SQL: &str = "COPY cached_copy_in FROM STDIN";
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new_with_statement_cache(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+            crate::config::ProtocolVersion::V3_0,
+            crate::client::StatementCacheSettings::new(1, NonZeroUsize::MIN),
+        );
+        let inner = Arc::clone(client.inner());
+        let statement =
+            Statement::new(&inner, "s_stale_copy_in".to_string(), vec![], vec![], false);
+        let statement = inner.cache_statement(SQL, statement, inner.type_cache_generation());
+        assert!(
+            inner.cached_statement(SQL).is_some(),
+            "the fixture failed to cache its statement"
+        );
+
+        let copy = copy_in_inner::<Bytes>(&inner, statement, None);
+        let respond = async {
+            let mut request = requests
+                .next()
+                .await
+                .expect("COPY IN did not enqueue its request");
+            let mut frame = Vec::with_capacity(64);
+            frame.push(b'E');
+            let body = b"SERROR\0C26000\0Mscripted stale statement\0RFetchPreparedStatement\0\0";
+            frame.extend_from_slice(&(u32::try_from(body.len()).unwrap() + 4).to_be_bytes());
+            frame.extend_from_slice(body);
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    BytesMut::from(frame.as_slice()),
+                )))
+                .expect("deliver the stale-statement COPY IN error");
+        };
+
+        let (result, ()) = futures_util::future::join(copy, respond).await;
+        let error = match result {
+            Err(failure) => failure.into_error(),
+            Ok(_) => panic!("a stale cached COPY IN unexpectedly started"),
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("26000"),
+            "the COPY IN failure lost the server's stale-statement diagnosis"
+        );
+        assert!(
+            inner.cached_statement(SQL).is_none(),
+            "the BindComplete-slot error left its stale statement cached"
+        );
+    }
+
     async fn assert_pre_bind_mismatch_suppresses_copy_terminal(
         unnamed_sql: Option<&str>,
         unexpected: Message,
