@@ -45,7 +45,7 @@ use zeroship_runtime_macros::v8_class;
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use zeroship_data_core::binding::{COLD_START_DEPLOY_TOKEN, DbBinding};
-use crate::transaction::transaction_dispatch;
+use crate::v8_classes::transaction::transaction_dispatch;
 use crate::v8_bridge::v8_value_to_serde_json;
 use crate::v8_classes::collection::mint_collection;
 use crate::v8_classes::db_platform::mint_db_platform;
