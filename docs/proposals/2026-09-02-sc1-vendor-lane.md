@@ -199,8 +199,18 @@ of this step.
    order rule survived the move as a rule, not just as a comment.
 4. Introduce `BeginIntent`; move `build_begin_sql` into the PG lane; change
    `StepConfig`.
-5. Fold `apply_per_app_role` into the PG lane's `open`. It is already only
-   called from `open_session`.
+5. **DONE, `65812a5e0`.** `apply_per_app_role` moved to
+   `backend::postgres::apply_per_app_role`. Not folded INTO `open` - it stays a
+   named function, because `open_session` calls it between acquiring the client
+   and sending `BEGIN`, and that order is what the DB-1 guards depend on. It was
+   already the only caller.
+
+   **This was the last thing making `transaction/mod.rs` name
+   `compio_postgres`, so the whole `transaction/` subtree is now clean on the
+   tier signature census** (which fell 4 -> 3 -> 2 across steps 3 and 5). The
+   two remaining rows are elsewhere: `crud/system_fields_pass.rs`
+   (`zeroship_runtime`) and `drop_namespace.rs` (`compio_postgres`, in a
+   test-gated module the census tiers by path).
 6. `cancel.rs` becomes the lane's `canceller()`.
 
 Each step compiles and keeps the suite green on its own. Steps 1-3 remove both
