@@ -628,6 +628,160 @@ fn validate_unmask_projection(
     })
 }
 
+/// The eagerly-evaluated inputs of a `find`, produced by [`plan_find`] and
+/// consumed by [`run_find`].
+///
+/// This type exists because `find` CANNOT be cut the way the nine `plan_*`
+/// functions above were. Those had a synchronous planning prologue that ran to
+/// a `BuiltQuery` before the promise. `find` has no such prologue: its schema
+/// resolution and SQL build sit BEHIND `authorize_query_hint(...).await`, so
+/// they cannot be hoisted ahead of the V8 boundary at all. The engine half is
+/// therefore an `async fn`, and this struct carries what must still be read
+/// eagerly across into it.
+pub(crate) struct FindPlan {
+    limit: Option<i64>,
+    offset: Option<i64>,
+    order_by: Option<Value>,
+    select: Option<Value>,
+    unmask_columns: Vec<String>,
+    unmask_actor: Option<Value>,
+    unmask_rejected_claim: Option<Value>,
+    unmask_reason: Option<String>,
+    include_deleted: bool,
+}
+
+/// The EAGER half of `find`. Everything here must run while the dispatching
+/// handler is still the active one on this thread.
+///
+/// `record_read_set` is the reason this is a separate function rather than the
+/// head of [`run_find`]. It is ambient: `read_set::is_active` reads the
+/// `CURRENT_BUFFER` thread-local (`read_set.rs:368-373`), which is `Some` only
+/// inside a query handler. Moving it into the async body would defer it to
+/// first poll, where the buffer is either gone - silently dropping the entry
+/// the broker needs to narrow events - or belongs to a DIFFERENT query. That is
+/// the same hazard the `dispatch_insert` actor_id read is documented against.
+/// Verified by reading `read_set.rs`, not by a test.
+pub(crate) fn plan_find(
+    binding: &DbBinding,
+    collection: &str,
+    filter: &Value,
+    opts: &Value,
+) -> FindPlan {
+    // Record into the active query's read-set so the broker can
+    // narrow events to this filter. No-op outside `query()` handlers.
+    record_read_set(binding, collection, filter);
+
+    // DB-2: public `find` normalises an omitted limit here before calling the
+    // builder. This does not protect internal builder callers; they must pass
+    // their own explicit bound. Callers paginate past this page via `offset`.
+    let limit = Some(query::effective_query_limit(
+        opts.get("limit").and_then(Value::as_i64),
+    ));
+    // DB-3: strip an app-supplied reserved `auto` system actor — a find with
+    // `{unmask, actor:{kind:"auto"}}` must not impersonate the platform.
+    let unmask_sanitized = crate::crud::unmask::sanitize_app_actor(
+        opts.get("actor").cloned().filter(|v| !v.is_null()),
+    );
+
+    FindPlan {
+        limit,
+        offset: opts.get("offset").and_then(Value::as_i64),
+        order_by: opts.get("orderBy").cloned(),
+        select: opts.get("select").cloned(),
+        unmask_columns: parse_unmask_opt(opts.get("unmask")),
+        unmask_actor: unmask_sanitized.actor,
+        unmask_rejected_claim: unmask_sanitized.rejected_claim,
+        unmask_reason: opts
+            .get("unmaskReason")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        include_deleted: opts
+            .get("include_deleted")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false),
+    }
+}
+
+/// The DEFERRED half of `find`: no `scope`, no `v8::`, no `ResolveValue`.
+///
+/// `route` is passed in rather than captured because the routing decision must
+/// be frozen while the scope is live; see `crate::tx_route`.
+pub(crate) async fn run_find(
+    binding: DbBinding,
+    coll: String,
+    route: crate::tx_route::TxRoute,
+    filter: Value,
+    plan: FindPlan,
+) -> Result<read_pipeline::ApplyResult, DbError> {
+    validate_unmask_projection(plan.select.as_ref(), &plan.unmask_columns)?;
+
+    // Upfront auth fence for the unmask hint.
+    if !plan.unmask_columns.is_empty() {
+        crate::crud::unmask::authorize_query_hint(
+            &binding,
+            &coll,
+            &plan.unmask_columns,
+            &plan.unmask_actor,
+            plan.unmask_rejected_claim.as_ref(),
+            &plan.unmask_reason,
+        )
+        .await?;
+    }
+
+    // Resolve the descriptor entry BEFORE building SQL. It is the
+    // projection allowlist: the SELECT clause expands to `"id"` plus one
+    // term per declared field, with a masked column read through its
+    // sibling (`"<col>_masked" AS "<col>"`) so the ciphertext column never
+    // leaves the database on a default read. A collection this deploy does
+    // not declare is refused here.
+    let schema_hint = crate::descriptor::collection_schema(&binding, &coll)?;
+    // Soft-delete auto-filter gate.
+    let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(plan.include_deleted);
+    let mut sql_filter = filter;
+    maybe_lower_sqlite_boolean_filter(&schema_hint, &mut sql_filter);
+    let bq = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+        binding.app_id(),
+        &coll,
+        &sql_filter,
+        plan.limit,
+        plan.offset,
+        plan.order_by.as_ref(),
+        plan.select.as_ref(),
+        &schema_hint,
+        &plan.unmask_columns,
+        filter_soft_deleted,
+        current_sql_dialect(),
+    )
+    .map_err(DbError::from)?;
+    let rows = exec_query(&route, bq).await?;
+    let result = read_pipeline::apply(
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions {
+            unmask_columns: &plan.unmask_columns,
+            schema_field_scope: read_pipeline::SchemaFieldScope::All,
+            ..read_pipeline::ApplyOptions::default()
+        },
+    )
+    .await?;
+    // The audit runs AFTER the rows are in hand and BEFORE they are
+    // lowered: a failure here must refuse the read, not log it and
+    // return the plaintext anyway.
+    if !plan.unmask_columns.is_empty() {
+        crate::crud::unmask::audit_query_hint_granted(
+            &binding,
+            &coll,
+            &plan.unmask_columns,
+            &plan.unmask_actor,
+            plan.unmask_rejected_claim.as_ref(),
+            &plan.unmask_reason,
+        )
+        .await?;
+    }
+    Ok(result)
+}
+
 /// Shared dispatch for `find`. Reads `limit`/`offset`/`orderBy`/
 /// `select`/`unmask`/`actor` out of `opts`. The per-query unmask hint
 /// honours an upfront authorisation fence — a single
@@ -640,40 +794,11 @@ pub(crate) fn dispatch_find<'s>(
     filter: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let plan = plan_find(&binding, collection, &filter, &opts);
+
     let app_id = binding.app_id();
     let state = runtime_state(scope);
-    // Record into the active query's read-set so the broker can
-    // narrow events to this filter. No-op outside `query()` handlers.
-    record_read_set(&binding, collection, &filter);
-
-    // DB-2: public `find` normalises an omitted limit here before calling the
-    // builder. This does not protect internal builder callers; they must pass
-    // their own explicit bound. Callers paginate past this page via `offset`.
-    let limit = Some(query::effective_query_limit(
-        opts.get("limit").and_then(Value::as_i64),
-    ));
-    let offset = opts.get("offset").and_then(Value::as_i64);
-    let order_by = opts.get("orderBy").cloned();
-    let select = opts.get("select").cloned();
-    let unmask_columns = parse_unmask_opt(opts.get("unmask"));
-    // DB-3: strip an app-supplied reserved `auto` system actor — a find with
-    // `{unmask, actor:{kind:"auto"}}` must not impersonate the platform.
-    let unmask_sanitized = crate::crud::unmask::sanitize_app_actor(
-        opts.get("actor").cloned().filter(|v| !v.is_null()),
-    );
-    let unmask_actor = unmask_sanitized.actor;
-    let unmask_rejected_claim = unmask_sanitized.rejected_claim;
-    let unmask_reason = opts
-        .get("unmaskReason")
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let include_deleted = opts
-        .get("include_deleted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
     let coll = collection.to_string();
@@ -681,76 +806,7 @@ pub(crate) fn dispatch_find<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        async move {
-            validate_unmask_projection(select.as_ref(), &unmask_columns)?;
-
-            // Upfront auth fence for the unmask hint.
-            if !unmask_columns.is_empty() {
-                crate::crud::unmask::authorize_query_hint(
-                    &binding,
-                    &coll,
-                    &unmask_columns,
-                    &unmask_actor,
-                    unmask_rejected_claim.as_ref(),
-                    &unmask_reason,
-                )
-                .await?;
-            }
-
-            // Resolve the descriptor entry BEFORE building SQL. It is the
-            // projection allowlist: the SELECT clause expands to `"id"` plus one
-            // term per declared field, with a masked column read through its
-            // sibling (`"<col>_masked" AS "<col>"`) so the ciphertext column never
-            // leaves the database on a default read. A collection this deploy does
-            // not declare is refused here.
-            let schema_hint = crate::descriptor::collection_schema(&binding, &coll)?;
-            // Soft-delete auto-filter gate.
-            let filter_soft_deleted =
-                system_fields_pass::should_filter_soft_deleted(include_deleted);
-            let mut sql_filter = filter;
-            maybe_lower_sqlite_boolean_filter(&schema_hint, &mut sql_filter);
-            let bq = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
-                &app,
-                &coll,
-                &sql_filter,
-                limit,
-                offset,
-                order_by.as_ref(),
-                select.as_ref(),
-                &schema_hint,
-                &unmask_columns,
-                filter_soft_deleted,
-                current_sql_dialect(),
-            )
-            .map_err(DbError::from)?;
-            let rows = exec_query(&route, bq).await?;
-            let result = read_pipeline::apply(
-                &binding,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions {
-                    unmask_columns: &unmask_columns,
-                    schema_field_scope: read_pipeline::SchemaFieldScope::All,
-                    ..read_pipeline::ApplyOptions::default()
-                },
-            )
-            .await?;
-            // The audit runs AFTER the rows are in hand and BEFORE they are
-            // lowered: a failure here must refuse the read, not log it and
-            // return the plaintext anyway.
-            if !unmask_columns.is_empty() {
-                crate::crud::unmask::audit_query_hint_granted(
-                    &binding,
-                    &coll,
-                    &unmask_columns,
-                    &unmask_actor,
-                    unmask_rejected_claim.as_ref(),
-                    &unmask_reason,
-                )
-                .await?;
-            }
-            Ok(result)
-        },
+        run_find(binding, coll, route, filter, plan),
         |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
     )));
 
