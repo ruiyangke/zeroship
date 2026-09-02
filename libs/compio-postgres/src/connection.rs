@@ -658,11 +658,19 @@ where
     /// A custom `TlsConnect` whose stream answers `Err` to `try_into_split`
     /// still gets the serialized loop, and still has this limitation.
     ///
-    /// This is a KNOWN DEFECT, not a design decision, and it is being tracked.
-    /// It is documented here rather than left silent because the failure has
-    /// no error and no log - the events simply never come. Until it is fixed,
-    /// a listener that needs TLS must poll instead of waiting, or run its
-    /// subscription over a plaintext connection.
+    /// That residue is a KNOWN DEFECT rather than a design decision, and it is
+    /// worth stating plainly because the failure has no error and no log - the
+    /// events simply never come. Nothing this crate ships reaches it: both the
+    /// plain socket and rustls split, and the only in-tree stream that refuses
+    /// to is `test_utils::SerializedSocket`, which exists to make the
+    /// serialized loop testable at all.
+    ///
+    /// THIS PARAGRAPH ADVISED, UNTIL 2026-09-02, that "a listener that needs
+    /// TLS must poll instead of waiting, or run its subscription over a
+    /// plaintext connection". That was right before the 2026-08-24 fix and
+    /// wrong after it, and it contradicted this comment's own heading four
+    /// paragraphs up. It is a public doc, so the stale version told every
+    /// reader to work around a defect their TLS listener does not have.
     pub fn notifications(&mut self) -> mpsc::UnboundedReceiver<AsyncMessage> {
         let (tx, rx) = mpsc::unbounded();
         self.async_sender = Some(tx);
