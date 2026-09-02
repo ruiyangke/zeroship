@@ -1466,12 +1466,27 @@ pub async fn dispatch_unmask_for_query(
             continue;
         }
         for col in unmask_columns {
+            // Resolve the caller's spelling to the DECLARED one before reading,
+            // the way both siblings do: `dispatch_unmask` assigns
+            // `args.column = mask_meta.canonical_column`, and
+            // `dispatch_bulk_unmask` carries it through to its fetch.
+            //
+            // This path used to skip it, and `authorize_query_hint` keeps only
+            // the classification, so the caller's spelling reached
+            // `raw_column_name` - a bare prefix with no normalisation. A hint of
+            // `contactEmail` against a descriptor declaring `contact_email`
+            // therefore AUTHORISED correctly (`resolve_schema_column` is
+            // alias-tolerant) and then read `__zs_raw__contactEmail`, which no
+            // migration creates. It failed closed, but three siblings behaving
+            // two ways at one boundary is how the next divergence gets in.
+            let canonical = lookup_mask_meta(&schema, col)
+                .map_or_else(|| col.clone(), |meta| meta.canonical_column);
             // Use the single-cell fetch helpers directly — auth was
             // already checked upstream via `authorize_query_hint`.
             let single_args = UnmaskFieldArgs {
                 collection: collection.to_string(),
                 row_pk: row_pk.clone(),
-                column: col.clone(),
+                column: canonical.clone(),
                 actor: None,
                 reason: None,
                 // A fetch helper, not an audited dispatch: authorization already
@@ -1479,7 +1494,7 @@ pub async fn dispatch_unmask_for_query(
                 // where any refused claim was recorded.
                 rejected_claim: None,
             };
-            let plaintext = match lookup_encryption_meta(&schema, col)? {
+            let plaintext = match lookup_encryption_meta(&schema, &canonical)? {
                 Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
                 None => fetch_plaintext_parent(app_id, &single_args).await?,
             };
@@ -1488,7 +1503,11 @@ pub async fn dispatch_unmask_for_query(
             // the read cost is what this counts.
             crate::metrics::emit_db_metric(app_id, crate::metrics::DB_READS, 1);
             if let Some(obj) = row.as_object_mut() {
-                obj.insert(col.clone(), Value::String(plaintext));
+                // Under the DECLARED name, because that is the key the row
+                // already carries: the SELECT projects descriptor keys, so
+                // inserting under the caller's spelling would leave the masked
+                // value in place and add a second, differently-spelled field.
+                obj.insert(canonical.clone(), Value::String(plaintext));
             }
         }
     }
