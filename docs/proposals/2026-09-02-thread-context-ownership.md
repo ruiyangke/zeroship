@@ -165,6 +165,81 @@ Everything else in this document survives: the nine maps are still one entity,
 the destructor is still hand-written, and the placement question is still
 downstream of modelling it.
 
+## RESOLUTION, measured
+
+**Unrepresentable, and the two arms fail for two different reasons.** The
+question above conflated them.
+
+### The claim does bracket the session. The reducer proves it.
+
+`Action::ReleaseAdmission` is emitted at **exactly one site in the whole
+reducer** - `settle_now`, `reducer/mod.rs:1436` - and that site pushes
+`WithdrawSession` (`:1430`) or `ReleaseSession` (`:1433`) unconditionally,
+immediately before it. There is no second emission and no arm that skips the
+disposition. The driver applies them in that order (`driver.rs:582-589`), and
+`Action::ReleaseAdmission` is literally `retire_transaction` +
+`release_tx_claim`, which is what `probe::abandon_reducer` reproduces.
+
+So arm 1's state is not production's. **The arm says so itself**, and this
+proposal missed it by reading the assertion instead of the doc block:
+
+> *What this fixture substitutes, and why that is honest.* It restores the SAME
+> session rather than provisioning a successor's. A genuine successor cannot be
+> reached deterministically: admitting one requires the claim, releasing the
+> claim is what wakes this waiter, and the waiter then resolves before the
+> successor's `BEGIN` has run.
+
+The production state is *a successor's session in the slot* - which is why the
+assertion reads "in production it would belong to the NEXT caller". Today's
+probe cannot build that, so it stands in the retired lane's own session.
+
+**The lane makes the honest version constructible.** A probe that installs a
+successor lane directly reaches "filled slot plus dead identity" deterministically,
+without racing a real `BEGIN`. That is strictly more faithful than the
+substitution, so arm 1 is repaired by making it model what it says it wants -
+not by weakening it. The acceptance criterion is unchanged: deleting the
+post-wait `identity.is_current(..)` check in `cancel_and_reclaim` must still
+redden it.
+
+### Arm 2 is a real design defect, and the design was wrong.
+
+`withdrawn_tx_sessions` is **not lane state and cannot be**. Measured:
+
+| site | what it does |
+| --- | --- |
+| `context.rs:1139` `withdraw_tx_session` | inserts the tombstone |
+| `context.rs:1071` `admit_transaction` | removes it - the NEXT admission |
+| `context.rs:1120` `retire_transaction` | **does not touch it** |
+| `context.rs:949` `put_tx_client_for` | destroys a returning session if set |
+
+Its lifetime deliberately spans the gap between two lanes: it is created when a
+session is withdrawn, survives the lane's retirement, and is cleared only when a
+successor is admitted. It exists *precisely when no lane exists*. The code says
+this outright at `:1071` - "**the tombstone belongs to the session that was
+withdrawn, not to the app**" - and arm 2 is the moment that matters: `held.
+restore()` hands back a physical session after its lane is gone, and only the
+tombstone stops it reaching the pool.
+
+Folding it into `TxLane` kills it with the lane, so the restored session parks,
+returns to the pool, and a withdrawn backend is handed to the next borrower.
+That is the bug arm 2 exists to catch, and my refactor reintroduced it.
+
+### The corrected shape: eight, not nine
+
+`withdrawn_tx_sessions` stays thread-level beside `backend_generation` - which
+this proposal had **already excluded for the same class of reason** ("monotonic
+for the life of the thread and never reset"). The instinct was right and was not
+applied twice.
+
+```rust
+lanes:      HashMap<AppId, TxLane>,   // eight maps, entry IS the claim
+withdrawn:  HashSet<AppId>,           // tombstones; OUTLIVE their lane by design
+backend_generation: u64,              // monotonic, thread-lifetime
+```
+
+The rule that falls out, and that is worth stating because it is what was
+missed: **a tombstone cannot live inside the thing it is a tombstone for.**
+
 ## Cost
 
 - 55 accessors rewritten, most mechanically
