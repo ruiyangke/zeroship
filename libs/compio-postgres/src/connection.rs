@@ -8621,6 +8621,62 @@ mod tests {
         ));
     }
 
+    /// The COPY startup drain loops until the server answers `CopyInResponse`.
+    /// If the connection dies first, the read error is the ONLY way out: there
+    /// is no producer to wait on and no frame left to dispatch, so without this
+    /// arm the loop would keep calling `read_backend` on a dead socket.
+    ///
+    /// The script delivers `BindComplete` and then nothing, so startup never
+    /// finishes and the next read is EOF - which is precisely the shape of a
+    /// server that closes between `Bind` and `CopyInResponse`.
+    #[compio::test]
+    async fn a_read_failure_during_copy_startup_retires_the_request() {
+        let (response_tx, _response_rx) = mpsc::channel(4);
+        let (copy_in, _producer) = CopyInReceiver::for_connection_test(
+            Some(FrontendMessage::Raw(bytes::Bytes::from_static(
+                b"scripted COPY startup",
+            ))),
+            None,
+        );
+        let request = Request {
+            messages: RequestMessages::CopyIn(copy_in),
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            request_server_error: Arc::default(),
+        };
+        let (_request_tx, request_rx) = mpsc::unbounded();
+        let mut connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                // BindComplete and NOTHING else: startup cannot finish, so the
+                // drain reads again and finds the socket closed.
+                chunks: VecDeque::from([vec![b'2', 0, 0, 0, 4]]),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_rx,
+            Arc::new(AtomicU8::new(b'I')),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::default(),
+            None,
+        );
+
+        let Err(error) = connection.handle_request(request).await else {
+            panic!("a COPY startup read failure was not reported to the caller")
+        };
+        // The socket ended mid-startup, so this surfaces as the read failure it
+        // is rather than as a protocol complaint about a missing frame.
+        assert_eq!(
+            error.to_string(),
+            "error communicating with the server",
+            "the retiring error did not name the failed read"
+        );
+    }
+
     #[compio::test]
     async fn serialized_main_loop_preserves_stashed_batch_order() {
         let (connection, mut response, copy_request) =
