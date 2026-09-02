@@ -21,7 +21,7 @@
 use zeroship_core::database_role::per_app_role_name;
 
 use crate::budgets::{DB_IDLE_IN_TX_TIMEOUT_MS, DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS};
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Combined per-transaction client setup: `SET LOCAL ROLE` + the DB-1 timeout
 /// guards, as one simple-query batch run right after `BEGIN`. All `SET LOCAL`,

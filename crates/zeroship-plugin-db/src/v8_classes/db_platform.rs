@@ -42,7 +42,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use crate::binding::DbBinding;
+use zeroship_data_core::binding::DbBinding;
 use crate::crud::dispatch_set_mask_policy_field;
 use crate::v8_bridge::read_json_arg;
 

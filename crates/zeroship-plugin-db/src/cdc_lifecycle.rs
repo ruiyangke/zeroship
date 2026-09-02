@@ -19,7 +19,7 @@ use std::sync::{LazyLock, Mutex, MutexGuard};
 
 use crate::backend::{BackendHandle, ChangeStream};
 use crate::change_stream_pg::WalConsumerHandle;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 #[derive(Debug)]
 enum RunningConsumer {

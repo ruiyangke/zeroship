@@ -39,9 +39,9 @@
 //!
 //! ## Error rail
 //!
-//! Every fallible helper here returns [`crate::error::DbError`] — the
+//! Every fallible helper here returns [`zeroship_data_core::error::DbError`] — the
 //! `dispatch_*` layer in `crate::crud` calls
-//! [`crate::error::DbError::to_op_error`] at the V8 boundary so each
+//! [`crate::op_error::ToOpError::to_op_error`] at the V8 boundary so each
 //! throw carries `.code` for the SDK to branch on (replacing the
 //! earlier `Result<_, String>` rail).
 //!
@@ -59,7 +59,7 @@ use crate::backend::pg_error;
 use crate::backend::pg_row_json::rows_to_json_value;
 use crate::context;
 use crate::context::TxConnection;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 use crate::query::BuiltQuery;
 use crate::tx_route::TxRoute;
 

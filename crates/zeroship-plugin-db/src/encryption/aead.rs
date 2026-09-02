@@ -28,7 +28,7 @@ use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::wire;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 type HmacSha256 = Hmac<Sha256>;
 

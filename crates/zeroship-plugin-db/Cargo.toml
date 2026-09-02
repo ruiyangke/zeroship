@@ -23,6 +23,10 @@ zeroship-core = { workspace = true }
 # neutral call sites resolve unchanged. PostgreSQL introspection stays here in
 # `backend::pg_introspect`; no vendor type crosses into the schema crate.
 zeroship-schema = { workspace = true }
+# The data plane's domain tier. `DbError` and `DbBinding` moved out of this
+# crate; what stayed behind is the ADAPTER's half of the error hierarchy, the
+# `ToOpError` lowering in `src/op_error.rs`.
+zeroship-data-core = { workspace = true }
 # The operator charter is the worker's assignment authority, and it must not
 # arrive from the creator-authored descriptor. `zeroship-migrate-policy` is a
 # leaf (serde/toml/sha2/hmac/hex/thiserror/schemars and nothing of ours), so
@@ -33,7 +37,16 @@ zeroship-migrate-policy = { workspace = true }
 # query / mutation / count via a MeterHandle. Platform-measured,
 # unforgeable by app code (replaces the deleted env.meter API).
 zeroship-metering = { workspace = true }
-compio-postgres = { workspace = true }
+# `with-uuid-1` is DECLARED here because this crate USES it:
+# `backend/pg_row_json.rs` decodes OID 2950 through `row.try_get::<_, uuid::Uuid>`.
+# It was previously absent and the crate still built, purely because
+# `zeroship-authz` and `zeroship-workflow-scheduler` enable the feature and
+# Cargo unifies features across whatever crates share a build graph. So
+# `cargo check -p zeroship-plugin-db` ALONE failed with
+# `Uuid: FromSql is not satisfied` while any wider build passed - a latent
+# coupling that only becomes visible once a crate is asked to build by itself,
+# which is exactly what the data-crate split asks of every tier.
+compio-postgres = { workspace = true, features = ["with-uuid-1"] }
 compio = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
@@ -94,6 +107,10 @@ tempfile = { workspace = true }
 # uses the Rust impl on the PG side.
 
 [dev-dependencies]
+# `DbBinding::cold_start` is gated behind `test-helpers` in the domain tier: it
+# builds a deploy identity from an app id, and shipping that constructor in a
+# release binary would retire the check that nothing in production does so.
+zeroship-data-core = { workspace = true, features = ["test-helpers"] }
 zeroship-test-support = { workspace = true }
 # The DbPlan IR. A DEV dependency on purpose: nothing in this crate's `src/`
 # uses it yet, and declaring it a normal dependency would say otherwise. The
@@ -187,7 +204,7 @@ harness = false
 # downstream test crates (integration tests in `tests/integration.rs`).
 # The same symbols are visible to the in-crate unit tests via
 # `#[cfg(test)]` so `cargo test --lib` does NOT need this feature.
-test-helpers = []
+test-helpers = ["zeroship-data-core/test-helpers"]
 # Live logical-decoding coverage is separate from the broader helper-gated
 # integration suite because it requires the compose Postgres on port 5440.
 live-db-tests = ["test-helpers"]

@@ -23,7 +23,7 @@ use compio_postgres::{Client, NoTls};
 use sha2::{Digest, Sha256};
 
 use crate::backend::pg_error;
-use crate::error::{DbError, prefix_message};
+use zeroship_data_core::error::{DbError, prefix_message};
 
 /// A slot must remain inactive and have no live worker lease for this long.
 pub const ABANDONED_INACTIVITY_THRESHOLD: Duration = Duration::from_secs(60 * 60);

@@ -35,7 +35,7 @@
 //! This module is kept because `tests/integration.rs` and
 //! `tests/sqlite_integration.rs` pin its rejection contract.
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Walk every field definition in `schema` and reject any FK whose
 /// `refTarget` carries a dot-qualified `<other_app>.` prefix.

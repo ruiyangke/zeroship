@@ -73,7 +73,7 @@ use compio_postgres::TransactionStatus;
 
 use crate::backend::pg_error;
 use crate::context::TxConnection;
-use crate::error::{DbError, SessionSetupDisposition, SessionSetupError};
+use zeroship_data_core::error::{DbError, SessionSetupDisposition, SessionSetupError};
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 
 use super::reducer::deadline::{DeadlineGeneration, DeadlineKind};

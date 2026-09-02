@@ -26,6 +26,7 @@
 
 #![allow(unsafe_code)]
 
+use crate::op_error::ToOpError;
 use std::cell::RefCell;
 
 use zeroship_runtime::state::{JsonValue, OpError};
@@ -104,7 +105,7 @@ impl Subscription {
         }
         crate::cdc_lifecycle::ensure_ready(&self.app_id)
             .await
-            .map_err(crate::error::DbError::to_op_error)
+            .map_err(crate::op_error::ToOpError::to_op_error)
     }
 
     /// Poll for the next event. Resolves with the typed event object
@@ -132,7 +133,7 @@ impl Subscription {
         // TypeScript wrapper even if they skip the explicit ready() call.
         crate::cdc_lifecycle::ensure_ready(&self.app_id)
             .await
-            .map_err(crate::error::DbError::to_op_error)?;
+            .map_err(crate::op_error::ToOpError::to_op_error)?;
 
         let msg = std::future::poll_fn(|cx| {
             if let Some(m) = sub.pop() {
@@ -193,7 +194,7 @@ impl Subscription {
 /// scoped surface is the only path now. The wire `code` is
 /// `invalid_collection` — the same code
 /// `query::QueryError::InvalidCollection` flows through
-/// (`crate::error::From<QueryError> for DbError`), so SDK callers
+/// (`zeroship_data_core::error::From<QueryError> for DbError`), so SDK callers
 /// branch on a single stable string.
 pub(crate) fn refuse_mv_subscription(collection: &str) -> Option<OpError> {
     if collection.starts_with("__zeroship_mv_") {

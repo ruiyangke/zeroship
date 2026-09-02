@@ -21,7 +21,7 @@ use zeroship_migrate_policy::{
     AssignmentEvent, AssignmentGenerator, PolicyRegistry, RootCharter, RuleKind,
 };
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// The synthetic header, then the operator-shipped fragment.
 const SYSTEM_SHAPE_CHARTER_TOML: &str = concat!(

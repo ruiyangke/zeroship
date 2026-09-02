@@ -79,7 +79,7 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::diff::MaskKind;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Plaintext sidechannel populated by the encryption pass and consumed
 /// by the mask pass. Key = column name; value = the raw plaintext

@@ -66,8 +66,8 @@
 
 use std::rc::Rc;
 
-use crate::binding::DbBinding;
-use crate::error::DbError;
+use zeroship_data_core::binding::DbBinding;
+use zeroship_data_core::error::DbError;
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod lock_guard;
@@ -80,7 +80,7 @@ pub(crate) mod pg_row_json;
 // the `PG <-> ENGINE` tier cycle.
 pub(crate) mod pg_autocommit;
 // PostgreSQL error classification. PG tier: SQLSTATE and driver source-chain
-// inspection translate into the neutral `crate::error::DbError` hierarchy.
+// inspection translate into the neutral `zeroship_data_core::error::DbError` hierarchy.
 pub mod pg_error;
 // PostgreSQL catalog introspection into the vendor-neutral schema snapshot.
 // Gated with the SchemaIntrospect capability and both backend impls below.
@@ -374,7 +374,7 @@ pub trait LockManager: SqlExecutor {
     /// worst-case wall time). On exhaustion returns
     /// [`DbError::LockContention`] — the JS-visible `.code` is
     /// `lock_not_available` (set by
-    /// [`DbError::to_op_error`](crate::error::DbError::to_op_error)).
+    /// [`DbError::to_op_error`](crate::op_error::ToOpError::to_op_error)).
     ///
     /// The default impl is the only impl call sites should ever need
     /// — backends do not override this. They supply the underlying
@@ -2081,7 +2081,7 @@ mod tests {
     /// mock backend whose `try_acquire_advisory_lock` always returns
     /// `Ok(false)` (perpetual contention). The result must be a
     /// `DbError::LockContention` whose
-    /// [`crate::error::DbError::to_op_error`] mapping produces the
+    /// [`crate::op_error::ToOpError::to_op_error`] mapping produces the
     /// JS-visible `code = "lock_not_available"` envelope.
     ///
     /// The test pins:

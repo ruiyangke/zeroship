@@ -23,13 +23,14 @@
 //! the v8_class methods *before* reaching the dispatch helper — write
 //! ops trust their callers.
 
+use crate::op_error::ToOpError;
 use std::future::Future;
 
 use serde_json::Value;
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
-use crate::binding::DbBinding;
-use crate::error::DbError;
+use zeroship_data_core::binding::DbBinding;
+use zeroship_data_core::error::DbError;
 use crate::exec::{exec_count, exec_mutation_with_emit, exec_query};
 use crate::query;
 use crate::tx_route::TxRoute;

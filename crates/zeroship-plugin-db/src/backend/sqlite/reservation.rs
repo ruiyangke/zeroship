@@ -43,7 +43,7 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 
 use rusqlite::Connection;
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Opaque identifier for one app's transaction lane.
 ///

@@ -24,7 +24,7 @@
 //! the unpack path can hand the slice straight to `Aes256Gcm::decrypt`
 //! without re-stitching.
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Reserved version flag for the baseline AAD shape.
 ///

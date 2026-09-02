@@ -45,7 +45,7 @@ use compio_postgres::Pool;
 use zeroship_runtime::plugin::{NativePlugin, NativeRegistrar};
 
 use crate::context::{BackendInitState, with_mut as ctx_mut};
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 // Module visibility note:
 //
@@ -81,11 +81,17 @@ pub mod broker;
 // under `test-helpers` so the integration targets can name the `DbBinding` that
 // the descriptor store, the CRUD dispatchers and the search backends are keyed
 // by. It carries no behaviour beyond two owned strings.
-#[cfg(not(any(test, feature = "test-helpers")))]
-pub(crate) mod binding;
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod binding;
-pub mod error;
+// `binding` and `error` moved to `zeroship-data-core`, the domain tier. Their
+// visibility used to be a cfg-split pair here - `pub(crate)` in a release build,
+// `pub` under `test-helpers` - which does not survive a crate boundary: across
+// crates `cfg(test)` is the DEFINING crate's test build and never fires for a
+// consumer. The domain tier gates the one test-only constructor on the feature
+// alone; see `zeroship-data-core/Cargo.toml`.
+//
+// What stayed is the ADAPTER's half: `op_error` lowers `DbError` into the
+// runtime's `OpError`, because `OpError` is a delivery mechanism and a domain
+// type may not name one.
+pub mod op_error;
 // The DDL builders + `QueryError` + `SqlDialect` +
 // the system-field / validation helpers were extracted into the leaf crate
 // `zeroship-schema`. plugin-db re-exports the module wholesale so every
@@ -1257,7 +1263,7 @@ mod backend_url_tests {
         let err = backend_for_url("mysql://localhost/dev").unwrap_err();
         assert!(matches!(
             err,
-            crate::error::DbError::Configuration {
+            zeroship_data_core::error::DbError::Configuration {
                 code: "unsupported_database_url_scheme",
                 ..
             }

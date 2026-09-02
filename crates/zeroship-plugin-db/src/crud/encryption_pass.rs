@@ -63,7 +63,7 @@ use serde_json::Value;
 use zeroize::Zeroizing;
 
 use crate::backend::EncryptedColumn;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Encrypt every `t.encrypted(...)`-declared column on `row` in place.
 ///

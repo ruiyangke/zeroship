@@ -19,7 +19,7 @@ use futures::FutureExt;
 
 use crate::backend::postgres::PostgresBackend;
 use crate::backend::{BrokerPauseGuard, ChangeStream, SchemaPendingGuard};
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 #[derive(Debug, Default)]
 struct ExitState {

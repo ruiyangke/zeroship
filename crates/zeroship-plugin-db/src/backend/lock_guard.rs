@@ -57,7 +57,7 @@
 use compio_postgres::OwnedPooledClient;
 
 use crate::backend::{LockManager, LockScope};
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Session-scoped advisory-lock guard. See module docs for the lifecycle
 /// contract.

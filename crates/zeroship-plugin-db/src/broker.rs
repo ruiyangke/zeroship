@@ -60,7 +60,7 @@ use std::task::Waker;
 use serde_json::Value;
 use zeroship_core::change_event::{ChangeEvent, ChangeOp};
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 use crate::read_set::ReadSetEntry;
 
 // ---------------------------------------------------------------------------

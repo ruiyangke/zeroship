@@ -57,10 +57,10 @@
 
 use serde_json::Value;
 
-use crate::binding::DbBinding;
+use zeroship_data_core::binding::DbBinding;
 use crate::crud::mask_pass::apply_mask_kind;
 use crate::diff::MaskKind;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Absolute cap on rows sampled per column per run. Even when the
 /// percentage would yield more — say a 50 M-row table at 1 % = 500k

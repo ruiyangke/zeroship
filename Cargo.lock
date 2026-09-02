@@ -7442,6 +7442,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-data-core"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "zeroship-core",
+ "zeroship-schema",
+]
+
+[[package]]
 name = "zeroship-data-query-builder"
 version = "0.1.0"
 
@@ -7762,6 +7771,7 @@ dependencies = [
  "v8",
  "zeroize",
  "zeroship-core",
+ "zeroship-data-core",
  "zeroship-data-query-builder",
  "zeroship-metering",
  "zeroship-migrate-policy",

@@ -192,7 +192,7 @@ pub struct ObservedAuthority {
 // from `transaction::reducer` (engine), i.e. the contract crate would have
 // depended on the engine that depends on it. Moving the TYPE down resolves the
 // cycle without moving any logic.
-pub use crate::error::DenyReason;
+pub use zeroship_data_core::error::DenyReason;
 
 /// The classifier's verdict. Exactly one of three, and the classifier is
 /// total: every observation produces one.

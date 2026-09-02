@@ -1,7 +1,7 @@
 use serde_json::Value;
 
-use crate::binding::DbBinding;
-use crate::error::DbError;
+use zeroship_data_core::binding::DbBinding;
+use zeroship_data_core::error::DbError;
 use crate::exec::exec_query;
 use crate::query;
 use crate::tx_route::TxRoute;
@@ -680,7 +680,7 @@ mod tests {
     fn a_supplied_id_is_refused_at_the_document_boundary() {
         let doc = serde_json::json!({ "title": "hi", "id": "usr_034HQyaJ0C11GCzHMMrWwz" });
         match super::refuse_platform_assigned_id(&doc) {
-            Err(crate::error::DbError::ValidationFailed { code, .. }) => {
+            Err(zeroship_data_core::error::DbError::ValidationFailed { code, .. }) => {
                 assert_eq!(code, "platform_assigned_field");
             }
             other => panic!("expected the supplied id to be refused, got {other:?}"),
@@ -711,7 +711,7 @@ mod tests {
     use base64::Engine as _;
     use serde_json::Value;
 
-    use crate::binding::DbBinding;
+    use zeroship_data_core::binding::DbBinding;
     use crate::tx_route::TxRoute;
 
     use super::{
@@ -780,7 +780,7 @@ mod tests {
                 .await;
 
                 match result {
-                    Err(crate::error::DbError::ValidationFailed { code, .. }) => {
+                    Err(zeroship_data_core::error::DbError::ValidationFailed { code, .. }) => {
                         assert_eq!(code, "reserved_system_field_name");
                     }
                     other => panic!(

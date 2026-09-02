@@ -57,13 +57,14 @@
 //! a misbehaving SDK can't poison the storage, and an arbitrary RPC
 //! call can't bypass the SDK-side check.
 
+use crate::op_error::ToOpError;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
 use serde_json::Value;
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// The six canonical classification values. Mirrors the SDK's
 /// `Classification` type (`sdks/db/src/types.ts`) and `crate::diff::Classification`.

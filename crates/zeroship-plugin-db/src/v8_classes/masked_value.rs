@@ -39,6 +39,7 @@
 
 #![allow(unsafe_code)]
 
+use crate::op_error::ToOpError;
 use serde_json::Value;
 use zeroship_runtime::state::{
     IntoResolveValue, JsonValue, OpError, OpResult, ResolveValue,
@@ -47,7 +48,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_getter, v8_method};
 
-use crate::binding::DbBinding;
+use zeroship_data_core::binding::DbBinding;
 use crate::crud::unmask::{
     dispatch_bulk_unmask, dispatch_unmask, BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs,
 };
@@ -348,7 +349,7 @@ impl MaskedValue {
                         // `false` answer; every other error re-throws.
                         if matches!(
                             &e,
-                            crate::error::DbError::Coded { code, .. }
+                            zeroship_data_core::error::DbError::Coded { code, .. }
                                 if code == "unmask_not_permitted"
                         ) {
                             OpResult::JsValue {
@@ -574,7 +575,7 @@ pub fn rehydrate_masked_values<'s, 'a>(
         let deploy_token = env_vars
             .get("ZEROSHIP_DEPLOY_ID")
             .cloned()
-            .unwrap_or_else(|| crate::binding::COLD_START_DEPLOY_TOKEN.to_string());
+            .unwrap_or_else(|| zeroship_data_core::binding::COLD_START_DEPLOY_TOKEN.to_string());
         DbBinding::new(app_id, deploy_token)
     };
     let mut walker = RehydrateWalker {

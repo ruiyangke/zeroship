@@ -93,7 +93,7 @@ use serde_json::{Map, Value};
 use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
 use zeroship_runtime::state::SharedState;
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 use crate::system_shape_charter::AssignmentPlan;
 
 /// Does `event` fire while a row is being created?
