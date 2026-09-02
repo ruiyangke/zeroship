@@ -239,6 +239,22 @@ where
     ///   between `connect()` returning and `Connection::run` draining
     ///   `delayed_notices` would see `None` for keys the server already
     ///   sent (e.g. `server_version`).
+    /// NEVER returns `Ok(None)`, despite the `Option`.
+    ///
+    /// The body is a `loop` with no `break`; its only success returns are the
+    /// two `Ok(Some(..))` below, and every other exit is an `Err`. A peer that
+    /// hangs up does not produce `None` either - the read fails first, with
+    /// `buf_stream.rs`'s `UnexpectedEof` ("connection closed by server").
+    ///
+    /// So the five `None => Err(Error::closed())` arms among this function's
+    /// callers are unreachable by construction rather than untested, which is
+    /// why coverage reports them and no test can close them. Measured
+    /// 2026-09-01 by mutating two of those arms: both left
+    /// `a_peer_that_hangs_up_during_authentication_is_reported_as_closed`
+    /// green, because it exercises the EOF path instead.
+    ///
+    /// The `Option` is therefore removable, along with those five arms; that
+    /// is a signature change across five call sites and has not been done.
     async fn next(&mut self) -> Result<Option<Message>, Error> {
         loop {
             if let Some(body) = self.pending.take_raw_frame(b'v').map_err(Error::parse)? {

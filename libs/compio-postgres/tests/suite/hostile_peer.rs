@@ -6637,3 +6637,105 @@ async fn a_row_description_format_code_outside_text_or_binary_is_refused() {
     .await
     .expect("the format-code test exceeded its watchdog");
 }
+
+/// A peer that hangs up mid-handshake is reported as a closed connection, at
+/// both points the authentication exchange can be cut.
+///
+/// This does NOT reach `connect_raw.rs`'s `None => Err(Error::closed())` arms,
+/// and an earlier version of this doc claimed it did. Mutating those arms left
+/// the test green, which is how the claim was caught. `Handshake::next` is a
+/// `loop` with no `break` whose only success returns are two `Ok(Some(..))`,
+/// so it can never yield `Ok(None)`: those five arms are unreachable by
+/// construction, not merely untested, and no peer behaviour reaches them.
+///
+/// What a hang-up actually produces is the `UnexpectedEof` from
+/// `buf_stream.rs`, surfaced by the `?` on the read. That is the behaviour
+/// worth pinning: at both cut points the driver reports a closed connection
+/// rather than hanging, and the two differ in what it has already done - the
+/// second has PUT THE PASSWORD ON THE WIRE before the peer vanished.
+#[compio::test]
+async fn a_peer_that_hangs_up_during_authentication_is_reported_as_closed() {
+    // Cut 1: hang up after reading startup, before any authentication request.
+    let before_request = Box::pin(handshake_cut(951, false)).await;
+    assert!(
+        before_request.contains("connection closed"),
+        "hanging up before the authentication request reported {before_request:?}"
+    );
+
+    // Cut 2: request a cleartext password, take it, then hang up.
+    let after_credentials = Box::pin(handshake_cut(952, true)).await;
+    assert!(
+        after_credentials.contains("connection closed"),
+        "hanging up after the credentials reported {after_credentials:?}"
+    );
+}
+
+/// Run one startup against a peer that hangs up, and return the rendered error.
+///
+/// With `take_password` the peer first asks for a cleartext password and reads
+/// the reply, so the driver is waiting on `AuthenticationOk` when the socket
+/// goes away; without it the driver is still waiting for the request itself.
+async fn handshake_cut(process_id: i32, take_password: bool) -> String {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+
+        let mut length = [0u8; 4];
+        stream.read_exact(&mut length).expect("read startup length");
+        let length = u32::from_be_bytes(length) as usize;
+        let mut body = vec![0u8; length - 4];
+        stream.read_exact(&mut body).expect("read startup body");
+
+        if take_password {
+            // AuthenticationCleartextPassword is `R` carrying int32 3.
+            stream
+                .write_all(&backend_frame(b'R', &3u32.to_be_bytes()))
+                .expect("request a cleartext password");
+            stream.flush().expect("flush the password request");
+            let (tag, _) = read_frontend_frame_any(&mut stream);
+            assert_eq!(
+                tag, b'p',
+                "the driver did not answer with a password message"
+            );
+        }
+        // Hang up. `drop` closes the socket, which is the whole scenario.
+        drop(stream);
+    });
+
+    let _ = process_id;
+    let stream = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        compio::net::TcpStream::connect(server.addr),
+    )
+    .await
+    .expect("connecting to the hang-up peer timed out")
+    .expect("connect to the hang-up peer");
+
+    let mut config = stub_config(server.addr);
+    config.password("scripted-password");
+    let error = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        config.connect_raw(stream, compio_postgres::NoTls),
+    )
+    .await
+    .expect("the hang-up peer left startup hanging instead of reporting closure")
+    .err()
+    .expect("startup succeeded against a peer that hung up");
+    server.finish();
+    common::error_chain(&error)
+}
+
+/// Read one frontend frame whatever its tag.
+fn read_frontend_frame_any(stream: &mut impl Read) -> (u8, Vec<u8>) {
+    let mut tag = [0u8; 1];
+    stream.read_exact(&mut tag).expect("read frontend tag");
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read frontend frame length");
+    let length = u32::from_be_bytes(length) as usize;
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read frontend frame body");
+    (tag[0], body)
+}
