@@ -948,6 +948,289 @@ mod tests {
         (client, receiver)
     }
 
+    fn scripted_backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(body.len() + 5);
+        frame.push(tag);
+        frame.extend_from_slice(&(u32::try_from(body.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    /// The row stream refuses a frame its own poll does not name.
+    ///
+    /// `RowStream::poll_next` names nine message kinds and errors on anything
+    /// else, and that arm had never run. It is a different guard from the one
+    /// in `query_typed`: this one runs AFTER the caller already holds a
+    /// stream, so accepting a stray frame would surface it as rows rather
+    /// than as an error, or silently swallow it and keep polling.
+    ///
+    /// `NoData` gets `query_typed` to hand back the stream; `BindComplete` is
+    /// then the stray - legal, well framed, and not one of the nine.
+    #[compio::test]
+    async fn the_row_stream_refuses_a_frame_its_poll_does_not_name() {
+        use futures_util::TryStreamExt;
+
+        let mut frames = scripted_backend_frame(b'n', b"");
+        frames.extend_from_slice(&scripted_backend_frame(b'2', b""));
+
+        let error = typed_against(frames, |inner| async move {
+            let stream =
+                super::query_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>()).await?;
+            let mut stream = Box::pin(stream);
+            while stream.as_mut().try_next().await?.is_some() {}
+            Ok(())
+        })
+        .await
+        .expect_err("the row stream accepted a frame its poll does not name");
+        assert!(
+            format!("{error}").contains("unexpected message from server"),
+            "the row stream reported {error} rather than an out-of-order message"
+        );
+    }
+
+    /// The one-variable control: the same stream ended by a frame it does name.
+    #[compio::test]
+    async fn the_row_stream_accepts_ready_for_query_as_its_end() {
+        use futures_util::TryStreamExt;
+
+        let mut frames = scripted_backend_frame(b'n', b"");
+        frames.extend_from_slice(&scripted_backend_frame(b'Z', b"I"));
+
+        typed_against(frames, |inner| async move {
+            let stream =
+                super::query_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>()).await?;
+            let mut stream = Box::pin(stream);
+            let mut rows = 0;
+            while stream.as_mut().try_next().await?.is_some() {
+                rows += 1;
+            }
+            assert_eq!(rows, 0, "no DataRow was sent, so no rows arrive");
+            Ok(())
+        })
+        .await
+        .expect("the row stream rejected a well-formed ReadyForQuery");
+    }
+
+    /// Answer one typed-query call with a scripted frame.
+    ///
+    /// Both entry points send their whole Parse/Bind/Describe/Execute/Sync
+    /// batch and then read, so a single frame lands on the first arm of the
+    /// loop with nothing consumed before it.
+    async fn typed_against<T, F, Fut>(frame: Vec<u8>, call: F) -> Result<T, crate::Error>
+    where
+        F: FnOnce(std::sync::Arc<crate::client::InnerClient>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, crate::Error>>,
+    {
+        use crate::client::ResponseMessages;
+        use crate::codec::BackendMessages;
+        use futures_util::StreamExt;
+        use std::sync::Arc;
+
+        let (client, mut receiver) = test_client();
+        let inner = Arc::clone(client.inner());
+        let call = call(Arc::clone(&inner));
+        let respond = async {
+            let mut request = receiver
+                .next()
+                .await
+                .expect("the typed query did not enqueue its request");
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    BytesMut::from(&frame[..]),
+                )))
+                .expect("deliver the scripted typed-query response");
+        };
+        let (result, ()) = futures_util::join!(call, respond);
+        result
+    }
+
+    /// `query_typed` and `execute_typed` both refuse a frame their loop does
+    /// not name.
+    ///
+    /// Both are public, both drive the extended protocol themselves, and both
+    /// refusal arms were uncovered. `PortalSuspended` is the payload: a real
+    /// extended-query message, correctly framed, that neither loop expects -
+    /// so accepting it would mean continuing to read a stream whose position
+    /// the driver no longer understands.
+    #[compio::test]
+    async fn typed_queries_refuse_a_frame_their_loop_does_not_name() {
+        let suspended = scripted_backend_frame(b's', b"");
+
+        let error = typed_against(suspended.clone(), |inner| async move {
+            super::query_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>())
+                .await
+                .map(|_| ())
+        })
+        .await
+        .expect_err("query_typed accepted a frame its loop does not name");
+        assert!(
+            format!("{error}").contains("unexpected message from server"),
+            "query_typed reported {error} rather than an out-of-order message"
+        );
+
+        let error = typed_against(suspended, |inner| async move {
+            super::execute_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>())
+                .await
+                .map(|_| ())
+        })
+        .await
+        .expect_err("execute_typed accepted a frame its loop does not name");
+        assert!(
+            format!("{error}").contains("unexpected message from server"),
+            "execute_typed reported {error} rather than an out-of-order message"
+        );
+    }
+
+    /// The one-variable control: each entry point on a frame it does name.
+    #[compio::test]
+    async fn typed_queries_accept_the_frames_they_name() {
+        typed_against(scripted_backend_frame(b'n', b""), |inner| async move {
+            super::query_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>())
+                .await
+                .map(|_| ())
+        })
+        .await
+        .expect("query_typed rejected a well-formed NoData");
+
+        let rows = typed_against(scripted_backend_frame(b'Z', b"I"), |inner| async move {
+            super::execute_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>()).await
+        })
+        .await
+        .expect("execute_typed rejected a well-formed ReadyForQuery");
+        assert_eq!(
+            rows, 0,
+            "no CommandComplete was sent, so no rows are counted"
+        );
+    }
+
+    /// Drive `start` against one scripted backend frame.
+    async fn start_against(frame: Vec<u8>) -> Result<(), crate::Error> {
+        use crate::client::ResponseMessages;
+        use crate::codec::BackendMessages;
+        use futures_util::StreamExt;
+        use std::sync::Arc;
+
+        let (client, mut receiver) = test_client();
+        let inner = Arc::clone(client.inner());
+        let statement = Statement::new(&inner, "s_start".to_string(), vec![], vec![], false);
+        let start = super::start(
+            &inner,
+            bytes::Bytes::from_static(b"B\0\0\0\x04"),
+            &statement,
+        );
+        let respond = async {
+            let mut request = receiver
+                .next()
+                .await
+                .expect("start did not enqueue its request");
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    BytesMut::from(&frame[..]),
+                )))
+                .expect("deliver the scripted start response");
+        };
+        let (result, ()) = futures_util::join!(start, respond);
+        result.map(|_| ())
+    }
+
+    /// `start` refuses anything but `BindComplete` as the first reply.
+    ///
+    /// It is the shared prelude of every prepared-statement query path, and
+    /// its refusal arm had never run. Accepting a different frame would hand
+    /// the caller a `Responses` positioned mid-exchange, so the rows that
+    /// follow belong to a step the caller never asked for.
+    ///
+    /// `ParseComplete` is the payload: legal, well framed, and owed earlier in
+    /// a different exchange rather than here.
+    #[compio::test]
+    async fn start_refuses_a_first_reply_that_is_not_bind_complete() {
+        let error = start_against(scripted_backend_frame(b'1', b""))
+            .await
+            .expect_err("start accepted a frame that was not BindComplete");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("unexpected message from server"),
+            "start reported {rendered:?} rather than an out-of-order message"
+        );
+        assert!(
+            error.code().is_none(),
+            "start reported a server SQLSTATE, so the refusal was not local"
+        );
+    }
+
+    /// The one-variable control: the same path with the frame it is owed.
+    #[compio::test]
+    async fn start_accepts_bind_complete() {
+        start_against(scripted_backend_frame(b'2', b""))
+            .await
+            .expect("start rejected a well-formed BindComplete");
+    }
+
+    /// Drive `sync` against one scripted backend frame.
+    async fn sync_against(frame: Vec<u8>) -> Result<(), crate::Error> {
+        use crate::client::ResponseMessages;
+        use crate::codec::BackendMessages;
+        use futures_util::StreamExt;
+        use std::sync::Arc;
+
+        let (client, mut receiver) = test_client();
+        let inner = Arc::clone(client.inner());
+        let sync = super::sync(&inner);
+        let respond = async {
+            let mut request = receiver
+                .next()
+                .await
+                .expect("sync did not enqueue its Sync request");
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    BytesMut::from(&frame[..]),
+                )))
+                .expect("deliver the scripted sync response");
+        };
+        let (result, ()) = futures_util::join!(sync, respond);
+        result
+    }
+
+    /// `Client::check_connection` must not call a desynchronised session
+    /// healthy.
+    ///
+    /// `sync` is the whole body of that public method: it sends a bare Sync
+    /// and accepts only `ReadyForQuery`. The refusal arm had never run, and it
+    /// is the one that matters - a health check reporting `Ok` after the peer
+    /// answered with something else tells the caller the connection is usable
+    /// when the next request will find the stream out of step.
+    ///
+    /// `BindComplete` is the payload because it is well framed and legal in
+    /// its own right; only its position is wrong.
+    #[compio::test]
+    async fn check_connection_refuses_a_reply_that_is_not_ready_for_query() {
+        let error = sync_against(scripted_backend_frame(b'2', b""))
+            .await
+            .expect_err("sync accepted a frame that was not ReadyForQuery");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("unexpected message from server"),
+            "sync reported {rendered:?} rather than an out-of-order message"
+        );
+        assert!(
+            error.code().is_none(),
+            "sync reported a server SQLSTATE, so the refusal was not local"
+        );
+    }
+
+    /// The one-variable control: the same path with the frame it is owed.
+    /// Without it the refusal above also passes for a `sync` that never
+    /// succeeds at all.
+    #[compio::test]
+    async fn check_connection_accepts_ready_for_query() {
+        sync_against(scripted_backend_frame(b'Z', b"I"))
+            .await
+            .expect("sync rejected a well-formed ReadyForQuery");
+    }
+
     fn frontend_frames(mut batch: &[u8]) -> Vec<(u8, Vec<u8>)> {
         let mut frames = Vec::new();
         while !batch.is_empty() {

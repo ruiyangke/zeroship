@@ -1,9 +1,9 @@
 //! Differential value-codec tests against `tokio-postgres` 0.7.18.
 //!
-//! Both drivers talk to the same live PostgreSQL server. Values cross the
-//! extended protocol in binary form, come back through `FromSql`, are rebound
-//! through `ToSql`, and come back a second time. Only plain Rust data crosses
-//! the runtime boundary.
+//! Both drivers talk to the same live `PostgreSQL` server. Values cross the
+//! extended protocol in binary form and the simple protocol in text form;
+//! binary and explicitly text-formatted Bind parameters rebound each value.
+//! Only plain Rust data crosses the runtime boundary.
 //!
 //! The stock type crate has no Rust carrier for NUMERIC, INTERVAL, ranges,
 //! multiranges, or records. Its `Vec<T>` carrier also rejects multiple
@@ -14,14 +14,15 @@
 //! and compare the server's text witness. This is what keeps a shared codec
 //! mistake from passing merely because both Rust drivers descend from it.
 //!
-//! This crate's manifest enables none of tokio-postgres's optional chrono,
-//! time, UUID, or JSON codecs. Changing dependency features is outside this
-//! task's allowed file scope, so UUID/JSON and the full temporal range use the
-//! exact wire carrier; the always-on native `SystemTime` codec is compared
-//! directly. The deliberate 24:00 and infinity differences remain explicit.
+//! The oracle enables its chrono and time codecs so the optional temporal
+//! carriers are genuinely compared when this crate's matching features are
+//! selected. Other optional native codecs follow this crate's matching
+//! features, while UUID and JSON retain independent exact-wire coverage. The
+//! deliberate 24:00 and `SystemTime` infinity differences remain explicit.
 
 use std::error::Error;
 use std::future::Future;
+use std::net::IpAddr;
 use std::panic::AssertUnwindSafe;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -40,6 +41,69 @@ const RANGE_LB_INF: u8 = 0x08;
 const RANGE_UB_INF: u8 = 0x10;
 
 type BoxError = Box<dyn Error + Send + Sync>;
+
+/// UTF-8 bytes explicitly tagged as a text-format Bind parameter.
+///
+/// The two drivers use separate copies of `postgres-types`, so this carrier
+/// implements both copies of `ToSql`. A built-in value would choose binary;
+/// returning `Format::Text` here is what makes the text-encode arm exercise
+/// the protocol format code rather than merely cast a binary parameter.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct TextWire(String);
+
+impl compio_types::ToSql for TextWire {
+    fn to_sql(
+        &self,
+        _: &compio_types::Type,
+        out: &mut compio_types::private::BytesMut,
+    ) -> Result<compio_types::IsNull, BoxError> {
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(compio_types::IsNull::No)
+    }
+
+    fn accepts(_: &compio_types::Type) -> bool {
+        true
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &compio_types::Type,
+        out: &mut compio_types::private::BytesMut,
+    ) -> Result<compio_types::IsNull, BoxError> {
+        <Self as compio_types::ToSql>::to_sql(self, ty, out)
+    }
+
+    fn encode_format(&self, _: &compio_types::Type) -> compio_types::Format {
+        compio_types::Format::Text
+    }
+}
+
+impl tokio_types::ToSql for TextWire {
+    fn to_sql(
+        &self,
+        _: &tokio_types::Type,
+        out: &mut tokio_types::private::BytesMut,
+    ) -> Result<tokio_types::IsNull, BoxError> {
+        out.extend_from_slice(self.0.as_bytes());
+        Ok(tokio_types::IsNull::No)
+    }
+
+    fn accepts(_: &tokio_types::Type) -> bool {
+        true
+    }
+
+    fn to_sql_checked(
+        &self,
+        ty: &tokio_types::Type,
+        out: &mut tokio_types::private::BytesMut,
+    ) -> Result<tokio_types::IsNull, BoxError> {
+        <Self as tokio_types::ToSql>::to_sql(self, ty, out)
+    }
+
+    fn encode_format(&self, _: &tokio_types::Type) -> tokio_types::Format {
+        tokio_types::Format::Text
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct Wire(Vec<u8>);
@@ -163,6 +227,306 @@ impl RawCase {
             expression: expression.to_owned(),
             parameter_type: parameter_type.to_owned(),
         }
+    }
+}
+
+/// One value observed through all four protocol format/direction cells.
+///
+/// Extended queries request binary results in both drivers. The text decode
+/// therefore comes from the simple protocol, while `TextWire` selects a text
+/// Bind parameter for the text encode. Every rebound still returns in binary,
+/// which lets the server's parser prove that text and binary name one value.
+#[derive(Debug, PartialEq, Eq)]
+struct FormatObservation {
+    name: String,
+    binary_decoded: Wire,
+    binary_decoded_text: String,
+    text_decoded: String,
+    binary_encoded: Wire,
+    binary_encoded_text: String,
+    text_encoded: Wire,
+    text_encoded_text: String,
+}
+
+fn tokio_simple_value(
+    messages: Vec<tokio_postgres::SimpleQueryMessage>,
+    case_name: &str,
+) -> String {
+    let mut values = messages.into_iter().filter_map(|message| match message {
+        tokio_postgres::SimpleQueryMessage::Row(row) => Some(
+            row.get(0)
+                .unwrap_or_else(|| panic!("{case_name}: tokio text result was NULL"))
+                .to_owned(),
+        ),
+        _ => None,
+    });
+    let value = values
+        .next()
+        .unwrap_or_else(|| panic!("{case_name}: tokio text decode returned no row"));
+    assert!(
+        values.next().is_none(),
+        "{case_name}: tokio text decode returned more than one row"
+    );
+    value
+}
+
+fn compio_simple_value(
+    messages: Vec<compio_postgres::SimpleQueryMessage>,
+    case_name: &str,
+) -> String {
+    let mut values = messages.into_iter().filter_map(|message| match message {
+        compio_postgres::SimpleQueryMessage::Row(row) => Some(
+            row.get(0)
+                .unwrap_or_else(|| panic!("{case_name}: compio text result was NULL"))
+                .to_owned(),
+        ),
+        _ => None,
+    });
+    let value = values
+        .next()
+        .unwrap_or_else(|| panic!("{case_name}: compio text decode returned no row"));
+    assert!(
+        values.next().is_none(),
+        "{case_name}: compio text decode returned more than one row"
+    );
+    value
+}
+
+const FORMAT_RENDERING_SQL: &str = "SET TIME ZONE 'UTC'; \
+     SET DateStyle = 'ISO, YMD'; \
+     SET IntervalStyle = 'postgres'; \
+     SET bytea_output = 'hex'; \
+     SET lc_monetary = 'C'";
+
+fn tokio_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    on_tokio(url, move |client| async move {
+        client
+            .batch_execute(FORMAT_RENDERING_SQL)
+            .await
+            .expect("set deterministic rendering on tokio-postgres");
+
+        let mut observations = Vec::with_capacity(cases.len());
+        for case in cases {
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT {0} AS value, ({0})::text AS rendered",
+                        case.expression
+                    ),
+                    &[],
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: tokio binary decode: {}",
+                        case.name,
+                        common::error_chain(&error)
+                    )
+                });
+            let binary_decoded: Wire = row.get("value");
+            let binary_decoded_text: String = row.get("rendered");
+
+            let messages = client
+                .simple_query(&format!("SELECT {}", case.expression))
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: tokio text decode: {}",
+                        case.name,
+                        common::error_chain(&error)
+                    )
+                });
+            let text_decoded = tokio_simple_value(messages, &case.name);
+
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT $1::{0} AS value, ($1::{0})::text AS rendered",
+                        case.parameter_type
+                    ),
+                    &[&binary_decoded],
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: tokio binary encode: {}",
+                        case.name,
+                        common::error_chain(&error)
+                    )
+                });
+            let binary_encoded = row.get("value");
+            let binary_encoded_text = row.get("rendered");
+
+            let text_parameter = TextWire(text_decoded.clone());
+            let row = client
+                .query_one(
+                    &format!(
+                        "SELECT $1::{0} AS value, ($1::{0})::text AS rendered",
+                        case.parameter_type
+                    ),
+                    &[&text_parameter],
+                )
+                .await
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "{}: tokio text encode: {}",
+                        case.name,
+                        common::error_chain(&error)
+                    )
+                });
+            observations.push(FormatObservation {
+                name: case.name,
+                binary_decoded,
+                binary_decoded_text,
+                text_decoded,
+                binary_encoded,
+                binary_encoded_text,
+                text_encoded: row.get("value"),
+                text_encoded_text: row.get("rendered"),
+            });
+        }
+        observations
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    let client = compio_client().await;
+    client
+        .batch_execute(FORMAT_RENDERING_SQL)
+        .await
+        .expect("set deterministic rendering on compio-postgres");
+
+    let mut observations = Vec::with_capacity(cases.len());
+    for case in cases {
+        let row = client
+            .query_one(
+                &format!(
+                    "SELECT {0} AS value, ({0})::text AS rendered",
+                    case.expression
+                ),
+                &[],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: compio binary decode: {}",
+                    case.name,
+                    common::error_chain(&error)
+                )
+            });
+        let binary_decoded: Wire = row.get("value");
+        let binary_decoded_text: String = row.get("rendered");
+
+        let messages = client
+            .simple_query(&format!("SELECT {}", case.expression))
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: compio text decode: {}",
+                    case.name,
+                    common::error_chain(&error)
+                )
+            });
+        let text_decoded = compio_simple_value(messages, &case.name);
+
+        let row = client
+            .query_one(
+                &format!(
+                    "SELECT $1::{0} AS value, ($1::{0})::text AS rendered",
+                    case.parameter_type
+                ),
+                &[&binary_decoded],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: compio binary encode: {}",
+                    case.name,
+                    common::error_chain(&error)
+                )
+            });
+        let binary_encoded = row.get("value");
+        let binary_encoded_text = row.get("rendered");
+
+        let text_parameter = TextWire(text_decoded.clone());
+        let row = client
+            .query_one(
+                &format!(
+                    "SELECT $1::{0} AS value, ($1::{0})::text AS rendered",
+                    case.parameter_type
+                ),
+                &[&text_parameter],
+            )
+            .await
+            .unwrap_or_else(|error| {
+                panic!(
+                    "{}: compio text encode: {}",
+                    case.name,
+                    common::error_chain(&error)
+                )
+            });
+        observations.push(FormatObservation {
+            name: case.name.clone(),
+            binary_decoded,
+            binary_decoded_text,
+            text_decoded,
+            binary_encoded,
+            binary_encoded_text,
+            text_encoded: row.get("value"),
+            text_encoded_text: row.get("rendered"),
+        });
+    }
+    observations
+}
+
+fn assert_format_differential(
+    cases: &[RawCase],
+    ours: &[FormatObservation],
+    theirs: &[FormatObservation],
+) {
+    assert_eq!(
+        ours.len(),
+        cases.len(),
+        "compio-postgres answered the wrong number of format cases"
+    );
+    assert_eq!(
+        theirs.len(),
+        cases.len(),
+        "tokio-postgres answered the wrong number of format cases"
+    );
+
+    for (case, (ours, theirs)) in cases.iter().zip(ours.iter().zip(theirs)) {
+        assert_eq!(
+            ours, theirs,
+            "{}: the drivers disagreed across text/binary encode/decode",
+            case.name
+        );
+        assert_eq!(
+            ours.binary_decoded, ours.binary_encoded,
+            "{}: binary decode/encode changed the wire value",
+            case.name
+        );
+        assert_eq!(
+            ours.binary_decoded, ours.text_encoded,
+            "{}: text decode/encode changed the binary value",
+            case.name
+        );
+        assert_eq!(
+            ours.text_decoded, ours.binary_decoded_text,
+            "{}: text and binary decode rendered different values",
+            case.name
+        );
+        assert_eq!(
+            ours.text_decoded, ours.binary_encoded_text,
+            "{}: binary rebound rendered a different value",
+            case.name
+        );
+        assert_eq!(
+            ours.text_decoded, ours.text_encoded_text,
+            "{}: text rebound rendered a different value",
+            case.name
+        );
     }
 }
 
@@ -593,6 +957,84 @@ fn decode_interval(bytes: &[u8]) -> Result<IntervalWire, BoxError> {
     Ok(interval)
 }
 
+fn float_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new("float4-nan", "'NaN'::float4", "float4"),
+        RawCase::new("float4-positive-infinity", "'Infinity'::float4", "float4"),
+        RawCase::new("float4-negative-infinity", "'-Infinity'::float4", "float4"),
+        RawCase::new("float4-negative-zero", "'-0'::float4", "float4"),
+        RawCase::new(
+            "float4-positive-subnormal",
+            "'1.401298464324817e-45'::float4",
+            "float4",
+        ),
+        RawCase::new(
+            "float4-negative-subnormal",
+            "'-1.401298464324817e-45'::float4",
+            "float4",
+        ),
+        RawCase::new("float8-nan", "'NaN'::float8", "float8"),
+        RawCase::new("float8-positive-infinity", "'Infinity'::float8", "float8"),
+        RawCase::new("float8-negative-infinity", "'-Infinity'::float8", "float8"),
+        RawCase::new("float8-negative-zero", "'-0'::float8", "float8"),
+        RawCase::new(
+            "float8-positive-subnormal",
+            "'4.9406564584124654e-324'::float8",
+            "float8",
+        ),
+        RawCase::new(
+            "float8-negative-subnormal",
+            "'-4.9406564584124654e-324'::float8",
+            "float8",
+        ),
+        RawCase::new("float8-17-digit", "'1.0000000000000002'::float8", "float8"),
+    ]
+}
+
+fn tokio_float_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_float_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+/// Both drivers preserve every required float through text and binary.
+#[compio::test]
+async fn both_drivers_agree_on_float_text_and_binary_codecs() {
+    let cases = float_format_cases();
+    let theirs = tokio_float_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_float_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let expected = [
+        ("float4-nan", "NaN", "7fc00000"),
+        ("float4-positive-infinity", "Infinity", "7f800000"),
+        ("float4-negative-infinity", "-Infinity", "ff800000"),
+        ("float4-negative-zero", "-0", "80000000"),
+        ("float4-positive-subnormal", "1e-45", "00000001"),
+        ("float4-negative-subnormal", "-1e-45", "80000001"),
+        ("float8-nan", "NaN", "7ff8000000000000"),
+        ("float8-positive-infinity", "Infinity", "7ff0000000000000"),
+        ("float8-negative-infinity", "-Infinity", "fff0000000000000"),
+        ("float8-negative-zero", "-0", "8000000000000000"),
+        ("float8-positive-subnormal", "5e-324", "0000000000000001"),
+        ("float8-negative-subnormal", "-5e-324", "8000000000000001"),
+        ("float8-17-digit", "1.0000000000000002", "3ff0000000000001"),
+    ];
+    assert_eq!(ours.len(), expected.len());
+    for (observation, (name, text, binary_hex)) in ours.iter().zip(expected) {
+        assert_eq!(observation.name, name);
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        assert_eq!(
+            hex(&observation.binary_decoded.0),
+            binary_hex,
+            "{name}: server binary"
+        );
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct NativeObservation {
     int2: Vec<i16>,
@@ -874,6 +1316,2702 @@ async fn native_scalar_codecs_round_trip_identically() {
     assert_eq!(ours.char_, [i8::MIN, -1, 0, 1, i8::MAX]);
 }
 
+fn array_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new("array-format-empty", "ARRAY[]::text[]", "text[]"),
+        RawCase::new(
+            "array-format-null-element",
+            "ARRAY['first', NULL, E'line\\nlast']::text[]",
+            "text[]",
+        ),
+        RawCase::new(
+            "array-format-multidimensional",
+            "ARRAY[['a', NULL], ['c', 'd']]::text[]",
+            "text[]",
+        ),
+        RawCase::new(
+            "array-format-lower-bound-three",
+            "'[3:5]={a,b,c}'::text[]",
+            "text[]",
+        ),
+    ]
+}
+
+fn tokio_array_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_array_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NativeArrayShapeObservation {
+    multidimensional: ValueOutcome<Vec<Option<String>>>,
+    lower_values: Vec<String>,
+    server_lower_bound: i32,
+    server_dimensions: String,
+    rebound_lower_bound: i32,
+    rebound_dimensions: String,
+}
+
+fn tokio_native_array_shape_observation(url: String) -> NativeArrayShapeObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(
+                "SELECT ARRAY[['a', NULL], ['c', 'd']]::text[], \
+                        '[3:5]={a,b,c}'::text[], \
+                        array_lower('[3:5]={a,b,c}'::text[], 1), \
+                        array_dims('[3:5]={a,b,c}'::text[])",
+                &[],
+            )
+            .await
+            .expect("tokio native array decode");
+        let multidimensional = match row.try_get::<_, Vec<Option<String>>>(0) {
+            Ok(value) => ValueOutcome::Value(value),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+        let lower_values: Vec<String> = row.get(1);
+        let rebound = client
+            .query_one(
+                "SELECT array_lower($1::text[], 1), array_dims($1::text[])",
+                &[&lower_values],
+            )
+            .await
+            .expect("tokio native lower-bound rebound");
+        NativeArrayShapeObservation {
+            multidimensional,
+            lower_values,
+            server_lower_bound: row.get(2),
+            server_dimensions: row.get(3),
+            rebound_lower_bound: rebound.get(0),
+            rebound_dimensions: rebound.get(1),
+        }
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_native_array_shape_observation() -> NativeArrayShapeObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(
+            "SELECT ARRAY[['a', NULL], ['c', 'd']]::text[], \
+                    '[3:5]={a,b,c}'::text[], \
+                    array_lower('[3:5]={a,b,c}'::text[], 1), \
+                    array_dims('[3:5]={a,b,c}'::text[])",
+            &[],
+        )
+        .await
+        .expect("compio native array decode");
+    let multidimensional = match row.try_get::<_, Vec<Option<String>>>(0) {
+        Ok(value) => ValueOutcome::Value(value),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+    let lower_values: Vec<String> = row.get(1);
+    let rebound = client
+        .query_one(
+            "SELECT array_lower($1::text[], 1), array_dims($1::text[])",
+            &[&lower_values],
+        )
+        .await
+        .expect("compio native lower-bound rebound");
+    NativeArrayShapeObservation {
+        multidimensional,
+        lower_values,
+        server_lower_bound: row.get(2),
+        server_dimensions: row.get(3),
+        rebound_lower_bound: rebound.get(0),
+        rebound_dimensions: rebound.get(1),
+    }
+}
+
+/// Both drivers preserve array wire shape in text and binary formats.
+#[compio::test]
+async fn both_drivers_agree_on_array_text_and_binary_codecs() {
+    let cases = array_format_cases();
+    let theirs = tokio_array_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_array_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let empty = decode_array(&ours[0].binary_decoded.0).expect("decode empty array");
+    assert!(empty.dimensions.is_empty());
+    assert!(empty.values.is_empty());
+
+    let nullable = decode_array(&ours[1].binary_decoded.0).expect("decode nullable array");
+    assert_eq!(nullable.dimensions, [(3, 1)]);
+    assert!(nullable.has_null);
+    assert_eq!(nullable.values[1], None);
+
+    let multidimensional =
+        decode_array(&ours[2].binary_decoded.0).expect("decode multidimensional array");
+    assert_eq!(multidimensional.dimensions, [(2, 1), (2, 1)]);
+    assert_eq!(multidimensional.values.len(), 4);
+    assert_eq!(ours[2].text_decoded, "{{a,NULL},{c,d}}");
+
+    let lower_bound = decode_array(&ours[3].binary_decoded.0).expect("decode lower-bound array");
+    assert_eq!(lower_bound.dimensions, [(3, 3)]);
+    assert_eq!(ours[3].text_decoded, "[3:5]={a,b,c}");
+
+    // The wire carrier above proves both drivers preserve the server's shape.
+    // Their shared Vec codec cannot represent it: it refuses two dimensions
+    // but silently discards a non-1 lower bound and writes 1 on rebound.
+    let theirs = tokio_native_array_shape_observation(common::plaintext_url());
+    let ours = compio_native_array_shape_observation().await;
+    assert_eq!(ours, theirs);
+    assert_eq!(ours.multidimensional, ValueOutcome::LocalFailure);
+    assert_eq!(ours.lower_values, ["a", "b", "c"]);
+    assert_eq!(ours.server_lower_bound, 3);
+    assert_eq!(ours.server_dimensions, "[3:5]");
+    assert_eq!(ours.rebound_lower_bound, 1);
+    assert_eq!(ours.rebound_dimensions, "[1:3]");
+}
+
+/// Desired invariant blocked by both Vec codecs discarding array lower bounds.
+#[ignore = "both postgres-types Vec codecs normalize [3:5] to [1:3]"]
+#[compio::test]
+async fn native_array_codecs_must_not_discard_lower_bounds() {
+    let theirs = tokio_native_array_shape_observation(common::plaintext_url());
+    let ours = compio_native_array_shape_observation().await;
+    assert_eq!(ours.server_dimensions, ours.rebound_dimensions);
+    assert_eq!(theirs.server_dimensions, theirs.rebound_dimensions);
+}
+
+#[cfg(feature = "array-impls")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeFixedArrayObservation {
+    decoded_exact: [i32; 3],
+    decoded_nullable: [Option<i32>; 3],
+    decoded_empty: [i32; 0],
+    too_few: ValueOutcome<[i32; 3]>,
+    too_many: ValueOutcome<[i32; 3]>,
+    too_few_error: String,
+    too_many_error: String,
+    decoded_lower: [i32; 3],
+    server_text: [String; 4],
+    server_wires: [Wire; 4],
+    outbound_wires: [Vec<u8>; 4],
+    rebound_exact: [i32; 3],
+    rebound_nullable: [Option<i32>; 3],
+    rebound_empty: [i32; 0],
+    rebound_lower: [i32; 3],
+    rebound_text: [String; 4],
+    rebound_wires: [Wire; 4],
+    server_lower_bound: i32,
+    server_dimensions: String,
+    rebound_lower_bound: i32,
+    rebound_dimensions: String,
+    bytea_accepts: bool,
+    bytea_array_accepts: bool,
+    bytea_server_text: String,
+    bytea_server_wire: Wire,
+    bytea_outbound_wire: Vec<u8>,
+    bytea_rebound_text: String,
+    bytea_rebound_wire: Wire,
+}
+
+#[cfg(feature = "array-impls")]
+const NATIVE_FIXED_ARRAY_DECODE_SQL: &str = "SELECT \
+    ARRAY[1,2,3]::int4[], (ARRAY[1,2,3]::int4[])::text, \
+    ARRAY[-2147483648,NULL,2147483647]::int4[], \
+        (ARRAY[-2147483648,NULL,2147483647]::int4[])::text, \
+    ARRAY[]::int4[], (ARRAY[]::int4[])::text, \
+    ARRAY[1,2]::int4[], ARRAY[1,2,3,4]::int4[], \
+    '[3:5]={1,2,3}'::int4[], ('[3:5]={1,2,3}'::int4[])::text, \
+        array_lower('[3:5]={1,2,3}'::int4[], 1), \
+        array_dims('[3:5]={1,2,3}'::int4[]), \
+    decode('0080ff', 'hex'), (decode('0080ff', 'hex'))::text";
+
+#[cfg(feature = "array-impls")]
+const NATIVE_FIXED_ARRAY_REBOUND_SQL: &str = "SELECT \
+    $1::int4[], ($1::int4[])::text, \
+    $2::int4[], ($2::int4[])::text, \
+    $3::int4[], ($3::int4[])::text, \
+    $4::int4[], ($4::int4[])::text, \
+        array_lower($4::int4[], 1), array_dims($4::int4[]), \
+    $5::bytea, ($5::bytea)::text";
+
+#[cfg(feature = "array-impls")]
+fn tokio_fixed_array_wire<T>(value: &T, ty: &tokio_types::Type) -> Vec<u8>
+where
+    T: tokio_types::ToSql,
+{
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres fixed-array encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "array-impls")]
+fn compio_fixed_array_wire<T>(value: &T, ty: &compio_types::Type) -> Vec<u8>
+where
+    T: compio_types::ToSql,
+{
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres fixed-array encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "array-impls")]
+fn tokio_fixed_array_decode_error(wire: &Wire) -> String {
+    <[i32; 3] as tokio_types::FromSql>::from_sql(&tokio_types::Type::INT4_ARRAY, &wire.0)
+        .expect_err("tokio-postgres accepted the wrong fixed-array length")
+        .to_string()
+}
+
+#[cfg(feature = "array-impls")]
+fn compio_fixed_array_decode_error(wire: &Wire) -> String {
+    <[i32; 3] as compio_types::FromSql>::from_sql(&compio_types::Type::INT4_ARRAY, &wire.0)
+        .expect_err("compio-postgres accepted the wrong fixed-array length")
+        .to_string()
+}
+
+#[cfg(feature = "array-impls")]
+fn tokio_native_fixed_array_observation(url: String) -> NativeFixedArrayObservation {
+    on_tokio(url, |client| async move {
+        client
+            .batch_execute(FORMAT_RENDERING_SQL)
+            .await
+            .expect("set deterministic rendering on tokio-postgres");
+        let row = client
+            .query_one(NATIVE_FIXED_ARRAY_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres fixed-array decode");
+        let decoded_exact: [i32; 3] = row.get(0);
+        let decoded_nullable: [Option<i32>; 3] = row.get(2);
+        let decoded_empty: [i32; 0] = row.get(4);
+        let too_few = match row.try_get::<_, [i32; 3]>(6) {
+            Ok(value) => ValueOutcome::Value(value),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+        let too_many = match row.try_get::<_, [i32; 3]>(7) {
+            Ok(value) => ValueOutcome::Value(value),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+        let too_few_wire: Wire = row.get(6);
+        let too_many_wire: Wire = row.get(7);
+        let decoded_lower: [i32; 3] = row.get(8);
+        let bytea = [0x00_u8, 0x80, 0xff];
+        let outbound_wires = [
+            tokio_fixed_array_wire(&decoded_exact, &tokio_types::Type::INT4_ARRAY),
+            tokio_fixed_array_wire(&decoded_nullable, &tokio_types::Type::INT4_ARRAY),
+            tokio_fixed_array_wire(&decoded_empty, &tokio_types::Type::INT4_ARRAY),
+            tokio_fixed_array_wire(&decoded_lower, &tokio_types::Type::INT4_ARRAY),
+        ];
+        let rebound = client
+            .query_one(
+                NATIVE_FIXED_ARRAY_REBOUND_SQL,
+                &[
+                    &decoded_exact,
+                    &decoded_nullable,
+                    &decoded_empty,
+                    &decoded_lower,
+                    &bytea,
+                ],
+            )
+            .await
+            .expect("tokio-postgres fixed-array rebound");
+        NativeFixedArrayObservation {
+            decoded_exact,
+            decoded_nullable,
+            decoded_empty,
+            too_few,
+            too_many,
+            too_few_error: tokio_fixed_array_decode_error(&too_few_wire),
+            too_many_error: tokio_fixed_array_decode_error(&too_many_wire),
+            decoded_lower,
+            server_text: [row.get(1), row.get(3), row.get(5), row.get(9)],
+            server_wires: [row.get(0), row.get(2), row.get(4), row.get(8)],
+            outbound_wires,
+            rebound_exact: rebound.get(0),
+            rebound_nullable: rebound.get(2),
+            rebound_empty: rebound.get(4),
+            rebound_lower: rebound.get(6),
+            rebound_text: [
+                rebound.get(1),
+                rebound.get(3),
+                rebound.get(5),
+                rebound.get(7),
+            ],
+            rebound_wires: [
+                rebound.get(0),
+                rebound.get(2),
+                rebound.get(4),
+                rebound.get(6),
+            ],
+            server_lower_bound: row.get(10),
+            server_dimensions: row.get(11),
+            rebound_lower_bound: rebound.get(8),
+            rebound_dimensions: rebound.get(9),
+            bytea_accepts: <[u8; 3] as tokio_types::ToSql>::accepts(&tokio_types::Type::BYTEA),
+            bytea_array_accepts: <[u8; 3] as tokio_types::ToSql>::accepts(
+                &tokio_types::Type::BYTEA_ARRAY,
+            ),
+            bytea_server_text: row.get(13),
+            bytea_server_wire: row.get(12),
+            bytea_outbound_wire: tokio_fixed_array_wire(&bytea, &tokio_types::Type::BYTEA),
+            bytea_rebound_text: rebound.get(11),
+            bytea_rebound_wire: rebound.get(10),
+        }
+    })
+}
+
+#[cfg(feature = "array-impls")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_fixed_array_observation() -> NativeFixedArrayObservation {
+    let client = compio_client().await;
+    client
+        .batch_execute(FORMAT_RENDERING_SQL)
+        .await
+        .expect("set deterministic rendering on compio-postgres");
+    let row = client
+        .query_one(NATIVE_FIXED_ARRAY_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres fixed-array decode");
+    let decoded_exact: [i32; 3] = row.get(0);
+    let decoded_nullable: [Option<i32>; 3] = row.get(2);
+    let decoded_empty: [i32; 0] = row.get(4);
+    let too_few = match row.try_get::<_, [i32; 3]>(6) {
+        Ok(value) => ValueOutcome::Value(value),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+    let too_many = match row.try_get::<_, [i32; 3]>(7) {
+        Ok(value) => ValueOutcome::Value(value),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+    let too_few_wire: Wire = row.get(6);
+    let too_many_wire: Wire = row.get(7);
+    let decoded_lower: [i32; 3] = row.get(8);
+    let bytea = [0x00_u8, 0x80, 0xff];
+    let outbound_wires = [
+        compio_fixed_array_wire(&decoded_exact, &compio_types::Type::INT4_ARRAY),
+        compio_fixed_array_wire(&decoded_nullable, &compio_types::Type::INT4_ARRAY),
+        compio_fixed_array_wire(&decoded_empty, &compio_types::Type::INT4_ARRAY),
+        compio_fixed_array_wire(&decoded_lower, &compio_types::Type::INT4_ARRAY),
+    ];
+    let rebound = client
+        .query_one(
+            NATIVE_FIXED_ARRAY_REBOUND_SQL,
+            &[
+                &decoded_exact,
+                &decoded_nullable,
+                &decoded_empty,
+                &decoded_lower,
+                &bytea,
+            ],
+        )
+        .await
+        .expect("compio-postgres fixed-array rebound");
+    NativeFixedArrayObservation {
+        decoded_exact,
+        decoded_nullable,
+        decoded_empty,
+        too_few,
+        too_many,
+        too_few_error: compio_fixed_array_decode_error(&too_few_wire),
+        too_many_error: compio_fixed_array_decode_error(&too_many_wire),
+        decoded_lower,
+        server_text: [row.get(1), row.get(3), row.get(5), row.get(9)],
+        server_wires: [row.get(0), row.get(2), row.get(4), row.get(8)],
+        outbound_wires,
+        rebound_exact: rebound.get(0),
+        rebound_nullable: rebound.get(2),
+        rebound_empty: rebound.get(4),
+        rebound_lower: rebound.get(6),
+        rebound_text: [
+            rebound.get(1),
+            rebound.get(3),
+            rebound.get(5),
+            rebound.get(7),
+        ],
+        rebound_wires: [
+            rebound.get(0),
+            rebound.get(2),
+            rebound.get(4),
+            rebound.get(6),
+        ],
+        server_lower_bound: row.get(10),
+        server_dimensions: row.get(11),
+        rebound_lower_bound: rebound.get(8),
+        rebound_dimensions: rebound.get(9),
+        bytea_accepts: <[u8; 3] as compio_types::ToSql>::accepts(&compio_types::Type::BYTEA),
+        bytea_array_accepts: <[u8; 3] as compio_types::ToSql>::accepts(
+            &compio_types::Type::BYTEA_ARRAY,
+        ),
+        bytea_server_text: row.get(13),
+        bytea_server_wire: row.get(12),
+        bytea_outbound_wire: compio_fixed_array_wire(&bytea, &compio_types::Type::BYTEA),
+        bytea_rebound_text: rebound.get(11),
+        bytea_rebound_wire: rebound.get(10),
+    }
+}
+
+/// Fixed arrays agree on values and exact wire bytes, including two shared
+/// shape defects that the active assertions pin independently of the oracle.
+#[cfg(feature = "array-impls")]
+#[compio::test]
+async fn native_fixed_array_codecs_match_values_and_pin_shared_wire_defects() {
+    let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
+    let ours = compio_native_fixed_array_observation().await;
+    assert_eq!(ours, theirs);
+
+    assert_eq!(ours.decoded_exact, [1, 2, 3]);
+    assert_eq!(
+        ours.decoded_nullable,
+        [Some(i32::MIN), None, Some(i32::MAX)]
+    );
+    assert_eq!(ours.decoded_empty, [0_i32; 0]);
+    assert_eq!(ours.too_few, ValueOutcome::LocalFailure);
+    assert_eq!(ours.too_many, ValueOutcome::LocalFailure);
+    assert_eq!(
+        ours.too_few_error,
+        "too few elements in array (expected 3, got 2)"
+    );
+    assert_eq!(
+        ours.too_many_error,
+        "excess elements in array (expected 3, got more than that)"
+    );
+    assert_eq!(ours.decoded_lower, [1, 2, 3]);
+    assert_eq!(
+        ours.server_text,
+        [
+            "{1,2,3}",
+            "{-2147483648,NULL,2147483647}",
+            "{}",
+            "[3:5]={1,2,3}",
+        ]
+    );
+
+    let exact_wire = "0000000100000000000000170000000300000001\
+        000000040000000100000004000000020000000400000003";
+    let nullable_wire = "0000000100000001000000170000000300000001\
+        0000000480000000ffffffff000000047fffffff";
+    let canonical_empty_wire = "000000000000000000000017";
+    let noncanonical_empty_wire = "0000000100000000000000170000000000000001";
+    let lower_three_wire = "0000000100000000000000170000000300000003\
+        000000040000000100000004000000020000000400000003";
+    assert_eq!(hex(&ours.server_wires[0].0), exact_wire);
+    assert_eq!(hex(&ours.server_wires[1].0), nullable_wire);
+    assert_eq!(hex(&ours.server_wires[2].0), canonical_empty_wire);
+    assert_eq!(hex(&ours.server_wires[3].0), lower_three_wire);
+    assert_eq!(hex(&ours.outbound_wires[0]), exact_wire);
+    assert_eq!(hex(&ours.outbound_wires[1]), nullable_wire);
+
+    // Both fixed-array codecs write a one-dimensional, zero-length array that
+    // PostgreSQL never emits. The server canonicalizes it back to ndim = 0.
+    assert_eq!(hex(&ours.outbound_wires[2]), noncanonical_empty_wire);
+    assert_ne!(ours.outbound_wires[2], ours.server_wires[2].0);
+    assert_eq!(hex(&ours.rebound_wires[2].0), canonical_empty_wire);
+
+    // A fixed Rust array has no lower-bound slot, so both codecs normalize the
+    // server's [3:5] array to [1:3] when writing it back.
+    assert_eq!(hex(&ours.outbound_wires[3]), exact_wire);
+    assert_ne!(ours.outbound_wires[3], ours.server_wires[3].0);
+    assert_eq!(ours.server_lower_bound, 3);
+    assert_eq!(ours.server_dimensions, "[3:5]");
+    assert_eq!(ours.rebound_lower_bound, 1);
+    assert_eq!(ours.rebound_dimensions, "[1:3]");
+
+    assert_eq!(ours.rebound_exact, [1, 2, 3]);
+    assert_eq!(
+        ours.rebound_nullable,
+        [Some(i32::MIN), None, Some(i32::MAX)]
+    );
+    assert_eq!(ours.rebound_empty, [0_i32; 0]);
+    assert_eq!(ours.rebound_lower, [1, 2, 3]);
+    assert_eq!(
+        ours.rebound_text,
+        ["{1,2,3}", "{-2147483648,NULL,2147483647}", "{}", "{1,2,3}",]
+    );
+    assert_eq!(hex(&ours.rebound_wires[0].0), exact_wire);
+    assert_eq!(hex(&ours.rebound_wires[1].0), nullable_wire);
+    assert_eq!(hex(&ours.rebound_wires[3].0), exact_wire);
+
+    // `[u8; N]` is deliberately a BYTEA specialization, not a BYTEA[] array.
+    assert!(ours.bytea_accepts);
+    assert!(!ours.bytea_array_accepts);
+    assert_eq!(ours.bytea_server_text, "\\x0080ff");
+    assert_eq!(ours.bytea_server_wire.0, [0x00, 0x80, 0xff]);
+    assert_eq!(ours.bytea_outbound_wire, [0x00, 0x80, 0xff]);
+    assert_eq!(ours.bytea_rebound_text, "\\x0080ff");
+    assert_eq!(ours.bytea_rebound_wire.0, [0x00, 0x80, 0xff]);
+}
+
+/// Desired invariant blocked by both fixed-array codecs emitting an empty
+/// array as one zero-length dimension instead of `PostgreSQL`'s canonical wire.
+#[cfg(feature = "array-impls")]
+#[ignore = "both postgres-types fixed-array codecs emit noncanonical empty-array wire"]
+#[compio::test]
+async fn native_fixed_array_codecs_must_emit_canonical_empty_wire() {
+    let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
+    let ours = compio_native_fixed_array_observation().await;
+    assert_eq!(ours.outbound_wires[2], ours.server_wires[2].0);
+    assert_eq!(theirs.outbound_wires[2], theirs.server_wires[2].0);
+}
+
+/// Desired invariant blocked by both fixed-array codecs discarding array
+/// lower bounds that their Rust carrier has no field in which to retain.
+#[cfg(feature = "array-impls")]
+#[ignore = "both postgres-types fixed-array codecs normalize [3:5] to [1:3]"]
+#[compio::test]
+async fn native_fixed_array_codecs_must_preserve_lower_bounds() {
+    let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
+    let ours = compio_native_fixed_array_observation().await;
+    assert_eq!(ours.server_dimensions, ours.rebound_dimensions);
+    assert_eq!(theirs.server_dimensions, theirs.rebound_dimensions);
+}
+
+fn byte_string_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new("bytea-format-empty", "decode('', 'hex')", "bytea"),
+        RawCase::new(
+            "bytea-format-high-bytes",
+            "decode('00ff5c0a80c3', 'hex')",
+            "bytea",
+        ),
+        RawCase::new("text-format-empty", "''::text", "text"),
+        RawCase::new(
+            "text-format-hostile-utf8",
+            "$cpg$line one\r\nline two\t\\'\" / e\u{301} / \u{1f600} / \u{1f680} / \u{2028}$cpg$::text",
+            "text",
+        ),
+        RawCase::new(
+            "varchar-format-trailing-spaces",
+            "$cpg$varying  \u{754c}\u{1f680}  $cpg$::varchar(32)",
+            "varchar(32)",
+        ),
+        RawCase::new("char-format-ascii-padding", "'xy'::char(8)", "char(8)"),
+        RawCase::new(
+            "char-format-unicode-padding",
+            "'\u{754c}\u{1f680}'::char(4)",
+            "char(4)",
+        ),
+    ]
+}
+
+fn tokio_byte_string_format_observations(
+    url: String,
+    cases: Vec<RawCase>,
+) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_byte_string_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NativeByteStringObservation {
+    decoded_bytea: [Vec<u8>; 2],
+    rebound_bytea: [Vec<u8>; 2],
+    decoded_strings: [String; 5],
+    rebound_strings: [String; 5],
+}
+
+const NATIVE_BYTE_STRING_DECODE_SQL: &str = "SELECT \
+    decode('', 'hex'), \
+    decode('00ff5c0a80c3', 'hex'), \
+    ''::text, \
+    $cpg$line one\r\nline two\t\\'\" / e\u{301} / \u{1f600} / \u{1f680} / \u{2028}$cpg$::text, \
+    $cpg$varying  \u{754c}\u{1f680}  $cpg$::varchar(32), \
+    'xy'::char(8), \
+    '\u{754c}\u{1f680}'::char(4)";
+
+const NATIVE_BYTE_STRING_REBOUND_SQL: &str = "SELECT \
+    $1::bytea, $2::bytea, $3::text, $4::text, $5::varchar(32), \
+    $6::char(8), $7::char(4)";
+
+fn tokio_native_byte_string_observation(url: String) -> NativeByteStringObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_BYTE_STRING_DECODE_SQL, &[])
+            .await
+            .expect("tokio native byte/string decode");
+        let decoded_bytea = [row.get(0), row.get(1)];
+        let decoded_strings = [row.get(2), row.get(3), row.get(4), row.get(5), row.get(6)];
+        let ascii_char_input = "xy".to_owned();
+        let unicode_char_input = "\u{754c}\u{1f680}".to_owned();
+        let rebound = client
+            .query_one(
+                NATIVE_BYTE_STRING_REBOUND_SQL,
+                &[
+                    &decoded_bytea[0],
+                    &decoded_bytea[1],
+                    &decoded_strings[0],
+                    &decoded_strings[1],
+                    &decoded_strings[2],
+                    &ascii_char_input,
+                    &unicode_char_input,
+                ],
+            )
+            .await
+            .expect("tokio native byte/string encode");
+        NativeByteStringObservation {
+            decoded_bytea,
+            rebound_bytea: [rebound.get(0), rebound.get(1)],
+            decoded_strings,
+            rebound_strings: [
+                rebound.get(2),
+                rebound.get(3),
+                rebound.get(4),
+                rebound.get(5),
+                rebound.get(6),
+            ],
+        }
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_native_byte_string_observation() -> NativeByteStringObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_BYTE_STRING_DECODE_SQL, &[])
+        .await
+        .expect("compio native byte/string decode");
+    let decoded_bytea = [row.get(0), row.get(1)];
+    let decoded_strings = [row.get(2), row.get(3), row.get(4), row.get(5), row.get(6)];
+    let ascii_char_input = "xy".to_owned();
+    let unicode_char_input = "\u{754c}\u{1f680}".to_owned();
+    let rebound = client
+        .query_one(
+            NATIVE_BYTE_STRING_REBOUND_SQL,
+            &[
+                &decoded_bytea[0],
+                &decoded_bytea[1],
+                &decoded_strings[0],
+                &decoded_strings[1],
+                &decoded_strings[2],
+                &ascii_char_input,
+                &unicode_char_input,
+            ],
+        )
+        .await
+        .expect("compio native byte/string encode");
+    NativeByteStringObservation {
+        decoded_bytea,
+        rebound_bytea: [rebound.get(0), rebound.get(1)],
+        decoded_strings,
+        rebound_strings: [
+            rebound.get(2),
+            rebound.get(3),
+            rebound.get(4),
+            rebound.get(5),
+            rebound.get(6),
+        ],
+    }
+}
+
+/// Both drivers preserve byte and string values in text and binary formats.
+#[compio::test]
+async fn both_drivers_agree_on_byte_and_string_text_and_binary_codecs() {
+    let cases = byte_string_format_cases();
+    let theirs = tokio_byte_string_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_byte_string_format_observations(&cases).await;
+    assert_eq!(ours, theirs);
+
+    // BPCHAR's output function preserves its padding, while its cast to text
+    // removes it. The generic invariant therefore applies through VARCHAR;
+    // the two CHAR cases are checked against both server witnesses below.
+    assert_format_differential(&cases[..5], &ours[..5], &theirs[..5]);
+
+    let expected = [
+        ("bytea-format-empty", "\\x", ""),
+        ("bytea-format-high-bytes", "\\x00ff5c0a80c3", "00ff5c0a80c3"),
+        ("text-format-empty", "", ""),
+        (
+            "text-format-hostile-utf8",
+            "line one\r\nline two\t\\'\" / e\u{301} / \u{1f600} / \u{1f680} / \u{2028}",
+            "6c696e65206f6e650d0a6c696e652074776f095c2722202f2065cc81202f20f09f9880202f20f09f9a80202f20e280a8",
+        ),
+        (
+            "varchar-format-trailing-spaces",
+            "varying  \u{754c}\u{1f680}  ",
+            "76617279696e672020e7958cf09f9a802020",
+        ),
+    ];
+    for (observation, (name, text, binary_hex)) in ours.iter().zip(expected) {
+        assert_eq!(observation.name, name);
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        assert_eq!(
+            hex(&observation.binary_decoded.0),
+            binary_hex,
+            "{name}: wire"
+        );
+    }
+
+    for (observation, padded, rendered, binary_hex) in [
+        (&ours[5], "xy      ", "xy", "7879202020202020"),
+        (
+            &ours[6],
+            "\u{754c}\u{1f680}  ",
+            "\u{754c}\u{1f680}",
+            "e7958cf09f9a802020",
+        ),
+    ] {
+        assert_eq!(observation.text_decoded, padded);
+        assert_eq!(observation.binary_decoded_text, rendered);
+        assert_eq!(hex(&observation.binary_decoded.0), binary_hex);
+        assert_eq!(observation.binary_decoded, observation.binary_encoded);
+        assert_eq!(observation.binary_decoded, observation.text_encoded);
+        assert_eq!(observation.binary_encoded_text, rendered);
+        assert_eq!(observation.text_encoded_text, rendered);
+    }
+
+    let theirs = tokio_native_byte_string_observation(common::plaintext_url());
+    let ours = compio_native_byte_string_observation().await;
+    assert_eq!(ours, theirs);
+    assert_eq!(
+        ours.decoded_bytea,
+        [Vec::new(), vec![0, 0xff, 0x5c, 0x0a, 0x80, 0xc3]]
+    );
+    assert_eq!(ours.decoded_bytea, ours.rebound_bytea);
+    assert_eq!(
+        ours.decoded_strings,
+        [
+            String::new(),
+            "line one\r\nline two\t\\'\" / e\u{301} / \u{1f600} / \u{1f680} / \u{2028}".to_owned(),
+            "varying  \u{754c}\u{1f680}  ".to_owned(),
+            "xy      ".to_owned(),
+            "\u{754c}\u{1f680}  ".to_owned(),
+        ]
+    );
+    assert_eq!(ours.decoded_strings, ours.rebound_strings);
+}
+
+#[cfg(feature = "with-smol_str-01")]
+const SMOL_STR_INLINE_23: &str = "abcdefghijklmnopqrstuvw";
+#[cfg(feature = "with-smol_str-01")]
+const SMOL_STR_HEAP_24: &str = "abcdefghijklmnopqrstuvwx";
+#[cfg(feature = "with-smol_str-01")]
+const SMOL_STR_DECOMPOSED_UNICODE: &str = "e\u{301}/\u{754c}/\u{1f680}";
+
+#[cfg(feature = "with-smol_str-01")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeSmolStrObservation {
+    decoded: [String; 5],
+    decoded_heap_allocated: [bool; 5],
+    server_text: [String; 5],
+    server_wires: [Wire; 5],
+    outbound: [String; 5],
+    outbound_heap_allocated: [bool; 5],
+    outbound_wires: [Vec<u8>; 5],
+    rebound: [String; 5],
+    rebound_heap_allocated: [bool; 5],
+    rebound_text: [String; 5],
+    rebound_wires: [Wire; 5],
+}
+
+#[cfg(feature = "with-smol_str-01")]
+const NATIVE_SMOL_STR_DECODE_SQL: &str = "SELECT \
+    ''::text, ''::text, (''::text)::text, \
+    'abcdefghijklmnopqrstuvw'::text, 'abcdefghijklmnopqrstuvw'::text, \
+        ('abcdefghijklmnopqrstuvw'::text)::text, \
+    'abcdefghijklmnopqrstuvwx'::text, 'abcdefghijklmnopqrstuvwx'::text, \
+        ('abcdefghijklmnopqrstuvwx'::text)::text, \
+    $cpg$e\u{301}/\u{754c}/\u{1f680}$cpg$::text, \
+        $cpg$e\u{301}/\u{754c}/\u{1f680}$cpg$::text, \
+        ($cpg$e\u{301}/\u{754c}/\u{1f680}$cpg$::text)::text, \
+    'xy'::char(5), 'xy'::char(5), ('xy'::char(5))::text";
+
+#[cfg(feature = "with-smol_str-01")]
+const NATIVE_SMOL_STR_REBOUND_SQL: &str = "SELECT \
+    $1::text, $1::text, ($1::text)::text, \
+    $2::text, $2::text, ($2::text)::text, \
+    $3::text, $3::text, ($3::text)::text, \
+    $4::text, $4::text, ($4::text)::text, \
+    $5::char(5), $5::char(5), ($5::char(5))::text";
+
+#[cfg(feature = "with-smol_str-01")]
+fn smol_str_inputs() -> [smol_str::SmolStr; 5] {
+    [
+        smol_str::SmolStr::new(""),
+        smol_str::SmolStr::new(SMOL_STR_INLINE_23),
+        smol_str::SmolStr::new(SMOL_STR_HEAP_24),
+        smol_str::SmolStr::new(SMOL_STR_DECOMPOSED_UNICODE),
+        smol_str::SmolStr::new("xy"),
+    ]
+}
+
+#[cfg(feature = "with-smol_str-01")]
+fn smol_str_strings(values: &[smol_str::SmolStr; 5]) -> [String; 5] {
+    values.each_ref().map(|value| value.as_str().to_owned())
+}
+
+#[cfg(feature = "with-smol_str-01")]
+fn smol_str_heap_flags(values: &[smol_str::SmolStr; 5]) -> [bool; 5] {
+    values.each_ref().map(|value| value.is_heap_allocated())
+}
+
+#[cfg(feature = "with-smol_str-01")]
+fn tokio_smol_str_wire(value: &smol_str::SmolStr, ty: &tokio_types::Type) -> Vec<u8> {
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres native SmolStr encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-smol_str-01")]
+fn compio_smol_str_wire(value: &smol_str::SmolStr, ty: &compio_types::Type) -> Vec<u8> {
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres native SmolStr encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-smol_str-01")]
+fn tokio_native_smol_str_observation(url: String) -> NativeSmolStrObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_SMOL_STR_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native SmolStr decode");
+        let decoded = [row.get(0), row.get(3), row.get(6), row.get(9), row.get(12)];
+        let outbound = smol_str_inputs();
+        let outbound_wires = [
+            tokio_smol_str_wire(&outbound[0], &tokio_types::Type::TEXT),
+            tokio_smol_str_wire(&outbound[1], &tokio_types::Type::TEXT),
+            tokio_smol_str_wire(&outbound[2], &tokio_types::Type::TEXT),
+            tokio_smol_str_wire(&outbound[3], &tokio_types::Type::TEXT),
+            tokio_smol_str_wire(&outbound[4], &tokio_types::Type::BPCHAR),
+        ];
+        let rebound = client
+            .query_one(
+                NATIVE_SMOL_STR_REBOUND_SQL,
+                &[
+                    &outbound[0],
+                    &outbound[1],
+                    &outbound[2],
+                    &outbound[3],
+                    &outbound[4],
+                ],
+            )
+            .await
+            .expect("tokio-postgres native SmolStr encode");
+        let rebound_values = [
+            rebound.get(0),
+            rebound.get(3),
+            rebound.get(6),
+            rebound.get(9),
+            rebound.get(12),
+        ];
+
+        NativeSmolStrObservation {
+            decoded: smol_str_strings(&decoded),
+            decoded_heap_allocated: smol_str_heap_flags(&decoded),
+            server_text: [row.get(2), row.get(5), row.get(8), row.get(11), row.get(14)],
+            server_wires: [row.get(1), row.get(4), row.get(7), row.get(10), row.get(13)],
+            outbound: smol_str_strings(&outbound),
+            outbound_heap_allocated: smol_str_heap_flags(&outbound),
+            outbound_wires,
+            rebound: smol_str_strings(&rebound_values),
+            rebound_heap_allocated: smol_str_heap_flags(&rebound_values),
+            rebound_text: [
+                rebound.get(2),
+                rebound.get(5),
+                rebound.get(8),
+                rebound.get(11),
+                rebound.get(14),
+            ],
+            rebound_wires: [
+                rebound.get(1),
+                rebound.get(4),
+                rebound.get(7),
+                rebound.get(10),
+                rebound.get(13),
+            ],
+        }
+    })
+}
+
+#[cfg(feature = "with-smol_str-01")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_smol_str_observation() -> NativeSmolStrObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_SMOL_STR_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native SmolStr decode");
+    let decoded = [row.get(0), row.get(3), row.get(6), row.get(9), row.get(12)];
+    let outbound = smol_str_inputs();
+    let outbound_wires = [
+        compio_smol_str_wire(&outbound[0], &compio_types::Type::TEXT),
+        compio_smol_str_wire(&outbound[1], &compio_types::Type::TEXT),
+        compio_smol_str_wire(&outbound[2], &compio_types::Type::TEXT),
+        compio_smol_str_wire(&outbound[3], &compio_types::Type::TEXT),
+        compio_smol_str_wire(&outbound[4], &compio_types::Type::BPCHAR),
+    ];
+    let rebound = client
+        .query_one(
+            NATIVE_SMOL_STR_REBOUND_SQL,
+            &[
+                &outbound[0],
+                &outbound[1],
+                &outbound[2],
+                &outbound[3],
+                &outbound[4],
+            ],
+        )
+        .await
+        .expect("compio-postgres native SmolStr encode");
+    let rebound_values = [
+        rebound.get(0),
+        rebound.get(3),
+        rebound.get(6),
+        rebound.get(9),
+        rebound.get(12),
+    ];
+
+    NativeSmolStrObservation {
+        decoded: smol_str_strings(&decoded),
+        decoded_heap_allocated: smol_str_heap_flags(&decoded),
+        server_text: [row.get(2), row.get(5), row.get(8), row.get(11), row.get(14)],
+        server_wires: [row.get(1), row.get(4), row.get(7), row.get(10), row.get(13)],
+        outbound: smol_str_strings(&outbound),
+        outbound_heap_allocated: smol_str_heap_flags(&outbound),
+        outbound_wires,
+        rebound: smol_str_strings(&rebound_values),
+        rebound_heap_allocated: smol_str_heap_flags(&rebound_values),
+        rebound_text: [
+            rebound.get(2),
+            rebound.get(5),
+            rebound.get(8),
+            rebound.get(11),
+            rebound.get(14),
+        ],
+        rebound_wires: [
+            rebound.get(1),
+            rebound.get(4),
+            rebound.get(7),
+            rebound.get(10),
+            rebound.get(13),
+        ],
+    }
+}
+
+/// Native `SmolStr` codecs preserve UTF-8 and the inline/heap boundary.
+#[cfg(feature = "with-smol_str-01")]
+#[compio::test]
+async fn native_smol_str_codecs_cover_storage_boundary_and_char_padding() {
+    let theirs = tokio_native_smol_str_observation(common::plaintext_url());
+    let ours = compio_native_smol_str_observation().await;
+    assert_eq!(ours, theirs);
+
+    let expected_outbound = [
+        "",
+        SMOL_STR_INLINE_23,
+        SMOL_STR_HEAP_24,
+        SMOL_STR_DECOMPOSED_UNICODE,
+        "xy",
+    ];
+    let expected_decoded = [
+        "",
+        SMOL_STR_INLINE_23,
+        SMOL_STR_HEAP_24,
+        SMOL_STR_DECOMPOSED_UNICODE,
+        "xy   ",
+    ];
+    let expected_heap_allocated = [false, false, true, false, false];
+    let expected_server_wires = [
+        "",
+        "6162636465666768696a6b6c6d6e6f7071727374757677",
+        "6162636465666768696a6b6c6d6e6f707172737475767778",
+        "65cc812fe7958c2ff09f9a80",
+        "7879202020",
+    ];
+    let expected_outbound_wires = [
+        "",
+        "6162636465666768696a6b6c6d6e6f7071727374757677",
+        "6162636465666768696a6b6c6d6e6f707172737475767778",
+        "65cc812fe7958c2ff09f9a80",
+        "7879",
+    ];
+
+    assert_eq!(ours.outbound, expected_outbound);
+    assert_eq!(ours.decoded, expected_decoded);
+    assert_eq!(ours.rebound, expected_decoded);
+    assert_eq!(ours.server_text, expected_outbound);
+    assert_eq!(ours.rebound_text, expected_outbound);
+    assert_eq!(ours.outbound_heap_allocated, expected_heap_allocated);
+    assert_eq!(ours.decoded_heap_allocated, expected_heap_allocated);
+    assert_eq!(ours.rebound_heap_allocated, expected_heap_allocated);
+    assert_eq!(
+        ours.outbound.each_ref().map(|value| value.len()),
+        [0, 23, 24, 12, 2]
+    );
+    assert_eq!(
+        ours.decoded.each_ref().map(|value| value.len()),
+        [0, 23, 24, 12, 5]
+    );
+    assert_eq!(
+        ours.rebound.each_ref().map(|value| value.len()),
+        [0, 23, 24, 12, 5]
+    );
+    for (index, expected_wire) in expected_server_wires.into_iter().enumerate() {
+        assert_eq!(hex(&ours.server_wires[index].0), expected_wire);
+        assert_eq!(hex(&ours.rebound_wires[index].0), expected_wire);
+        assert_eq!(
+            hex(&ours.outbound_wires[index]),
+            expected_outbound_wires[index]
+        );
+    }
+}
+
+const JSON_KEY_ORDER_SOURCE: &str = r#"{"zz":0,"a":1,"bbb":2,"aa":3}"#;
+const JSON_KEY_ORDER_JSONB_TEXT: &str = r#"{"a": 1, "aa": 3, "zz": 0, "bbb": 2}"#;
+const JSON_UNICODE_SOURCE: &str =
+    r#"{"bmp":"\u00e9\u754c","pair":"\uD83D\uDE80","solidus":"\/","control":"\u0001"}"#;
+const JSON_UNICODE_JSONB_TEXT: &str =
+    r#"{"bmp": "é界", "pair": "🚀", "control": "\u0001", "solidus": "/"}"#;
+
+fn deep_json_source() -> String {
+    format!(
+        "{}{}{}",
+        "[".repeat(64),
+        r#"{"leaf":"\u754c"}"#,
+        "]".repeat(64)
+    )
+}
+
+fn deep_jsonb_text() -> String {
+    format!(
+        "{}{}{}",
+        "[".repeat(64),
+        r#"{"leaf": "界"}"#,
+        "]".repeat(64)
+    )
+}
+
+fn json_format_cases() -> Vec<RawCase> {
+    let deep = deep_json_source();
+    vec![
+        RawCase::new(
+            "json-format-key-order",
+            &format!("$json${JSON_KEY_ORDER_SOURCE}$json$::json"),
+            "json",
+        ),
+        RawCase::new(
+            "jsonb-format-key-order",
+            &format!("$json${JSON_KEY_ORDER_SOURCE}$json$::jsonb"),
+            "jsonb",
+        ),
+        RawCase::new(
+            "json-format-unicode-escapes",
+            &format!("$json${JSON_UNICODE_SOURCE}$json$::json"),
+            "json",
+        ),
+        RawCase::new(
+            "jsonb-format-unicode-escapes",
+            &format!("$json${JSON_UNICODE_SOURCE}$json$::jsonb"),
+            "jsonb",
+        ),
+        RawCase::new(
+            "json-format-deep-nesting",
+            &format!("$json${deep}$json$::json"),
+            "json",
+        ),
+        RawCase::new(
+            "jsonb-format-deep-nesting",
+            &format!("$json${deep}$json$::jsonb"),
+            "jsonb",
+        ),
+    ]
+}
+
+fn tokio_json_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_json_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+/// Both drivers preserve JSON values through text and binary formats.
+#[compio::test]
+async fn both_drivers_agree_on_json_text_and_binary_codecs() {
+    let cases = json_format_cases();
+    let theirs = tokio_json_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_json_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let deep_json = deep_json_source();
+    let deep_jsonb = deep_jsonb_text();
+    assert_eq!(deep_json.len(), 145, "deep JSON fixture changed shape");
+    assert_eq!(deep_jsonb.len(), 143, "deep JSONB fixture changed shape");
+    let expected = [
+        ("json-format-key-order", JSON_KEY_ORDER_SOURCE, false),
+        ("jsonb-format-key-order", JSON_KEY_ORDER_JSONB_TEXT, true),
+        ("json-format-unicode-escapes", JSON_UNICODE_SOURCE, false),
+        (
+            "jsonb-format-unicode-escapes",
+            JSON_UNICODE_JSONB_TEXT,
+            true,
+        ),
+        ("json-format-deep-nesting", &deep_json, false),
+        ("jsonb-format-deep-nesting", &deep_jsonb, true),
+    ];
+    for (observation, (name, text, is_jsonb)) in ours.iter().zip(expected) {
+        assert_eq!(observation.name, name);
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        let mut expected_wire = Vec::with_capacity(text.len() + usize::from(is_jsonb));
+        if is_jsonb {
+            expected_wire.push(1);
+        }
+        expected_wire.extend_from_slice(text.as_bytes());
+        assert_eq!(observation.binary_decoded.0, expected_wire, "{name}: wire");
+    }
+}
+
+fn extended_scalar_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new(
+            "scalar-uuid",
+            "'ffffffff-0000-8000-8000-0123456789ab'::uuid",
+            "uuid",
+        ),
+        RawCase::new("scalar-inet-v4-prefix", "'192.0.2.129/24'::inet", "inet"),
+        RawCase::new(
+            "scalar-inet-v6-prefix",
+            "'2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet",
+            "inet",
+        ),
+        RawCase::new("scalar-cidr-v4", "'192.0.2.128/25'::cidr", "cidr"),
+        RawCase::new("scalar-cidr-v6", "'2001:db8:abcd:ef00::/56'::cidr", "cidr"),
+        RawCase::new("scalar-macaddr", "'08:00:2b:01:02:03'::macaddr", "macaddr"),
+        RawCase::new("scalar-bit-nine", "B'101010101'::bit(9)", "bit(9)"),
+        RawCase::new("scalar-varbit-empty", "B''::varbit", "varbit"),
+        RawCase::new("scalar-varbit-nine", "B'101010101'::varbit(9)", "varbit(9)"),
+        RawCase::new("scalar-oid-max", "4294967295::oid", "oid"),
+        RawCase::new("scalar-money-max", "'92233720368547758.07'::money", "money"),
+        RawCase::new("scalar-money-negative-cent", "'-0.01'::money", "money"),
+    ]
+}
+
+fn tokio_extended_scalar_format_observations(
+    url: String,
+    cases: Vec<RawCase>,
+) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_extended_scalar_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct NativeExtendedScalarObservation {
+    inet4_decoded: IpAddr,
+    inet4_server_text: String,
+    inet4_server_mask: i32,
+    inet4_rebound: IpAddr,
+    inet4_rebound_text: String,
+    inet4_rebound_mask: i32,
+    inet4_rebound_wire: Wire,
+    inet6_decoded: IpAddr,
+    inet6_server_text: String,
+    inet6_server_mask: i32,
+    inet6_rebound: IpAddr,
+    inet6_rebound_text: String,
+    inet6_rebound_mask: i32,
+    inet6_rebound_wire: Wire,
+    oid_decoded: u32,
+    oid_rebound: u32,
+}
+
+const NATIVE_EXTENDED_SCALAR_DECODE_SQL: &str = "SELECT \
+    '192.0.2.129/24'::inet, ('192.0.2.129/24'::inet)::text, \
+        masklen('192.0.2.129/24'::inet), \
+    '2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet, \
+        ('2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet)::text, \
+        masklen('2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet), \
+    4294967295::oid";
+
+const NATIVE_EXTENDED_SCALAR_REBOUND_SQL: &str = "SELECT \
+    $1::inet, ($1::inet)::text, masklen($1::inet), $1::inet, \
+    $2::inet, ($2::inet)::text, masklen($2::inet), $2::inet, \
+    $3::oid";
+
+fn tokio_native_extended_scalar_observation(url: String) -> NativeExtendedScalarObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_EXTENDED_SCALAR_DECODE_SQL, &[])
+            .await
+            .expect("tokio native extended-scalar decode");
+        let inet4_decoded = row.get(0);
+        let inet6_decoded = row.get(3);
+        let oid_decoded = row.get(6);
+        let rebound = client
+            .query_one(
+                NATIVE_EXTENDED_SCALAR_REBOUND_SQL,
+                &[&inet4_decoded, &inet6_decoded, &oid_decoded],
+            )
+            .await
+            .expect("tokio native extended-scalar encode");
+        NativeExtendedScalarObservation {
+            inet4_decoded,
+            inet4_server_text: row.get(1),
+            inet4_server_mask: row.get(2),
+            inet4_rebound: rebound.get(0),
+            inet4_rebound_text: rebound.get(1),
+            inet4_rebound_mask: rebound.get(2),
+            inet4_rebound_wire: rebound.get(3),
+            inet6_decoded,
+            inet6_server_text: row.get(4),
+            inet6_server_mask: row.get(5),
+            inet6_rebound: rebound.get(4),
+            inet6_rebound_text: rebound.get(5),
+            inet6_rebound_mask: rebound.get(6),
+            inet6_rebound_wire: rebound.get(7),
+            oid_decoded,
+            oid_rebound: rebound.get(8),
+        }
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_native_extended_scalar_observation() -> NativeExtendedScalarObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_EXTENDED_SCALAR_DECODE_SQL, &[])
+        .await
+        .expect("compio native extended-scalar decode");
+    let inet4_decoded = row.get(0);
+    let inet6_decoded = row.get(3);
+    let oid_decoded = row.get(6);
+    let rebound = client
+        .query_one(
+            NATIVE_EXTENDED_SCALAR_REBOUND_SQL,
+            &[&inet4_decoded, &inet6_decoded, &oid_decoded],
+        )
+        .await
+        .expect("compio native extended-scalar encode");
+    NativeExtendedScalarObservation {
+        inet4_decoded,
+        inet4_server_text: row.get(1),
+        inet4_server_mask: row.get(2),
+        inet4_rebound: rebound.get(0),
+        inet4_rebound_text: rebound.get(1),
+        inet4_rebound_mask: rebound.get(2),
+        inet4_rebound_wire: rebound.get(3),
+        inet6_decoded,
+        inet6_server_text: row.get(4),
+        inet6_server_mask: row.get(5),
+        inet6_rebound: rebound.get(4),
+        inet6_rebound_text: rebound.get(5),
+        inet6_rebound_mask: rebound.get(6),
+        inet6_rebound_wire: rebound.get(7),
+        oid_decoded,
+        oid_rebound: rebound.get(8),
+    }
+}
+
+/// Supported extended scalars agree in text and binary formats.
+#[compio::test]
+async fn both_drivers_agree_on_extended_scalar_text_and_binary_codecs() {
+    let cases = extended_scalar_format_cases();
+    let theirs = tokio_extended_scalar_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_extended_scalar_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let expected = [
+        (
+            "scalar-uuid",
+            "ffffffff-0000-8000-8000-0123456789ab",
+            "ffffffff0000800080000123456789ab",
+        ),
+        (
+            "scalar-inet-v4-prefix",
+            "192.0.2.129/24",
+            "02180004c0000281",
+        ),
+        (
+            "scalar-inet-v6-prefix",
+            "2001:db8:abcd:ef01:2345:6789:abcd:ef01/73",
+            "0349001020010db8abcdef0123456789abcdef01",
+        ),
+        ("scalar-cidr-v4", "192.0.2.128/25", "02190104c0000280"),
+        (
+            "scalar-cidr-v6",
+            "2001:db8:abcd:ef00::/56",
+            "0338011020010db8abcdef000000000000000000",
+        ),
+        ("scalar-macaddr", "08:00:2b:01:02:03", "08002b010203"),
+        ("scalar-bit-nine", "101010101", "00000009aa80"),
+        ("scalar-varbit-empty", "", "00000000"),
+        ("scalar-varbit-nine", "101010101", "00000009aa80"),
+        ("scalar-oid-max", "4294967295", "ffffffff"),
+        (
+            "scalar-money-max",
+            "$92,233,720,368,547,758.07",
+            "7fffffffffffffff",
+        ),
+        ("scalar-money-negative-cent", "-$0.01", "ffffffffffffffff"),
+    ];
+    for (observation, (name, text, binary_hex)) in ours.iter().zip(expected) {
+        assert_eq!(observation.name, name);
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        assert_eq!(
+            hex(&observation.binary_decoded.0),
+            binary_hex,
+            "{name}: wire"
+        );
+    }
+
+    let theirs = tokio_native_extended_scalar_observation(common::plaintext_url());
+    let ours = compio_native_extended_scalar_observation().await;
+    assert_eq!(ours, theirs);
+    assert_eq!(ours.oid_decoded, u32::MAX);
+    assert_eq!(ours.oid_rebound, u32::MAX);
+
+    assert_eq!(ours.inet4_decoded, "192.0.2.129".parse::<IpAddr>().unwrap());
+    assert_eq!(ours.inet4_rebound, ours.inet4_decoded);
+    assert_eq!(ours.inet4_server_text, "192.0.2.129/24");
+    assert_eq!(ours.inet4_server_mask, 24);
+    assert_eq!(ours.inet4_rebound_text, "192.0.2.129/32");
+    assert_eq!(ours.inet4_rebound_mask, 32);
+    assert_eq!(hex(&ours.inet4_rebound_wire.0), "02200004c0000281");
+
+    assert_eq!(
+        ours.inet6_decoded,
+        "2001:db8:abcd:ef01:2345:6789:abcd:ef01"
+            .parse::<IpAddr>()
+            .unwrap()
+    );
+    assert_eq!(ours.inet6_rebound, ours.inet6_decoded);
+    assert_eq!(
+        ours.inet6_server_text,
+        "2001:db8:abcd:ef01:2345:6789:abcd:ef01/73"
+    );
+    assert_eq!(ours.inet6_server_mask, 73);
+    assert_eq!(
+        ours.inet6_rebound_text,
+        "2001:db8:abcd:ef01:2345:6789:abcd:ef01/128"
+    );
+    assert_eq!(ours.inet6_rebound_mask, 128);
+    assert_eq!(
+        hex(&ours.inet6_rebound_wire.0),
+        "0380001020010db8abcdef0123456789abcdef01"
+    );
+}
+
+/// Desired invariant blocked by both `IpAddr` codecs discarding INET prefixes.
+#[ignore = "both postgres-types IpAddr codecs discard INET prefix lengths"]
+#[compio::test]
+async fn native_inet_codecs_must_not_discard_prefix_lengths() {
+    let theirs = tokio_native_extended_scalar_observation(common::plaintext_url());
+    let ours = compio_native_extended_scalar_observation().await;
+    assert_eq!(ours.inet4_server_mask, ours.inet4_rebound_mask);
+    assert_eq!(theirs.inet4_server_mask, theirs.inet4_rebound_mask);
+    assert_eq!(ours.inet6_server_mask, ours.inet6_rebound_mask);
+    assert_eq!(theirs.inet6_server_mask, theirs.inet6_rebound_mask);
+}
+
+#[cfg(feature = "with-cidr-0_3")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeCidrObservation {
+    decoded_text: [String; 4],
+    decoded_masks: [u8; 4],
+    server_text: [String; 4],
+    server_masks: [i32; 4],
+    server_wires: [Wire; 4],
+    outbound_wires: [Vec<u8>; 4],
+    rebound_text: [String; 4],
+    rebound_masks: [i32; 4],
+    rebound_wires: [Wire; 4],
+}
+
+#[cfg(feature = "with-cidr-0_3")]
+const NATIVE_CIDR_DECODE_SQL: &str = "SELECT \
+    '192.0.2.128/25'::cidr, '192.0.2.128/25'::cidr, \
+        ('192.0.2.128/25'::cidr)::text, masklen('192.0.2.128/25'::cidr), \
+    '2001:db8:abcd:ef00::/56'::cidr, '2001:db8:abcd:ef00::/56'::cidr, \
+        ('2001:db8:abcd:ef00::/56'::cidr)::text, \
+        masklen('2001:db8:abcd:ef00::/56'::cidr), \
+    '192.0.2.129/24'::inet, '192.0.2.129/24'::inet, \
+        ('192.0.2.129/24'::inet)::text, masklen('192.0.2.129/24'::inet), \
+    '2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet, \
+        '2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet, \
+        ('2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet)::text, \
+        masklen('2001:db8:abcd:ef01:2345:6789:abcd:ef01/73'::inet)";
+
+#[cfg(feature = "with-cidr-0_3")]
+const NATIVE_CIDR_REBOUND_SQL: &str = "SELECT \
+    ($1::cidr)::text, masklen($1::cidr), $1::cidr, \
+    ($2::cidr)::text, masklen($2::cidr), $2::cidr, \
+    ($3::inet)::text, masklen($3::inet), $3::inet, \
+    ($4::inet)::text, masklen($4::inet), $4::inet";
+
+#[cfg(feature = "with-cidr-0_3")]
+fn tokio_native_wire<T>(value: &T, ty: &tokio_types::Type) -> Vec<u8>
+where
+    T: tokio_types::ToSql,
+{
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql(value, ty, &mut wire)
+        .expect("tokio-postgres native network encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-cidr-0_3")]
+fn compio_native_wire<T>(value: &T, ty: &compio_types::Type) -> Vec<u8>
+where
+    T: compio_types::ToSql,
+{
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql(value, ty, &mut wire)
+        .expect("compio-postgres native network encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-cidr-0_3")]
+fn tokio_native_cidr_observation(url: String) -> NativeCidrObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_CIDR_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native CIDR decode");
+        let cidr4: cidr::IpCidr = row.get(0);
+        let cidr6: cidr::IpCidr = row.get(4);
+        let inet4: cidr::IpInet = row.get(8);
+        let inet6: cidr::IpInet = row.get(12);
+        let outbound_wires = [
+            tokio_native_wire(&cidr4, &tokio_types::Type::CIDR),
+            tokio_native_wire(&cidr6, &tokio_types::Type::CIDR),
+            tokio_native_wire(&inet4, &tokio_types::Type::INET),
+            tokio_native_wire(&inet6, &tokio_types::Type::INET),
+        ];
+        let rebound = client
+            .query_one(NATIVE_CIDR_REBOUND_SQL, &[&cidr4, &cidr6, &inet4, &inet6])
+            .await
+            .expect("tokio-postgres native CIDR encode");
+
+        NativeCidrObservation {
+            decoded_text: [
+                cidr4.to_string(),
+                cidr6.to_string(),
+                inet4.to_string(),
+                inet6.to_string(),
+            ],
+            decoded_masks: [
+                cidr4.network_length(),
+                cidr6.network_length(),
+                inet4.network_length(),
+                inet6.network_length(),
+            ],
+            server_text: [row.get(2), row.get(6), row.get(10), row.get(14)],
+            server_masks: [row.get(3), row.get(7), row.get(11), row.get(15)],
+            server_wires: [row.get(1), row.get(5), row.get(9), row.get(13)],
+            outbound_wires,
+            rebound_text: [
+                rebound.get(0),
+                rebound.get(3),
+                rebound.get(6),
+                rebound.get(9),
+            ],
+            rebound_masks: [
+                rebound.get(1),
+                rebound.get(4),
+                rebound.get(7),
+                rebound.get(10),
+            ],
+            rebound_wires: [
+                rebound.get(2),
+                rebound.get(5),
+                rebound.get(8),
+                rebound.get(11),
+            ],
+        }
+    })
+}
+
+#[cfg(feature = "with-cidr-0_3")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_cidr_observation() -> NativeCidrObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_CIDR_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native CIDR decode");
+    let cidr4: cidr::IpCidr = row.get(0);
+    let cidr6: cidr::IpCidr = row.get(4);
+    let inet4: cidr::IpInet = row.get(8);
+    let inet6: cidr::IpInet = row.get(12);
+    let outbound_wires = [
+        compio_native_wire(&cidr4, &compio_types::Type::CIDR),
+        compio_native_wire(&cidr6, &compio_types::Type::CIDR),
+        compio_native_wire(&inet4, &compio_types::Type::INET),
+        compio_native_wire(&inet6, &compio_types::Type::INET),
+    ];
+    let rebound = client
+        .query_one(NATIVE_CIDR_REBOUND_SQL, &[&cidr4, &cidr6, &inet4, &inet6])
+        .await
+        .expect("compio-postgres native CIDR encode");
+
+    NativeCidrObservation {
+        decoded_text: [
+            cidr4.to_string(),
+            cidr6.to_string(),
+            inet4.to_string(),
+            inet6.to_string(),
+        ],
+        decoded_masks: [
+            cidr4.network_length(),
+            cidr6.network_length(),
+            inet4.network_length(),
+            inet6.network_length(),
+        ],
+        server_text: [row.get(2), row.get(6), row.get(10), row.get(14)],
+        server_masks: [row.get(3), row.get(7), row.get(11), row.get(15)],
+        server_wires: [row.get(1), row.get(5), row.get(9), row.get(13)],
+        outbound_wires,
+        rebound_text: [
+            rebound.get(0),
+            rebound.get(3),
+            rebound.get(6),
+            rebound.get(9),
+        ],
+        rebound_masks: [
+            rebound.get(1),
+            rebound.get(4),
+            rebound.get(7),
+            rebound.get(10),
+        ],
+        rebound_wires: [
+            rebound.get(2),
+            rebound.get(5),
+            rebound.get(8),
+            rebound.get(11),
+        ],
+    }
+}
+
+/// Native CIDR carriers retain prefixes. The local encoder also emits the
+/// server's `is_cidr=1`; upstream emits `0`, which `PostgreSQL` accepts and then
+/// normalizes, so an ordinary round trip would hide that wire defect.
+#[cfg(feature = "with-cidr-0_3")]
+#[compio::test]
+async fn native_cidr_codecs_preserve_prefixes_and_expose_upstream_flag_defect() {
+    let theirs = tokio_native_cidr_observation(common::plaintext_url());
+    let ours = compio_native_cidr_observation().await;
+
+    assert_eq!(ours.decoded_text, theirs.decoded_text);
+    assert_eq!(ours.decoded_masks, theirs.decoded_masks);
+    assert_eq!(ours.server_text, theirs.server_text);
+    assert_eq!(ours.server_masks, theirs.server_masks);
+    assert_eq!(ours.server_wires, theirs.server_wires);
+    assert_eq!(ours.rebound_text, theirs.rebound_text);
+    assert_eq!(ours.rebound_masks, theirs.rebound_masks);
+    assert_eq!(ours.rebound_wires, theirs.rebound_wires);
+
+    let expected_text = [
+        "192.0.2.128/25",
+        "2001:db8:abcd:ef00::/56",
+        "192.0.2.129/24",
+        "2001:db8:abcd:ef01:2345:6789:abcd:ef01/73",
+    ];
+    assert_eq!(ours.decoded_text, expected_text);
+    assert_eq!(ours.server_text, expected_text);
+    assert_eq!(ours.rebound_text, expected_text);
+    assert_eq!(ours.decoded_masks, [25, 56, 24, 73]);
+    assert_eq!(ours.server_masks, [25, 56, 24, 73]);
+    assert_eq!(ours.rebound_masks, [25, 56, 24, 73]);
+
+    let server_wire = [
+        "02190104c0000280",
+        "0338011020010db8abcdef000000000000000000",
+        "02180004c0000281",
+        "0349001020010db8abcdef0123456789abcdef01",
+    ];
+    let upstream_wire = [
+        "02190004c0000280",
+        "0338001020010db8abcdef000000000000000000",
+        server_wire[2],
+        server_wire[3],
+    ];
+    for index in 0..server_wire.len() {
+        assert_eq!(hex(&ours.server_wires[index].0), server_wire[index]);
+        assert_eq!(hex(&ours.rebound_wires[index].0), server_wire[index]);
+        assert_eq!(hex(&ours.outbound_wires[index]), server_wire[index]);
+        assert_eq!(hex(&theirs.outbound_wires[index]), upstream_wire[index]);
+    }
+    assert_ne!(theirs.outbound_wires[0], theirs.server_wires[0].0);
+    assert_ne!(theirs.outbound_wires[1], theirs.server_wires[1].0);
+}
+
+#[cfg(feature = "with-eui48-1")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeEui48Observation {
+    decoded: [[u8; 6]; 3],
+    server_text: [String; 3],
+    server_wires: [Wire; 3],
+    outbound_wires: [Vec<u8>; 3],
+    rebound: [[u8; 6]; 3],
+    rebound_text: [String; 3],
+    rebound_wires: [Wire; 3],
+    macaddr8_text: [String; 2],
+    macaddr8_wires: [Wire; 2],
+    macaddr8_encode_supported: bool,
+    macaddr8_decode_supported: bool,
+}
+
+#[cfg(feature = "with-eui48-1")]
+const NATIVE_EUI48_DECODE_SQL: &str = "SELECT \
+    '00:00:00:00:00:00'::macaddr, '00:00:00:00:00:00'::macaddr, \
+        ('00:00:00:00:00:00'::macaddr)::text, \
+    'ff:ff:ff:ff:ff:ff'::macaddr, 'ff:ff:ff:ff:ff:ff'::macaddr, \
+        ('ff:ff:ff:ff:ff:ff'::macaddr)::text, \
+    '08:00:2b:01:02:03'::macaddr, '08:00:2b:01:02:03'::macaddr, \
+        ('08:00:2b:01:02:03'::macaddr)::text, \
+    '08:00:2b:01:02:03:04:05'::macaddr8, \
+        ('08:00:2b:01:02:03:04:05'::macaddr8)::text, \
+    ('08:00:2b:01:02:03'::macaddr)::macaddr8, \
+        (('08:00:2b:01:02:03'::macaddr)::macaddr8)::text";
+
+#[cfg(feature = "with-eui48-1")]
+const NATIVE_EUI48_REBOUND_SQL: &str = "SELECT \
+    $1::macaddr, $1::macaddr, ($1::macaddr)::text, \
+    $2::macaddr, $2::macaddr, ($2::macaddr)::text, \
+    $3::macaddr, $3::macaddr, ($3::macaddr)::text";
+
+#[cfg(feature = "with-eui48-1")]
+fn tokio_eui48_wire(value: eui48::MacAddress, ty: &tokio_types::Type) -> Result<Vec<u8>, String> {
+    let mut wire = tokio_types::private::BytesMut::new();
+    match tokio_types::ToSql::to_sql_checked(&value, ty, &mut wire) {
+        Ok(tokio_types::IsNull::No) => Ok(wire.to_vec()),
+        Ok(tokio_types::IsNull::Yes) => Err("unexpected NULL".to_owned()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(feature = "with-eui48-1")]
+fn compio_eui48_wire(value: eui48::MacAddress, ty: &compio_types::Type) -> Result<Vec<u8>, String> {
+    let mut wire = compio_types::private::BytesMut::new();
+    match compio_types::ToSql::to_sql_checked(&value, ty, &mut wire) {
+        Ok(compio_types::IsNull::No) => Ok(wire.to_vec()),
+        Ok(compio_types::IsNull::Yes) => Err("unexpected NULL".to_owned()),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(feature = "with-eui48-1")]
+fn tokio_native_eui48_observation(url: String) -> NativeEui48Observation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_EUI48_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native EUI-48 decode");
+        let nil: eui48::MacAddress = row.get(0);
+        let broadcast: eui48::MacAddress = row.get(3);
+        let pattern: eui48::MacAddress = row.get(6);
+        let outbound_wires = [
+            tokio_eui48_wire(nil, &tokio_types::Type::MACADDR)
+                .expect("tokio-postgres nil EUI-48 encode"),
+            tokio_eui48_wire(broadcast, &tokio_types::Type::MACADDR)
+                .expect("tokio-postgres broadcast EUI-48 encode"),
+            tokio_eui48_wire(pattern, &tokio_types::Type::MACADDR)
+                .expect("tokio-postgres patterned EUI-48 encode"),
+        ];
+        let rebound = client
+            .query_one(NATIVE_EUI48_REBOUND_SQL, &[&nil, &broadcast, &pattern])
+            .await
+            .expect("tokio-postgres native EUI-48 encode");
+
+        NativeEui48Observation {
+            decoded: [nil.to_array(), broadcast.to_array(), pattern.to_array()],
+            server_text: [row.get(2), row.get(5), row.get(8)],
+            server_wires: [row.get(1), row.get(4), row.get(7)],
+            outbound_wires,
+            rebound: [
+                rebound.get::<_, eui48::MacAddress>(0).to_array(),
+                rebound.get::<_, eui48::MacAddress>(3).to_array(),
+                rebound.get::<_, eui48::MacAddress>(6).to_array(),
+            ],
+            rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+            rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+            macaddr8_text: [row.get(10), row.get(12)],
+            macaddr8_wires: [row.get(9), row.get(11)],
+            macaddr8_encode_supported: tokio_eui48_wire(pattern, &tokio_types::Type::MACADDR8)
+                .is_ok(),
+            macaddr8_decode_supported: row.try_get::<_, eui48::MacAddress>(9).is_ok(),
+        }
+    })
+}
+
+#[cfg(feature = "with-eui48-1")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_eui48_observation() -> NativeEui48Observation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_EUI48_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native EUI-48 decode");
+    let nil: eui48::MacAddress = row.get(0);
+    let broadcast: eui48::MacAddress = row.get(3);
+    let pattern: eui48::MacAddress = row.get(6);
+    let outbound_wires = [
+        compio_eui48_wire(nil, &compio_types::Type::MACADDR)
+            .expect("compio-postgres nil EUI-48 encode"),
+        compio_eui48_wire(broadcast, &compio_types::Type::MACADDR)
+            .expect("compio-postgres broadcast EUI-48 encode"),
+        compio_eui48_wire(pattern, &compio_types::Type::MACADDR)
+            .expect("compio-postgres patterned EUI-48 encode"),
+    ];
+    let rebound = client
+        .query_one(NATIVE_EUI48_REBOUND_SQL, &[&nil, &broadcast, &pattern])
+        .await
+        .expect("compio-postgres native EUI-48 encode");
+
+    NativeEui48Observation {
+        decoded: [nil.to_array(), broadcast.to_array(), pattern.to_array()],
+        server_text: [row.get(2), row.get(5), row.get(8)],
+        server_wires: [row.get(1), row.get(4), row.get(7)],
+        outbound_wires,
+        rebound: [
+            rebound.get::<_, eui48::MacAddress>(0).to_array(),
+            rebound.get::<_, eui48::MacAddress>(3).to_array(),
+            rebound.get::<_, eui48::MacAddress>(6).to_array(),
+        ],
+        rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+        rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+        macaddr8_text: [row.get(10), row.get(12)],
+        macaddr8_wires: [row.get(9), row.get(11)],
+        macaddr8_encode_supported: compio_eui48_wire(pattern, &compio_types::Type::MACADDR8)
+            .is_ok(),
+        macaddr8_decode_supported: row.try_get::<_, eui48::MacAddress>(9).is_ok(),
+    }
+}
+
+/// The six-byte native carrier agrees with the server. `macaddr8` remains a
+/// distinct eight-byte type that neither native codec accepts.
+#[cfg(feature = "with-eui48-1")]
+#[compio::test]
+async fn native_eui48_codecs_cover_macaddr_and_expose_macaddr8_limit() {
+    let theirs = tokio_native_eui48_observation(common::plaintext_url());
+    let ours = compio_native_eui48_observation().await;
+    assert_eq!(ours, theirs);
+
+    let expected_bytes = [
+        [0, 0, 0, 0, 0, 0],
+        [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+        [0x08, 0x00, 0x2b, 0x01, 0x02, 0x03],
+    ];
+    let expected_text = [
+        "00:00:00:00:00:00",
+        "ff:ff:ff:ff:ff:ff",
+        "08:00:2b:01:02:03",
+    ];
+    let expected_wires = ["000000000000", "ffffffffffff", "08002b010203"];
+    assert_eq!(ours.decoded, expected_bytes);
+    assert_eq!(ours.rebound, expected_bytes);
+    assert_eq!(ours.server_text, expected_text);
+    assert_eq!(ours.rebound_text, expected_text);
+    for (index, expected_wire) in expected_wires.into_iter().enumerate() {
+        assert_eq!(hex(&ours.server_wires[index].0), expected_wire);
+        assert_eq!(hex(&ours.outbound_wires[index]), expected_wire);
+        assert_eq!(hex(&ours.rebound_wires[index].0), expected_wire);
+    }
+
+    assert_eq!(
+        ours.macaddr8_text,
+        ["08:00:2b:01:02:03:04:05", "08:00:2b:ff:fe:01:02:03"]
+    );
+    assert_eq!(
+        ours.macaddr8_wires.each_ref().map(|wire| hex(&wire.0)),
+        ["08002b0102030405", "08002bfffe010203"]
+    );
+    assert!(!ours.macaddr8_encode_supported);
+    assert!(!ours.macaddr8_decode_supported);
+}
+
+/// Desired invariant blocked by the six-byte-only `eui48::MacAddress` carrier.
+#[cfg(feature = "with-eui48-1")]
+#[ignore = "both eui48::MacAddress codecs reject PostgreSQL MACADDR8"]
+#[compio::test]
+async fn native_eui48_codecs_must_support_macaddr8() {
+    let theirs = tokio_native_eui48_observation(common::plaintext_url());
+    let ours = compio_native_eui48_observation().await;
+    assert!(ours.macaddr8_encode_supported);
+    assert!(ours.macaddr8_decode_supported);
+    assert!(theirs.macaddr8_encode_supported);
+    assert!(theirs.macaddr8_decode_supported);
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeBitVecObservation {
+    decoded_bits: [Vec<bool>; 3],
+    server_text: [String; 3],
+    server_wires: [Wire; 3],
+    outbound_wires: [Vec<u8>; 3],
+    rebound_bits: [Vec<bool>; 3],
+    rebound_text: [String; 3],
+    rebound_wires: [Wire; 3],
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+const NATIVE_BIT_VEC_DECODE_SQL: &str = "SELECT \
+    B''::varbit, B''::varbit, (B''::varbit)::text, \
+    B'1'::bit(1), B'1'::bit(1), (B'1'::bit(1))::text, \
+    B'1011001110001'::varbit, B'1011001110001'::varbit, \
+        (B'1011001110001'::varbit)::text";
+
+#[cfg(feature = "with-bit-vec-0_9")]
+const NATIVE_BIT_VEC_REBOUND_SQL: &str = "SELECT \
+    $1::varbit, $1::varbit, ($1::varbit)::text, \
+    $2::bit(1), $2::bit(1), ($2::bit(1))::text, \
+    $3::varbit, $3::varbit, ($3::varbit)::text";
+
+#[cfg(feature = "with-bit-vec-0_9")]
+fn bit_vec_bits(value: &bit_vec::BitVec) -> Vec<bool> {
+    value.iter().collect()
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+fn tokio_bit_vec_wire(value: &bit_vec::BitVec, ty: &tokio_types::Type) -> Vec<u8> {
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres native bit-vector encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+fn compio_bit_vec_wire(value: &bit_vec::BitVec, ty: &compio_types::Type) -> Vec<u8> {
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres native bit-vector encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+fn tokio_native_bit_vec_observation(url: String) -> NativeBitVecObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_BIT_VEC_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native bit-vector decode");
+        let empty: bit_vec::BitVec = row.get(0);
+        let one: bit_vec::BitVec = row.get(3);
+        let thirteen: bit_vec::BitVec = row.get(6);
+        let outbound_wires = [
+            tokio_bit_vec_wire(&empty, &tokio_types::Type::VARBIT),
+            tokio_bit_vec_wire(&one, &tokio_types::Type::BIT),
+            tokio_bit_vec_wire(&thirteen, &tokio_types::Type::VARBIT),
+        ];
+        let rebound = client
+            .query_one(NATIVE_BIT_VEC_REBOUND_SQL, &[&empty, &one, &thirteen])
+            .await
+            .expect("tokio-postgres native bit-vector encode");
+
+        NativeBitVecObservation {
+            decoded_bits: [
+                bit_vec_bits(&empty),
+                bit_vec_bits(&one),
+                bit_vec_bits(&thirteen),
+            ],
+            server_text: [row.get(2), row.get(5), row.get(8)],
+            server_wires: [row.get(1), row.get(4), row.get(7)],
+            outbound_wires,
+            rebound_bits: [
+                bit_vec_bits(&rebound.get(0)),
+                bit_vec_bits(&rebound.get(3)),
+                bit_vec_bits(&rebound.get(6)),
+            ],
+            rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+            rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+        }
+    })
+}
+
+#[cfg(feature = "with-bit-vec-0_9")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_bit_vec_observation() -> NativeBitVecObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_BIT_VEC_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native bit-vector decode");
+    let empty: bit_vec::BitVec = row.get(0);
+    let one: bit_vec::BitVec = row.get(3);
+    let thirteen: bit_vec::BitVec = row.get(6);
+    let outbound_wires = [
+        compio_bit_vec_wire(&empty, &compio_types::Type::VARBIT),
+        compio_bit_vec_wire(&one, &compio_types::Type::BIT),
+        compio_bit_vec_wire(&thirteen, &compio_types::Type::VARBIT),
+    ];
+    let rebound = client
+        .query_one(NATIVE_BIT_VEC_REBOUND_SQL, &[&empty, &one, &thirteen])
+        .await
+        .expect("compio-postgres native bit-vector encode");
+
+    NativeBitVecObservation {
+        decoded_bits: [
+            bit_vec_bits(&empty),
+            bit_vec_bits(&one),
+            bit_vec_bits(&thirteen),
+        ],
+        server_text: [row.get(2), row.get(5), row.get(8)],
+        server_wires: [row.get(1), row.get(4), row.get(7)],
+        outbound_wires,
+        rebound_bits: [
+            bit_vec_bits(&rebound.get(0)),
+            bit_vec_bits(&rebound.get(3)),
+            bit_vec_bits(&rebound.get(6)),
+        ],
+        rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+        rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+    }
+}
+
+/// Native bit-vector codecs retain exact bit lengths, encode the declared bit
+/// count, and clear the unused low bits of the last wire byte.
+#[cfg(feature = "with-bit-vec-0_9")]
+#[compio::test]
+async fn native_bit_vec_codecs_cover_lengths_and_final_byte_padding() {
+    let theirs = tokio_native_bit_vec_observation(common::plaintext_url());
+    let ours = compio_native_bit_vec_observation().await;
+    assert_eq!(ours, theirs);
+
+    let expected_bits = [
+        vec![],
+        vec![true],
+        vec![
+            true, false, true, true, false, false, true, true, true, false, false, false, true,
+        ],
+    ];
+    let expected_text = ["", "1", "1011001110001"];
+    let expected_wires = ["00000000", "0000000180", "0000000db388"];
+    let expected_wire_lengths = [4, 5, 6];
+    assert_eq!(ours.decoded_bits, expected_bits);
+    assert_eq!(ours.rebound_bits, expected_bits);
+    assert_eq!(ours.server_text, expected_text);
+    assert_eq!(ours.rebound_text, expected_text);
+    for (index, expected_wire) in expected_wires.into_iter().enumerate() {
+        assert_eq!(
+            ours.server_wires[index].0.len(),
+            expected_wire_lengths[index]
+        );
+        assert_eq!(
+            ours.outbound_wires[index].len(),
+            expected_wire_lengths[index]
+        );
+        assert_eq!(
+            ours.rebound_wires[index].0.len(),
+            expected_wire_lengths[index]
+        );
+        assert_eq!(hex(&ours.server_wires[index].0), expected_wire);
+        assert_eq!(hex(&ours.outbound_wires[index]), expected_wire);
+        assert_eq!(hex(&ours.rebound_wires[index].0), expected_wire);
+    }
+    assert_eq!(ours.outbound_wires[2][5] & 0b0000_0111, 0);
+}
+
+#[cfg(feature = "with-uuid-1")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeUuidObservation {
+    decoded: [uuid::Uuid; 3],
+    server_text: [String; 3],
+    server_wires: [Wire; 3],
+    outbound_wires: [Vec<u8>; 3],
+    rebound: [uuid::Uuid; 3],
+    rebound_text: [String; 3],
+    rebound_wires: [Wire; 3],
+}
+
+#[cfg(feature = "with-uuid-1")]
+const NATIVE_UUID_DECODE_SQL: &str = "SELECT \
+    '00000000-0000-0000-0000-000000000000'::uuid, \
+        '00000000-0000-0000-0000-000000000000'::uuid, \
+        ('00000000-0000-0000-0000-000000000000'::uuid)::text, \
+    'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid, \
+        'ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid, \
+        ('ffffffff-ffff-ffff-ffff-ffffffffffff'::uuid)::text, \
+    'f81d4fae-7dec-4a0c-a765-00a0c91e6bf6'::uuid, \
+        'f81d4fae-7dec-4a0c-a765-00a0c91e6bf6'::uuid, \
+        ('f81d4fae-7dec-4a0c-a765-00a0c91e6bf6'::uuid)::text";
+
+#[cfg(feature = "with-uuid-1")]
+const NATIVE_UUID_REBOUND_SQL: &str = "SELECT \
+    $1::uuid, $1::uuid, ($1::uuid)::text, \
+    $2::uuid, $2::uuid, ($2::uuid)::text, \
+    $3::uuid, $3::uuid, ($3::uuid)::text";
+
+#[cfg(feature = "with-uuid-1")]
+fn tokio_uuid_wire(value: &uuid::Uuid) -> Vec<u8> {
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, &tokio_types::Type::UUID, &mut wire)
+        .expect("tokio-postgres native UUID encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-uuid-1")]
+fn compio_uuid_wire(value: &uuid::Uuid) -> Vec<u8> {
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, &compio_types::Type::UUID, &mut wire)
+        .expect("compio-postgres native UUID encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-uuid-1")]
+fn tokio_native_uuid_observation(url: String) -> NativeUuidObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_UUID_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native UUID decode");
+        let decoded = [row.get(0), row.get(3), row.get(6)];
+        let outbound_wires = decoded.each_ref().map(tokio_uuid_wire);
+        let rebound = client
+            .query_one(
+                NATIVE_UUID_REBOUND_SQL,
+                &[&decoded[0], &decoded[1], &decoded[2]],
+            )
+            .await
+            .expect("tokio-postgres native UUID encode");
+
+        NativeUuidObservation {
+            decoded,
+            server_text: [row.get(2), row.get(5), row.get(8)],
+            server_wires: [row.get(1), row.get(4), row.get(7)],
+            outbound_wires,
+            rebound: [rebound.get(0), rebound.get(3), rebound.get(6)],
+            rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+            rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+        }
+    })
+}
+
+#[cfg(feature = "with-uuid-1")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_uuid_observation() -> NativeUuidObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_UUID_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native UUID decode");
+    let decoded = [row.get(0), row.get(3), row.get(6)];
+    let outbound_wires = decoded.each_ref().map(compio_uuid_wire);
+    let rebound = client
+        .query_one(
+            NATIVE_UUID_REBOUND_SQL,
+            &[&decoded[0], &decoded[1], &decoded[2]],
+        )
+        .await
+        .expect("compio-postgres native UUID encode");
+
+    NativeUuidObservation {
+        decoded,
+        server_text: [row.get(2), row.get(5), row.get(8)],
+        server_wires: [row.get(1), row.get(4), row.get(7)],
+        outbound_wires,
+        rebound: [rebound.get(0), rebound.get(3), rebound.get(6)],
+        rebound_text: [rebound.get(2), rebound.get(5), rebound.get(8)],
+        rebound_wires: [rebound.get(1), rebound.get(4), rebound.get(7)],
+    }
+}
+
+/// Native UUID carriers agree with the server's canonical text and exact wire.
+#[cfg(feature = "with-uuid-1")]
+#[compio::test]
+async fn native_uuid_codecs_match_server_text_and_wire() {
+    let theirs = tokio_native_uuid_observation(common::plaintext_url());
+    let ours = compio_native_uuid_observation().await;
+    assert_eq!(ours, theirs);
+
+    let expected_text = [
+        "00000000-0000-0000-0000-000000000000",
+        "ffffffff-ffff-ffff-ffff-ffffffffffff",
+        "f81d4fae-7dec-4a0c-a765-00a0c91e6bf6",
+    ];
+    let expected_values = expected_text.map(|text| uuid::Uuid::parse_str(text).unwrap());
+    let expected_wires = [
+        "00000000000000000000000000000000",
+        "ffffffffffffffffffffffffffffffff",
+        "f81d4fae7dec4a0ca76500a0c91e6bf6",
+    ];
+
+    assert_eq!(ours.decoded, expected_values);
+    assert_eq!(ours.rebound, expected_values);
+    assert_eq!(ours.server_text, expected_text);
+    assert_eq!(ours.rebound_text, expected_text);
+    for (index, expected_wire) in expected_wires.into_iter().enumerate() {
+        assert_eq!(hex(&ours.server_wires[index].0), expected_wire);
+        assert_eq!(hex(&ours.outbound_wires[index]), expected_wire);
+        assert_eq!(hex(&ours.rebound_wires[index].0), expected_wire);
+    }
+}
+
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_JSON_SOURCE_TEXT: &str = r#"{"zz":0,"a":1,"bbb":2,"aa":3}"#;
+
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_SERDE_JSON_TEXT: &str = r#"{"a":1,"aa":3,"bbb":2,"zz":0}"#;
+
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_SERVER_JSONB_TEXT: &str = r#"{"a": 1, "aa": 3, "zz": 0, "bbb": 2}"#;
+
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_JSON_DECODE_SQL: &str = r#"WITH fixture(value) AS (
+    VALUES ($json${"zz":0,"a":1,"bbb":2,"aa":3}$json$::text)
+)
+SELECT
+    value::json, value::json, (value::json)::text,
+    value::jsonb, value::jsonb, (value::jsonb)::text
+FROM fixture"#;
+
+#[cfg(feature = "with-serde_json-1")]
+const NATIVE_JSON_REBOUND_SQL: &str =
+    "SELECT $1::json, ($1::json)::text, $2::jsonb, ($2::jsonb)::text";
+
+#[cfg(feature = "with-serde_json-1")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeJsonObservation {
+    decoded: [serde_json::Value; 2],
+    decoded_serialized: [String; 2],
+    server_text: [String; 2],
+    server_wires: [Wire; 2],
+    outbound_wires: [Vec<u8>; 2],
+    rebound_text: [String; 2],
+    rebound_wires: [Wire; 2],
+    version_two_error: String,
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn expected_jsonb_wire(text: &str) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(text.len() + 1);
+    wire.push(1);
+    wire.extend_from_slice(text.as_bytes());
+    wire
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn tokio_json_wire(value: &serde_json::Value, ty: &tokio_types::Type) -> Vec<u8> {
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres native JSON encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn compio_json_wire(value: &serde_json::Value, ty: &compio_types::Type) -> Vec<u8> {
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres native JSON encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn tokio_jsonb_version_two_error() -> String {
+    <serde_json::Value as tokio_types::FromSql>::from_sql(
+        &tokio_types::Type::JSONB,
+        &[2, b'{', b'}'],
+    )
+    .expect_err("tokio-postgres accepted JSONB version 2")
+    .to_string()
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn compio_jsonb_version_two_error() -> String {
+    <serde_json::Value as compio_types::FromSql>::from_sql(
+        &compio_types::Type::JSONB,
+        &[2, b'{', b'}'],
+    )
+    .expect_err("compio-postgres accepted JSONB version 2")
+    .to_string()
+}
+
+#[cfg(feature = "with-serde_json-1")]
+fn tokio_native_json_observation(url: String) -> NativeJsonObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_JSON_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native JSON decode");
+        let decoded = [row.get(0), row.get(3)];
+        let decoded_serialized = decoded.each_ref().map(|value| {
+            serde_json::to_string(value).expect("serialize tokio-postgres native JSON")
+        });
+        let outbound_wires = [
+            tokio_json_wire(&decoded[0], &tokio_types::Type::JSON),
+            tokio_json_wire(&decoded[1], &tokio_types::Type::JSONB),
+        ];
+        let rebound = client
+            .query_one(NATIVE_JSON_REBOUND_SQL, &[&decoded[0], &decoded[1]])
+            .await
+            .expect("tokio-postgres native JSON encode");
+
+        NativeJsonObservation {
+            decoded,
+            decoded_serialized,
+            server_text: [row.get(2), row.get(5)],
+            server_wires: [row.get(1), row.get(4)],
+            outbound_wires,
+            rebound_text: [rebound.get(1), rebound.get(3)],
+            rebound_wires: [rebound.get(0), rebound.get(2)],
+            version_two_error: tokio_jsonb_version_two_error(),
+        }
+    })
+}
+
+#[cfg(feature = "with-serde_json-1")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_json_observation() -> NativeJsonObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_JSON_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native JSON decode");
+    let decoded = [row.get(0), row.get(3)];
+    let decoded_serialized = decoded
+        .each_ref()
+        .map(|value| serde_json::to_string(value).expect("serialize compio-postgres native JSON"));
+    let outbound_wires = [
+        compio_json_wire(&decoded[0], &compio_types::Type::JSON),
+        compio_json_wire(&decoded[1], &compio_types::Type::JSONB),
+    ];
+    let rebound = client
+        .query_one(NATIVE_JSON_REBOUND_SQL, &[&decoded[0], &decoded[1]])
+        .await
+        .expect("compio-postgres native JSON encode");
+
+    NativeJsonObservation {
+        decoded,
+        decoded_serialized,
+        server_text: [row.get(2), row.get(5)],
+        server_wires: [row.get(1), row.get(4)],
+        outbound_wires,
+        rebound_text: [rebound.get(1), rebound.get(3)],
+        rebound_wires: [rebound.get(0), rebound.get(2)],
+        version_two_error: compio_jsonb_version_two_error(),
+    }
+}
+
+/// Native serde conversion exposes three distinct object-key orders: source
+/// JSON, `serde_json` serialization, and server-canonical JSONB.
+#[cfg(feature = "with-serde_json-1")]
+#[compio::test]
+async fn native_serde_json_codecs_cover_json_and_jsonb_wire_contracts() {
+    let theirs = tokio_native_json_observation(common::plaintext_url());
+    let ours = compio_native_json_observation().await;
+    assert_eq!(ours, theirs);
+
+    assert_eq!(ours.decoded[0], ours.decoded[1]);
+    assert_ne!(NATIVE_JSON_SOURCE_TEXT, NATIVE_SERDE_JSON_TEXT);
+    assert_ne!(NATIVE_SERDE_JSON_TEXT, NATIVE_SERVER_JSONB_TEXT);
+    assert_eq!(
+        ours.decoded_serialized,
+        [NATIVE_SERDE_JSON_TEXT, NATIVE_SERDE_JSON_TEXT]
+    );
+    assert_eq!(
+        ours.server_text,
+        [NATIVE_JSON_SOURCE_TEXT, NATIVE_SERVER_JSONB_TEXT]
+    );
+    assert_eq!(
+        ours.rebound_text,
+        [NATIVE_SERDE_JSON_TEXT, NATIVE_SERVER_JSONB_TEXT]
+    );
+
+    assert_eq!(ours.server_wires[0].0, NATIVE_JSON_SOURCE_TEXT.as_bytes());
+    assert_eq!(
+        ours.server_wires[1].0,
+        expected_jsonb_wire(NATIVE_SERVER_JSONB_TEXT)
+    );
+    assert_eq!(ours.outbound_wires[0], NATIVE_SERDE_JSON_TEXT.as_bytes());
+    assert_eq!(
+        ours.outbound_wires[1],
+        expected_jsonb_wire(NATIVE_SERDE_JSON_TEXT)
+    );
+    assert_eq!(ours.rebound_wires[0].0, NATIVE_SERDE_JSON_TEXT.as_bytes());
+    assert_eq!(
+        ours.rebound_wires[1].0,
+        expected_jsonb_wire(NATIVE_SERVER_JSONB_TEXT)
+    );
+    assert_eq!(ours.server_wires[1].0.first(), Some(&1));
+    assert_eq!(ours.outbound_wires[1].first(), Some(&1));
+    assert_eq!(ours.rebound_wires[1].0.first(), Some(&1));
+    assert_eq!(ours.version_two_error, "unsupported JSONB encoding version");
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+const NATIVE_GEO_DECODE_SQL: &str = "SELECT \
+    '(1.5,-2.25)'::point, '(1.5,-2.25)'::point, \
+        ('(1.5,-2.25)'::point)::text, \
+    '((3,4),(1,2))'::box, '((3,4),(1,2))'::box, \
+        ('((3,4),(1,2))'::box)::text, \
+    '[(1,2),(3,4),(5,6)]'::path, \
+        '[(1,2),(3,4),(5,6)]'::path, \
+        ('[(1,2),(3,4),(5,6)]'::path)::text, \
+    '((1,2),(3,4),(5,6))'::path, \
+        '((1,2),(3,4),(5,6))'::path, \
+        ('((1,2),(3,4),(5,6))'::path)::text, \
+    '((1,2),(3,4),(5,6))'::polygon, \
+        ('((1,2),(3,4),(5,6))'::polygon)::text";
+
+#[cfg(feature = "with-geo-types-0_7")]
+const NATIVE_GEO_REBOUND_SQL: &str = "SELECT \
+    $1::point, ($1::point)::text, \
+    $2::box, ($2::box)::text, \
+    $3::path, ($3::path)::text, \
+    $4::path, ($4::path)::text, \
+    $5::polygon, ($5::polygon)::text";
+
+#[cfg(feature = "with-geo-types-0_7")]
+#[derive(Debug, PartialEq)]
+struct NativeGeoObservation {
+    decoded_point: geo_types::Point<f64>,
+    decoded_box: geo_types::Rect<f64>,
+    decoded_paths: [geo_types::LineString<f64>; 2],
+    server_text: [String; 5],
+    server_wires: [Wire; 5],
+    outbound_wires: [Vec<u8>; 4],
+    rebound_text: [String; 5],
+    rebound_wires: [Wire; 5],
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn append_geo_point(wire: &mut Vec<u8>, point: (f64, f64)) {
+    wire.extend_from_slice(&point.0.to_be_bytes());
+    wire.extend_from_slice(&point.1.to_be_bytes());
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn expected_geo_point_wire(point: (f64, f64)) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(16);
+    append_geo_point(&mut wire, point);
+    wire
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn expected_geo_box_wire(first: (f64, f64), second: (f64, f64)) -> Vec<u8> {
+    let mut wire = Vec::with_capacity(32);
+    append_geo_point(&mut wire, first);
+    append_geo_point(&mut wire, second);
+    wire
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn expected_geo_path_wire(closed: bool, points: &[(f64, f64)]) -> Vec<u8> {
+    let count = i32::try_from(points.len()).expect("PATH fixture count fits i32");
+    let mut wire = Vec::with_capacity(5 + points.len() * 16);
+    wire.push(u8::from(closed));
+    wire.extend_from_slice(&count.to_be_bytes());
+    for point in points {
+        append_geo_point(&mut wire, *point);
+    }
+    wire
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn expected_geo_polygon_wire(points: &[(f64, f64)]) -> Vec<u8> {
+    let count = i32::try_from(points.len()).expect("POLYGON fixture count fits i32");
+    let mut wire = Vec::with_capacity(4 + points.len() * 16);
+    wire.extend_from_slice(&count.to_be_bytes());
+    for point in points {
+        append_geo_point(&mut wire, *point);
+    }
+    wire
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn tokio_geo_wire<T>(value: &T, ty: &tokio_types::Type) -> Vec<u8>
+where
+    T: tokio_types::ToSql,
+{
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres native geometry encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn compio_geo_wire<T>(value: &T, ty: &compio_types::Type) -> Vec<u8>
+where
+    T: compio_types::ToSql,
+{
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres native geometry encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+fn tokio_native_geo_observation(url: String) -> NativeGeoObservation {
+    on_tokio(url, |client| async move {
+        let row = client
+            .query_one(NATIVE_GEO_DECODE_SQL, &[])
+            .await
+            .expect("tokio-postgres native geometry decode");
+        let point: geo_types::Point<f64> = row.get(0);
+        let rectangle: geo_types::Rect<f64> = row.get(3);
+        let open_path: geo_types::LineString<f64> = row.get(6);
+        let closed_path: geo_types::LineString<f64> = row.get(9);
+        let polygon_wire: Wire = row.get(12);
+        let outbound_wires = [
+            tokio_geo_wire(&point, &tokio_types::Type::POINT),
+            tokio_geo_wire(&rectangle, &tokio_types::Type::BOX),
+            tokio_geo_wire(&open_path, &tokio_types::Type::PATH),
+            tokio_geo_wire(&closed_path, &tokio_types::Type::PATH),
+        ];
+        let rebound = client
+            .query_one(
+                NATIVE_GEO_REBOUND_SQL,
+                &[&point, &rectangle, &open_path, &closed_path, &polygon_wire],
+            )
+            .await
+            .expect("tokio-postgres native geometry encode");
+
+        NativeGeoObservation {
+            decoded_point: point,
+            decoded_box: rectangle,
+            decoded_paths: [open_path, closed_path],
+            server_text: [row.get(2), row.get(5), row.get(8), row.get(11), row.get(13)],
+            server_wires: [
+                row.get(1),
+                row.get(4),
+                row.get(7),
+                row.get(10),
+                polygon_wire,
+            ],
+            outbound_wires,
+            rebound_text: [
+                rebound.get(1),
+                rebound.get(3),
+                rebound.get(5),
+                rebound.get(7),
+                rebound.get(9),
+            ],
+            rebound_wires: [
+                rebound.get(0),
+                rebound.get(2),
+                rebound.get(4),
+                rebound.get(6),
+                rebound.get(8),
+            ],
+        }
+    })
+}
+
+#[cfg(feature = "with-geo-types-0_7")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_geo_observation() -> NativeGeoObservation {
+    let client = compio_client().await;
+    let row = client
+        .query_one(NATIVE_GEO_DECODE_SQL, &[])
+        .await
+        .expect("compio-postgres native geometry decode");
+    let point: geo_types::Point<f64> = row.get(0);
+    let rectangle: geo_types::Rect<f64> = row.get(3);
+    let open_path: geo_types::LineString<f64> = row.get(6);
+    let closed_path: geo_types::LineString<f64> = row.get(9);
+    let polygon_wire: Wire = row.get(12);
+    let outbound_wires = [
+        compio_geo_wire(&point, &compio_types::Type::POINT),
+        compio_geo_wire(&rectangle, &compio_types::Type::BOX),
+        compio_geo_wire(&open_path, &compio_types::Type::PATH),
+        compio_geo_wire(&closed_path, &compio_types::Type::PATH),
+    ];
+    let rebound = client
+        .query_one(
+            NATIVE_GEO_REBOUND_SQL,
+            &[&point, &rectangle, &open_path, &closed_path, &polygon_wire],
+        )
+        .await
+        .expect("compio-postgres native geometry encode");
+
+    NativeGeoObservation {
+        decoded_point: point,
+        decoded_box: rectangle,
+        decoded_paths: [open_path, closed_path],
+        server_text: [row.get(2), row.get(5), row.get(8), row.get(11), row.get(13)],
+        server_wires: [
+            row.get(1),
+            row.get(4),
+            row.get(7),
+            row.get(10),
+            polygon_wire,
+        ],
+        outbound_wires,
+        rebound_text: [
+            rebound.get(1),
+            rebound.get(3),
+            rebound.get(5),
+            rebound.get(7),
+            rebound.get(9),
+        ],
+        rebound_wires: [
+            rebound.get(0),
+            rebound.get(2),
+            rebound.get(4),
+            rebound.get(6),
+            rebound.get(8),
+        ],
+    }
+}
+
+/// Native geometry carriers agree on coordinates. Direct bytes expose the
+/// closed PATH state loss, which is still shared, and the BOX corner order,
+/// which is NOT: the local encoder emits the server's order and upstream does
+/// not. POLYGON stays raw because neither `geo-types` integration supplies a
+/// native polygon codec.
+///
+/// `outbound_wires` is therefore compared against the SERVER rather than
+/// against tokio, and every other field is compared field-by-field. A blanket
+/// `assert_eq!(ours, theirs)` would now fail on the corner order alone and say
+/// nothing about the fields that must still agree.
+#[cfg(feature = "with-geo-types-0_7")]
+#[compio::test]
+async fn native_geo_types_codecs_cover_geometry_wires_and_shared_limits() {
+    let theirs = tokio_native_geo_observation(common::plaintext_url());
+    let ours = compio_native_geo_observation().await;
+    assert_eq!(ours.decoded_point, theirs.decoded_point);
+    assert_eq!(ours.decoded_box, theirs.decoded_box);
+    assert_eq!(ours.decoded_paths, theirs.decoded_paths);
+    assert_eq!(ours.server_text, theirs.server_text);
+    assert_eq!(ours.server_wires, theirs.server_wires);
+    assert_eq!(ours.rebound_text, theirs.rebound_text);
+    assert_eq!(ours.rebound_wires, theirs.rebound_wires);
+
+    let points = [(1.0, 2.0), (3.0, 4.0), (5.0, 6.0)];
+    let expected_line = geo_types::LineString::from(points.to_vec());
+    assert_eq!(ours.decoded_point, geo_types::Point::new(1.5, -2.25));
+    assert_eq!(
+        ours.decoded_box,
+        geo_types::Rect::new((1.0, 2.0), (3.0, 4.0))
+    );
+    assert_eq!(ours.decoded_paths, [expected_line.clone(), expected_line]);
+    assert_eq!(
+        ours.server_text,
+        [
+            "(1.5,-2.25)",
+            "(3,4),(1,2)",
+            "[(1,2),(3,4),(5,6)]",
+            "((1,2),(3,4),(5,6))",
+            "((1,2),(3,4),(5,6))",
+        ]
+    );
+    assert_eq!(
+        ours.rebound_text,
+        [
+            "(1.5,-2.25)",
+            "(3,4),(1,2)",
+            "[(1,2),(3,4),(5,6)]",
+            "[(1,2),(3,4),(5,6)]",
+            "((1,2),(3,4),(5,6))",
+        ]
+    );
+
+    let point_wire = expected_geo_point_wire((1.5, -2.25));
+    let server_box_wire = expected_geo_box_wire((3.0, 4.0), (1.0, 2.0));
+    let codec_box_wire = expected_geo_box_wire((1.0, 2.0), (3.0, 4.0));
+    let open_path_wire = expected_geo_path_wire(false, &points);
+    let closed_path_wire = expected_geo_path_wire(true, &points);
+    let polygon_wire = expected_geo_polygon_wire(&points);
+
+    assert_eq!(
+        ours.server_wires.each_ref().map(|wire| wire.0.as_slice()),
+        [
+            point_wire.as_slice(),
+            server_box_wire.as_slice(),
+            open_path_wire.as_slice(),
+            closed_path_wire.as_slice(),
+            polygon_wire.as_slice(),
+        ]
+    );
+    assert_eq!(
+        ours.outbound_wires.each_ref().map(Vec::as_slice),
+        [
+            point_wire.as_slice(),
+            server_box_wire.as_slice(),
+            open_path_wire.as_slice(),
+            open_path_wire.as_slice(),
+        ]
+    );
+    assert_eq!(
+        ours.rebound_wires.each_ref().map(|wire| wire.0.as_slice()),
+        [
+            point_wire.as_slice(),
+            server_box_wire.as_slice(),
+            open_path_wire.as_slice(),
+            open_path_wire.as_slice(),
+            polygon_wire.as_slice(),
+        ]
+    );
+
+    assert_eq!(
+        ours.outbound_wires[1], ours.server_wires[1].0,
+        "our BOX encoder must emit the server's corner order"
+    );
+    // Upstream still writes the low corner first. Pinned so that upstream
+    // adopting the server's order shows up here as a failing expectation
+    // rather than silently making the local divergence redundant.
+    assert_eq!(
+        theirs.outbound_wires[1], codec_box_wire,
+        "upstream changed its BOX corner order; the local override can go"
+    );
+    // Every other outbound wire must still match upstream byte for byte.
+    assert_eq!(ours.outbound_wires[0], theirs.outbound_wires[0]);
+    assert_eq!(ours.outbound_wires[2], theirs.outbound_wires[2]);
+    assert_eq!(ours.outbound_wires[3], theirs.outbound_wires[3]);
+    assert_ne!(ours.outbound_wires[3], ours.server_wires[3].0);
+    assert_eq!(ours.outbound_wires[2], ours.outbound_wires[3]);
+}
+
+/// Desired invariant now HALF met: the local `Rect` codec emits the server's
+/// BOX corner order, upstream's still emits the reverse. The assertion on
+/// `ours` is covered by the wire test above; this one stays ignored solely for
+/// its second line, which rules on tokio.
+///
+/// Severity, measured against the server rather than inferred: NOT corruption.
+/// `box '(1,2),(3,4)'` is sent by PostgreSQL as high corner first, 3,4,1,2, and
+/// even its text form normalises to `(3,4),(1,2)`. Upstream sends 1,2,3,4.
+/// Feeding BOTH orders back through `COPY ... FROM STDIN (FORMAT binary)`
+/// stores `(3,4),(1,2)` either way and both compare `=` to the original,
+/// because `box_recv` normalises the corners on receipt. So this was wire
+/// nonconformance only - the same class as the CIDR `is_cidr` flag, and fixed
+/// the same way - and a claim that it lost or swapped a value would be wrong.
+#[cfg(feature = "with-geo-types-0_7")]
+#[ignore = "upstream geo-types Rect codec still emits PostgreSQL BOX corners in reverse order"]
+#[compio::test]
+async fn native_geo_rect_codecs_must_emit_server_box_order() {
+    let theirs = tokio_native_geo_observation(common::plaintext_url());
+    let ours = compio_native_geo_observation().await;
+    assert_eq!(ours.outbound_wires[1], ours.server_wires[1].0);
+    assert_eq!(theirs.outbound_wires[1], theirs.server_wires[1].0);
+}
+
+/// Desired invariant blocked because `LineString` has no closed-path state.
+#[cfg(feature = "with-geo-types-0_7")]
+#[ignore = "both geo-types LineString codecs discard PostgreSQL PATH closed state"]
+#[compio::test]
+async fn native_geo_path_codecs_must_preserve_closed_flag() {
+    let theirs = tokio_native_geo_observation(common::plaintext_url());
+    let ours = compio_native_geo_observation().await;
+    assert_eq!(ours.outbound_wires[3], ours.server_wires[3].0);
+    assert_eq!(theirs.outbound_wires[3], theirs.server_wires[3].0);
+}
+
 #[derive(Debug, PartialEq, Eq)]
 struct ArrayObservation {
     empty: Vec<Option<String>>,
@@ -924,6 +4062,124 @@ async fn native_one_dimensional_arrays_round_trip_identically() {
             Some("line\nlast".to_owned())
         ]
     );
+}
+
+fn numeric_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new(
+            "numeric-zero-scale-40",
+            "'0.0000000000000000000000000000000000000000'::numeric",
+            "numeric",
+        ),
+        RawCase::new("numeric-trailing-zeros", "'123.450000'::numeric", "numeric"),
+        RawCase::new(
+            "numeric-large-positive-weight",
+            "'1e1000'::numeric",
+            "numeric",
+        ),
+        RawCase::new(
+            "numeric-large-negative-weight",
+            "'1e-1000'::numeric",
+            "numeric",
+        ),
+        RawCase::new(
+            "numeric-beyond-float-precision",
+            "'1234567890123456789012345678901234567890.123456789012345678901234567890'::numeric",
+            "numeric",
+        ),
+        RawCase::new("numeric-nan-format", "'NaN'::numeric", "numeric"),
+        RawCase::new(
+            "numeric-positive-infinity-format",
+            "'Infinity'::numeric",
+            "numeric",
+        ),
+        RawCase::new(
+            "numeric-negative-infinity-format",
+            "'-Infinity'::numeric",
+            "numeric",
+        ),
+    ]
+}
+
+fn tokio_numeric_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_numeric_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+/// Both drivers preserve NUMERIC's scale, weight, signs, and exact digits.
+#[compio::test]
+async fn both_drivers_agree_on_numeric_text_and_binary_codecs() {
+    let cases = numeric_format_cases();
+    let theirs = tokio_numeric_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_numeric_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let positive_weight_text = format!("1{}", "0".repeat(1000));
+    let negative_weight_text = format!("0.{}1", "0".repeat(999));
+    let expected = [
+        (
+            "numeric-zero-scale-40",
+            "0.0000000000000000000000000000000000000000",
+            "0000000000000028",
+        ),
+        (
+            "numeric-trailing-zeros",
+            "123.450000",
+            "0002000000000006007b1194",
+        ),
+        (
+            "numeric-large-positive-weight",
+            positive_weight_text.as_str(),
+            "000100fa000000000001",
+        ),
+        (
+            "numeric-large-negative-weight",
+            negative_weight_text.as_str(),
+            "0001ff06000003e80001",
+        ),
+        ("numeric-nan-format", "NaN", "00000000c0000000"),
+        (
+            "numeric-positive-infinity-format",
+            "Infinity",
+            "00000000d0000020",
+        ),
+        (
+            "numeric-negative-infinity-format",
+            "-Infinity",
+            "00000000f0000020",
+        ),
+    ];
+    for (name, text, binary_hex) in expected {
+        let observation = ours
+            .iter()
+            .find(|observation| observation.name == name)
+            .unwrap_or_else(|| panic!("no numeric observation named {name}"));
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        assert_eq!(
+            hex(&observation.binary_decoded.0),
+            binary_hex,
+            "{name}: server binary"
+        );
+    }
+
+    let precise = ours
+        .iter()
+        .find(|observation| observation.name == "numeric-beyond-float-precision")
+        .expect("numeric precision observation");
+    assert_eq!(
+        precise.text_decoded,
+        "1234567890123456789012345678901234567890.123456789012345678901234567890"
+    );
+    let precise_wire =
+        decode_numeric(&precise.binary_decoded.0).expect("decode precise NUMERIC wire value");
+    assert_eq!(precise_wire.weight, 9);
+    assert_eq!(precise_wire.display_scale, 30);
+    assert_eq!(precise_wire.digits.len(), 18);
+    assert!(precise_wire.digits.iter().all(|digit| *digit < 10_000));
 }
 
 /// NUMERIC is base-10000 digits plus explicit sign and display scale.
@@ -1292,6 +4548,802 @@ async fn domains_over_every_value_family_round_trip_as_their_base_wire_type() {
         .batch_execute(&cleanup)
         .await
         .expect("drop shared domains and composite");
+}
+
+fn temporal_format_cases() -> Vec<RawCase> {
+    vec![
+        RawCase::new("temporal-date-bc", "'4714-11-24 BC'::date", "date"),
+        RawCase::new(
+            "temporal-date-negative-infinity",
+            "'-infinity'::date",
+            "date",
+        ),
+        RawCase::new(
+            "temporal-date-positive-infinity",
+            "'infinity'::date",
+            "date",
+        ),
+        RawCase::new(
+            "temporal-timestamp-bc",
+            "'4714-11-24 00:00:00 BC'::timestamp",
+            "timestamp",
+        ),
+        RawCase::new(
+            "temporal-timestamp-microsecond",
+            "'1999-12-31 23:59:59.999999'::timestamp",
+            "timestamp",
+        ),
+        RawCase::new(
+            "temporal-timestamp-negative-infinity",
+            "'-infinity'::timestamp",
+            "timestamp",
+        ),
+        RawCase::new(
+            "temporal-timestamp-positive-infinity",
+            "'infinity'::timestamp",
+            "timestamp",
+        ),
+        RawCase::new(
+            "temporal-timestamptz-offset-microsecond",
+            "'2001-02-03 04:05:06.123456+05:45'::timestamptz",
+            "timestamptz",
+        ),
+        RawCase::new(
+            "temporal-timestamptz-negative-infinity",
+            "'-infinity'::timestamptz",
+            "timestamptz",
+        ),
+        RawCase::new(
+            "temporal-timestamptz-positive-infinity",
+            "'infinity'::timestamptz",
+            "timestamptz",
+        ),
+        RawCase::new(
+            "temporal-time-last-microsecond",
+            "'23:59:59.999999'::time",
+            "time",
+        ),
+        RawCase::new("temporal-time-end-of-day", "'24:00'::time", "time"),
+        RawCase::new(
+            "temporal-interval-mixed-signs",
+            "'1 mon -2 days 03:04:05.000006'::interval",
+            "interval",
+        ),
+    ]
+}
+
+fn tokio_temporal_format_observations(url: String, cases: Vec<RawCase>) -> Vec<FormatObservation> {
+    tokio_format_observations(url, cases)
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_temporal_format_observations(cases: &[RawCase]) -> Vec<FormatObservation> {
+    compio_format_observations(cases).await
+}
+
+/// Whether the server takes `interval 'infinity'`, and what it answers.
+///
+/// This is a server-version fork, not a driver difference: the server gained
+/// interval infinity after 16, so the same query is a syntax error on one
+/// supported server and a value on another. Recording the OUTCOME rather than
+/// asserting a refusal keeps the differential claim - both drivers say the
+/// same thing - independent of which server is answering.
+fn tokio_interval_infinity_states(url: String) -> Vec<String> {
+    on_tokio(url, |client| async move {
+        let mut states = Vec::new();
+        for expression in ["'infinity'::interval", "'-infinity'::interval"] {
+            match client
+                .query_one(&format!("SELECT ({expression})::text"), &[])
+                .await
+            {
+                Ok(row) => states.push(format!("ok:{}", row.get::<_, String>(0))),
+                Err(error) => states.push(format!(
+                    "err:{}",
+                    error
+                        .code()
+                        .expect("interval infinity refusal had no SQLSTATE")
+                        .code()
+                )),
+            }
+        }
+        states
+    })
+}
+
+#[allow(clippy::future_not_send)]
+async fn compio_interval_infinity_states() -> Vec<String> {
+    let client = compio_client().await;
+    let mut states = Vec::new();
+    for expression in ["'infinity'::interval", "'-infinity'::interval"] {
+        match client
+            .query_one(&format!("SELECT ({expression})::text"), &[])
+            .await
+        {
+            Ok(row) => states.push(format!("ok:{}", row.get::<_, String>(0))),
+            Err(error) => states.push(format!(
+                "err:{}",
+                error
+                    .code()
+                    .expect("interval infinity refusal had no SQLSTATE")
+                    .code()
+            )),
+        }
+    }
+    states
+}
+
+/// Both drivers preserve temporal values through text and binary formats.
+#[compio::test]
+async fn both_drivers_agree_on_temporal_text_and_binary_codecs() {
+    let cases = temporal_format_cases();
+    let theirs = tokio_temporal_format_observations(common::plaintext_url(), cases.clone());
+    let ours = compio_temporal_format_observations(&cases).await;
+    assert_format_differential(&cases, &ours, &theirs);
+
+    let expected = [
+        ("temporal-date-bc", "4714-11-24 BC", "ffda97a7"),
+        ("temporal-date-negative-infinity", "-infinity", "80000000"),
+        ("temporal-date-positive-infinity", "infinity", "7fffffff"),
+        (
+            "temporal-timestamp-bc",
+            "4714-11-24 00:00:00 BC",
+            "fd0f7cc1411fa000",
+        ),
+        (
+            "temporal-timestamp-microsecond",
+            "1999-12-31 23:59:59.999999",
+            "ffffffffffffffff",
+        ),
+        (
+            "temporal-timestamp-negative-infinity",
+            "-infinity",
+            "8000000000000000",
+        ),
+        (
+            "temporal-timestamp-positive-infinity",
+            "infinity",
+            "7fffffffffffffff",
+        ),
+        (
+            "temporal-timestamptz-negative-infinity",
+            "-infinity",
+            "8000000000000000",
+        ),
+        (
+            "temporal-timestamptz-positive-infinity",
+            "infinity",
+            "7fffffffffffffff",
+        ),
+        (
+            "temporal-time-last-microsecond",
+            "23:59:59.999999",
+            "000000141dd75fff",
+        ),
+        ("temporal-time-end-of-day", "24:00:00", "000000141dd76000"),
+    ];
+    for (name, text, binary_hex) in expected {
+        let observation = ours
+            .iter()
+            .find(|observation| observation.name == name)
+            .unwrap_or_else(|| panic!("no temporal observation named {name}"));
+        assert_eq!(observation.text_decoded, text, "{name}: server text");
+        assert_eq!(
+            hex(&observation.binary_decoded.0),
+            binary_hex,
+            "{name}: server binary"
+        );
+    }
+
+    let zoned = ours
+        .iter()
+        .find(|observation| observation.name == "temporal-timestamptz-offset-microsecond")
+        .expect("offset timestamptz observation");
+    assert_eq!(zoned.text_decoded, "2001-02-02 22:20:06.123456+00");
+    assert_eq!(
+        i64::from_be_bytes(zoned.binary_decoded.0.as_slice().try_into().unwrap()),
+        34_467_606_123_456
+    );
+
+    let interval = ours
+        .iter()
+        .find(|observation| observation.name == "temporal-interval-mixed-signs")
+        .expect("interval observation");
+    assert_eq!(
+        decode_interval(&interval.binary_decoded.0).unwrap(),
+        IntervalWire {
+            microseconds: 11_045_000_006,
+            days: -2,
+            months: 1,
+        }
+    );
+
+    let theirs = tokio_interval_infinity_states(common::plaintext_url());
+    let ours = compio_interval_infinity_states().await;
+    assert_eq!(
+        ours, theirs,
+        "the drivers disagreed about interval infinity"
+    );
+
+    // PostgreSQL 17 introduced interval infinity. Below that the literal is a
+    // syntax error; at or above it, it is a value. Measured on both servers
+    // this suite runs against: 160014 refuses, 180004 renders "infinity".
+    let server: i32 = compio_client()
+        .await
+        .query_one_scalar("SELECT current_setting('server_version_num')::int4", &[])
+        .await
+        .expect("read server_version_num");
+    let expected: [String; 2] = if server < 170_000 {
+        ["err:22007".to_owned(), "err:22007".to_owned()]
+    } else {
+        ["ok:infinity".to_owned(), "ok:-infinity".to_owned()]
+    };
+    assert_eq!(ours, expected, "server_version_num={server}");
+}
+
+const TYPED_TEMPORAL_SQL: &str = "SELECT \
+     '0001-01-01 BC'::date, \
+     '1999-12-31 23:59:59.999999'::timestamp, \
+     '2001-02-03 04:05:06.123456+05:45'::timestamptz, \
+     '23:59:59.999999'::time, \
+     '-infinity'::date, 'infinity'::date, \
+     '-infinity'::timestamp, 'infinity'::timestamp, \
+     '-infinity'::timestamptz, 'infinity'::timestamptz, \
+     '24:00'::time";
+
+const TYPED_TEMPORAL_REBOUND_SQL: &str = "SELECT \
+     $1::date::text, $2::timestamp::text, $3::timestamptz::text, $4::time::text, \
+     $5::date::text, $6::date::text, \
+     $7::timestamp::text, $8::timestamp::text, \
+     $9::timestamptz::text, $10::timestamptz::text";
+
+#[cfg(feature = "with-jiff-0_2")]
+#[derive(Debug, PartialEq, Eq)]
+struct BoundJiffTimeObservation {
+    server_text: String,
+    server_wire: Wire,
+    decoded: ValueOutcome<String>,
+}
+
+#[cfg(feature = "with-jiff-0_2")]
+#[derive(Debug, PartialEq, Eq)]
+struct NativeJiffObservation {
+    decoded: [String; 4],
+    server_wires: [Wire; 11],
+    outbound_wires: [Vec<u8>; 10],
+    rebound: Vec<String>,
+    time_24: ValueOutcome<String>,
+    submicro_input: String,
+    submicro_outbound_wire: Vec<u8>,
+    submicro_bind: ValueOutcome<BoundJiffTimeObservation>,
+}
+
+#[cfg(feature = "with-jiff-0_2")]
+fn tokio_jiff_wire<T>(value: &T, ty: &tokio_types::Type) -> Vec<u8>
+where
+    T: tokio_types::ToSql,
+{
+    let mut wire = tokio_types::private::BytesMut::new();
+    let is_null = tokio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("tokio-postgres native Jiff encode");
+    assert!(matches!(is_null, tokio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-jiff-0_2")]
+fn compio_jiff_wire<T>(value: &T, ty: &compio_types::Type) -> Vec<u8>
+where
+    T: compio_types::ToSql,
+{
+    let mut wire = compio_types::private::BytesMut::new();
+    let is_null = compio_types::ToSql::to_sql_checked(value, ty, &mut wire)
+        .expect("compio-postgres native Jiff encode");
+    assert!(matches!(is_null, compio_types::IsNull::No));
+    wire.to_vec()
+}
+
+#[cfg(feature = "with-jiff-0_2")]
+fn tokio_native_jiff_observation(url: String) -> NativeJiffObservation {
+    on_tokio(url, |client| async move {
+        client
+            .batch_execute(FORMAT_RENDERING_SQL)
+            .await
+            .expect("set tokio Jiff temporal rendering");
+        let row = client
+            .query_one(TYPED_TEMPORAL_SQL, &[])
+            .await
+            .expect("tokio-postgres native Jiff decode");
+
+        let date: jiff::civil::Date = row.get(0);
+        let datetime: jiff::civil::DateTime = row.get(1);
+        let timestamp: jiff::Timestamp = row.get(2);
+        let time: jiff::civil::Time = row.get(3);
+        let date_neg: tokio_types::Date<jiff::civil::Date> = row.get(4);
+        let date_pos: tokio_types::Date<jiff::civil::Date> = row.get(5);
+        let datetime_neg: tokio_types::Timestamp<jiff::civil::DateTime> = row.get(6);
+        let datetime_pos: tokio_types::Timestamp<jiff::civil::DateTime> = row.get(7);
+        let timestamp_neg: tokio_types::Timestamp<jiff::Timestamp> = row.get(8);
+        let timestamp_pos: tokio_types::Timestamp<jiff::Timestamp> = row.get(9);
+        let time_24 = match row.try_get::<_, jiff::civil::Time>(10) {
+            Ok(value) => ValueOutcome::Value(value.to_string()),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+
+        let server_wires = std::array::from_fn(|index| row.get(index));
+        let outbound_wires = [
+            tokio_jiff_wire(&date, &tokio_types::Type::DATE),
+            tokio_jiff_wire(&datetime, &tokio_types::Type::TIMESTAMP),
+            tokio_jiff_wire(&timestamp, &tokio_types::Type::TIMESTAMPTZ),
+            tokio_jiff_wire(&time, &tokio_types::Type::TIME),
+            tokio_jiff_wire(&date_neg, &tokio_types::Type::DATE),
+            tokio_jiff_wire(&date_pos, &tokio_types::Type::DATE),
+            tokio_jiff_wire(&datetime_neg, &tokio_types::Type::TIMESTAMP),
+            tokio_jiff_wire(&datetime_pos, &tokio_types::Type::TIMESTAMP),
+            tokio_jiff_wire(&timestamp_neg, &tokio_types::Type::TIMESTAMPTZ),
+            tokio_jiff_wire(&timestamp_pos, &tokio_types::Type::TIMESTAMPTZ),
+        ];
+        let rebound = client
+            .query_one(
+                TYPED_TEMPORAL_REBOUND_SQL,
+                &[
+                    &date,
+                    &datetime,
+                    &timestamp,
+                    &time,
+                    &date_neg,
+                    &date_pos,
+                    &datetime_neg,
+                    &datetime_pos,
+                    &timestamp_neg,
+                    &timestamp_pos,
+                ],
+            )
+            .await
+            .expect("tokio-postgres native Jiff rebound");
+
+        let submicro = jiff::civil::Time::new(23, 59, 59, 999_999_500)
+            .expect("construct Jiff sub-microsecond edge");
+        let submicro_outbound_wire = tokio_jiff_wire(&submicro, &tokio_types::Type::TIME);
+        let submicro_bind = match client
+            .query_one("SELECT ($1::time)::text, $1::time", &[&submicro])
+            .await
+        {
+            Ok(row) => {
+                let decoded = match row.try_get::<_, jiff::civil::Time>(1) {
+                    Ok(value) => ValueOutcome::Value(value.to_string()),
+                    Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+                    Err(error) => {
+                        ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned())
+                    }
+                };
+                ValueOutcome::Value(BoundJiffTimeObservation {
+                    server_text: row.get(0),
+                    server_wire: row.get(1),
+                    decoded,
+                })
+            }
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+
+        NativeJiffObservation {
+            decoded: [
+                date.to_string(),
+                datetime.to_string(),
+                timestamp.to_string(),
+                time.to_string(),
+            ],
+            server_wires,
+            outbound_wires,
+            rebound: (0..10).map(|index| rebound.get(index)).collect(),
+            time_24,
+            submicro_input: submicro.to_string(),
+            submicro_outbound_wire,
+            submicro_bind,
+        }
+    })
+}
+
+#[cfg(feature = "with-jiff-0_2")]
+#[allow(clippy::future_not_send)]
+async fn compio_native_jiff_observation() -> NativeJiffObservation {
+    let client = compio_client().await;
+    client
+        .batch_execute(FORMAT_RENDERING_SQL)
+        .await
+        .expect("set compio Jiff temporal rendering");
+    let row = client
+        .query_one(TYPED_TEMPORAL_SQL, &[])
+        .await
+        .expect("compio-postgres native Jiff decode");
+
+    let date: jiff::civil::Date = row.get(0);
+    let datetime: jiff::civil::DateTime = row.get(1);
+    let timestamp: jiff::Timestamp = row.get(2);
+    let time: jiff::civil::Time = row.get(3);
+    let date_neg: compio_types::Date<jiff::civil::Date> = row.get(4);
+    let date_pos: compio_types::Date<jiff::civil::Date> = row.get(5);
+    let datetime_neg: compio_types::Timestamp<jiff::civil::DateTime> = row.get(6);
+    let datetime_pos: compio_types::Timestamp<jiff::civil::DateTime> = row.get(7);
+    let timestamp_neg: compio_types::Timestamp<jiff::Timestamp> = row.get(8);
+    let timestamp_pos: compio_types::Timestamp<jiff::Timestamp> = row.get(9);
+    let time_24 = match row.try_get::<_, jiff::civil::Time>(10) {
+        Ok(value) => ValueOutcome::Value(value.to_string()),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+
+    let server_wires = std::array::from_fn(|index| row.get(index));
+    let outbound_wires = [
+        compio_jiff_wire(&date, &compio_types::Type::DATE),
+        compio_jiff_wire(&datetime, &compio_types::Type::TIMESTAMP),
+        compio_jiff_wire(&timestamp, &compio_types::Type::TIMESTAMPTZ),
+        compio_jiff_wire(&time, &compio_types::Type::TIME),
+        compio_jiff_wire(&date_neg, &compio_types::Type::DATE),
+        compio_jiff_wire(&date_pos, &compio_types::Type::DATE),
+        compio_jiff_wire(&datetime_neg, &compio_types::Type::TIMESTAMP),
+        compio_jiff_wire(&datetime_pos, &compio_types::Type::TIMESTAMP),
+        compio_jiff_wire(&timestamp_neg, &compio_types::Type::TIMESTAMPTZ),
+        compio_jiff_wire(&timestamp_pos, &compio_types::Type::TIMESTAMPTZ),
+    ];
+    let rebound = client
+        .query_one(
+            TYPED_TEMPORAL_REBOUND_SQL,
+            &[
+                &date,
+                &datetime,
+                &timestamp,
+                &time,
+                &date_neg,
+                &date_pos,
+                &datetime_neg,
+                &datetime_pos,
+                &timestamp_neg,
+                &timestamp_pos,
+            ],
+        )
+        .await
+        .expect("compio-postgres native Jiff rebound");
+
+    let submicro = jiff::civil::Time::new(23, 59, 59, 999_999_500)
+        .expect("construct Jiff sub-microsecond edge");
+    let submicro_outbound_wire = compio_jiff_wire(&submicro, &compio_types::Type::TIME);
+    let submicro_bind = match client
+        .query_one("SELECT ($1::time)::text, $1::time", &[&submicro])
+        .await
+    {
+        Ok(row) => {
+            let decoded = match row.try_get::<_, jiff::civil::Time>(1) {
+                Ok(value) => ValueOutcome::Value(value.to_string()),
+                Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+                Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+            };
+            ValueOutcome::Value(BoundJiffTimeObservation {
+                server_text: row.get(0),
+                server_wire: row.get(1),
+                decoded,
+            })
+        }
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+
+    NativeJiffObservation {
+        decoded: [
+            date.to_string(),
+            datetime.to_string(),
+            timestamp.to_string(),
+            time.to_string(),
+        ],
+        server_wires,
+        outbound_wires,
+        rebound: (0..10).map(|index| rebound.get(index)).collect(),
+        time_24,
+        submicro_input: submicro.to_string(),
+        submicro_outbound_wire,
+        submicro_bind,
+    }
+}
+
+/// Jiff's finite carriers and generic infinity wrappers agree with the server.
+/// Its bare time refuses 24:00, while sub-microsecond input truncates to the
+/// last representable microsecond instead of producing an undecodable 24:00.
+#[cfg(feature = "with-jiff-0_2")]
+#[compio::test]
+async fn native_jiff_codecs_cover_temporal_edges_and_remain_closed() {
+    let theirs = tokio_native_jiff_observation(common::plaintext_url());
+    let ours = compio_native_jiff_observation().await;
+    assert_eq!(ours, theirs);
+
+    assert_eq!(
+        ours.decoded,
+        [
+            "0000-01-01",
+            "1999-12-31T23:59:59.999999",
+            "2001-02-02T22:20:06.123456Z",
+            "23:59:59.999999",
+        ]
+    );
+    assert_eq!(
+        ours.rebound,
+        [
+            "0001-01-01 BC",
+            "1999-12-31 23:59:59.999999",
+            "2001-02-02 22:20:06.123456+00",
+            "23:59:59.999999",
+            "-infinity",
+            "infinity",
+            "-infinity",
+            "infinity",
+            "-infinity",
+            "infinity",
+        ]
+    );
+
+    let expected_wires = [
+        "fff4da8b",
+        "ffffffffffffffff",
+        "00001f591d6b53c0",
+        "000000141dd75fff",
+        "80000000",
+        "7fffffff",
+        "8000000000000000",
+        "7fffffffffffffff",
+        "8000000000000000",
+        "7fffffffffffffff",
+        "000000141dd76000",
+    ];
+    for (index, expected_wire) in expected_wires.into_iter().enumerate() {
+        assert_eq!(hex(&ours.server_wires[index].0), expected_wire);
+        if index < ours.outbound_wires.len() {
+            assert_eq!(hex(&ours.outbound_wires[index]), expected_wire);
+        }
+    }
+    assert_eq!(ours.time_24, ValueOutcome::LocalFailure);
+
+    assert_eq!(ours.submicro_input, "23:59:59.9999995");
+    assert_eq!(hex(&ours.submicro_outbound_wire), "000000141dd75fff");
+    let ValueOutcome::Value(bound) = &ours.submicro_bind else {
+        panic!(
+            "Jiff sub-microsecond bind did not reach the server: {:?}",
+            ours.submicro_bind
+        );
+    };
+    assert_eq!(bound.server_text, "23:59:59.999999");
+    assert_eq!(hex(&bound.server_wire.0), "000000141dd75fff");
+    assert_eq!(
+        bound.decoded,
+        ValueOutcome::Value("23:59:59.999999".to_owned())
+    );
+}
+
+#[cfg(all(feature = "with-chrono-0_4", feature = "with-time-0_3"))]
+#[derive(Debug, PartialEq, Eq)]
+struct TypedTemporalObservation {
+    chrono_rebound: Vec<String>,
+    time_rebound: Vec<String>,
+    chrono_time_24: ValueOutcome<String>,
+    time_time_24: ValueOutcome<String>,
+}
+
+#[cfg(all(feature = "with-chrono-0_4", feature = "with-time-0_3"))]
+fn tokio_typed_temporal_observation(url: String) -> TypedTemporalObservation {
+    on_tokio(url, |client| async move {
+        client
+            .batch_execute(FORMAT_RENDERING_SQL)
+            .await
+            .expect("set tokio temporal rendering");
+        let row = client
+            .query_one(TYPED_TEMPORAL_SQL, &[])
+            .await
+            .expect("tokio typed temporal decode");
+
+        let chrono_date: chrono::NaiveDate = row.get(0);
+        let chrono_timestamp: chrono::NaiveDateTime = row.get(1);
+        let chrono_timestamptz: chrono::DateTime<chrono::Utc> = row.get(2);
+        let chrono_time: chrono::NaiveTime = row.get(3);
+        let chrono_date_neg: tokio_types::Date<chrono::NaiveDate> = row.get(4);
+        let chrono_date_pos: tokio_types::Date<chrono::NaiveDate> = row.get(5);
+        let chrono_timestamp_neg: tokio_types::Timestamp<chrono::NaiveDateTime> = row.get(6);
+        let chrono_timestamp_pos: tokio_types::Timestamp<chrono::NaiveDateTime> = row.get(7);
+        let chrono_timestamptz_neg: tokio_types::Timestamp<chrono::DateTime<chrono::Utc>> =
+            row.get(8);
+        let chrono_timestamptz_pos: tokio_types::Timestamp<chrono::DateTime<chrono::Utc>> =
+            row.get(9);
+        let chrono_time_24 = match row.try_get::<_, chrono::NaiveTime>(10) {
+            Ok(value) => ValueOutcome::Value(value.to_string()),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+        let rebound = client
+            .query_one(
+                TYPED_TEMPORAL_REBOUND_SQL,
+                &[
+                    &chrono_date,
+                    &chrono_timestamp,
+                    &chrono_timestamptz,
+                    &chrono_time,
+                    &chrono_date_neg,
+                    &chrono_date_pos,
+                    &chrono_timestamp_neg,
+                    &chrono_timestamp_pos,
+                    &chrono_timestamptz_neg,
+                    &chrono_timestamptz_pos,
+                ],
+            )
+            .await
+            .expect("tokio chrono temporal rebound");
+        let chrono_rebound = (0..10).map(|index| rebound.get(index)).collect();
+
+        let time_date: time::Date = row.get(0);
+        let time_timestamp: time::PrimitiveDateTime = row.get(1);
+        let time_timestamptz: time::OffsetDateTime = row.get(2);
+        let time_time: time::Time = row.get(3);
+        let time_date_neg: tokio_types::Date<time::Date> = row.get(4);
+        let time_date_pos: tokio_types::Date<time::Date> = row.get(5);
+        let time_timestamp_neg: tokio_types::Timestamp<time::PrimitiveDateTime> = row.get(6);
+        let time_timestamp_pos: tokio_types::Timestamp<time::PrimitiveDateTime> = row.get(7);
+        let time_timestamptz_neg: tokio_types::Timestamp<time::OffsetDateTime> = row.get(8);
+        let time_timestamptz_pos: tokio_types::Timestamp<time::OffsetDateTime> = row.get(9);
+        let time_time_24 = match row.try_get::<_, time::Time>(10) {
+            Ok(value) => ValueOutcome::Value(value.to_string()),
+            Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+            Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+        };
+        let rebound = client
+            .query_one(
+                TYPED_TEMPORAL_REBOUND_SQL,
+                &[
+                    &time_date,
+                    &time_timestamp,
+                    &time_timestamptz,
+                    &time_time,
+                    &time_date_neg,
+                    &time_date_pos,
+                    &time_timestamp_neg,
+                    &time_timestamp_pos,
+                    &time_timestamptz_neg,
+                    &time_timestamptz_pos,
+                ],
+            )
+            .await
+            .expect("tokio time temporal rebound");
+        let time_rebound = (0..10).map(|index| rebound.get(index)).collect();
+
+        TypedTemporalObservation {
+            chrono_rebound,
+            time_rebound,
+            chrono_time_24,
+            time_time_24,
+        }
+    })
+}
+
+#[cfg(all(feature = "with-chrono-0_4", feature = "with-time-0_3"))]
+#[allow(clippy::future_not_send)]
+async fn compio_typed_temporal_observation() -> TypedTemporalObservation {
+    let client = compio_client().await;
+    client
+        .batch_execute(FORMAT_RENDERING_SQL)
+        .await
+        .expect("set compio temporal rendering");
+    let row = client
+        .query_one(TYPED_TEMPORAL_SQL, &[])
+        .await
+        .expect("compio typed temporal decode");
+
+    let chrono_date: chrono::NaiveDate = row.get(0);
+    let chrono_timestamp: chrono::NaiveDateTime = row.get(1);
+    let chrono_timestamptz: chrono::DateTime<chrono::Utc> = row.get(2);
+    let chrono_time: chrono::NaiveTime = row.get(3);
+    let chrono_date_neg: compio_types::Date<chrono::NaiveDate> = row.get(4);
+    let chrono_date_pos: compio_types::Date<chrono::NaiveDate> = row.get(5);
+    let chrono_timestamp_neg: compio_types::Timestamp<chrono::NaiveDateTime> = row.get(6);
+    let chrono_timestamp_pos: compio_types::Timestamp<chrono::NaiveDateTime> = row.get(7);
+    let chrono_timestamptz_neg: compio_types::Timestamp<chrono::DateTime<chrono::Utc>> = row.get(8);
+    let chrono_timestamptz_pos: compio_types::Timestamp<chrono::DateTime<chrono::Utc>> = row.get(9);
+    let chrono_time_24 = match row.try_get::<_, chrono::NaiveTime>(10) {
+        Ok(value) => ValueOutcome::Value(value.to_string()),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+    let rebound = client
+        .query_one(
+            TYPED_TEMPORAL_REBOUND_SQL,
+            &[
+                &chrono_date,
+                &chrono_timestamp,
+                &chrono_timestamptz,
+                &chrono_time,
+                &chrono_date_neg,
+                &chrono_date_pos,
+                &chrono_timestamp_neg,
+                &chrono_timestamp_pos,
+                &chrono_timestamptz_neg,
+                &chrono_timestamptz_pos,
+            ],
+        )
+        .await
+        .expect("compio chrono temporal rebound");
+    let chrono_rebound = (0..10).map(|index| rebound.get(index)).collect();
+
+    let time_date: time::Date = row.get(0);
+    let time_timestamp: time::PrimitiveDateTime = row.get(1);
+    let time_timestamptz: time::OffsetDateTime = row.get(2);
+    let time_time: time::Time = row.get(3);
+    let time_date_neg: compio_types::Date<time::Date> = row.get(4);
+    let time_date_pos: compio_types::Date<time::Date> = row.get(5);
+    let time_timestamp_neg: compio_types::Timestamp<time::PrimitiveDateTime> = row.get(6);
+    let time_timestamp_pos: compio_types::Timestamp<time::PrimitiveDateTime> = row.get(7);
+    let time_timestamptz_neg: compio_types::Timestamp<time::OffsetDateTime> = row.get(8);
+    let time_timestamptz_pos: compio_types::Timestamp<time::OffsetDateTime> = row.get(9);
+    let time_time_24 = match row.try_get::<_, time::Time>(10) {
+        Ok(value) => ValueOutcome::Value(value.to_string()),
+        Err(error) if error.code().is_none() => ValueOutcome::LocalFailure,
+        Err(error) => ValueOutcome::ServerFailure(error.code().unwrap().code().to_owned()),
+    };
+    let rebound = client
+        .query_one(
+            TYPED_TEMPORAL_REBOUND_SQL,
+            &[
+                &time_date,
+                &time_timestamp,
+                &time_timestamptz,
+                &time_time,
+                &time_date_neg,
+                &time_date_pos,
+                &time_timestamp_neg,
+                &time_timestamp_pos,
+                &time_timestamptz_neg,
+                &time_timestamptz_pos,
+            ],
+        )
+        .await
+        .expect("compio time temporal rebound");
+    let time_rebound = (0..10).map(|index| rebound.get(index)).collect();
+
+    TypedTemporalObservation {
+        chrono_rebound,
+        time_rebound,
+        chrono_time_24,
+        time_time_24,
+    }
+}
+
+#[cfg(all(feature = "with-chrono-0_4", feature = "with-time-0_3"))]
+/// Upstream aliases `PostgreSQL` 24:00 to midnight; this port refuses the loss.
+#[compio::test]
+async fn time_24_refusal_matches_the_server_instead_of_tokio() {
+    let theirs = tokio_typed_temporal_observation(common::plaintext_url());
+    let ours = compio_typed_temporal_observation().await;
+
+    let expected = vec![
+        "0001-01-01 BC".to_owned(),
+        "1999-12-31 23:59:59.999999".to_owned(),
+        "2001-02-02 22:20:06.123456+00".to_owned(),
+        "23:59:59.999999".to_owned(),
+        "-infinity".to_owned(),
+        "infinity".to_owned(),
+        "-infinity".to_owned(),
+        "infinity".to_owned(),
+        "-infinity".to_owned(),
+        "infinity".to_owned(),
+    ];
+    assert_eq!(ours.chrono_rebound, expected);
+    assert_eq!(ours.time_rebound, expected);
+    assert_eq!(theirs.chrono_rebound, expected);
+    assert_eq!(theirs.time_rebound, expected);
+
+    assert_eq!(ours.chrono_time_24, ValueOutcome::LocalFailure);
+    assert_eq!(ours.time_time_24, ValueOutcome::LocalFailure);
+    assert_eq!(
+        theirs.chrono_time_24,
+        ValueOutcome::Value("00:00:00".to_owned())
+    );
+    assert_eq!(
+        theirs.time_time_24,
+        ValueOutcome::Value("0:00:00.0".to_owned())
+    );
 }
 
 /// PostgreSQL's temporal units, epoch, endpoints, and interval field order.

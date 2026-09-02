@@ -14,18 +14,45 @@ test = true
 
 [features]
 default = []
-array-impls = ["postgres-types/array-impls"]
+array-impls = [
+    "postgres-types/array-impls",
+    "tokio-postgres/array-impls",
+]
 with-chrono-0_4 = ["postgres-types/with-chrono-0_4"]
-with-serde_json-1 = ["postgres-types/with-serde_json-1"]
-with-uuid-1 = ["postgres-types/with-uuid-1"]
+with-serde_json-1 = [
+    "postgres-types/with-serde_json-1",
+    "tokio-postgres/with-serde_json-1",
+]
+with-uuid-1 = [
+    "postgres-types/with-uuid-1",
+    "tokio-postgres/with-uuid-1",
+]
 with-time-0_3 = ["postgres-types/with-time-0_3"]
 with-bit-vec-0_8 = ["postgres-types/with-bit-vec-0_8"]
-with-bit-vec-0_9 = ["postgres-types/with-bit-vec-0_9"]
-with-eui48-1 = ["postgres-types/with-eui48-1"]
-with-geo-types-0_7 = ["postgres-types/with-geo-types-0_7"]
-with-jiff-0_2 = ["postgres-types/with-jiff-0_2"]
-with-smol_str-01 = ["postgres-types/with-smol_str-01"]
-with-cidr-0_3 = ["postgres-types/with-cidr-0_3"]
+with-bit-vec-0_9 = [
+    "postgres-types/with-bit-vec-0_9",
+    "tokio-postgres/with-bit-vec-0_9",
+]
+with-eui48-1 = [
+    "postgres-types/with-eui48-1",
+    "tokio-postgres/with-eui48-1",
+]
+with-geo-types-0_7 = [
+    "postgres-types/with-geo-types-0_7",
+    "tokio-postgres/with-geo-types-0_7",
+]
+with-jiff-0_2 = [
+    "postgres-types/with-jiff-0_2",
+    "tokio-postgres/with-jiff-0_2",
+]
+with-smol_str-01 = [
+    "postgres-types/with-smol_str-01",
+    "tokio-postgres/with-smol_str-01",
+]
+with-cidr-0_3 = [
+    "postgres-types/with-cidr-0_3",
+    "tokio-postgres/with-cidr-0_3",
+]
 # rustls-backed TLS: `MakeRustlsConnect` (src/tls_rustls.rs) plus the pool's
 # ability to open encrypted connections. rustls is pinned to `aws-lc-rs`, the
 # workspace's single crypto provider (see the root Cargo.toml comment on
@@ -105,7 +132,7 @@ postgres-protocol = { workspace = true }
 # A source-local fork of postgres-types 0.2.14. Rust's orphan rules prevent
 # repairing its SystemTime/chrono/time implementations from this crate, and
 # the fork also owns the generated built-in Kind table used by Statement.
-postgres-types = { path = "vendor/postgres-types", features = ["with-uuid-1"] }
+postgres-types = { path = "vendor/postgres-types" }
 rand = "0.10"
 whoami = "2.0"
 compio = { workspace = true }
@@ -191,10 +218,22 @@ optional = true
 # src/row.rs and their tests). So the suite was comparing a fixed driver
 # against an unfixed one, and would have read OUR correct behaviour as the
 # divergence. Move this deliberately when the port moves, never by resolution.
-tokio-postgres = { version = "=0.7.18", default-features = false, features = ["runtime"] }
+tokio-postgres = { version = "=0.7.18", default-features = false, features = [
+    "runtime",
+    "with-chrono-0_4",
+    "with-time-0_3",
+] }
 tokio = { version = "1", features = ["rt", "macros"] }
 chrono = { version = "0.4.33", default-features = false, features = ["clock"] }
 time = { workspace = true }
+uuid = { workspace = true }
+cidr = "0.3.2"
+eui48 = { version = "1", default-features = false }
+bit-vec = "0.9"
+serde_json = "1"
+geo-types = "0.7"
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+smol_str = { version = "0.1", default-features = false }
 compio = { workspace = true }
 criterion = { workspace = true }
 # Integration tests consume the LISTEN/NOTIFY async-message stream

@@ -970,6 +970,125 @@ mod tests {
         assert_eq!(rows, 2);
     }
 
+    /// A backpressured `Sink::poll_flush` must yield `Pending` and KEEP the
+    /// staged bytes, not report the flush done and drop them.
+    ///
+    /// `poll_flush` is the path a caller uses to force staged rows out without
+    /// finishing the COPY. When the connection cannot accept another frame the
+    /// only safe answer is `Pending`: returning `Ready(Ok(()))` would tell the
+    /// caller its rows had been handed over while they were still sitting in
+    /// `buf`, and the next `poll_flush` would be the only thing that could
+    /// still send them.
+    ///
+    /// The small trailing item is staged WITHOUT a preceding `poll_ready` on
+    /// purpose - by then readiness is already `Pending`, and a sub-4096 item
+    /// never touches the channel, so buffering it is the only way to reach a
+    /// flush that has something to write and nowhere to write it.
+    #[compio::test]
+    async fn a_backpressured_copy_flush_keeps_its_staged_bytes() {
+        let (_client, _requests, mut sink, mut receiver, _response_sender) =
+            copy_sink_fixture(SinkState::Active);
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        // Fill the one-slot channel so the sender stops being ready.
+        for byte in [b'a', b'b'] {
+            assert!(matches!(
+                futures_util::Sink::poll_ready(sink.as_mut(), &mut context),
+                Poll::Ready(Ok(()))
+            ));
+            futures_util::Sink::start_send(sink.as_mut(), Bytes::from(vec![byte; 4097]))
+                .expect("queue COPY data ahead of the backpressure");
+        }
+        assert!(matches!(
+            futures_util::Sink::poll_ready(sink.as_mut(), &mut context),
+            Poll::Pending
+        ));
+
+        futures_util::Sink::start_send(sink.as_mut(), Bytes::from_static(b"staged"))
+            .expect("stage a sub-threshold row behind the backpressure");
+        assert_eq!(
+            sink.as_ref().get_ref().buf.len(),
+            b"staged".len(),
+            "the small row did not stage into the buffer"
+        );
+
+        assert!(
+            matches!(
+                futures_util::Sink::poll_flush(sink.as_mut(), &mut context),
+                Poll::Pending
+            ),
+            "a flush with nowhere to write reported itself complete"
+        );
+        assert_eq!(
+            sink.as_ref().get_ref().buf.len(),
+            b"staged".len(),
+            "the backpressured flush discarded the bytes it could not send"
+        );
+        assert!(matches!(sink.as_ref().get_ref().state, SinkState::Active));
+
+        // Control, one variable away: drain the channel and the same flush
+        // completes and hands the staged bytes over.
+        assert!(matches!(
+            receiver.next().await,
+            Some(FrontendMessage::CopyData(_))
+        ));
+        assert!(matches!(
+            futures_util::Sink::poll_flush(sink.as_mut(), &mut context),
+            Poll::Ready(Ok(())) | Poll::Pending
+        ));
+        assert!(
+            sink.as_ref().get_ref().buf.is_empty(),
+            "the unblocked flush left the staged bytes behind"
+        );
+    }
+
+    /// `Sink::send` can never reach `start_send`'s finished-guard, because
+    /// `poll_ready` refuses first. That makes the guard second-line defence
+    /// against a caller driving the sink by hand and skipping `poll_ready` -
+    /// which the `Sink` contract permits it to get wrong. Both refusals are
+    /// asserted here so the ordering stays visible; do not delete the
+    /// `start_send` arm as unreachable.
+    #[compio::test]
+    async fn a_finished_sink_refuses_data_sent_without_polling_ready() {
+        let (_client, _requests, mut sink, mut receiver, _response_sender) =
+            copy_sink_fixture(SinkState::Finished(7));
+        let waker = noop_waker();
+        let mut context = Context::from_waker(&waker);
+
+        // The guard a well-behaved caller hits first.
+        let ready = futures_util::Sink::poll_ready(sink.as_mut(), &mut context);
+        match ready {
+            Poll::Ready(Err(error)) => {
+                assert_eq!(error.to_string(), "COPY IN sink is already finished");
+            }
+            _ => panic!("a finished sink accepted poll_ready"),
+        }
+
+        // A large item bypasses the staging buffer, so without the guard this
+        // would queue a CopyData frame after the COPY was already terminated.
+        let error = futures_util::Sink::start_send(sink.as_mut(), Bytes::from(vec![b'a'; 4097]))
+            .expect_err("a finished sink accepted a large unsolicited item");
+        assert_eq!(error.to_string(), "COPY IN sink is already finished");
+        assert!(matches!(
+            futures_util::Stream::poll_next(Pin::new(&mut receiver), &mut context),
+            Poll::Pending
+        ));
+
+        // A small item stages into `buf` instead, and `poll_flush` returns
+        // early on a finished sink - so without the guard those bytes would
+        // accumulate with nothing left to drain them.
+        let error = futures_util::Sink::start_send(sink.as_mut(), Bytes::from_static(b"tail"))
+            .expect_err("a finished sink accepted a small unsolicited item");
+        assert_eq!(error.to_string(), "COPY IN sink is already finished");
+        assert!(sink.as_ref().get_ref().buf.is_empty());
+
+        assert!(matches!(
+            sink.as_ref().get_ref().state,
+            SinkState::Finished(7)
+        ));
+    }
+
     #[compio::test]
     async fn disconnected_finish_preserves_a_queued_server_error() {
         let (client, _requests, mut sink, receiver, mut response_sender) =

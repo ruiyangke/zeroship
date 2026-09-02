@@ -141,3 +141,58 @@ there was no cheap way to tell "fixed" from "still broken" short of re-deriving
 every entry - which is what finally happened. Any finding that survives a cycle
 should carry the commit it was last confirmed at, and any finding whose line
 reference no longer resolves should be re-derived or dropped, never forwarded.
+
+## Re-derived 2026-09-01 at 07a05fb20
+
+The recurring prompt still carries these six as "all re-verified live at
+d2422bdcd". That commit is real, and it is **688 commits behind HEAD**. Every
+item was re-checked against the current tree; none is true, and the specific
+line numbers no longer point at the code described.
+
+| Finding as stated | At HEAD |
+| --- | --- |
+| `codec.rs:75` has an uncalled `take_deferred_error()` | **Three live callers**: `codec.rs:867`, `connection.rs:804`, `connection.rs:2485`. |
+| `connect_raw.rs:302` `Normal { messages, .. }` discards `deferred_error` | The arm is at `:319`. Every assignment site is gated on `saw_error_response`, so nothing is discarded that was set. |
+| `connect_raw.rs:461` charges `frame_len` but a retained frame pins the whole allocation | This is the fix, not the bug. The constant is at `:84` and the check at `:503`; the read is `read_backend_detached_async_frames`, chosen so "what is charged and what is held must be the same bytes". The comment at `:288-297` records the original measurement, 13 bytes pinning 1 MiB. |
+| `connect_raw.rs:993` `into_inner()` drops unread buffered bytes | **No `into_inner()` call exists anywhere in `connect_raw.rs`.** |
+| `binary_copy.rs:63` `write_raw` splits the row buffer before an await | `write_raw` is at `:72` and takes a `checkpoint`, truncating to it on error; the only await is a `send_buffered_rows(.., checkpoint)` past 4096 bytes. There is no pre-await split to lose rows at. |
+| TLS split discards unconsumed ciphertext, at `tls_sansio.rs:750` | The split is `try_into_split`, `maybe_tls_stream.rs:207` and `:269`. The cited file and line describe nothing. |
+
+Treat the list in the prompt as a fixed string, not as a live finding set. It
+has now been re-derived twice, on 2026-08-31 and 2026-09-01, with the same
+result both times.
+
+## The seventh item, the one carried as UNVERIFIED, settled 2026-09-01
+
+The prompt carries a seventh entry the other six do not have a verdict for:
+
+> `copy_in.rs` poll_ready/poll_flush treating the sink's OWN close as a lost
+> connection and draining away CommandComplete + ReadyForQuery (UNVERIFIED -
+> decide whether poll_flush's `sender.is_closed()` is reachable from our own
+> poll_close before fixing)
+
+Answering the question as posed: **our own close does close the sender**, and
+that is not a deduction - `copy_in.rs:1502` already asserts it, with the
+message "the pending close poll did not close its own sender". So
+`sender.is_closed()` is indeed true after our own `poll_close`.
+
+**The false-disconnection branch is still unreachable in that state**, for a
+reason visible three lines above it. `poll_flush` computes
+
+    let closed_by_sink = matches!(self.state, SinkState::ReadingAfterClose);
+
+and takes the diagnosis only on `disconnected && !closed_by_sink`. The same
+transition that closes the sender sets `ReadingAfterClose` (`:411`), which is
+exactly the state `closed_by_sink` tests. `SinkState::Finished` returns `Ok`
+at the top of the function before any of this. `poll_close` itself routes to
+`poll_finish`, which never calls `poll_flush` at all.
+
+**And the guard is bound.** Replacing it with `let closed_by_sink = false;`
+fails exactly one test out of 702:
+
+    copy_in::tests::flush_after_cancelled_close_preserves_copy_completion
+
+which is named for the scenario the finding describes. So: the hazard is real
+in principle, a guard exists for precisely it, and a test holds that guard in
+place. There is nothing to fix here, and the entry can be retired rather than
+carried as UNVERIFIED.

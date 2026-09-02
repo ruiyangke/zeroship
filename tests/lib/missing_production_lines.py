@@ -16,11 +16,28 @@ import sys, os
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from dead_functions import test_spans
 
+# Files whose uncovered lines are NOT production gaps, even though they sit
+# outside any `#[cfg(test)]` span:
+#
+#   test_utils.rs    `#[doc(hidden)]` test-only helpers, compiled
+#                    unconditionally ON PURPOSE - it was behind a `test-utils`
+#                    feature and that quietly split the suite, so
+#                    tests/serialized_loop.rs stopped building and the crate's
+#                    own documented test command ran 24 fewer tests.
+#   error/sqlstate.rs  a generated SQLSTATE table; its coverage percentage is
+#                    meaningless.
+#
+# Both are REPORTED as excluded rather than dropped silently: an invisible
+# exclusion is how a real gap disappears.
+SCAFFOLDING = ("test_utils.rs", "sqlstate.rs")
+
+
 def main():
     if len(sys.argv) < 2:
         sys.exit(f"usage: {sys.argv[0]} <missing-lines-file> [file-substr ...]")
     wanted = sys.argv[2:]
     total_raw = total_prod = 0
+    excluded = []
     for row in open(sys.argv[1]):
         if ": " not in row:
             continue
@@ -29,6 +46,9 @@ def main():
         if wanted and not any(w in rel for w in wanted):
             continue
         if not os.path.exists(rel):
+            continue
+        if rel.endswith(SCAFFOLDING):
+            excluded.append((rel.split("/")[-1], len([n for n in nums.replace(",", " ").split() if n.isdigit()])))
             continue
         lines = [int(n) for n in nums.replace(",", " ").split() if n.isdigit()]
         src = open(rel).read().split("\n")
@@ -47,6 +67,8 @@ def main():
                 out.append(str(a) if a == b else f"{a}-{b}")
             print(f"{rel.split('/')[-1]:<20} {len(prod):>4} of {len(lines):>4} uncovered are production: {', '.join(out)}")
     print(f"\nTOTAL uncovered {total_raw}, of which production {total_prod}, test scaffolding {total_raw - total_prod}")
+    for name, n in excluded:
+        print(f"EXCLUDED {name}: {n} uncovered lines, not counted (see SCAFFOLDING)")
 
 if __name__ == "__main__":
     main()

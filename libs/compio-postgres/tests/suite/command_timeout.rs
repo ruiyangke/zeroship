@@ -188,6 +188,52 @@ async fn server_statement_timeout_remains_a_server_error() {
     .expect("server statement_timeout exceeded the outer test watchdog");
 }
 
+/// `OwnedPooledClient::command` is documented as "identical in every respect to
+/// `PooledClient::command` - both call the same body". The borrowed form is
+/// covered by the test below; the owned form was not, so nothing checked that
+/// an owned lease enters the pool's command deadline at all. A `command` that
+/// skipped the scope would run without any deadline and look perfectly healthy.
+///
+/// Also exercises `pool()` and the owned `Deref`, both unexecuted.
+#[compio::test]
+async fn owned_lease_command_enters_the_command_scope() {
+    compio::time::timeout(OUTER_WATCHDOG, async {
+        let pool = std::rc::Rc::new(connect_pool(Duration::from_millis(100)).await);
+        let mut lease = pool.get_owned().await.expect("take an owned pool lease");
+
+        let before = lease
+            .query("SELECT pg_backend_pid()", &[])
+            .await
+            .expect("read the owned lease's backend PID")[0]
+            .get::<_, i32>(0);
+
+        let error = lease
+            .command(async |client| client.query("SELECT 1::int4 FROM pg_sleep(3)", &[]).await)
+            .await
+            .expect_err("the owned lease bypassed the configured command deadline");
+        assert!(
+            error.is_command_timeout(),
+            "owned command failed for another reason: {error}"
+        );
+
+        let after = lease
+            .query("SELECT pg_backend_pid()", &[])
+            .await
+            .expect("the owned command path did not drain its response")[0]
+            .get::<_, i32>(0);
+        assert_eq!(
+            after, before,
+            "the owned command discarded a session whose cancellation recovered"
+        );
+        assert!(
+            std::rc::Rc::ptr_eq(lease.pool(), &pool),
+            "the lease reported a different pool than it came from"
+        );
+    })
+    .await
+    .expect("owned lease command cancellation hung");
+}
+
 #[compio::test]
 async fn pool_convenience_queries_enter_the_command_scope() {
     compio::time::timeout(OUTER_WATCHDOG, async {

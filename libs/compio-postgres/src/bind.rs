@@ -199,6 +199,101 @@ mod tests {
         frame
     }
 
+    /// Drive `bind` against an arbitrary backend frame sequence.
+    ///
+    /// The sibling helper below hard-codes a well-formed prefix followed by a
+    /// terminal `ErrorResponse`, which is the only shape its two tests need.
+    /// The four `unexpected_message` arms want the opposite: a prefix that is
+    /// wrong at exactly one slot.
+    async fn bind_with_raw_response(
+        unnamed: bool,
+        frames: Vec<u8>,
+    ) -> Result<crate::Portal, Error> {
+        let (sender, mut receiver) = mpsc::unbounded();
+        let client = Client::new_with_statement_cache(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+            ProtocolVersion::V3_0,
+            StatementCacheSettings::new(0, NonZeroUsize::MIN),
+        );
+        let inner = Arc::clone(client.inner());
+        let statement = Statement::new(&inner, "s_raw_bind".to_string(), vec![], vec![], false);
+        let bind = super::bind(
+            &inner,
+            statement,
+            std::iter::empty::<i32>(),
+            unnamed.then_some("SELECT 1"),
+            crate::portal::PortalScope::new(),
+        );
+        let respond = async {
+            let mut request = receiver
+                .next()
+                .await
+                .expect("bind did not enqueue its protocol request");
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    BytesMut::from(&frames[..]),
+                )))
+                .expect("deliver the scripted bind response");
+        };
+        let (result, ()) = futures_util::join!(bind, respond);
+        result
+    }
+
+    /// Each of `bind`'s four expectations refuses a well-formed frame that is
+    /// merely in the wrong place.
+    ///
+    /// All four arms were uncovered. Every one of them accepts a message that
+    /// is individually legal, so the failure they prevent is not a decode
+    /// error - it is `bind` reporting a Portal whose Sync-terminated exchange
+    /// was never confirmed, or whose descriptor belongs to another step.
+    #[compio::test]
+    async fn every_bind_expectation_refuses_a_misplaced_frame() {
+        let parse_complete = backend_frame(b'1', b"");
+        let bind_complete = backend_frame(b'2', b"");
+
+        // Unnamed bind expects ParseComplete first; BindComplete is not it.
+        let mut slot_one = Vec::new();
+        slot_one.extend_from_slice(&bind_complete);
+        // Named bind expects BindComplete first; ParseComplete is not it.
+        let mut slot_two = Vec::new();
+        slot_two.extend_from_slice(&parse_complete);
+        // Unnamed: after ParseComplete and BindComplete a descriptor is owed.
+        let mut slot_three = Vec::new();
+        slot_three.extend_from_slice(&parse_complete);
+        slot_three.extend_from_slice(&bind_complete);
+        slot_three.extend_from_slice(&bind_complete);
+        // Named: after BindComplete only ReadyForQuery will do.
+        let mut slot_four = Vec::new();
+        slot_four.extend_from_slice(&bind_complete);
+        slot_four.extend_from_slice(&parse_complete);
+
+        for (label, unnamed, frames) in [
+            ("ParseComplete slot", true, slot_one),
+            ("BindComplete slot", false, slot_two),
+            ("descriptor slot", true, slot_three),
+            ("ReadyForQuery slot", false, slot_four),
+        ] {
+            let Err(error) = bind_with_raw_response(unnamed, frames).await else {
+                panic!("the {label} accepted a misplaced frame")
+            };
+            let rendered = format!("{error}");
+            assert!(
+                rendered.contains("unexpected message from server"),
+                "the {label} reported {rendered:?} rather than an out-of-order message"
+            );
+            assert!(
+                error.code().is_none(),
+                "the {label} reported a server SQLSTATE, so the refusal was not local"
+            );
+        }
+    }
+
     async fn bind_with_terminal_response(unnamed: bool) -> Result<crate::Portal, Error> {
         let (sender, mut receiver) = mpsc::unbounded();
         let client = Client::new_with_statement_cache(
