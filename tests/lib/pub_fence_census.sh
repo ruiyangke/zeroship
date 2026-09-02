@@ -66,6 +66,35 @@
 # So ask two SEPARATE questions per item: "does anything name it?" picks the
 # candidate; "is it in a public signature?" decides. Only the second is
 # authoritative, and only the compiler answers it reliably.
+#
+# ---------------------------------------------------------------------------
+# THE ORACLE IS ONE-SIDED: IT CATCHES NARROWING AND IS BLIND TO WIDENING.
+# ---------------------------------------------------------------------------
+#
+# The batch-narrow-then-let-the-compiler-adjudicate loop ends when the build is
+# green. Green proves nothing was narrowed too far. It says NOTHING about an
+# item left wider than it needs to be, because widening never fails to compile.
+# So the restore half of the loop needs its own check, and on 2026-09-02 it did
+# not have one: a `sed` restoring the 17 items the compiler had demanded matched
+# by NAME, and `parse_args` / `parse_bulk_args` each exist TWICE -
+#
+#     #[cfg(any(test, feature = "test-helpers"))]  pub fn parse_args(..)
+#     #[cfg(not(any(test, feature = "test-helpers")))]
+#                                          pub(crate) fn parse_args(..)
+#
+# - so it widened the PRODUCTION arm of the DB-3 argument parser to `pub` and
+# every config still compiled clean. The tell was not a build failure but
+# `git diff` on a file that should have had none.
+#
+# Two consequences worth carrying:
+#   - After a restore pass, DIFF the files. A restore that touched a line the
+#     narrowing pass never touched is a widening, not a restoration.
+#   - Before restoring an item by name, check whether the name is forked by
+#     cfg. `grep -A2 'cfg(not(any(test' <file>` lists the production arms.
+#
+# And the numeric tell, which is why this census is worth re-running on both
+# sides of an edit: the total went UP by 2 while the pass was supposedly only
+# narrowing. A count that moves the wrong way is the cheapest available signal.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
