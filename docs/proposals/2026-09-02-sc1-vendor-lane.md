@@ -174,10 +174,29 @@ of this step.
    became an unused import - the driver no longer classifies a PostgreSQL error
    at all on this path.
 
-3. Move `cleanup` onto `TxConnection`; delete `rollback_session_in_slot`'s match.
-   `cleanup_postgres` and `cleanup_sqlite` become lane methods. **Unblocked.**
-   This is now the largest remaining match: `driver.rs:961-962` plus the two
-   functions at `:1077` and `:1103`.
+3. **DONE, `41aee1a51`.** `TxConnection::cleanup` replaced
+   `rollback_session_in_slot`'s match, and `cleanup_postgres` / `cleanup_sqlite`
+   moved to `backend::postgres::cleanup` and
+   `backend::sqlite::reservation::cleanup`.
+
+   **It needed a 3a the draft did not have, for the same reason 1a existed.**
+   `CleanupAck` was owned by `transaction/reducer/mod.rs`, so a vendor cleanup
+   returning it would depend upward on the protocol it serves. It moved to
+   data-core beside `SettleIntent` and `TerminalResult` - it is the third member
+   of that vocabulary, and the one whose ANSWER is deliberately weaker than its
+   request. The reducer re-exports it, so its call sites are unchanged.
+
+   **The result is the milestone this step existed for: `driver.rs` no longer
+   imports `compio_postgres`.** Vendor mentions 12 -> 5, of which two are
+   rustdoc prose and one is a `terminal_result` call; the only structural pair
+   left is `install(app_id, TxConnection::Postgres(..) / ::Sqlite(..))` in
+   `open_session`, which is step 5.
+
+   Mutation-verified in its new home: sampling `transaction_status()` BEFORE the
+   cleanup `ROLLBACK` turns
+   `a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection` red with
+   `Indeterminate(Cancelled)` where `Cancelled(Cancelled)` is required. The
+   order rule survived the move as a rule, not just as a comment.
 4. Introduce `BeginIntent`; move `build_begin_sql` into the PG lane; change
    `StepConfig`.
 5. Fold `apply_per_app_role` into the PG lane's `open`. It is already only
