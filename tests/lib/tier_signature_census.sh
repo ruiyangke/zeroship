@@ -200,7 +200,14 @@ tier() {
     ./backend/sqlite/*)                                  echo "SQLITE" ;;
     ./encryption/*)                                      echo "ENCRYPT" ;;
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo "CDC" ;;
-    ./error.rs|./descriptor.rs|./binding.rs|./budgets.rs) echo "CORE" ;;
+    # CORE is now HALF EXTRACTED. `error.rs` and `binding.rs` left for
+    # `zeroship-data-core`; this census scans only `zeroship-plugin-db/src`, so
+    # naming them here would be two patterns that match nothing - a map claiming
+    # coverage it does not have. The extracted half needs no census row: Cargo
+    # enforces its dependency direction, and its vendor-freedom is ruled on by
+    # tests/vendor_embedding_gate.sh, which now lists the crate as a root.
+    # What remains below is the CORE-destined code still inside the plugin.
+    ./descriptor.rs|./budgets.rs)                        echo "CORE" ;;
     *)                                                   echo "CONTESTED" ;;
   esac
 }
