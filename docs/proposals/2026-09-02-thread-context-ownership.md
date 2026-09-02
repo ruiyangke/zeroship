@@ -240,6 +240,40 @@ backend_generation: u64,              // monotonic, thread-lifetime
 The rule that falls out, and that is worth stating because it is what was
 missed: **a tombstone cannot live inside the thing it is a tombstone for.**
 
+### A third thing the build found: the lane needed a destructor
+
+`TxLane` had no `Drop`, so `release_tx_claim`'s `lanes.remove` dropped whatever
+session was still parked - and on PostgreSQL a plain drop is
+`pool.return_client(entry)`, which republishes the lease as **idle**. A lane
+released with a live session hands an open transaction to the next borrower, on
+a thread that multiplexes co-resident apps.
+
+Every settle path disposes of the session first, so this was not reachable
+through the reducer. It was reachable through `probe::reset`. The fix is a
+`Drop` impl that destroys rather than returns, which makes the guarantee
+structural instead of a rule every caller must remember - strictly stronger than
+HEAD, where the same property rests on call-site discipline.
+
+## Outcome, landed in `f255c73a1`
+
+Eleven `HashMap`s became three plus one `HashSet`, and the four owners are now
+legible as fields rather than as an argument in a document:
+
+| owner | fields | crate |
+| --- | --- | --- |
+| lanes | `lanes`, `withdrawn_tx_sessions`, `mask_policies` | data-engine |
+| schema cache | `schemas` | data-core |
+| backend | `pool`, `db_url`, `backend`, `backend_selection`, `backend_init_in_progress` | adapter |
+| generation | `backend_generation` | adapter |
+
+Verified: 711 lib tests, both feature configs (`--all-targets` and
+`--features test-helpers`), dependents clean, and both live arms pass **and
+still redden under their own stated mutations** - the identity check deleted
+gives `idle` where `idle in transaction` is required; `__private_api_close`
+deleted gives a pool `total_count` of 1 where 0 is required. The five remaining
+`native_transaction` failures were measured at the pre-lane commit and fail
+identically there (#143).
+
 ## Cost
 
 - 55 accessors rewritten, most mechanically
