@@ -97,7 +97,6 @@ impl std::fmt::Debug for Db {
 // ---------------------------------------------------------------------------
 
 #[v8_class]
-#[allow(dead_code)]
 impl Db {
     /// `new Db()` from JS rejects with `TypeError("illegal
     /// constructor")` — real instances are minted via [`mint_db`] from

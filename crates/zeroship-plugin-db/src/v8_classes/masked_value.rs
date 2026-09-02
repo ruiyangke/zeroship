@@ -94,7 +94,6 @@ pub struct MaskedValue {
 // ---------------------------------------------------------------------------
 
 #[v8_class]
-#[allow(dead_code)]
 impl MaskedValue {
     /// `new MaskedValue()` from JS rejects with a `TypeError` — real
     /// instances are minted by [`mint_masked_value`] from the row

@@ -79,7 +79,6 @@ impl Drop for Subscription {
 // ---------------------------------------------------------------------------
 
 #[v8_class]
-#[allow(dead_code)] // Methods invoked via V8 callbacks; Rust can't trace through extern.
 impl Subscription {
     /// `new Subscription()` from JS rejects — real instances come from
     /// [`mint_subscription`] via `collection.openSubscription()` (the
