@@ -656,6 +656,23 @@ attribute is gone from the field; it does not prove the field is READ on the
 path a production worker takes. Only a registering test binds that, and none
 exists.
 
+**A related hazard was reported against those tests and does NOT exist; do not
+spend time on it.** The charter tests stamp a custom `AssignmentPlan` into the
+thread-local context and clear it with a trailing `reset_context_for_tests()`,
+which invites the reading that a panic between the two would leak a wrong
+charter into a co-scheduled test. Measured 2026-09-01 with a two-test probe:
+libtest spawns a fresh OS thread for **every** test, in the default runner AND
+under `--test-threads=1` (setter on `ThreadId(2)`, reader on `ThreadId(3)`,
+reader saw nothing in both modes). There is no co-scheduled test on that thread,
+so no Drop guard or `catch_unwind` is warranted.
+
+The second-order point is worth more than the first. If every test gets a fresh
+context by construction, the 22 `reset_context_for_tests()` calls in that file
+are not buying the between-test isolation their placement implies - what they
+buy is connection hygiene, because the function drops this thread's operator
+pools and those own live connections. Read a stamp/reset pair there as a pool
+release, never as an isolation guarantee.
+
 0. `insert({ path: "/x" })` on a descriptor-installed collection succeeds. It
    does NOT today once the strip is removed: `id`/`created_at`/`updated_at` are
    `required: true` with no default, so `validateDoc:511` raises. **Measured.**
