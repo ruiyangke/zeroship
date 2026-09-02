@@ -167,9 +167,44 @@ to obsolete it is the "two intermediate versions" the pre-launch stance forbids.
 | `query.rs` DDL builders | **ZERO.** Every hit in `plugin-db/src` is a doc comment; the two real uses in `crud/write_pipeline.rs` are past its `#[cfg(test)]` |
 | `query.rs` DML builders | live, and `data-query-builder` is their replacement |
 | `diff.rs` `compute_diff` | test-only; the LIVE twin is `zeroship-migrate-core/src/schema/diff.rs:418` |
-| `diff.rs` introspection | **gone** - moved to `backend/pg_introspect.rs` |
-| `diff.rs` TYPES - `MaskKind`, `Classification`, `MaskMeta`, `EncryptionMeta` | **live** - named by the masking policy AND both vendors |
+| `diff.rs` introspection | the PG impl is **test-gated**, not gone - see the correction below |
+| `diff.rs` TYPES | **7 live, 7 not** - see the correction below |
 | `mask_codec.rs`, `ident.rs`, `descriptors.rs`, `error.rs` | live |
+
+**The TYPES row said "`MaskKind`, `Classification`, `MaskMeta`, `EncryptionMeta` - live"
+until 2026-09-02, and it was wrong in BOTH directions.** Measured at `d883c56a3` by
+counting `diff::X` references in `zeroship-plugin-db/src` while excluding three
+things, each of which changes the answer:
+
+- **doc comments** - the differ's entire `src` presence is two `///` citations, at
+  `backend/mod.rs:591` and `backend/sqlite/mod.rs:1085`. Counting prose as use
+  makes `compute_diff` look live;
+- **test-gated MODULES** - `backend/pg_introspect.rs` is declared
+  `#[cfg(any(test, feature = "test-helpers"))]` at `backend/mod.rs:97`, and it is
+  the only file that spells `use zeroship_schema::diff::{…}`. That single
+  exclusion moves the whole introspection surface;
+- **`#[cfg(test)]` REGIONS inside shipped files** - `WrappedType` reads as live off
+  three `assert!`s at `backend/sqlite/mod.rs:2533/:2553/:2565`, and `LiveSchema`
+  off three `assert_impl` helpers. The file is shipped; those lines are not.
+
+| | items |
+| --- | --- |
+| **live** (7) | `MaskKind` 10, `LiveSchema` 4, `MaskMeta` 2, `ColumnInfo` 1, `EncryptionMeta` 1, `ForeignKeyInfo` 1, `IndexInfo` 1 |
+| **test- or prose-only** (7) | `compute_diff`, `ChangeKind`, `ChangeClass`, `DiffOp`, `classify_add_column`, `Classification`, `WrappedType` |
+
+So `Classification` is in the old "live" list and has **zero** shipped references, while
+`LiveSchema`, `ColumnInfo`, `ForeignKeyInfo` and `IndexInfo` are live and were omitted.
+Deleting on the old row strands `SqliteBackend`'s `SchemaIntrospect` impl, whose associated
+type is `crate::diff::LiveSchema` (`backend/sqlite/mod.rs:827`) and which builds one at
+`:863`. The introspection is not "gone": its PG half is test-gated, its SQLite half ships.
+
+Also note `MaskKind`'s 10: nine are in `read_set.rs`, whose own header records that nothing
+below it runs today. Its one live consumer is `crud/mask_pass.rs:81`.
+
+A second spelling is why this needed re-measuring at all. `plugin-db/src/lib.rs:165`/`:167`
+re-export the module (`pub(crate) use zeroship_schema::diff;`, cfg-forked), so almost every
+consumer says `crate::diff::X` and NOT `zeroship_schema::diff::X`. A grep for the qualified
+path alone finds one file and reports the differ as unreferenced.
 
 `zeroship-migrate-core` does **not** depend on `zeroship-schema` - checked in its manifest, not
 inferred. Its same-named `build_*` references are its own `schema/query.rs`.
