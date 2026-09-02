@@ -2688,6 +2688,93 @@ mod tests {
         }
     }
 
+    /// A file that parses as a CRL and then has bytes left over is not a CRL,
+    /// it is a CRL followed by something else - a truncated append, two
+    /// concatenated files, or a deliberate suffix. Hashing the issuer out of
+    /// the part that did parse would silently accept whichever half we happened
+    /// to read, so the whole input has to be consumed.
+    ///
+    /// The untouched fixture is the control: it differs from the refused input
+    /// by exactly the one appended byte.
+    #[test]
+    fn a_crl_with_trailing_bytes_is_refused() {
+        let pem = include_str!("../tests/data/stale_guard_crl.pem");
+        let crl = CertificateRevocationListDer::from_pem_slice(pem.as_bytes())
+            .expect("parse the CRL fixture");
+        openssl_crl_issuer(&crl).expect("the fixture on its own must parse to completion");
+
+        let mut der = crl.as_ref().to_vec();
+        der.push(0x00);
+        let padded = CertificateRevocationListDer::from(der);
+
+        let error =
+            openssl_crl_issuer(&padded).expect_err("a CRL with bytes after its end was accepted");
+        assert!(
+            error.contains("trailing data after CRL"),
+            "unexpected refusal: {error}"
+        );
+    }
+
+    /// A CRL whose `thisUpdate` has not arrived yet cannot be trusted to list
+    /// current revocations - it is either a clock disagreement or a forged
+    /// file, and treating it as authoritative would mean honouring a revocation
+    /// list that does not claim to be in force.
+    ///
+    /// `thisUpdate` is the first `UTCTime` in the TBSCertList, encoded as tag
+    /// `0x17`, length 13, `YYMMDDHHMMSSZ`. Rewriting ONLY the two year digits
+    /// keeps every DER length identical, so nothing needs re-encoding, and 49
+    /// stays inside UTCTime's 2000-2049 window. The signature is not checked by
+    /// this path, so a patched body still parses.
+    ///
+    /// The assertion on the parsed timestamp is what makes this sound: it
+    /// proves the patch landed on `thisUpdate` rather than trusting the byte
+    /// offset to have found the right field.
+    #[test]
+    fn a_crl_dated_in_the_future_is_refused() {
+        let pem = include_str!("../tests/data/stale_guard_crl.pem");
+        let crl = CertificateRevocationListDer::from_pem_slice(pem.as_bytes())
+            .expect("parse the CRL fixture");
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the system clock is after the unix epoch")
+                .as_secs(),
+        )
+        .expect("the system clock fits an X.509 timestamp");
+
+        // Control: as shipped, the fixture has already started.
+        let (_, shipped) = openssl_crl_issuer(&crl).expect("read the fixture thisUpdate");
+        assert!(
+            shipped <= now,
+            "the fixture is no longer in the past; it needs regenerating"
+        );
+        ensure_crls_started(std::slice::from_ref(&crl))
+            .expect("the shipped fixture must be accepted");
+
+        let mut der = crl.as_ref().to_vec();
+        let at = der
+            .windows(2)
+            .position(|window| window == [0x17, 0x0d])
+            .expect("the fixture carries no 13-byte UTCTime");
+        der[at + 2] = b'4';
+        der[at + 3] = b'9';
+        let future = CertificateRevocationListDer::from(der);
+
+        let (_, patched) =
+            openssl_crl_issuer(&future).expect("the year-patched CRL must still parse");
+        assert!(
+            patched > now,
+            "the year patch did not move thisUpdate into the future"
+        );
+
+        let error = ensure_crls_started(std::slice::from_ref(&future))
+            .expect_err("a CRL whose thisUpdate has not arrived was accepted");
+        assert!(
+            error.contains("thisUpdate is in the future"),
+            "unexpected refusal: {error}"
+        );
+    }
+
     #[test]
     fn consecutive_hash_entries_distinguish_collisions_from_stale_crls() {
         let pem = include_str!("../tests/data/stale_guard_crl.pem");
