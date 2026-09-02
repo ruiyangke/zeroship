@@ -270,7 +270,16 @@ Two consequences measured on live PostgreSQL:
   list, so neither production provisioning nor the plugin-db test provisioner grants DML on all
   tables or installs prospective table default privileges. Bindings grant their columns
   explicitly. The sole reserved-table exception is `__zeroship_audit_unmask`: the runtime role
-  receives table `INSERT` plus `USAGE` on its owned serial sequence, and nothing else.
+  receives table `INSERT` plus `USAGE` on its owned serial sequence, and nothing else. That the
+  grant is TABLE-level rather than column-scoped is what let `claimed_actor` be added on
+  2026-09-01 without a grant change; a column-scoped grant would have failed the INSERT instead.
+- **The unmask audit row separates the actor from the claim that was refused.** `actor_id` and
+  `actor_role` carry identity the platform accepted; `claimed_actor` carries, verbatim and
+  untrusted, an actor claim the DB-3 fence stripped. They are distinct columns because
+  `sanitize_app_actor` discards a claim naming a reserved system kind, and discarding it also
+  erased the evidence anyone tried: a forged `kind: "auto"` audited byte-for-byte like a caller
+  who sent no actor at all. Never read `claimed_actor` as identity - it is what a handler SENT,
+  which is precisely why it is recorded.
 - **Bounded writes narrow through the primary key.** PostgreSQL refuses `SELECT ctid` with 42501
   under column-scoped SELECT, which made update, soft-delete and restore unusable and also blocked
   purge once its separately required table DELETE privilege was present. Those paths now select
