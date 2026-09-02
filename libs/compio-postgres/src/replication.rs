@@ -5632,6 +5632,56 @@ mod tests {
 
     /// A `ReplicationStream` reading the given bytes as if the walsender had
     /// sent them inside the CopyBoth channel.
+    /// A `BufStream` whose read buffer already holds `bytes`, with no peer
+    /// behind it. `take_buffered_server_error` only PEEKS, so what is already
+    /// buffered is the whole of its input.
+    fn buffered_stream(bytes: &[u8]) -> BufStream<ScriptedPeer> {
+        let mut stream = BufStream::new(ScriptedPeer { unread: Vec::new() });
+        stream.buf().extend_from_slice(bytes);
+        stream
+    }
+
+    /// The buffered-error scan must STOP rather than misread.
+    ///
+    /// It runs after a local failure, to prefer a server diagnosis the socket
+    /// already delivered. Every stop condition below leaves the bytes where
+    /// they are and reports "no diagnosis here", so the caller keeps its own
+    /// error. Guessing instead would attach an unrelated frame's contents to a
+    /// failure it had nothing to do with.
+    #[test]
+    fn the_buffered_error_scan_stops_on_anything_it_cannot_trust() {
+        // A length below the 4-byte header cannot describe a frame.
+        assert!(
+            take_buffered_server_error(&mut buffered_stream(&[ERROR_RESPONSE_TAG, 0, 0, 0, 2]))
+                .is_none(),
+            "an impossible frame length was scanned as a diagnosis"
+        );
+
+        // A complete header whose body has not arrived yet.
+        assert!(
+            take_buffered_server_error(&mut buffered_stream(&[ERROR_RESPONSE_TAG, 0, 0, 0, 64]))
+                .is_none(),
+            "a frame still in flight was scanned as a diagnosis"
+        );
+
+        // A synchronous frame: ReadyForQuery belongs to the request, not here.
+        assert!(
+            take_buffered_server_error(&mut buffered_stream(b"Z\0\0\0\x05I")).is_none(),
+            "a synchronous frame was scanned as a diagnosis"
+        );
+
+        // Control: a complete ErrorResponse IS taken, so the refusals above are
+        // the stop conditions and not a scan that never finds anything.
+        let error_frame = error_response_message(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "scripted buffered diagnosis"),
+        ]);
+        let found = take_buffered_server_error(&mut buffered_stream(&error_frame))
+            .expect("a complete ErrorResponse was not taken");
+        assert_eq!(found.code(), Some(&crate::error::SqlState::ADMIN_SHUTDOWN));
+    }
+
     fn stream_over(bytes: Vec<u8>) -> ReplicationStream<ScriptedPeer, ScriptedPeer> {
         ReplicationStream {
             stream: BufStream::new(MaybeTlsStream::Raw(ScriptedPeer { unread: bytes })),
