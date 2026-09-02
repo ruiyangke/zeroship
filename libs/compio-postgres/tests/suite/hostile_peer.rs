@@ -2281,6 +2281,95 @@ async fn the_first_delayed_frame_crossing_the_byte_budget_is_refused() {
     .expect("delayed-byte boundary test exceeded its outer watchdog");
 }
 
+/// The delayed queue is bounded by MESSAGE COUNT as well as by bytes, and the
+/// count is the bound that matters for small frames.
+///
+/// The byte budget above charges each frame its WIRE length. A minimal notice
+/// is about 32 bytes, so a peer can send roughly thirty thousand of them
+/// inside the 1 MiB budget - and every one becomes a heap-allocated `Message`
+/// whose real footprint is far larger than the bytes it was charged. The
+/// 256-message cap is what stops that, and nothing asserted it: the byte test
+/// stays green with the count check removed.
+///
+/// Both cases here stay THREE ORDERS OF MAGNITUDE under the byte budget, which
+/// is what makes the count the only thing that can answer. The peer asserts
+/// that itself rather than leaving it to arithmetic in this comment.
+#[compio::test]
+async fn the_delayed_handshake_queue_is_bounded_by_message_count_not_only_bytes() {
+    compio::time::timeout(
+        OPERATION_WATCHDOG,
+        Box::pin(async {
+            let cases: [(&str, usize, i32, bool); 2] = [
+                ("at the count limit", 256, 4301, true),
+                ("one past the count limit", 257, 4302, false),
+            ];
+
+            let mut ruled_on = 0usize;
+            for (label, count, process_id, accepted) in cases {
+                let server = StubServer::spawn(move |listener| {
+                    let mut stream = accept_bounded(&listener);
+                    assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+                    let mut response = Vec::new();
+                    for _ in 0..count {
+                        response.extend_from_slice(&notice_frame("x"));
+                    }
+                    assert!(
+                        response.len() < 1024 * 1024,
+                        "{label} sent {} bytes, so the BYTE budget could answer and this \
+                     case would not isolate the count bound",
+                        response.len()
+                    );
+                    response.extend_from_slice(&successful_startup_frames(
+                        process_id,
+                        &1234i32.to_be_bytes(),
+                    ));
+                    stream
+                        .write_all(&response)
+                        .expect("write count-budget startup response");
+                    stream.flush().expect("flush count-budget startup response");
+                    thread::sleep(Duration::from_millis(100));
+                });
+
+                let result = compio::time::timeout(
+                    OPERATION_WATCHDOG,
+                    stub_config(server.addr).connect(compio_postgres::NoTls),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{label} handshake hung"));
+                server.finish();
+
+                match (accepted, result) {
+                    (true, Ok((client, connection))) => {
+                        assert_eq!(client.process_id(), process_id);
+                        drop((client, connection));
+                    }
+                    (true, Err(error)) => {
+                        panic!("exactly 256 delayed messages were refused: {error}")
+                    }
+                    (false, Err(error)) => {
+                        let chain = common::error_chain(&error);
+                        assert!(
+                            chain.contains("too many asynchronous messages"),
+                            "message 257 was refused by something other than the count \
+                         bound: {chain}"
+                        );
+                    }
+                    (false, Ok(pair)) => {
+                        drop(pair);
+                        panic!("the handshake retained a 257th delayed message")
+                    }
+                }
+                ruled_on += 1;
+            }
+
+            assert_eq!(ruled_on, 2, "the count boundary ruled on no cases");
+        }),
+    )
+    .await
+    .expect("delayed-count boundary test exceeded its outer watchdog");
+}
+
 #[compio::test]
 async fn duplicate_backend_key_data_during_startup_is_refused() {
     Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
