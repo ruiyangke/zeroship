@@ -116,11 +116,53 @@ async fn require_pg() -> String {
 /// ```
 const SCHEMA: &str = "plugin_db_test";
 
+/// Tripwire for a parallel run, so the harness failure cannot masquerade as a
+/// data-plane one.
+///
+/// The structural fix (per-test schema, or a guard that serialises only the
+/// sharing tests) is still undone - see [`SCHEMA`]. Until then this at least
+/// makes the diagnosis free. Without it a parallel run prints 18 failures with
+/// names like `aggregate_having` and `update_one_inc`, which reads as a broken
+/// data plane; the note on [`SCHEMA`] records how expensive that misreading is.
+///
+/// Not a fix and not a substitute for one: it detects the race rather than
+/// removing it, and a run that happens not to overlap still passes.
+static SETUP_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Guard that decrements [`SETUP_IN_FLIGHT`] however `setup` ends, panic
+/// included - otherwise the first failing test would poison every later one
+/// with a false parallelism report.
+struct SetupInFlight;
+
+impl Drop for SetupInFlight {
+    fn drop(&mut self) {
+        SETUP_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Set up the test schema and table. Drops and recreates on every call.
 ///
 /// The `DROP ... CASCADE` is why this suite cannot run in parallel - see the
 /// note on [`SCHEMA`].
 async fn setup(pool: &Pool) {
+    let concurrent = SETUP_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    let _in_flight = SetupInFlight;
+    assert!(
+        concurrent == 1,
+        "THIS SUITE IS RUNNING IN PARALLEL AND ITS RESULTS ARE MEANINGLESS.\n\
+         \n\
+         {concurrent} tests entered `setup()` at once. `setup` opens with\n\
+         `DROP SCHEMA \"{SCHEMA}\" CASCADE`, and twenty tests share that one\n\
+         name, so they are destroying each other's fixture right now. Any\n\
+         failures reported alongside this one are harness artefacts, not\n\
+         defects - measured 2026-09-01, 18 failed in parallel and 83 passed\n\
+         serially on the same tree.\n\
+         \n\
+         Re-run with:\n\
+         \n\
+         \x20 PG_TEST_URL=... cargo test -p zeroship-plugin-db \\\n\
+         \x20   --features live-db-tests --test integration -- --test-threads=1",
+    );
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -7340,7 +7382,29 @@ fn direct_connection_sites_do_not_grow() {
     //       cell WITHOUT going through `env.db`, and the SDK path is the thing
     //       under suspicion. It drops the client and calls `drain_pg` before its
     //       first assertion, so the socket is returned even on the failing path.
-    const PINNED: usize = 122;
+    // Raised to 123 on 2026-09-01. The arithmetic, because a pin moved without
+    // one is a rubber stamp - and here the two numbers do not match, which is
+    // exactly the case that needs writing down:
+    //   +2  `tests/mask_flip.rs` went from 11 connect sites to 13
+    //       (measured at d245ee35c vs HEAD). The two are
+    //       `a_rejected_impersonation_is_distinguishable_from_an_absent_actor`
+    //       and `a_query_hint_reads_the_column_its_alias_resolved_to`. Each
+    //       opens its own pool because each needs a distinct app schema, and
+    //       each ends in `release_pg(pool).await` - that file is 13 connects to
+    //       13 releases, which is the property this pin exists to keep.
+    //   -1  the previous pin carried one slot of headroom: the measured total
+    //       moved 122 -> 123, not 122 -> 124. Recorded rather than smoothed
+    //       over, because "+2 sites, +1 pin" reads like an arithmetic error
+    //       otherwise, and the next person should not have to re-derive it.
+    //
+    // DO NOT SPELL THE NEEDLE OUT IN THIS FILE. The scan reads every `.rs`
+    // under `tests/`, this file included, which is why the needles above are
+    // assembled with `concat!`. The first draft of the comment you are reading
+    // wrote one of them in full to explain the arithmetic, and the count went
+    // 123 -> 124: the pin was raised, the test stayed red, and the extra site
+    // was the prose describing the sites. Say "connect sites", never the
+    // literal.
+    const PINNED: usize = 123;
     // 10 files today, one of them nested. This floor alone does NOT catch a walk
     // that stops descending - measured: flattening it reads 9 and clears 9. That
     // is what the second assertion is for. This one catches the scan being
