@@ -453,6 +453,19 @@ pub struct ThreadDbContext {
     /// `crate::supply_root_keys_for_tests`, which is how the test suites
     /// drive encrypted columns without mutating the process environment.
     supplied_root_keys: Option<Rc<SuppliedRootKeys>>,
+
+    /// This thread's projection of the OPERATOR CHARTER: which columns the
+    /// platform assigns, by which generator, on which write event.
+    ///
+    /// Stamped by `DbPlugin::register` from the charter the plugin prototype
+    /// parsed at composition - the same route `meter` and `resource_key` take,
+    /// and for the same reason: the value is process-wide, so threading it
+    /// through every CRUD call site would carry one constant down every path.
+    ///
+    /// It is deliberately NOT keyed by app or deploy. The charter is compiled
+    /// into the binary; a creator's descriptor may mirror it but may never
+    /// replace it, so there is nothing per-tenant to key on.
+    assignment_plan: Option<Rc<crate::system_shape_charter::AssignmentPlan>>,
 }
 
 impl ThreadDbContext {
@@ -485,7 +498,32 @@ impl ThreadDbContext {
             backend_init_in_progress: false,
             meter: None,
             supplied_root_keys: None,
+            assignment_plan: None,
         }
+    }
+
+    // ----- operator assignment charter --------------------------------
+
+    /// This thread's projection of the operator charter, if one is stamped.
+    ///
+    /// `None` on a thread whose plugin has not registered yet;
+    /// [`crate::system_shape_charter::plan`] is the accessor every consumer
+    /// uses, and it derives-and-stamps from the same compiled bytes on a miss.
+    pub(crate) fn assignment_plan(
+        &self,
+    ) -> Option<Rc<crate::system_shape_charter::AssignmentPlan>> {
+        self.assignment_plan.as_ref().map(Rc::clone)
+    }
+
+    /// Stamp the charter projection (called from `DbPlugin::register`, and by
+    /// the derive-on-miss path). Idempotent overwrite - registration may fire
+    /// more than once per worker thread, and every plugin projects the same
+    /// compiled charter.
+    pub(crate) fn set_assignment_plan(
+        &mut self,
+        plan: Rc<crate::system_shape_charter::AssignmentPlan>,
+    ) {
+        self.assignment_plan = Some(plan);
     }
 
     // ----- column root keys -------------------------------------------
