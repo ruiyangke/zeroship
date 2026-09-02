@@ -721,6 +721,32 @@ impl ThreadDbContext {
         self.backend_selection.clone()
     }
 
+    /// Which SQL dialect this thread's statements must be written in.
+    ///
+    /// **Answered here because the two things it is derived from both live
+    /// here.** An open backend is authoritative; before one exists the
+    /// service's selection is the best available answer, and PostgreSQL is the
+    /// default when neither is set - a dialect is needed to BUILD a statement,
+    /// which happens before any connection is opened.
+    ///
+    /// The engine used to compute this itself, matching `BackendHandle`'s
+    /// variants and then `BackendUrl`'s - naming an adapter type and a vendor
+    /// enum to answer a question about SQL text.
+    /// `tests/lib/tier_direction_census.sh` reported the `BackendUrl` half as
+    /// `ENGINE crud/mod.rs -> ADAPTER`. Neither enum is the answer; the dialect
+    /// is, and only this struct can produce it without reaching anywhere.
+    pub(crate) fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
+        use zeroship_schema::query::SqlDialect;
+        match &self.backend {
+            Some(BackendHandle::Sqlite(_)) => SqlDialect::Sqlite,
+            Some(BackendHandle::Postgres(_)) => SqlDialect::Postgres,
+            None => match &self.backend_selection {
+                Some(crate::BackendUrl::Sqlite { .. }) => SqlDialect::Sqlite,
+                _ => SqlDialect::Postgres,
+            },
+        }
+    }
+
     /// Hand this thread the service's database resources: the URL its lazy
     /// backend init will open, the backend selection already made for it, and
     /// the stable resource key everything is indexed by.

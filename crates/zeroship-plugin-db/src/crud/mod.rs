@@ -227,15 +227,15 @@ fn record_read_set(binding: &DbBinding, collection: &str, filter: &Value) {
     crate::read_set::record_if_active(collection, filter, &schema);
 }
 
+/// Which dialect the statements below must be written in.
+///
+/// **Asked, not derived.** This used to match `BackendHandle`'s variants and
+/// then fall back to matching `BackendUrl`'s - an engine function naming a
+/// vendor-selection enum from the adapter to answer a question about SQL text.
+/// The context owns both inputs and now answers directly; see
+/// [`crate::context::ThreadDbContext::sql_dialect`] for the precedence.
 fn current_sql_dialect() -> query::SqlDialect {
-    match crate::context::with(|c| c.backend()) {
-        Some(crate::backend::BackendHandle::Sqlite(_)) => query::SqlDialect::Sqlite,
-        Some(crate::backend::BackendHandle::Postgres(_)) => query::SqlDialect::Postgres,
-        None => match crate::context::with(|c| c.backend_selection()) {
-            Some(crate::BackendUrl::Sqlite { .. }) => query::SqlDialect::Sqlite,
-            _ => query::SqlDialect::Postgres,
-        },
-    }
+    crate::context::with(|c| c.sql_dialect())
 }
 
 // The four `maybe_lower_sqlite_boolean_*` helpers take the ALREADY-RESOLVED
