@@ -11,7 +11,7 @@
 //!   plaintext (per `wraps`), build the canonical AAD (Camp A — row_pk
 //!   bound for Randomised, omitted for Deterministic; see
 //!   `docs/archive/p5-encryption-backup-implementation-plan.md` §13),
-//!   call `EncryptedColumn::encrypt`, swap the JSON Value to a base64
+//!   call `encryption::aead::encrypt`, swap the JSON Value to a base64
 //!   string of the ciphertext blob. The SQL build layer then recognises
 //!   the column and emits `decode($N, 'base64')::bytea` at the
 //!   parameter site so the BYTEA column receives raw bytes.
@@ -19,7 +19,7 @@
 //! - **Read path** ([`decrypt_row_on_read`]): receive the row already
 //!   decoded into `Value` (BYTEA columns are surfaced as `\xHHHH...`
 //!   hex strings by `compio-postgres`'s text protocol). Parse the hex
-//!   back to bytes, call `EncryptedColumn::decrypt` with the same AAD
+//!   back to bytes, call `encryption::aead::decrypt` with the same AAD
 //!   the write path used, deserialise per `wraps`, swap back into the
 //!   row.
 //!
@@ -62,7 +62,7 @@ use base64::Engine as _;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::backend::EncryptedColumn;
+use crate::encryption::KeyStore;
 use zeroship_data_core::error::DbError;
 
 /// Encrypt every `t.encrypted(...)`-declared column on `row` in place.
@@ -102,20 +102,17 @@ type PendingEncryption = (
 );
 
 #[cfg(any(test, feature = "test-helpers"))]
-pub async fn encrypt_row_on_write<B>(
-    backend: &B,
+pub async fn encrypt_row_on_write(
+    keys: &KeyStore,
     app_id: &str,
     collection: &str,
     schema: &Value,
     row_pk: &str,
     row: &mut Value,
-) -> Result<(), DbError>
-where
-    B: EncryptedColumn,
-{
+) -> Result<(), DbError> {
     let mut sidechannel = crate::crud::mask_pass::MaskPlaintextSidechannel::new();
     encrypt_row_on_write_with_sidechannel(
-        backend,
+        keys,
         app_id,
         collection,
         schema,
@@ -139,18 +136,15 @@ where
 /// Non-encrypted columns and `null`-valued columns are NOT added to
 /// the sidechannel — the mask pass already handles those by reading
 /// `row[col]` directly (the non-encrypted path) or skipping (`null`).
-pub(crate) async fn encrypt_row_on_write_with_sidechannel<B>(
-    backend: &B,
+pub(crate) async fn encrypt_row_on_write_with_sidechannel(
+    keys: &KeyStore,
     app_id: &str,
     collection: &str,
     schema: &Value,
     row_pk: &str,
     row: &mut Value,
     sidechannel: &mut crate::crud::mask_pass::MaskPlaintextSidechannel,
-) -> Result<(), DbError>
-where
-    B: EncryptedColumn,
-{
+) -> Result<(), DbError> {
     let Some(schema_obj) = schema.as_object() else {
         return Ok(()); // schema not present → no encrypted columns to find
     };
@@ -196,7 +190,7 @@ where
     }
 
     for (col, mode, key_id, _wraps, plaintext, sidechannel_str) in to_encrypt {
-        let key = backend.resolve_key(app_id, &key_id).await?;
+        let key = keys.resolve(app_id, &key_id).await?;
         let aad = crate::encryption::aad::canonical_aad(
             collection,
             &col,
@@ -205,7 +199,7 @@ where
                 crate::backend::EncryptionMode::Deterministic => None,
             },
         );
-        let ciphertext = backend.encrypt(&key, mode, &plaintext, &aad)?;
+        let ciphertext = crate::encryption::aead::encrypt(&key, mode, &plaintext, &aad)?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&ciphertext);
         // Stash the plaintext for the mask pass BEFORE replacing the
         // row value with the base64 ciphertext.
@@ -243,16 +237,13 @@ fn plaintext_to_sidechannel_string(value: &Value, wraps: &str) -> String {
 /// On a tag-verification failure (tampered ciphertext, wrong AAD,
 /// wrong key) the function surfaces
 /// `ValidationFailed { code: "encryption_aead_failed" }`.
-pub async fn decrypt_row_on_read<B>(
-    backend: &B,
+pub async fn decrypt_row_on_read(
+    keys: &KeyStore,
     app_id: &str,
     collection: &str,
     schema: &Value,
     row: &mut Value,
-) -> Result<(), DbError>
-where
-    B: EncryptedColumn,
-{
+) -> Result<(), DbError> {
     let Some(schema_obj) = schema.as_object() else {
         return Ok(());
     };
@@ -272,8 +263,13 @@ where
     };
 
     // Same async-borrow shuffle as the write path.
-    let mut to_decrypt: Vec<(String, crate::backend::EncryptionMode, String, &'static str, Vec<u8>)> =
-        Vec::new();
+    let mut to_decrypt: Vec<(
+        String,
+        crate::backend::EncryptionMode,
+        String,
+        &'static str,
+        Vec<u8>,
+    )> = Vec::new();
     for (col, def) in schema_obj.iter() {
         let Some(enc_meta) = def.get("encrypted").and_then(|v| v.as_object()) else {
             continue;
@@ -347,7 +343,7 @@ where
     }
 
     for (col, mode, key_id, wraps, blob) in to_decrypt {
-        let key = backend.resolve_key(app_id, &key_id).await?;
+        let key = keys.resolve(app_id, &key_id).await?;
         let aad = crate::encryption::aad::canonical_aad(
             collection,
             &col,
@@ -356,7 +352,11 @@ where
                 crate::backend::EncryptionMode::Deterministic => None,
             },
         );
-        let plaintext = Zeroizing::new(backend.decrypt(&key, mode, &blob, &aad)?);
+        // Decrypt is mode-agnostic - the wire format carries the nonce and
+        // AES-GCM verifies the tag however it was produced - so `mode` reaches
+        // only the AAD reconstruction above, never this call. Both deleted
+        // `EncryptedColumn::decrypt` impls took `mode` and ignored it too.
+        let plaintext = Zeroizing::new(crate::encryption::aead::decrypt(&key, &blob, &aad)?);
         let value = deserialise_wrapped(&plaintext, wraps)?;
         let obj = row.as_object_mut().expect("checked above");
         obj.insert(col, value);
@@ -416,9 +416,7 @@ fn deserialise_wrapped(bytes: &[u8], wraps: &str) -> Result<Value, DbError> {
     match wraps {
         "string" => {
             let s = std::str::from_utf8(bytes).map_err(|e| {
-                DbError::internal(format!(
-                    "decrypted plaintext is not valid UTF-8: {e}"
-                ))
+                DbError::internal(format!("decrypted plaintext is not valid UTF-8: {e}"))
             })?;
             Ok(Value::String(s.to_string()))
         }
@@ -523,6 +521,28 @@ pub fn strip_encryption_markers(row: &mut Value) {
 mod tests {
     use super::*;
 
+    /// A key store over one supplied root, for the encrypt/decrypt tests.
+    ///
+    /// This replaces three hand-written `StubBackend` types that each impl'd
+    /// the `EncryptedColumn` trait deleted on 2026-09-02. Each stub returned a
+    /// FIXED `AeadKey` and re-implemented the mode dispatch, so the tests
+    /// exercised a copy of the production path rather than the path itself.
+    /// A real `KeyStore` runs the actual HKDF expansion, which is strictly more
+    /// binding; the tests assert round-trips and AAD behaviour, neither of
+    /// which depends on the key's bytes.
+    ///
+    /// `supplied`, never `env_var`: the root is handed to the store directly,
+    /// so no test reads or writes process environment.
+    fn test_key_store() -> KeyStore {
+        use crate::encryption::{LocalKeySource, SuppliedRootKeys};
+        let keys = std::rc::Rc::new(
+            SuppliedRootKeys::new()
+                .with_hex("default", &"11".repeat(32))
+                .expect("fixture root key must parse"),
+        );
+        KeyStore::new(LocalKeySource::supplied(keys))
+    }
+
     /// `serialise_wrapped` / `deserialise_wrapped` round-trip for the
     /// three supported wrapped types.
     #[test]
@@ -573,8 +593,14 @@ mod tests {
     /// hex_to_bytes round-trips with and without the `\x` prefix.
     #[test]
     fn hex_to_bytes_round_trip() {
-        assert_eq!(hex_to_bytes("\\xdeadbeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
-        assert_eq!(hex_to_bytes("deadbeef").unwrap(), vec![0xde, 0xad, 0xbe, 0xef]);
+        assert_eq!(
+            hex_to_bytes("\\xdeadbeef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
+        assert_eq!(
+            hex_to_bytes("deadbeef").unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef]
+        );
         assert_eq!(hex_to_bytes("\\x").unwrap(), Vec::<u8>::new());
     }
 
@@ -608,7 +634,10 @@ mod tests {
             parse_mode(&m).unwrap(),
             crate::backend::EncryptionMode::Randomised
         ));
-        m.insert("mode".to_string(), Value::String("deterministic".to_string()));
+        m.insert(
+            "mode".to_string(),
+            Value::String("deterministic".to_string()),
+        );
         assert!(matches!(
             parse_mode(&m).unwrap(),
             crate::backend::EncryptionMode::Deterministic
@@ -642,37 +671,20 @@ mod tests {
     /// `encryption_aead_failed`.
     #[test]
     fn write_then_read_round_trip_randomised() {
-        use crate::backend::{EncryptedColumn, EncryptionMode};
-        use crate::encryption::aead::AeadKey;
-
-        // Minimal in-test backend that exercises the same encrypt /
-        // decrypt path the real PG impl uses.
-        struct StubBackend;
-        impl EncryptedColumn for StubBackend {
-            type KeyHandle = AeadKey;
-            async fn resolve_key(&self, _app_id: &str, _key_id: &str) -> Result<Self::KeyHandle, DbError> {
-                Ok(AeadKey { k_enc: [0x11; 32], k_siv: [0x22; 32] })
-            }
-            fn encrypt(&self, key: &Self::KeyHandle, mode: EncryptionMode, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, DbError> {
-                match mode {
-                    EncryptionMode::Randomised => crate::encryption::aead::encrypt_randomised(key, plaintext, aad),
-                    EncryptionMode::Deterministic => crate::encryption::aead::encrypt_deterministic(key, plaintext, aad),
-                }
-            }
-            fn decrypt(&self, key: &Self::KeyHandle, _mode: EncryptionMode, blob: &[u8], aad: &[u8]) -> Result<Vec<u8>, DbError> {
-                crate::encryption::aead::decrypt(key, blob, aad)
-            }
-        }
+        let keys = test_key_store();
 
         let schema = serde_json::json!({
             "ssn": { "type": "string", "encrypted": { "mode": "randomised", "keyId": "default", "wraps": "string" } },
             "name": { "type": "string" },
         });
-        let mut row = serde_json::json!({ "id": "usr_01HX", "ssn": "123-45-6789", "name": "alice" });
+        let mut row =
+            serde_json::json!({ "id": "usr_01HX", "ssn": "123-45-6789", "name": "alice" });
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
-            encrypt_row_on_write(&StubBackend, "app1", "users", &schema, "usr_01HX", &mut row).await.unwrap();
+            encrypt_row_on_write(&keys, "app1", "users", &schema, "usr_01HX", &mut row)
+                .await
+                .unwrap();
         });
 
         // After encrypt: ssn should be a base64 string, name unchanged,
@@ -689,7 +701,9 @@ mod tests {
         // text. (In production the BYTEA round-trip is handled by
         // compio-postgres; here we do it by hand for the unit test.)
         let b64 = obj["ssn"].as_str().unwrap().to_string();
-        let raw = base64::engine::general_purpose::STANDARD.decode(b64).unwrap();
+        let raw = base64::engine::general_purpose::STANDARD
+            .decode(b64)
+            .unwrap();
         let hex_str = format!(
             "\\x{}",
             raw.iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -697,7 +711,7 @@ mod tests {
         let mut read_row = serde_json::json!({ "id": "usr_01HX", "ssn": hex_str, "name": "alice" });
 
         rt.block_on(async {
-            decrypt_row_on_read(&StubBackend, "app1", "users", &schema, &mut read_row)
+            decrypt_row_on_read(&keys, "app1", "users", &schema, &mut read_row)
                 .await
                 .unwrap();
         });
@@ -708,10 +722,10 @@ mod tests {
         // Same ciphertext under a DIFFERENT row_pk must fail tag check
         // (Camp A defence — the row-swap attack surfaces as
         // `encryption_aead_failed`).
-        let mut wrong_pk_row = serde_json::json!({ "id": "usr_02HX", "ssn": hex_str, "name": "alice" });
+        let mut wrong_pk_row =
+            serde_json::json!({ "id": "usr_02HX", "ssn": hex_str, "name": "alice" });
         let err = rt.block_on(async {
-            decrypt_row_on_read(&StubBackend, "app1", "users", &schema, &mut wrong_pk_row)
-                .await
+            decrypt_row_on_read(&keys, "app1", "users", &schema, &mut wrong_pk_row).await
         });
         match err {
             Err(DbError::ValidationFailed { code, .. }) => {
@@ -723,48 +737,7 @@ mod tests {
 
     #[test]
     fn decrypt_row_on_read_skips_masked_default_aliases() {
-        use crate::backend::{EncryptedColumn, EncryptionMode};
-        use crate::encryption::aead::AeadKey;
-
-        struct StubBackend;
-        impl EncryptedColumn for StubBackend {
-            type KeyHandle = AeadKey;
-            async fn resolve_key(
-                &self,
-                _app_id: &str,
-                _key_id: &str,
-            ) -> Result<Self::KeyHandle, DbError> {
-                Ok(AeadKey {
-                    k_enc: [0x11; 32],
-                    k_siv: [0x22; 32],
-                })
-            }
-            fn encrypt(
-                &self,
-                key: &Self::KeyHandle,
-                mode: EncryptionMode,
-                plaintext: &[u8],
-                aad: &[u8],
-            ) -> Result<Vec<u8>, DbError> {
-                match mode {
-                    EncryptionMode::Randomised => {
-                        crate::encryption::aead::encrypt_randomised(key, plaintext, aad)
-                    }
-                    EncryptionMode::Deterministic => {
-                        crate::encryption::aead::encrypt_deterministic(key, plaintext, aad)
-                    }
-                }
-            }
-            fn decrypt(
-                &self,
-                key: &Self::KeyHandle,
-                _mode: EncryptionMode,
-                blob: &[u8],
-                aad: &[u8],
-            ) -> Result<Vec<u8>, DbError> {
-                crate::encryption::aead::decrypt(key, blob, aad)
-            }
-        }
+        let keys = test_key_store();
 
         let schema = serde_json::json!({
             "contactEmail": {
@@ -780,15 +753,9 @@ mod tests {
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
-            decrypt_row_on_read(
-                &StubBackend,
-                "app1",
-                "users",
-                &schema,
-                &mut read_row,
-            )
-            .await
-            .unwrap();
+            decrypt_row_on_read(&keys, "app1", "users", &schema, &mut read_row)
+                .await
+                .unwrap();
         });
 
         assert_eq!(read_row["contactEmail"].as_str(), Some("a***@example.com"));
@@ -800,25 +767,7 @@ mod tests {
     /// ciphertext lookups depend on this.
     #[test]
     fn deterministic_same_plaintext_yields_same_ciphertext() {
-        use crate::backend::{EncryptedColumn, EncryptionMode};
-        use crate::encryption::aead::AeadKey;
-
-        struct StubBackend;
-        impl EncryptedColumn for StubBackend {
-            type KeyHandle = AeadKey;
-            async fn resolve_key(&self, _app_id: &str, _key_id: &str) -> Result<Self::KeyHandle, DbError> {
-                Ok(AeadKey { k_enc: [0x33; 32], k_siv: [0x44; 32] })
-            }
-            fn encrypt(&self, key: &Self::KeyHandle, mode: EncryptionMode, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, DbError> {
-                match mode {
-                    EncryptionMode::Randomised => crate::encryption::aead::encrypt_randomised(key, plaintext, aad),
-                    EncryptionMode::Deterministic => crate::encryption::aead::encrypt_deterministic(key, plaintext, aad),
-                }
-            }
-            fn decrypt(&self, key: &Self::KeyHandle, _mode: EncryptionMode, blob: &[u8], aad: &[u8]) -> Result<Vec<u8>, DbError> {
-                crate::encryption::aead::decrypt(key, blob, aad)
-            }
-        }
+        let keys = test_key_store();
 
         let schema = serde_json::json!({
             "ssn": { "type": "string", "encrypted": { "mode": "deterministic", "keyId": "default", "wraps": "string" } },
@@ -829,8 +778,12 @@ mod tests {
 
         let rt = compio::runtime::Runtime::new().expect("compio runtime");
         rt.block_on(async {
-            encrypt_row_on_write(&StubBackend, "app1", "users", &schema, "usr_a", &mut row_a).await.unwrap();
-            encrypt_row_on_write(&StubBackend, "app1", "users", &schema, "usr_b", &mut row_b).await.unwrap();
+            encrypt_row_on_write(&keys, "app1", "users", &schema, "usr_a", &mut row_a)
+                .await
+                .unwrap();
+            encrypt_row_on_write(&keys, "app1", "users", &schema, "usr_b", &mut row_b)
+                .await
+                .unwrap();
         });
 
         // Both row encryptions used DIFFERENT row_pks but produced

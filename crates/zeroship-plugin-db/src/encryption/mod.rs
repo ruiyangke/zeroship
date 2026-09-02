@@ -1,12 +1,15 @@
 //! Cross-backend column encryption — AES-256-GCM at the storage
-//! boundary, used by both the Postgres and SQLite [`crate::backend`]
-//! impls via the [`crate::backend::EncryptedColumn`] capability trait.
+//! boundary, reached identically whichever [`crate::backend`] arm is
+//! configured.
 //!
 //! ## What this module ships
 //!
-//! Pure-Rust crypto surface. `PostgresBackend` / `SqliteBackend` both
-//! implement [`crate::backend::EncryptedColumn`]; the call sites live in
-//! `crud/encryption_pass.rs`.
+//! Pure-Rust crypto surface, and it is **vendor-blind**: the call sites in
+//! `crud/encryption_pass.rs` call [`aead`] directly and get their key material
+//! from a [`KeyStore`] borrowed off the backend handle. Both backends went
+//! through an `EncryptedColumn` capability trait until 2026-09-02, with
+//! identical impls; the trait is deleted, because "which database is this" was
+//! never a question column encryption needed answered.
 //!
 //! ## Layout
 //!

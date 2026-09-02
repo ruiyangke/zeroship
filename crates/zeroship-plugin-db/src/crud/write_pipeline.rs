@@ -1,10 +1,10 @@
 use serde_json::Value;
 
-use zeroship_data_core::binding::DbBinding;
-use zeroship_data_core::error::DbError;
 use crate::exec::exec_query;
 use crate::query;
 use crate::tx_route::TxRoute;
+use zeroship_data_core::binding::DbBinding;
+use zeroship_data_core::error::DbError;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use std::cell::RefCell;
@@ -711,8 +711,8 @@ mod tests {
     use base64::Engine as _;
     use serde_json::Value;
 
-    use zeroship_data_core::binding::DbBinding;
     use crate::tx_route::TxRoute;
+    use zeroship_data_core::binding::DbBinding;
 
     use super::{
         ApplyMode, apply, inspect_update, validate_update_patch_keys, validate_user_doc_keys,
@@ -783,9 +783,9 @@ mod tests {
                     Err(zeroship_data_core::error::DbError::ValidationFailed { code, .. }) => {
                         assert_eq!(code, "reserved_system_field_name");
                     }
-                    other => panic!(
-                        "expected descriptor prefix '{prefix}' to be refused, got {other:?}"
-                    ),
+                    other => {
+                        panic!("expected descriptor prefix '{prefix}' to be refused, got {other:?}")
+                    }
                 }
                 assert!(
                     doc.get("id").is_none(),
@@ -828,7 +828,7 @@ mod tests {
         });
     }
 
-    use crate::backend::{EncryptedColumn as _, EncryptionMode, SqlExecutor};
+    use crate::backend::SqlExecutor;
     use crate::encryption;
     use crate::query::{
         FkEmission, SqlDialect, build_create_table_with_fks_for_dialect, build_insert_with_dialect,
@@ -905,12 +905,12 @@ mod tests {
             .decode(ciphertext_b64)
             .expect("ciphertext base64 must decode");
         let key = backend
-            .resolve_key(app_id, key_id)
+            .key_store()
+            .resolve(app_id, key_id)
             .await
             .expect("resolve key");
         let aad = encryption::canonical_aad(collection, "ssn", Some(id.as_bytes()));
-        let plaintext = backend
-            .decrypt(&key, EncryptionMode::Randomised, &ciphertext, &aad)
+        let plaintext = crate::encryption::aead::decrypt(&key, &ciphertext, &aad)
             .expect("decrypt prepared ciphertext");
         assert_eq!(
             plaintext,
@@ -1114,19 +1114,18 @@ mod tests {
                 .and_then(Value::as_str)
                 .expect("update ssn ciphertext in the raw column");
             let update_key = backend
-                .resolve_key(app_id, key_id)
+                .key_store()
+                .resolve(app_id, key_id)
                 .await
                 .expect("resolve update key");
-            let update_plaintext = backend
-                .decrypt(
-                    &update_key,
-                    EncryptionMode::Randomised,
-                    &base64::engine::general_purpose::STANDARD
-                        .decode(update_ciphertext)
-                        .expect("decode update ciphertext"),
-                    &encryption::canonical_aad(collection, "ssn", Some(seeded_id.as_bytes())),
-                )
-                .expect("decrypt update ciphertext");
+            let update_plaintext = crate::encryption::aead::decrypt(
+                &update_key,
+                &base64::engine::general_purpose::STANDARD
+                    .decode(update_ciphertext)
+                    .expect("decode update ciphertext"),
+                &encryption::canonical_aad(collection, "ssn", Some(seeded_id.as_bytes())),
+            )
+            .expect("decrypt update ciphertext");
             assert_eq!(
                 update_plaintext, b"555-55-5555",
                 "update pipeline must encrypt against the filter row id",

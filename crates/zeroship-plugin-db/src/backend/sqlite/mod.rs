@@ -1619,7 +1619,7 @@ impl crate::backend::SpatialIndex for SqliteBackend {
 }
 
 // ===========================================================================
-// Real EncryptedColumn impl on SqliteBackend
+// Key-store accessor on SqliteBackend
 // ===========================================================================
 //
 // Symmetric to the PG-side impl in `backend/postgres.rs`. Crypto math
@@ -1634,48 +1634,14 @@ impl crate::backend::SpatialIndex for SqliteBackend {
 // The `sqlite` feature gate on this file already restricts the build to
 // SQLite-enabled targets.
 
-// Real `EncryptedColumn` body. Delegates to the workspace
-// `crate::encryption::aead` module (mode-dispatch on encrypt; mode-
-// agnostic on decrypt because the wire format carries the nonce). Key
-// resolution goes through `self.key_store` (env-var-only on SQLite).
-impl crate::backend::EncryptedColumn for SqliteBackend {
-    type KeyHandle = crate::encryption::aead::AeadKey;
-
-    async fn resolve_key(&self, app_id: &str, key_id: &str) -> Result<Self::KeyHandle, DbError> {
-        self.key_store.resolve(app_id, key_id).await
-    }
-
-    fn encrypt(
-        &self,
-        key: &Self::KeyHandle,
-        mode: crate::backend::EncryptionMode,
-        plaintext: &[u8],
-        aad: &[u8],
-    ) -> Result<Vec<u8>, DbError> {
-        match mode {
-            crate::backend::EncryptionMode::Randomised => {
-                crate::encryption::aead::encrypt_randomised(key, plaintext, aad)
-            }
-            crate::backend::EncryptionMode::Deterministic => {
-                crate::encryption::aead::encrypt_deterministic(key, plaintext, aad)
-            }
-        }
-    }
-
-    fn decrypt(
-        &self,
-        key: &Self::KeyHandle,
-        _mode: crate::backend::EncryptionMode,
-        ciphertext: &[u8],
-        aad: &[u8],
-    ) -> Result<Vec<u8>, DbError> {
-        // Decrypt is mode-agnostic: the wire format carries the nonce,
-        // and AES-GCM verifies the tag regardless of how the nonce was
-        // produced on the write side. The caller picks the
-        // mode-appropriate AAD (Camp A: row_pk in AAD for Randomised,
-        // omitted for Deterministic) — see
-        // `crate::crud::encryption_pass`.
-        crate::encryption::aead::decrypt(key, ciphertext, aad)
+impl SqliteBackend {
+    /// Borrow this isolate's column-encryption key store.
+    ///
+    /// All that remains of the `EncryptedColumn` impl deleted on 2026-09-02;
+    /// see the twin on `PostgresBackend`. Both bodies were identical, which is
+    /// what made the trait a vendor coupling with no vendor content.
+    pub fn key_store(&self) -> &crate::encryption::KeyStore {
+        &self.key_store
     }
 }
 

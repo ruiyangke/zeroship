@@ -2056,16 +2056,18 @@ async fn prepare_upsert_doc_for_write(
     .await
 }
 
-/// Run the write-side encryption pass over `doc` using the
-/// backend-arm `EncryptedColumn` impl.
+/// Run the write-side encryption pass over `doc`.
 ///
-/// - **PG arm** (chosen at runtime, not compiled in): goes through
-///   `PostgresBackend`'s `EncryptedColumn` impl. The SQL builder
+/// **The CRYPTO does not branch on the arm; the SQL LOWERING does.** Both
+/// arms encrypt with `encryption::aead` under a key from the same
+/// `encryption::KeyStore`, which is why this function no longer selects a
+/// backend at all. What still differs is how the ciphertext is bound:
+///
+/// - **PG arm** (chosen at runtime, not compiled in): the SQL builder
 ///   emits `decode($N, 'base64')::bytea` so the BYTEA column receives
 ///   raw bytes.
-/// - **SQLite arm** (chosen at runtime, not compiled in): goes through
-///   `SqliteBackend`'s `EncryptedColumn` impl using env-var-sourced
-///   keys. The SQL builder (when called with `SqlDialect::Sqlite`)
+/// - **SQLite arm** (chosen at runtime, not compiled in): the keys are
+///   env-var-sourced. The SQL builder (when called with `SqlDialect::Sqlite`)
 ///   emits `$N` and tags the encrypted-column param with
 ///   `SQLITE_BINARY_BIND_PREFIX`; the session actor binds the raw bytes
 ///   as a BLOB.
@@ -2085,39 +2087,31 @@ async fn encryption_pass_dispatch(
     doc: &mut Value,
     sidechannel: &mut mask_pass::MaskPlaintextSidechannel,
 ) -> Result<(), DbError> {
+    // One arm, not two: see the twin note in `read_pipeline.rs`. Both branches
+    // called this same function with these same arguments before the
+    // `EncryptedColumn` trait was deleted on 2026-09-02.
+    //
+    // A `column_encryption_unavailable` refusal used to follow them, guarded by
+    // `schema_has_encrypted_columns`. IT WAS UNREACHABLE, and collapsing the
+    // arms is what exposed that: `ensure_backend_for_shared_sql` returns a
+    // `BackendHandle`, not an `Option`, and the handle has exactly two variants
+    // - so `as_encrypted_column_pg()` and `as_encrypted_column_sqlite()` were
+    // exhaustive between them and one always returned first. The refusal read
+    // as the fence that stops a declared-encrypted column being written in
+    // plaintext; it never ran, and deleting it removes that impression rather
+    // than a protection. The real fence is that this function cannot obtain a
+    // handle without `?`-propagating the failure.
     let backend = crate::exec::ensure_backend_for_shared_sql().await?;
-    if let Some(pg) = backend.as_encrypted_column_pg() {
-        return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
-            pg,
-            app_id,
-            collection,
-            schema,
-            row_pk,
-            doc,
-            sidechannel,
-        )
-        .await;
-    }
-    if let Some(sq) = backend.as_encrypted_column_sqlite() {
-        return crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
-            sq,
-            app_id,
-            collection,
-            schema,
-            row_pk,
-            doc,
-            sidechannel,
-        )
-        .await;
-    }
-    if schema_has_encrypted_columns(schema) {
-        return Err(DbError::Configuration {
-            code: "column_encryption_unavailable",
-            message: "db: no backend arm available for column encryption CRUD path".to_string(),
-            hint: None,
-        });
-    }
-    Ok(())
+    crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
+        backend.key_store(),
+        app_id,
+        collection,
+        schema,
+        row_pk,
+        doc,
+        sidechannel,
+    )
+    .await
 }
 
 /// Cheap walk: does any field def on `schema` carry `encrypted`?

@@ -274,10 +274,20 @@ impl KeyStore {
     /// Look up or derive the [`AeadKey`] for `(app_id, key_id)`.
     ///
     /// The body never `.await`s -- every source resolves in-process.
-    /// The signature stays async because this is what
-    /// [`crate::backend::EncryptedColumn::resolve_key`] calls, and that
-    /// trait method is async on both backends.
-    #[allow(clippy::unused_async)] // Shape is fixed by the EncryptedColumn trait.
+    ///
+    /// **THE REASON IT IS STILL ASYNC IS NOW WEAKER THAN IT WAS.** Until
+    /// 2026-09-02 this cited `EncryptedColumn::resolve_key`, whose two impls
+    /// were `async fn` and delegated straight here; that trait is deleted and
+    /// the CRUD passes call this directly, so nothing above imposes the shape
+    /// any more. It stays async deliberately, not by oversight: this is the one
+    /// seam a key source that leaves the process would arrive at, and making it
+    /// sync would cascade - `decrypt_row_on_read`, `encrypt_row_on_write*` and
+    /// `apply_mask_to_one_row` await nothing else, so each would lose its own
+    /// `async` in turn, and every caller after them.
+    ///
+    /// If a remote key source never lands, delete the `async` here and follow
+    /// that cascade in one change rather than leaving this note to rot.
+    #[allow(clippy::unused_async)]
     pub async fn resolve(&self, app_id: &str, key_id: &str) -> Result<AeadKey, DbError> {
         // Increment BEFORE the cache lookup so a
         // resolve-attempt is counted regardless of cache hit/miss.

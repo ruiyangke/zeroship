@@ -30,6 +30,8 @@ mod support;
 mod parity;
 
 use zeroship_core::change_event::ChangeOp;
+use zeroship_data_core::binding::DbBinding;
+use zeroship_data_core::error::DbError;
 use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_plugin_db::backend::sqlite::session::TerminalIntent;
@@ -37,9 +39,7 @@ use zeroship_plugin_db::backend::{
     BackendHandle, ChangeStream, LockManager, LockScope, SchemaIntrospect, SqlExecutor,
 };
 use zeroship_plugin_db::backend_selection::{new_sqlite_backend, new_sqlite_backend_with_secrets};
-use zeroship_data_core::binding::DbBinding;
 use zeroship_plugin_db::broker::{Subscription, SubscriptionMessage, subscribe};
-use zeroship_data_core::error::DbError;
 use zeroship_plugin_db::query::{IndexKind, IndexSpec, raw_column_name};
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
@@ -2950,7 +2950,7 @@ fn near_returns_within_radius() {
 }
 
 // ===========================================================================
-// `EncryptedColumn` impl on SqliteBackend
+// Column encryption on SqliteBackend
 // ===========================================================================
 //
 // These tests exercise the full SQLite round-trip for `t.encrypted(...)`-
@@ -2958,7 +2958,7 @@ fn near_returns_within_radius() {
 // encrypt with the right AAD shape (Camp A - row_pk in AAD for
 // Randomised, omitted for Deterministic), BLOB storage on disk via
 // rusqlite's typed BLOB binding, decrypt-on-read. Mirrors the PG suite's
-// `EncryptedColumn` impl tests in `tests/integration.rs`.
+// column-encryption tests in `tests/integration.rs`.
 
 /// Helper: hand this isolate a synthetic root key for `key_id`, for the
 /// duration of a test. Same shape as the PG-side `with_root_key` in
@@ -3269,8 +3269,8 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         use std::collections::HashMap;
 
         use base64::Engine as _;
+        use zeroship_plugin_db::backend::EncryptionMode;
         use zeroship_plugin_db::backend::sqlite::session::TypedCell;
-        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
         use zeroship_plugin_db::encryption;
         use zeroship_plugin_db::query::{
             FkEmission, SqlDialect, build_create_table_with_fks_for_dialect,
@@ -3370,7 +3370,8 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
         assert_eq!(typed.rows.len(), 2, "two rows stored");
 
         let key = backend
-            .resolve_key(app_id, key_id)
+            .key_store()
+            .resolve(app_id, key_id)
             .await
             .expect("resolve key");
         for row in &typed.rows {
@@ -3417,14 +3418,12 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
                 stored_blob, expected_ciphertext,
                 "raw stored bytes must match the write-side ciphertext",
             );
-            let plaintext = backend
-                .decrypt(
-                    &key,
-                    EncryptionMode::Randomised,
-                    &stored_blob,
-                    &encryption::canonical_aad(collection, "ssn", Some(id.as_bytes())),
-                )
-                .expect("decrypt stored blob");
+            let plaintext = zeroship_plugin_db::encryption::aead::decrypt(
+                &key,
+                &stored_blob,
+                &encryption::canonical_aad(collection, "ssn", Some(id.as_bytes())),
+            )
+            .expect("decrypt stored blob");
             assert!(
                 plaintext == b"123-45-6789" || plaintext == b"987-65-4321",
                 "decrypting the stored blob must recover one of the inserted plaintexts",
@@ -3514,8 +3513,8 @@ fn upsert_conflict_update_preserves_insert_only_fields_and_encrypts_sqlite_runti
     let _keys = with_root_key("c2_upsert_runtime_conflict", &"f".repeat(64));
 
     run(async {
+        use zeroship_plugin_db::backend::EncryptionMode;
         use zeroship_plugin_db::backend::sqlite::session::TypedCell;
-        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
         use zeroship_plugin_db::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3583,7 +3582,9 @@ const _procedures = { upsertConflict };
         // iterating the charter. It was pinning the DB-3 shape: app JS naming
         // whichever actor it liked on a row it wrote.
         assert!(
-            first.get("created_by").is_none_or(serde_json::Value::is_null),
+            first
+                .get("created_by")
+                .is_none_or(serde_json::Value::is_null),
             "a supplied created_by must not land on the insert arm: {first:?}"
         );
         assert!(
@@ -3674,17 +3675,16 @@ const _procedures = { upsertConflict };
         }
 
         let key = backend
-            .resolve_key("default", key_id)
+            .key_store()
+            .resolve("default", key_id)
             .await
             .expect("resolve key");
-        let plaintext = backend
-            .decrypt(
-                &key,
-                EncryptionMode::Randomised,
-                &stored_blob,
-                &encryption::canonical_aad("users", "ssn", Some(b"user_seed")),
-            )
-            .expect("decrypt stored conflict ciphertext");
+        let plaintext = zeroship_plugin_db::encryption::aead::decrypt(
+            &key,
+            &stored_blob,
+            &encryption::canonical_aad("users", "ssn", Some(b"user_seed")),
+        )
+        .expect("decrypt stored conflict ciphertext");
         assert_eq!(
             plaintext,
             b"987-65-4321".to_vec(),
@@ -3699,8 +3699,8 @@ fn upsert_conflict_with_deterministic_key_keeps_randomised_ciphertext_readable_s
     let _keys = with_root_key("c2_upsert_det_conflict_runtime", &"6".repeat(64));
 
     run(async {
+        use zeroship_plugin_db::backend::EncryptionMode;
         use zeroship_plugin_db::backend::sqlite::session::TypedCell;
-        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
         use zeroship_plugin_db::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3798,27 +3798,24 @@ const _procedures = { upsertConflict };
         }
 
         let key = backend
-            .resolve_key("default", key_id)
+            .key_store()
+            .resolve("default", key_id)
             .await
             .expect("resolve key");
-        let email_plaintext = backend
-            .decrypt(
-                &key,
-                EncryptionMode::Deterministic,
-                &email_blob,
-                &encryption::canonical_aad("users", "email", None),
-            )
-            .expect("decrypt deterministic conflict key");
+        let email_plaintext = zeroship_plugin_db::encryption::aead::decrypt(
+            &key,
+            &email_blob,
+            &encryption::canonical_aad("users", "email", None),
+        )
+        .expect("decrypt deterministic conflict key");
         assert_eq!(email_plaintext, b"alice@example.com".to_vec());
 
-        let ssn_plaintext = backend
-            .decrypt(
-                &key,
-                EncryptionMode::Randomised,
-                &ssn_blob,
-                &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
-            )
-            .expect("decrypt conflict-updated randomised sibling");
+        let ssn_plaintext = zeroship_plugin_db::encryption::aead::decrypt(
+            &key,
+            &ssn_blob,
+            &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
+        )
+        .expect("decrypt conflict-updated randomised sibling");
         assert_eq!(
             ssn_plaintext,
             b"987-65-4321".to_vec(),
@@ -3833,8 +3830,8 @@ fn update_non_id_filter_keeps_randomised_ciphertext_readable_sqlite_runtime() {
     let _keys = with_root_key("c1_update_non_id_runtime", &"7".repeat(64));
 
     run(async {
+        use zeroship_plugin_db::backend::EncryptionMode;
         use zeroship_plugin_db::backend::sqlite::session::TypedCell;
-        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
         use zeroship_plugin_db::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -3922,17 +3919,16 @@ const _procedures = { seed, updateByEmail };
         }
 
         let key = backend
-            .resolve_key("default", key_id)
+            .key_store()
+            .resolve("default", key_id)
             .await
             .expect("resolve key");
-        let plaintext = backend
-            .decrypt(
-                &key,
-                EncryptionMode::Randomised,
-                &stored_blob,
-                &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
-            )
-            .expect("decrypt updated ciphertext");
+        let plaintext = zeroship_plugin_db::encryption::aead::decrypt(
+            &key,
+            &stored_blob,
+            &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
+        )
+        .expect("decrypt updated ciphertext");
         assert_eq!(
             plaintext,
             b"987-65-4321".to_vec(),
@@ -3947,8 +3943,8 @@ fn update_many_non_id_filter_encrypts_per_row_sqlite_runtime() {
     let _keys = with_root_key("c1_update_many_non_id_runtime", &"8".repeat(64));
 
     run(async {
+        use zeroship_plugin_db::backend::EncryptionMode;
         use zeroship_plugin_db::backend::sqlite::session::TypedCell;
-        use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
         use zeroship_plugin_db::encryption;
 
         let dir = tempfile::tempdir().expect("tempdir");
@@ -4054,7 +4050,8 @@ const _procedures = { seed, updateManyByName };
         assert_eq!(typed.rows.len(), 2, "exactly two rows should be updated");
 
         let key = backend
-            .resolve_key("default", key_id)
+            .key_store()
+            .resolve("default", key_id)
             .await
             .expect("resolve key");
         for row in &typed.rows {
@@ -4080,14 +4077,12 @@ const _procedures = { seed, updateManyByName };
                 }
                 other => panic!("ssn (the masked column) must be TEXT, got {other:?}"),
             }
-            let plaintext = backend
-                .decrypt(
-                    &key,
-                    EncryptionMode::Randomised,
-                    &stored_blob,
-                    &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
-                )
-                .expect("decrypt updated ciphertext");
+            let plaintext = zeroship_plugin_db::encryption::aead::decrypt(
+                &key,
+                &stored_blob,
+                &encryption::canonical_aad("users", "ssn", Some(row_id.as_bytes())),
+            )
+            .expect("decrypt updated ciphertext");
             assert_eq!(
                 plaintext,
                 b"999-88-7777".to_vec(),
@@ -4794,7 +4789,7 @@ const _procedures = { seed, nestedCasUpdateMany };
 /// in-crate `encryption::keys::tests` use.
 #[test]
 fn encrypted_column_round_trip_sqlite_randomised() {
-    use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+    use zeroship_plugin_db::backend::EncryptionMode;
     use zeroship_plugin_db::encryption;
     let key_id = "p5_sqlite_rt_rand";
     let _keys = with_root_key("p5_sqlite_rt_rand", &"a".repeat(64));
@@ -4816,14 +4811,19 @@ fn encrypted_column_round_trip_sqlite_randomised() {
             .expect("CREATE TABLE enc_notes");
 
         let key = backend
-            .resolve_key("app1", key_id)
+            .key_store()
+            .resolve("app1", key_id)
             .await
             .expect("resolve_key");
         let plaintext = b"123-45-6789";
         let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
-        let ct = backend
-            .encrypt(&key, EncryptionMode::Randomised, plaintext, &aad)
-            .expect("encrypt");
+        let ct = zeroship_plugin_db::encryption::aead::encrypt(
+            &key,
+            EncryptionMode::Randomised,
+            plaintext,
+            &aad,
+        )
+        .expect("encrypt");
 
         // Bind the ciphertext as an inline X'...' BLOB literal. The
         // session actor's `[&str]` params lane only carries TEXT; SQL
@@ -4861,9 +4861,8 @@ fn encrypted_column_round_trip_sqlite_randomised() {
             .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
             .collect();
 
-        let recovered = backend
-            .decrypt(&key, EncryptionMode::Randomised, &raw, &aad)
-            .expect("decrypt");
+        let recovered =
+            zeroship_plugin_db::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
         assert_eq!(recovered, plaintext);
     });
 }
@@ -4871,7 +4870,7 @@ fn encrypted_column_round_trip_sqlite_randomised() {
 /// **Gate #1 (SQLite half), deterministic variant**.
 #[test]
 fn encrypted_column_round_trip_sqlite_deterministic() {
-    use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+    use zeroship_plugin_db::backend::EncryptionMode;
     use zeroship_plugin_db::encryption;
     let key_id = "p5_sqlite_rt_det";
     let _keys = with_root_key("p5_sqlite_rt_det", &"b".repeat(64));
@@ -4893,15 +4892,20 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
             .expect("CREATE TABLE enc_notes");
 
         let key = backend
-            .resolve_key("app1", key_id)
+            .key_store()
+            .resolve("app1", key_id)
             .await
             .expect("resolve_key");
         let plaintext = b"DETERMINISTIC-PLAINTEXT";
         // Deterministic AAD: row_pk omitted (Camp A).
         let aad = encryption::canonical_aad("enc_notes", "ssn", None);
-        let ct = backend
-            .encrypt(&key, EncryptionMode::Deterministic, plaintext, &aad)
-            .expect("encrypt");
+        let ct = zeroship_plugin_db::encryption::aead::encrypt(
+            &key,
+            EncryptionMode::Deterministic,
+            plaintext,
+            &aad,
+        )
+        .expect("encrypt");
 
         let blob_lit = sqlite_blob_literal(&ct);
         let insert_sql =
@@ -4928,9 +4932,8 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
             .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
             .collect();
 
-        let recovered = backend
-            .decrypt(&key, EncryptionMode::Deterministic, &raw, &aad)
-            .expect("decrypt");
+        let recovered =
+            zeroship_plugin_db::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
         assert_eq!(recovered, plaintext);
     });
 }
@@ -4951,7 +4954,7 @@ fn encrypted_column_round_trip_sqlite_deterministic() {
 /// alone exercises the equality-lookup contract.
 #[test]
 fn deterministic_encrypted_equality_via_index_sqlite() {
-    use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+    use zeroship_plugin_db::backend::EncryptionMode;
     use zeroship_plugin_db::encryption;
     let key_id = "p5_sqlite_det_eq";
     let _keys = with_root_key("p5_sqlite_det_eq", &"c".repeat(64));
@@ -4981,7 +4984,8 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
             .expect("CREATE INDEX");
 
         let key = backend
-            .resolve_key("app1", key_id)
+            .key_store()
+            .resolve("app1", key_id)
             .await
             .expect("resolve_key");
 
@@ -4998,16 +5002,24 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
         let ciphertexts: Vec<Vec<u8>> = plaintexts
             .iter()
             .map(|p| {
-                backend
-                    .encrypt(&key, EncryptionMode::Deterministic, p, &aad)
-                    .expect("encrypt")
+                zeroship_plugin_db::encryption::aead::encrypt(
+                    &key,
+                    EncryptionMode::Deterministic,
+                    p,
+                    &aad,
+                )
+                .expect("encrypt")
             })
             .collect();
 
         // Defining deterministic property: re-encrypt P0 → same bytes.
-        let p0_again = backend
-            .encrypt(&key, EncryptionMode::Deterministic, plaintexts[0], &aad)
-            .expect("re-encrypt P0");
+        let p0_again = zeroship_plugin_db::encryption::aead::encrypt(
+            &key,
+            EncryptionMode::Deterministic,
+            plaintexts[0],
+            &aad,
+        )
+        .expect("re-encrypt P0");
         assert_eq!(
             ciphertexts[0], p0_again,
             "deterministic mode must produce byte-identical ciphertext for the same plaintext"
@@ -5062,7 +5074,7 @@ fn deterministic_encrypted_equality_via_index_sqlite() {
 /// assertion for the row-PK-in-AAD policy.
 #[test]
 fn randomised_ciphertext_row_swap_rejected_sqlite() {
-    use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+    use zeroship_plugin_db::backend::EncryptionMode;
     use zeroship_plugin_db::encryption;
     let key_id = "p5_sqlite_row_swap";
     let _keys = with_root_key("p5_sqlite_row_swap", &"d".repeat(64));
@@ -5083,24 +5095,22 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             .await
             .expect("CREATE TABLE enc_notes");
 
-        let key = backend.resolve_key("app1", key_id).await.unwrap();
+        let key = backend.key_store().resolve("app1", key_id).await.unwrap();
         // Insert row A and row B, each with its OWN AAD (binds row_pk).
-        let ct_a = backend
-            .encrypt(
-                &key,
-                EncryptionMode::Randomised,
-                b"sensitive-A",
-                &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a")),
-            )
-            .unwrap();
-        let ct_b = backend
-            .encrypt(
-                &key,
-                EncryptionMode::Randomised,
-                b"sensitive-B",
-                &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b")),
-            )
-            .unwrap();
+        let ct_a = zeroship_plugin_db::encryption::aead::encrypt(
+            &key,
+            EncryptionMode::Randomised,
+            b"sensitive-A",
+            &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a")),
+        )
+        .unwrap();
+        let ct_b = zeroship_plugin_db::encryption::aead::encrypt(
+            &key,
+            EncryptionMode::Randomised,
+            b"sensitive-B",
+            &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b")),
+        )
+        .unwrap();
         for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
             let blob_lit = sqlite_blob_literal(ct);
             let sql =
@@ -5131,8 +5141,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
             .map(|i| u8::from_str_radix(&hex_str[i..i + 2], 16).unwrap())
             .collect();
         let aad_b = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b"));
-        let err = backend
-            .decrypt(&key, EncryptionMode::Randomised, &raw, &aad_b)
+        let err = zeroship_plugin_db::encryption::aead::decrypt(&key, &raw, &aad_b)
             .expect_err("row-swap must fail AAD verification");
         match err {
             DbError::ValidationFailed { code, .. } => {
@@ -5153,7 +5162,7 @@ fn randomised_ciphertext_row_swap_rejected_sqlite() {
 /// decryption result).
 #[test]
 fn cross_backend_ciphertext_decrypt_via_shared_key() {
-    use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode};
+    use zeroship_plugin_db::backend::EncryptionMode;
     use zeroship_plugin_db::encryption;
     let key_id = "p5_sqlite_cross";
     let _keys = with_root_key("p5_sqlite_cross", &"e".repeat(64));
@@ -5165,23 +5174,26 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
         // Use the SAME app_id so HKDF salt matches; the env-var key
         // sourcing is process-global, so the root key is identical.
         let app_id = "app_shared";
-        let key_a = backend_a.resolve_key(app_id, key_id).await.unwrap();
-        let key_b = backend_b.resolve_key(app_id, key_id).await.unwrap();
+        let key_a = backend_a.key_store().resolve(app_id, key_id).await.unwrap();
+        let key_b = backend_b.key_store().resolve(app_id, key_id).await.unwrap();
         // The derived halves must match — same root + same app_id.
         assert_eq!(key_a.k_enc, key_b.k_enc);
         assert_eq!(key_a.k_siv, key_b.k_siv);
 
         let plaintext = b"cross-instance-payload";
         let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
-        let ct = backend_a
-            .encrypt(&key_a, EncryptionMode::Randomised, plaintext, &aad)
-            .expect("encrypt on A");
+        let ct = zeroship_plugin_db::encryption::aead::encrypt(
+            &key_a,
+            EncryptionMode::Randomised,
+            plaintext,
+            &aad,
+        )
+        .expect("encrypt on A");
 
         // Decrypt the SAME ciphertext on backend_b with backend_b's
         // resolved key. Must round-trip.
-        let recovered = backend_b
-            .decrypt(&key_b, EncryptionMode::Randomised, &ct, &aad)
-            .expect("decrypt on B");
+        let recovered =
+            zeroship_plugin_db::encryption::aead::decrypt(&key_b, &ct, &aad).expect("decrypt on B");
         assert_eq!(recovered, plaintext);
     });
 }
@@ -5190,8 +5202,8 @@ fn cross_backend_ciphertext_decrypt_via_shared_key() {
 // Close the SQLite CRUD-path gap
 // ===========================================================================
 //
-// The `EncryptedColumn` trait is wired on `SqliteBackend` and the
-// trait surface is pinned by the round-trip tests above, but the
+// Column encryption works on `SqliteBackend` and the crypto
+// surface is pinned by the round-trip tests above, but the
 // orchestrator's CRUD-path SQL builder used to emit PG-only
 // `decode($N, 'base64')::bytea` syntax for encrypted columns, so a
 // SQLite app with a `t.encrypted(...)` column on its schema surfaced
@@ -5282,9 +5294,16 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
         // Step 1 — encryption pass swaps ssn into base64 ciphertext +
         // installs the `__zsbin__ssn` marker.
-        encrypt_row_on_write(&backend, "app_demo", "users", &schema, row_pk, &mut doc)
-            .await
-            .expect("encrypt_row_on_write");
+        encrypt_row_on_write(
+            backend.key_store(),
+            "app_demo",
+            "users",
+            &schema,
+            row_pk,
+            &mut doc,
+        )
+        .await
+        .expect("encrypt_row_on_write");
         assert!(
             doc.get("__zsbin__ssn").and_then(|v| v.as_bool()) == Some(true),
             "encryption pass must install the marker key: {doc:?}",
@@ -5385,9 +5404,15 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
             "ssn": hex,
         });
 
-        decrypt_row_on_read(&backend, "app_demo", "users", &schema, &mut row_value)
-            .await
-            .expect("decrypt_row_on_read");
+        decrypt_row_on_read(
+            backend.key_store(),
+            "app_demo",
+            "users",
+            &schema,
+            &mut row_value,
+        )
+        .await
+        .expect("decrypt_row_on_read");
 
         assert_eq!(
             row_value.get("ssn").and_then(|v| v.as_str()),
@@ -6281,7 +6306,7 @@ fn p55_pr1_build_create_table_refuses_classification_name_field_sqlite() {
 //   - the audit table is created idempotently on first call;
 //   - the default-deny stub grants `kind: "auto"` and denies everyone else;
 //   - both granted AND denied paths emit a row to the per-app audit table;
-//   - the encrypted-column read path decrypts via the EncryptedColumn impl;
+//   - the encrypted-column read path decrypts via `encryption::aead`;
 //   - the typed error rail surfaces `unmask_column_not_masked` /
 //     `unmask_not_permitted` on the SDK's `.code`-branchable path.
 //
@@ -6433,7 +6458,7 @@ fn cold_unmask_with_auto_actor_initializes_and_attaches_before_read() {
             "ssn": plaintext,
         });
         encrypt_row_on_write(
-            backend.as_ref(),
+            backend.key_store(),
             app_id,
             collection,
             &schema,
@@ -6779,7 +6804,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             "email": plaintext,
         });
         encrypt_row_on_write(
-            backend.as_ref(),
+            backend.key_store(),
             app_id,
             collection,
             &schema,
@@ -7951,7 +7976,7 @@ fn drift_check_handles_encrypted_column() {
             "ssn": plaintext,
         });
         encrypt_row_on_write(
-            backend.as_ref(),
+            backend.key_store(),
             app_id,
             collection,
             &schema,
@@ -11296,9 +11321,7 @@ fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
 
         let a_stamp = client
             .query(
-                &format!(
-                    "SELECT created_at FROM \"{app}\".\"{coll}\" WHERE id = 'a_default'"
-                ),
+                &format!("SELECT created_at FROM \"{app}\".\"{coll}\" WHERE id = 'a_default'"),
                 &[],
             )
             .await
