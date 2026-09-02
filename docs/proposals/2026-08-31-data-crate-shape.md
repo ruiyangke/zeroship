@@ -209,6 +209,45 @@ path alone finds one file and reports the differ as unreferenced.
 `zeroship-migrate-core` does **not** depend on `zeroship-schema` - checked in its manifest, not
 inferred. Its same-named `build_*` references are its own `schema/query.rs`.
 
+### THE ENGINE HAS ALREADY DONE THIS DELETION, IN THE MIRROR DIRECTION
+
+Measured 2026-09-02. `crates/zeroship-migrate-core/src/schema/mod.rs` is a rewrite of
+`zeroship-schema/src/lib.rs` - same five modules, same headings - and its opening paragraph
+records the cut:
+
+> the data-plane query language that used to ride along here - the find and aggregate
+> builders, the MongoDB-style filter->WHERE translator, the query limits - had **zero
+> engine callers** and lived here only for a consumer (plugin-db) that is not in this
+> repo, so it was deleted.
+
+So the engine kept the write/diff/describe half and deleted the data-plane half.
+`zeroship-schema` is the exact mirror: it kept BOTH, and the half the engine kept is the
+half nothing here calls. Every one of its five modules has a live twin, and the twins are
+split across two crates:
+
+| `zeroship-schema` | live twin | code lines (schema / twin) | differing |
+| --- | --- | --- | --- |
+| `descriptors.rs` | `zeroship-migrate-backend/src/descriptors.rs` | 16 / 16 | **0** |
+| `error.rs` | `zeroship-migrate-backend/src/schema_error.rs` | 22 / 22 | **0** |
+| `mask_codec.rs` | `zeroship-migrate-backend/src/mask_codec.rs` | 296 / 365 | 117 |
+| `diff.rs` | `zeroship-migrate-core/src/schema/diff.rs` | 1488 / 1666 | 652 |
+| `query.rs` | `zeroship-migrate-core/src/schema/query.rs` | 10346 / 3900 | 9546 |
+
+Comments and blank lines stripped, so the two crates' differing doc prose over the same
+items does not count. `descriptors` and `error` are **line-for-line identical code** - 38
+lines carrying `VectorMetric`, `EncryptionMode`, `GeoPoint` and `MaskSentinelError`.
+
+The `query.rs` row is the whole story in one number: the schema copy is 2.6x the engine's
+because it still carries the DML half the engine deleted - and that DML half is the only
+part plugin-db calls. `migrate-core` reaches the three leaf modules by re-exporting them
+from `migrate-backend` (`pub use zeroship_migrate_backend::{descriptors, mask_codec,
+schema_error as error};`), which is the shape this split should copy rather than reinvent.
+
+The sentinel WRITE half is dead here and live there: `build_mask_sentinel_comments` and
+`build_encryption_sentinel_comments` are called from shipped code at
+`zeroship-migrate-postgres/src/schema.rs:305-306`, while `zeroship-schema`'s own copies at
+`query.rs:297-298` are reached only from the DDL emitter that has no production caller.
+
 **The caveat that stops this being cheap.** "No production caller" is not "safe to delete". The DDL
 builders are reached from `sqlite_integration.rs` and `integration.rs` by tests pinning real DDL
 behaviour. The cost is deletion PLUS migrating those onto the migration engine's renderer.
