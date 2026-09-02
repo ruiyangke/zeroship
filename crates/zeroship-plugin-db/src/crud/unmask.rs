@@ -85,7 +85,7 @@ use crate::error::DbError;
 /// `pub` under `test-helpers` so `tests/sqlite_integration.rs` can drive
 /// `dispatch_unmask` directly; production callers reach this through
 /// the V8 dispatcher's `parse_args`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct UnmaskFieldArgs {
     pub collection: String,
     pub row_pk: String,
@@ -96,6 +96,15 @@ pub struct UnmaskFieldArgs {
     /// Free-text rationale recorded on the audit row. Truncation is the
     /// caller's responsibility — long reasons are stored verbatim.
     pub reason: Option<String>,
+    /// The actor claim [`sanitize_app_actor`] REFUSED, kept for the audit row
+    /// and for nothing else.
+    ///
+    /// This is never consulted by [`check_unmask_authorization`] and never
+    /// written to `actor_id` / `actor_role`. It exists because stripping the
+    /// claim - which is correct - also erased the only evidence that anyone
+    /// tried to make it: a forged `kind: "auto"` and a genuinely absent actor
+    /// both arrived here as `actor: None` and audited identically.
+    pub rejected_claim: Option<Value>,
 }
 
 /// Result of a successful unmask. The wire shape is `{ plaintext: <str> }`;
@@ -308,17 +317,42 @@ pub(crate) const RESERVED_SYSTEM_ACTOR_KINDS: &[&str] = &["auto"];
 /// (→ "unauthenticated → denied"), so app code can never impersonate the
 /// system actor. Genuine system callers build their actor in Rust and never
 /// pass through this V8 boundary, so they are unaffected.
-pub(crate) fn sanitize_app_actor(actor: Option<Value>) -> Option<Value> {
+pub(crate) fn sanitize_app_actor(actor: Option<Value>) -> SanitizedActor {
     let kind = actor
         .as_ref()
         .and_then(|v| v.get("kind"))
         .and_then(|k| k.as_str())
         .unwrap_or("");
     if RESERVED_SYSTEM_ACTOR_KINDS.contains(&kind) {
-        None
+        SanitizedActor {
+            actor: None,
+            rejected_claim: actor,
+        }
     } else {
-        actor
+        SanitizedActor {
+            actor,
+            rejected_claim: None,
+        }
     }
+}
+
+/// What [`sanitize_app_actor`] decided: at most one of these is `Some`.
+///
+/// Two fields rather than one return value because the refused claim must be
+/// recorded and must NEVER be usable as identity. Returning a bare
+/// `Option<Value>` made those the same slot, so the only safe thing to do with a
+/// refused claim was discard it - which erased the evidence that anyone tried.
+/// A caller that wants identity reads [`Self::actor`]; the audit writer is the
+/// only reader of [`Self::rejected_claim`].
+#[derive(Debug, Clone, Default)]
+pub(crate) struct SanitizedActor {
+    /// The actor as it may be used for authorization. `None` when the caller
+    /// sent none, AND when the claim was refused - those two are
+    /// indistinguishable here on purpose, because they must be treated
+    /// identically by every authorization decision.
+    pub(crate) actor: Option<Value>,
+    /// The claim that was refused, for the audit row only.
+    pub(crate) rejected_claim: Option<Value>,
 }
 
 pub(crate) fn check_unmask_authorization(
@@ -852,12 +886,21 @@ async fn write_audit_unmask_row(
     if let Some(pg) = backend.as_postgres() {
         let sql = format!(
             r#"INSERT INTO "{app_id}"."__zeroship_audit_unmask"
-               (actor_id, actor_role, collection, row_pk, "column",
+               (actor_id, actor_role, claimed_actor, collection, row_pk, "column",
                 classification, reason, outcome)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8)"#
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#
         );
         let actor_id_s: String = actor_id.unwrap_or_default();
         let actor_role_s: String = actor_role.unwrap_or_default();
+        // The refused claim, serialised whole. Whole rather than picked apart
+        // into id/kind because it is UNTRUSTED INPUT: an operator reading it is
+        // reading what a handler SENT, and splitting it into the same shape as
+        // the trusted columns is how the two get confused at a glance.
+        let claimed_actor_s: String = args
+            .rejected_claim
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
         let reason_s: String = args.reason.clone().unwrap_or_default();
         // text params: empty strings serve as NULL placeholders;
         // pg interprets `''` as TEXT, so we ROUTE truly-null fields
@@ -896,6 +939,7 @@ async fn write_audit_unmask_row(
             &[
                 &actor_id_s,
                 &actor_role_s,
+                &claimed_actor_s,
                 &args.collection,
                 &args.row_pk,
                 &args.column,
@@ -914,18 +958,24 @@ async fn write_audit_unmask_row(
         let q_app = sq.quote_ident(app_id);
         let sql = format!(
             r#"INSERT INTO {q_app}."__zeroship_audit_unmask"
-               (actor_id, actor_role, collection, row_pk, "column",
+               (actor_id, actor_role, claimed_actor, collection, row_pk, "column",
                 classification, reason, outcome)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"#
+               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#
         );
         let actor_id_s: String = actor_id.unwrap_or_default();
         let actor_role_s: String = actor_role.unwrap_or_default();
+        let claimed_actor_s: String = args
+            .rejected_claim
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
         let reason_s: String = args.reason.clone().unwrap_or_default();
         sq.pool_exec(
             &sql,
             &[
                 actor_id_s.as_str(),
                 actor_role_s.as_str(),
+                claimed_actor_s.as_str(),
                 args.collection.as_str(),
                 args.row_pk.as_str(),
                 args.column.as_str(),
@@ -980,12 +1030,15 @@ pub struct BulkUnmaskItem {
     pub columns: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct BulkUnmaskArgs {
     pub collection: String,
     pub items: Vec<BulkUnmaskItem>,
     pub actor: Option<Value>,
     pub reason: Option<String>,
+    /// The refused actor claim, for the audit row only. See
+    /// [`UnmaskFieldArgs::rejected_claim`].
+    pub rejected_claim: Option<Value>,
 }
 
 /// Result of a successful bulk unmask.
@@ -1069,6 +1122,9 @@ pub async fn dispatch_bulk_unmask(
         items: normalized_audit_items,
         actor: args.actor.clone(),
         reason: args.reason.clone(),
+        // Carried, not dropped: this value exists to reach the audit row, and
+        // this struct is what the audit writer reads.
+        rejected_claim: args.rejected_claim.clone(),
     };
 
     // ---- Step 1: only after every column is validated, initialize the
@@ -1129,6 +1185,7 @@ pub async fn dispatch_bulk_unmask(
                 column: canonical_col.clone(),
                 actor: args.actor.clone(),
                 reason: args.reason.clone(),
+                rejected_claim: args.rejected_claim.clone(),
             };
             // Read encryption / plaintext path identically to the
             // single-cell helper — we already checked auth, so call
@@ -1223,6 +1280,7 @@ async fn write_audit_bulk_row(
         column: columns_joined,
         actor: args.actor.clone(),
         reason: Some(reason_text),
+        rejected_claim: args.rejected_claim.clone(),
     };
     write_audit_unmask_row(app_id, &synthetic, &classification_joined, outcome).await
 }
@@ -1252,6 +1310,10 @@ pub async fn authorize_query_hint(
     collection: &str,
     unmask_columns: &[String],
     actor: &Option<Value>,
+    // The refused claim, for the audit row only - see
+    // `SanitizedActor::rejected_claim`. Callers that never sanitise (tests
+    // building args in Rust) pass `None`.
+    rejected_claim: Option<&Value>,
     reason: &Option<String>,
 ) -> Result<(), DbError> {
     if unmask_columns.is_empty() {
@@ -1293,6 +1355,7 @@ pub async fn authorize_query_hint(
             unmask_columns,
             &classifications,
             actor,
+            rejected_claim,
             reason,
             "denied",
             Some(&unauthorized),
@@ -1327,6 +1390,9 @@ pub async fn audit_query_hint_granted(
     collection: &str,
     unmask_columns: &[String],
     actor: &Option<Value>,
+    // See `authorize_query_hint`. A granted hint normally carries no refused
+    // claim, but the parameter exists so the two audit arms cannot drift.
+    rejected_claim: Option<&Value>,
     reason: &Option<String>,
 ) -> Result<(), DbError> {
     if unmask_columns.is_empty() {
@@ -1350,6 +1416,7 @@ pub async fn audit_query_hint_granted(
         unmask_columns,
         &classifications,
         actor,
+        rejected_claim,
         reason,
         "granted",
         None,
@@ -1407,6 +1474,10 @@ pub async fn dispatch_unmask_for_query(
                 column: col.clone(),
                 actor: None,
                 reason: None,
+                // A fetch helper, not an audited dispatch: authorization already
+                // happened upstream in `authorize_query_hint`, which is also
+                // where any refused claim was recorded.
+                rejected_claim: None,
             };
             let plaintext = match lookup_encryption_meta(&schema, col)? {
                 Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
@@ -1435,6 +1506,10 @@ async fn write_audit_query_hint_row(
     unmask_columns: &[String],
     classifications: &[String],
     actor: &Option<Value>,
+    // The claim `sanitize_app_actor` refused, if any. A separate parameter
+    // rather than a field of `actor` because it must never be reachable from
+    // anything that decides authorization.
+    rejected_claim: Option<&Value>,
     reason: &Option<String>,
     outcome: &str,
     unauthorized: Option<&[String]>,
@@ -1460,6 +1535,7 @@ async fn write_audit_query_hint_row(
         column: columns_joined,
         actor: actor.clone(),
         reason: Some(reason_text),
+        rejected_claim: rejected_claim.cloned(),
     };
     write_audit_unmask_row(app_id, &synthetic, &class_joined, outcome).await
 }
@@ -1570,7 +1646,7 @@ fn parse_args_inner(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
         });
     }
     // DB-3: app JS cannot claim the reserved `auto` system actor.
-    let actor = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
+    let sanitized = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
     let reason = obj
         .get("reason")
         .and_then(|v| v.as_str())
@@ -1579,8 +1655,9 @@ fn parse_args_inner(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
         collection,
         row_pk,
         column,
-        actor,
+        actor: sanitized.actor,
         reason,
+        rejected_claim: sanitized.rejected_claim,
     })
 }
 
@@ -1746,8 +1823,9 @@ fn parse_bulk_args_inner(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
         }
         items.push(BulkUnmaskItem { row_pk, columns });
     }
-    // DB-3: app JS cannot claim the reserved `auto` system actor.
-    let actor = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
+    // DB-3: app JS cannot claim the reserved `auto` system actor. The refused
+    // claim rides along to the audit row so the attempt is recorded.
+    let sanitized = sanitize_app_actor(obj.get("actor").cloned().filter(|v| !v.is_null()));
     let reason = obj
         .get("reason")
         .and_then(|v| v.as_str())
@@ -1755,8 +1833,9 @@ fn parse_bulk_args_inner(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
     Ok(BulkUnmaskArgs {
         collection,
         items,
-        actor,
+        actor: sanitized.actor,
         reason,
+        rejected_claim: sanitized.rejected_claim,
     })
 }
 
@@ -1786,15 +1865,28 @@ mod tests {
         // App JS claiming the privileged system actor is stripped to None, so
         // check_unmask_authorization's "unauthenticated → denied" arm applies —
         // an app handler can no longer unmask its PII via {actor:{kind:"auto"}}.
-        assert_eq!(sanitize_app_actor(Some(json!({ "kind": "auto" }))), None);
-        // A non-reserved, app-declared actor kind passes through unchanged.
+        let forged = sanitize_app_actor(Some(json!({ "kind": "auto" })));
+        assert_eq!(forged.actor, None);
+        // ...and the refused claim is RETAINED, so the audit row can record
+        // that someone tried. Dropping it made a forged claim indistinguishable
+        // from an absent actor in `__zeroship_audit_unmask`.
+        assert_eq!(forged.rejected_claim, Some(json!({ "kind": "auto" })));
+
+        // A non-reserved, app-declared actor kind passes through unchanged, and
+        // produces no rejected claim.
+        let ordinary = sanitize_app_actor(Some(json!({ "kind": "support_agent" })));
+        assert_eq!(ordinary.actor, Some(json!({ "kind": "support_agent" })));
+        assert_eq!(ordinary.rejected_claim, None);
+
+        // No actor / missing kind stay as-is (denied downstream regardless),
+        // and neither is a refused CLAIM - nothing was claimed.
+        assert_eq!(sanitize_app_actor(None).actor, None);
+        assert_eq!(sanitize_app_actor(None).rejected_claim, None);
         assert_eq!(
-            sanitize_app_actor(Some(json!({ "kind": "support_agent" }))),
-            Some(json!({ "kind": "support_agent" }))
+            sanitize_app_actor(Some(json!({}))).actor,
+            Some(json!({}))
         );
-        // No actor / missing kind stay as-is (denied downstream regardless).
-        assert_eq!(sanitize_app_actor(None), None);
-        assert_eq!(sanitize_app_actor(Some(json!({}))), Some(json!({})));
+        assert_eq!(sanitize_app_actor(Some(json!({}))).rejected_claim, None);
     }
 
     #[test]
@@ -1804,11 +1896,14 @@ mod tests {
         // arm — which returns before consulting any policy. Pre-fix the raw
         // {kind:"auto"} reached the no-policy fallback and was GRANTED.
         let sanitized = sanitize_app_actor(Some(json!({ "kind": "auto" })));
-        assert_eq!(sanitized, None);
+        assert_eq!(sanitized.actor, None);
         assert!(
-            !check_unmask_authorization("app_x", &sanitized, "pii").unwrap(),
+            !check_unmask_authorization("app_x", &sanitized.actor, "pii").unwrap(),
             "sanitized (stripped-auto) app actor must be denied"
         );
+        // And the retained claim must not reach the authorization decision:
+        // the checker takes `sanitized.actor`, never the whole struct.
+        assert!(sanitized.rejected_claim.is_some());
     }
 
     // ---------------------------------------------------------------
@@ -2183,6 +2278,7 @@ mod tests {
             items: vec![],
             actor: Some(json!({ "kind": "auto" })),
             reason: None,
+            rejected_claim: None,
         };
         let result = runtime
             .block_on(dispatch_bulk_unmask(&binding, args))
@@ -2216,6 +2312,7 @@ mod tests {
             }],
             actor: Some(json!({ "kind": "auto" })),
             reason: None,
+            rejected_claim: None,
         };
         let err = runtime
             .block_on(dispatch_bulk_unmask(&binding, args))
@@ -2245,6 +2342,7 @@ mod tests {
             }],
             actor: Some(json!({ "kind": "auto" })),
             reason: None,
+            rejected_claim: None,
         };
         let err = runtime
             .block_on(dispatch_bulk_unmask(&binding, args))
@@ -2268,6 +2366,7 @@ mod tests {
             "users",
             &[],
             &Some(json!({ "kind": "user" })),
+            None,
             &None,
         ));
         assert!(ok.is_ok());
@@ -2292,6 +2391,7 @@ mod tests {
                 "users",
                 &["nonexistent".to_string()],
                 &Some(json!({ "kind": "auto" })),
+                None,
                 &None,
             ))
             .unwrap_err();

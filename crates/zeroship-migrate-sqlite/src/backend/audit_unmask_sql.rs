@@ -114,6 +114,12 @@ pub fn audit_unmask_ddl(schema: &str) -> Vec<String> {
                 ts              TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 actor_id        TEXT,
                 actor_role      TEXT,
+                -- The refused DB-3 claim, verbatim. Kept in step with the
+                -- PostgreSQL twin in `zeroship-migrate-server`'s
+                -- `audit_unmask_table_sql`: two dialects diverging on an audit
+                -- schema is its own defect. See that file for why the column
+                -- exists at all.
+                claimed_actor   TEXT,
                 collection      TEXT NOT NULL,
                 row_pk          TEXT NOT NULL,
                 "column"        TEXT NOT NULL,

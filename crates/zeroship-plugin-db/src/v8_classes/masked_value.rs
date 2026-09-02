@@ -297,7 +297,7 @@ impl MaskedValue {
 
         // DB-3: app JS must not be able to claim the reserved `auto` system
         // actor — strip it so an app handler cannot impersonate the platform.
-        let actor = crate::crud::unmask::sanitize_app_actor(
+        let sanitized = crate::crud::unmask::sanitize_app_actor(
             opts_v.get("actor").cloned().filter(|v| !v.is_null()),
         );
         let reason = opts_v
@@ -309,8 +309,9 @@ impl MaskedValue {
             collection: self.collection.clone(),
             row_pk: self.row_pk.clone(),
             column: self.column.clone(),
-            actor,
+            actor: sanitized.actor,
             reason,
+            rejected_claim: sanitized.rejected_claim,
         };
         let binding = self.binding.clone();
 
@@ -404,7 +405,7 @@ impl MaskedValue {
 
         // DB-3: app JS must not be able to claim the reserved `auto` system
         // actor — strip it so an app handler cannot impersonate the platform.
-        let actor = crate::crud::unmask::sanitize_app_actor(
+        let sanitized = crate::crud::unmask::sanitize_app_actor(
             opts_v.get("actor").cloned().filter(|v| !v.is_null()),
         );
         let reason = opts_v
@@ -418,8 +419,9 @@ impl MaskedValue {
                 row_pk: self.row_pk.clone(),
                 columns: cols,
             }],
-            actor,
+            actor: sanitized.actor,
             reason,
+            rejected_claim: sanitized.rejected_claim,
         };
         let binding = self.binding.clone();
         let row_pk = self.row_pk.clone();

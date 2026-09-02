@@ -487,6 +487,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
             column: "ssn".to_string(),
             actor: Some(json!({ "kind": "auto", "id": null })),
             reason: Some("mask_flip integration test".to_string()),
+            rejected_claim: None,
         },
     )
     .await
@@ -629,7 +630,7 @@ async fn audit_rows(pool: &Rc<Pool>, app: &str) -> Vec<Value> {
     let rows = pool
         .query_text_params(
             &format!(
-                "SELECT actor_id, actor_role, collection, row_pk, \"column\", \
+                "SELECT actor_id, actor_role, claimed_actor, collection, row_pk, \"column\", \
                  classification, reason, outcome \
                  FROM \"{app}\".\"__zeroship_audit_unmask\" ORDER BY id"
             ),
@@ -647,6 +648,7 @@ fn unmask_args(row_pk: &str, actor: Option<Value>) -> UnmaskFieldArgs {
         column: "ssn".to_string(),
         actor,
         reason: Some("mask_flip integration test".to_string()),
+        rejected_claim: None,
     }
 }
 
@@ -775,6 +777,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
             column: "hr".to_string(),
             actor: Some(json!({ "kind": "support", "id": "usr_support_1" })),
             reason: None,
+            rejected_claim: None,
         },
     )
     .await
@@ -1148,6 +1151,76 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
     release_pg(pool).await;
 }
 
+/// A REJECTED impersonation must be distinguishable, in the audit trail, from a
+/// caller who simply sent no actor.
+///
+/// `sanitize_app_actor` strips the whole actor - `id` included - when the claim
+/// names a reserved system kind, so both cases reach the audit writer as
+/// `actor: None` and both rows come out `actor_id=""`, `actor_role=""`.
+///
+/// `__zeroship_audit_unmask` is the ONE durable record that someone tried to
+/// exploit DB-3, and DB-3 is the bug the "privilege follows the PROCESS"
+/// invariant is written about. An operator reading this table has to be able to
+/// tell "a handler sent no actor", which happens on every anonymous path and is
+/// routine, from "a handler claimed `kind: auto` and named `usr_support_1` while
+/// doing it", which is an intrusion attempt. The fence working is exactly why
+/// the attempt leaves no other trace.
+///
+/// The two calls below differ in ONE token - the actor - against the same row,
+/// the same column and the same policy, so any difference between the two rows
+/// can only come from the actor. Stripping the claim is correct and must stay;
+/// what must change is that the REJECTED claim is recorded rather than dropped.
+#[compio::test]
+async fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
+    let url = require_pg().await;
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app = "flip_db3_signal";
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    let schema = flip_schema();
+    let person = audited_unmask_fixture(&pool, &url, app, &schema, "123-45-6789").await;
+
+    dispatch_set_mask_policy(app, json!({ "support": ["pci"] }))
+        .await
+        .expect("install the app's declared mask policy");
+
+    // ---- (1) a forged claim on the reserved system kind, naming a real user
+    let forged = parse_args(&unmask_args_json(
+        &person.id,
+        &json!({ "kind": "auto", "id": "usr_support_1" }),
+    ))
+    .expect("the forged payload must parse; DB-3 is a fence, not a shape check");
+    dispatch_unmask(&DbBinding::cold_start(app), forged)
+        .await
+        .expect_err("the forged claim must be refused");
+
+    // ---- (2) no actor at all, same row, same column, same policy
+    let anonymous = parse_args(&unmask_args_json(&person.id, &Value::Null))
+        .expect("an actor-less payload must parse");
+    dispatch_unmask(&DbBinding::cold_start(app), anonymous)
+        .await
+        .expect_err("an absent actor must be refused");
+
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(audit.len(), 2, "both refusals are audited: {audit:?}");
+
+    // Neither row may present the forged claim as identity. This half already
+    // holds and must keep holding - the fix is a new column, never a relaxation
+    // of these two.
+    for row in &audit {
+        assert_eq!(row["actor_id"], json!(""), "{row:?}");
+        assert_eq!(row["actor_role"], json!(""), "{row:?}");
+    }
+
+    assert_ne!(
+        audit[0], audit[1],
+        "the forged-impersonation row and the no-actor row are IDENTICAL, so the \
+         audit trail cannot record that anyone attempted DB-3. Stripping the \
+         claim is right; discarding it is what has to change. Rows: {audit:?}",
+    );
+
+    release_pg(pool).await;
+}
+
 // ---------------------------------------------------------------------------
 // 1c. The OTHER two callers of the same check: the batch and the query hint
 // ---------------------------------------------------------------------------
@@ -1177,6 +1250,9 @@ fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmask
         }],
         actor,
         reason: Some("mask_flip integration test".to_string()),
+        // Args built in Rust never pass the sanitiser, so there is no refused
+        // claim to carry. The DB-3 tests drive `parse_bulk_args` instead.
+        rejected_claim: None,
     }
 }
 
@@ -1351,6 +1427,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         ],
         actor: Some(actor),
         reason: Some("mask_flip integration test".to_string()),
+        rejected_claim: None,
     };
     let err = dispatch_bulk_unmask(&DbBinding::cold_start(app), two_rows.clone())
         .await
@@ -1407,6 +1484,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         ],
         actor: Some(json!({ "kind": "support", "id": "usr_support_1" })),
         reason: Some("mask_flip integration test".to_string()),
+        rejected_claim: None,
     };
     let err = dispatch_bulk_unmask(&DbBinding::cold_start(app), both_denied)
         .await
@@ -1516,6 +1594,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
         "people",
         &both,
         &actor,
+        None,
         &reason,
     )
     .await
@@ -1590,6 +1669,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
         "people",
         &["email".to_string()],
         &actor,
+        None,
         &reason,
     )
     .await
@@ -1611,6 +1691,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
         "people",
         &both,
         &actor,
+        None,
         &reason,
     )
     .await
@@ -1631,6 +1712,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
         "people",
         &both,
         &actor,
+        None,
         &reason,
     )
     .await

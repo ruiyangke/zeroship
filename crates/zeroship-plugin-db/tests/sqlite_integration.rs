@@ -6490,6 +6490,7 @@ fn cold_unmask_with_auto_actor_initializes_and_attaches_before_read() {
             column: "ssn".to_string(),
             actor: Some(serde_json::json!({ "kind": "auto", "id": null })),
             reason: Some("integration test".to_string()),
+            rejected_claim: None,
         };
         let result = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
@@ -6578,6 +6579,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
             column: "ssn".to_string(),
             actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
+            rejected_claim: None,
         };
         let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
@@ -6623,6 +6625,7 @@ fn unmask_column_not_masked_returns_typed_error() {
             column: "name".to_string(),
             actor: Some(serde_json::json!({ "kind": "auto" })),
             reason: None,
+            rejected_claim: None,
         };
         let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
@@ -6664,6 +6667,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
             column: "diag".to_string(),
             actor: Some(serde_json::json!({ "kind": "user", "id": "doctor_x" })),
             reason: Some("chart review".to_string()),
+            rejected_claim: None,
         };
         let _err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
@@ -6827,6 +6831,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             column: "email".to_string(),
             actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
             reason: Some("user requested own data".to_string()),
+            rejected_claim: None,
         };
         let result = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
@@ -6894,6 +6899,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
             column: "ssn".to_string(),
             actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
+            rejected_claim: None,
         };
         let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
@@ -6939,6 +6945,7 @@ fn unmask_default_deny_when_no_policy() {
             column: "name".to_string(),
             actor: Some(serde_json::json!({ "kind": "user", "id": "usr_xyz" })),
             reason: None,
+            rejected_claim: None,
         };
         let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
             .await
@@ -7027,6 +7034,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
             column: "data".to_string(),
             actor: Some(serde_json::json!({ "kind": "support", "id": "sup_1" })),
             reason: None,
+            rejected_claim: None,
         };
         let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args1.clone())
             .await
@@ -8075,6 +8083,7 @@ fn cold_bulk_unmask_initializes_and_attaches_before_read() {
             ],
             actor: Some(serde_json::json!({ "kind": "user", "id": "actor_x" })),
             reason: Some("ops dashboard".into()),
+            rejected_claim: None,
         };
         let result = dispatch_bulk_unmask(&DbBinding::cold_start(app_id), args)
             .await
@@ -8168,6 +8177,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             }],
             actor: Some(serde_json::json!({ "kind": "user", "id": "actor_x" })),
             reason: None,
+            rejected_claim: None,
         };
         let err = dispatch_bulk_unmask(&DbBinding::cold_start(app_id), args)
             .await
@@ -8215,6 +8225,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
             }],
             actor: Some(serde_json::json!({ "kind": "auto" })),
             reason: None,
+            rejected_claim: None,
         };
         let err = dispatch_bulk_unmask(&DbBinding::cold_start(app_id), args)
             .await
@@ -8315,6 +8326,7 @@ fn cold_query_unmask_hint_initializes_and_attaches_before_read() {
             collection,
             &["ssn".to_string()],
             &actor,
+            None,
             &reason,
         )
         .await
@@ -8369,6 +8381,7 @@ fn cold_query_unmask_hint_initializes_and_attaches_before_read() {
             collection,
             &["ssn".to_string()],
             &actor,
+            None,
             &reason,
         )
         .await
@@ -8428,6 +8441,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
             collection,
             &["ssn".to_string()],
             &actor,
+            None,
             &None,
         )
         .await
@@ -8469,6 +8483,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
             collection,
             &["does_not_exist".to_string()],
             &actor,
+            None,
             &None,
         )
         .await
