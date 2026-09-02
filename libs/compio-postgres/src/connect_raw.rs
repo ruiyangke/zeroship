@@ -239,23 +239,25 @@ where
     ///   between `connect()` returning and `Connection::run` draining
     ///   `delayed_notices` would see `None` for keys the server already
     ///   sent (e.g. `server_version`).
-    /// NEVER returns `Ok(None)`, despite the `Option`.
     ///
-    /// The body is a `loop` with no `break`; its only success returns are the
-    /// two `Ok(Some(..))` below, and every other exit is an `Err`. A peer that
-    /// hangs up does not produce `None` either - the read fails first, with
-    /// `buf_stream.rs`'s `UnexpectedEof` ("connection closed by server").
+    /// Returns a `Message`, never an `Option<Message>`.
     ///
-    /// So the five `None => Err(Error::closed())` arms among this function's
-    /// callers are unreachable by construction rather than untested, which is
-    /// why coverage reports them and no test can close them. Measured
-    /// 2026-09-01 by mutating two of those arms: both left
-    /// `a_peer_that_hangs_up_during_authentication_is_reported_as_closed`
-    /// green, because it exercises the EOF path instead.
+    /// It used to return `Result<Option<Message>, Error>`, and the `None` was
+    /// unreachable: the body is a `loop` with no `break`, its only success
+    /// returns are the two `Ok(..)` below, and every other exit is an `Err`. A
+    /// peer that hangs up does not produce `None` either - the read fails
+    /// first, with `buf_stream.rs`'s `UnexpectedEof` ("connection closed by
+    /// server"), which `a_peer_that_hangs_up_during_authentication_is
+    /// _reported_as_closed` pins at two cut points.
     ///
-    /// The `Option` is therefore removable, along with those five arms; that
-    /// is a signature change across five call sites and has not been done.
-    async fn next(&mut self) -> Result<Option<Message>, Error> {
+    /// That `Option` cost six `None => Err(Error::closed())` arms across this
+    /// function's callers, all dead, all reported by coverage as untested.
+    /// They were measured dead on 2026-09-01 - mutating two of them left the
+    /// hang-up test green - and removed with the `Option` itself.
+    ///
+    /// Do not reintroduce it: a caller that needs "the peer went away" already
+    /// gets it as an `Err` from the `?` on this call.
+    async fn next(&mut self) -> Result<Message, Error> {
         loop {
             if let Some(body) = self.pending.take_raw_frame(b'v').map_err(Error::parse)? {
                 match self.phase {
@@ -300,7 +302,7 @@ where
             // iterator is empty.
             if let Some(m) = self.pending.next().map_err(Error::parse)? {
                 self.authentication_started();
-                return Ok(Some(m));
+                return Ok(m);
             }
 
             // DETACHED, not shared. A delayed async frame outlives this batch:
@@ -329,7 +331,7 @@ where
                     // produce an `unexpected_message` error.
                     _ => {
                         self.authentication_started();
-                        return Ok(Some(msg));
+                        return Ok(msg);
                     }
                 },
                 BackendMessage::Normal { messages, .. } => {
@@ -805,22 +807,22 @@ where
             .await
             .map_err(Error::target_session_attrs_fatal)?;
         match message {
-            Some(Message::RowDescription(_))
+            Message::RowDescription(_)
                 if !saw_row_description && state.is_none() && !saw_command_complete =>
             {
                 saw_row_description = true;
             }
-            Some(Message::DataRow(row))
+            Message::DataRow(row)
                 if saw_row_description && state.is_none() && !saw_command_complete =>
             {
                 state = Some(probe.parse(&row).map_err(Error::target_session_attrs)?);
             }
-            Some(Message::CommandComplete(_))
+            Message::CommandComplete(_)
                 if saw_row_description && state.is_some() && !saw_command_complete =>
             {
                 saw_command_complete = true;
             }
-            Some(Message::ParameterStatus(body)) => {
+            Message::ParameterStatus(body) => {
                 let name = body
                     .name()
                     .map_err(Error::parse)
@@ -836,17 +838,16 @@ where
                     .prefer_available_ascii_server_error(result)
                     .map_err(Error::target_session_attrs_fatal)?;
             }
-            Some(Message::ReadyForQuery(_)) if saw_row_description && saw_command_complete => {
+            Message::ReadyForQuery(_) if saw_row_description && saw_command_complete => {
                 let state = state
                     .ok_or_else(Error::unexpected_message)
                     .map_err(Error::target_session_attrs)?;
                 return require_target_session_attrs(target, state);
             }
-            Some(Message::ErrorResponse(body)) => {
+            Message::ErrorResponse(body) => {
                 return Err(Error::target_session_attrs(Error::db(body)));
             }
-            Some(_) => return Err(Error::target_session_attrs(Error::unexpected_message())),
-            None => return Err(Error::target_session_attrs_fatal(Error::closed())),
+            _ => return Err(Error::target_session_attrs(Error::unexpected_message())),
         }
     }
 }
@@ -1135,13 +1136,13 @@ where
     T: TlsStream + Unpin,
 {
     match handshake.next().await? {
-        Some(Message::AuthenticationOk) => {
+        Message::AuthenticationOk => {
             handshake
                 .prefer_available_server_error(check_require_auth(config, AuthMethod::None))?;
             handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
             return Ok(());
         }
-        Some(Message::AuthenticationCleartextPassword) => {
+        Message::AuthenticationCleartextPassword => {
             handshake
                 .prefer_available_server_error(check_require_auth(config, AuthMethod::Password))?;
             handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
@@ -1154,7 +1155,7 @@ where
 
             authenticate_password(handshake, pass).await?;
         }
-        Some(Message::AuthenticationMd5Password(body)) => {
+        Message::AuthenticationMd5Password(body) => {
             handshake.prefer_available_server_error(check_require_auth(config, AuthMethod::Md5))?;
             handshake.prefer_available_server_error(can_skip_channel_binding(config))?;
 
@@ -1167,7 +1168,7 @@ where
             let output = authentication::md5_hash(user.as_bytes(), pass, body.salt());
             authenticate_password(handshake, output.as_bytes()).await?;
         }
-        Some(Message::AuthenticationSasl(body)) => {
+        Message::AuthenticationSasl(body) => {
             // PostgreSQL 16's only SASL authentication family is SCRAM; both
             // SCRAM-SHA-256 and SCRAM-SHA-256-PLUS map to this policy name.
             // Check before constructing or writing the client-first message.
@@ -1184,12 +1185,12 @@ where
         // standard elsewhere -- `libpq_parameter_parity` requires a refused
         // connection parameter to be named through the error's source chain,
         // for exactly this reason.
-        Some(Message::AuthenticationGss) => {
+        Message::AuthenticationGss => {
             handshake.prefer_available_server_error(check_require_auth(config, AuthMethod::Gss))?;
             return handshake
                 .prefer_available_server_error(Err(unsupported_authentication("GSSAPI")));
         }
-        Some(Message::AuthenticationSspi) => {
+        Message::AuthenticationSspi => {
             handshake
                 .prefer_available_server_error(check_require_auth(config, AuthMethod::Sspi))?;
             return handshake
@@ -1198,25 +1199,23 @@ where
         // Neither of these has an `AuthMethod` variant, so neither consults
         // `require_auth`: there is no policy that could permit a method the
         // driver cannot perform.
-        Some(Message::AuthenticationKerberosV5) => {
+        Message::AuthenticationKerberosV5 => {
             return handshake
                 .prefer_available_server_error(Err(unsupported_authentication("Kerberos V5")));
         }
-        Some(Message::AuthenticationScmCredential) => {
+        Message::AuthenticationScmCredential => {
             return handshake
                 .prefer_available_server_error(Err(unsupported_authentication("SCM credential")));
         }
-        Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
-        Some(_) => return Err(Error::unexpected_message()),
-        None => return Err(Error::closed()),
+        Message::ErrorResponse(body) => return Err(Error::db(body)),
+        _ => return Err(Error::unexpected_message()),
     }
 
     // After sending our credentials, expect an AuthenticationOk.
     match handshake.next().await? {
-        Some(Message::AuthenticationOk) => Ok(()),
-        Some(Message::ErrorResponse(body)) => Err(Error::db(body)),
-        Some(_) => Err(Error::unexpected_message()),
-        None => Err(Error::closed()),
+        Message::AuthenticationOk => Ok(()),
+        Message::ErrorResponse(body) => Err(Error::db(body)),
+        _ => Err(Error::unexpected_message()),
     }
 }
 
@@ -1367,13 +1366,12 @@ where
     handshake.send(FrontendMessage::Raw(buf.freeze())).await?;
 
     let body = match handshake.next().await? {
-        Some(Message::AuthenticationSaslContinue(body)) => body,
-        Some(Message::AuthenticationOk) => {
+        Message::AuthenticationSaslContinue(body) => body,
+        Message::AuthenticationOk => {
             return Err(incomplete_authentication_exchange(config));
         }
-        Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
-        Some(_) => return Err(Error::unexpected_message()),
-        None => return Err(Error::closed()),
+        Message::ErrorResponse(body) => return Err(Error::db(body)),
+        _ => return Err(Error::unexpected_message()),
     };
 
     scram
@@ -1385,13 +1383,12 @@ where
     handshake.send(FrontendMessage::Raw(buf.freeze())).await?;
 
     let body = match handshake.next().await? {
-        Some(Message::AuthenticationSaslFinal(body)) => body,
-        Some(Message::AuthenticationOk) => {
+        Message::AuthenticationSaslFinal(body) => body,
+        Message::AuthenticationOk => {
             return Err(incomplete_authentication_exchange(config));
         }
-        Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
-        Some(_) => return Err(Error::unexpected_message()),
-        None => return Err(Error::closed()),
+        Message::ErrorResponse(body) => return Err(Error::db(body)),
+        _ => return Err(Error::unexpected_message()),
     };
 
     scram
@@ -1462,7 +1459,7 @@ where
 
     loop {
         match handshake.next().await? {
-            Some(Message::ParameterStatus(body)) => {
+            Message::ParameterStatus(body) => {
                 let result = record_parameter_status(
                     &mut parameters,
                     body.name().map_err(Error::parse)?.to_string(),
@@ -1478,7 +1475,7 @@ where
             // match, and the arm that used to sit here was unreachable - it
             // queued into `delayed` a second time, which is why the byte budget
             // has exactly one enforcement point rather than two.
-            Some(Message::ReadyForQuery(_)) => {
+            Message::ReadyForQuery(_) => {
                 handshake.finish_startup();
                 let (process_id, secret_key) = match handshake.backend_key.take() {
                     Some((process_id, secret_key)) => (process_id, Some(secret_key)),
@@ -1486,9 +1483,8 @@ where
                 };
                 return Ok((process_id, secret_key, parameters));
             }
-            Some(Message::ErrorResponse(body)) => return Err(Error::db(body)),
-            Some(_) => return Err(Error::unexpected_message()),
-            None => return Err(Error::closed()),
+            Message::ErrorResponse(body) => return Err(Error::db(body)),
+            _ => return Err(Error::unexpected_message()),
         }
     }
 }
@@ -1772,7 +1768,7 @@ mod tests {
 
         assert!(matches!(
             handshake.next().await.unwrap(),
-            Some(Message::AuthenticationCleartextPassword)
+            Message::AuthenticationCleartextPassword
         ));
         let error = authenticate_password(&mut handshake, b"wrong")
             .await
@@ -2197,7 +2193,7 @@ mod tests {
 
         assert!(matches!(
             handshake.next().await.unwrap(),
-            Some(Message::ReadyForQuery(_))
+            Message::ReadyForQuery(_)
         ));
         handshake.finish_startup();
         let error = probe_target_session_attrs(
@@ -3933,7 +3929,7 @@ mod tests {
 
         assert!(matches!(
             handshake.next().await.expect("read scripted handshake"),
-            Some(Message::AuthenticationOk)
+            Message::AuthenticationOk
         ));
         assert_eq!(handshake.delayed.len(), 1);
         assert_eq!(handshake.delayed_bytes, NOTIFICATION_FRAME_LEN);
