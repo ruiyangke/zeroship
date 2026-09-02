@@ -105,8 +105,8 @@ impl std::fmt::Debug for TxCanceller {
     }
 }
 
-impl TxCanceller {
-    /// Capture the canceller for a session that is about to be installed.
+impl TxConnection {
+    /// Capture the canceller for this session, before it is installed.
     ///
     /// Taken at install time and not at cancel time, because at cancel time the
     /// client is exactly what we do not have.
@@ -116,16 +116,22 @@ impl TxCanceller {
     /// (its autocommit reservation is minted per command). A PostgreSQL session
     /// always yields a token; whether the server issued a usable secret key is
     /// decided later, by `cancel_query` itself.
-    pub(crate) fn capture(client: &TxConnection) -> Option<Self> {
-        match client {
-            TxConnection::Postgres(pg) => Some(Self::Postgres(Box::new(PostgresCanceller {
+    ///
+    /// The fifth and last of the lane's operations, beside `exec`, `settle`,
+    /// `cleanup` and `destroy`: the driver asks the session for its canceller
+    /// rather than matching the session to build one.
+    pub(crate) fn canceller(&self) -> Option<TxCanceller> {
+        match self {
+            Self::Postgres(pg) => Some(TxCanceller::Postgres(Box::new(PostgresCanceller {
                 pool: Rc::clone(pg.pool()),
                 token: pg.cancel_token(),
             }))),
-            TxConnection::Sqlite(handle) => handle.cancel_handle().map(Self::Sqlite),
+            Self::Sqlite(handle) => handle.cancel_handle().map(TxCanceller::Sqlite),
         }
     }
+}
 
+impl TxCanceller {
     /// Deliver the cancellation, and wait for the backend to acknowledge that it
     /// has it.
     ///
