@@ -328,12 +328,27 @@ worker stops trusting descriptor bindings.
 
 ## What the lists become
 
-`assign` in the charter is what lets the hardcoded lists go: `SYSTEM_FIELD_NAMES`
-and `IMMUTABLE_SYSTEM_FIELDS` in Rust, the SDK list in `install-schema.ts`, three
-copies in `sdks/db/src/types.ts`, two prose strings in
+`assign` in the charter is what lets the ERGONOMIC lists go: `IMMUTABLE_SYSTEM_FIELDS`
+in Rust, the SDK list in `install-schema.ts`, three copies in
+`sdks/db/src/types.ts`, two prose strings in
 `crates/zeroship-plugin-db/src/error.rs:728-745`, and the field-naming inside
-`system_fields_pass.rs`, which iterates the descriptor and invokes the named
-generator instead. Adding an eighth system field becomes a charter line.
+`system_fields_pass.rs`, which iterates the charter and invokes the named
+generator instead.
+
+**`SYSTEM_FIELD_NAMES` is NOT one of them, and this paragraph said it was.** It
+is a trusted producer, for a reason that only became visible once the write pass
+was converted: `implicit_read_projection_parts`
+(`crates/zeroship-schema/src/query.rs:3644-3656`) runs two loops, and only the
+SECOND consults `readable`. The seven are projected unconditionally; everything
+else is projected at the creator-authored descriptor's discretion. Deleting the
+const would move the platform's own columns into the discretionary loop, where
+`readable: false` suppresses them. The const is the mechanism that makes them
+unhideable, not a convenience copy of the charter.
+
+So "adding an eighth system field becomes a charter line" is true of the DDL and
+the write pass and false of the system as a whole. An eighth column would be
+created, assigned and projected - but only through the descriptor, so unlike the
+seven it could be hidden by hand-editing one JSON key.
 
 **Two consumers cannot be converted, and the tree says so.** The three
 per-dialect DDL emitters live in `zeroship-schema` (`query.rs:208`, `:322`,
@@ -350,7 +365,23 @@ merged. The gate cannot assert equality - the lists are different projections
 (all seven, the three timestamps, the immutable subset, the indexed subset, DDL
 tuples, row types, prose) - so it must define named contracts and register each
 mirror against one, and state its limits as
-`tests/inject_policy_mirror_gate.sh:55-89` does.
+`tests/inject_policy_mirror_gate.sh` does.
+
+**Two of those contracts are now built.** `inject_policy_mirror_gate.sh` arm 5
+compares the charter's assigned columns against `SYSTEM_FIELD_NAMES` in content
+and order; arm 6 compares the charter's three system indexes against all three
+per-dialect `SYSTEM_INDEXED_COLS` copies (`query.rs:227`, `:341`, `:471`),
+separately rather than deduplicated, so two dialects agreeing while a third does
+not is caught. Both are mutation-proved in both directions and against a blinded
+extractor.
+
+The projections still unguarded, in the order they would hurt: the DDL tuples
+(types, nullability, collation - the charter header records that PostgreSQL and
+the engine already disagree on `id`/`created_by`/`updated_by`, so this one is
+known-drifted rather than merely unchecked), the row types in
+`sdks/db/src/types.ts`, and the prose in `error.rs`. Types need a rendered-DDL
+comparison rather than a textual one, which is why they are last: the check is a
+different kind of instrument, not a bigger version of arms 5 and 6.
 
 ---
 
