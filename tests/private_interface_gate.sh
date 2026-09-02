@@ -100,22 +100,44 @@ fi
 # a module no shipped binary compiles is not API the split publishes. This gate
 # counts them, because it runs UNDER `--features test-helpers`, where those
 # modules very much do compile and the lint very much can fire inside them.
-# Census 225 + 35 gated = 260 here. A divergence of any other size is worth
-# reading rather than reconciling automatically.
+# Census 147 shipped + 35 gated = 182 here. A divergence of any other size is
+# worth reading rather than reconciling automatically.
 # ---------------------------------------------------------------------------
+# Brace-tracking, not "stop at the first #[cfg(test)] mod". That older rule
+# assumed a file's test module is last; five files here declare an early named
+# one and keep shipping items after it (see the note in
+# tests/lib/pub_fence_census.sh, which carries the same function).
+count_shipped_pub() {
+  awk '
+    BEGIN { depth = 0; intest = 0; pending = 0; n = 0 }
+    /^[[:space:]]*#\[cfg\(test\)\]/ { pending = 1; next }
+    {
+      if (pending && NF) {
+        if ($0 ~ /^[[:space:]]*(pub )?mod /) {
+          intest = 1
+          depth = gsub(/\{/, "{") - gsub(/\}/, "}")
+          pending = 0
+          next
+        }
+        pending = 0
+      }
+      if (intest) {
+        depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+        if (depth <= 0) { intest = 0; depth = 0 }
+        next
+      }
+      if ($0 ~ /^[[:space:]]*(\/\/|\*)/) next
+      if ($0 ~ /^[[:space:]]*pub (fn|struct|enum|trait|const|static|type|unsafe fn|async fn) /) n++
+    }
+    END { print n + 0 }' "$1"
+}
+
 capped=$(grep -oE "^pub\(crate\) mod [a-z_]+;" "$LIB" | awk '{print $3}' | tr -d ';' | sort -u)
 fenced=0
 for m in $capped; do
   files=$(find "$SRC/$m.rs" "$SRC/$m" -name '*.rs' 2>/dev/null)
   for f in $files; do
-    b=$(awk '/^#\[cfg\(test\)\]/{c=NR;next} c&&NF{if($0~/^(pub )?mod /){print c;exit} c=0}' "$f")
-    [ -n "$b" ] || b=999999
-    k=$(awk -v b="$b" '
-      NR >= b { exit }
-      /^[[:space:]]*(\/\/|\*)/ { next }
-      /^[[:space:]]*pub (fn|struct|enum|trait|const|static|type|unsafe fn|async fn) / { n++ }
-      END { print n+0 }' "$f")
-    fenced=$((fenced + k))
+    fenced=$((fenced + $(count_shipped_pub "$f")))
   done
 done
 

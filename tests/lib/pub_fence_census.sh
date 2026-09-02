@@ -152,6 +152,43 @@ module_is_test_gated() {  # $1 = a .rs path under $SRC
   [ "$decls" -gt 0 ] && [ "$decls" -eq "$gated" ]
 }
 
+# Count line-start `pub <kind>` declarations OUTSIDE any `#[cfg(test)] mod`
+# block, tracking brace depth to find where each block ends.
+#
+# THE RULE WAS "stop counting at the first #[cfg(test)] mod" UNTIL 2026-09-02,
+# which assumes a file's test module is last. Five files in this tree break
+# that: plugin-db's `auth/bootstrap.rs` (`mod reserved_table_revoke_tests` at
+# :489, real `mod tests` at :555), `backend/postgres.rs` (:1467, then :1671 and
+# :1702), `lib.rs` (five blocks from :506), `v8_classes/subscription.rs`
+# (:217, :350), and zeroship-schema's `query.rs` (`mod schema_renderer_tests`
+# at :594, real `mod tests` at :6618). The old rule discarded every shipped
+# item after the first marker - one item here, and 6000 lines of query.rs when
+# the same rule was used to survey that file.
+count_shipped_pub() {
+  awk '
+    BEGIN { depth = 0; intest = 0; pending = 0; n = 0 }
+    /^[[:space:]]*#\[cfg\(test\)\]/ { pending = 1; next }
+    {
+      if (pending && NF) {
+        if ($0 ~ /^[[:space:]]*(pub )?mod /) {
+          intest = 1
+          depth = gsub(/\{/, "{") - gsub(/\}/, "}")
+          pending = 0
+          next
+        }
+        pending = 0
+      }
+      if (intest) {
+        depth += gsub(/\{/, "{") - gsub(/\}/, "}")
+        if (depth <= 0) { intest = 0; depth = 0 }
+        next
+      }
+      if ($0 ~ /^[[:space:]]*(\/\/|\*)/) next
+      if ($0 ~ /^[[:space:]]*pub (fn|struct|enum|trait|const|static|type|unsafe fn|async fn) /) n++
+    }
+    END { print n + 0 }' "$1"
+}
+
 printf '%-22s %10s %10s  %s\n' MODULE SHIPPED TEST_GATED 'ALSO PUB UNDER test-helpers'
 total=0; gated_total=0; modules=0
 for m in $capped; do
@@ -160,13 +197,7 @@ for m in $capped; do
   modules=$((modules + 1))
   n=0; g=0
   for f in $files; do
-    b=$(awk '/^#\[cfg\(test\)\]/{c=NR;next} c&&NF{if($0~/^(pub )?mod /){print c;exit} c=0}' "$f")
-    [ -n "$b" ] || b=999999
-    k=$(awk -v b="$b" '
-      NR >= b { exit }
-      /^[[:space:]]*(\/\/|\*)/ { next }
-      /^[[:space:]]*pub (fn|struct|enum|trait|const|static|type|unsafe fn|async fn) / { n++ }
-      END { print n+0 }' "$f")
+    k=$(count_shipped_pub "$f")
     if module_is_test_gated "$f"; then g=$((g + k)); else n=$((n + k)); fi
   done
   note=""
