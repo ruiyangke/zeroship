@@ -39,7 +39,7 @@
 
 use zeroship_runtime::state::OpError;
 
-use crate::binding::DbBinding;
+use zeroship_data_core::binding::DbBinding;
 use crate::v8_classes::collection::mint_collection;
 
 /// Mint the collections-only `tx` view for a `Db.transaction(fn)`
@@ -102,7 +102,7 @@ mod tests {
 
     use zeroship_runtime::init_v8;
 
-    use crate::binding::DbBinding;
+    use zeroship_data_core::binding::DbBinding;
 
     fn assert_absent(scope: &mut v8::PinScope, obj: v8::Local<v8::Object>, name: &str) {
         let key = v8::String::new(scope, name).unwrap();

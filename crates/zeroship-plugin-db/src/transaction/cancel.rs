@@ -49,7 +49,7 @@ use compio_postgres::{CancelToken, Pool};
 use crate::backend::sqlite::reservation::TerminalOutcome as SqliteTerminalOutcome;
 use crate::backend::sqlite::session::SqliteCancelHandle;
 use crate::context::TxConnection;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// What one delivered cancellation accomplished.
 ///

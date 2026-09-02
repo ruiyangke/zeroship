@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::diff::LiveSchema;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Backend;
@@ -510,7 +510,7 @@ impl PostgresBackend {
 impl VectorIndex for PostgresBackend {
     async fn vector_search(
         &self,
-        binding: &crate::binding::DbBinding,
+        binding: &zeroship_data_core::binding::DbBinding,
         collection: &str,
         column: &str,
         query: &[f32],
@@ -607,7 +607,7 @@ impl PostgresBackend {
 impl SpatialIndex for PostgresBackend {
     async fn spatial_near(
         &self,
-        binding: &crate::binding::DbBinding,
+        binding: &zeroship_data_core::binding::DbBinding,
         collection: &str,
         column: &str,
         point: GeoPoint,
@@ -893,7 +893,7 @@ mod backup_pg {
     use crate::backend::{
         BusyPolicy, LockGuard, LockScope, PgLockManager, PitrTarget, SnapshotHandle, SnapshotOpts,
     };
-    use crate::error::DbError;
+    use zeroship_data_core::error::DbError;
 
     /// Parse a `file:///abs/path` URI into the underlying filesystem
     /// path. Returns a typed `Configuration` error for unsupported

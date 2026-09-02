@@ -13,7 +13,7 @@ use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
 
-use crate::binding::DbBinding;
+use zeroship_data_core::binding::DbBinding;
 use crate::crud::{
     dispatch_aggregate, dispatch_bulk_unmask_field, dispatch_count, dispatch_delete_many,
     dispatch_delete_one, dispatch_distinct, dispatch_find, dispatch_insert, dispatch_insert_many,

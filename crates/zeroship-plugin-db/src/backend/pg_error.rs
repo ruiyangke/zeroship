@@ -13,7 +13,7 @@
 //! a PostgreSQL crate without pulling the vendor into the crate that owns
 //! [`DbError`].
 
-use crate::error::{
+use zeroship_data_core::error::{
     DbError, DenyReason, GRANT_REVOKED, GRANT_REVOKED_MESSAGE, MISSING_ROLE_HINT,
     MISSING_ROLE_MESSAGE, SCHEMA_NOT_PROVISIONED, SessionSetupDisposition, SessionSetupError,
 };
@@ -161,7 +161,7 @@ pub fn classify(e: &compio_postgres::Error) -> DbError {
 /// resulting message body. The SQLSTATE-derived `.code` is preserved.
 pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
     let mut err = classify(&e);
-    crate::error::prefix_message(&mut err, &format!("{context}: "));
+    zeroship_data_core::error::prefix_message(&mut err, &format!("{context}: "));
     err
 }
 

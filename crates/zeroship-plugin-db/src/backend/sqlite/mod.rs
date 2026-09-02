@@ -35,7 +35,7 @@ use crate::backend::Backend;
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::backend::SchemaIntrospect;
 use crate::backend::{DialectBuilder, LockManager, SqlExecutor};
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 use self::change_sink::ChangeSink;
 
@@ -1394,7 +1394,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
     /// any) follow.
     async fn vector_search(
         &self,
-        binding: &crate::binding::DbBinding,
+        binding: &zeroship_data_core::binding::DbBinding,
         collection: &str,
         column: &str,
         query: &[f32],
@@ -1517,7 +1517,7 @@ fn build_spatial_near_base_query(
 impl crate::backend::SpatialIndex for SqliteBackend {
     async fn spatial_near(
         &self,
-        binding: &crate::binding::DbBinding,
+        binding: &zeroship_data_core::binding::DbBinding,
         collection: &str,
         column: &str,
         point: crate::backend::GeoPoint,
@@ -2017,7 +2017,7 @@ mod backup_sqlite {
 
     use super::SqliteBackend;
     use crate::backend::{BusyPolicy, LockScope, PitrTarget, SnapshotHandle, SnapshotOpts};
-    use crate::error::DbError;
+    use zeroship_data_core::error::DbError;
 
     /// Tag used by both `snapshot` and `restore` for the per-app backup lock.
     /// It matches the PostgreSQL arm's shared tag.

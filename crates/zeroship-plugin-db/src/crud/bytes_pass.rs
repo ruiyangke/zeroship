@@ -59,7 +59,7 @@
 use base64::Engine as _;
 use serde_json::Value;
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 use crate::query::SqlDialect;
 
 /// Cheap walk: does any field def on `schema` declare a plain, non-encrypted

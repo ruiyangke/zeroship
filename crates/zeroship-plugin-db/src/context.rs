@@ -38,9 +38,9 @@ use compio_postgres::{OwnedPooledClient, Pool};
 
 use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, PostgresBackend};
-use crate::binding::DbBinding;
+use zeroship_data_core::binding::DbBinding;
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 use crate::service::DbResourceKey;
 use zeroship_core::change_event::ChangeEvent;
 

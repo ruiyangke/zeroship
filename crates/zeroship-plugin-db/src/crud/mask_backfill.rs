@@ -50,7 +50,7 @@ use zeroize::Zeroizing;
 use crate::backend::EncryptedColumn;
 use crate::crud::mask_pass::apply_mask_kind;
 use crate::diff::{Classification, MaskKind};
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Default batch size for backfill / rewrite loops. We use 1000 here
 /// as a middle ground between

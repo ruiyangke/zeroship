@@ -52,7 +52,7 @@
 //! arm (`vector_ip_ops` opclass).
 
 use crate::backend::VectorMetric;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 use crate::query::quote_ident;
 
 /// Reject [`VectorMetric::InnerProduct`] with a typed `DbError` on

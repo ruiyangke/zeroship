@@ -41,7 +41,7 @@ use serde_json::Value;
 
 use crate::backend::pg_error;
 use crate::backend::pg_session_sql::autocommit_local_session_setup_sql;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// The result of selecting a single cell: `SELECT <col> FROM <t> WHERE id = $1`.
 ///
@@ -91,7 +91,7 @@ pub(crate) async fn roled_rows(
     // synchronous so it cannot issue async RESET SQL).
     let tx = client.transaction().await.map_err(|e| {
         let mut err = pg_error::classify(&e);
-        crate::error::prefix_message(
+        zeroship_data_core::error::prefix_message(
             &mut err,
             "db: autocommit BEGIN (per-app §17.5 + DB-1 guards): ",
         );
@@ -101,7 +101,7 @@ pub(crate) async fn roled_rows(
     let setup_sql = autocommit_local_session_setup_sql(app_id)?;
     tx.simple_query(&setup_sql).await.map_err(|e| {
         let mut classified = pg_error::classify_pg_per_app_session_setup(&e, app_id);
-        crate::error::prefix_message(classified.error_mut(), "db: per-app session setup: ");
+        zeroship_data_core::error::prefix_message(classified.error_mut(), "db: per-app session setup: ");
         classified.into_db_error()
     })?;
 
@@ -116,7 +116,7 @@ pub(crate) async fn roled_rows(
     // connection dirty so the pool drains it before the next checkout.
     tx.commit().await.map_err(|e| {
         let mut err = pg_error::classify(&e);
-        crate::error::prefix_message(
+        zeroship_data_core::error::prefix_message(
             &mut err,
             "db: autocommit COMMIT (per-app §17.5 + DB-1 guards): ",
         );

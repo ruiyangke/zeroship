@@ -26,7 +26,7 @@ use zeroship_core::database_role::per_app_role_name;
 
 use super::APP_ROLE_TEMPLATE;
 use crate::backend::pg_error;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 

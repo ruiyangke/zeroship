@@ -35,6 +35,7 @@
 
 #![allow(unsafe_code)]
 
+use crate::op_error::ToOpError;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -43,7 +44,7 @@ use zeroship_runtime_macros::v8_class;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
-use crate::binding::{COLD_START_DEPLOY_TOKEN, DbBinding};
+use zeroship_data_core::binding::{COLD_START_DEPLOY_TOKEN, DbBinding};
 use crate::transaction::transaction_dispatch;
 use crate::v8_bridge::v8_value_to_serde_json;
 use crate::v8_classes::collection::mint_collection;
@@ -235,7 +236,7 @@ impl Db {
             "env.db.__platform string access denied (platform_internal_only) — \
              the platform capability handle is private-symbol-only"
         );
-        Err(crate::error::DbError::AccessDenied {
+        Err(zeroship_data_core::error::DbError::AccessDenied {
             code: "platform_internal_only",
         }
         .to_op_error())

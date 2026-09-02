@@ -34,7 +34,7 @@ impl DbBinding {
     /// [`COLD_START_DEPLOY_TOKEN`] only when the host injected none. Nothing
     /// in a shipped binary should be constructing a deploy identity from an
     /// app id alone, and this gate is what makes that checkable.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(feature = "test-helpers")]
     pub fn cold_start(app_id: impl Into<String>) -> Self {
         Self::new(app_id, COLD_START_DEPLOY_TOKEN)
     }

@@ -6,6 +6,7 @@
 //! retains only the app-scoped watchdog operation. Abandoned-slot cleanup is
 //! operator-owned and runs from the worker process, outside V8.
 
+use crate::op_error::ToOpError;
 use zeroship_runtime::state::{OpResult, ResolveValue};
 
 use crate::exec::ensure_pool;

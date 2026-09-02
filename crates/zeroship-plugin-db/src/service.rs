@@ -58,7 +58,7 @@ use std::sync::Arc;
 use compio_postgres::Pool;
 use sha2::{Digest, Sha256};
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 use crate::{backend_for_url, BackendUrl, DbPlugin};
 
 /// Connections the operator-lifecycle pool keeps for maintenance work.

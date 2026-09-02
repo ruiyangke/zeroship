@@ -53,7 +53,7 @@ use compio_postgres::Pool;
 
 use crate::backend::BackendHandle;
 use crate::backend::pg_error;
-use crate::error::{DbError, prefix_message};
+use zeroship_data_core::error::{DbError, prefix_message};
 
 /// Options for [`drop_namespace`].
 #[derive(Debug, Clone)]

@@ -97,7 +97,7 @@ use crate::backend::sqlite::reservation::{
     self, CancelCleanup, CancelIntent, Lane, Reservation, ReservationKind, TerminalOutcome,
     TxLaneId,
 };
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Wire code for "this session cannot open another app's transaction
 /// connection right now".

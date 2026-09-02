@@ -9,7 +9,7 @@ use zeroship_core::change_event::ChangeEvent;
 
 use crate::backend::sqlite::SqliteBackend;
 use crate::backend::sqlite::change_sink::{ChangeSink, DeliveryDisposition};
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Engine adapter from the SQLite-owned delivery port to the process broker.
 #[derive(Debug, Clone, Copy)]

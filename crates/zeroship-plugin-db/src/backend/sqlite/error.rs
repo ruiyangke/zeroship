@@ -22,7 +22,7 @@
 //! from `libsqlite3_sys` constants (which would force a `use` for
 //! each — the integers are part of the SQLite stable ABI).
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 // ---------------------------------------------------------------------------
 // Extended result-code constants. The values are part of SQLite's

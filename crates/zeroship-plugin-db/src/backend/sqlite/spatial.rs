@@ -39,7 +39,7 @@
 //! the byte order on read — this module does not handle that case.
 
 use crate::backend::GeoPoint;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Earth's mean radius in metres (IUGG / WGS84 standard). The
 /// haversine formula treats Earth as a perfect sphere — actual

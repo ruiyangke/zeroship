@@ -3,8 +3,8 @@ use std::sync::Arc;
 use base64::Engine as _;
 use serde_json::Value;
 
-use crate::binding::DbBinding;
-use crate::error::DbError;
+use zeroship_data_core::binding::DbBinding;
+use zeroship_data_core::error::DbError;
 
 pub(crate) enum SchemaFieldScope<'a> {
     All,

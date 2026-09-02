@@ -1,0 +1,47 @@
+[package]
+name = "zeroship-data-core"
+version = "0.1.0"
+edition = "2021"
+description = "The data plane's domain tier: the typed error hierarchy every backend translates INTO, and the immutable identity of one env.db binding. Names no database driver, no V8, and no runtime - the translators live in the vendor crates and the OpError lowering lives in the adapter."
+
+# ---------------------------------------------------------------------------
+# WHAT THIS MANIFEST IS FOR.
+# ---------------------------------------------------------------------------
+#
+# Decision 5 of docs/proposals/2026-08-31-data-crate-shape.md - "the core and
+# every other non-vendor crate never embed a vendor directly" - is enforced HERE
+# rather than by review. `compio-postgres`, `rusqlite`, `v8` and
+# `zeroship-runtime` are absent below, so naming `compio_postgres::Error` in this
+# crate is E0433 at compile time, for everyone, forever.
+#
+# THE FENCE HAS A HOLE AND IT IS LOAD-BEARING TO SAY SO. E0433 stops a crate
+# SPELLING a path; it says nothing about a crate HOLDING a value of that type.
+# `zeroship-schema` below declares `compio-postgres` itself, and
+# crates/zeroship-schema/src/error.rs:31 is `pub source: compio_postgres::Error`
+# - a public field. Any code here that touches that field handles a vendor value
+# by INFERENCE, with the vendor token appearing on no line, so neither this
+# manifest nor tests/vendor_embedding_gate.sh can see it. The floor is therefore
+# zeroship-data-core -> zeroship-schema -> compio-postgres, and this crate is
+# vendor-free in SPELLING rather than in its dependency closure.
+[dependencies]
+# `DbError`'s Display/Debug and the descriptor-shaped payloads it carries.
+serde_json = { workspace = true }
+# `impl From<PerAppRoleNameError> for DbError` - per-app role naming is a
+# platform vocabulary type, not a driver type.
+zeroship-core = { workspace = true }
+# `impl From<QueryError>` and `impl From<MaskSentinelError>`, both unconditional
+# `impl` blocks, which is why this edge cannot be feature-gated away. See the
+# hole described above.
+zeroship-schema = { workspace = true }
+
+[features]
+# `DbBinding::cold_start` only. It was gated `#[cfg(any(test, feature =
+# "test-helpers"))]` while it lived in `zeroship-plugin-db`, where `test` was
+# true for that crate's own unit tests. Across a crate boundary `cfg(test)` is
+# THIS crate's test build and never fires for a consumer, so the `test` arm
+# would have silently become dead and the constructor unreachable from every
+# test that uses it. The feature is now the whole gate.
+test-helpers = []
+
+[lints]
+workspace = true

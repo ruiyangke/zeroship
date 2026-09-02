@@ -50,7 +50,7 @@ use sha2::Sha256;
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::auth::util::{hex_decode, hex_encode};
 #[cfg(any(test, feature = "test-helpers"))]
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 #[cfg(any(test, feature = "test-helpers"))]
 type HmacSha256 = Hmac<Sha256>;

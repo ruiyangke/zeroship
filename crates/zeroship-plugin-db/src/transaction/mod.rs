@@ -134,13 +134,14 @@ pub(crate) mod cancel;
 #[cfg(any(test, feature = "test-helpers"))]
 pub mod probe;
 
+use crate::op_error::ToOpError;
 use std::cell::Cell;
 
 use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
 use crate::backend::pg_error;
-use crate::binding::DbBinding;
-use crate::error::DbError;
+use zeroship_data_core::binding::DbBinding;
+use zeroship_data_core::error::DbError;
 use crate::exec::clear_pending_emits;
 use crate::tx_route::TxRoute;
 use crate::v8_bridge::runtime_state;
@@ -177,7 +178,7 @@ pub(crate) async fn client_exec_on_tx(
     client: &crate::context::TxConnection,
     sql: &str,
     params: &[&str],
-) -> Result<u64, crate::error::DbError> {
+) -> Result<u64, zeroship_data_core::error::DbError> {
     use crate::backend::SqlExecutor;
     use crate::context::TxConnection;
 
@@ -190,7 +191,7 @@ pub(crate) async fn client_exec_on_tx(
         }
         (crate::backend::BackendHandle::Postgres(_), TxConnection::Sqlite(_))
         | (crate::backend::BackendHandle::Sqlite(_), TxConnection::Postgres(_)) => Err(
-            crate::error::DbError::internal("db: transaction backend/client mismatch"),
+            zeroship_data_core::error::DbError::internal("db: transaction backend/client mismatch"),
         ),
     }
 }
@@ -211,17 +212,17 @@ pub(crate) async fn client_exec_on_tx(
 pub(crate) async fn apply_per_app_role(
     client: &compio_postgres::Client,
     app_id: &str,
-) -> Result<(), crate::error::SessionSetupError> {
+) -> Result<(), zeroship_data_core::error::SessionSetupError> {
     // SET LOCAL ROLE + the DB-1 timeout guards (statement / idle-in-tx / lock)
     // in one simple-query batch — all SET LOCAL, so they revert at the tx end.
     // The idle-in-tx guard is the load-bearing defense: a creator callback that
     // never resolves can no longer pin this dedicated connection forever and
     // exhaust the shared Postgres for other tenants.
     let sql = crate::auth::bootstrap::tx_session_setup_sql(app_id)
-        .map_err(crate::error::SessionSetupError::failed)?;
+        .map_err(zeroship_data_core::error::SessionSetupError::failed)?;
     client.simple_query(&sql).await.map_err(|e| {
         let mut classified = pg_error::classify_pg_per_app_session_setup(&e, app_id);
-        crate::error::prefix_message(
+        zeroship_data_core::error::prefix_message(
             classified.error_mut(),
             "db: tx session setup (per-app section 17.5 + DB-1 guards): ",
         );
@@ -848,7 +849,7 @@ fn run_begin_continuation(
             // Callback threw synchronously → straight to rollback, then
             // reject the outer with the captured exception.
             let op_err = exc.map_or_else(
-                || crate::error::DbError::internal("db.transaction: callback threw").to_op_error(),
+                || zeroship_data_core::error::DbError::internal("db.transaction: callback threw").to_op_error(),
                 |g| {
                     let local = v8::Local::new(scope, &g);
                     zeroship_runtime::state::OpError::js_value(

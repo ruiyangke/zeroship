@@ -11,7 +11,7 @@
 //! itself. The one exception is [`HeldSession`], which exists to reproduce a
 //! *timing* the production paths reach by scheduling rather than by request.
 
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 use super::driver;
 use super::reducer::frames::{FrameClose, FrameId};

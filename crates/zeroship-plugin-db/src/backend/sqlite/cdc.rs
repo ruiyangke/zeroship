@@ -95,7 +95,7 @@ use crate::backend::sqlite::SqliteBackend;
 use crate::backend::sqlite::change_sink::{ChangeSink, DeliveryDisposition};
 use crate::backend::sqlite::session::SqliteSession;
 use crate::backend::{BrokerPauseGuard, ChangeStream, SchemaPendingGuard};
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 // ---------------------------------------------------------------------------
 // Dispatcher state — captured by the hook closures

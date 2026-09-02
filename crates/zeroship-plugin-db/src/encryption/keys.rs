@@ -67,7 +67,7 @@ use zeroize::Zeroizing;
 use zeroship_core::config::DeclaredEnvFamily;
 
 use super::aead::AeadKey;
-use crate::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Root key material handed to the process directly, addressed by key id.
 ///
