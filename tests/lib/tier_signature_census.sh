@@ -175,6 +175,23 @@ region_filter() {   # $1 = file, $2 = "prod" | "test"
       initem = 1
       next
     }
+    # DEFECT 11 is defect 10 own blind spot, found the next cycle by acting on
+    # it. `pend` survived a blank line but not a second ATTRIBUTE, so
+    #     #[cfg(any(test, feature = "test-helpers"))]
+    #     #[doc(hidden)]
+    #     pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, ..)
+    # dropped out of the gate at the `#[doc(hidden)]` line and was scanned as
+    # shipped code. Both remaining `compio_postgres` signatures in lib.rs have
+    # exactly that shape, which is why #109 still read as 2 open violations
+    # after its bench half had already been fixed on 2026-09-01.
+    #
+    # NOTE FOR EDITORS: this awk program is a SINGLE-QUOTED shell string. An
+    # apostrophe anywhere in it - including in a comment - ends the string and
+    # the file stops parsing. The first draft of this block said "defect 10s"
+    # with an apostrophe and the whole census died with a bash syntax error
+    # that printed NOTHING through the usual `| grep VIOLATION`, which reads
+    # exactly like a clean run.
+    pend && /^#\[/ { next }
     pend && /^[[:space:]]*$/ { next }
     { pend = 0 }
     intest {
