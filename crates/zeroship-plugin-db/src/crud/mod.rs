@@ -977,6 +977,154 @@ pub(crate) fn dispatch_insert_many<'s>(
 // updateOne / updateMany — write paths
 // ---------------------------------------------------------------------------
 
+/// The ENGINE half of `updateOne`.
+///
+/// Returns a `(rows, has_masked)` PAIR rather than the [`read_pipeline::ApplyResult`]
+/// the insert halves return. That is not a stylistic difference: the
+/// probe-found-nothing arm below returns `(Vec::new(), false)`, a shape no
+/// `ApplyResult` produces, and the `false` is load-bearing - see the comment at
+/// that return. `actor_id` is eager for the reason given on [`run_insert`].
+pub(crate) async fn run_update_one(
+    binding: DbBinding,
+    coll: String,
+    route: crate::tx_route::TxRoute,
+    filter: Value,
+    update: Value,
+    actor_id: Option<String>,
+) -> Result<(Vec<Value>, bool), DbError> {
+    let mut update = update;
+    write_pipeline::inspect_update(binding.app_id(), &coll, &mut update)?;
+    // Detect creator-supplied CAS version + reject
+    // the unsupported "version filter without id" shape eagerly.
+    let cas_version = system_fields_pass::extract_cas_version(&filter, &coll)?;
+    if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
+        return Err(DbError::multi_row_version_filter_unsupported(&coll));
+    }
+
+    // The descriptor entry for this collection. Everything below reads it:
+    // the per-row-randomised-encryption decision, the SQLite boolean
+    // lowering, and the target-row probe's filter. An undeclared collection
+    // rejects the op rather than silently skipping the per-row path.
+    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    let per_row_encrypted_update =
+        write_pipeline::update_requires_per_row_encryption(&schema, &update);
+    let target_row = if per_row_encrypted_update {
+        let target_rows =
+            write_pipeline::resolve_target_row_ids(&route, &coll, &filter, 1, &schema)
+                .await?;
+        let Some(target_row) = target_rows.first().cloned() else {
+            if let Some(expected_version) = cas_version {
+                let row_id = filter
+                    .as_object()
+                    .and_then(|o| o.get("id"))
+                    .and_then(|v| v.as_str());
+                return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+            }
+            // Probe found nothing and the caller supplied no CAS predicate:
+            // resolve with JS `null`. Returned as an EMPTY ROW SET rather
+            // than a bespoke `ResolveValue::Json("null")`, because
+            // `first_row_or_null_masked(vec![], false)` lowers to exactly
+            // that string - so the success path has one shape, not two.
+            //
+            // THE `false` IS LOAD-BEARING; DO NOT DERIVE IT. An empty row
+            // vector does NOT imply "nothing was masked": `read_pipeline`
+            // computes `has_masked` from the SCHEMA, not from the rows, so
+            // it is `true` for zero rows on any collection with a masked
+            // column. Deriving it here - which reads like a consistency fix,
+            // since every other arm does derive it - would silently turn
+            // this arm's `ResolveValue::Json` into `JsonWithRehydration`
+            // and hand JS a rehydration pass over `null`.
+            return Ok((Vec::new(), false));
+        };
+        Some(target_row)
+    } else {
+        None
+    };
+
+    let mut update = update;
+    let row_pk = target_row.as_ref().map_or("", |row| row.row_pk.as_str());
+    write_pipeline::apply(
+        &binding,
+        &coll,
+        &mut update,
+        write_pipeline::ApplyMode::Update { row_pk },
+    )
+    .await?;
+    maybe_lower_sqlite_boolean_update(&schema, &mut update);
+    let sql_filter = if let Some(target_row) = target_row {
+        let mut sql_filter = serde_json::json!({ "id": target_row.id_value });
+        if let Some(expected_version) = cas_version {
+            sql_filter["version"] = Value::from(expected_version);
+        }
+        sql_filter
+    } else {
+        let mut sql_filter = filter.clone();
+        maybe_lower_sqlite_boolean_filter(&schema, &mut sql_filter);
+        sql_filter
+    };
+    // Auto-bump via the system-fields-aware builder.
+    // Actor flows into the `updated_by` bind; the `hints` from the
+    // pre-pass tell the builder which auto-bumps to suppress.
+    // No `skip_*` knob is set: the pass stripped every column the
+    // charter re-assigns on write, so the patch cannot carry a
+    // competing assignment for the builder to defer to.
+    let autobump = query::SystemFieldAutoBump {
+        dispatch_write: true,
+        actor_id: actor_id.as_deref(),
+        ..Default::default()
+    };
+    let built = query::build_update_one_with_system_fields(
+        binding.app_id(),
+        &coll,
+        &schema,
+        &sql_filter,
+        &update,
+        current_sql_dialect(),
+        &autobump,
+    );
+    let bq = built.map_err(DbError::from)?;
+    let rows = exec_mutation_with_emit(
+        bq,
+        &route,
+        &coll,
+        zeroship_core::change_event::ChangeOp::Update,
+    )
+    .await?;
+    let result = read_pipeline::apply(
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions::default(),
+    )
+    .await?;
+    // Optimistic-concurrency check. When the
+    // creator supplied a `version: N` predicate AND the
+    // RETURNING set is empty, classify as a CAS failure
+    // (the row exists at a different version, or the row
+    // is missing — the SDK consumer retries either way).
+    if let Some(expected_version) = cas_version {
+        if result.rows.is_empty() {
+            let row_id = filter
+                .as_object()
+                .and_then(|o| o.get("id"))
+                .and_then(|v| v.as_str());
+            return Err(DbError::version_mismatch(&coll, row_id, expected_version));
+        }
+        // The `id` PK ensures at most one row matches
+        // `{ id: ..., version: N }`; a result set >1 is
+        // a regression in the dispatcher contract.
+        if result.rows.len() > 1 {
+            tracing::error!(
+                collection = %coll,
+                row_count = result.rows.len(),
+                "version_mismatch_unexpected_multi_row: CAS update returned >1 row"
+            );
+            return Err(DbError::internal("version_mismatch_unexpected_multi_row"));
+        }
+    }
+    Ok((result.rows, result.has_masked))
+}
+
 /// Shared dispatch for `updateOne`. See [`dispatch_insert`] for the
 /// capability-gate contract.
 ///
@@ -999,7 +1147,6 @@ pub(crate) fn dispatch_update_one<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let coll = collection.to_string();
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
 
@@ -1011,139 +1158,7 @@ pub(crate) fn dispatch_update_one<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        async move {
-            let mut update = update;
-            write_pipeline::inspect_update(&app, &coll, &mut update)?;
-            // Detect creator-supplied CAS version + reject
-            // the unsupported "version filter without id" shape eagerly.
-            let cas_version = system_fields_pass::extract_cas_version(&filter, &coll)?;
-            if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
-                return Err(DbError::multi_row_version_filter_unsupported(&coll));
-            }
-
-            // The descriptor entry for this collection. Everything below reads it:
-            // the per-row-randomised-encryption decision, the SQLite boolean
-            // lowering, and the target-row probe's filter. An undeclared collection
-            // rejects the op rather than silently skipping the per-row path.
-            let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-            let per_row_encrypted_update =
-                write_pipeline::update_requires_per_row_encryption(&schema, &update);
-            let target_row = if per_row_encrypted_update {
-                let target_rows =
-                    write_pipeline::resolve_target_row_ids(&route, &coll, &filter, 1, &schema)
-                        .await?;
-                let Some(target_row) = target_rows.first().cloned() else {
-                    if let Some(expected_version) = cas_version {
-                        let row_id = filter
-                            .as_object()
-                            .and_then(|o| o.get("id"))
-                            .and_then(|v| v.as_str());
-                        return Err(DbError::version_mismatch(&coll, row_id, expected_version));
-                    }
-                    // Probe found nothing and the caller supplied no CAS predicate:
-                    // resolve with JS `null`. Returned as an EMPTY ROW SET rather
-                    // than a bespoke `ResolveValue::Json("null")`, because
-                    // `first_row_or_null_masked(vec![], false)` lowers to exactly
-                    // that string - so the success path has one shape, not two.
-                    //
-                    // THE `false` IS LOAD-BEARING; DO NOT DERIVE IT. An empty row
-                    // vector does NOT imply "nothing was masked": `read_pipeline`
-                    // computes `has_masked` from the SCHEMA, not from the rows, so
-                    // it is `true` for zero rows on any collection with a masked
-                    // column. Deriving it here - which reads like a consistency fix,
-                    // since every other arm does derive it - would silently turn
-                    // this arm's `ResolveValue::Json` into `JsonWithRehydration`
-                    // and hand JS a rehydration pass over `null`.
-                    return Ok((Vec::new(), false));
-                };
-                Some(target_row)
-            } else {
-                None
-            };
-
-            let mut update = update;
-            let row_pk = target_row.as_ref().map_or("", |row| row.row_pk.as_str());
-            write_pipeline::apply(
-                &binding,
-                &coll,
-                &mut update,
-                write_pipeline::ApplyMode::Update { row_pk },
-            )
-            .await?;
-            maybe_lower_sqlite_boolean_update(&schema, &mut update);
-            let sql_filter = if let Some(target_row) = target_row {
-                let mut sql_filter = serde_json::json!({ "id": target_row.id_value });
-                if let Some(expected_version) = cas_version {
-                    sql_filter["version"] = Value::from(expected_version);
-                }
-                sql_filter
-            } else {
-                let mut sql_filter = filter.clone();
-                maybe_lower_sqlite_boolean_filter(&schema, &mut sql_filter);
-                sql_filter
-            };
-            // Auto-bump via the system-fields-aware builder.
-            // Actor flows into the `updated_by` bind; the `hints` from the
-            // pre-pass tell the builder which auto-bumps to suppress.
-            // No `skip_*` knob is set: the pass stripped every column the
-            // charter re-assigns on write, so the patch cannot carry a
-            // competing assignment for the builder to defer to.
-            let autobump = query::SystemFieldAutoBump {
-                dispatch_write: true,
-                actor_id: actor_id.as_deref(),
-                ..Default::default()
-            };
-            let built = query::build_update_one_with_system_fields(
-                &app,
-                &coll,
-                &schema,
-                &sql_filter,
-                &update,
-                current_sql_dialect(),
-                &autobump,
-            );
-            let bq = built.map_err(DbError::from)?;
-            let rows = exec_mutation_with_emit(
-                bq,
-                &route,
-                &coll,
-                zeroship_core::change_event::ChangeOp::Update,
-            )
-            .await?;
-            let result = read_pipeline::apply(
-                &binding,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions::default(),
-            )
-            .await?;
-            // Optimistic-concurrency check. When the
-            // creator supplied a `version: N` predicate AND the
-            // RETURNING set is empty, classify as a CAS failure
-            // (the row exists at a different version, or the row
-            // is missing — the SDK consumer retries either way).
-            if let Some(expected_version) = cas_version {
-                if result.rows.is_empty() {
-                    let row_id = filter
-                        .as_object()
-                        .and_then(|o| o.get("id"))
-                        .and_then(|v| v.as_str());
-                    return Err(DbError::version_mismatch(&coll, row_id, expected_version));
-                }
-                // The `id` PK ensures at most one row matches
-                // `{ id: ..., version: N }`; a result set >1 is
-                // a regression in the dispatcher contract.
-                if result.rows.len() > 1 {
-                    tracing::error!(
-                        collection = %coll,
-                        row_count = result.rows.len(),
-                        "version_mismatch_unexpected_multi_row: CAS update returned >1 row"
-                    );
-                    return Err(DbError::internal("version_mismatch_unexpected_multi_row"));
-                }
-            }
-            Ok((result.rows, result.has_masked))
-        },
+        run_update_one(binding, coll, route, filter, update, actor_id),
         |(rows, has_masked)| crate::v8_bridge::first_row_or_null_masked(rows, has_masked),
     )));
 
