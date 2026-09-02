@@ -242,9 +242,21 @@ pub(crate) mod exec;
 #[cfg(feature = "test-helpers")]
 pub mod exec;
 
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod drop_namespace;
-#[cfg(feature = "test-helpers")]
+// COMPILED ONLY INTO TEST BUILDS, and that is now structural rather than
+// documented. `drop_namespace` has no production caller anywhere in the
+// workspace - measured 2026-09-02 across every crate, excluding tests and its
+// own file: zero call sites. `zeroship-control`'s
+// `cron/workflow_engine.rs` says so independently ("plugin-db's currently
+// unwired drop_namespace"). It is exercised only by the PG integration suite.
+//
+// The module carried `#![allow(dead_code)]` and a comment saying to remove the
+// allow "when a database-keyed migrate-server coordinator owns the call". That
+// comment was accurate and is the reason this is a GATE rather than a deletion:
+// the code is wanted, its caller is not built yet. Gating rather than allowing
+// makes the fact checkable - a production build no longer contains a
+// `DROP SCHEMA` / `DROP ROLE` path at all - and takes the module's
+// `compio_postgres` coupling out of the engine tier the split has to extract.
+#[cfg(any(test, feature = "test-helpers"))]
 pub mod drop_namespace;
 
 #[cfg(not(feature = "test-helpers"))]

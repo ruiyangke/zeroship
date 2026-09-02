@@ -41,13 +41,25 @@
 //! detaching) is surfaced so the caller retries from step 3. Every other
 //! step is a no-op when its precondition is already met.
 //!
-//! ## Dead-code posture (migration-service redesign pending)
+//! ## This module is compiled only into test builds
 //!
 //! [`drop_namespace`] has no production caller and is not a creator-facing or
 //! control-plane app lifecycle entry point. It is fully exercised by the
-//! `tests/integration.rs` PG suite (reachable via `test-helpers`). Remove the
-//! allow only when a database-keyed migrate-server coordinator owns the call.
-#![allow(dead_code)]
+//! `tests/integration.rs` PG suite. Un-gate the `mod` declaration in `lib.rs`
+//! when a database-keyed migrate-server coordinator owns the call.
+//!
+//! Until 2026-09-02 that fact was carried by a module-wide
+//! `#![allow(dead_code)]` and this paragraph. The gate says the same thing and
+//! checks it: a production build now contains no `DROP SCHEMA` / `DROP ROLE`
+//! path at all, and the allow proved unnecessary once the gate was in place
+//! (removed and re-checked under `--features test-helpers` - the tests use
+//! every item, so nothing goes unused in the configuration that compiles it).
+//!
+//! **The tier census still counts this file.** It tiers by path and reads each
+//! file on its own, so a `mod` declaration gated in `lib.rs` is invisible to
+//! it; the one `compio_postgres` row here is real code in a build nobody ships.
+//! Item-level cfgs ARE understood (census defect 10); module-level ones, from
+//! the declaring file, are not.
 
 use compio_postgres::Pool;
 

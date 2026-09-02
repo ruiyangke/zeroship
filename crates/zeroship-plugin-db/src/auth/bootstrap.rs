@@ -21,6 +21,7 @@
 //! re-running [`ensure_per_app_role`] on a provisioned cluster is a
 //! cheap no-op.
 
+#[cfg(any(test, feature = "test-helpers"))]
 use compio_postgres::Pool;
 use zeroship_core::database_role::per_app_role_name;
 
@@ -66,6 +67,7 @@ const WORKER_WRITABLE_RESERVED_TABLE: &str = "__zeroship_audit_unmask";
 /// [`crate::backend::pg_error::coded_sql`]; this is the
 /// `auth/bootstrap`-scoped
 /// thin wrapper.
+#[cfg(any(test, feature = "test-helpers"))]
 fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
     pg_error::coded_sql(&format!("auth/bootstrap: {context}"), e)
 }
@@ -77,6 +79,7 @@ fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
 /// `pg_roles` first, then issue the CREATE only when missing. The
 /// `attrs` string is appended verbatim to the CREATE ROLE statement —
 /// callers pass identifier-clean literals, no user input flows here.
+#[cfg(any(test, feature = "test-helpers"))]
 async fn create_role_if_missing(pool: &Pool, name: &str, attrs: &str) -> Result<bool, DbError> {
     let exists: bool = !pool
         .query_text_params("SELECT 1 FROM pg_roles WHERE rolname = $1", &[name])
@@ -236,6 +239,7 @@ pub struct PerAppRoleOutcome {
 ///
 /// Runs under the caller's pool, which in production is the platform
 /// (bootstrap) role — a superuser or CREATEROLE principal.
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn ensure_per_app_role(pool: &Pool, app_id: &str) -> Result<PerAppRoleOutcome, DbError> {
     let role = per_app_role_name(app_id)?;
     let schema = crate::query::quote_ident(app_id);
@@ -446,6 +450,7 @@ fn grant_worker_unmask_audit_append_privileges_sql(app_id: &str, role: &str) -> 
     )
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 async fn set_worker_unmask_audit_append_privileges(
     pool: &Pool,
     app_id: &str,
@@ -466,6 +471,7 @@ async fn set_worker_unmask_audit_append_privileges(
     Ok(())
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 async fn revoke_reserved_system_table_privileges(
     pool: &Pool,
     app_id: &str,
@@ -533,6 +539,7 @@ mod reserved_table_revoke_tests {
 /// (e.g. a grant in another schema that should never have existed), the
 /// DROP errors loudly rather than silently — surfacing the §17.5
 /// violation instead of masking it.
+#[cfg(any(test, feature = "test-helpers"))]
 pub async fn drop_per_app_role(pool: &Pool, app_id: &str) -> Result<(), DbError> {
     let role = per_app_role_name(app_id)?;
     pool.execute(&format!("DROP ROLE IF EXISTS \"{role}\""), &[])
