@@ -3565,20 +3565,38 @@ const _procedures = { upsertConflict };
             Some("user_seed"),
             "first upsert should return the inserted row"
         );
+        // The insert-only property, and it is the sharpest assertion here
+        // because the two documents supply DIFFERENT ids: the conflict arm
+        // keeps the seeded row's id rather than taking `user_new` from
+        // `EXCLUDED`.
         assert_eq!(
             second.get("id").and_then(|v| v.as_str()),
             Some("user_seed"),
             "conflict update must keep the original id"
         );
-        assert_eq!(
-            second.get("created_by").and_then(|v| v.as_str()),
-            Some("usr_seed"),
-            "conflict update must preserve original created_by"
+        // The two documents supply DIFFERENT actor ids, and neither lands.
+        // `created_by` / `updated_by` are charter-assigned, so the value comes
+        // from the request's authenticated user - here there is none, and the
+        // generator yields NULL rather than the id the document asked for.
+        //
+        // This asserted `usr_seed` / `usr_update` until the write pass started
+        // iterating the charter. It was pinning the DB-3 shape: app JS naming
+        // whichever actor it liked on a row it wrote.
+        assert!(
+            first.get("created_by").is_none_or(serde_json::Value::is_null),
+            "a supplied created_by must not land on the insert arm: {first:?}"
         );
-        assert_eq!(
-            second.get("updated_by").and_then(|v| v.as_str()),
-            Some("usr_update"),
-            "mutable updated_by should update on conflict"
+        assert!(
+            second
+                .get("created_by")
+                .is_none_or(serde_json::Value::is_null),
+            "a supplied created_by must not land on the conflict arm: {second:?}"
+        );
+        assert!(
+            second
+                .get("updated_by")
+                .is_none_or(serde_json::Value::is_null),
+            "a supplied updated_by must not land on the conflict arm: {second:?}"
         );
         assert_eq!(
             second.get("version").and_then(|v| v.as_i64()),
@@ -3614,14 +3632,19 @@ const _procedures = { upsertConflict };
             TypedCell::Text(id) => assert_eq!(id, "user_seed"),
             other => panic!("id must be TEXT, got {other:?}"),
         }
-        match &row[1] {
-            TypedCell::Text(created_by) => assert_eq!(created_by, "usr_seed"),
-            other => panic!("created_by must be TEXT, got {other:?}"),
-        }
-        match &row[2] {
-            TypedCell::Text(updated_by) => assert_eq!(updated_by, "usr_update"),
-            other => panic!("updated_by must be TEXT, got {other:?}"),
-        }
+        // Read back from the DATABASE, not from the returned row, that neither
+        // supplied actor id was stored. Both documents named one; there is no
+        // authenticated user on this vector, so the stored value is NULL.
+        assert!(
+            matches!(&row[1], TypedCell::Null),
+            "created_by must be NULL when no actor is bound, got {:?}",
+            row[1]
+        );
+        assert!(
+            matches!(&row[2], TypedCell::Null),
+            "updated_by must be NULL when no actor is bound, got {:?}",
+            row[2]
+        );
         match &row[3] {
             TypedCell::Integer(version) => assert_eq!(*version, 2),
             other => panic!("version must be INTEGER, got {other:?}"),
