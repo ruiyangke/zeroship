@@ -245,7 +245,7 @@ pub trait SqlExecutor: 'static {
 /// `LocalApp` both, since SQLite is in-process by definition;
 /// §8.5). The variant classifies *visibility*, not key shape.
 /// Name of the per-app lock shared by snapshot and restore.
-pub const SNAPSHOT_RESTORE_LOCK_TAG: &str = "snapshot_restore";
+pub(crate) const SNAPSHOT_RESTORE_LOCK_TAG: &str = "snapshot_restore";
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum LockScope {
@@ -299,7 +299,7 @@ impl LockScope {
     /// Borrow the `app_id` field regardless of variant. Convenience
     /// for log-rendering and audit-row metadata that doesn't care
     /// about visibility class.
-    pub fn app_id(&self) -> &str {
+    pub(crate) fn app_id(&self) -> &str {
         match self {
             Self::GlobalApp { app_id, .. } | Self::LocalApp { app_id, .. } => app_id.as_str(),
         }
@@ -307,7 +307,7 @@ impl LockScope {
 
     /// Borrow the `name` field regardless of variant. Convenience
     /// for log-rendering and audit-row metadata.
-    pub fn name(&self) -> &str {
+    pub(crate) fn name(&self) -> &str {
         match self {
             Self::GlobalApp { name, .. } | Self::LocalApp { name, .. } => name.as_str(),
         }
@@ -801,7 +801,7 @@ pub trait DialectBuilder: 'static {
 /// implement this trait — it would have its own audit-helper signatures (a
 /// `SqliteExecutor` accessor returning `&sqlite::Connection`, etc.).
 #[cfg(any(test, feature = "test-helpers"))]
-pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::OwnedPooledClient> {
+pub(crate) trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::OwnedPooledClient> {
     /// Borrow the underlying `compio_postgres::Pool`. Free-function
     /// audit helpers in [`crate::audit`] take `&Pool` directly; this
     /// accessor lets generic consumers (e.g.
@@ -832,7 +832,7 @@ pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::OwnedPooledClient
 /// [`LockManager::acquire_advisory_lock`] takes, so the orchestrator can hand
 /// it straight into `LockGuard::acquire` without an adapter.
 #[cfg(any(test, feature = "test-helpers"))]
-pub trait PgLockManager: LockManager<Client = compio_postgres::OwnedPooledClient> {
+pub(crate) trait PgLockManager: LockManager<Client = compio_postgres::OwnedPooledClient> {
     /// Acquire a pool-leased client for advisory-lock duty.
     ///
     /// Returns an [`compio_postgres::OwnedPooledClient`]: the lease owns an
@@ -1463,7 +1463,7 @@ impl Drop for SchemaPendingGuard {
 /// that enum, and this trait exists so tests can assert the concrete backends
 /// implement the whole sub-trait set.
 #[cfg(any(test, feature = "test-helpers"))]
-pub trait Backend:
+pub(crate) trait Backend:
     SqlExecutor + LockManager + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema> + 'static
 {
 }
@@ -1725,7 +1725,7 @@ impl BackendHandle {
     /// is the stable consumer contract so the existing
     /// `ok_or_else(...)?` consumer sites map the non-PG case to a
     /// typed `backend_unsupported` error rather than a panic.
-    pub fn as_postgres(&self) -> Option<&PostgresBackend> {
+    pub(crate) fn as_postgres(&self) -> Option<&PostgresBackend> {
         match self {
             Self::Postgres(b) => Some(b),
             Self::Sqlite(_) => None,
@@ -1817,7 +1817,7 @@ impl BackendHandle {
     /// Returning the store rather than performing the crypto is deliberate:
     /// key SOURCING is the only part a backend ever contributed, and now that
     /// both source identically the seam is a borrow, not a dispatch.
-    pub fn key_store(&self) -> &crate::encryption::KeyStore {
+    pub(crate) fn key_store(&self) -> &crate::encryption::KeyStore {
         match self {
             Self::Postgres(b) => b.key_store(),
             Self::Sqlite(b) => b.key_store(),

@@ -160,7 +160,7 @@ fn register_sqlite_vec_once() {
 /// borrow from the statement; we materialise to owned `Option<String>`
 /// here so the reply can cross the actor / future boundary).
 #[allow(dead_code)]
-pub type Row = Vec<Option<String>>;
+pub(crate) type Row = Vec<Option<String>>;
 
 /// A typed SQLite cell - preserves the underlying storage-class
 /// discriminator across the actor boundary instead of collapsing every
@@ -807,7 +807,7 @@ impl SqliteSession {
     /// shape could not express. It deliberately does NOT publish itself in
     /// `tx_owner`, so it cannot block a legitimate reservation.
     #[cfg(feature = "test-helpers")]
-    pub fn unregistered_transaction_handle_for_tests(
+    pub(crate) fn unregistered_transaction_handle_for_tests(
         self: &Rc<Self>,
     ) -> SqliteSessionHandle {
         // `u32::MAX` is a lane id `next_tx_lane` cannot reach before the
@@ -1149,7 +1149,7 @@ impl std::fmt::Debug for SqliteCancelGuard {
 impl SqliteCancelGuard {
     #[allow(dead_code)] // nothing arms this guard yet - see the type comment
     #[must_use]
-    pub fn new(handle: SqliteCancelHandle) -> Self {
+    pub(crate) fn new(handle: SqliteCancelHandle) -> Self {
         Self {
             handle: Some(handle),
         }
@@ -1158,7 +1158,7 @@ impl SqliteCancelGuard {
     /// Stop this guard from cancelling. Call it before returning a delivered
     /// result to the caller.
     #[allow(dead_code)] // nothing arms this guard yet - see the type comment
-    pub fn disarm(mut self) {
+    pub(crate) fn disarm(mut self) {
         self.handle = None;
     }
 }
@@ -1368,13 +1368,13 @@ pub(crate) struct NextCommandGate {
 
 #[cfg(any(test, feature = "test-helpers"))]
 impl NextCommandGate {
-    pub async fn wait_until_blocked(&self) -> Result<(), DbError> {
+    pub(crate) async fn wait_until_blocked(&self) -> Result<(), DbError> {
         self.entered_rx.recv_async().await.map_err(|_| {
             DbError::internal("SqliteSession test gate: worker dropped entered signal")
         })
     }
 
-    pub fn release(self) {
+    pub(crate) fn release(self) {
         let _ = self.release_tx.send(());
     }
 }
@@ -1384,7 +1384,7 @@ impl SqliteSession {
     /// Install a one-shot gate for the next command **this session's** actor
     /// runs. Sessions do not share the slot, so a gate armed here can only ever
     /// be tripped by a command this session was asked to run.
-    pub fn arm_next_command_gate_for_tests(&self) -> NextCommandGate {
+    pub(crate) fn arm_next_command_gate_for_tests(&self) -> NextCommandGate {
         let (entered_tx, entered_rx) = flume::bounded(1);
         let (release_tx, release_rx) = flume::bounded(1);
         let mut slot = self
