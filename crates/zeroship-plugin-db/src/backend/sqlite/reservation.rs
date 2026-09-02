@@ -52,7 +52,7 @@ use zeroship_data_core::error::DbError;
 /// and the caller both need a `Copy` key they can put inside a [`Lane`], and an
 /// app id is a `String`.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct TxLaneId(pub(crate) u32);
+pub(crate) struct TxLaneId(pub(crate) u32);
 
 /// Which connection a command runs on.
 ///
@@ -66,7 +66,7 @@ pub struct TxLaneId(pub(crate) u32);
 /// refused while app A held one (defect L22b). Carrying the lane id here is
 /// what makes the two keys the same key.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum Lane {
+pub(crate) enum Lane {
     /// `op_conn` - autocommit operations, each wrapped in
     /// `BEGIN DEFERRED ... COMMIT` where the statement permits it. One
     /// connection serves every app: an autocommit reservation is minted per
@@ -154,7 +154,7 @@ pub struct Reservation {
 /// What a reservation is for. Autocommit reservations retire at command
 /// completion; transaction reservations at `Settle` or cancellation.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum ReservationKind {
+pub(crate) enum ReservationKind {
     Autocommit,
     Transaction,
 }
@@ -345,7 +345,7 @@ impl Reservation {
 
 /// What [`Reservation::request_cancel`] decided.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum CancelIntent {
+pub(crate) enum CancelIntent {
     /// Intent recorded; the actor had not started, so do not interrupt.
     Set,
     /// Intent recorded and the actor is running this command sequence:
@@ -565,7 +565,7 @@ pub(crate) fn outcome_for_a_claimed_terminal(reservation: &Reservation) -> Termi
 /// Shared with the `SQLITE_INTERRUPT` arm of the error mapper
 /// (`super::error::from_sqlite`) so a cancellation reports the same code
 /// whether the actor classified it or a raw rusqlite error carried it out.
-pub const CANCELLED_CODE: &str = "statement_cancelled";
+pub(crate) const CANCELLED_CODE: &str = "statement_cancelled";
 
 /// Classify a `COMMIT`, per SC-2's terminal table.
 ///
