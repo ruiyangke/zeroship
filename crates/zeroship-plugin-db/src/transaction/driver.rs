@@ -736,7 +736,7 @@ async fn open_session(app_id: &str, begin: BeginIntent) -> Result<(), OpenSessio
 /// holding it out of the slot - so the one moment it can be taken is the one
 /// moment we still own the client.
 fn install(app_id: &str, client: TxConnection) {
-    let canceller = super::cancel::TxCanceller::capture(&client);
+    let canceller = client.canceller();
     crate::context::with_mut(|c| {
         let previous = c.install_tx_client(app_id, client);
         debug_assert!(
