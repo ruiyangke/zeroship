@@ -39,7 +39,9 @@ impl<'a> FromSql<'a> for Rect<f64> {
 
 impl ToSql for Rect<f64> {
     fn to_sql(&self, _: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        types::box_to_sql(self.min().x, self.min().y, self.max().x, self.max().y, out);
+        // HIGH corner first, matching `geo_types_07.rs` and the server. See the
+        // comment there for why this diverges from upstream.
+        types::box_to_sql(self.max().x, self.max().y, self.min().x, self.min().y, out);
         Ok(IsNull::No)
     }
 

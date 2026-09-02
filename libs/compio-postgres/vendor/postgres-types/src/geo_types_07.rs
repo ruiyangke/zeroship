@@ -39,7 +39,12 @@ impl<'a> FromSql<'a> for Rect<f64> {
 
 impl ToSql for Rect<f64> {
     fn to_sql(&self, _: &Type, out: &mut BytesMut) -> Result<IsNull, Box<dyn Error + Sync + Send>> {
-        types::box_to_sql(self.min().x, self.min().y, self.max().x, self.max().y, out);
+        // HIGH corner first. PostgreSQL emits `box '(1,2),(3,4)'` as 3,4,1,2,
+        // and `box_from_sql` above reads the leading pair as `upper_right`, so
+        // writing the low corner first contradicts our own decoder. Upstream
+        // writes min-then-max; `box_recv` normalises on receipt, so this is
+        // wire conformance rather than a value fix.
+        types::box_to_sql(self.max().x, self.max().y, self.min().x, self.min().y, out);
         Ok(IsNull::No)
     }
 
