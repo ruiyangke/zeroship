@@ -1987,12 +1987,18 @@ mod backup_sqlite {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::SqliteBackend;
-    use crate::backend::{BusyPolicy, LockScope, PitrTarget, SnapshotHandle, SnapshotOpts};
+    use crate::backend::{
+        BusyPolicy, LockScope, PitrTarget, SNAPSHOT_RESTORE_LOCK_TAG, SnapshotHandle, SnapshotOpts,
+    };
     use zeroship_data_core::error::DbError;
 
-    /// Tag used by both `snapshot` and `restore` for the per-app backup lock.
-    /// It matches the PostgreSQL arm's shared tag.
-    const SNAPSHOT_RESTORE_LOCK_TAG: &str = "snapshot_restore";
+    // The lock tag is IMPORTED, not redeclared. This module carried its own
+    // `const SNAPSHOT_RESTORE_LOCK_TAG: &str = "snapshot_restore"` until
+    // 2026-09-02, whose doc comment said "It matches the PostgreSQL arm's
+    // shared tag" - an agreement between two string literals, held by hand and
+    // checked by nothing. `crate::backend` already exports the one both arms
+    // mean, and this module already imported five of its neighbours on the
+    // line above.
 
     /// Parse a `file:///abs/path` URI into the underlying filesystem
     /// path. Mirrors the PG arm's `parse_dest_path` shape so the SDK
