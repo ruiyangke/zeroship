@@ -72,8 +72,6 @@ pub(crate) mod mask_policy;
 #[cfg(feature = "test-helpers")]
 pub mod mask_policy;
 
-pub(crate) use mask_policy::dispatch_set_mask_policy_field;
-pub(crate) use unmask::{dispatch_bulk_unmask_field, dispatch_unmask_field};
 
 // Mask backfill / rewrite / removal jobs driven by the migration service.
 // Same visibility pattern: `pub` under `test-helpers` so integration tests

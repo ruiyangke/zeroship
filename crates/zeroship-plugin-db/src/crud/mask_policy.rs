@@ -415,40 +415,6 @@ fn load_sqlite_blocking(path: PathBuf, app_id: String) -> Result<Option<MaskPoli
     }
 }
 
-// ---------------------------------------------------------------------------
-// V8 dispatch glue
-// ---------------------------------------------------------------------------
-
-use zeroship_runtime::state::ResolveValue;
-
-/// V8-facing dispatch helper for `zeroship.db.setMaskPolicy`. Returns
-/// the unresolved Promise; the dispatcher body runs as a spawned op
-/// and resolves with `{}` on success or rejects with the typed
-/// `OpError`.
-///
-/// Called from `v8_classes::db::Db::set_mask_policy` (the `#[v8_method]`
-/// wrapping this entry point).
-pub(crate) fn dispatch_set_mask_policy_field<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    app_id: &str,
-    policy_v: Value,
-) -> v8::Local<'s, v8::Promise> {
-    let state = crate::v8_bridge::runtime_state(scope);
-    let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
-    let app = app_id.to_string();
-
-    // The engine half already existed as a separate `async fn`; what was here
-    // was a hand-rolled copy of `settle`'s two arms. Its error arm and
-    // `settle`'s are the same `reject_op` call.
-    state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
-        resolver,
-        request_id,
-        async move { dispatch_set_mask_policy(&app, policy_v).await },
-        |()| ResolveValue::Json("{}".to_string()),
-    )));
-
-    promise
-}
 
 // ---------------------------------------------------------------------------
 // Tests
