@@ -2987,6 +2987,37 @@ mod tests {
         );
     }
 
+    /// `is_pool_closed` must find the marker in EITHER chain shape.
+    ///
+    /// The pool raises it as `Error::connect(io::Error::other(PoolClosedError))`,
+    /// so today it sits in an io payload and the live suite reaches it that way.
+    /// The source comment records that whether such a payload ALSO surfaces as
+    /// a standard error-chain source depends on the Rust version - which is why
+    /// the function tries both, and why only one of the two arms can be
+    /// exercised by the pool's own constructor on any given toolchain. The
+    /// other is reachable here because `PoolClosedError` is crate-private and
+    /// this is the crate.
+    ///
+    /// Without the direct-source arm, a toolchain that starts exposing io
+    /// payloads as sources would silently turn every closed-pool rejection into
+    /// an ordinary connect failure, and callers branching on this predicate
+    /// would retry a pool that is never coming back.
+    #[test]
+    fn is_pool_closed_finds_the_marker_in_either_chain_shape() {
+        assert!(
+            pool_closed_error().is_pool_closed(),
+            "the shape the pool actually raises was not recognised"
+        );
+        assert!(
+            Error::tls(Box::new(PoolClosedError)).is_pool_closed(),
+            "a directly-sourced marker was not recognised"
+        );
+        assert!(
+            !Error::tls("an unrelated tls failure".into()).is_pool_closed(),
+            "an unrelated error was reported as a closed pool"
+        );
+    }
+
     /// Every `PoolConfig` getter must return its OWN field.
     ///
     /// Four of the five are `Duration`. Any permutation among those four type
