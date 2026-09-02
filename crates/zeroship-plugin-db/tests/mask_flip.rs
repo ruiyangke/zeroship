@@ -47,6 +47,10 @@ use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
+use zeroship_plugin_db::binding::DbBinding;
+use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
+use zeroship_plugin_db::crud::unmask::{dispatch_unmask, UnmaskFieldArgs};
+use zeroship_plugin_db::error::DbError;
 use zeroship_plugin_db::query::{
     build_aggregate, build_create_table_with_fks, build_distinct, build_find_with_schema,
     build_insert, build_where, raw_column_name, read_surface_columns, validate_field_name,
@@ -450,6 +454,327 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
         "ssn",
         "the audit row names the LOGICAL field, not the physical column",
     );
+
+    release_pg(pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// 1b. The other half of the audited path: the REFUSAL
+// ---------------------------------------------------------------------------
+//
+// The arm above is the only exercise `dispatch_unmask` had on Postgres, and the
+// only actor it passes is `{"kind":"auto"}`. The no-policy fallback inside
+// `check_unmask_authorization` is literally `Ok(kind == "auto")`, so that arm
+// tests the check against its own allow-literal: neutering the whole call to
+// `... ? || true` leaves it green, and left the entire `if !allowed` branch -
+// the denied audit row and the `unmask_not_permitted` error - with no Postgres
+// coverage at all. The SQLite suite caught the mutation; this file did not.
+
+/// Stand up everything the audited unmask path needs on a real server, and put
+/// one row behind it whose real SSN is genuinely recoverable through that path.
+///
+/// The grants are deliberately SUFFICIENT FOR A LEAK: the runtime role can read
+/// the raw column, and the row exists under the id the platform minted. A build
+/// whose authorization check stops refusing therefore hands the plaintext back,
+/// rather than failing later on a missing row or a permission error. A denial
+/// test whose fixture could not leak in the first place proves nothing about
+/// the check - it would pass against an implementation that had no check and no
+/// data either.
+async fn audited_unmask_fixture(
+    pool: &Rc<Pool>,
+    url: &str,
+    app: &str,
+    schema: &Value,
+    ssn: &str,
+) -> Inserted {
+    fixture(pool, url, app, "people", schema).await;
+    let person = insert_through_the_pipeline(
+        pool,
+        app,
+        "people",
+        schema,
+        json!({ "ssn": ssn, "nickname": "ada" }),
+    )
+    .await;
+    pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
+        .await
+        .expect("the audit table the deploy provisions");
+    // The audit INSERT and the value SELECT both run `SET LOCAL ROLE
+    // app_<id>_role`, so the per-app role and its grants have to exist. The
+    // deploy's `zeroship migrate` creates them; this stands in for it. The
+    // append privilege on the audit table comes from `ensure_per_app_role`
+    // itself, which is why it runs AFTER the table is provisioned.
+    zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(pool, app)
+        .await
+        .expect("per-app role, as the deploy would provision it");
+    let raw_col = raw_column_name("ssn");
+    support::grant_runtime_select_columns(pool, app, "people", &["id", &raw_col]).await;
+
+    // Control zero, read as the admin principal: the plaintext really is on
+    // disk under the minted id. Every refusal asserted below is therefore a
+    // refusal, not an empty table.
+    let stored = pool
+        .query_text_params(
+            &format!("SELECT \"{raw_col}\" AS raw FROM \"{app}\".\"people\" WHERE id = $1"),
+            &[person.id.as_str()],
+        )
+        .await
+        .expect("read the raw column directly");
+    assert_eq!(stored.len(), 1, "the fixture row must exist");
+    assert_eq!(
+        stored[0].get::<_, String>("raw"),
+        ssn,
+        "the fixture must have a real value for the denied path to be denying \
+         access TO something",
+    );
+    person
+}
+
+/// The audit rows the app's schema HOLDS, oldest first.
+///
+/// Read back out of PostgreSQL as the admin principal - never from anything
+/// `dispatch_unmask` returned. On the denied path it returns an `Err` that
+/// carries no audit information at all, so a test that inspected the return
+/// value could not tell a written row from an unwritten one.
+async fn audit_rows(pool: &Rc<Pool>, app: &str) -> Vec<Value> {
+    let rows = pool
+        .query_text_params(
+            &format!(
+                "SELECT actor_id, actor_role, collection, row_pk, \"column\", \
+                 classification, reason, outcome \
+                 FROM \"{app}\".\"__zeroship_audit_unmask\" ORDER BY id"
+            ),
+            &[],
+        )
+        .await
+        .expect("read the audit table");
+    rows.iter().map(row_to_json).collect()
+}
+
+fn unmask_args(row_pk: &str, actor: Option<Value>) -> UnmaskFieldArgs {
+    UnmaskFieldArgs {
+        collection: "people".to_string(),
+        row_pk: row_pk.to_string(),
+        column: "ssn".to_string(),
+        actor,
+        reason: Some("mask_flip integration test".to_string()),
+    }
+}
+
+/// The `code` of a refusal, whatever variant carried it. Written this way so a
+/// denial that arrives as the WRONG typed error is reported by name instead of
+/// matching a wildcard arm.
+fn refusal_code(err: &DbError) -> String {
+    match err {
+        DbError::Coded { code, .. } => code.clone(),
+        DbError::ValidationFailed { code, .. } => (*code).to_string(),
+        other => panic!("expected a coded refusal, got {other:?}"),
+    }
+}
+
+/// **The denied branch, on Postgres.** An actor the app's policy does not
+/// permit is refused, the refusal is audited, and no plaintext comes back.
+///
+/// The closing arm is the control, differing in exactly ONE variable: the same
+/// actor, the same row and the same column, after a policy grants that actor
+/// role the column's classification. It succeeds. So the refusal above is a
+/// property of the AUTHORIZATION DECISION and not of a fixture that could not
+/// have produced the plaintext anyway - and it puts the policy path itself
+/// (`MaskPolicy::allows`, via `dispatch_set_mask_policy`) on Postgres for the
+/// first time, rather than only the no-policy fallback.
+///
+/// It belongs in this file rather than beside the SQLite policy tests because
+/// what is unverified is the POSTGRES dispatch: the policy cache is shared code
+/// that the SQLite suite already covers, while the denied path's audit INSERT,
+/// its `SET LOCAL ROLE` funnel and its per-app grants are all PG-specific and
+/// exist nowhere in that suite.
+#[compio::test]
+async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audited() {
+    let url = require_pg().await;
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app = "flip_denied";
+    let schema = flip_schema();
+    let ssn = "123-45-6789";
+    let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
+
+    // `support` is not `auto`, and no policy is installed - so the no-policy
+    // fallback denies it. This is the case `mask_flip` never had.
+    let err = dispatch_unmask(
+        &DbBinding::cold_start(app),
+        unmask_args(
+            &person.id,
+            Some(json!({ "kind": "support", "id": "usr_support_1" })),
+        ),
+    )
+    .await
+    .expect_err(
+        "an actor no policy permits must be REFUSED; a build that returns \
+         plaintext here has no authorization check on its one privileged \
+         read path",
+    );
+    assert_eq!(
+        refusal_code(&err),
+        "unmask_not_permitted",
+        "the refusal must be the authorization refusal, not an incidental \
+         failure further down the path: {err:?}",
+    );
+    // The plaintext did not come back. The `Err` has no field that could carry
+    // it, so this asserts the weaker reachable thing: the value appears nowhere
+    // in the error the caller receives, message and hint included.
+    assert!(
+        !format!("{err:?}").contains(ssn),
+        "the refusal must not carry the value it refused: {err:?}",
+    );
+
+    // The audit row the guarantee rests on, read back from the database.
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(audit.len(), 1, "the denied path writes exactly one row");
+    assert_eq!(audit[0]["outcome"], json!("denied"));
+    assert_eq!(audit[0]["actor_role"], json!("support"));
+    assert_eq!(audit[0]["actor_id"], json!("usr_support_1"));
+    assert_eq!(
+        audit[0]["classification"],
+        json!("pci"),
+        "the audit row records the classification that was refused",
+    );
+    assert_eq!(
+        audit[0]["column"],
+        json!("ssn"),
+        "the audit row names the LOGICAL field, not the physical column",
+    );
+    assert_eq!(audit[0]["collection"], json!("people"));
+    assert_eq!(
+        audit[0]["row_pk"],
+        json!(person.id),
+        "and the row it names is the one the platform minted",
+    );
+
+    // ---- THE CONTROL, differing in one variable: the policy ----
+    dispatch_set_mask_policy(app, json!({ "support": ["pci"] }))
+        .await
+        .expect("install the app's declared mask policy");
+    let result = dispatch_unmask(
+        &DbBinding::cold_start(app),
+        unmask_args(
+            &person.id,
+            Some(json!({ "kind": "support", "id": "usr_support_1" })),
+        ),
+    )
+    .await
+    .expect("the same actor must pass once the policy grants it the class");
+    assert_eq!(
+        result.plaintext, ssn,
+        "the policy path must reach the same value the fallback refused",
+    );
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(audit.len(), 2, "the granted path appends its own row");
+    assert_eq!(audit[1]["outcome"], json!("granted"));
+
+    // And the grant is scoped to the classification the policy named: the same
+    // role is still refused a class the policy does not list. Without this the
+    // control could pass against an `allows` that ignores its arguments.
+    zeroship_plugin_db::cache_schema_for_tests(
+        app,
+        "vitals",
+        json!({ "hr": { "type": "string", "mask": { "kind": "full", "classification": "phi" } } }),
+    );
+    let err = dispatch_unmask(
+        &DbBinding::cold_start(app),
+        UnmaskFieldArgs {
+            collection: "vitals".to_string(),
+            row_pk: person.id.clone(),
+            column: "hr".to_string(),
+            actor: Some(json!({ "kind": "support", "id": "usr_support_1" })),
+            reason: None,
+        },
+    )
+    .await
+    .expect_err("a class the policy does not list must still be refused");
+    assert_eq!(refusal_code(&err), "unmask_not_permitted");
+
+    release_pg(pool).await;
+}
+
+/// **The unauthenticated branch.** `check_unmask_authorization` returns
+/// `Ok(false)` before it ever looks at a policy when the actor is absent or is
+/// not an object - a different arm of the function from the wrong-kind case
+/// above, and the arm `sanitize_app_actor` deliberately routes app JS into when
+/// it claims the reserved `auto` kind (DB-3).
+///
+/// Both shapes run against the same leak-capable fixture, and the closing
+/// control shows that fixture handing the plaintext to an actor a policy does
+/// permit. So "refused" here is about the ACTOR, not about the row.
+#[compio::test]
+async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
+    let url = require_pg().await;
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app = "flip_unauth";
+    let schema = flip_schema();
+    let ssn = "987-65-4321";
+    let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
+
+    // `None` is exactly what `sanitize_app_actor` produces from an app-JS
+    // actor claiming `kind: "auto"`, so this is also the shape DB-3's patch
+    // hands the check.
+    for (label, actor) in [
+        ("absent", None),
+        ("not an object", Some(json!("support"))),
+        ("object with no kind", Some(json!({ "id": "usr_1" }))),
+    ] {
+        let err = match dispatch_unmask(&DbBinding::cold_start(app), unmask_args(&person.id, actor))
+            .await
+        {
+            Ok(leaked) => panic!(
+                "an actor that is {label} must be refused; the call returned \
+                 the plaintext instead: {leaked:?}"
+            ),
+            Err(e) => e,
+        };
+        assert_eq!(
+            refusal_code(&err),
+            "unmask_not_permitted",
+            "actor {label}: expected the authorization refusal, got {err:?}",
+        );
+        assert!(
+            !format!("{err:?}").contains(ssn),
+            "actor {label}: the refusal must not carry the value: {err:?}",
+        );
+    }
+
+    // Three attempts, three denied rows. The first two have no actor at all,
+    // so both actor columns land empty; the third carries an id and no kind.
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(audit.len(), 3, "every refusal is audited: {audit:?}");
+    for row in &audit {
+        assert_eq!(row["outcome"], json!("denied"), "{row:?}");
+        assert_eq!(row["classification"], json!("pci"), "{row:?}");
+    }
+    assert_eq!(audit[0]["actor_role"], json!(""));
+    assert_eq!(audit[0]["actor_id"], json!(""));
+    assert_eq!(audit[2]["actor_id"], json!("usr_1"));
+    assert_eq!(
+        audit[2]["actor_role"],
+        json!(""),
+        "an actor with no kind is audited with an empty role, not a forged one",
+    );
+
+    // ---- THE CONTROL: the same fixture DOES hand out the plaintext ----
+    dispatch_set_mask_policy(app, json!({ "support": ["pci"] }))
+        .await
+        .expect("install the app's declared mask policy");
+    let result = dispatch_unmask(
+        &DbBinding::cold_start(app),
+        unmask_args(
+            &person.id,
+            Some(json!({ "kind": "support", "id": "usr_2" })),
+        ),
+    )
+    .await
+    .expect("a permitted actor must still get the value");
+    assert_eq!(result.plaintext, ssn);
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(audit.len(), 4);
+    assert_eq!(audit[3]["outcome"], json!("granted"));
 
     release_pg(pool).await;
 }
