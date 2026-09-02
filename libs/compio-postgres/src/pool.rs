@@ -5139,6 +5139,56 @@ mod tests {
         );
     }
 
+    /// A cycle must refuse to start at all on a pool that is gone or closed.
+    ///
+    /// Both guards are unreachable from the production caller, which stores the
+    /// task handle inside the pool so a drop or close cancels a sleeping task
+    /// before it can begin another cycle. They exist because `housekeep` is
+    /// deliberately kept TOTAL over a `Weak` - its own comment says so - which
+    /// is what lets these lifecycle cases be tested directly without weakening
+    /// that ownership argument.
+    ///
+    /// The other housekeeping tests drop or close the pool MID-cycle, so they
+    /// exercise the later bail-outs and leave this entry pair untouched.
+    #[compio::test]
+    async fn housekeeping_refuses_to_start_on_a_dropped_or_closed_pool() {
+        // Dropped: the Weak no longer upgrades.
+        assert!(
+            !Pool::housekeep(&Weak::new()).await,
+            "a cycle started against a pool that no longer exists"
+        );
+
+        // Closed: the pool is alive but out of service.
+        //
+        // The idle entry is deliberately STALE. `housekeep` has later close
+        // checks too, so on a fresh entry the cycle would bail out at one of
+        // those and return false either way - the entry guard would mutate
+        // green. Reaping happens BEFORE those checks, so an expired entry is
+        // what makes the guard the only thing standing between a closed pool
+        // and a mutated idle set. Measured: with a fresh entry this test passes
+        // against a driver whose entry guard has been removed.
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            idle_timeout: Duration::from_millis(1),
+            ..PoolConfig::default()
+        };
+        let (client, _receiver) = fake_client(4410);
+        let mut entry = PoolEntry::new(client, config.max_lifetime);
+        entry.last_used = Instant::now() - Duration::from_secs(1);
+        let pool = Rc::new(test_pool(config, vec![entry], 0, 1));
+        pool.closed.set(true);
+        assert!(
+            !Pool::housekeep(&Rc::downgrade(&pool)).await,
+            "a cycle started against a closed pool"
+        );
+        assert_eq!(
+            pool.idle_count(),
+            1,
+            "a closed pool reaped its idle entry instead of refusing the cycle"
+        );
+    }
+
     #[compio::test]
     async fn housekeeping_keeps_a_recent_idle_entry() {
         let config = PoolConfig {
