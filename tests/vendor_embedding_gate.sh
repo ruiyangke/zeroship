@@ -163,7 +163,23 @@ while IFS= read -r f; do
 
   # Production region only: everything before the file's first column-0
   # #[cfg(test)]. A vendor named inside a test module is not an embedding.
-  boundary=$(grep -n '^#\[cfg(test)\]' "$f" | head -1 | cut -d: -f1)
+  # The production region ends at the file's test MODULE, not at its first
+  # item-level `#[cfg(test)]`. Taking the first cfg of ANY kind is silently
+  # defeated by one innocuous line: a `#[cfg(test)] use crate::x;` near the top
+  # hides every vendor mention below it.
+  #
+  # Measured 2026-09-01 on exec.rs: two lines at the top took its five mentions
+  # to zero and this arm went from naming them to printing `ok`. Only the
+  # baseline-liveness arm noticed, and only because that file is IN the
+  # baseline - a file outside it would be blinded in total silence. Every crate
+  # move adds exactly such imports, so this had to be fixed before the moves.
+  boundary=$(awk '
+    /^#\[cfg\(test\)\]/ { candidate = NR; next }
+    candidate && NF {
+      if ($0 ~ /^(pub )?mod /) { print candidate; exit }
+      candidate = 0
+    }
+  ' "$f")
   [ -n "$boundary" ] || boundary=999999
   hits=$(awk -v b="$boundary" -v pat="$VENDORS" \
            'NR < b && $0 ~ pat && $0 !~ /^[[:space:]]*\/\// { n++ } END { print n+0 }' "$f")
@@ -204,7 +220,23 @@ while IFS= read -r rel; do
     bad "baseline names $rel, which does not exist - delete the entry"
     continue
   fi
-  boundary=$(grep -n '^#\[cfg(test)\]' "$f" | head -1 | cut -d: -f1)
+  # The production region ends at the file's test MODULE, not at its first
+  # item-level `#[cfg(test)]`. Taking the first cfg of ANY kind is silently
+  # defeated by one innocuous line: a `#[cfg(test)] use crate::x;` near the top
+  # hides every vendor mention below it.
+  #
+  # Measured 2026-09-01 on exec.rs: two lines at the top took its five mentions
+  # to zero and this arm went from naming them to printing `ok`. Only the
+  # baseline-liveness arm noticed, and only because that file is IN the
+  # baseline - a file outside it would be blinded in total silence. Every crate
+  # move adds exactly such imports, so this had to be fixed before the moves.
+  boundary=$(awk '
+    /^#\[cfg\(test\)\]/ { candidate = NR; next }
+    candidate && NF {
+      if ($0 ~ /^(pub )?mod /) { print candidate; exit }
+      candidate = 0
+    }
+  ' "$f")
   [ -n "$boundary" ] || boundary=999999
   hits=$(awk -v b="$boundary" -v pat="$VENDORS" \
            'NR < b && $0 ~ pat && $0 !~ /^[[:space:]]*\/\// { n++ } END { print n+0 }' "$f")
