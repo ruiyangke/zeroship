@@ -27,6 +27,12 @@ use std::collections::BTreeSet;
 ///
 /// `OpenFrame` takes no caller-supplied child id for exactly this reason.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+// `pub`, and the fourth item in this crate whose zero-ish reader count would
+// have narrowed it wrongly. Phase 0.5's audit tried `pub(crate)` on
+// 2026-09-02: `tests/native_transaction.rs` binds one from
+// `probe::open_frame(APP)` and compares two of them, never writing the type's
+// name, so six errors. Its siblings in this file narrowed cleanly. See the
+// return-position rule in tests/lib/pub_fence_census.sh.
 pub struct FrameId(u64);
 
 impl FrameId {
@@ -38,7 +44,7 @@ impl FrameId {
 
 /// Whether a frame's `SAVEPOINT` has landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameStatus {
+pub(crate) enum FrameStatus {
     /// Inserted before `SAVEPOINT` was sent. Cannot yet act.
     Opening,
     /// `SAVEPOINT` succeeded (or this is the root, created on a confirmed
@@ -55,7 +61,7 @@ pub enum FrameStatus {
 
 /// One frame on the stack.
 #[derive(Debug, Clone)]
-pub struct Frame {
+pub(crate) struct Frame {
     id: FrameId,
     /// `None` for the root.
     savepoint: Option<Box<str>>,
@@ -98,7 +104,7 @@ impl Frame {
 /// A change event queued by a write, published only from a confirmed root
 /// commit.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Effect {
+pub(crate) struct Effect {
     pub collection: Box<str>,
     pub payload: Box<str>,
 }
@@ -115,7 +121,7 @@ impl Effect {
 /// Why a frame operation was refused. Each is a value the caller receives,
 /// never an out-of-band log line.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameError {
+pub(crate) enum FrameError {
     /// The named frame is not the top of the stack. None of the frame guards
     /// mutates the stack, so this changes nothing.
     SavepointNotCurrent,
@@ -142,7 +148,7 @@ impl FrameError {
 
 /// How a frame closed, which decides the fate of its effects.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FrameClose {
+pub(crate) enum FrameClose {
     /// `RELEASE` succeeded: effects are appended to the parent, in order.
     /// Nothing is published.
     Released,
@@ -153,7 +159,7 @@ pub enum FrameClose {
 
 /// The strict-LIFO frame stack.
 #[derive(Debug, Default)]
-pub struct FrameStack {
+pub(crate) struct FrameStack {
     frames: Vec<Frame>,
     /// Monotonic, never reset, never depth-derived. Governs both the frame id
     /// and the savepoint name.
