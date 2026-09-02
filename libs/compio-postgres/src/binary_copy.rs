@@ -535,6 +535,58 @@ mod tests {
     use std::future::Future;
     use std::task::Waker;
 
+    /// `try_get` is the documented non-panicking twin of `get`, and BOTH of
+    /// its refusals were uncovered.
+    ///
+    /// A caller reaches for `try_get` precisely to avoid a panic on a bad
+    /// index or a mismatched Rust type, so these two arms are the whole reason
+    /// the method exists. Neither had ever run: every binary-COPY test asks
+    /// for a column that is present, at a type that accepts it.
+    ///
+    /// The controls matter here more than usual - the same assertions pass for
+    /// a `try_get` that refuses everything, which would be a worse bug than
+    /// the panic it replaces.
+    #[test]
+    fn try_get_refuses_a_missing_column_and_a_mismatched_type() {
+        let row = BinaryCopyOutRow {
+            buf: Bytes::from_static(b"\x01\x02\x03"),
+            ranges: vec![Some(0..3)],
+            types: Arc::new(vec![Type::BYTEA]),
+        };
+
+        // Index past the end of the row.
+        let error = row
+            .try_get::<Vec<u8>>(1)
+            .expect_err("try_get accepted an index the row does not have");
+        assert_eq!(
+            format!("{error}"),
+            "invalid column `1`",
+            "the missing-column refusal did not name the index"
+        );
+
+        // Present column, but a Rust type that does not accept BYTEA.
+        let error = row
+            .try_get::<i32>(0)
+            .expect_err("try_get accepted a type the column does not hold");
+        // The SOURCE, not just the wrapper. Asserting only "error
+        // deserializing column 0" was too weak to bind this arm: skipping the
+        // `accepts` check lets `from_sql` run and fail on its own, rendering
+        // the same wrapper text, so the mutation passed. Only the `accepts`
+        // path produces a `WrongType` source naming both types.
+        let source = std::error::Error::source(&error).expect("a WrongType source");
+        let rendered = format!("{source}");
+        assert_eq!(
+            rendered, "cannot convert between the Rust type `i32` and the Postgres type `bytea`",
+            "the wrong-type refusal did not come from the accepts check"
+        );
+
+        // Controls: the same row answers the index and type it does hold.
+        let value: Vec<u8> = row
+            .try_get(0)
+            .expect("try_get refused the column and type the row holds");
+        assert_eq!(value, b"\x01\x02\x03");
+    }
+
     #[test]
     fn binary_copy_out_row_debug_redacts_buffer() {
         const BUFFER_SECRET: &str = "binary-copy-row-secret-7f3d91c2";
