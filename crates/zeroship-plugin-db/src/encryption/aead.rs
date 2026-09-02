@@ -84,7 +84,11 @@ pub fn encrypt(
 /// [`super::aad::canonical_aad`] — the caller is responsible for
 /// folding the right context in for the mode (per Camp-A,
 /// `(collection, column, row_pk_bytes)` for Randomised).
-pub fn encrypt_randomised(key: &AeadKey, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, DbError> {
+pub(crate) fn encrypt_randomised(
+    key: &AeadKey,
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, DbError> {
     let nonce_arr = Aes256Gcm::generate_nonce(&mut OsRng);
     // `Aes256Gcm::generate_nonce` returns a `GenericArray<u8, 12>`
     // — copy out so we can hand the same 12-byte buffer to
@@ -110,7 +114,7 @@ pub fn encrypt_randomised(key: &AeadKey, plaintext: &[u8], aad: &[u8]) -> Result
 /// Binding the AAD into the nonce makes each `(collection, column)` derive its
 /// own nonce space, so cross-column reuse can't occur. The AAD is internally
 /// length-prefixed (`aad.rs`), so `aad ‖ plaintext` is unambiguous.
-pub fn encrypt_deterministic(
+pub(crate) fn encrypt_deterministic(
     key: &AeadKey,
     plaintext: &[u8],
     aad: &[u8],
