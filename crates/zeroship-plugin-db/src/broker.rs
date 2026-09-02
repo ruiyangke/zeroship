@@ -786,8 +786,13 @@ pub fn unsuppress_app(app_id: &str) {
     }
 }
 
-/// True when the given app's local-emit path is suppressed on this
-/// thread (i.e. a [`WalConsumer`] is running for that app).
+/// True when the given app's local-emit path is suppressed anywhere in this
+/// PROCESS (i.e. a [`WalConsumer`] or a backfill guard is running for it).
+///
+/// Not "on this thread": `SUPPRESSED_APPS` is a `LazyLock<Mutex<..>>`, and it
+/// has to be process-wide because a worker runs many single-threaded compio
+/// runtimes and a backfill on one must suppress delivery on all of them. This
+/// said "on this thread" until 2026-09-01.
 pub fn is_app_suppressed(app_id: &str) -> bool {
     suppressed_apps().contains_key(app_id)
 }
