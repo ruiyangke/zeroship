@@ -81,6 +81,39 @@ pub(crate) enum TxConnection {
     Sqlite(SqliteSessionHandle),
 }
 
+impl TxConnection {
+    /// Execute a control statement (`BEGIN`, `SAVEPOINT`, `RELEASE`,
+    /// `ROLLBACK TO`) on this pinned transaction session.
+    ///
+    /// **Terminal statements do NOT come through here.** A terminal statement's
+    /// command tag is not cosmetic - PostgreSQL answers `COMMIT` with the tag
+    /// `ROLLBACK` when the transaction is in a failed state, and this path
+    /// returns a row count, which throws the tag away.
+    /// [`crate::transaction::driver`]'s `terminal` reads the tag and classifies
+    /// the three-way `TerminalResult` the state machine needs.
+    ///
+    /// **This takes no backend, and that is the point.** Each variant holds
+    /// exactly the `SqlExecutor::Client` of the backend that produced it -
+    /// `PostgresBackend::Client = OwnedPooledClient`, `SqliteBackend::Client =
+    /// SqliteSessionHandle` - so the variant already names the vendor. Passing a
+    /// `BackendHandle` alongside and matching on the pair, as this operation did
+    /// until 2026-09-02, re-proved that pairing at runtime and needed an
+    /// unreachable "backend/client mismatch" arm to be total. Neither backend's
+    /// `client_exec` reads `&self`, so the second half carried no information.
+    pub(crate) async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
+        match self {
+            Self::Postgres(client) => {
+                let rows = client
+                    .query_text_params(sql, params)
+                    .await
+                    .map_err(|e| crate::backend::pg_error::classify(&e))?;
+                Ok(rows.len() as u64)
+            }
+            Self::Sqlite(handle) => handle.exec(sql, params).await,
+        }
+    }
+}
+
 /// Destroy a transaction session's physical connection instead of returning it.
 ///
 /// **This is what SC-1's `WithdrawSession` means, and a plain `drop` is not it.**
