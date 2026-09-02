@@ -2376,6 +2376,28 @@ pub mod pgoutput {
 
     /// Decode a tuple - a u16 column count followed by per-column
     /// `(format_byte, [u32 len + bytes])`.
+
+    /// How much to reserve for `claimed` items when `remaining` bytes are left
+    /// and each item costs at least `min_bytes_per_item` on the wire.
+    ///
+    /// The count is peer-chosen and the byte budget is not, so the budget is
+    /// the sound bound: it can never refuse valid input, because an item that
+    /// is really there has already paid its minimum. Reserving the raw count
+    /// lets an eight-byte frame claiming 65535 columns allocate megabytes, a
+    /// ~300000x amplification repeatable per frame.
+    ///
+    /// NAMED so it can be asserted. The decode-level tests cannot see it - a
+    /// malformed frame errors identically whether the capacity came from the
+    /// frame or from the wire count - and `VmPeak`, the only memory instrument
+    /// available here, does not resolve megabytes. Extracting the expression
+    /// is what turns a documented "no assertion here could" into a bound one.
+    pub(crate) fn reservation(
+        claimed: usize,
+        remaining: usize,
+        min_bytes_per_item: usize,
+    ) -> usize {
+        claimed.min(remaining / min_bytes_per_item)
+    }
     fn read_tuple(buf: &mut &[u8]) -> Result<TupleData, DecodeError> {
         let n = read_u16(buf)? as usize;
         // Reserve for what the frame can still CONTAIN, not for what it
@@ -2386,7 +2408,10 @@ pub mod pgoutput {
         // columns reserved about 2.6 MB before the first column byte was even
         // read, which is a ~300000x amplification a peer can repeat per frame.
         //
-        // NO TEST DISCRIMINATES THIS, and that is measured rather than assumed.
+        // THIS IS NOW BOUND, by `a_reservation_is_bounded_by_the_bytes_left_not_
+        // the_claimed_count`. It was not until 2026-09-02, and the reasoning that
+        // kept it unbound is worth keeping because it was correct as far as it
+        // went:
         // A `u16` count caps the over-reservation at ~2.6 MB where Truncate's
         // `u32` reaches ~17 GB, and 2.6 MB is below what the only instrument
         // available here can see: `tests/suite/pgoutput_allocation.rs` reads
@@ -2395,9 +2420,11 @@ pub mod pgoutput {
         // the workspace sets `unsafe_code = "deny"`. A VmPeak assertion written
         // for these two sites PASSES with the clamps deleted - checked
         // 2026-08-26 - so shipping one would have claimed cover it does not
-        // give. This is defence in depth on the same argument as Truncate's
-        // clamp, not a fix with a regression test behind it.
-        let mut columns = Vec::with_capacity(n.min(buf.len()));
+        // give. What that argument missed is that the clamp does not have to be
+        // observed through memory at all: naming the expression makes it
+        // assertable directly. Deleting the clamp now fails one test and leaves
+        // the other 71 in this module green.
+        let mut columns = Vec::with_capacity(reservation(n, buf.len(), 1));
         for _ in 0..n {
             let fmt = read_u8(buf)?;
             match fmt {
@@ -2612,7 +2639,7 @@ pub mod pgoutput {
                 // Same clamp as `read_tuple`: a Relation column costs at least
                 // its flags byte, so the remaining length bounds how many can
                 // really follow.
-                let mut columns = Vec::with_capacity(ncols.min(cur.len()));
+                let mut columns = Vec::with_capacity(reservation(ncols, cur.len(), 1));
                 for _ in 0..ncols {
                     let flags = read_u8(&mut cur)?;
                     let col_name = read_cstr(&mut cur)?;
@@ -2728,7 +2755,7 @@ pub mod pgoutput {
                 // refuse valid input - and because the WAL consumer propagates
                 // a decode error out of its run loop, refusing valid input
                 // kills replication permanently rather than degrading.
-                let mut relation_ids = Vec::with_capacity(nrelations.min(cur.len() / 4));
+                let mut relation_ids = Vec::with_capacity(reservation(nrelations, cur.len(), 4));
                 for _ in 0..nrelations {
                     relation_ids.push(read_u32(&mut cur)?);
                 }
@@ -4444,12 +4471,12 @@ mod tests {
     /// leaves it green, because the vector still grows; that mutation was tried
     /// first and passed, so this test does not cover it.
     ///
-    /// That uncovered case is a HOLE, not a handoff - nothing else in this
-    /// crate asserts the reservation size, and no assertion here could: the
-    /// malformed frame below errors identically whether the capacity came from
-    /// the frame or from the wire count. Stated rather than left implicit,
-    /// because an exclusion that does not say where the class IS covered leaves
-    /// a reader unable to tell a gap from a delegation.
+    /// That case is covered SINCE 2026-09-02 by
+    /// `a_reservation_is_bounded_by_the_bytes_left_not_the_claimed_count`, which
+    /// asserts the clamp directly. This comment used to call it a HOLE on the
+    /// grounds that "no assertion here could" tell the two capacities apart -
+    /// true of a decode-level assertion, and the reason the expression was
+    /// given a name instead.
     ///
     /// `TRUNCATE ... CASCADE` on a heavily partitioned table emits one id per
     /// partition and PostgreSQL enforces no ceiling, so a rejecting limit
@@ -4460,6 +4487,37 @@ mod tests {
     /// It does NOT test the reservation itself. Decoding the malformed frame
     /// below errors identically whether the capacity is bounded by the frame
     /// or taken from the wire count, so no assertion here can tell those apart.
+    /// Binds the reservation clamp the sibling test above documents as a HOLE.
+    ///
+    /// It is a hole only while the expression is anonymous: a decode-level test
+    /// cannot separate a capacity taken from the frame from one taken from the
+    /// wire count, because both decode identically. Naming the expression makes
+    /// the amplification directly assertable, with no memory instrument.
+    #[test]
+    fn a_reservation_is_bounded_by_the_bytes_left_not_the_claimed_count() {
+        // An eight-byte Insert claiming the u16 ceiling of columns. Each column
+        // costs at least one byte, so eight is all the frame can hold.
+        assert_eq!(
+            pgoutput::reservation(65_535, 8, 1),
+            8,
+            "a claimed column count outran the bytes that could carry it"
+        );
+        // Truncate's ids are four bytes each, so the same eight bytes cap at 2.
+        assert_eq!(
+            pgoutput::reservation(u32::MAX as usize, 8, 4),
+            2,
+            "a claimed relation count outran the bytes that could carry it"
+        );
+        // The clamp must never refuse or shrink input that really is present:
+        // a TRUNCATE naming 70000 partitions is valid and must reserve in full.
+        assert_eq!(
+            pgoutput::reservation(70_000, 70_000 * 4, 4),
+            70_000,
+            "the clamp shrank a reservation the frame could actually fill"
+        );
+        assert_eq!(pgoutput::reservation(0, 0, 1), 0);
+    }
+
     #[test]
     fn pgoutput_decode_accepts_a_truncate_larger_than_any_fixed_cap() {
         const N: u32 = 70_000; // above the u16 ceiling a sibling arm uses
