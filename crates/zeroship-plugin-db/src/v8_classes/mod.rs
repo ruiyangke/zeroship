@@ -13,7 +13,11 @@
 //! - [`collection`] — per-collection CRUD. Each method walks its
 //!   `v8::Local<Value>` args directly into a `serde_json::Value` via
 //!   `v8_bridge::v8_value_to_serde_json` (no JSON.stringify/parse) and
-//!   calls a shared `crud::dispatch_*` helper.
+//!   calls a shared [`dispatch`] helper.
+//! - [`dispatch`] — the 17 `dispatch_*` helpers those methods call. They
+//!   lived in `crud/mod.rs` until 2026-09-02, which left `v8::` signature
+//!   positions inside an ENGINE-tiered file; they are the V8 boundary, so
+//!   they belong on this side of it.
 //! - [`transaction`] — hosts `mint_tx_view`, the
 //!   collections-only object handed to a `Db.transaction(fn)` callback.
 //!   The `Transaction` v8_class (`commit`/`rollback`/`collection` +
@@ -31,6 +35,7 @@
 pub mod collection;
 pub mod db;
 pub mod db_platform;
+pub mod dispatch;
 pub mod masked_value;
 pub mod replication;
 pub mod subscription;
