@@ -2419,30 +2419,16 @@ pub(crate) async fn run_search(
         filter,
     } = plan;
 
-    // Reach the backend through the per-isolate context. The
-    // dispatch helper isn't generic over the backend; runtime
-    // wiring stashes a `BackendHandle` per isolate that we route
-    // through the existing `as_postgres()` accessor.
+    // Reach the backend through the per-isolate context; runtime wiring stashes
+    // a `BackendHandle` per isolate. `BackendHandle` itself implements
+    // `VectorIndex`, so the vendor branch - and the SQLite ATTACH prelude that
+    // used to sit here - lives in `backend/mod.rs` where naming a vendor is
+    // legitimate. This function no longer knows either backend exists.
     let backend = crate::exec::ensure_backend_for_shared_sql().await?;
-    // SQLite arm routes through the pure-Rust flat-scan
-    // `VectorIndex` impl on `SqliteBackend`. We short-circuit
-    // BEFORE the PG path so a build with both arms compiled
-    // in (`--features "pg sqlite"` for tests) dispatches
-    // based on which arm the runtime is bound to, not on
-    // Cargo-feature ordering.
-    let rows = if let Some(sq) = backend.as_sqlite() {
-        sq.attach_app_file(binding.app_id()).await?;
-        use crate::backend::VectorIndex as _;
-        sq.vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
-            .await?
-    } else {
-        let pg = backend
-            .as_postgres()
-            .ok_or_else(|| DbError::backend_unsupported("vector_search"))?;
-        use crate::backend::VectorIndex as _;
-        pg.vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
-            .await?
-    };
+    use crate::backend::VectorIndex as _;
+    let rows = backend
+        .vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
+        .await?;
 
     // Metering, success arm only. The search family is a read op on
     // either backend and reaches the database WITHOUT passing
@@ -2608,25 +2594,13 @@ pub(crate) async fn run_near(
         filter,
     } = plan;
 
+    // As in `run_search`: `BackendHandle` implements `SpatialIndex`, so the
+    // vendor branch and the SQLite ATTACH prelude live in the vendor tier.
     let backend = crate::exec::ensure_backend_for_shared_sql().await?;
-    // SQLite arm routes through the pure-Rust haversine
-    // flat-scan `SpatialIndex` impl on `SqliteBackend`.
-    // Short-circuit BEFORE the PG path so a build with both
-    // arms compiled in dispatches based on which arm the
-    // runtime is bound to.
-    let rows = if let Some(sq) = backend.as_sqlite() {
-        sq.attach_app_file(binding.app_id()).await?;
-        use crate::backend::SpatialIndex as _;
-        sq.spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
-            .await?
-    } else {
-        let pg = backend
-            .as_postgres()
-            .ok_or_else(|| DbError::backend_unsupported("spatial_near"))?;
-        use crate::backend::SpatialIndex as _;
-        pg.spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
-            .await?
-    };
+    use crate::backend::SpatialIndex as _;
+    let rows = backend
+        .spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
+        .await?;
 
     // Metering, success arm only. The search family is a read op on
     // either backend and reaches the database WITHOUT passing
