@@ -91,7 +91,6 @@ use std::rc::Rc;
 
 use serde_json::{Map, Value};
 use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
-use zeroship_runtime::state::SharedState;
 
 use zeroship_data_core::error::DbError;
 use crate::system_shape_charter::AssignmentPlan;
@@ -193,33 +192,6 @@ pub(crate) fn prefix_for_collection(
         .unwrap_or_else(|| derive_prefix_from_collection_name(collection));
     crate::query::validate_id_prefix(&prefix)?;
     Ok(prefix)
-}
-
-/// Look up the current request's authenticated actor id (typed_id
-/// string), if any.
-///
-/// Reads the runtime's `per_request_user` slot using the request id
-/// currently bound by the pump (see `crates/runtime/src/auth.rs` for
-/// the wire contract). The user JSON shape is gateway-defined and
-/// carries at minimum `{ "id": "usr_..." }` for an authenticated
-/// user; we extract the `id` field and discard the rest (Q-SF-A:
-/// "typed_id only" for `created_by` — only the id flows to the row,
-/// not the role / display name / etc.).
-///
-/// Returns `None` when no request is bound (module init, raw
-/// background dispatch), when no user is attached to the request
-/// (anonymous), or when the user JSON is malformed. NULL is the
-/// design choice for `created_by` in that case (§2.3 of the
-/// proposal); the column is nullable so the INSERT succeeds.
-pub(crate) fn current_actor_id(state: &SharedState) -> Option<String> {
-    let s = state.borrow();
-    let rid = s.executing_request_id?;
-    let user_json = s.per_request_user.get(&rid)?;
-    let parsed: Value = serde_json::from_str(user_json).ok()?;
-    parsed
-        .get("id")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
 }
 
 /// Run the auto-population pass over a single insert document.

@@ -32,7 +32,7 @@
 use std::future::Future;
 
 use serde_json::Value;
-use zeroship_runtime::state::{OpResult, ResolveValue};
+use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
 
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
@@ -42,7 +42,7 @@ use crate::crud::{
     plan_aggregate, plan_count, plan_delete_many, plan_delete_one, plan_distinct, plan_find,
     plan_near, plan_purge_many, plan_purge_one, plan_restore_many, plan_restore_one, plan_search,
     read_pipeline, run_find, run_insert, run_insert_many, run_near, run_search, run_update_many,
-    run_update_one, run_upsert, system_fields_pass,
+    run_update_one, run_upsert,
 };
 use crate::crud::mask_policy::dispatch_set_mask_policy;
 use crate::crud::unmask::{dispatch_bulk_unmask, dispatch_unmask, parse_args, parse_bulk_args};
@@ -50,6 +50,42 @@ use crate::exec::{exec_count, exec_mutation_with_emit};
 use crate::op_error::ToOpError;
 use crate::query;
 use crate::v8_bridge::{runtime_state, setup_js_promise};
+
+/// Look up the current request's authenticated actor id (typed_id
+/// string), if any.
+///
+/// Reads the runtime's `per_request_user` slot using the request id
+/// currently bound by the pump (see `crates/runtime/src/auth.rs` for
+/// the wire contract). The user JSON shape is gateway-defined and
+/// carries at minimum `{ "id": "usr_..." }` for an authenticated
+/// user; we extract the `id` field and discard the rest (Q-SF-A:
+/// "typed_id only" for `created_by` - only the id flows to the row,
+/// not the role / display name / etc.).
+///
+/// Returns `None` when no request is bound (module init, raw
+/// background dispatch), when no user is attached to the request
+/// (anonymous), or when the user JSON is malformed. NULL is the
+/// design choice for `created_by` in that case (§2.3 of the
+/// proposal); the column is nullable so the INSERT succeeds.
+///
+/// **Lives here, in the adapter, because per-request identity is runtime
+/// state.** It sat in `crud/system_fields_pass.rs` until 2026-09-02, where its
+/// `&SharedState` parameter was the LAST signature in the ENGINE tier naming
+/// the V8 runtime crate - the final row on
+/// `tests/lib/tier_signature_census.sh`. All nine of its callers were already
+/// in this file, so the move relocated a definition and nothing else: the
+/// engine's write pass takes the actor id as an ARGUMENT and never learns where
+/// it came from.
+pub(crate) fn current_actor_id(state: &SharedState) -> Option<String> {
+    let s = state.borrow();
+    let rid = s.executing_request_id?;
+    let user_json = s.per_request_user.get(&rid)?;
+    let parsed: Value = serde_json::from_str(user_json).ok()?;
+    parsed
+        .get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+}
 
 /// Shared dispatch for `find`. Reads `limit`/`offset`/`orderBy`/
 /// `select`/`unmask`/`actor` out of `opts`. The per-query unmask hint
@@ -102,7 +138,7 @@ pub(crate) fn dispatch_insert<'s>(
     // encryption pass's `resolve_key` round-trip), the pump may rotate
     // the slot. Reading here pins the actor to the request that
     // originated the insert.
-    let actor_id = system_fields_pass::current_actor_id(&state);
+    let actor_id = current_actor_id(&state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
@@ -125,7 +161,7 @@ pub(crate) fn dispatch_insert_many<'s>(
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
-    let actor_id = system_fields_pass::current_actor_id(&state);
+    let actor_id = current_actor_id(&state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
@@ -164,7 +200,7 @@ pub(crate) fn dispatch_update_one<'s>(
     // Read actor at the sync boundary (same rationale as
     // `dispatch_insert`'s actor pin: the runtime's `executing_request_id`
     // rotates on the next pump turn).
-    let actor_id = system_fields_pass::current_actor_id(&state);
+    let actor_id = current_actor_id(&state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
@@ -202,7 +238,7 @@ pub(crate) fn dispatch_update_many<'s>(
 
     // Actor read at sync boundary (mirrors
     // `dispatch_update_one`'s rationale).
-    let actor_id = system_fields_pass::current_actor_id(&state);
+    let actor_id = current_actor_id(&state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
@@ -228,7 +264,7 @@ pub(crate) fn dispatch_delete_one<'s>(
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
-    let actor_id = system_fields_pass::current_actor_id(&state);
+    let actor_id = current_actor_id(&state);
 
     let built = plan_delete_one(&binding, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -269,7 +305,7 @@ pub(crate) fn dispatch_delete_many<'s>(
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
-    let actor_id = system_fields_pass::current_actor_id(&state);
+    let actor_id = current_actor_id(&state);
 
     let built = plan_delete_many(&binding, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -384,7 +420,7 @@ pub(crate) fn dispatch_restore_one<'s>(
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
-    let actor_id = system_fields_pass::current_actor_id(&state);
+    let actor_id = current_actor_id(&state);
 
     let built = plan_restore_one(&binding, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -422,7 +458,7 @@ pub(crate) fn dispatch_restore_many<'s>(
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
-    let actor_id = system_fields_pass::current_actor_id(&state);
+    let actor_id = current_actor_id(&state);
 
     let built = plan_restore_many(&binding, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -578,7 +614,7 @@ pub(crate) fn dispatch_upsert<'s>(
     let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    let actor_id = system_fields_pass::current_actor_id(&state);
+    let actor_id = current_actor_id(&state);
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
