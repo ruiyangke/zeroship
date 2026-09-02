@@ -956,6 +956,61 @@ mod tests {
         frame
     }
 
+    /// The row stream refuses a frame its own poll does not name.
+    ///
+    /// `RowStream::poll_next` names nine message kinds and errors on anything
+    /// else, and that arm had never run. It is a different guard from the one
+    /// in `query_typed`: this one runs AFTER the caller already holds a
+    /// stream, so accepting a stray frame would surface it as rows rather
+    /// than as an error, or silently swallow it and keep polling.
+    ///
+    /// `NoData` gets `query_typed` to hand back the stream; `BindComplete` is
+    /// then the stray - legal, well framed, and not one of the nine.
+    #[compio::test]
+    async fn the_row_stream_refuses_a_frame_its_poll_does_not_name() {
+        use futures_util::TryStreamExt;
+
+        let mut frames = scripted_backend_frame(b'n', b"");
+        frames.extend_from_slice(&scripted_backend_frame(b'2', b""));
+
+        let error = typed_against(frames, |inner| async move {
+            let stream =
+                super::query_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>()).await?;
+            let mut stream = Box::pin(stream);
+            while stream.as_mut().try_next().await?.is_some() {}
+            Ok(())
+        })
+        .await
+        .expect_err("the row stream accepted a frame its poll does not name");
+        assert!(
+            format!("{error}").contains("unexpected message from server"),
+            "the row stream reported {error} rather than an out-of-order message"
+        );
+    }
+
+    /// The one-variable control: the same stream ended by a frame it does name.
+    #[compio::test]
+    async fn the_row_stream_accepts_ready_for_query_as_its_end() {
+        use futures_util::TryStreamExt;
+
+        let mut frames = scripted_backend_frame(b'n', b"");
+        frames.extend_from_slice(&scripted_backend_frame(b'Z', b"I"));
+
+        typed_against(frames, |inner| async move {
+            let stream =
+                super::query_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>()).await?;
+            let mut stream = Box::pin(stream);
+            let mut rows = 0;
+            while stream.as_mut().try_next().await?.is_some() {
+                rows += 1;
+            }
+            assert_eq!(rows, 0, "no DataRow was sent, so no rows arrive");
+            Ok(())
+        })
+        .await
+        .expect("the row stream rejected a well-formed ReadyForQuery");
+    }
+
     /// Answer one typed-query call with a scripted frame.
     ///
     /// Both entry points send their whole Parse/Bind/Describe/Execute/Sync
