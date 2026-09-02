@@ -90,11 +90,18 @@ fi
 
 # ---------------------------------------------------------------------------
 # Arm 2: the population the lint can fire inside - every `pub` item whose only
-# fence is a `pub(crate) mod` in lib.rs. That is audit 1's worklist, and the
-# set that becomes genuinely public the day the module becomes a crate. Counted
-# here rather than imported from tests/lib/pub_fence_census.sh so this gate does
-# not go quiet if that script is renamed; the two numbers should agree, and a
-# divergence is worth reading rather than reconciling automatically.
+# fence is a `pub(crate) mod` in lib.rs. Counted here rather than imported from
+# tests/lib/pub_fence_census.sh so this gate does not go quiet if that script is
+# renamed.
+#
+# THE TWO NUMBERS DIFFER ON PURPOSE, and did not until 2026-09-02. The census
+# reports SHIPPED surface and now excludes items in test-gated submodules
+# (transaction/probe.rs, crud/mask_drift.rs, auth/util.rs - 35 items), because
+# a module no shipped binary compiles is not API the split publishes. This gate
+# counts them, because it runs UNDER `--features test-helpers`, where those
+# modules very much do compile and the lint very much can fire inside them.
+# Census 225 + 35 gated = 260 here. A divergence of any other size is worth
+# reading rather than reconciling automatically.
 # ---------------------------------------------------------------------------
 capped=$(grep -oE "^pub\(crate\) mod [a-z_]+;" "$LIB" | awk '{print $3}' | tr -d ';' | sort -u)
 fenced=0

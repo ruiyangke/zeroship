@@ -116,13 +116,49 @@ if [ -z "$capped" ]; then
   exit 1
 fi
 
-printf '%-22s %10s  %s\n' MODULE PUB_ITEMS 'ALSO PUB UNDER test-helpers'
-total=0; modules=0
+# A submodule whose own `mod` declaration is behind a test cfg is not compiled
+# into any shipped binary, so its items are not surface the split publishes.
+# They were counted as such until 2026-09-02, which put 22 of `transaction`'s
+# 107 in the worklist: `transaction/probe.rs`, declared at
+# `transaction/mod.rs:144` as `#[cfg(any(test, feature = "test-helpers"))]
+# pub mod probe;` and described in its own doc comment as "Not compiled into a
+# production build". Same rule as `module_is_test_gated` in
+# tests/vendor_embedding_gate.sh; kept separate so a rename there cannot
+# silently change this census's numbers.
+module_is_test_gated() {  # $1 = a .rs path under $SRC
+  local file="$1" name decls gated decl_file decl_line prev i
+  name=$(basename "$file" .rs)
+  [ "$name" = "mod" ] && name=$(basename "$(dirname "$file")")
+  [ -z "$name" ] && return 1
+  decls=0; gated=0
+  while IFS= read -r hit; do
+    decl_file="${hit%%:*}"; decl_line="${hit#*:}"; decl_line="${decl_line%%:*}"
+    decls=$((decls + 1))
+    i=$((decl_line - 1))
+    while [ "$i" -ge 1 ]; do
+      prev=$(sed -n "${i}p" "$decl_file")
+      case "$prev" in
+        *"#[cfg("*)
+          case "$prev" in
+            *"not("*) break ;;
+            *test*) gated=$((gated + 1)); break ;;
+            *) break ;;
+          esac ;;
+        "#["*|*"//"*|"") i=$((i - 1)) ;;
+        *) break ;;
+      esac
+    done
+  done < <(grep -rn -E "^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${name}[[:space:]]*;" "$SRC" 2>/dev/null)
+  [ "$decls" -gt 0 ] && [ "$decls" -eq "$gated" ]
+}
+
+printf '%-22s %10s %10s  %s\n' MODULE SHIPPED TEST_GATED 'ALSO PUB UNDER test-helpers'
+total=0; gated_total=0; modules=0
 for m in $capped; do
   files=$(find "$SRC/$m.rs" "$SRC/$m" -name '*.rs' 2>/dev/null | LC_ALL=C sort)
   [ -n "$files" ] || continue
   modules=$((modules + 1))
-  n=0
+  n=0; g=0
   for f in $files; do
     b=$(awk '/^#\[cfg\(test\)\]/{c=NR;next} c&&NF{if($0~/^(pub )?mod /){print c;exit} c=0}' "$f")
     [ -n "$b" ] || b=999999
@@ -131,17 +167,19 @@ for m in $capped; do
       /^[[:space:]]*(\/\/|\*)/ { next }
       /^[[:space:]]*pub (fn|struct|enum|trait|const|static|type|unsafe fn|async fn) / { n++ }
       END { print n+0 }' "$f")
-    n=$((n + k))
+    if module_is_test_gated "$f"; then g=$((g + k)); else n=$((n + k)); fi
   done
   note=""
   printf '%s\n' "$twinned" | grep -qx "$m" && note="yes"
-  printf '%-22s %10d  %s\n' "$m" "$n" "$note"
+  printf '%-22s %10d %10d  %s\n' "$m" "$n" "$g" "$note"
   total=$((total + n))
+  gated_total=$((gated_total + g))
 done
 
 echo
 printf 'MODULES RULED ON: %d\n' "$modules"
 printf 'pub items fenced ONLY by a pub(crate) module: %d\n' "$total"
+printf '  (+ %d more in test-gated submodules, which no shipped binary compiles)\n' "$gated_total"
 
 # ---------------------------------------------------------------------------
 # The four controls the proposal names by hand. Reported individually because
