@@ -186,6 +186,16 @@ pub enum TypedCell {
 /// A typed row + column names, returned by the `QueryTyped` command
 /// variant. Consumers: [`crate::backend::VectorIndex::vector_search`]
 /// (vec0 JOIN result) and `spatial_near`.
+///
+/// **`pub`, and it must stay so even though NOTHING NAMES IT outside this
+/// module.** Phase 0.5's visibility audit narrowed it to `pub(crate)` on
+/// 2026-09-02 on exactly that evidence and the compiler refused with 39
+/// errors: `tests/sqlite_integration.rs` obtains one by INFERENCE from
+/// `query_typed` and then reads `.rows`, so it never writes the type's name
+/// and a reference count cannot see it. Its five siblings in this file -
+/// `Interrupts`, `SqliteSession`, `TxLease`, `SqliteCancelGuard`,
+/// `NextCommandGate` - narrowed cleanly in the same pass; this one is the
+/// exception, and the reason is the return position, not the count.
 #[derive(Debug, Clone)]
 pub struct TypedRows {
     /// Column names in result-set order. Length matches every row's
@@ -328,7 +338,7 @@ struct LaneInterrupt {
 /// differ in kind: `op_conn` exists for the session's whole life, while an
 /// app's transaction connection is opened on that app's first
 /// `db.transaction()` and can be evicted again.
-pub struct Interrupts {
+pub(crate) struct Interrupts {
     op: LaneInterrupt,
     tx: Mutex<HashMap<TxLaneId, LaneInterrupt>>,
 }
@@ -473,7 +483,7 @@ impl Interrupts {
 /// plain OS thread sidesteps both: the worker runs independently of compio, the
 /// caller-side `flume::Sender::send_async` future awaits purely on flume's
 /// atomic-park primitives, and clean shutdown is fully signalled by `Shutdown`.
-pub struct SqliteSession {
+pub(crate) struct SqliteSession {
     tx: flume::Sender<Command>,
     interrupts: Arc<Interrupts>,
     /// Monotonic reservation ids. Shared with nothing else; ids are opaque and
@@ -1022,7 +1032,7 @@ impl Drop for SqliteSession {
 /// still not stranded: `reserve_transaction` decides admission from the `Weak`,
 /// which this drop has already invalidated, and the next `Reserve` repeats the
 /// rollback cleanup.
-pub struct TxLease {
+pub(crate) struct TxLease {
     /// Liveness token. Held ONLY here and never cloned into a command, so its
     /// strong count is exactly "is this lease alive" - which is the question
     /// `reserve_transaction` asks and the reservation's own count cannot
@@ -1124,7 +1134,7 @@ impl SqliteCancelHandle {
 // cancel now, but it does so explicitly through `transaction::cancel::TxCanceller`.
 // Nothing arms a guard that cancels on DROP.
 #[allow(dead_code)]
-pub struct SqliteCancelGuard {
+pub(crate) struct SqliteCancelGuard {
     handle: Option<SqliteCancelHandle>,
 }
 
@@ -1351,7 +1361,7 @@ type NextCommandGateSlot = Arc<Mutex<Option<NextCommandGateWorker>>>;
 /// Test helper: stall the next worker command before execution until the
 /// returned gate is released.
 #[cfg(any(test, feature = "test-helpers"))]
-pub struct NextCommandGate {
+pub(crate) struct NextCommandGate {
     entered_rx: flume::Receiver<()>,
     release_tx: flume::Sender<()>,
 }
