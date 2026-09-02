@@ -140,11 +140,31 @@ of this step.
 
 ## Order
 
-1. Give PostgreSQL a `pg_terminal` projection, mirroring `sqlite_terminal`.
-   Pure refactor, no behaviour change, testable without a database.
-2. Move `settle` onto `TxConnection`; delete `terminal`'s match.
+1. **DONE, `28a59bea2`.** Give PostgreSQL the terminal projection `sqlite_terminal`
+   already had. Split in two - `pg_terminal_from_tag` and
+   `pg_terminal_from_status` - because `compio_postgres::Error` has no public
+   constructor, so a single error-taking function could not be unit-tested at
+   all. Five pure arms now cover L8, the `RELEASE` control, and DBR-03.
+
+1a. **DONE, `be58e73ee`, AND THIS STEP WAS MISSING FROM THE FIRST DRAFT.** Move
+   `SettleIntent` and `TerminalResult` to data-core. The draft said "move
+   `settle` onto `TxConnection`" as though the types were already placeable, but
+   they are owned by `transaction/reducer/mod.rs`, which is ENGINE. A lane
+   naming them would reach UP into the protocol - the exact inversion #103 fixed
+   by moving `DenyReason` DOWN, on the rule "the engine keeps the logic, the core
+   keeps the vocabulary". The reducer re-exports both, so its call sites are
+   unchanged.
+
+2. **BLOCKED ON #100, and the draft did not say so.** Moving `settle` onto
+   `TxConnection` puts a method on a type in `context.rs` - and `context.rs` has
+   no settled crate. The shape document places it in TWO different ones
+   (`:147` adapter, `:191` and `:1733` data-engine), both stated as settled, and
+   #100 concludes "the right answer is genuinely open. Decide it before any
+   boundary is drawn." Investing more of the lane in that module deepens a
+   commitment nobody has made. Decide #100 first.
+
 3. Move `cleanup` onto `TxConnection`; delete `rollback_session_in_slot`'s match.
-   `cleanup_postgres` and `cleanup_sqlite` become lane methods.
+   `cleanup_postgres` and `cleanup_sqlite` become lane methods. Same #100 block.
 4. Introduce `BeginIntent`; move `build_begin_sql` into the PG lane; change
    `StepConfig`.
 5. Fold `apply_per_app_role` into the PG lane's `open`. It is already only
