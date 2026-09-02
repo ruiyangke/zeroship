@@ -1519,6 +1519,123 @@ mod tests {
 
     const EXPECTED_DELAYED_MESSAGE_LIMIT: usize = 256;
 
+    /// The full truth table for `require_target_session_attrs`: every one of the
+    /// six targets against all four probe answers.
+    ///
+    /// The catch-all arm is the point. `ReadWrite`/`ReadOnly` are settled by
+    /// `transaction_read_only` and `Primary`/`Standby`/`PreferStandby` by
+    /// `pg_is_in_recovery`, so a probe answering the OTHER property cannot
+    /// settle the requirement at all - ten of these twenty-four pairs are that
+    /// case, and none of them had ever run.
+    ///
+    /// The two failure classes must not be conflated, which is why each case
+    /// asserts the rendered error rather than merely `is_err`: a requirement
+    /// that was checked and failed is `error checking target session
+    /// attributes`, while a probe that answered the wrong question is `error
+    /// connecting to server`. Asserting only "an error came back" would let the
+    /// covered mismatch arms stand in for the uncovered catch-all.
+    #[test]
+    fn every_target_session_attrs_pairing_is_classified() {
+        use TargetSessionAttrs as A;
+        use TargetSessionState as S;
+
+        #[derive(Debug)]
+        enum Expect {
+            Allowed,
+            Mismatch,
+            WrongProperty,
+        }
+
+        let cases = [
+            (A::Any, S::TransactionReadOnly(true), Expect::Allowed),
+            (A::Any, S::TransactionReadOnly(false), Expect::Allowed),
+            (A::Any, S::InRecovery(true), Expect::Allowed),
+            (A::Any, S::InRecovery(false), Expect::Allowed),
+            (A::ReadWrite, S::TransactionReadOnly(false), Expect::Allowed),
+            (A::ReadWrite, S::TransactionReadOnly(true), Expect::Mismatch),
+            (A::ReadWrite, S::InRecovery(true), Expect::WrongProperty),
+            (A::ReadWrite, S::InRecovery(false), Expect::WrongProperty),
+            (A::ReadOnly, S::TransactionReadOnly(true), Expect::Allowed),
+            (A::ReadOnly, S::TransactionReadOnly(false), Expect::Mismatch),
+            (A::ReadOnly, S::InRecovery(true), Expect::WrongProperty),
+            (A::ReadOnly, S::InRecovery(false), Expect::WrongProperty),
+            (A::Primary, S::InRecovery(false), Expect::Allowed),
+            (A::Primary, S::InRecovery(true), Expect::Mismatch),
+            (
+                A::Primary,
+                S::TransactionReadOnly(true),
+                Expect::WrongProperty,
+            ),
+            (
+                A::Primary,
+                S::TransactionReadOnly(false),
+                Expect::WrongProperty,
+            ),
+            (A::Standby, S::InRecovery(true), Expect::Allowed),
+            (A::Standby, S::InRecovery(false), Expect::Mismatch),
+            (
+                A::Standby,
+                S::TransactionReadOnly(true),
+                Expect::WrongProperty,
+            ),
+            (
+                A::Standby,
+                S::TransactionReadOnly(false),
+                Expect::WrongProperty,
+            ),
+            (A::PreferStandby, S::InRecovery(true), Expect::Allowed),
+            (A::PreferStandby, S::InRecovery(false), Expect::Mismatch),
+            (
+                A::PreferStandby,
+                S::TransactionReadOnly(true),
+                Expect::WrongProperty,
+            ),
+            (
+                A::PreferStandby,
+                S::TransactionReadOnly(false),
+                Expect::WrongProperty,
+            ),
+        ];
+        assert_eq!(cases.len(), 24, "the truth table stopped being exhaustive");
+
+        let mut wrong_property_seen = 0;
+        for (target, state, expect) in cases {
+            let outcome = require_target_session_attrs(target, state);
+            match expect {
+                Expect::Allowed => {
+                    outcome.unwrap_or_else(|error| {
+                        panic!("{target:?} against {state:?} was refused: {error}")
+                    });
+                }
+                Expect::Mismatch => {
+                    let Err(error) = outcome else {
+                        panic!("{target:?} against {state:?} was accepted, not refused")
+                    };
+                    assert_eq!(
+                        error.to_string(),
+                        "error checking target session attributes",
+                        "{target:?} against {state:?} was not a requirement mismatch"
+                    );
+                }
+                Expect::WrongProperty => {
+                    wrong_property_seen += 1;
+                    let Err(error) = outcome else {
+                        panic!("{target:?} against {state:?} was accepted, not refused")
+                    };
+                    assert_eq!(
+                        error.to_string(),
+                        "error connecting to server",
+                        "{target:?} against {state:?} was not refused as a bad probe"
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            wrong_property_seen, 10,
+            "the wrong-property arm stopped being exercised"
+        );
+    }
+
     /// `sslcertmode=require` is a demand that the connection be authenticated
     /// by a client certificate, so every way of NOT having sent one must be a
     /// refusal. Two of the five arms had never run - `NotSent` and `Unknown` -
