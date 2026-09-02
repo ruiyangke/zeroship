@@ -254,9 +254,9 @@ mod tests {
         );
 
         for setup_sql in [
-            crate::auth::bootstrap::tx_session_setup_sql(app_id)
+            crate::backend::pg_session_sql::tx_session_setup_sql(app_id)
                 .expect("transaction setup role name"),
-            crate::auth::bootstrap::autocommit_local_session_setup_sql(app_id)
+            crate::backend::pg_session_sql::autocommit_local_session_setup_sql(app_id)
                 .expect("autocommit setup role name"),
         ] {
             assert!(
