@@ -956,6 +956,99 @@ mod tests {
         frame
     }
 
+    /// Answer one typed-query call with a scripted frame.
+    ///
+    /// Both entry points send their whole Parse/Bind/Describe/Execute/Sync
+    /// batch and then read, so a single frame lands on the first arm of the
+    /// loop with nothing consumed before it.
+    async fn typed_against<T, F, Fut>(frame: Vec<u8>, call: F) -> Result<T, crate::Error>
+    where
+        F: FnOnce(std::sync::Arc<crate::client::InnerClient>) -> Fut,
+        Fut: std::future::Future<Output = Result<T, crate::Error>>,
+    {
+        use crate::client::ResponseMessages;
+        use crate::codec::BackendMessages;
+        use futures_util::StreamExt;
+        use std::sync::Arc;
+
+        let (client, mut receiver) = test_client();
+        let inner = Arc::clone(client.inner());
+        let call = call(Arc::clone(&inner));
+        let respond = async {
+            let mut request = receiver
+                .next()
+                .await
+                .expect("the typed query did not enqueue its request");
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    BytesMut::from(&frame[..]),
+                )))
+                .expect("deliver the scripted typed-query response");
+        };
+        let (result, ()) = futures_util::join!(call, respond);
+        result
+    }
+
+    /// `query_typed` and `execute_typed` both refuse a frame their loop does
+    /// not name.
+    ///
+    /// Both are public, both drive the extended protocol themselves, and both
+    /// refusal arms were uncovered. `PortalSuspended` is the payload: a real
+    /// extended-query message, correctly framed, that neither loop expects -
+    /// so accepting it would mean continuing to read a stream whose position
+    /// the driver no longer understands.
+    #[compio::test]
+    async fn typed_queries_refuse_a_frame_their_loop_does_not_name() {
+        let suspended = scripted_backend_frame(b's', b"");
+
+        let error = typed_against(suspended.clone(), |inner| async move {
+            super::query_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>())
+                .await
+                .map(|_| ())
+        })
+        .await
+        .expect_err("query_typed accepted a frame its loop does not name");
+        assert!(
+            format!("{error}").contains("unexpected message from server"),
+            "query_typed reported {error} rather than an out-of-order message"
+        );
+
+        let error = typed_against(suspended, |inner| async move {
+            super::execute_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>())
+                .await
+                .map(|_| ())
+        })
+        .await
+        .expect_err("execute_typed accepted a frame its loop does not name");
+        assert!(
+            format!("{error}").contains("unexpected message from server"),
+            "execute_typed reported {error} rather than an out-of-order message"
+        );
+    }
+
+    /// The one-variable control: each entry point on a frame it does name.
+    #[compio::test]
+    async fn typed_queries_accept_the_frames_they_name() {
+        typed_against(scripted_backend_frame(b'n', b""), |inner| async move {
+            super::query_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>())
+                .await
+                .map(|_| ())
+        })
+        .await
+        .expect("query_typed rejected a well-formed NoData");
+
+        let rows = typed_against(scripted_backend_frame(b'Z', b"I"), |inner| async move {
+            super::execute_typed(&inner, "SELECT 1", std::iter::empty::<(i32, Type)>()).await
+        })
+        .await
+        .expect("execute_typed rejected a well-formed ReadyForQuery");
+        assert_eq!(
+            rows, 0,
+            "no CommandComplete was sent, so no rows are counted"
+        );
+    }
+
     /// Drive `start` against one scripted backend frame.
     async fn start_against(frame: Vec<u8>) -> Result<(), crate::Error> {
         use crate::client::ResponseMessages;
