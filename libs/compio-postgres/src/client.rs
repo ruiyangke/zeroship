@@ -564,6 +564,40 @@ mod transaction_status_tests {
     use bytes::BytesMut;
     use futures_channel::mpsc;
 
+    /// The status byte is peer-chosen and its decode gates
+    /// `stale_cache_replay_permitted`, which refuses the replay for
+    /// `InTransaction` and `Failed` alike. So the property that matters is not
+    /// "an unknown byte reads as Failed" but the stronger "exactly one of the
+    /// 256 possible bytes yields `Idle`" - only `Idle` opens the replay path.
+    ///
+    /// The single-byte test below cannot express that. A well-meant
+    /// `b'E' => Self::Idle`, added while spelling out the failed-transaction
+    /// status PostgreSQL actually sends, would permit replay on a failed
+    /// transaction and leave that test green. 256 inhabitants, so enumerate.
+    #[test]
+    fn exactly_one_status_byte_decodes_to_the_replay_permitting_state() {
+        let mut idle = Vec::new();
+        let mut in_transaction = Vec::new();
+        for byte in 0..=u8::MAX {
+            match TransactionStatus::from_byte(byte) {
+                TransactionStatus::Idle => idle.push(byte),
+                TransactionStatus::InTransaction => in_transaction.push(byte),
+                TransactionStatus::Failed => {}
+            }
+        }
+
+        assert_eq!(
+            idle,
+            vec![b'I'],
+            "only 'I' may decode to Idle, the one state that permits the stale-cache replay"
+        );
+        assert_eq!(
+            in_transaction,
+            vec![b'T'],
+            "only 'T' may decode to InTransaction"
+        );
+    }
+
     #[test]
     fn unknown_ready_for_query_status_is_conservatively_failed() {
         assert_eq!(
