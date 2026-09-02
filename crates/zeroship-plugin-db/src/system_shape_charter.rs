@@ -15,7 +15,11 @@
 //! **Why `include_str!` rather than a file read.** There is no runtime path, no
 //! deployment step and no creator-controlled source: the bytes are in the binary.
 
-use zeroship_migrate_policy::{PolicyRegistry, RootCharter};
+use std::rc::Rc;
+
+use zeroship_migrate_policy::{
+    AssignmentEvent, AssignmentGenerator, PolicyRegistry, RootCharter, RuleKind,
+};
 
 use crate::error::DbError;
 
@@ -36,6 +40,130 @@ pub(crate) fn load() -> Result<RootCharter, DbError> {
             format!("the embedded system-shape charter is invalid: {source:?}"),
         )
     })
+}
+
+/// One column the operator charter assigns: which generator computes its value,
+/// and on which write event.
+///
+/// This is a PROJECTION of the charter, not a second declaration of it. Every
+/// field is copied out of one [`zeroship_migrate_policy::InjectColumn`]; nothing
+/// here is defaulted, inferred or renamed.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AssignedColumn {
+    /// The column name, exactly as the charter spells it.
+    pub(crate) name: String,
+    /// The generator that computes the value.
+    pub(crate) by: AssignmentGenerator,
+    /// The event that activates the generator.
+    pub(crate) on: AssignmentEvent,
+}
+
+/// Every column the operator charter assigns, in charter order.
+///
+/// **This is what replaced the hardcoded name lists in the write pass.** The
+/// pass iterates this and matches on [`AssignedColumn::by`] / [`AssignedColumn::on`];
+/// it names no column. Adding an eighth platform column is a charter line.
+///
+/// Order is charter order, and that is load-bearing rather than incidental:
+/// [`Self::columns`] is walked to build the INSERT document, and two columns
+/// assigned by the same generator must be injected in the order the operator
+/// declared them so the emitted SQL is stable across runs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct AssignmentPlan {
+    columns: Vec<AssignedColumn>,
+}
+
+impl AssignmentPlan {
+    /// Project every assigned column out of a parsed charter's inject rules.
+    ///
+    /// Infallible on purpose. The only failure this could report is two inject
+    /// rules assigning one column differently, and the loader already refuses
+    /// that: `compose::inject_specs_collide` compares `assign` alongside
+    /// type/nullable/default/collation, so two divergent injects collide at
+    /// load rather than reaching here. The `debug_assert` states the assumption
+    /// where it is relied on instead of inventing an error path no caller can
+    /// take.
+    pub(crate) fn from_charter(charter: &RootCharter) -> Self {
+        let mut columns: Vec<AssignedColumn> = Vec::new();
+        for rule in &charter.doc().rules {
+            let RuleKind::Inject { spec } = &rule.kind else {
+                continue;
+            };
+            for column in &spec.columns {
+                let Some(assign) = &column.assign else {
+                    continue;
+                };
+                let projected = AssignedColumn {
+                    name: column.name.clone(),
+                    by: assign.by,
+                    on: assign.on,
+                };
+                if let Some(existing) = columns.iter().find(|c| c.name == projected.name) {
+                    debug_assert_eq!(
+                        *existing, projected,
+                        "two inject rules assign `{}` differently; the loader's collision \
+                         comparator should have refused this charter",
+                        projected.name,
+                    );
+                    continue;
+                }
+                columns.push(projected);
+            }
+        }
+        Self { columns }
+    }
+
+    /// Every assigned column, in charter order.
+    pub(crate) fn columns(&self) -> &[AssignedColumn] {
+        &self.columns
+    }
+
+    /// The assignment governing `name`, if the charter assigns it.
+    pub(crate) fn assignment_for(&self, name: &str) -> Option<&AssignedColumn> {
+        self.columns.iter().find(|column| column.name == name)
+    }
+
+    /// Columns whose value is fixed when the row is created and may never be
+    /// re-assigned: `on = "insert"`.
+    ///
+    /// This is where `IMMUTABLE_SYSTEM_FIELDS` went. Immutability is DERIVED
+    /// from the event rather than declared as its own property - the design
+    /// decision that `assign = { by, on }` is one property, not three.
+    pub(crate) fn immutable_after_insert(&self) -> impl Iterator<Item = &str> {
+        self.columns
+            .iter()
+            .filter(|column| column.on == AssignmentEvent::Insert)
+            .map(|column| column.name.as_str())
+    }
+
+    /// Columns the platform re-assigns on every write: `on = "write"`.
+    pub(crate) fn reassigned_on_write(&self) -> impl Iterator<Item = &str> {
+        self.columns
+            .iter()
+            .filter(|column| column.on == AssignmentEvent::Write)
+            .map(|column| column.name.as_str())
+    }
+}
+
+/// This worker thread's projection of the operator charter.
+///
+/// The plugin stamps it during [`crate::DbPlugin::register`], the same way it
+/// stamps the meter and the resource key. A vector that never registered a
+/// plugin - the unit tests, and the `test-helpers` integration targets that
+/// drive the pass directly - derives it here on first use.
+///
+/// **That fallback is not a second authority.** Both paths parse
+/// [`SYSTEM_SHAPE_CHARTER_TOML`], which is `include_str!`-ed from the operator's
+/// one file; there is no configuration, no descriptor and no environment in
+/// either path, so the two cannot disagree. What the stamp buys is that a
+/// production worker fails at composition rather than inside its first write.
+pub(crate) fn plan() -> Result<Rc<AssignmentPlan>, DbError> {
+    if let Some(plan) = crate::context::with(super::context::ThreadDbContext::assignment_plan) {
+        return Ok(plan);
+    }
+    let plan = Rc::new(AssignmentPlan::from_charter(&load()?));
+    crate::context::with_mut(|c| c.set_assignment_plan(Rc::clone(&plan)));
+    Ok(plan)
 }
 
 #[cfg(test)]

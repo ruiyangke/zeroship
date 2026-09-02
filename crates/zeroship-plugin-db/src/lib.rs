@@ -338,13 +338,9 @@ pub struct DbPlugin {
     /// process serves - it is compiled into the binary, not derived from any
     /// app's descriptor.
     ///
-    /// NOT YET READ BY ANY CONSUMER, deliberately and visibly. Parsing it here
-    /// already buys one thing - a malformed authority fails at composition
-    /// rather than inside the first write - but the pass that iterates these
-    /// bindings instead of naming fields is a later step. The `allow` is
-    /// scoped to this field so the day that pass lands, deleting the attribute
-    /// is the whole change.
-    #[allow(dead_code, reason = "read once the write pass iterates the charter")]
+    /// Read by [`Self::register`], which projects it into the per-worker-thread
+    /// context as a [`system_shape_charter::AssignmentPlan`]. The write pass
+    /// iterates that projection and names no column of its own.
     system_shape_charter: zeroship_migrate_policy::RootCharter,
 }
 
@@ -448,6 +444,12 @@ impl NativePlugin for DbPlugin {
             // Stamp the process-wide meter so the exec boundary can emit a
             // per-app usage metric on each successful op.
             c.set_meter(self.meter.clone());
+            // Stamp the operator charter's assignment projection, so the write
+            // pass reads the authority this process was composed with rather
+            // than deriving one on its first write.
+            c.set_assignment_plan(std::rc::Rc::new(
+                system_shape_charter::AssignmentPlan::from_charter(self.system_shape_charter()),
+            ));
         });
         // Every JS-visible entry point lives on the Db v8_class wrapper
         // (see `v8_classes::db`).
