@@ -246,3 +246,48 @@ async fn rows_affected_marks_the_last_page_and_counts_only_that_execute() {
         "the fixture must span more than one page or this proves nothing: {observed:?}"
     );
 }
+
+/// A portal is refused by a client that does not own it.
+///
+/// `Portal` holds a `Weak<InnerClient>`, and `with_live_on` compares it by
+/// pointer against the client being asked to run it. Nothing covered the
+/// mismatch arm: every existing portal test binds and drains on one client, so
+/// `portal.rs:124` never ran.
+///
+/// The guard is not bookkeeping. Portal names are per-connection, and this
+/// suite already has `portal_name_collision` cases proving the same name can
+/// exist on two connections meaning different things. Executing A's portal
+/// through B would therefore not fail loudly - it would silently run whatever
+/// B has under that name, or a stale plan, and return rows the caller never
+/// asked for.
+#[compio::test]
+async fn a_portal_is_refused_by_a_client_that_does_not_own_it() {
+    let mut owner = client().await;
+    let mut stranger = client().await;
+
+    let owning_transaction = owner.transaction().await.expect("begin on the owner");
+    let portal = bind_ordered_rows(&owning_transaction).await;
+
+    let stranger_transaction = stranger.transaction().await.expect("begin on the stranger");
+    let error = stranger_transaction
+        .query_portal_raw(&portal, 1)
+        .await
+        .err()
+        .expect("a portal from another client must be refused");
+
+    let rendered = common::error_chain(&error);
+    assert!(
+        rendered.contains("portal no longer belongs to an active transaction on this client"),
+        "the refusal did not name the ownership rule: {rendered}"
+    );
+
+    // The owner still works, so the refusal cost the owning session nothing.
+    let page = fetch_page(&owning_transaction, &portal, 3).await;
+    assert_eq!(page.values, vec![1, 2, 3]);
+
+    owning_transaction.rollback().await.expect("rollback owner");
+    stranger_transaction
+        .rollback()
+        .await
+        .expect("rollback stranger");
+}
