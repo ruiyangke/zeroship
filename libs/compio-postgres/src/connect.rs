@@ -868,6 +868,45 @@ mod tests {
         script
     }
 
+    /// An entry with an empty host and no hostaddr is REFUSED, not guessed.
+    ///
+    /// libpq would fall back to its compiled-in default Unix socket directory.
+    /// This driver deliberately does not - the surrounding comment explains
+    /// why: that default is process configuration, which a published library
+    /// takes from its caller rather than reading for itself, and inferring it
+    /// would silently dial a platform-specific path nobody named.
+    ///
+    /// The refusal names the entry position, because a multi-host string is
+    /// where this actually bites: one good host and one empty one would
+    /// otherwise be indistinguishable in the message.
+    #[test]
+    fn an_empty_host_without_a_hostaddr_is_refused_rather_than_defaulted() {
+        let mut config = Config::new();
+        config.host("first.example").host("").port(5432).port(5432);
+
+        let Err(error) = endpoints(&config) else {
+            panic!("an empty host entry was resolved to something")
+        };
+        let rendered = format!("{error}: {}", {
+            let source = std::error::Error::source(&error);
+            source.map(ToString::to_string).unwrap_or_default()
+        });
+        assert!(
+            rendered.contains("host and hostaddr entry 2 are both empty"),
+            "the refusal must name which entry is empty: {rendered}"
+        );
+
+        // Control: the same config with both hosts named resolves.
+        let mut good = Config::new();
+        good.host("first.example").host("second.example");
+        assert_eq!(
+            endpoints(&good)
+                .expect("two named hosts must resolve")
+                .len(),
+            2
+        );
+    }
+
     #[test]
     fn passfile_uses_the_default_os_user_and_database() {
         use std::io::Write as _;
