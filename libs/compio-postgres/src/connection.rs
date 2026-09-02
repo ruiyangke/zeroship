@@ -4856,6 +4856,50 @@ mod tests {
         );
     }
 
+    /// An ErrorResponse whose field list does not parse yields NO diagnosis.
+    ///
+    /// The ASCII scan walks every field before trusting the text, so a frame
+    /// that fails partway through that walk has already been half-read. Taking
+    /// the fields decoded so far would present a truncated server message as
+    /// though it were the whole one; returning `None` leaves the caller with
+    /// its local error instead of a diagnosis the server never finished
+    /// sending.
+    ///
+    /// **This pins the OUTCOME, not one arm.** Two independent paths refuse a
+    /// malformed frame: the scan's own `Err(_) => return None`, and the
+    /// trailing `DbError::parse(..).ok()`, which walks the same bytes and fails
+    /// the same way. Measured: turning the scan's arm into a `break` leaves
+    /// this test green, because the parse behind it still yields `None`. So the
+    /// scan's arm is REDUNDANT here rather than unbound - do not read a green
+    /// mutation as evidence that it can be deleted, and do not expect this test
+    /// to notice if it is.
+    #[test]
+    fn a_malformed_error_response_yields_no_diagnosis() {
+        // 'M' names a field whose value never reaches its NUL terminator, so
+        // the field iterator errors instead of ending cleanly.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"SERROR\0");
+        payload.extend_from_slice(b"Munterminated");
+        let mut bytes = vec![b'E'];
+        bytes.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(b"Z\0\0\0\x05I");
+        let malformed = BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice()));
+
+        assert!(
+            first_ascii_server_error(&malformed).is_none(),
+            "a half-parsed ErrorResponse was presented as a server diagnosis"
+        );
+
+        // Control, one variable away: the same shape properly terminated does
+        // decode, so the refusal is the truncation and not the frame itself.
+        let terminated = error_response_batch("22012", "division by zero");
+        assert_eq!(
+            first_ascii_server_error(&terminated).map(|error| error.code().code().to_owned()),
+            Some("22012".to_owned())
+        );
+    }
+
     #[test]
     fn retirement_decodes_only_ascii_server_diagnostics() {
         let ascii = error_response_batch("22012", "division by zero");
