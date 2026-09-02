@@ -971,7 +971,7 @@ async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
     };
 
     match canceller.cancel().await {
-        Ok(super::cancel::CancelDelivery::SqliteSettled(outcome)) => {
+        Ok(crate::backend::cancel::CancelDelivery::SqliteSettled(outcome)) => {
             // SQLite's actor rolls back and retires the reservation BEFORE it
             // acknowledges, so its answer is the cleanup result. There is
             // nothing left to reclaim.
@@ -982,7 +982,7 @@ async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
                 }
             };
         }
-        Ok(super::cancel::CancelDelivery::Requested) => {}
+        Ok(crate::backend::cancel::CancelDelivery::Requested) => {}
         Err(error) => {
             tracing::warn!(
                 app_id,
