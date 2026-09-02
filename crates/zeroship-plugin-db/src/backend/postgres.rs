@@ -109,7 +109,7 @@ impl PostgresBackend {
     /// The isolate context uses this to hand a backend the root keys the
     /// host installed (`ThreadDbContext::local_key_source`) instead of
     /// the process environment.
-    pub fn new_with_key_source(
+    pub(crate) fn new_with_key_source(
         pool: Rc<compio_postgres::Pool>,
         url: String,
         key_source: crate::encryption::LocalKeySource,
@@ -126,12 +126,12 @@ impl PostgresBackend {
     /// Borrow the inner pool. Provided for the few places that still
     /// need the raw `Pool` (e.g. the v8_classes layer's `ensure_pool`
     /// shim until the consumer migration completes).
-    pub fn pool(&self) -> &Rc<compio_postgres::Pool> {
+    pub(crate) fn pool(&self) -> &Rc<compio_postgres::Pool> {
         &self.pool
     }
 
     /// Borrow the configured URL.
-    pub fn url(&self) -> &str {
+    pub(crate) fn url(&self) -> &str {
         &self.url
     }
 }
