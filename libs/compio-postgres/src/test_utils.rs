@@ -32,10 +32,13 @@
 //! So the count has been wrong in both directions: two when there were three,
 //! and then three when there were two.
 //!
-//! `statement_for_test` has ZERO call sites anywhere in the workspace. It is
-//! public API of a publishable library, built for those same benches, so it is
-//! left rather than deleted on one grep - but nothing in the tree justifies it,
-//! which is worth knowing before the next reader assumes it is load-bearing.
+//! `statement_for_test` has no caller OUTSIDE this module, but it is NOT
+//! dead: `row_for_test` builds its `Statement` with it (below), so deleting
+//! it breaks both benches through their `row_for_test` call. This note said
+//! "ZERO call sites anywhere in the workspace" for one commit, because the
+//! grep behind that claim excluded this file to skip the definition and hid
+//! the call with it. A caller search that cannot see the defining module
+//! cannot answer whether a function is dead.
 //!
 //! Keeping them was re-ruled on 2026-08-25. The alternative considered was
 //! having the benches fetch one real row before the timed loop, which would
