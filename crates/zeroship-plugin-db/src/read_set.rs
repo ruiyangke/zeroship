@@ -1,5 +1,37 @@
 //! Read-set capture + predicate evaluation.
 //!
+//! # NOTHING BELOW RUNS TODAY. Measured 2026-09-02.
+//!
+//! Everything after this block describes the feature as designed, in the
+//! present tense, and it is worth reading that way - but the narrowing does not
+//! happen in any shipped path, and delivery is coarse-grained. **BOTH ends are
+//! disconnected, and each was checked separately because "inert on both ends"
+//! is two claims:**
+//!
+//! * **Producer.** [`record_if_active`] has exactly one call site,
+//!   `crud/mod.rs:242`, and it is real production code - which is why a caller
+//!   grep alone reads as "live". But its first line is `if !is_active()`, and
+//!   `is_active()` is true only inside an [`Active`] capture. **`Active::begin`
+//!   has no caller anywhere outside this module**, so `CURRENT_BUFFER` is
+//!   always `None` and the function returns immediately. No entry is ever
+//!   recorded.
+//! * **Consumer.** `broker::Subscription::set_read_set` has ten call sites and
+//!   every one is inside `broker.rs`'s own `#[cfg(test)]` module (it begins at
+//!   line 1106; the calls run 1374-1612). So `Subscription::read_set` is `None`
+//!   on every production subscription, and `Subscription::accepts` opens with
+//!   `let Some(rs) = ... else { return true }` - it accepts every event.
+//!
+//! **The consequence is a delivery-semantics fact, not just dead code.** Every
+//! subscriber on `(app_id, collection)` receives every change to that
+//! collection, including rows its filter excludes. That is the coarse-grained
+//! default the paragraph below says this module removes.
+//!
+//! Wiring it is two connections, not a rewrite: open a capture around the
+//! `query()` handler dispatch (adapter-side - #117 moved the kind gate INTO
+//! the capture precisely so this module need not ask), and hand
+//! [`Active::take`]'s entries to the subscription the handler opened. That is
+//! a change to what subscribers receive, so it is a decision, not a cleanup.
+//!
 //! Without a read-set, the broker and the cross-worker WAL consumer
 //! deliver **coarse-grained**: every subscription on
 //! `(app_id, collection)` receives every change to that collection.

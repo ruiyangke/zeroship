@@ -441,13 +441,30 @@ one. Phase 0 is still worth doing first and is still individually shippable; **i
   load-bearing. Four are named security controls (`sanitize_app_actor`, `TxRoute::capture`,
   `DbBinding::cold_start`, `context::with_mut`). This repository has already shipped this mistake once
   and written a comment claiming it had not.
-- **The dead-code decision. TWO OF FOUR ARE RULED ON (2026-09-02): `cross_app_fk.rs` and
-  `crud/mask_backfill.rs` are DELETED.** `drop_namespace.rs` and `read_set.rs` remain. Both
+- **The dead-code decision. ALL FOUR ARE MEASURED (2026-09-02), and they took THREE different
+  answers, which is the finding.** `cross_app_fk.rs` and `crud/mask_backfill.rs` are DELETED.
+  `drop_namespace.rs` is REASSIGNED (see the target table). `read_set.rs` is the one genuine
+  delete-or-wire call and is stated below. Both
   deletions were confirmed the only way that is not a grep - remove the file and compile - and both
   turned up a stale claim on the way out: `cross_app_fk`'s declaration named an enforcer
   (`zeroship_schema::query`) with zero cross-app references, and three crates described
   `mask_backfill` as holding a `run_mask_backfill` / `run_mask_rewrite` runner that its own header
   said in its first four lines had never existed. Original text follows.
+
+  **`read_set.rs` (709 lines) - "inert on both ends" CONFIRMED, and it is two claims, so each was
+  checked separately.** PRODUCER: `record_if_active` has one real production call site
+  (`crud/mod.rs:242`), which is why a caller grep reads as live - but it opens `if !is_active()`,
+  and `Active::begin` has no caller outside the module, so nothing is ever recorded. CONSUMER:
+  `broker::Subscription::set_read_set` has ten call sites, all inside `broker.rs`'s own test module
+  (boundary line 1106), so `read_set` is `None` on every real subscription and `accepts()` returns
+  `true` unconditionally.
+
+  **The consequence is a delivery-semantics fact, not just dead weight**: every subscriber on
+  `(app_id, collection)` receives every change to that collection, including rows its filter
+  excludes - the exact coarse-grained behaviour the module says it removes. Wiring is two
+  connections (open a capture around the `query()` dispatch; hand `Active::take`'s entries to the
+  subscription), not a rewrite. **That changes what subscribers receive, so it is an operator
+  decision, and it is the one item in this audit still open.**
 
   Several modules are self-declared unreachable - `cross_app_fk.rs`,
   `drop_namespace.rs`, `crud/mask_backfill.rs` - plus `read_set.rs`, inert on both ends. **Giving
