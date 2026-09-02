@@ -260,7 +260,7 @@ impl CleanupCause {
 
 /// The latched cleanup: one cause, one goal.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct LatchedCleanup {
+pub(crate) struct LatchedCleanup {
     pub cause: CleanupCause,
     pub goal: CleanupGoal,
 }
@@ -289,7 +289,7 @@ pub enum SessionOwnership {
 /// A token minted per backend command. Guard order step 2: every completion
 /// must carry the token its current action minted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct CommandToken(u64);
+pub(crate) struct CommandToken(u64);
 
 impl CommandToken {
     #[must_use]
@@ -300,7 +300,7 @@ impl CommandToken {
 
 /// The backend generation the admitted handle stored. Guard order step 4.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct BackendGeneration(pub u64);
+pub(crate) struct BackendGeneration(pub u64);
 
 /// The settle vocabulary, which this module USES but does not OWN.
 ///
@@ -344,7 +344,7 @@ impl TerminalOutcome {
 
 /// The routed authority an event carries, for guard order step 1.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EventAuthority {
+pub(crate) struct EventAuthority {
     pub identity: identity::AuthorityIdentity,
     pub domain: identity::AuthorityDomain,
 }
@@ -357,7 +357,7 @@ pub struct EventAuthority {
 /// the event instead of collapsing it to a boolean while the exact
 /// `DbError` stays with the driver.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BeginOutcome {
+pub(crate) enum BeginOutcome {
     /// `BEGIN` and session setup both succeeded.
     Opened(BackendGeneration),
     /// Setup produced a creator-facing error that should survive unchanged.
@@ -508,7 +508,7 @@ impl Action {
 
 /// A successful reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TxReply {
+pub(crate) enum TxReply {
     Began,
     FrameOpened(FrameId),
     FrameClosed(FrameId),
@@ -522,7 +522,7 @@ pub enum TxReply {
 /// the caller receives - never an out-of-band log line. A protocol whose
 /// illegal transitions are only observable in a worker log is not executable.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TxProtocolError {
+pub(crate) enum TxProtocolError {
     /// Guard 1. The event's authority does not match the stored one. **Must
     /// not touch that entry's session, actor, timer or admission** - not even
     /// to cancel it.
@@ -636,7 +636,7 @@ pub struct TxReducer {
 /// The gate's three outcomes. The middle one is the one a hand-rolled
 /// implementation gets wrong.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GateOutcome {
+pub(crate) enum GateOutcome {
     /// The gate was open; the force latches the single cleanup cause.
     ForceWon,
     /// An earlier force already owns the cause. The second joins it and emits
