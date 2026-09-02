@@ -169,3 +169,68 @@ fn naming_a_service_without_a_file_is_an_error() {
         "the error does not name the service: {error:?}"
     );
 }
+
+/// Every `ServiceError` renders a message that names what went wrong.
+///
+/// The two tests above already reach two of these variants, but they assert on
+/// `format!("{:?}", source)` - the DEBUG rendering - and `.contains(SERVICE)`
+/// passes there because the service name is a struct FIELD. The `Display` impl
+/// (`service.rs:42-64`) had therefore never run, in any of its four arms.
+///
+/// That impl is the whole user-facing surface for a misconfigured service
+/// file. This driver deliberately does not search `$PGSERVICEFILE`,
+/// `~/.pg_service.conf` or `$PGSYSCONFDIR`, so when a service will not resolve
+/// the message is the only thing telling the caller which of the four reasons
+/// applies - missing file, missing section, bad syntax, or unreadable path.
+#[test]
+fn every_service_error_renders_a_message_naming_its_cause() {
+    fn rendered(error: &compio_postgres::Error) -> String {
+        let source = std::error::Error::source(error).expect("a ServiceError source");
+        format!("{source}")
+    }
+
+    // No service file at all.
+    let error = format!("service={SERVICE}")
+        .parse::<Config>()
+        .expect_err("a service with nowhere to read it from must not resolve");
+    let text = rendered(&error);
+    assert!(
+        text.contains(SERVICE) && text.contains("no service file"),
+        "the no-file arm did not name its cause: {text}"
+    );
+
+    // The file exists but does not define the section.
+    let path = service_file_path("display_undefined");
+    std::fs::write(&path, "[some_other_service]\nhost=127.0.0.1\n").expect("write service file");
+    let result = config_for_service(&path);
+    std::fs::remove_file(&path).ok();
+    let text = rendered(&result.expect_err("an undefined service must not resolve"));
+    assert!(
+        text.contains(SERVICE) && text.contains("not found in"),
+        "the undefined arm did not name its cause: {text}"
+    );
+
+    // A line that is neither a section header nor a key=value pair.
+    let path = service_file_path("display_syntax");
+    std::fs::write(&path, format!("[{SERVICE}]\nthis line is not a pair\n"))
+        .expect("write service file");
+    let result = config_for_service(&path);
+    std::fs::remove_file(&path).ok();
+    let text = rendered(&result.expect_err("a malformed service file must not resolve"));
+    assert!(
+        text.contains("syntax error in service file") && text.contains("line 2"),
+        "the syntax arm did not name the offending line: {text}"
+    );
+
+    // A path that cannot be read as a file. A directory is the portable way to
+    // make `read_to_string` fail without depending on permission semantics.
+    let directory = service_file_path("display_unreadable_dir");
+    std::fs::create_dir_all(&directory).expect("create the directory standing in for a file");
+    let result = config_for_service(&directory);
+    std::fs::remove_dir_all(&directory).ok();
+    let text = rendered(&result.expect_err("an unreadable service file must not resolve"));
+    assert!(
+        text.contains("could not read service file"),
+        "the unreadable arm did not name its cause: {text}"
+    );
+}
