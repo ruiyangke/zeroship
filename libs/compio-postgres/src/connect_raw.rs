@@ -4096,6 +4096,45 @@ mod tests {
             .expect("scripted connection task did not stop after its peer closed");
     }
 
+    /// The ordinary handoff's counterpart to
+    /// `replication_handshake_preserves_coalesced_post_ready_bytes`. That test
+    /// covers the replication path, which rebuilds its data-phase framer and so
+    /// has to carry the bytes deliberately. This covers the path everything
+    /// else uses, which keeps its `BufStream` whole - and whose own comment
+    /// says exactly that, without anything checking it.
+    ///
+    /// Structural preservation is not a tested property. Rebuilding the stream
+    /// at the handoff drops whatever the last startup read over-read, so a
+    /// FATAL arriving in the same segment as ReadyForQuery would vanish with no
+    /// error anywhere.
+    #[compio::test]
+    async fn ordinary_handshake_delivers_coalesced_post_ready_bytes() {
+        let mut script = successful_handshake(std::iter::empty());
+        script.extend_from_slice(&error_response(
+            "57P01",
+            "terminating connection after startup",
+        ));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+
+        let (client, connection) = plaintext_config()
+            .connect_raw(stream, NoTls)
+            .await
+            .expect("a normal handshake must succeed even with a coalesced FATAL");
+        let run = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = compio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("the connection task never observed the coalesced frame")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .expect_err("the coalesced FATAL must fail the connection task");
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "the connection lost the frame buffered during startup: {error}"
+        );
+        drop(client);
+    }
+
     #[compio::test]
     async fn connect_raw_timeout_covers_a_stalled_handshake() {
         let (stream, startup_observed) = scripted_server_after_startup(None).await;
