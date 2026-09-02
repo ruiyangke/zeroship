@@ -4684,6 +4684,67 @@ mod tests {
         );
     }
 
+    /// A tag the `START_REPLICATION` loop does not expect must END the
+    /// command, not be skipped.
+    ///
+    /// The loop consumes `NoticeResponse`, `NotificationResponse` and
+    /// `ParameterStatus` and keeps waiting, because those are asynchronous and
+    /// answer nothing. Every other tag is a walsender saying something this
+    /// command cannot use -- a backend that is not a walsender at all answers
+    /// `CommandComplete` + `ReadyForQuery`, and a pooler can put either in
+    /// front of the stream.
+    ///
+    /// Widening the async arm to a bare `_` is the rewrite this guards
+    /// against, and it is not a cosmetic one. MEASURED against that mutation:
+    /// the payload is dropped, nothing has changed, the loop reads again and
+    /// reports `connection closed by server` -- against a real peer it blocks
+    /// until the read deadline instead. So the binding assertion is that the
+    /// offending tag is NAMED, which a silent skip cannot produce.
+    ///
+    /// `read_header` does not filter tags -- it reads the tag and length and
+    /// hands both on -- so each case below reaches the match rather than
+    /// being refused earlier by the framer.
+    #[compio::test]
+    async fn an_unexpected_tag_answering_start_replication_is_refused() {
+        let unexpected: &[(&str, u8, &[u8])] = &[
+            ("CommandComplete", b'C', b"START_REPLICATION\0"),
+            ("ReadyForQuery", b'Z', b"I"),
+            ("RowDescription", b'T', b"\x00\x00"),
+            ("CopyInResponse", b'G', b"\x00\x00\x00"),
+        ];
+
+        let mut ruled_on = 0usize;
+        for (case, tag, body) in unexpected {
+            ruled_on += 1;
+            let connection = replication_connection_over(startup_frame(*tag, body));
+            let outcome = connection
+                .start_logical_replication(StartReplicationOptions {
+                    slot_name: "slot",
+                    ..Default::default()
+                })
+                .await;
+            let Err(error) = outcome else {
+                panic!("{case} was accepted as a START_REPLICATION answer")
+            };
+            // The text lives on the io source, not on `Error`'s own Display.
+            let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+                std::error::Error::source(*source)
+            })
+            .fold(error.to_string(), |chain, source| {
+                format!("{chain}: {source}")
+            });
+            assert!(
+                chain.contains("unexpected message tag during START_REPLICATION"),
+                "{case} did not end the command by name: {chain}"
+            );
+            assert!(
+                chain.contains(&format!("0x{tag:02x}")),
+                "{case} was refused without naming the tag that caused it: {chain}"
+            );
+        }
+        assert_eq!(ruled_on, 4, "the unexpected-tag matrix shrank");
+    }
+
     /// A peer that accepts a configured number of writes, writes part of the
     /// next frame, fails the remainder, and is healthy for every write after
     /// that.
