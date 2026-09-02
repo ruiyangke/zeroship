@@ -321,6 +321,45 @@ and the same SSI-predicate-lock amplification.
   descriptor being true about the database. See 3.1.
 - **Worker configuration** is the trust root for the mask-policy ceiling.
   Nothing inside an isolate contributes to it.
+- **Column encryption has NO trust root, and this is measured, not feared.**
+  Whether a value is encrypted on write is decided from the creator-authored
+  descriptor and nothing else: `crud/mod.rs:2512-2517`
+  (`schema_has_encrypted_columns` = `def.get("encrypted").is_some()`) feeds
+  `crud/write_pipeline.rs:243`, and that flag gates the **entire** encryption
+  stage rather than one column's branch. Delete the key and the stage is skipped,
+  so no ciphertext is produced and no `__zsbin__<col>` marker is deposited; the
+  builders key on that marker (`crud/bytes_pass.rs:113,151`,
+  `zeroship-schema/src/query.rs:201`), so the statement degrades to a bare `$N`.
+  Two red probes drove one document through the real pipeline twice, varying only
+  the presence of that key, and both confirmed plaintext at rest:
+
+  | | PostgreSQL 18.4 | SQLite |
+  | --- | --- | --- |
+  | funnel | `query_text_params` (`backend/postgres.rs:312-319`) | `session.exec` (`backend/sqlite/mod.rs:625-632`) |
+  | outcome | accepted; stored bytes decode to the plaintext | accepted; `typeof()` = `text` in a `BLOB` column |
+
+  The deploy pipeline's ordering guarantee above does **not** cover this. Ordering
+  says the migration ran before the descriptor was served; it says nothing about a
+  descriptor whose `encrypted` key was removed after generation, which is exactly
+  the case `zeroship-migrate-server`'s `apply.rs` already concedes ("a creator who
+  hand-edits both generated files can make them agree about a lie").
+
+  **This forecloses a dialect-uniform fix.** The driver's typed bind path does
+  refuse the Postgres case client-side (`WrongType { postgres: Bytea, rust:
+  "&str" }`), but the data plane deliberately does not use it: `client.rs:2876-2883`
+  documents the text-params funnel as "the server infers each parameter's type
+  from its SQL position and a text value implicit-casts to the target column type
+  - the coercion model a schema-blind DML assembler needs". On SQLite there is no
+  type fence to reach for at all, because affinity is a preference. So parameter
+  typing is at best a Postgres-side second layer, and a structural fence keyed on
+  a fact the creator cannot author is required for SQLite regardless. Any design
+  that claims to close this must say which leg it covers.
+
+  Note the signal to key that fence on is **not** the raw sibling. A
+  `__zs_raw__<col>` column marks *masking*, not encryption - the engine's own
+  fixture (`crates/zeroship-migrate/tests/sqlite_engine/declarative_sqlite.rs:1150`)
+  emits `__zs_raw__ssn` as plain `TEXT` for a masked-but-unencrypted column
+  beside `__zs_raw__secret` as `BLOB` for one that is both.
 
 ### 3.5 Descriptor contract and transport
 
@@ -1379,6 +1418,27 @@ D4 makes the ceiling worker configuration. **Its format, its configuration
 source, and what the dev and `zeroship serve` vectors read are not specified
 anywhere in this document set.** SC-5 owns the composition point; nothing owns
 the source.
+
+### Open: column encryption has no trust root, and no fix covers both dialects
+
+3.4 states the measured gap: `encrypted` is read from the creator-authored
+descriptor at a single whole-stage gate, and deleting it stores plaintext at rest
+on **both** Postgres and SQLite. Confirmed by two red probes through the real
+write pipeline, not inferred.
+
+What blocks it is that the obvious fix is dialect-split. Parameter typing works
+only on Postgres, and fights the deliberate schema-blind coercion model there;
+SQLite has no type fence at all because affinity is a preference. The remaining
+option is a structural fence keyed on a fact the creator cannot author - the
+physical column type - which means reading the live schema.
+
+**That reader does not ship.** `backend::pg_introspect` is
+`#[cfg(any(test, feature = "test-helpers"))]` (`backend/mod.rs:87`), and 3.1
+removed live-catalog reads from the CRUD path deliberately (`descriptor.rs:12-28`).
+So this is blocked on the same decision as the dormant mask-drift sweep: whether a
+live-schema read returns to the data plane at all, and if so on what cadence. The
+two must be decided together; nothing else in this document depends on that answer,
+and two separate defences now do.
 
 ### Open: SC-1's executable form is larger than SC-1
 
