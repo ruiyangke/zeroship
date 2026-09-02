@@ -518,10 +518,13 @@ fn serve_copy_in(stream: &mut TcpStream, tags: &std::sync::mpsc::Sender<(u8, Vec
                 pending.clear();
             }
             b'c' => {
-                let mut r = command_complete(b"COPY 1");
-                r.extend_from_slice(&ready_for_query());
-                let _ = stream.write_all(&r);
-                let _ = stream.flush();
+                // CommandComplete ONLY. ReadyForQuery belongs to the Sync that
+                // follows it, and sending one here is a message the frontend
+                // never asked for. This driver tolerated the extra frame, so
+                // the COPY tests passed against a peer that was not conformant;
+                // driving tokio-postgres through the same peer refused it with
+                // UnexpectedMessage, which is what exposed the fault.
+                pending.extend_from_slice(&command_complete(b"COPY 1"));
             }
             b'f' => {
                 let mut r = error_response("57014", "copy from stdin failed");
