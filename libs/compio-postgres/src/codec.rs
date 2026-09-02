@@ -1282,6 +1282,60 @@ mod tests {
     /// mutations left it green, because the bounds-checked `get` at the top of
     /// the loop already returns `None` for an offset past the end. The probe is
     /// what caught that; the test passing did not.
+    /// Sweep THIS crate's decode path, not upstream's message parser.
+    ///
+    /// `BackendMessages::next` is `backend::Message::parse`; the length ceiling,
+    /// startup limits, deferred errors and COPY metadata validation all live in
+    /// `read_backend`, behind a `ReadFramer`. The `decoder_fuzz` module below
+    /// drives the former and so never reaches any of them - measured with a probe
+    /// panic in `copy_format::validate_wire`, unhit by its whole sweep.
+    #[compio::test]
+    async fn hostile_frames_through_the_real_decoder_are_refused_rather_than_panicking() {
+        struct Rng(u64);
+        impl Rng {
+            fn next_u64(&mut self) -> u64 {
+                let mut x = self.0;
+                x ^= x >> 12;
+                x ^= x << 25;
+                x ^= x >> 27;
+                self.0 = x;
+                x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+            }
+            fn below(&mut self, n: usize) -> usize {
+                ((self.next_u64() >> 33) as usize) % n
+            }
+        }
+
+        const TAGS: &[u8] = b"123AcCdDEGHIKnNRSstTZVWv\x00\xff";
+        let mut rng = Rng(0xC0DE_C0FF_EE00_1234);
+        let (mut decoded, mut refused) = (0u32, 0u32);
+
+        for _ in 0..20_000 {
+            let mut frames = Vec::new();
+            for _ in 0..=rng.below(3) {
+                let body_len = rng.below(24);
+                let mut frame = vec![TAGS[rng.below(TAGS.len())]];
+                frame.extend_from_slice(&(body_len as u32 + 4).to_be_bytes());
+                for _ in 0..body_len {
+                    frame.push((rng.next_u64() & 0xff) as u8);
+                }
+                frames.push(frame);
+            }
+            let mut framer = ScriptedFramer::new(frames);
+            framer.max_message_size = if rng.below(8) == 0 { 16 } else { usize::MAX };
+            match read_backend(&mut framer).await {
+                Ok(_) => decoded += 1,
+                Err(_) => refused += 1,
+            }
+        }
+
+        assert!(
+            decoded > 500,
+            "the generator never produced a decodable batch: decoded={decoded}"
+        );
+        assert!(refused > 500, "no batch was refused: refused={refused}");
+    }
+
     #[test]
     fn first_matching_tag_refuses_a_sub_minimum_frame_length() {
         let mut short = vec![b'X'];
