@@ -25,7 +25,7 @@ use std::fmt;
 /// today's per-app axis and is named for the axis rather than being the only
 /// one possible.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct AuthorityIdentity {
+pub(crate) struct AuthorityIdentity {
     /// Opaque. Never parsed, never split, never compared except for equality.
     key: Box<str>,
     /// Bumped when the subject is re-provisioned. Part of the identity rather
@@ -71,7 +71,7 @@ impl fmt::Display for AuthorityIdentity {
 /// and no PITR-resurrection defence; a binding on that tier carries the same
 /// domain value it captured and the comparison below is trivially satisfied.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct AuthorityDomain {
+pub(crate) struct AuthorityDomain {
     system_identifier: u64,
     timeline_id: u32,
 }
@@ -94,7 +94,7 @@ impl fmt::Display for AuthorityDomain {
 
 /// The schema epoch an observation carries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct SchemaEpoch(u64);
+pub(crate) struct SchemaEpoch(u64);
 
 impl SchemaEpoch {
     #[must_use]
@@ -110,7 +110,7 @@ impl SchemaEpoch {
 
 /// The subject's lifecycle state, as the authority record reports it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum LifecycleState {
+pub(crate) enum LifecycleState {
     /// Settled and serving. The only state that can reach `Current`.
     Stable,
     /// Mid-transition - provisioning, deprovisioning, migrating. Retryable:
@@ -127,7 +127,7 @@ pub enum LifecycleState {
 /// stand-in. SC-1 invariant 8 only needs the algebra: a raise is ignored, a
 /// lower value tightens.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct MaskCeiling {
+pub(crate) struct MaskCeiling {
     allowed: std::collections::BTreeSet<Box<str>>,
 }
 
@@ -170,7 +170,7 @@ impl MaskCeiling {
 
 /// What the binding captured, and what every observation is compared against.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExpectedAuthority {
+pub(crate) struct ExpectedAuthority {
     pub identity: AuthorityIdentity,
     pub domain: AuthorityDomain,
     pub epoch: SchemaEpoch,
@@ -178,7 +178,7 @@ pub struct ExpectedAuthority {
 
 /// One authority observation, from any of the three sources.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObservedAuthority {
+pub(crate) struct ObservedAuthority {
     pub identity: AuthorityIdentity,
     pub domain: AuthorityDomain,
     pub epoch: SchemaEpoch,
@@ -197,7 +197,7 @@ pub use zeroship_data_core::error::DenyReason;
 /// The classifier's verdict. Exactly one of three, and the classifier is
 /// total: every observation produces one.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Verdict {
+pub(crate) enum Verdict {
     /// Identity matches, the lifecycle is stable, and the epoch is the
     /// expected one. **Not forcing**: it never claims the gate. Its ceiling is
     /// folded into the effective ceiling by `meet`, so it can only tighten.
@@ -238,7 +238,7 @@ impl Verdict {
 /// that question is answered by the identity comparison, uniformly, for every
 /// value it could take.
 #[must_use]
-pub fn classify(observed: &ObservedAuthority, expected: &ExpectedAuthority) -> Verdict {
+pub(crate) fn classify(observed: &ObservedAuthority, expected: &ExpectedAuthority) -> Verdict {
     // --- identity, first and entirely ---
     //
     // The domain leads because it is the coarsest: if the cluster answering is
