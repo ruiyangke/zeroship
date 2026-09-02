@@ -931,6 +931,49 @@ mod tests {
         );
     }
 
+    /// The three cases above are four points out of 131072. `raw` is a peer-
+    /// chosen `i16` and `has_oids` a peer-chosen flag bit, so the whole input
+    /// domain is small enough to ENUMERATE rather than sample: this walks every
+    /// `i16` against both flag values.
+    ///
+    /// It pins two properties at once. Totality - no input panics, which is
+    /// what the widening to `i32` bought and what a release build would not
+    /// otherwise discriminate. And exactness - for each `(expected, has_oids)`
+    /// the accepted set is precisely the one `raw` satisfying
+    /// `raw + has_oids == expected`, so "never panics" cannot be met by
+    /// refusing everything, and a column count beyond `i16` accepts nothing at
+    /// all.
+    ///
+    /// `expected == 0` with the OID flag accepts `raw == -1`. That is correct
+    /// here: `-1` is the end-of-data sentinel, and the caller intercepts it
+    /// before this function is reached.
+    #[test]
+    fn tuple_field_count_is_total_and_exact_over_every_i16_a_peer_can_send() {
+        for expected in [0usize, 1, 2, 1706, 40_000] {
+            for has_oids in [false, true] {
+                let mut accepted = Vec::new();
+                for raw in i16::MIN..=i16::MAX {
+                    if let Ok(len) = tuple_field_count(raw, has_oids, expected) {
+                        assert_eq!(
+                            len, expected,
+                            "accepted raw={raw} has_oids={has_oids} but reported {len} \
+                             instead of {expected}"
+                        );
+                        accepted.push(raw);
+                    }
+                }
+
+                let want =
+                    i32::try_from(expected).expect("expected fits i32") - i32::from(has_oids);
+                let expected_accepted: Vec<i16> = i16::try_from(want).into_iter().collect();
+                assert_eq!(
+                    accepted, expected_accepted,
+                    "expected={expected} has_oids={has_oids} accepted the wrong set"
+                );
+            }
+        }
+    }
+
     /// A column count that does not fit the wire's `int16` is refused, not
     /// wrapped.
     ///
