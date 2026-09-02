@@ -1676,6 +1676,52 @@ impl BackendHandle {
         }
     }
 
+    /// Persist an app's mask policy wherever this backend keeps one.
+    ///
+    /// **PostgreSQL stores nothing, and that is not a gap.** Its policy is held
+    /// in the thread context and re-installed by `installSchema` on every boot,
+    /// so there is no restart to survive. SQLite may run without that
+    /// re-install, so it writes a sidecar beside the app files.
+    ///
+    /// Selecting between those by VENDOR is what this tier is for. The engine
+    /// used to write `if backend.as_postgres().is_some() { .. } else if let
+    /// Some(sq) = backend.as_sqlite() { persist_sqlite(sq, ..) }`, which put
+    /// both concrete backend names, and SQLite's whole storage strategy, into
+    /// engine code.
+    ///
+    /// # Errors
+    ///
+    /// The SQLite store's I/O failures. The PostgreSQL arm cannot fail.
+    pub(crate) async fn persist_mask_policy(
+        &self,
+        app_id: &str,
+        policy_json: &serde_json::Value,
+    ) -> Result<(), DbError> {
+        match self {
+            Self::Postgres(_) => Ok(()),
+            Self::Sqlite(sq) => sqlite::mask_policy_store::persist(sq, app_id, policy_json).await,
+        }
+    }
+
+    /// Read back what [`Self::persist_mask_policy`] wrote, if anything.
+    ///
+    /// `None` on PostgreSQL always: nothing was stored, so there is nothing to
+    /// recover, and the caller falls back to the cache the same way it would
+    /// for a SQLite app with no sidecar entry.
+    ///
+    /// # Errors
+    ///
+    /// The SQLite store's read and parse failures.
+    pub(crate) async fn load_mask_policy(
+        &self,
+        app_id: &str,
+    ) -> Result<Option<serde_json::Value>, DbError> {
+        match self {
+            Self::Postgres(_) => Ok(None),
+            Self::Sqlite(sq) => sqlite::mask_policy_store::load(sq, app_id).await,
+        }
+    }
+
     /// Run `f` against the inner [`PostgresBackend`].
     ///
     /// **No `dyn Backend` anywhere**: dispatching to the concrete
