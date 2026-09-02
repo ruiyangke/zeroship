@@ -882,7 +882,9 @@ fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmask
 /// The fence is exercised on BOTH axes - a batch mixing two columns on one
 /// row, and a batch mixing two rows where only one carries the forbidden
 /// column - because a single-row batch cannot tell an all-or-nothing fence from
-/// a per-row one. The two controls differ from their refusal in exactly one
+/// a per-row one. A third arm pins that the fence COLLECTS every denied pair
+/// rather than stopping at the first, which every single-denial arm is blind
+/// to. The two controls differ from their refusal in exactly one
 /// variable each and prove the withheld half was withholdable: the same actor
 /// under the same policy DOES get `email` when the batch does not also ask for
 /// `ssn`, and the same two-row batch hands over both values once the policy
@@ -1065,6 +1067,65 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         "and does not report the permitted row's pair as unauthorized: {reason:?}",
     );
 
+    // ---- the fence COLLECTS every denied pair; it does not stop at the first
+    //
+    // Every arm above carries exactly ONE unauthorized pair, and a fence that
+    // broke out of the loop on the first denial would satisfy all of them: one
+    // audit row, one refusal, same code. The loop at
+    // `crates/zeroship-plugin-db/src/crud/unmask.rs:1080-1089` has no `break`
+    // and no early return - it pushes every denied pair and refuses once at
+    // `:1093` - and TWO observable things follow that a short-circuit would get
+    // wrong. The refusal counts the pairs (`unauthorized.len()` at `:1107`), so
+    // it must say TWO; and the whole call still audits exactly ONCE, so two
+    // denials must not become two rows.
+    let both_denied = BulkUnmaskArgs {
+        collection: "people".to_string(),
+        items: vec![
+            BulkUnmaskItem {
+                row_pk: person.id.clone(),
+                columns: vec!["ssn".to_string()],
+            },
+            BulkUnmaskItem {
+                row_pk: second.id.clone(),
+                columns: vec!["email".to_string(), "ssn".to_string()],
+            },
+        ],
+        actor: Some(json!({ "kind": "support", "id": "usr_support_1" })),
+        reason: Some("mask_flip integration test".to_string()),
+    };
+    let err = dispatch_bulk_unmask(&DbBinding::cold_start(app), both_denied)
+        .await
+        .expect_err("two forbidden pairs must still refuse the whole batch");
+    assert_eq!(refusal_code(&err), "bulk_unmask_partial_unauthorized");
+    assert!(
+        format!("{err:?}").contains("2 (row, column) pair(s) not authorized"),
+        "the refusal counts EVERY denied pair; a fence that stopped at the \
+         first would report 1: {err:?}",
+    );
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(
+        audit.len(),
+        4,
+        "two denied pairs still audit ONCE, not once per denial: {audit:?}",
+    );
+    assert_eq!(audit[3]["outcome"], json!("denied"));
+    let reason = audit[3]["reason"]
+        .as_str()
+        .expect("the audit row carries a reason");
+    assert!(
+        reason.contains(&format!("{}/ssn", person.id)),
+        "the reason names the first denied pair: {reason:?}",
+    );
+    assert!(
+        reason.contains(&format!("{}/ssn", second.id)),
+        "and the second, which a short-circuiting fence would never reach: \
+         {reason:?}",
+    );
+    assert!(
+        !reason.contains(&format!("{}/email", second.id)),
+        "and still not the permitted pair: {reason:?}",
+    );
+
     // ---- CONTROL 2, differing in one variable: the policy. The SAME two-row
     // batch now passes whole, and BOTH rows hand over their values - so the
     // refusal above withheld two real values, and the arm can pass.
@@ -1083,11 +1144,11 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     let audit = audit_rows(&pool, app).await;
     assert_eq!(
         audit.len(),
-        4,
+        5,
         "the granted batch appends one row: {audit:?}"
     );
-    assert_eq!(audit[3]["outcome"], json!("granted"));
-    assert_eq!(audit[3]["column"], json!("email,ssn"));
+    assert_eq!(audit[4]["outcome"], json!("granted"));
+    assert_eq!(audit[4]["column"], json!("email,ssn"));
 
     release_pg(pool).await;
 }
