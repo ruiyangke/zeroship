@@ -139,27 +139,30 @@ pub fn set_local_role_sql(app_id: &str) -> Result<String, DbError> {
     ))
 }
 
-/// `SET ROLE "app_<id>_role"` — session-level variant for the rare
-/// non-transactional client-SQL path. MUST be paired with
-/// [`reset_role_sql`] before the connection returns to the pool, or the
-/// next checkout inherits the constrained role.
-///
-/// # Errors
-///
-/// Returns a typed database error if the complete role name exceeds
-/// PostgreSQL's identifier limit.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn set_role_sql(app_id: &str) -> Result<String, DbError> {
-    let role = per_app_role_name(app_id)?;
-    Ok(format!("SET ROLE {}", crate::query::quote_ident(&role)))
-}
-
-/// `RESET ROLE` — restore the session's original (login) role. Pairs
-/// with [`set_role_sql`] on the non-transactional path.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn reset_role_sql() -> &'static str {
-    "RESET ROLE"
-}
+// DELETED 2026-09-01: `set_role_sql` and `reset_role_sql`.
+//
+// They built the session-level `SET ROLE` / `RESET ROLE` pair, and their
+// rustdoc described "the rare non-transactional client-SQL path" and said the
+// two MUST be paired before the connection returns to the pool. No such path
+// exists: both had ZERO callers anywhere in the workspace, tests included, and
+// the only thing they documented was how to reintroduce a shape this crate
+// deliberately refuses.
+//
+// That shape is cancellation-unsafe by construction. `SET ROLE` persists for
+// the SESSION, so its `RESET ROLE` is a manual obligation on a pooled
+// connection: cancel the statement between the two - a timeout, a dropped
+// future, a panic - and the connection returns to the pool still wearing the
+// constrained role, which the next checkout silently inherits. The pairing
+// instruction is exactly the part that cannot be relied on.
+//
+// `SET LOCAL ROLE` inside a transaction has no such obligation: PostgreSQL
+// reverts it at COMMIT or ROLLBACK whichever way the statement ends. That is
+// why the roled funnel is the only production path, and why the survivor below
+// is the LOCAL variant.
+//
+// Deleted rather than documented-away, per the pre-launch stance: a helper that
+// exists is an invitation, and prose telling the reader not to accept it is
+// weaker than not offering it.
 
 // ── DB-1: per-app connection-hold / statement-time guards ────────────────────
 //
@@ -547,16 +550,28 @@ mod tests {
     use super::*;
 
     #[test]
-    fn set_role_sql_shapes_are_quoted_and_correct() {
+    fn set_local_role_sql_shape_is_quoted_and_correct() {
         assert_eq!(
             set_local_role_sql("app_demo").unwrap(),
             r#"SET LOCAL ROLE "app_app_demo_role""#
         );
-        assert_eq!(
-            set_role_sql("app_demo").unwrap(),
-            r#"SET ROLE "app_app_demo_role""#
+    }
+
+    /// The emitted statement must stay LOCAL.
+    ///
+    /// `SET ROLE` and `SET LOCAL ROLE` differ by one word and by whether the
+    /// change survives the transaction. The session form leaves a pooled
+    /// connection wearing the constrained role if the statement is cancelled
+    /// before its `RESET`, so dropping `LOCAL` here would reintroduce the
+    /// cancellation-unsafe pair deleted above - and every other assertion in
+    /// this file would still pass.
+    #[test]
+    fn the_role_statement_is_transaction_scoped_not_session_scoped() {
+        let sql = set_local_role_sql("app_demo").unwrap();
+        assert!(
+            sql.starts_with("SET LOCAL ROLE "),
+            "the role fence must be transaction-scoped: {sql}",
         );
-        assert_eq!(reset_role_sql(), "RESET ROLE");
     }
 
     #[test]
@@ -568,10 +583,6 @@ mod tests {
         assert_eq!(
             set_local_role_sql(r#"a"b"#).unwrap(),
             r#"SET LOCAL ROLE "app_a""b_role""#
-        );
-        assert_eq!(
-            set_role_sql(r#"a"b"#).unwrap(),
-            r#"SET ROLE "app_a""b_role""#
         );
     }
 
