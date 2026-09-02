@@ -2582,6 +2582,61 @@ mod tests {
         }
     }
 
+    /// The two behaviours an all-whitespace name cannot pin: a whitespace RUN
+    /// becomes exactly ONE space, and ASCII case folds.
+    ///
+    /// The tests above prove which bytes count as whitespace, because an
+    /// all-space name canonicalising to empty fails the moment the class
+    /// shrinks. They say nothing about what a run BETWEEN two words becomes.
+    /// Deleting the run instead of collapsing it -- `canonical.push(b' ')`
+    /// removed -- leaves both of them green while changing the hash of every
+    /// issuer whose name contains a space, which is nearly all of them. Every
+    /// `sslcrldir` lookup would then miss, because the filename OpenSSL chose
+    /// is derived from ITS canonical bytes, not ours.
+    ///
+    /// The expectations are not read off our own implementation. They are the
+    /// equivalence classes OpenSSL 3.6.1 itself produces, measured by giving
+    /// `openssl req -x509` a CN per row and reading `openssl x509 -hash`:
+    ///
+    /// ```text
+    ///   49cdc5e0   "A B"  "A\tB"  "A\rB"  "A\x0bB"  "A\x0cB"  "A\t\tB"  "a b"
+    ///   9ab520a7   "\tAB"  "AB\t"  "AB"
+    /// ```
+    ///
+    /// Two rows OpenSSL's own `-subj` parser normalises before encoding ("A  B"
+    /// and " AB") were DISCARDED as evidence: their DER came back already
+    /// collapsed, so they measured the argument parser rather than the
+    /// canonicaliser. The tab rows carry a real 0x09 in the DER and are what
+    /// the classes above rest on.
+    #[test]
+    fn crl_issuer_whitespace_run_becomes_one_space_and_case_folds() {
+        let collapses_to_a_space: &[&[u8]] = &[
+            b"A B", b"A\tB", b"A\rB", b"A\x0bB", b"A\x0cB", b"A\t\tB", b"A \tB", b"a b",
+        ];
+        let mut ruled_on = 0usize;
+        for input in collapses_to_a_space {
+            ruled_on += 1;
+            let value = Any::from_tag_and_data(Tag::Utf8String, input);
+            assert_eq!(
+                openssl_canonical_string(&value),
+                Ok(Some(b"a b".to_vec())),
+                "{input:?} must canonicalise to one space between the words, lowercased"
+            );
+        }
+
+        let strips_to_bare_letters: &[&[u8]] = &[b"\tAB", b"AB\t", b"AB", b"  AB \t "];
+        for input in strips_to_bare_letters {
+            ruled_on += 1;
+            let value = Any::from_tag_and_data(Tag::Utf8String, input);
+            assert_eq!(
+                openssl_canonical_string(&value),
+                Ok(Some(b"ab".to_vec())),
+                "{input:?} must lose its surrounding whitespace entirely"
+            );
+        }
+        assert_eq!(ruled_on, 12, "the OpenSSL equivalence matrix shrank");
+    }
+
     #[test]
     fn crl_issuer_utf8_string_containing_only_c_whitespace_is_empty() {
         let value = Any::from_tag_and_data(Tag::Utf8String, b" \t\n\x0b\x0c\r");
