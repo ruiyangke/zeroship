@@ -52,7 +52,7 @@ pub struct AeadKey {
     pub k_siv: [u8; 32],
 }
 
-/// Encrypt under the column's declared [`EncryptionMode`].
+/// Encrypt under the column's declared [`crate::backend::EncryptionMode`].
 ///
 /// The mode-to-function mapping had no home of its own until 2026-09-02: it
 /// was the body of `EncryptedColumn::encrypt`, written identically on both

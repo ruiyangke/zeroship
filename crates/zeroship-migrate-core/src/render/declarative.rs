@@ -8959,3 +8959,49 @@ mod derived_index_alias_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod bare_identifier_tests {
+    //! `validate_ident` is the live refusal of a dot-qualified name, and until
+    //! 2026-09-02 nothing asserted it.
+    //!
+    //! **Why it is worth pinning here specifically.** A creator's FK target is
+    //! meant to stay inside the calling app, and the platform used to carry a
+    //! dedicated 235-line validator for exactly that
+    //! (`zeroship-plugin-db/src/cross_app_fk.rs`, error code
+    //! `cross_app_fk_forbidden`). That module had ZERO production callers - its
+    //! own rustdoc said "in a default build, nobody" - because decision 10
+    //! removed all DDL from plugin-db, so no plugin-db path sees a `refTarget`
+    //! before DDL any more. It was deleted rather than wired, since there is no
+    //! longer a place in that crate to wire it TO.
+    //!
+    //! What actually refuses `other_app.users` today is the charset rule below:
+    //! a dot is neither ASCII-alphanumeric nor `_`, and `validate_desired` runs
+    //! `validate_ident` over every desired table name before any SQL is
+    //! rendered. Deleting the old module therefore removed a redundant checker,
+    //! but it would ALSO have removed the only test evidence that the property
+    //! holds at all - eleven tests, all of them exercising the dead function.
+    //! These two cases are that evidence, moved onto the path that runs.
+    //!
+    //! NOT the same rule as `validate_cross_app_fk_targets` in this file, which
+    //! is a dangling-target check and explicitly PERMITS a target owned by
+    //! another member app. Do not read one as covering the other.
+    use super::validate_ident;
+
+    #[test]
+    fn a_dot_qualified_table_name_is_refused() {
+        let err = validate_ident("table", "other_app.users")
+            .expect_err("a dot-qualified name is not a bare identifier");
+        assert!(
+            format!("{err:?}").contains("not a valid bare identifier"),
+            "unexpected error for a dotted name: {err:?}"
+        );
+    }
+
+    /// The control: the same call shape, differing only in the dot.
+    #[test]
+    fn the_same_name_without_the_dot_is_accepted() {
+        validate_ident("table", "other_app_users")
+            .expect("a bare identifier of the same characters must pass");
+    }
+}
