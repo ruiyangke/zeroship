@@ -49,7 +49,10 @@ use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
 use zeroship_plugin_db::binding::DbBinding;
 use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
-use zeroship_plugin_db::crud::unmask::{dispatch_unmask, UnmaskFieldArgs};
+use zeroship_plugin_db::crud::unmask::{
+    audit_query_hint_granted, authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask,
+    dispatch_unmask_for_query, BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs,
+};
 use zeroship_plugin_db::error::DbError;
 use zeroship_plugin_db::query::{
     build_aggregate, build_create_table_with_fks, build_distinct, build_find_with_schema,
@@ -99,6 +102,28 @@ fn flip_schema() -> Value {
         // The control. Same type, same nullability, no mask. Every assertion
         // about `ssn` below has a twin about `nickname`, so a fixture that
         // simply returned no rows for everything cannot pass.
+        "nickname": { "type": "string" },
+    })
+}
+
+/// [`flip_schema`] with a SECOND masked column whose classification DIFFERS.
+///
+/// The batch and query-hint paths authorise a REQUEST, not a cell, and the only
+/// shape in which "atomic" and "per-column" differ observably is a request that
+/// is half-authorised. That needs two classifications a single policy can split
+/// on, which `flip_schema` cannot express: it declares one masked column, so
+/// every request over it is authorised entirely or refused entirely whatever
+/// the fence does.
+fn two_class_schema() -> Value {
+    json!({
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "full", "classification": "pci" }
+        },
+        "email": {
+            "type": "string",
+            "mask": { "kind": "email", "classification": "pii" }
+        },
         "nickname": { "type": "string" },
     })
 }
@@ -487,15 +512,37 @@ async fn audited_unmask_fixture(
     schema: &Value,
     ssn: &str,
 ) -> Inserted {
-    fixture(pool, url, app, "people", schema).await;
-    let person = insert_through_the_pipeline(
+    audited_unmask_fixture_with(
         pool,
+        url,
         app,
-        "people",
         schema,
         json!({ "ssn": ssn, "nickname": "ada" }),
+        &[("ssn", ssn)],
     )
-    .await;
+    .await
+}
+
+/// [`audited_unmask_fixture`] for a row carrying MORE THAN ONE masked column,
+/// which the batch and query-hint arms need: their whole subject is a request
+/// spanning two classifications, one the policy permits and one it does not.
+///
+/// `masked` names every masked field and the plaintext its row must hold. Each
+/// one is granted to the runtime role and read back as the admin principal, so
+/// the leak-capability requirement in [`audited_unmask_fixture`]'s doc holds
+/// per COLUMN: "neither value came back" is then an assertion about two values
+/// that were both genuinely there to come back, and a batch that withheld the
+/// permitted one is withholding something it could have returned.
+async fn audited_unmask_fixture_with(
+    pool: &Rc<Pool>,
+    url: &str,
+    app: &str,
+    schema: &Value,
+    doc: Value,
+    masked: &[(&str, &str)],
+) -> Inserted {
+    fixture(pool, url, app, "people", schema).await;
+    let person = insert_through_the_pipeline(pool, app, "people", schema, doc).await;
     pool.batch_execute(&zeroship_migrate_server::provisioning::audit_unmask_table_sql(app))
         .await
         .expect("the audit table the deploy provisions");
@@ -507,26 +554,33 @@ async fn audited_unmask_fixture(
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(pool, app)
         .await
         .expect("per-app role, as the deploy would provision it");
-    let raw_col = raw_column_name("ssn");
-    support::grant_runtime_select_columns(pool, app, "people", &["id", &raw_col]).await;
+    let raw_columns: Vec<String> = masked
+        .iter()
+        .map(|(column, _)| raw_column_name(column))
+        .collect();
+    let mut readable: Vec<&str> = vec!["id"];
+    readable.extend(raw_columns.iter().map(String::as_str));
+    support::grant_runtime_select_columns(pool, app, "people", &readable).await;
 
     // Control zero, read as the admin principal: the plaintext really is on
     // disk under the minted id. Every refusal asserted below is therefore a
     // refusal, not an empty table.
-    let stored = pool
-        .query_text_params(
-            &format!("SELECT \"{raw_col}\" AS raw FROM \"{app}\".\"people\" WHERE id = $1"),
-            &[person.id.as_str()],
-        )
-        .await
-        .expect("read the raw column directly");
-    assert_eq!(stored.len(), 1, "the fixture row must exist");
-    assert_eq!(
-        stored[0].get::<_, String>("raw"),
-        ssn,
-        "the fixture must have a real value for the denied path to be denying \
-         access TO something",
-    );
+    for ((column, plaintext), raw_col) in masked.iter().zip(&raw_columns) {
+        let stored = pool
+            .query_text_params(
+                &format!("SELECT \"{raw_col}\" AS raw FROM \"{app}\".\"people\" WHERE id = $1"),
+                &[person.id.as_str()],
+            )
+            .await
+            .expect("read the raw column directly");
+        assert_eq!(stored.len(), 1, "the fixture row must exist");
+        assert_eq!(
+            stored[0].get::<_, String>("raw"),
+            *plaintext,
+            "the fixture must have a real value for '{column}' for the denied \
+             path to be denying access TO something",
+        );
+    }
     person
 }
 
@@ -775,6 +829,451 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 4);
     assert_eq!(audit[3]["outcome"], json!("granted"));
+
+    release_pg(pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// 1c. The OTHER two callers of the same check: the batch and the query hint
+// ---------------------------------------------------------------------------
+//
+// `check_unmask_authorization` has three call sites. Section 1b bound the
+// single-cell one. The other two - `dispatch_bulk_unmask`
+// (`bulkUnmaskFields`) and `authorize_query_hint` (`find({ unmask: [...] })`)
+// - had NO Postgres coverage: neutering either loop to
+// `if false && !check_unmask_authorization(...)` left all nine tests in this
+// file green, and only two SQLite tests went red. Both are creator-facing read
+// paths, and both are the shape DB-3 came from.
+//
+// Neither authorises a CELL. Each authorises a REQUEST, and one denied column
+// refuses the whole call - so each arm below drives a HALF-AUTHORISED request,
+// one column the policy permits and one it does not. That is the only shape in
+// which an atomic fence and a per-column one behave differently; a request over
+// a single classification cannot tell them apart.
+
+/// A one-row batch over `people`, so the arms below differ only in the column
+/// list and the actor.
+fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmaskArgs {
+    BulkUnmaskArgs {
+        collection: "people".to_string(),
+        items: vec![BulkUnmaskItem {
+            row_pk: row_pk.to_string(),
+            columns: columns.iter().map(|c| (*c).to_string()).collect(),
+        }],
+        actor,
+        reason: Some("mask_flip integration test".to_string()),
+    }
+}
+
+/// **The batch fence, on Postgres.** A `bulkUnmaskFields` call naming one
+/// permitted column and one the policy forbids is refused ENTIRELY: the error
+/// carries `bulk_unmask_partial_unauthorized`, one denied audit row lands, and
+/// neither value comes back - not the forbidden one, and not the permitted one
+/// either.
+///
+/// That second half is the property worth binding. The all-or-nothing decision
+/// is `if !unauthorized.is_empty()` at
+/// `crates/zeroship-plugin-db/src/crud/unmask.rs:1093`, which returns before
+/// the decrypt loop at `:1119` runs at all, and the reason is in that
+/// function's own doc: a partial grant leaks the authorisation verdict through
+/// which columns came back populated, which is a read oracle over the policy
+/// itself.
+///
+/// The fence is exercised on BOTH axes - a batch mixing two columns on one
+/// row, and a batch mixing two rows where only one carries the forbidden
+/// column - because a single-row batch cannot tell an all-or-nothing fence from
+/// a per-row one. The two controls differ from their refusal in exactly one
+/// variable each and prove the withheld half was withholdable: the same actor
+/// under the same policy DOES get `email` when the batch does not also ask for
+/// `ssn`, and the same two-row batch hands over both values once the policy
+/// grants both classes.
+#[compio::test]
+async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
+    let url = require_pg().await;
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app = "flip_bulk_denied";
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    let schema = two_class_schema();
+    let (ssn, email) = ("123-45-6789", "ada@example.com");
+    let person = audited_unmask_fixture_with(
+        &pool,
+        &url,
+        app,
+        &schema,
+        json!({ "ssn": ssn, "email": email, "nickname": "ada" }),
+        &[("ssn", ssn), ("email", email)],
+    )
+    .await;
+
+    // The policy grants `support` exactly ONE of the two classifications:
+    // `email` is pii and permitted, `ssn` is pci and is not.
+    dispatch_set_mask_policy(app, json!({ "support": ["pii"] }))
+        .await
+        .expect("install the app's declared mask policy");
+    let actor = json!({ "kind": "support", "id": "usr_support_1" });
+
+    // ---- the half-authorised batch ----
+    let err = dispatch_bulk_unmask(
+        &DbBinding::cold_start(app),
+        bulk_args(&person.id, &["email", "ssn"], Some(actor.clone())),
+    )
+    .await
+    .expect_err(
+        "a batch naming one forbidden column must be refused; a build that \
+         hands back the permitted half has no atomic fence, and which columns \
+         came back is itself a read oracle over the policy",
+    );
+    assert_eq!(
+        refusal_code(&err),
+        "bulk_unmask_partial_unauthorized",
+        "the refusal must be the batch fence's own code, not an incidental \
+         failure further down the path: {err:?}",
+    );
+    let rendered = format!("{err:?}");
+    assert!(
+        !rendered.contains(ssn),
+        "the refusal must not carry the value it refused: {err:?}",
+    );
+    assert!(
+        !rendered.contains(email),
+        "nor the value it would have permitted on its own: {err:?}",
+    );
+
+    // The audit row the guarantee rests on, read back from the database.
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(
+        audit.len(),
+        1,
+        "the refused batch writes exactly one row for the whole call: {audit:?}",
+    );
+    assert_eq!(audit[0]["outcome"], json!("denied"));
+    assert_eq!(audit[0]["actor_role"], json!("support"));
+    assert_eq!(audit[0]["actor_id"], json!("usr_support_1"));
+    assert_eq!(audit[0]["collection"], json!("people"));
+    assert_eq!(
+        audit[0]["row_pk"],
+        json!(person.id),
+        "and the row it names is the one the platform minted",
+    );
+    assert_eq!(
+        audit[0]["column"],
+        json!("email,ssn"),
+        "the row names every column the batch ASKED for, not only the refused one",
+    );
+    assert_eq!(
+        audit[0]["classification"],
+        json!("pci,pii"),
+        "and the union of the classifications the batch spanned",
+    );
+    let reason = audit[0]["reason"]
+        .as_str()
+        .expect("the audit row carries a reason");
+    assert!(
+        reason.contains(&format!("unauthorized=[{}/ssn]", person.id)),
+        "the reason names the (row, column) pair that caused the refusal: {reason:?}",
+    );
+    assert!(
+        !reason.contains("/email"),
+        "and does not report the permitted pair as unauthorized: {reason:?}",
+    );
+
+    // ---- CONTROL 1, differing in one variable: the batch drops the forbidden
+    // column. Same actor, same row, same policy - and now the value arrives.
+    // So the refusal above withheld a column this very call could return,
+    // which is what makes the fence ATOMIC rather than merely right per column.
+    let granted = dispatch_bulk_unmask(
+        &DbBinding::cold_start(app),
+        bulk_args(&person.id, &["email"], Some(actor.clone())),
+    )
+    .await
+    .expect("the permitted column alone must be returned");
+    assert_eq!(
+        granted.results[&person.id]["email"], email,
+        "the permitted column really was reachable for this actor: {:?}",
+        granted.results,
+    );
+    assert!(
+        !granted.results[&person.id].contains_key("ssn"),
+        "and the forbidden column is not smuggled in beside it: {:?}",
+        granted.results,
+    );
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(audit.len(), 2, "the granted batch appends its own row");
+    assert_eq!(audit[1]["outcome"], json!("granted"));
+    assert_eq!(audit[1]["column"], json!("email"));
+    assert_eq!(audit[1]["classification"], json!("pii"));
+
+    // ---- and the fence spans ROWS, not only columns ----
+    //
+    // A SECOND row asking only for the permitted column, batched with the first
+    // row asking for the forbidden one. Everything above is a single-row batch,
+    // which cannot tell an all-or-nothing fence from a per-ROW one: a build
+    // that refused row-by-row would return this row's email and pass every
+    // assertion so far. `check_unmask_authorization` never sees a row, so the
+    // verdict cannot differ per row - but WHAT IS RETURNED can, and that is the
+    // half the atomic fence owns.
+    let second = insert_through_the_pipeline(
+        &pool,
+        app,
+        "people",
+        &schema,
+        json!({ "ssn": "555-55-5555", "email": "grace@example.com", "nickname": "grace" }),
+    )
+    .await;
+    let two_rows = BulkUnmaskArgs {
+        collection: "people".to_string(),
+        items: vec![
+            BulkUnmaskItem {
+                row_pk: second.id.clone(),
+                columns: vec!["email".to_string()],
+            },
+            BulkUnmaskItem {
+                row_pk: person.id.clone(),
+                columns: vec!["ssn".to_string()],
+            },
+        ],
+        actor: Some(actor),
+        reason: Some("mask_flip integration test".to_string()),
+    };
+    let err = dispatch_bulk_unmask(&DbBinding::cold_start(app), two_rows.clone())
+        .await
+        .expect_err("one forbidden pair on ONE row must refuse every row");
+    assert_eq!(refusal_code(&err), "bulk_unmask_partial_unauthorized");
+    let rendered = format!("{err:?}");
+    assert!(
+        !rendered.contains("grace@example.com"),
+        "the wholly-permitted row's value must not come back either: {err:?}",
+    );
+    assert!(!rendered.contains(ssn), "{err:?}");
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(audit.len(), 3, "the refused batch audits once: {audit:?}");
+    assert_eq!(audit[2]["outcome"], json!("denied"));
+    assert_eq!(
+        audit[2]["row_pk"],
+        json!(format!("{},{}", second.id, person.id)),
+        "the row names every row the batch spanned, in caller order",
+    );
+    let reason = audit[2]["reason"]
+        .as_str()
+        .expect("the audit row carries a reason");
+    assert!(
+        reason.contains(&format!("unauthorized=[{}/ssn]", person.id)),
+        "the reason names the offending pair: {reason:?}",
+    );
+    assert!(
+        !reason.contains(&format!("{}/email", second.id)),
+        "and does not report the permitted row's pair as unauthorized: {reason:?}",
+    );
+
+    // ---- CONTROL 2, differing in one variable: the policy. The SAME two-row
+    // batch now passes whole, and BOTH rows hand over their values - so the
+    // refusal above withheld two real values, and the arm can pass.
+    dispatch_set_mask_policy(app, json!({ "support": ["pii", "pci"] }))
+        .await
+        .expect("widen the app's declared mask policy");
+    let granted = dispatch_bulk_unmask(&DbBinding::cold_start(app), two_rows)
+        .await
+        .expect("the same batch must pass once the policy grants both classes");
+    assert_eq!(granted.results[&person.id]["ssn"], ssn);
+    assert_eq!(
+        granted.results[&second.id]["email"], "grace@example.com",
+        "the permitted row's value was there the whole time: {:?}",
+        granted.results,
+    );
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(
+        audit.len(),
+        4,
+        "the granted batch appends one row: {audit:?}"
+    );
+    assert_eq!(audit[3]["outcome"], json!("granted"));
+    assert_eq!(audit[3]["column"], json!("email,ssn"));
+
+    release_pg(pool).await;
+}
+
+/// **The query-hint fence, on Postgres.** `find({ unmask: [...] })` authorises
+/// its hint BEFORE any SQL is built, and a hint naming one forbidden column is
+/// refused entirely rather than quietly degraded to the columns the actor may
+/// see - which would conceal the authorisation failure from the caller.
+///
+/// The all-or-nothing decision is the same `if !unauthorized.is_empty()` shape
+/// as the batch, at `crates/zeroship-plugin-db/src/crud/unmask.rs:1289`.
+/// `dispatch_find` calls this at
+/// `crates/zeroship-plugin-db/src/crud/mod.rs:686`, before
+/// `build_find_with_schema_and_unmask_and_soft_delete_with_dialect`, so a
+/// refusal here means the unmasking SELECT is never issued at all.
+///
+/// This drives `authorize_query_hint` directly, as its SQLite twin does - the
+/// `find` entry point needs a live V8 scope. The gap that leaves is what the
+/// closing control covers: it runs the REAL post-find promotion
+/// (`dispatch_unmask_for_query`) over rows from the REAL find builder and shows
+/// them carrying plaintext once the policy permits it, so the refusal above is
+/// withholding something this fixture demonstrably produces.
+#[compio::test]
+async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
+    let url = require_pg().await;
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app = "flip_hint_denied";
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    let schema = two_class_schema();
+    let (ssn, email) = ("987-65-4321", "grace@example.com");
+    let person = audited_unmask_fixture_with(
+        &pool,
+        &url,
+        app,
+        &schema,
+        json!({ "ssn": ssn, "email": email, "nickname": "grace" }),
+        &[("ssn", ssn), ("email", email)],
+    )
+    .await;
+
+    dispatch_set_mask_policy(app, json!({ "support": ["pii"] }))
+        .await
+        .expect("install the app's declared mask policy");
+    let actor = Some(json!({ "kind": "support", "id": "usr_support_2" }));
+    let reason = Some("mask_flip integration test".to_string());
+    let both = ["email".to_string(), "ssn".to_string()];
+
+    let err = authorize_query_hint(
+        &DbBinding::cold_start(app),
+        "people",
+        &both,
+        &actor,
+        &reason,
+    )
+    .await
+    .expect_err(
+        "a hint naming one forbidden column must be refused; a build that \
+         authorises it lets the find SELECT promote a class the policy withholds",
+    );
+    assert_eq!(
+        refusal_code(&err),
+        "unmask_not_permitted",
+        "the refusal must be the authorization refusal, not an incidental \
+         failure further down the path: {err:?}",
+    );
+    let rendered = format!("{err:?}");
+    assert!(
+        !rendered.contains(ssn),
+        "the refusal must not carry the value it refused: {err:?}",
+    );
+    assert!(
+        !rendered.contains(email),
+        "nor the value it would have permitted on its own: {err:?}",
+    );
+
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(
+        audit.len(),
+        1,
+        "the refused hint writes exactly one row for the whole query: {audit:?}",
+    );
+    assert_eq!(audit[0]["outcome"], json!("denied"));
+    assert_eq!(audit[0]["actor_role"], json!("support"));
+    assert_eq!(audit[0]["actor_id"], json!("usr_support_2"));
+    assert_eq!(audit[0]["collection"], json!("people"));
+    assert_eq!(audit[0]["column"], json!("email,ssn"));
+    assert_eq!(audit[0]["classification"], json!("pci,pii"));
+    assert_eq!(
+        audit[0]["row_pk"],
+        json!("[query_hint]"),
+        "a hint is not a per-row dispatch, so the row_pk slot carries the \
+         marker and an operator's `row_pk = '<id>'` query does not sweep it in",
+    );
+    let reason_text = audit[0]["reason"]
+        .as_str()
+        .expect("the audit row carries a reason");
+    assert!(
+        reason_text.contains("[query_hint] unauthorized=[ssn]"),
+        "the reason names the column that caused the refusal: {reason_text:?}",
+    );
+    assert!(
+        !reason_text.contains("email"),
+        "and does not report the permitted column as unauthorized: {reason_text:?}",
+    );
+
+    // The refused hint leaves the ordinary read surface where it was: the find
+    // a caller falls back to still shows the MASK. Without this the arm above
+    // would pass against a build that refused the hint and leaked through the
+    // default projection anyway.
+    let rows = run_find(&pool, app, &json!({}), &schema).await;
+    assert_eq!(rows.len(), 1, "the fixture row is still there: {rows:?}");
+    assert_eq!(rows[0]["id"], json!(person.id));
+    assert_eq!(rows[0]["ssn"], json!("***"));
+    assert_eq!(rows[0]["email"], json!("g***@example.com"));
+    assert_eq!(rows[0]["nickname"], json!("grace"));
+
+    // ---- CONTROL 1, differing in one variable: the hint drops the forbidden
+    // column. Same actor, same policy - and the fence passes. It writes no
+    // audit row of its own: the granted row is deferred to
+    // `audit_query_hint_granted` so a failing SELECT leaves no ghost, which is
+    // why the count staying at 1 is the assertion here.
+    authorize_query_hint(
+        &DbBinding::cold_start(app),
+        "people",
+        &["email".to_string()],
+        &actor,
+        &reason,
+    )
+    .await
+    .expect("the permitted column alone must pass the fence");
+    assert_eq!(
+        audit_rows(&pool, app).await.len(),
+        1,
+        "the granted fence defers its audit row until after the SELECT lands",
+    );
+
+    // ---- CONTROL 2, differing in one variable: the policy. The same hint now
+    // passes, and the promotion the dispatcher runs after the SELECT hands back
+    // both plaintexts.
+    dispatch_set_mask_policy(app, json!({ "support": ["pii", "pci"] }))
+        .await
+        .expect("widen the app's declared mask policy");
+    authorize_query_hint(
+        &DbBinding::cold_start(app),
+        "people",
+        &both,
+        &actor,
+        &reason,
+    )
+    .await
+    .expect("the same hint must pass once the policy grants both classes");
+    let mut rows = run_find(&pool, app, &json!({}), &schema).await;
+    dispatch_unmask_for_query(&DbBinding::cold_start(app), "people", &both, &mut rows)
+        .await
+        .expect("the promotion the find dispatcher runs after the SELECT");
+    assert_eq!(rows[0]["id"], json!(person.id));
+    assert_eq!(
+        rows[0]["ssn"],
+        json!(ssn),
+        "the hint promotes plaintext into the listed columns: {rows:?}",
+    );
+    assert_eq!(rows[0]["email"], json!(email));
+    audit_query_hint_granted(
+        &DbBinding::cold_start(app),
+        "people",
+        &both,
+        &actor,
+        &reason,
+    )
+    .await
+    .expect("the granted audit row, written once the rows are in hand");
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(
+        audit.len(),
+        2,
+        "the granted query appends exactly one row: {audit:?}",
+    );
+    assert_eq!(audit[1]["outcome"], json!("granted"));
+    assert_eq!(audit[1]["column"], json!("email,ssn"));
+    assert_eq!(audit[1]["row_pk"], json!("[query_hint]"));
+
+    // And the promotion was in-memory only: the fields' own columns still hold
+    // the mask on disk, so the next default read leaks nothing.
+    let after = run_find(&pool, app, &json!({}), &schema).await;
+    assert_eq!(after[0]["ssn"], json!("***"));
+    assert_eq!(after[0]["email"], json!("g***@example.com"));
 
     release_pg(pool).await;
 }
