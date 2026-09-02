@@ -13,7 +13,8 @@
 use std::error::Error;
 use std::fmt::Write as _;
 
-use compio_postgres::types::{self, IsNull, ToSql, Type};
+use compio_postgres::error::SqlState;
+use compio_postgres::types::{self, IsNull, PgLsn, ToSql, Type};
 use futures_util::{SinkExt, TryStreamExt};
 
 use crate::common;
@@ -2586,4 +2587,53 @@ async fn test_only_money_wire_matches_binary_copy() {
         ],
     )
     .await;
+}
+
+/// `PgLsn`'s text parser must refuse what `PostgreSQL` refuses.
+///
+/// Each half of an LSN is 32 bits. Parsing a half as `u64` accepts an overlong
+/// one and then silently produces a DIFFERENT position: `hi << 32` discards the
+/// excess high bits, and an oversized low half folds into the high word through
+/// the `|`. Measured before the fix, both of these were accepted rather than
+/// refused - `FFFFFFFFF/0` became `FFFFFFFF/0` and `0/FFFFFFFFF` became
+/// `F/FFFFFFFF`. An LSN is a position, so a silently wrong one resumes from the
+/// wrong place instead of failing loudly.
+///
+/// The driver's own LSN parser in `replication.rs` already uses `u32` for
+/// exactly this reason; this pins the public carrier to the same rule.
+///
+/// `PostgreSQL` is the oracle here rather than a transcribed constant: every
+/// string below is put to the server in this test, so a disagreement about
+/// which inputs are valid shows up as a failure.
+#[compio::test]
+async fn pg_lsn_text_parsing_refuses_what_the_server_refuses() {
+    let client = compio_client().await;
+
+    for text in ["0/0", "A/B", "FFFFFFFF/FFFFFFFF"] {
+        let rendered: String = client
+            .query_one(&format!("SELECT '{text}'::pg_lsn::text"), &[])
+            .await
+            .unwrap_or_else(|error| panic!("{text}: server refused a valid LSN: {error}"))
+            .get(0);
+        let ours = text
+            .parse::<PgLsn>()
+            .unwrap_or_else(|_| panic!("{text}: we refused an LSN the server accepts"));
+        assert_eq!(ours.to_string(), rendered, "{text}: round trip");
+    }
+
+    for text in ["FFFFFFFFF/0", "0/FFFFFFFFF"] {
+        let error = client
+            .query_one(&format!("SELECT '{text}'::pg_lsn::text"), &[])
+            .await
+            .expect_err(&format!("{text}: server accepted an overlong LSN half"));
+        assert_eq!(
+            error.code(),
+            Some(&SqlState::INVALID_TEXT_REPRESENTATION),
+            "{text}: server refused it for some other reason: {error}"
+        );
+        assert!(
+            text.parse::<PgLsn>().is_err(),
+            "{text}: accepted an LSN the server refuses, silently changing the position"
+        );
+    }
 }
