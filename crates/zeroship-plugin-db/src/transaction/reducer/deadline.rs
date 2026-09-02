@@ -49,7 +49,7 @@ pub enum DeadlineKind {
 impl DeadlineKind {
     /// The name used in diagnostics and in the creator-visible cause.
     #[must_use]
-    pub const fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Execution => "execution",
             Self::CancellationSql => "cancellation_sql",
@@ -71,12 +71,12 @@ impl fmt::Display for DeadlineKind {
 /// does. A newtype rather than a bare `u64` so a generation cannot be compared
 /// against a frame sequence or a reservation id by accident.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct DeadlineGeneration(u64);
+pub(crate) struct DeadlineGeneration(u64);
 
 impl DeadlineGeneration {
     /// The raw value, for diagnostics only.
     #[must_use]
-    pub const fn get(self) -> u64 {
+    pub(crate) const fn get(self) -> u64 {
         self.0
     }
 }
@@ -87,13 +87,13 @@ impl DeadlineGeneration {
 /// kinds and a counter living inside it would restart, which is exactly the
 /// reuse the `(kind, generation)` pair exists to prevent.
 #[derive(Debug, Default)]
-pub struct DeadlineGenerations {
+pub(crate) struct DeadlineGenerations {
     next: u64,
 }
 
 impl DeadlineGenerations {
     /// A fresh generation. Never returns the same value twice.
-    pub const fn mint(&mut self) -> DeadlineGeneration {
+    pub(crate) const fn mint(&mut self) -> DeadlineGeneration {
         self.next += 1;
         DeadlineGeneration(self.next)
     }
@@ -101,7 +101,7 @@ impl DeadlineGenerations {
 
 /// The slot's value. Exactly one of three.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeadlineState {
+pub(crate) enum DeadlineState {
     /// No timer is outstanding. The only state `arm_initial` accepts, and the
     /// state `disarm` produces.
     Disarmed,
@@ -123,7 +123,7 @@ pub enum DeadlineState {
 /// must produce no SQL, no reply, no claim change, no interrupt and no state
 /// mutation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DeadlineError {
+pub(crate) enum DeadlineError {
     /// The call named a `(kind, generation)` pair the slot is not holding, or
     /// was made from a state that mutator does not accept. A duplicate
     /// delivery of an already-claimed timer is exactly this case.
@@ -135,7 +135,7 @@ impl DeadlineError {
     /// SC-1's guard order makes a stale deadline a no-op, not a rejection the
     /// caller is told about.
     #[must_use]
-    pub const fn code(self) -> &'static str {
+    pub(crate) const fn code(self) -> &'static str {
         match self {
             Self::Stale => "stale_transaction_deadline",
         }
@@ -151,7 +151,7 @@ impl DeadlineError {
 /// future. That is what makes rule 4's "independent of callback behaviour"
 /// true rather than aspirational.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct ScheduleTimer {
+pub(crate) struct ScheduleTimer {
     pub kind: DeadlineKind,
     pub generation: DeadlineGeneration,
     pub at: Instant,
@@ -162,7 +162,7 @@ pub struct ScheduleTimer {
 /// Shared by every deadline this protocol arms, holding exactly one
 /// [`DeadlineState`].
 #[derive(Debug)]
-pub struct DeadlineSlot {
+pub(crate) struct DeadlineSlot {
     state: DeadlineState,
 }
 
@@ -175,7 +175,7 @@ impl Default for DeadlineSlot {
 impl DeadlineSlot {
     /// A slot holding no timer.
     #[must_use]
-    pub const fn new() -> Self {
+    pub(crate) const fn new() -> Self {
         Self {
             state: DeadlineState::Disarmed,
         }
@@ -184,7 +184,7 @@ impl DeadlineSlot {
     /// The current value. Read-only; every mutation goes through the four
     /// mutators below.
     #[must_use]
-    pub const fn state(&self) -> DeadlineState {
+    pub(crate) const fn state(&self) -> DeadlineState {
         self.state
     }
 
@@ -201,7 +201,7 @@ impl DeadlineSlot {
     ///
     /// Returns the refusal this operation's guard produced. Every one is a
     /// value the caller receives, never an out-of-band log line.
-    pub fn arm_initial(
+    pub(crate) fn arm_initial(
         &mut self,
         kind: DeadlineKind,
         generation: DeadlineGeneration,
@@ -233,7 +233,7 @@ impl DeadlineSlot {
     ///
     /// Returns the refusal this operation's guard produced. Every one is a
     /// value the caller receives, never an out-of-band log line.
-    pub fn claim_fire(
+    pub(crate) fn claim_fire(
         &mut self,
         kind: DeadlineKind,
         generation: DeadlineGeneration,
@@ -270,7 +270,7 @@ impl DeadlineSlot {
     ///
     /// Returns the refusal this operation's guard produced. Every one is a
     /// value the caller receives, never an out-of-band log line.
-    pub fn replace_current(
+    pub(crate) fn replace_current(
         &mut self,
         expected_kind: DeadlineKind,
         next_kind: DeadlineKind,
@@ -301,7 +301,7 @@ impl DeadlineSlot {
     /// Unlike the other three this never fails: a transaction reaching
     /// `Settled` must leave no armed timer behind whatever it was under, and a
     /// terminal cleanup that could be refused would leak one.
-    pub const fn disarm(&mut self) {
+    pub(crate) const fn disarm(&mut self) {
         self.state = DeadlineState::Disarmed;
     }
 }

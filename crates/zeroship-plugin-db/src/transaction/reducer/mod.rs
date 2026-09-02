@@ -101,7 +101,7 @@ impl TxState {
     /// alone that admits creator work, because `InFlight` already has an owner
     /// (invariant 6).
     #[must_use]
-    pub const fn admits_creator_sql(self) -> bool {
+    pub(crate) const fn admits_creator_sql(self) -> bool {
         matches!(self, Self::Idle)
     }
 
@@ -112,7 +112,7 @@ impl TxState {
     /// once and the backend owes an answer, so a force arriving now would be
     /// starting a competing cleanup on a session that is already ending.
     #[must_use]
-    pub const fn is_forceable(self) -> bool {
+    pub(crate) const fn is_forceable(self) -> bool {
         matches!(
             self,
             Self::Preparing
@@ -170,7 +170,7 @@ impl CleanupGoal {
         reason = "merging the real Starting disposition with the unreachable \
                   defensive arm would claim they are the same case"
     )]
-    pub const fn for_state(state: TxState) -> Self {
+    pub(crate) const fn for_state(state: TxState) -> Self {
         match state {
             TxState::Preparing => Self::NoTransaction,
             TxState::Starting => Self::AbortIfOpened,
@@ -237,7 +237,7 @@ pub enum CleanupCause {
 impl CleanupCause {
     /// The creator-visible code for this cause.
     #[must_use]
-    pub const fn code(self) -> &'static str {
+    pub(crate) const fn code(self) -> &'static str {
         match self {
             Self::Cancelled => "transaction_cancelled",
             Self::DeadlineExpired(_) => "transaction_deadline_expired",
@@ -253,7 +253,7 @@ impl CleanupCause {
     /// Only `EpochChanged` is retryable; every denial and every deadline is
     /// terminal.
     #[must_use]
-    pub const fn retryable(self) -> bool {
+    pub(crate) const fn retryable(self) -> bool {
         matches!(self, Self::EpochChanged)
     }
 }
@@ -293,7 +293,7 @@ pub struct CommandToken(u64);
 
 impl CommandToken {
     #[must_use]
-    pub const fn get(self) -> u64 {
+    pub(crate) const fn get(self) -> u64 {
         self.0
     }
 }
@@ -494,7 +494,7 @@ impl Action {
     /// Invariant 16 asserts this is false for every action emitted at or after
     /// entry to [`TxState::Cancelling`].
     #[must_use]
-    pub const fn is_creator_data_sql(&self) -> bool {
+    pub(crate) const fn is_creator_data_sql(&self) -> bool {
         matches!(
             self,
             Self::IssueDataSql { .. }
@@ -556,7 +556,7 @@ pub(crate) enum TxProtocolError {
 impl TxProtocolError {
     /// The creator-visible code.
     #[must_use]
-    pub const fn code(self) -> &'static str {
+    pub(crate) const fn code(self) -> &'static str {
         match self {
             Self::AppIncarnationMismatch => "app_incarnation_mismatch",
             Self::StaleTransactionCompletion => "stale_transaction_completion",
@@ -576,7 +576,7 @@ impl TxProtocolError {
 
 /// The time budgets each deadline kind enforces.
 #[derive(Debug, Clone, Copy)]
-pub struct TxBudgets {
+pub(crate) struct TxBudgets {
     /// Bounds admission-to-terminal: everything a caller can see.
     pub execution: Duration,
     /// Bounds forced cleanup, from the force winning the gate to the
@@ -661,7 +661,7 @@ impl TxReducer {
     /// Never in practice: the only fallible step is arming a slot this call
     /// just constructed, which is `Disarmed` by definition.
     #[must_use]
-    pub fn admit(
+    pub(crate) fn admit(
         expected: ExpectedAuthority,
         budgets: TxBudgets,
         now: Instant,
@@ -699,7 +699,7 @@ impl TxReducer {
     }
 
     #[must_use]
-    pub const fn state(&self) -> TxState {
+    pub(crate) const fn state(&self) -> TxState {
         self.state
     }
 
@@ -710,17 +710,17 @@ impl TxReducer {
     /// expectation is fixed at admission and an entry never follows a new one
     /// in place - a changed authority re-resolves to a fresh handle.
     #[must_use]
-    pub const fn expected(&self) -> &ExpectedAuthority {
+    pub(crate) const fn expected(&self) -> &ExpectedAuthority {
         &self.expected
     }
 
     #[must_use]
-    pub const fn session(&self) -> SessionOwnership {
+    pub(crate) const fn session(&self) -> SessionOwnership {
         self.session
     }
 
     #[must_use]
-    pub const fn cleanup(&self) -> Option<LatchedCleanup> {
+    pub(crate) const fn cleanup(&self) -> Option<LatchedCleanup> {
         self.cleanup
     }
 
@@ -731,7 +731,7 @@ impl TxReducer {
     /// resumed future belongs to, so a cleanup that outlived its transaction
     /// cannot act on the next one's session.
     #[must_use]
-    pub const fn cancellation_token(&self) -> Option<CommandToken> {
+    pub(crate) const fn cancellation_token(&self) -> Option<CommandToken> {
         self.cancellation_token
     }
 
@@ -744,38 +744,38 @@ impl TxReducer {
     /// staleness counter: a later transaction can never mint a value an earlier
     /// one already held.
     #[must_use]
-    pub const fn generation(&self) -> Option<BackendGeneration> {
+    pub(crate) const fn generation(&self) -> Option<BackendGeneration> {
         self.generation
     }
 
     #[must_use]
-    pub const fn outcome(&self) -> Option<TerminalOutcome> {
+    pub(crate) const fn outcome(&self) -> Option<TerminalOutcome> {
         self.outcome
     }
 
     #[must_use]
-    pub const fn frames(&self) -> &FrameStack {
+    pub(crate) const fn frames(&self) -> &FrameStack {
         &self.frames
     }
 
     #[must_use]
-    pub const fn deadline(&self) -> &DeadlineSlot {
+    pub(crate) const fn deadline(&self) -> &DeadlineSlot {
         &self.slot
     }
 
     /// The running ceiling fold. `None` until `BEGIN` captured one.
     #[must_use]
-    pub const fn effective_ceiling(&self) -> Option<&MaskCeiling> {
+    pub(crate) const fn effective_ceiling(&self) -> Option<&MaskCeiling> {
         self.effective_ceiling.as_ref()
     }
 
     #[must_use]
-    pub const fn begin_ceiling(&self) -> Option<&MaskCeiling> {
+    pub(crate) const fn begin_ceiling(&self) -> Option<&MaskCeiling> {
         self.begin_ceiling.as_ref()
     }
 
     /// Apply one event, in SC-1's normative guard order.
-    pub fn apply(&mut self, event: TxEvent, now: Instant) -> Vec<Action> {
+    pub(crate) fn apply(&mut self, event: TxEvent, now: Instant) -> Vec<Action> {
         // --- Guard 1: identity ---
         //
         // A mismatch must not touch that entry's session, actor, timer or
@@ -1498,7 +1498,7 @@ impl TxReducer {
     ///
     /// Returns the refusal this operation's guard produced. Every one is a
     /// value the caller receives, never an out-of-band log line.
-    pub fn queue_effect(&mut self, effect: Effect) -> Result<(), FrameError> {
+    pub(crate) fn queue_effect(&mut self, effect: Effect) -> Result<(), FrameError> {
         self.frames.queue_effect(effect)
     }
 }

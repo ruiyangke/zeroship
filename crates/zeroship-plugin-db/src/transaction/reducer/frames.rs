@@ -37,7 +37,7 @@ pub struct FrameId(u64);
 
 impl FrameId {
     #[must_use]
-    pub const fn get(self) -> u64 {
+    pub(crate) const fn get(self) -> u64 {
         self.0
     }
 }
@@ -74,29 +74,29 @@ pub(crate) struct Frame {
 
 impl Frame {
     #[must_use]
-    pub const fn id(&self) -> FrameId {
+    pub(crate) const fn id(&self) -> FrameId {
         self.id
     }
 
     /// The savepoint name, or `None` for the root.
     #[must_use]
-    pub fn savepoint(&self) -> Option<&str> {
+    pub(crate) fn savepoint(&self) -> Option<&str> {
         self.savepoint.as_deref()
     }
 
     #[must_use]
-    pub const fn status(&self) -> FrameStatus {
+    pub(crate) const fn status(&self) -> FrameStatus {
         self.status
     }
 
     #[must_use]
-    pub const fn is_root(&self) -> bool {
+    pub(crate) const fn is_root(&self) -> bool {
         self.savepoint.is_none()
     }
 
     /// This frame's queued effects, for diagnosis.
     #[must_use]
-    pub fn effects(&self) -> &[Effect] {
+    pub(crate) fn effects(&self) -> &[Effect] {
         &self.effects
     }
 }
@@ -110,7 +110,7 @@ pub(crate) struct Effect {
 }
 
 impl Effect {
-    pub fn new(collection: impl Into<Box<str>>, payload: impl Into<Box<str>>) -> Self {
+    pub(crate) fn new(collection: impl Into<Box<str>>, payload: impl Into<Box<str>>) -> Self {
         Self {
             collection: collection.into(),
             payload: payload.into(),
@@ -136,7 +136,7 @@ pub(crate) enum FrameError {
 
 impl FrameError {
     #[must_use]
-    pub const fn code(self) -> &'static str {
+    pub(crate) const fn code(self) -> &'static str {
         match self {
             Self::SavepointNotCurrent => "savepoint_not_current",
             Self::SavepointDepthExceeded => "savepoint_depth_exceeded",
@@ -175,7 +175,7 @@ pub(crate) struct FrameStack {
 impl FrameStack {
     /// A stack with no frames. `BEGIN` has not been confirmed.
     #[must_use]
-    pub const fn new(max_depth: u32) -> Self {
+    pub(crate) const fn new(max_depth: u32) -> Self {
         Self {
             frames: Vec::new(),
             next_sequence: 0,
@@ -186,30 +186,30 @@ impl FrameStack {
 
     /// Has `BEGIN` been confirmed?
     #[must_use]
-    pub const fn has_root(&self) -> bool {
+    pub(crate) const fn has_root(&self) -> bool {
         !self.frames.is_empty()
     }
 
     /// The number of frames currently open, root included.
     #[must_use]
-    pub const fn depth(&self) -> usize {
+    pub(crate) const fn depth(&self) -> usize {
         self.frames.len()
     }
 
     /// The innermost frame - the only one that may act.
     #[must_use]
-    pub fn top(&self) -> Option<&Frame> {
+    pub(crate) fn top(&self) -> Option<&Frame> {
         self.frames.last()
     }
 
     /// Every savepoint name minted so far, for the arm that rules on reuse.
     #[must_use]
-    pub const fn minted_names(&self) -> &BTreeSet<Box<str>> {
+    pub(crate) const fn minted_names(&self) -> &BTreeSet<Box<str>> {
         &self.minted_names
     }
 
     /// Create the root frame. Called only on a confirmed `BEGIN`.
-    pub fn open_root(&mut self) -> FrameId {
+    pub(crate) fn open_root(&mut self) -> FrameId {
         debug_assert!(self.frames.is_empty(), "root is opened exactly once");
         let id = self.mint_id();
         self.frames.push(Frame {
@@ -230,7 +230,7 @@ impl FrameStack {
     ///
     /// Returns the refusal this operation's guard produced. Every one is a
     /// value the caller receives, never an out-of-band log line.
-    pub fn open_child(&mut self) -> Result<(FrameId, Box<str>), FrameError> {
+    pub(crate) fn open_child(&mut self) -> Result<(FrameId, Box<str>), FrameError> {
         let Some(top) = self.frames.last() else {
             return Err(FrameError::NoOpenFrame);
         };
@@ -267,7 +267,7 @@ impl FrameStack {
     ///
     /// Returns the refusal this operation's guard produced. Every one is a
     /// value the caller receives, never an out-of-band log line.
-    pub fn confirm_child_open(&mut self, id: FrameId) -> Result<(), FrameError> {
+    pub(crate) fn confirm_child_open(&mut self, id: FrameId) -> Result<(), FrameError> {
         let Some(top) = self.frames.last_mut() else {
             return Err(FrameError::NoOpenFrame);
         };
@@ -285,7 +285,7 @@ impl FrameStack {
     ///
     /// Returns the refusal this operation's guard produced. Every one is a
     /// value the caller receives, never an out-of-band log line.
-    pub fn abandon_opening_child(&mut self, id: FrameId) -> Result<(), FrameError> {
+    pub(crate) fn abandon_opening_child(&mut self, id: FrameId) -> Result<(), FrameError> {
         let Some(top) = self.frames.last() else {
             return Err(FrameError::NoOpenFrame);
         };
@@ -303,7 +303,7 @@ impl FrameStack {
     ///
     /// Returns the refusal this operation's guard produced. Every one is a
     /// value the caller receives, never an out-of-band log line.
-    pub fn mark_rolled_back(&mut self, id: FrameId) -> Result<(), FrameError> {
+    pub(crate) fn mark_rolled_back(&mut self, id: FrameId) -> Result<(), FrameError> {
         let Some(top) = self.frames.last_mut() else {
             return Err(FrameError::NoOpenFrame);
         };
@@ -330,7 +330,7 @@ impl FrameStack {
     ///
     /// Returns the refusal this operation's guard produced. Every one is a
     /// value the caller receives, never an out-of-band log line.
-    pub fn queue_effect(&mut self, effect: Effect) -> Result<(), FrameError> {
+    pub(crate) fn queue_effect(&mut self, effect: Effect) -> Result<(), FrameError> {
         let Some(top) = self.frames.last_mut() else {
             return Err(FrameError::NoOpenFrame);
         };
@@ -353,7 +353,7 @@ impl FrameStack {
     ///
     /// On a stack invariant this module maintains itself; a caller cannot
     /// reach it with any sequence of public calls.
-    pub fn close_top(&mut self, id: FrameId, close: FrameClose) -> Result<FrameId, FrameError> {
+    pub(crate) fn close_top(&mut self, id: FrameId, close: FrameClose) -> Result<FrameId, FrameError> {
         let Some(top) = self.frames.last() else {
             return Err(FrameError::NoOpenFrame);
         };
@@ -392,7 +392,7 @@ impl FrameStack {
     /// Only the root can be open at this point in a healthy transaction; any
     /// deeper frame's buffer is included because a commit confirms the whole
     /// tree, and a child that closed already moved or discarded its own.
-    pub fn take_effects_for_confirmed_commit(&mut self) -> Vec<Effect> {
+    pub(crate) fn take_effects_for_confirmed_commit(&mut self) -> Vec<Effect> {
         let mut out = Vec::new();
         for frame in &mut self.frames {
             out.append(&mut frame.effects);
@@ -402,7 +402,7 @@ impl FrameStack {
 
     /// Discard every frame buffer, for every terminal outcome other than a
     /// confirmed root commit.
-    pub fn discard_all_effects(&mut self) {
+    pub(crate) fn discard_all_effects(&mut self) {
         for frame in &mut self.frames {
             frame.effects.clear();
         }
@@ -410,7 +410,7 @@ impl FrameStack {
 
     /// Every retained effect, for diagnosis. Does not detach them.
     #[must_use]
-    pub fn retained_effects(&self) -> Vec<&Effect> {
+    pub(crate) fn retained_effects(&self) -> Vec<&Effect> {
         self.frames.iter().flat_map(Frame::effects).collect()
     }
 

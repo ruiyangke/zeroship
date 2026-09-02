@@ -155,7 +155,7 @@ use crate::tx_route::TxRoute;
 /// 8 matches the proposal's depth cap (Q-P9-D). Real code rarely nests
 /// transactions beyond two or three levels; the cap is a runaway-recursion
 /// guard, not a workload limit.
-pub const MAX_SAVEPOINT_DEPTH: u32 = 8;
+pub(crate) const MAX_SAVEPOINT_DEPTH: u32 = 8;
 
 
 

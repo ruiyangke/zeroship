@@ -38,7 +38,7 @@ pub(crate) struct AuthorityIdentity {
 impl AuthorityIdentity {
     /// The identity of one app incarnation - today's axis.
     #[must_use]
-    pub fn for_app(app_id: impl Into<Box<str>>, incarnation: u64) -> Self {
+    pub(crate) fn for_app(app_id: impl Into<Box<str>>, incarnation: u64) -> Self {
         Self {
             key: app_id.into(),
             incarnation,
@@ -47,13 +47,13 @@ impl AuthorityIdentity {
 
     /// The opaque key, for diagnostics only. Never branch on its contents.
     #[must_use]
-    pub fn key(&self) -> &str {
+    pub(crate) fn key(&self) -> &str {
         &self.key
     }
 
     /// The incarnation, for diagnostics only.
     #[must_use]
-    pub const fn incarnation(&self) -> u64 {
+    pub(crate) const fn incarnation(&self) -> u64 {
         self.incarnation
     }
 }
@@ -78,7 +78,7 @@ pub(crate) struct AuthorityDomain {
 
 impl AuthorityDomain {
     #[must_use]
-    pub const fn new(system_identifier: u64, timeline_id: u32) -> Self {
+    pub(crate) const fn new(system_identifier: u64, timeline_id: u32) -> Self {
         Self {
             system_identifier,
             timeline_id,
@@ -98,12 +98,12 @@ pub(crate) struct SchemaEpoch(u64);
 
 impl SchemaEpoch {
     #[must_use]
-    pub const fn new(value: u64) -> Self {
+    pub(crate) const fn new(value: u64) -> Self {
         Self(value)
     }
 
     #[must_use]
-    pub const fn get(self) -> u64 {
+    pub(crate) const fn get(self) -> u64 {
         self.0
     }
 }
@@ -133,7 +133,7 @@ pub(crate) struct MaskCeiling {
 
 impl MaskCeiling {
     /// A ceiling permitting exactly `kinds`.
-    pub fn of<I, S>(kinds: I) -> Self
+    pub(crate) fn of<I, S>(kinds: I) -> Self
     where
         I: IntoIterator<Item = S>,
         S: Into<Box<str>>,
@@ -149,7 +149,7 @@ impl MaskCeiling {
     /// makes invariant 8 hold by construction: the result is a subset of both,
     /// so a mid-transaction raise cannot broaden anything.
     #[must_use]
-    pub fn meet(&self, other: &Self) -> Self {
+    pub(crate) fn meet(&self, other: &Self) -> Self {
         Self {
             allowed: self.allowed.intersection(&other.allowed).cloned().collect(),
         }
@@ -157,13 +157,13 @@ impl MaskCeiling {
 
     /// Is every kind this ceiling permits also permitted by `other`?
     #[must_use]
-    pub fn is_no_broader_than(&self, other: &Self) -> bool {
+    pub(crate) fn is_no_broader_than(&self, other: &Self) -> bool {
         self.allowed.is_subset(&other.allowed)
     }
 
     /// Does the ceiling permit `kind`?
     #[must_use]
-    pub fn permits(&self, kind: &str) -> bool {
+    pub(crate) fn permits(&self, kind: &str) -> bool {
         self.allowed.contains(kind)
     }
 }
@@ -215,7 +215,7 @@ pub(crate) enum Verdict {
 impl Verdict {
     /// `ReResolve` and `Deny` are forcing publishers; `Current` is not.
     #[must_use]
-    pub const fn is_forcing(&self) -> bool {
+    pub(crate) const fn is_forcing(&self) -> bool {
         !matches!(self, Self::Current { .. })
     }
 }
