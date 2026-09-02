@@ -306,35 +306,20 @@ impl CommandToken {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct BackendGeneration(pub u64);
 
-/// What the creator asked settlement to do.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SettleIntent {
-    Commit,
-    Rollback,
-}
-
-impl SettleIntent {
-    #[must_use]
-    pub const fn verb(self) -> &'static str {
-        match self {
-            Self::Commit => "COMMIT",
-            Self::Rollback => "ROLLBACK",
-        }
-    }
-}
-
-/// What the backend actually did with the terminal statement.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TerminalResult {
-    /// The command tag confirmed a commit. The only arm that publishes.
-    Committed,
-    /// The transaction rolled back - including a `COMMIT` PostgreSQL answered
-    /// with the tag `ROLLBACK`, which is a failed transaction, not a
-    /// successful one.
-    RolledBack,
-    /// The terminal statement's outcome cannot be determined.
-    Indeterminate,
-}
+/// The settle vocabulary, which this module USES but does not OWN.
+///
+/// `SettleIntent` and `TerminalResult` moved to `zeroship-data-core` on
+/// 2026-09-02. They are the two types that cross the backend seam - the intent
+/// goes down to a lane, the result comes back - so a lane must be able to name
+/// them without depending on the protocol that interprets them. Leaving them
+/// here would make every vendor backend reach UP into the reducer, which is the
+/// inversion `DenyReason` was moved down to fix (#103): the engine keeps the
+/// logic, the core keeps the vocabulary.
+///
+/// Re-exported rather than re-pathed at ~40 call sites, and that is not a
+/// compatibility shim: `reducer::SettleIntent` is the name the protocol reads
+/// in, and it is the same type.
+pub use zeroship_data_core::error::{SettleIntent, TerminalResult};
 
 /// How a transaction ended.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
