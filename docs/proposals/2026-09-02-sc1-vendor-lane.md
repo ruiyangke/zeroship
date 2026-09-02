@@ -155,16 +155,29 @@ of this step.
    keeps the vocabulary". The reducer re-exports both, so its call sites are
    unchanged.
 
-2. **BLOCKED ON #100, and the draft did not say so.** Moving `settle` onto
-   `TxConnection` puts a method on a type in `context.rs` - and `context.rs` has
-   no settled crate. The shape document places it in TWO different ones
-   (`:147` adapter, `:191` and `:1733` data-engine), both stated as settled, and
-   #100 concludes "the right answer is genuinely open. Decide it before any
-   boundary is drawn." Investing more of the lane in that module deepens a
-   commitment nobody has made. Decide #100 first.
+2. **DONE, `f682673e4`.** Was blocked on #100, which is now decided (`context.rs`
+   is the composition root, so a method on `TxConnection` is an adapter concern
+   and commits to nothing further). `TxConnection::settle` owns the dispatch and
+   `terminal` no longer matches variants.
+
+   **It went further than the draft said, and had to.** Moving only the method
+   would have left `pg_terminal_from_tag`, `pg_terminal_from_status` and
+   `sqlite_terminal` in the ENGINE - three functions whose whole content is
+   vendor knowledge, two of which name `compio_postgres::TransactionStatus` and
+   `rusqlite`-derived outcomes in their signatures. They moved DOWN to the
+   backends that produce them (`backend::postgres::terminal_from_{tag,status}`,
+   `backend::sqlite::reservation::terminal_result`), which also keeps the
+   driver's two cleanup call sites legal: engine calling vendor is downward.
+   The five pure L8 arms moved with them and still bind there.
+
+   Measured: `driver.rs` vendor mentions 14 -> 12, and `crate::backend::pg_error`
+   became an unused import - the driver no longer classifies a PostgreSQL error
+   at all on this path.
 
 3. Move `cleanup` onto `TxConnection`; delete `rollback_session_in_slot`'s match.
-   `cleanup_postgres` and `cleanup_sqlite` become lane methods. Same #100 block.
+   `cleanup_postgres` and `cleanup_sqlite` become lane methods. **Unblocked.**
+   This is now the largest remaining match: `driver.rs:961-962` plus the two
+   functions at `:1077` and `:1103`.
 4. Introduce `BeginIntent`; move `build_begin_sql` into the PG lane; change
    `StepConfig`.
 5. Fold `apply_per_app_role` into the PG lane's `open`. It is already only
