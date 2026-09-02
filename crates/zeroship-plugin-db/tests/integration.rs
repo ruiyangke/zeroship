@@ -37,7 +37,7 @@ use compio_postgres::{NoTls, Pool};
 use serde_json::{Value, json};
 use uuid::Uuid;
 use zeroship_plugin_db::backend::ChangeStream;
-use zeroship_plugin_db::binding::DbBinding;
+use zeroship_data_core::binding::DbBinding;
 
 const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
 
@@ -2509,7 +2509,7 @@ async fn c1_setup_refuses_to_create_a_missing_publication() {
         .expect_err("worker must not create a missing publication");
     assert!(matches!(
         err,
-        zeroship_plugin_db::error::DbError::Configuration {
+        zeroship_data_core::error::DbError::Configuration {
             code: "replication_publication_missing",
             ..
         }
@@ -2689,7 +2689,7 @@ async fn c1_abandoned_reaper_preserves_inactive_slot_owned_by_live_worker() {
     assert!(
         matches!(
             conflict,
-            zeroship_plugin_db::error::DbError::Configuration {
+            zeroship_data_core::error::DbError::Configuration {
                 code: "cdc_worker_lease_conflict",
                 ..
             }
@@ -3716,7 +3716,7 @@ fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
 #[test]
 fn cross_app_fk_rejected_at_parse() {
     use zeroship_plugin_db::cross_app_fk::reject_cross_app_fk;
-    use zeroship_plugin_db::error::DbError;
+    use zeroship_data_core::error::DbError;
 
     let schema = serde_json::json!({
         "authorId": { "type": "ref", "refTarget": "other_app.users" }
@@ -3945,7 +3945,7 @@ async fn vector_search_returns_k_nearest() {
 #[compio::test]
 async fn pgvector_extension_missing_reports_typed_error() {
     use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
-    use zeroship_plugin_db::error::DbError;
+    use zeroship_data_core::error::DbError;
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4260,7 +4260,7 @@ async fn near_returns_within_radius() {
 #[compio::test]
 async fn postgis_extension_missing_reports_typed_error() {
     use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
-    use zeroship_plugin_db::error::DbError;
+    use zeroship_data_core::error::DbError;
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4352,7 +4352,7 @@ async fn postgis_extension_missing_reports_typed_error() {
 // itself.
 use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode, PostgresBackend};
 use zeroship_plugin_db::encryption;
-use zeroship_plugin_db::error::DbError;
+use zeroship_data_core::error::DbError;
 
 /// Helper: hand this isolate a synthetic root key for `key_id`, so the
 /// `PostgresBackend` the test (or the CRUD path behind it) constructs
@@ -6795,7 +6795,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     .await
     .expect_err("a role absent from the declared policy must be refused");
     match err {
-        zeroship_plugin_db::error::DbError::Coded { ref code, .. } => {
+        zeroship_data_core::error::DbError::Coded { ref code, .. } => {
             assert_eq!(code, "unmask_not_permitted", "got {err:?}");
         }
         other => panic!("expected unmask_not_permitted, got {other:?}"),

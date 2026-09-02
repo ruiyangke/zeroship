@@ -37,8 +37,11 @@
 //!     Those paths deliberately stay on the generic classifier.
 
 use compio_postgres::NoTls;
+use zeroship_data_core::error::DbError;
 use zeroship_plugin_db::backend::pg_error;
-use zeroship_plugin_db::error::DbError;
+// `DbError` is data-core's; lowering it to a V8 `OpError` is the ADAPTER's job,
+// so it arrives as a trait from plugin-db rather than an inherent method.
+use zeroship_plugin_db::op_error::ToOpError;
 
 fn test_url() -> String {
     zeroship_core::config::test_database_url()
@@ -218,7 +221,7 @@ async fn missing_per_app_role_is_creator_facing_not_internal() {
     // absence list can only rule out the leaks someone thought of.
     assert_eq!(
         op.message,
-        zeroship_plugin_db::error::MISSING_ROLE_MESSAGE,
+        zeroship_data_core::error::MISSING_ROLE_MESSAGE,
         "the wire message must be the fixed platform constant"
     );
 

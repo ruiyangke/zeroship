@@ -37,9 +37,9 @@ use zeroship_plugin_db::backend::{
     BackendHandle, ChangeStream, LockManager, LockScope, SchemaIntrospect, SqlExecutor,
 };
 use zeroship_plugin_db::backend_selection::{new_sqlite_backend, new_sqlite_backend_with_secrets};
-use zeroship_plugin_db::binding::DbBinding;
+use zeroship_data_core::binding::DbBinding;
 use zeroship_plugin_db::broker::{Subscription, SubscriptionMessage, subscribe};
-use zeroship_plugin_db::error::DbError;
+use zeroship_data_core::error::DbError;
 use zeroship_plugin_db::query::{IndexKind, IndexSpec, raw_column_name};
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
@@ -6585,7 +6585,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
             .await
             .expect_err("dispatch_unmask must refuse user actor under PR 4 stub");
         match err {
-            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+            zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
             }
             other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
@@ -6631,7 +6631,7 @@ fn unmask_column_not_masked_returns_typed_error() {
             .await
             .expect_err("unmask of non-masked column must refuse");
         match err {
-            zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+            zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "unmask_column_not_masked");
             }
             other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),
@@ -6905,7 +6905,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
             .await
             .expect_err("policy does not allow user → pii; must refuse");
         match err {
-            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+            zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
             }
             other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
@@ -6951,7 +6951,7 @@ fn unmask_default_deny_when_no_policy() {
             .await
             .expect_err("no policy + non-auto actor → default-deny");
         match err {
-            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+            zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
             }
             other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
@@ -6984,7 +6984,7 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
             .await
             .expect_err("rust validator must refuse unknown classification");
         match err {
-            zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+            zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "invalid_mask_classification");
             }
             other => {
@@ -7040,7 +7040,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
             .await
             .expect_err("no policy → default deny for support");
         match err {
-            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+            zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
             }
             other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
@@ -7062,7 +7062,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
             .await
             .expect_err("auth passes; SELECT misses");
         match err {
-            zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+            zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(
                     code, "unmask_not_found",
                     "support → internal must pass authz; failure is now the SELECT miss"
@@ -8183,7 +8183,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             .await
             .expect_err("bulk must refuse atomically");
         match err {
-            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+            zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "bulk_unmask_partial_unauthorized");
             }
             other => panic!("expected Coded::bulk_unmask_partial_unauthorized, got {other:?}"),
@@ -8231,7 +8231,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
             .await
             .expect_err("unknown column must refuse");
         match err {
-            zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+            zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "unmask_column_not_masked");
             }
             other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),
@@ -8447,7 +8447,7 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
         .await
         .expect_err("must refuse");
         match err {
-            zeroship_plugin_db::error::DbError::Coded { code, .. } => {
+            zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
             }
             other => panic!("expected Coded::unmask_not_permitted, got {other:?}"),
@@ -8489,7 +8489,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
         .await
         .expect_err("must refuse on unknown");
         match err {
-            zeroship_plugin_db::error::DbError::ValidationFailed { code, .. } => {
+            zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "unmask_column_not_masked");
             }
             other => panic!("expected ValidationFailed::unmask_column_not_masked, got {other:?}"),

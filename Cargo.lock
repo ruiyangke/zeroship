@@ -7968,6 +7968,7 @@ dependencies = [
  "uuid",
  "zeroship-bundle",
  "zeroship-core",
+ "zeroship-data-core",
  "zeroship-metering",
  "zeroship-migrate-server",
  "zeroship-plugin-db",

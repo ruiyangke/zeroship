@@ -47,14 +47,14 @@ use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
-use zeroship_plugin_db::binding::DbBinding;
+use zeroship_data_core::binding::DbBinding;
 use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
 use zeroship_plugin_db::crud::unmask::{
     audit_query_hint_granted, authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask,
     dispatch_unmask_for_query, parse_args, parse_bulk_args, BulkUnmaskArgs, BulkUnmaskItem,
     UnmaskFieldArgs,
 };
-use zeroship_plugin_db::error::DbError;
+use zeroship_data_core::error::DbError;
 use zeroship_plugin_db::query::{
     build_aggregate, build_create_table_with_fks, build_distinct, build_find_with_schema,
     build_insert, build_where, raw_column_name, read_surface_columns, validate_field_name,
@@ -496,7 +496,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
     support::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
 
     let result = zeroship_plugin_db::crud::unmask::dispatch_unmask(
-        &zeroship_plugin_db::binding::DbBinding::cold_start(app),
+        &zeroship_data_core::binding::DbBinding::cold_start(app),
         zeroship_plugin_db::crud::unmask::UnmaskFieldArgs {
             collection: "people".to_string(),
             row_pk: person.id.clone(),
