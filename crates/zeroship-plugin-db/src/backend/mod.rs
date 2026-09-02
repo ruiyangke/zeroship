@@ -1544,6 +1544,77 @@ pub enum BackendHandle {
     Sqlite(Rc<SqliteBackend>),
 }
 
+/// Vendor selection for vector search lives HERE, in the vendor tier, instead
+/// of at the engine call site.
+///
+/// Until 2026-09-02 the engine wrote
+/// `if let Some(sq) = backend.as_sqlite() { .. } else { backend.as_postgres().ok_or(..)? }`.
+/// That is the downcast the crate split forbids: it puts the names of both
+/// concrete backends into engine code. Both arms already called this same trait
+/// method with identical arguments, so the branch was only ever SELECTING an
+/// impl - and selecting an impl by vendor is precisely what this tier is for.
+///
+/// The `backend_unsupported("vector_search")` arm the old shape carried is not
+/// reproduced, because it was unreachable: [`BackendHandle`] has exactly two
+/// variants and neither is `#[cfg]`-gated, so the `else` of `as_sqlite()` was
+/// always `Postgres`. Verified by reading the enum, not by test.
+impl VectorIndex for BackendHandle {
+    #[allow(clippy::too_many_arguments)]
+    async fn vector_search(
+        &self,
+        binding: &DbBinding,
+        collection: &str,
+        column: &str,
+        query: &[f32],
+        k: usize,
+        metric: VectorMetric,
+        filter: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        match self {
+            // The SQLite arm has to ATTACH the app's database file before it
+            // can scan it. That prelude sat at the engine call site; it belongs
+            // to the arm that needs it, and nothing else has to know.
+            Self::Sqlite(sq) => {
+                sq.attach_app_file(binding.app_id()).await?;
+                sq.vector_search(binding, collection, column, query, k, metric, filter)
+                    .await
+            }
+            Self::Postgres(pg) => {
+                pg.vector_search(binding, collection, column, query, k, metric, filter)
+                    .await
+            }
+        }
+    }
+}
+
+/// Vendor selection for spatial search. Same rationale as the [`VectorIndex`]
+/// impl directly above, including the ATTACH prelude on the SQLite arm.
+impl SpatialIndex for BackendHandle {
+    #[allow(clippy::too_many_arguments)]
+    async fn spatial_near(
+        &self,
+        binding: &DbBinding,
+        collection: &str,
+        column: &str,
+        point: GeoPoint,
+        radius_m: f64,
+        filter: &serde_json::Value,
+        limit: Option<usize>,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        match self {
+            Self::Sqlite(sq) => {
+                sq.attach_app_file(binding.app_id()).await?;
+                sq.spatial_near(binding, collection, column, point, radius_m, filter, limit)
+                    .await
+            }
+            Self::Postgres(pg) => {
+                pg.spatial_near(binding, collection, column, point, radius_m, filter, limit)
+                    .await
+            }
+        }
+    }
+}
+
 impl BackendHandle {
     /// Run `f` against the inner [`PostgresBackend`].
     ///
