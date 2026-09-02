@@ -317,7 +317,8 @@ edge that exists and is not one relocation away; it appears only after the execu
 | destination | modules |
 | --- | --- |
 | `plugin-db` (thin) | `v8_classes/`, `v8_bridge.rs`, `lib.rs` (the `DbPlugin` part), `tx_scope.rs` |
-| `data-engine` | `crud/`, `transaction/`, `exec.rs`, `broker.rs`, `read_set.rs`, `tx_route.rs`, `drop_namespace.rs`, `BackendHandle` |
+| `data-engine` | `crud/`, `transaction/`, `exec.rs`, `broker.rs`, `read_set.rs`, `tx_route.rs`, `BackendHandle` |
+| migrate-server (teardown coordinator) | `drop_namespace.rs` - **reassigned 2026-09-02, see below** |
 | `data-core` | `error.rs` (less `to_op_error`), `descriptor.rs`, the six vendor-free capability traits |
 | `data-encryption` (if split) | `encryption/` |
 
@@ -339,6 +340,23 @@ the tree bound to `AeadKey`, and both backends held the same `KeyStore` from the
 same source - a vendor-shaped trait with no vendor content, whose only effect
 was making the engine ask which backend it was on to reach code that does not
 depend on the answer.
+
+**`drop_namespace.rs` is REASSIGNED off `data-engine`, and it is not a
+dead-code deletion.** The dead-code audit reached it and returned a third
+answer: neither delete nor wire, but MOVE. It is the only record of the
+privileged PostgreSQL teardown ORDER (subscription gate -> broker drain -> slot
+teardown -> `DROP SCHEMA CASCADE` -> `DROP ROLE`), and unlike the two modules
+deleted above it has real evidence - six integration tests in
+`tests/integration.rs` driving it against live PostgreSQL.
+
+The assignment was wrong because those steps are privileged and the entry
+point's own doc requires the caller "must not be the worker login".
+`data-engine` is linked by `plugin-db`, which is linked by the worker, and
+AGENTS.md's standing invariant puts privileged work in "a separate service that
+does not execute creator code". Nothing is exposed today - the `#[cfg]` gate at
+`lib.rs:266` keeps it out of every shipped binary - so this is a destination
+correction, not a live defect. The module's own header already named the
+destination: a teardown coordinator behind `zeroship-migrate-server`.
 | `data-postgres` | `backend/postgres.rs`, `pg_error.rs`, `pg_introspect.rs`, `PgSqlExecutor` |
 | `data-sqlite` | `backend/sqlite/` |
 | `data-cdc-server` | `wal_consumer.rs`, `replication.rs`, `slot_reaper.rs` |

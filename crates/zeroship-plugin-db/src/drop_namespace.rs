@@ -55,9 +55,29 @@
 //! (removed and re-checked under `--features test-helpers` - the tests use
 //! every item, so nothing goes unused in the configuration that compiles it).
 //!
-//! **The tier census still counts this file.** It tiers by path and reads each
-//! file on its own, so a `mod` declaration gated in `lib.rs` is invisible to
-//! it; the one `compio_postgres` row here is real code in a build nobody ships.
+//! **The tier census no longer counts this file, as of 2026-09-02.** It used
+//! to: it tiers by path and read each file on its own, so a `mod` declaration
+//! gated in `lib.rs` was invisible to it, and the one `compio_postgres` row
+//! here was reported as a violation in a build nobody ships. Both the signature
+//! census and the vendor-embedding gate now resolve the declaration
+//! (`module_is_test_gated`), and the gate's baseline entry for this file was
+//! deleted with them. **That deletion was NOT the coupling going away** - the
+//! `use compio_postgres::Pool` below is still here, and would be a real
+//! violation the moment this module is un-gated.
+//!
+//! ## Where this belongs after the split
+//!
+//! `docs/proposals/2026-08-31-data-crate-shape.md` assigns this file to
+//! `data-engine`. **That is the wrong destination and the module says so
+//! itself**: the steps below are privileged - `DROP SCHEMA`, `DROP ROLE`,
+//! `pg_terminate_backend` - and the entry point's own doc requires that the
+//! caller "must not be the worker login". `data-engine` is linked by
+//! `plugin-db`, which is linked by the worker, and AGENTS.md's standing
+//! invariant is that privileged work "belongs to a separate service that does
+//! not execute creator code". The `#[cfg]` gate keeps it out of the shipped
+//! worker today, so nothing is exposed; the assignment is what needs changing,
+//! not the code. Destination is the one named at the top of this header: a
+//! teardown coordinator behind `zeroship-migrate-server`.
 //! Item-level cfgs ARE understood (census defect 10); module-level ones, from
 //! the declaring file, are not.
 
