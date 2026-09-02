@@ -3021,6 +3021,111 @@ mod tests {
     use std::task::{Context, Wake, Waker};
     use std::time::Duration;
 
+    /// With neither a read deadline nor COPY tracking, `ReadObligation::new`
+    /// allocates no inner state at all - that is the default request path, kept
+    /// allocation-free on purpose. Every transition must then be inert.
+    ///
+    /// These four early returns are the whole of that guarantee, and none of
+    /// them had ever run. They are the dangerous direction: each one guards a
+    /// `self.inner` unwrap, so a missing guard is a panic on the default path
+    /// rather than a wrong answer.
+    #[test]
+    fn an_untracked_read_obligation_ignores_every_copy_transition() {
+        let obligation = ReadObligation::new(None, false);
+        assert!(
+            obligation.inner.is_none(),
+            "the default path allocated inner state"
+        );
+
+        assert!(
+            !obligation.pause_for_copy_input(),
+            "an untracked obligation claimed a producer had been displaced"
+        );
+        assert!(
+            !obligation.prepare_copy_terminal(),
+            "an untracked obligation claimed a paused read phase to resume"
+        );
+        // Inert, and must stay inert: these have no return value to assert on,
+        // so the binding claim is that they neither panic nor create state.
+        obligation.enter_copy_output();
+        obligation.activate_copy_terminal();
+        obligation.activate_initial();
+        obligation.set_copy_terminal_has_sync(true);
+        obligation.observe_server_error();
+        assert!(
+            !obligation.copy_error_may_owe_extra_ready(),
+            "an untracked obligation owed an extra ReadyForQuery"
+        );
+        assert!(
+            obligation.inner.is_none(),
+            "a transition allocated inner state on the default path"
+        );
+    }
+
+    /// Once the connection has selected and queued the terminal COPY frame, no
+    /// producer remains that can legally answer a further `CopyInResponse`, so
+    /// `pause_for_copy_input` must report the displacement rather than pausing
+    /// the read clock a second time.
+    ///
+    /// The sequence is the real one: a COPY IN request pauses for input, the
+    /// connection queues its terminal, the terminal finishes flushing, and only
+    /// then does another CopyInResponse arrive.
+    ///
+    /// **The `activate_copy_terminal` step is load-bearing, not narrative.**
+    /// Stopping at `PendingCopyTerminalFlush` proves nothing: that state has its
+    /// own `=> return true` arm in the match below, so deleting the
+    /// `copy_terminal_queued` guard entirely still yields `true` and the test
+    /// stays green. Measured - the shorter version passed against the mutated
+    /// driver. Activating moves the state to `Active`, whose arm pauses and
+    /// returns `false`, so the queued-terminal guard becomes the only thing
+    /// that can answer `true`. Do not "simplify" this step away.
+    #[test]
+    fn a_queued_copy_terminal_displaces_a_later_copy_input_pause() {
+        let obligation = ReadObligation::new(None, true);
+        let inner = obligation
+            .inner
+            .as_ref()
+            .expect("tracking a COPY producer must allocate inner state");
+        assert_eq!(inner.state.get(), ReadObligationState::PendingInitialFlush);
+
+        assert!(
+            !obligation.pause_for_copy_input(),
+            "the first CopyInResponse displaced a producer that was still present"
+        );
+        assert_eq!(inner.state.get(), ReadObligationState::PausedForCopyInput);
+
+        assert!(
+            obligation.prepare_copy_terminal(),
+            "a paused COPY IN had no read phase to resume"
+        );
+        assert!(inner.copy_terminal_queued.get());
+        assert_eq!(
+            inner.state.get(),
+            ReadObligationState::PendingCopyTerminalFlush
+        );
+
+        // The terminal finished flushing, so the state leaves
+        // PendingCopyTerminalFlush while the queued bit survives it.
+        obligation.activate_copy_terminal();
+        assert_eq!(inner.state.get(), ReadObligationState::Active);
+        assert!(
+            inner.copy_terminal_queued.get(),
+            "the queued terminal must survive its own flush"
+        );
+
+        // The arm under test. `Active` on its own would pause and return false,
+        // so only the queued-terminal guard can produce true here.
+        assert!(
+            obligation.pause_for_copy_input(),
+            "a second CopyInResponse found a producer that no longer exists"
+        );
+        assert_eq!(
+            inner.state.get(),
+            ReadObligationState::Active,
+            "the displaced pause re-paused a response the terminal had released"
+        );
+    }
+
     struct ObservedSocket {
         inner: Socket,
         read_ended: Option<oneshot::Sender<()>>,
