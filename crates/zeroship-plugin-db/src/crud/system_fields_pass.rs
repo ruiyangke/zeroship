@@ -1,11 +1,44 @@
 //! The write-time assignment pass: the platform's own columns, computed by the
 //! platform.
 //!
-//! **This module names no platform column.** It iterates the operator charter
-//! (`policies/confined-system-shape.inject.toml`, compiled into the worker and
-//! projected by [`crate::system_shape_charter::AssignmentPlan`]) and invokes the
-//! generator each column declares. Adding an eighth platform column is a charter
-//! line, not a change here.
+//! **This module names no platform column on the write side.** It iterates the
+//! operator charter (`policies/confined-system-shape.inject.toml`, compiled into
+//! the worker and projected by [`crate::system_shape_charter::AssignmentPlan`])
+//! and invokes the generator each column declares.
+//!
+//! # What that does NOT mean, measured 2026-09-01
+//!
+//! An eighth charter column is a charter line for THIS pass, and for the DDL
+//! (the migration engine resolves the same fragment). It is **not** a charter
+//! line for the whole system, and the boundary is worth stating exactly because
+//! the next person to add one will trust this comment.
+//!
+//! The READ projection still holds a second, hand-maintained list:
+//! `zeroship_schema::query::SYSTEM_FIELD_NAMES` (`crates/zeroship-schema/src/query.rs:756`),
+//! walked by `implicit_read_projection_parts` (`:3644`) - which builds the
+//! SELECT list for every read builder AND the `RETURNING` list for every write
+//! (`build_returning_expr`, `:3685`) - and by `read_surface_columns` (`:3746`),
+//! the predicate that narrows every row reaching a creator. Nothing binds that
+//! list to this charter; the two agree because both were written to the same
+//! seven names.
+//!
+//! What that costs is NOT that an eighth column becomes unreadable. Measured on
+//! `build_find_with_schema`: a descriptor declaring `tenant_id` projects
+//! `..., "version", "deleted_at", "title", "tenant_id"`, because the same
+//! function's second loop projects every readable descriptor key. Real
+//! descriptors carry the injected columns as ordinary fields
+//! (`examples/db-todos/generated/zeroship/schema.runtime.json:6-45`, all
+//! `readable: true`), and they are generated from this same charter fragment
+//! (`sdks/vite-plugin/src/gen-types/index.ts:322`).
+//!
+//! What it costs is that the seven are projected UNCONDITIONALLY from the const
+//! while an eighth would be projected only through the descriptor - and the
+//! descriptor is creator-authored (`zeroship-migrate-server`'s `apply.rs:61-65`).
+//! So `created_at` cannot be hidden by a hand-edited descriptor and an eighth
+//! column could be, by dropping the key or marking it `readable: false`
+//! (measured: `readable: false` removes it from the SELECT while the seven stay).
+//! An eighth charter column would not inherit that unhideability until the read
+//! projection reads the charter too.
 //!
 //! # The shape it reads
 //!
