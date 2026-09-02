@@ -19,7 +19,7 @@
 //! 2026-08-27 over the 20 cycles in the guard below, TLS's exact one-connection
 //! shape is the eventfd plus socket, with no retained ring; its two-connection
 //! cost is still four. These exact transport-specific shapes are guarded in
-//! `tests/integration.rs::a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection`.
+//! `tests/suite/integration.rs::a_torn_down_runtime_leaks_two_descriptors_plus_one_per_live_connection`.
 //!
 //! None of that is specific to postgres: a bare `compio::net::TcpStream` read
 //! on a detached task leaks the same three.

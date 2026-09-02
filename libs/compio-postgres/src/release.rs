@@ -16,7 +16,7 @@
 //! is therefore exactly the case the reclaim skips: the runtime, its driver,
 //! the task and the socket all leak, and the server-side backend stays live for
 //! the rest of the PROCESS. Measured in
-//! `tests/integration.rs::a_connection_does_not_outlive_the_runtime_that_opened_it`.
+//! `tests/suite/integration.rs::a_connection_does_not_outlive_the_runtime_that_opened_it`.
 //!
 //! So the socket's release cannot be left to a future. It has to be a plain
 //! syscall on a descriptor this crate owns, run from a `Drop` that needs no
