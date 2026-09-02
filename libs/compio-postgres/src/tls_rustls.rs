@@ -2926,6 +2926,48 @@ mod tests {
         );
     }
 
+    /// `sslcrldir` naming a directory with nothing usable in it must FAIL,
+    /// because the alternative is silently verifying without revocation.
+    ///
+    /// This is the fail-closed half of the CRL configuration. `sslcrldir` is
+    /// an explicit request to check revocation; a typo in the path, a
+    /// directory whose CRLs were never rehashed, or one holding only source
+    /// `.crl` files all reach here with an empty load and no error of their
+    /// own. Accepting that builds a verifier with NO CRLs, which trusts a
+    /// revoked certificate while the operator believes revocation is on.
+    ///
+    /// The empty load is production-reachable, not a synthetic state:
+    /// `crls_from_hashed_directory` returns `Ok(vec![])` whenever no file name
+    /// matches OpenSSL's `<8 hex digits>.r<n>` pattern, and skips
+    /// non-conforming names rather than failing on them.
+    #[test]
+    fn an_sslcrldir_holding_no_usable_crls_is_refused() {
+        let error = verifier_for(
+            SslMode::VerifyFull,
+            roots_with(CA),
+            ConfiguredCrls {
+                file: Vec::new(),
+                directory: Some(ConfiguredCrlDirectory {
+                    path: "/isolated/empty-crl-directory".to_string(),
+                    loaded: Ok(Vec::new()),
+                }),
+            },
+            &provider(),
+        )
+        .expect_err("an sslcrldir that yields no CRLs must not verify without revocation");
+        let cause = std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            cause.contains("no usable OpenSSL-hashed PEM CRLs"),
+            "the refusal must say what the directory lacked: {cause}"
+        );
+        assert!(
+            cause.contains("/isolated/empty-crl-directory"),
+            "the refusal must name the directory the operator configured: {cause}"
+        );
+    }
+
     #[test]
     fn sslcrl_and_sslcrldir_cannot_select_different_crls_for_one_issuer() {
         let pem = include_str!("../tests/data/stale_guard_crl.pem");
