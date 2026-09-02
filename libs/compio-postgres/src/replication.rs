@@ -4483,10 +4483,26 @@ mod tests {
     /// refuses valid input - and the WAL consumer propagates a decode error out
     /// of its run loop, so refusing valid input stops replication permanently
     /// instead of degrading.
-    ///
-    /// It does NOT test the reservation itself. Decoding the malformed frame
-    /// below errors identically whether the capacity is bounded by the frame
-    /// or taken from the wire count, so no assertion here can tell those apart.
+    #[test]
+    fn pgoutput_decode_accepts_a_truncate_larger_than_any_fixed_cap() {
+        const N: u32 = 70_000; // above the u16 ceiling a sibling arm uses
+        let mut bytes = vec![b'T'];
+        bytes.extend_from_slice(&N.to_be_bytes());
+        bytes.push(0); // options
+        for id in 0..N {
+            bytes.extend_from_slice(&id.to_be_bytes());
+        }
+        let msg = pgoutput::decode(&bytes).expect("a large TRUNCATE is valid input");
+        match msg {
+            pgoutput::PgOutputMessage::Truncate { relation_ids, .. } => {
+                assert_eq!(relation_ids.len(), N as usize);
+                assert_eq!(relation_ids[0], 0);
+                assert_eq!(relation_ids[N as usize - 1], N - 1);
+            }
+            other => panic!("expected Truncate, got {other:?}"),
+        }
+    }
+
     /// Binds the reservation clamp the sibling test above documents as a HOLE.
     ///
     /// It is a hole only while the expression is anonymous: a decode-level test
@@ -4518,26 +4534,6 @@ mod tests {
         assert_eq!(pgoutput::reservation(0, 0, 1), 0);
     }
 
-    #[test]
-    fn pgoutput_decode_accepts_a_truncate_larger_than_any_fixed_cap() {
-        const N: u32 = 70_000; // above the u16 ceiling a sibling arm uses
-        let mut bytes = vec![b'T'];
-        bytes.extend_from_slice(&N.to_be_bytes());
-        bytes.push(0); // options
-        for id in 0..N {
-            bytes.extend_from_slice(&id.to_be_bytes());
-        }
-        let msg = pgoutput::decode(&bytes).expect("a large TRUNCATE is valid input");
-        match msg {
-            pgoutput::PgOutputMessage::Truncate { relation_ids, .. } => {
-                assert_eq!(relation_ids.len(), N as usize);
-                assert_eq!(relation_ids[0], 0);
-                assert_eq!(relation_ids[N as usize - 1], N - 1);
-            }
-            other => panic!("expected Truncate, got {other:?}"),
-        }
-    }
-
     /// A TRUNCATE whose relation count exceeds what the frame can hold is
     /// rejected.
     ///
@@ -4550,6 +4546,11 @@ mod tests {
     /// watches the process's own peak address space instead - the sibling
     /// above (`pgoutput_decode_accepts_a_truncate_larger_than_any_fixed_cap`)
     /// already carried that exclusion; this one kept the claim.
+    ///
+    /// The clamp ITSELF is bound since 2026-09-02 by
+    /// `a_reservation_is_bounded_by_the_bytes_left_not_the_claimed_count`,
+    /// which asserts `pgoutput::reservation` directly rather than through any
+    /// memory instrument. This is a delegation, not a gap.
     #[test]
     fn pgoutput_decode_rejects_a_truncate_count_larger_than_the_frame() {
         // count = u32::MAX, options = 0, and no ids at all.
