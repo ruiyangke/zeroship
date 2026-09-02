@@ -51,7 +51,8 @@ use zeroship_plugin_db::binding::DbBinding;
 use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
 use zeroship_plugin_db::crud::unmask::{
     audit_query_hint_granted, authorize_query_hint, dispatch_bulk_unmask, dispatch_unmask,
-    dispatch_unmask_for_query, BulkUnmaskArgs, BulkUnmaskItem, UnmaskFieldArgs,
+    dispatch_unmask_for_query, parse_args, parse_bulk_args, BulkUnmaskArgs, BulkUnmaskItem,
+    UnmaskFieldArgs,
 };
 use zeroship_plugin_db::error::DbError;
 use zeroship_plugin_db::query::{
@@ -863,6 +864,286 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
     let audit = audit_rows(&pool, app).await;
     assert_eq!(audit.len(), 4);
     assert_eq!(audit[3]["outcome"], json!("granted"));
+
+    release_pg(pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// 1b-2. DB-3: the actor an app SENDS, through the parser that sanitises it
+// ---------------------------------------------------------------------------
+//
+// Every arm above builds `UnmaskFieldArgs` / `BulkUnmaskArgs` in Rust, which
+// enters the dispatch path BELOW `sanitize_app_actor`. That helper is the DB-3
+// fix - app JS reached a privileged unmask and could pass `actor:{kind:"auto"}`
+// to read its own PII/PHI/PCI, because `check_unmask_authorization`'s no-policy
+// fallback is literally `Ok(kind == "auto")` and `MaskPolicy::allows` keeps that
+// rule for any policy that does not list `auto`. Until now the helper's only
+// coverage was in-module units that call it directly with no database behind
+// them, so the whole live path from "the JSON a handler sends" to "the row on
+// disk" was unbound: deleting the call reddened nothing in this file.
+//
+// The two arms below start from the JSON, hand it to the REAL parser, and
+// dispatch what comes out against Postgres. Each one's control differs from its
+// refusal in exactly ONE token - `actor.kind` - under one policy installed
+// before either call, so neither the fixture, the row, the column, the reason,
+// the actor id nor the policy can be what made the difference.
+
+/// The args object `Collection.unmaskField` actually hands `parse_args`.
+///
+/// The V8 method takes the caller's `opts` (`{ actor?, reason? }`) and stamps
+/// `collection` / `row_pk` / `column` onto that same map
+/// (`src/v8_classes/collection.rs`, `unmask_field`), so `actor` arrives exactly
+/// as app JS wrote it. Note the key is `row_pk`, not `rowPk`: the camelCase
+/// spelling is the JS method's positional parameter, and by the time the object
+/// reaches the parser it has been stamped in `snake_case`.
+fn unmask_args_json(row_pk: &str, actor: &Value) -> Value {
+    json!({
+        "collection": "people",
+        "row_pk": row_pk,
+        "column": "ssn",
+        "actor": actor,
+        "reason": "mask_flip integration test",
+    })
+}
+
+/// The args object `Collection.bulkUnmask` hands `parse_bulk_args`. Same
+/// stamping, and here the per-item key really is `rowPk` - that is the shape
+/// the SDK documents and the parser reads.
+fn bulk_args_json(row_pk: &str, columns: &[&str], actor: &Value) -> Value {
+    json!({
+        "collection": "people",
+        "items": [{ "rowPk": row_pk, "columns": columns }],
+        "actor": actor,
+        "reason": "mask_flip integration test",
+    })
+}
+
+/// **DB-3, on Postgres, through the parser.** An app handler that sends
+/// `actor: { kind: "auto" }` is refused, the refusal is audited, and the
+/// plaintext does not come back.
+///
+/// The payload is the one an app really sends, and it is not rejected for its
+/// SHAPE: `parse_args` accepts it and only then strips the reserved actor, so
+/// what this binds is the authorization outcome rather than a validation error
+/// that would happen to look the same.
+///
+/// **The control differs in one token.** The policy `{"support":["pci"]}` is
+/// installed BEFORE either call and is held constant across both. It does not
+/// list `auto`, and `MaskPolicy::allows` returns `role == "auto"` for a role it
+/// does not list - so this policy PERMITS the forged actor the moment the
+/// sanitiser stops running. That is what makes the refusal a statement about
+/// `sanitize_app_actor` and not about a fixture that could not have leaked: the
+/// identical payload naming `support` instead of `auto` returns the SSN.
+#[compio::test]
+async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
+    let url = require_pg().await;
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app = "flip_db3_single";
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    let schema = flip_schema();
+    let ssn = "123-45-6789";
+    let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
+
+    dispatch_set_mask_policy(app, json!({ "support": ["pci"] }))
+        .await
+        .expect("install the app's declared mask policy");
+
+    // ---- the forged system actor, parsed from the JSON a handler sends ----
+    let forged = parse_args(&unmask_args_json(
+        &person.id,
+        &json!({ "kind": "auto", "id": "usr_support_1" }),
+    ))
+    .expect(
+        "the payload must PARSE: DB-3 is an authorization fence, not a shape \
+         rejection, and a test that never got past the parser would assert \
+         nothing about it",
+    );
+    let err = match dispatch_unmask(&DbBinding::cold_start(app), forged).await {
+        Ok(leaked) => panic!(
+            "DB-3 is back: app JS claiming the reserved `auto` system actor was \
+             authorized, and the plaintext came back: {leaked:?}"
+        ),
+        Err(e) => e,
+    };
+    assert_eq!(
+        refusal_code(&err),
+        "unmask_not_permitted",
+        "the refusal must be the authorization refusal - not a parse error, and \
+         not an incidental failure further down the path: {err:?}",
+    );
+    assert!(
+        !format!("{err:?}").contains(ssn),
+        "the refusal must not carry the value it refused: {err:?}",
+    );
+
+    // The audit row, read back from PostgreSQL rather than from anything the
+    // call returned - the `Err` carries no audit information at all.
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(
+        audit.len(),
+        1,
+        "the denied path writes exactly one row: {audit:?}",
+    );
+    assert_eq!(audit[0]["outcome"], json!("denied"));
+    assert_eq!(audit[0]["collection"], json!("people"));
+    assert_eq!(audit[0]["column"], json!("ssn"));
+    assert_eq!(
+        audit[0]["classification"],
+        json!("pci"),
+        "the audit row records the classification that was refused",
+    );
+    assert_eq!(
+        audit[0]["row_pk"],
+        json!(person.id),
+        "and the row it names is the one the platform minted",
+    );
+    // The sanitiser strips the WHOLE actor, not just its `kind`: the id the
+    // caller supplied never reaches the audit row either. So a forged-`auto`
+    // attempt is recorded exactly like a call with no actor at all.
+    assert_eq!(
+        audit[0]["actor_role"],
+        json!(""),
+        "the forged `auto` claim must not be recorded as the actor's role: {audit:?}",
+    );
+    assert_eq!(
+        audit[0]["actor_id"],
+        json!(""),
+        "nor the id that travelled with it: {audit:?}",
+    );
+
+    // ---- THE CONTROL, differing in one token: `auto` -> `support` ----
+    let permitted = parse_args(&unmask_args_json(
+        &person.id,
+        &json!({ "kind": "support", "id": "usr_support_1" }),
+    ))
+    .expect("the same payload shape must parse");
+    let result = dispatch_unmask(&DbBinding::cold_start(app), permitted)
+        .await
+        .expect(
+            "the same payload naming a non-reserved kind the policy permits must \
+             reach the value; if this fails the refusal above proved nothing \
+             about the actor",
+        );
+    assert_eq!(
+        result.plaintext, ssn,
+        "the control must recover the very value the forged call was refused",
+    );
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(audit.len(), 2, "the granted path appends its own row");
+    assert_eq!(audit[1]["outcome"], json!("granted"));
+    assert_eq!(
+        audit[1]["actor_role"],
+        json!("support"),
+        "and a NON-reserved kind does travel through to the audit row, so the \
+         empty role above is the sanitiser and not an audit path that never \
+         records one: {audit:?}",
+    );
+
+    release_pg(pool).await;
+}
+
+/// **DB-3 on the bulk path.** `parse_bulk_args` is the second sanitising entry
+/// point, and it is reached by a different V8 method (`Collection.bulkUnmask`)
+/// with a different args shape, so the single-cell arm above says nothing about
+/// it: deleting one call leaves the other's tests green.
+///
+/// Same construction - one policy, installed first and held constant, and a
+/// control differing only in `actor.kind`. The refusal code differs because the
+/// batch owns its own atomic fence: every `(row, column)` pair is unauthorized
+/// once the actor is stripped, so the whole call is refused with
+/// `bulk_unmask_partial_unauthorized`.
+#[compio::test]
+async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
+    let url = require_pg().await;
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app = "flip_db3_bulk";
+    zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
+    let schema = flip_schema();
+    let ssn = "987-65-4321";
+    let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
+
+    dispatch_set_mask_policy(app, json!({ "support": ["pci"] }))
+        .await
+        .expect("install the app's declared mask policy");
+
+    // ---- the forged system actor, parsed from the JSON a handler sends ----
+    let forged = parse_bulk_args(&bulk_args_json(
+        &person.id,
+        &["ssn"],
+        &json!({ "kind": "auto", "id": "usr_support_1" }),
+    ))
+    .expect("the payload must PARSE; DB-3 is an authorization fence");
+    let err = match dispatch_bulk_unmask(&DbBinding::cold_start(app), forged).await {
+        Ok(leaked) => panic!(
+            "DB-3 is back on the bulk path: app JS claiming the reserved `auto` \
+             system actor was authorized, and the plaintext came back: \
+             {:?}",
+            leaked.results
+        ),
+        Err(e) => e,
+    };
+    assert_eq!(
+        refusal_code(&err),
+        "bulk_unmask_partial_unauthorized",
+        "the refusal must be the batch fence's own code, not a parse error and \
+         not an incidental failure further down the path: {err:?}",
+    );
+    assert!(
+        !format!("{err:?}").contains(ssn),
+        "the refusal must not carry the value it refused: {err:?}",
+    );
+
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(
+        audit.len(),
+        1,
+        "the refused batch writes exactly one row for the whole call: {audit:?}",
+    );
+    assert_eq!(audit[0]["outcome"], json!("denied"));
+    assert_eq!(audit[0]["collection"], json!("people"));
+    assert_eq!(audit[0]["column"], json!("ssn"));
+    assert_eq!(audit[0]["classification"], json!("pci"));
+    assert_eq!(audit[0]["row_pk"], json!(person.id));
+    assert_eq!(
+        audit[0]["actor_role"],
+        json!(""),
+        "the forged `auto` claim must not be recorded as the actor's role: {audit:?}",
+    );
+    assert_eq!(audit[0]["actor_id"], json!(""));
+    let reason = audit[0]["reason"]
+        .as_str()
+        .expect("the audit row carries a reason");
+    assert!(
+        reason.contains(&format!("unauthorized=[{}/ssn]", person.id)),
+        "the reason names the (row, column) pair that caused the refusal: {reason:?}",
+    );
+
+    // ---- THE CONTROL, differing in one token: `auto` -> `support` ----
+    let permitted = parse_bulk_args(&bulk_args_json(
+        &person.id,
+        &["ssn"],
+        &json!({ "kind": "support", "id": "usr_support_1" }),
+    ))
+    .expect("the same payload shape must parse");
+    let granted = dispatch_bulk_unmask(&DbBinding::cold_start(app), permitted)
+        .await
+        .expect(
+            "the same batch naming a non-reserved kind the policy permits must \
+             reach the value; if this fails the refusal above proved nothing",
+        );
+    assert_eq!(
+        granted.results[&person.id]["ssn"], ssn,
+        "the control must recover the very value the forged batch was refused: {:?}",
+        granted.results,
+    );
+    let audit = audit_rows(&pool, app).await;
+    assert_eq!(audit.len(), 2, "the granted batch appends its own row");
+    assert_eq!(audit[1]["outcome"], json!("granted"));
+    assert_eq!(
+        audit[1]["actor_role"],
+        json!("support"),
+        "and a NON-reserved kind does travel through to the audit row: {audit:?}",
+    );
 
     release_pg(pool).await;
 }
