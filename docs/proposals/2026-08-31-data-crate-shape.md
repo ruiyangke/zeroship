@@ -423,7 +423,15 @@ one. Phase 0 is still worth doing first and is still individually shippable; **i
   load-bearing. Four are named security controls (`sanitize_app_actor`, `TxRoute::capture`,
   `DbBinding::cold_start`, `context::with_mut`). This repository has already shipped this mistake once
   and written a comment claiming it had not.
-- **The dead-code decision.** Several modules are self-declared unreachable - `cross_app_fk.rs`,
+- **The dead-code decision. TWO OF FOUR ARE RULED ON (2026-09-02): `cross_app_fk.rs` and
+  `crud/mask_backfill.rs` are DELETED.** `drop_namespace.rs` and `read_set.rs` remain. Both
+  deletions were confirmed the only way that is not a grep - remove the file and compile - and both
+  turned up a stale claim on the way out: `cross_app_fk`'s declaration named an enforcer
+  (`zeroship_schema::query`) with zero cross-app references, and three crates described
+  `mask_backfill` as holding a `run_mask_backfill` / `run_mask_rewrite` runner that its own header
+  said in its first four lines had never existed. Original text follows.
+
+  Several modules are self-declared unreachable - `cross_app_fk.rs`,
   `drop_namespace.rs`, `crud/mask_backfill.rs` - plus `read_set.rs`, inert on both ends. **Giving
   dead code a crate is how the existing clusters got there.** Decide delete-or-wire BEFORE assigning.
 - **The tier-signature audit.** For each module, does any signature name a crate its assigned tier may

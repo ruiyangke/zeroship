@@ -10,10 +10,13 @@
 //! backfills) stays in plugin-db's data plane.
 //!
 //! The `(MaskKind, Classification)` types this codec round-trips live in
-//! [`crate::diff`] (the schema metadata types). plugin-db re-exports both
-//! the codec and the types from their original module paths, so
-//! `zeroship_plugin_db::crud::mask_backfill::parse_mask_sentinel` still
-//! resolves there.
+//! [`crate::diff`] (the schema metadata types). plugin-db's two consumers -
+//! `backend::pg_introspect` and `backend::sqlite` - call this module directly.
+//!
+//! They were once reached through a delegating wrapper at
+//! `zeroship_plugin_db::crud::mask_backfill::parse_mask_sentinel`; that module
+//! was deleted on 2026-09-02 with zero callers, and neither consumer went
+//! through it even then.
 //!
 //! Written `crate::...` until 2026-08-08, which was wrong in two ways once
 //! this module was extracted: `crate` is zeroship-schema, a leaf crate that

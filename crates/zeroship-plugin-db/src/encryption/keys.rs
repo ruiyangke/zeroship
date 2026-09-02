@@ -281,9 +281,9 @@ impl KeyStore {
     /// the CRUD passes call this directly, so nothing above imposes the shape
     /// any more. It stays async deliberately, not by oversight: this is the one
     /// seam a key source that leaves the process would arrive at, and making it
-    /// sync would cascade - `decrypt_row_on_read`, `encrypt_row_on_write*` and
-    /// `apply_mask_to_one_row` await nothing else, so each would lose its own
-    /// `async` in turn, and every caller after them.
+    /// sync would cascade - `decrypt_row_on_read` and `encrypt_row_on_write*`
+    /// await nothing else, so each would lose its own `async` in turn, and
+    /// every caller after them.
     ///
     /// If a remote key source never lands, delete the `async` here and follow
     /// that cascade in one change rather than leaving this note to rot.
