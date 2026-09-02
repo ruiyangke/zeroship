@@ -820,6 +820,61 @@ pub(crate) fn dispatch_find<'s>(
 /// Shared dispatch for `insert`. The capability gate is the caller's
 /// responsibility — `Collection::insert` calls
 /// `refuse_if_query_capability` before reaching here.
+/// The ENGINE half of `insert`: no `scope`, no `v8::`, no `ResolveValue`.
+///
+/// `actor_id` is a PARAMETER rather than something this function looks up, and
+/// that is load-bearing. `system_fields_pass::current_actor_id` reads
+/// `executing_request_id` off the runtime state, which is only guaranteed-set
+/// on the pump turn that initiates the dispatch. This function awaits before it
+/// writes (the encryption pass's `resolve_key` round-trip), so resolving the
+/// actor in here would attribute the row to whichever request happens to be
+/// current at first poll. [`dispatch_insert`] reads it eagerly and passes it in.
+pub(crate) async fn run_insert(
+    binding: DbBinding,
+    coll: String,
+    route: crate::tx_route::TxRoute,
+    doc: Value,
+    actor_id: Option<String>,
+) -> Result<read_pipeline::ApplyResult, DbError> {
+    let mut doc = doc;
+    write_pipeline::apply(
+        &binding,
+        &coll,
+        &mut doc,
+        write_pipeline::ApplyMode::Insert {
+            actor_id: actor_id.as_deref(),
+        },
+    )
+    .await?;
+    // `write_pipeline::apply` already refused an undeclared collection, so
+    // this resolution cannot fail here; it re-reads the same store entry
+    // rather than threading the schema back out through `apply`'s result.
+    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
+    let bq = query::build_insert_with_dialect(
+        binding.app_id(),
+        &coll,
+        &schema,
+        &doc,
+        current_sql_dialect(),
+    )
+    .map_err(DbError::from)?;
+    let rows = exec_mutation_with_emit(
+        bq,
+        &route,
+        &coll,
+        zeroship_core::change_event::ChangeOp::Insert,
+    )
+    .await?;
+    read_pipeline::apply(
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions::default(),
+    )
+    .await
+}
+
 pub(crate) fn dispatch_insert<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: DbBinding,
@@ -831,7 +886,6 @@ pub(crate) fn dispatch_insert<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let coll = collection.to_string();
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
 
@@ -847,40 +901,7 @@ pub(crate) fn dispatch_insert<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        async move {
-            let mut doc = doc;
-            write_pipeline::apply(
-                &binding,
-                &coll,
-                &mut doc,
-                write_pipeline::ApplyMode::Insert {
-                    actor_id: actor_id.as_deref(),
-                },
-            )
-            .await?;
-            // `write_pipeline::apply` already refused an undeclared collection, so
-            // this resolution cannot fail here; it re-reads the same store entry
-            // rather than threading the schema back out through `apply`'s result.
-            let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-            maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
-            let bq =
-                query::build_insert_with_dialect(&app, &coll, &schema, &doc, current_sql_dialect())
-                    .map_err(DbError::from)?;
-            let rows = exec_mutation_with_emit(
-                bq,
-                &route,
-                &coll,
-                zeroship_core::change_event::ChangeOp::Insert,
-            )
-            .await?;
-            read_pipeline::apply(
-                &binding,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions::default(),
-            )
-            .await
-        },
+        run_insert(binding, coll, route, doc, actor_id),
         |result| crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
     )));
 
@@ -889,6 +910,45 @@ pub(crate) fn dispatch_insert<'s>(
 
 /// Shared dispatch for `insertMany`. See [`dispatch_insert`] for the
 /// capability-gate contract.
+/// The ENGINE half of `insertMany`. `actor_id` is eager for the reason given on
+/// [`run_insert`]; it reaches the docs through
+/// `prepare_insert_many_docs_for_binding`, not `write_pipeline::apply`.
+pub(crate) async fn run_insert_many(
+    binding: DbBinding,
+    coll: String,
+    route: crate::tx_route::TxRoute,
+    docs: Value,
+    actor_id: Option<String>,
+) -> Result<read_pipeline::ApplyResult, DbError> {
+    let mut docs = docs;
+    prepare_insert_many_docs_for_binding(&mut docs, &binding, &coll, actor_id.as_deref()).await?;
+    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    maybe_lower_sqlite_boolean_docs(&schema, &mut docs);
+
+    let bq = query::build_insert_many_with_dialect(
+        binding.app_id(),
+        &coll,
+        &schema,
+        &docs,
+        current_sql_dialect(),
+    )
+    .map_err(DbError::from)?;
+    let rows = exec_mutation_with_emit(
+        bq,
+        &route,
+        &coll,
+        zeroship_core::change_event::ChangeOp::Insert,
+    )
+    .await?;
+    read_pipeline::apply(
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions::default(),
+    )
+    .await
+}
+
 pub(crate) fn dispatch_insert_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: DbBinding,
@@ -899,7 +959,6 @@ pub(crate) fn dispatch_insert_many<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
@@ -907,36 +966,7 @@ pub(crate) fn dispatch_insert_many<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        async move {
-            let mut docs = docs;
-            prepare_insert_many_docs_for_binding(&mut docs, &binding, &coll, actor_id.as_deref())
-                .await?;
-            let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-            maybe_lower_sqlite_boolean_docs(&schema, &mut docs);
-
-            let bq = query::build_insert_many_with_dialect(
-                &app,
-                &coll,
-                &schema,
-                &docs,
-                current_sql_dialect(),
-            )
-            .map_err(DbError::from)?;
-            let rows = exec_mutation_with_emit(
-                bq,
-                &route,
-                &coll,
-                zeroship_core::change_event::ChangeOp::Insert,
-            )
-            .await?;
-            read_pipeline::apply(
-                &binding,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions::default(),
-            )
-            .await
-        },
+        run_insert_many(binding, coll, route, docs, actor_id),
         |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
     )));
 
