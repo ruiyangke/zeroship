@@ -9,16 +9,29 @@
 //! Behaviour on the SERIALIZED connection loop, reached without TLS.
 //!
 //! `Connection::run` picks its loop by whether the transport splits into owned
-//! halves. A plain socket splits and takes the multiplexed loop; a TLS stream
-//! cannot - rustls keeps shared session state - so every TLS connection takes
-//! the serialized one. The loops are not equivalent, so behaviour proven over
-//! plaintext is not thereby proven over TLS, and until now the only way into
-//! the serialized loop from a test was to stand up a TLS server. That is why
-//! the two diverged with nothing going red (task #49).
+//! halves. **Both transports this crate ships split** - a plain socket, and
+//! rustls since `tls_sansio` drives the session directly rather than through an
+//! adapter that owns the socket (`maybe_tls_stream.rs:208`, `connection.rs:652`).
+//! So both take the MULTIPLEXED loop. What still reaches the serialized one is
+//! a custom `TlsConnect` whose stream answers `Err` to `try_into_split` - which
+//! in practice means these tests and nothing else.
 //!
-//! `test_utils::connect_serialized` makes that loop reachable over plaintext.
-//! These tests are the parity net for the refactor that will delete the
-//! serialized loop: they must keep passing when TLS and plaintext share one.
+//! THIS PARAGRAPH SAID THE OPPOSITE UNTIL 2026-09-02: that "rustls keeps shared
+//! session state" so "every TLS connection takes the serialized one", and that
+//! the only way in was to stand up a TLS server. That was true until the
+//! 2026-08-24 fix, whose whole point was that the cause "was not that rustls
+//! state cannot be shared" but that the adapter could never hand the socket
+//! back. Reading the stale version, one would conclude that running the suite
+//! over TLS exercises this loop. It does not - `suite-over-tls` runs on the
+//! multiplexed loop too, and `a_notification_reaches_an_idle_tls_connection`
+//! in `tests/tls_live.rs` passes precisely because TLS is now multiplexed
+//! (the serialized idle step reads no socket, so that test cannot pass on it).
+//!
+//! The loops are not equivalent, and they once diverged with nothing going red
+//! (task #49). `test_utils::connect_serialized` makes the serialized loop
+//! reachable over plaintext. These tests are therefore not merely a parity net
+//! for the refactor that will delete that loop - they are its ONLY coverage,
+//! and the 25 of them are all that stands behind it.
 
 use compio_postgres::test_utils::connect_serialized;
 use compio_postgres::{Client, Config};
