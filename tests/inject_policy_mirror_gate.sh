@@ -73,10 +73,28 @@
 #     it cannot be made to consume the fragment: it renders DDL directly, with
 #     no policy document in the path, and the two producers disagree on the
 #     id/created_by/updated_by TYPE (varchar(255) via the engine vs TEXT here,
-#     measured 2026-08-10 on a deployed app schema). Closing that needs a check
-#     of a different kind - comparing rendered DDL, not text. See the fragment's
-#     header. Both producers now pin the same bytewise comparison intent, but
-#     this textual mirror gate still cannot prove that rendered-DDL agreement.
+#     measured 2026-08-10 on a deployed app schema). Closing THE TYPES needs a
+#     check of a different kind - comparing rendered DDL, not text. See the
+#     fragment's header. Both producers now pin the same bytewise comparison
+#     intent, but this gate still cannot prove that rendered-DDL agreement.
+#
+#     THE NAMES, HOWEVER, ARE TEXT, and arm 5 now compares them. That paragraph
+#     read as though the whole seventh producer were out of reach, and the part
+#     that was in reach went unguarded for as long as it did partly because this
+#     header said it could not be done. What the Rust producer publishes as
+#     `SYSTEM_FIELD_NAMES` is an ordered list of the same seven names, and
+#     nothing bound it to the fragment.
+#
+#     Why that matters more than a tidiness argument: `SYSTEM_FIELD_NAMES` is
+#     not only DDL input. `implicit_read_projection_parts`
+#     (crates/zeroship-schema/src/query.rs) walks it to build the SELECT column
+#     list, reached from four production builders in that file, and
+#     `read_surface_columns` derives from it. So an eighth column added to the
+#     fragment alone would be created by the migration and assigned by the
+#     runtime write pass - which iterates the charter and names no column - and
+#     then never projected by any SELECT. The creator could not read the value
+#     the platform had just written to their row, and every existing test would
+#     stay green, because no test names a column that does not yet exist.
 #   - It reads TRACKED files only, via `git ls-files`. Build output
 #     (sdks/vite-plugin/dist/), node_modules, target/, and sibling worktrees
 #     under .worktrees/ are all ignored and therefore unscanned. That is
@@ -368,7 +386,96 @@ if ! gate_arm rule_lines "$rule_lines" 5; then
     exit 2
 fi
 
+# ---------------------------------------------------------------------------
+# Arm 5 (the seventh producer's NAME SET): the fragment assigns seven columns;
+# `zeroship-schema` publishes those same seven as an ordered Rust const. Prove
+# the two lists still agree, in content AND in order.
+#
+# ORDER, not just membership. `build_system_field_columns` renders its DDL by
+# walking the const, and the const's own rustdoc says "Order MUST match
+# SYSTEM_FIELD_NAMES" of the column emitter. A set comparison would pass on a
+# reordering that changes the emitted column order of every creator table.
+#
+# WHAT THIS ARM DOES NOT CLOSE. Types, nullability, defaults and collation are
+# still uncompared - see the header. This arm rules on names and their order,
+# which is exactly the part that is text on both sides.
+# ---------------------------------------------------------------------------
+#
+# A NOTE ON THE SINGLE PATH BELOW. An earlier draft of this arm special-cased a
+# missing Rust file with its own `gate_arm name_agreement 0 4` call before the
+# real one. tests/gate_arm_census.sh refused it: an arm id declared twice means
+# one declaration can vouch for the other's count. It was right, and the fix is
+# better than the code it rejected - a missing file makes the extractor yield
+# nothing, which is already the floor's job to catch, so there is one path and
+# one declaration. Do not reintroduce an early gate_arm call here.
+RUST_NAMES_FILE="crates/zeroship-schema/src/query.rs"
+
+# The fragment's side: every injected column carrying an `assign =` binding, in
+# declaration order. `assign` is the discriminator on purpose - it selects the
+# columns the PLATFORM computes, which is precisely the set the runtime write
+# pass and the read projection both have to know about. An injected column
+# without one would be creator-writable and does not belong in this comparison.
+fragment_names=$(
+    sed -n '/^\[\[inject\]\]/,/^\[\[/p' "$ROOT/$FRAGMENT" \
+        | grep -E '^\s*\{ *name *=.*assign *=' \
+        | sed -E 's/^\s*\{ *name *= *"([^"]+)".*/\1/' \
+        || true
+)
+
+# The Rust side: the const's string literals, in declaration order.
+rust_names=$(
+    awk '/^pub const SYSTEM_FIELD_NAMES/{f=1;next} f&&/^\];/{exit} f' \
+        "$ROOT/$RUST_NAMES_FILE" \
+        | sed -nE 's/^\s*"([^"]+)",?\s*$/\1/p' \
+        || true
+)
+
+fragment_n=$(printf '%s\n' "$fragment_names" | grep -c . || true)
+rust_n=$(printf '%s\n' "$rust_names" | grep -c . || true)
+
+# Examined = names this arm actually ruled on. Deliberately the SMALLER of the
+# two: if one extraction collapses to nothing, the arm ruled on nothing, and
+# taking the larger would let a broken extractor borrow the other side's count
+# and report a healthy number while comparing against an empty list.
+name_agreement_n=$fragment_n
+[ "$rust_n" -lt "$name_agreement_n" ] && name_agreement_n=$rust_n
+
+# Floor 4 against today's 7: low enough that deliberately retiring a system
+# column does not turn this red, high enough that either sed/awk silently
+# ceasing to match cannot pass. Both extractors are anchored on syntax that a
+# reformat could move, which is the failure this floor is really watching for.
+if ! gate_arm name_agreement "$name_agreement_n" 4; then
+    echo "  FAIL: extracted $fragment_n assigned column(s) from $FRAGMENT and"
+    echo "        $rust_n name(s) from SYSTEM_FIELD_NAMES."
+    echo "        One of the two extractors stopped matching. In order of how"
+    echo "        often each has actually happened: the file moved (is"
+    echo "        $RUST_NAMES_FILE still there?), the const was renamed, or the"
+    echo "        [[inject]] block was reformatted. Re-point this arm; do not"
+    echo "        lower the floor."
+    gate_arms_finish || true
+    exit 2
+fi
+
+if [ "$fragment_names" != "$rust_names" ]; then
+    echo "  FAIL: the platform column set has drifted between its two producers."
+    echo
+    echo "        $FRAGMENT (assigned columns, in order):"
+    printf '%s\n' "$fragment_names" | sed 's/^/          /'
+    echo "        $RUST_NAMES_FILE SYSTEM_FIELD_NAMES (in order):"
+    printf '%s\n' "$rust_names" | sed 's/^/          /'
+    echo
+    echo "        These are not interchangeable copies. The fragment drives the"
+    echo "        migration that CREATES the columns and the runtime pass that"
+    echo "        ASSIGNS them; the const drives the SELECT projection that READS"
+    echo "        them (implicit_read_projection_parts). A column in one and not"
+    echo "        the other is written but unreadable, or projected but absent."
+    echo "        Change both in the same commit."
+    gate_arms_finish || true
+    exit 2
+fi
+
 echo "  ok: one [[inject]] rule ($rule_lines semantic lines), $consumers_n consumers," \
-     "generated view fresh"
+     "generated view fresh, $name_agreement_n platform column names agree with" \
+     "SYSTEM_FIELD_NAMES"
 gate_arms_finish || exit 1
 exit 0
