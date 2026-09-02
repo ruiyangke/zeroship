@@ -876,9 +876,12 @@ pub trait ChangeStream: 'static {
     /// Returns a [`BrokerPauseGuard`] whose `Drop` resumes delivery
     /// and emits a `Resync` to every active subscriber (§16.7).
     ///
-    /// The guard's `Drop` starts as a no-op (tracing::trace! only)
-    /// until it is wired through `broker::suppress_app` /
-    /// `broker::resume_app_with_resync`.
+    /// `Drop` IS wired: it calls `broker::unsuppress_app` then
+    /// `broker::resume_app_with_resync` (see the impl on
+    /// [`BrokerPauseGuard`]). This said "starts as a no-op
+    /// (tracing::trace! only) until it is wired" until 2026-09-01, long after
+    /// the wiring landed - a stale "not done yet" reads as a to-do and invites
+    /// someone to implement it a second time.
     fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard;
 
     /// Engage the schema-pending decoder for `app_id`. Returns a
@@ -887,8 +890,10 @@ pub trait ChangeStream: 'static {
     /// `Broker::subscribe(app_id, …)` rejects new subscriptions with
     /// `DbError::Conflict { code: "schema_pending" }`.
     ///
-    /// The guard's `Drop` starts as a no-op (tracing::trace! only)
-    /// until both halves (subscribe-rejection + resync-on-drop) are wired.
+    /// `Drop` IS wired, same as [`ChangeStream::pause_broker`]: it calls
+    /// `broker::disengage_schema_pending` then
+    /// `broker::resume_app_with_resync`. The "starts as a no-op until both
+    /// halves are wired" note this carried until 2026-09-01 was stale.
     fn engage_schema_pending(&self, app_id: &str) -> SchemaPendingGuard;
 }
 
@@ -898,16 +903,15 @@ pub trait ChangeStream: 'static {
 ///
 /// Wired body (plan §7 backfill pause):
 ///
-/// 1. `::new(app_id)` — calls
-///    [`crate::broker::suppress_app`] which sets the
-///    thread-local `SUPPRESSED_APPS` flag. While the flag is set, the
-///    SQLite CDC publisher (`backend/sqlite/cdc.rs::publisher_loop`)
-///    drops every packet whose `app_id` matches before the broker
-///    fan-out, AND the legacy local-emit shim
-///    (`crate::broker::emit_local`) short-circuits to a no-op so
-///    the PG arm sees the same contract.
-/// 2. `::drop` — calls [`crate::broker::unsuppress_app`] to
-///    clear the suppression flag, then
+/// 1. `::new(app_id)` — calls [`crate::broker::suppress_app`], which
+///    INCREMENTS this app's entry in `SUPPRESSED_APPS`. While the count is
+///    non-zero, the SQLite CDC publisher
+///    (`backend/sqlite/cdc.rs::publisher_loop`) drops every packet whose
+///    `app_id` matches before the broker fan-out, AND the legacy local-emit
+///    shim (`crate::broker::emit_local`) short-circuits to a no-op so the PG
+///    arm sees the same contract.
+/// 2. `::drop` — calls [`crate::broker::unsuppress_app`], which DECREMENTS
+///    that count and removes the entry only at zero, then
 ///    [`crate::broker::Broker::resume_app_with_resync`] which pushes
 ///    one `Resync` message onto every active subscription registered
 ///    on `app_id`. Subscribers refetch and continue catching up.
@@ -916,6 +920,21 @@ pub trait ChangeStream: 'static {
 /// [`SchemaPendingGuard`] (the louder rail); backfill is silent on the
 /// `subscribe` path by design (a backfill window is internally driven and SDK
 /// callers have no way to observe it directly).
+///
+/// **`SUPPRESSED_APPS` is a process-wide REFCOUNT, not a thread-local flag,
+/// and the difference is the whole safety property.** It is
+/// `LazyLock<Mutex<HashMap<String, usize>>>` (`broker.rs:761`) - a count behind
+/// a process-wide mutex, because a worker process runs many single-threaded
+/// compio runtimes and a backfill on one must suppress delivery on all of them.
+///
+/// This doc called it a "thread-local flag" until 2026-09-01, and that reading
+/// makes overlapping guards look BROKEN when they are in fact the case the
+/// refcount exists for: with a boolean, an inner guard's drop would clear the
+/// outer guard's suppression and resume delivery mid-backfill. With the count,
+/// the inner drop takes it 2 -> 1 and nothing resumes until the outer one
+/// releases. Anyone "simplifying" this to a `HashSet` or a `bool` reintroduces
+/// exactly that bug, and it would surface as change events escaping during a
+/// backfill window rather than as a test failure.
 ///
 /// The `#[must_use]` annotation prevents accidental inline drop at
 /// the call site — the pause/resume contract is the *duration* of the
