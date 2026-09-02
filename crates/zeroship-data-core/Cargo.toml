@@ -14,15 +14,30 @@ description = "The data plane's domain tier: the typed error hierarchy every bac
 # `zeroship-runtime` are absent below, so naming `compio_postgres::Error` in this
 # crate is E0433 at compile time, for everyone, forever.
 #
-# THE FENCE HAS A HOLE AND IT IS LOAD-BEARING TO SAY SO. E0433 stops a crate
-# SPELLING a path; it says nothing about a crate HOLDING a value of that type.
-# `zeroship-schema` below declares `compio-postgres` itself, and
-# crates/zeroship-schema/src/error.rs:31 is `pub source: compio_postgres::Error`
-# - a public field. Any code here that touches that field handles a vendor value
-# by INFERENCE, with the vendor token appearing on no line, so neither this
-# manifest nor tests/vendor_embedding_gate.sh can see it. The floor is therefore
-# zeroship-data-core -> zeroship-schema -> compio-postgres, and this crate is
-# vendor-free in SPELLING rather than in its dependency closure.
+# THE HOLE THIS BLOCK DESCRIBED IS CLOSED, AND THE DESCRIPTION WAS STALE.
+#
+# Until 2026-09-02 the paragraph here said the fence leaked: that
+# `zeroship-schema` declared `compio-postgres` itself, that
+# `crates/zeroship-schema/src/error.rs:31` was `pub source: compio_postgres::Error`,
+# and that this crate was therefore "vendor-free in SPELLING rather than in its
+# dependency closure". Re-measured, none of that is true now:
+#
+#   cargo tree -p zeroship-data-core -e normal | grep -c compio-postgres  -> 0
+#   ... rusqlite -> 0, zeroship-runtime -> 0, v8 -> 0
+#
+# `zeroship-schema`'s own direct dependencies are serde_json, sha2 and
+# zeroship-core; its src/ names no driver, and error.rs has no `source` field of
+# any kind. The claim survived in this manifest, in #97 and in #101 after it
+# stopped being true, which is why it is corrected here rather than deleted -
+# the citation was precise, checkable, and wrong, and that is worth recording.
+#
+# THE REASONING WAS RIGHT EVEN THOUGH THE FACT EXPIRED. E0433 stops a crate
+# SPELLING a path; it says nothing about a crate ACQUIRING one transitively,
+# with no line of source changing. A manifest cannot police its own closure.
+# `tests/data_crate_closure_gate.sh` now does: it asserts the normal closure of
+# this crate and zeroship-data-query-builder reaches none of the four names
+# above, and it is mutation-proved - adding `compio-postgres` here turns it red
+# naming both the crate and the edge.
 [dependencies]
 # `DbError`'s Display/Debug and the descriptor-shaped payloads it carries.
 serde_json = { workspace = true }
