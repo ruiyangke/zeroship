@@ -3433,6 +3433,74 @@ mod tests {
     /// mutating it also failed
     /// `tls_protocol_bounds_parse_with_libpq_defaults_and_spelling`, which
     /// reaches it through DSN parsing rather than the setter.
+    /// Options whose REFUSAL of a bad value never ran.
+    ///
+    /// Eight `InvalidValue` arms in `set_parameter` were uncovered. Each is a
+    /// one-line parse away, and each guards a value that would otherwise be
+    /// taken as something reasonable:
+    ///
+    /// - an empty `passfile`, `service`, `servicefile` or `sslkeylogfile`
+    ///   would read as "use the default", which for `service` means silently
+    ///   ignoring the whole service lookup the caller asked for;
+    /// - `max_message_size=0` would mean "no message may arrive";
+    /// - `gssdelegation`, `sslcompression` and `requiressl` take `0` or `1`,
+    ///   and anything else is a typo the caller wants told about, not
+    ///   rounded to a default.
+    ///
+    /// The error must NAME the option, because a connection string is often
+    /// assembled from several sources and "invalid value" alone does not say
+    /// which key to look at.
+    mod bad_option_values_are_refused_by_name {
+        use super::super::Config;
+
+        #[test]
+        fn each_named_option_refuses_its_bad_value() {
+            for (dsn, option) in [
+                ("host=127.0.0.1 max_message_size=0", "max_message_size"),
+                ("host=127.0.0.1 max_message_size=nine", "max_message_size"),
+                ("host=127.0.0.1 gssdelegation=yes", "gssdelegation"),
+                ("host=127.0.0.1 sslcompression=yes", "sslcompression"),
+                ("host=127.0.0.1 requiressl=yes", "requiressl"),
+                ("host=127.0.0.1 passfile=", "passfile"),
+                ("host=127.0.0.1 service=", "service"),
+                ("host=127.0.0.1 servicefile=", "servicefile"),
+                ("host=127.0.0.1 sslkeylogfile=", "sslkeylogfile"),
+            ] {
+                let error = dsn
+                    .parse::<Config>()
+                    .expect_err(&format!("{dsn} was accepted"));
+                let rendered = format!(
+                    "{}",
+                    std::error::Error::source(&error).expect("a config-parse source")
+                );
+                assert_eq!(
+                    rendered,
+                    format!("invalid value for option `{option}`"),
+                    "{dsn} did not refuse by name"
+                );
+            }
+        }
+
+        /// The one-variable control: the same options with values they accept.
+        /// Without it, every assertion above also passes for a parser that
+        /// refuses these keys outright.
+        #[test]
+        fn the_same_options_accept_their_good_values() {
+            for dsn in [
+                "host=127.0.0.1 max_message_size=1024",
+                "host=127.0.0.1 gssdelegation=0",
+                "host=127.0.0.1 sslcompression=0",
+                "host=127.0.0.1 requiressl=0",
+                "host=127.0.0.1 passfile=/tmp/pgpass",
+                "host=127.0.0.1 servicefile=/tmp/pg_service.conf",
+                "host=127.0.0.1 sslkeylogfile=/tmp/keys.log",
+            ] {
+                dsn.parse::<Config>()
+                    .unwrap_or_else(|error| panic!("{dsn} was refused: {error}"));
+            }
+        }
+    }
+
     mod getters_distinguish_their_siblings {
         use super::super::{Config, SslProtocolVersion};
 
