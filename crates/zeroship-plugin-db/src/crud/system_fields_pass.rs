@@ -212,7 +212,7 @@ pub(crate) fn prefix_for_collection(
 /// Returns a validation error before minting when the resolved typed-id prefix
 /// is malformed or reserved for platform ids.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) fn apply_system_fields_on_insert(
+pub fn apply_system_fields_on_insert(
     doc: &mut Value,
     schema: &Value,
     collection: &str,
@@ -272,7 +272,7 @@ pub(crate) fn apply_system_fields_on_insert_many(
 }
 
 #[cfg(feature = "test-helpers")]
-pub fn apply_system_fields_on_insert_many(
+pub(crate) fn apply_system_fields_on_insert_many(
     docs: &mut Value,
     schema: &Value,
     collection: &str,
@@ -408,7 +408,7 @@ pub(crate) fn apply_system_fields_on_update(
 }
 
 #[cfg(feature = "test-helpers")]
-pub fn apply_system_fields_on_update(
+pub(crate) fn apply_system_fields_on_update(
     patch: &mut Value,
     app_id: &str,
     collection: &str,
