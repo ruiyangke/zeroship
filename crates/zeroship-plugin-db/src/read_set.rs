@@ -32,11 +32,15 @@
 //!
 //! ## Capture site
 //!
-//! Capture happens inside `ctx.db.find / count / aggregate`.
-//! The B3 capability layer's thread-local
-//! [`current_kind`](zeroship_runtime::rpc::current_kind) marker gates
-//! it: read-set capture is enabled **only** when the active procedure
-//! kind is `Query`. Mutations and actions never participate.
+//! Capture happens inside `ctx.db.find / count / aggregate`, and is enabled
+//! **only** when the active procedure kind is `Query`. Mutations and actions
+//! never participate.
+//!
+//! **The kind is resolved by whoever opens the scope, not read here.** This
+//! module consulted the B3 capability layer's thread-local `current_kind`
+//! marker on every record until 2026-09-02, which made a data-plane module
+//! depend on the V8 runtime crate for a fact its own installer already had.
+//! `Active::begin` now takes the answer as a boolean; see `Capture::recording`.
 //!
 //! ## What this module does NOT do
 //!
@@ -365,11 +369,28 @@ fn lower_operand(mask_kind: Option<crate::diff::MaskKind>, value: &Value) -> Val
 //    [`record_if_active`] without checking themselves.
 // 2. Tests and the SDK layer can set the active scope explicitly.
 
+/// One thread's in-flight capture.
+///
+/// **`recording` is the caller's answer to "is this a query?", not a lookup.**
+/// This module used to ask `zeroship_runtime::rpc::current_kind()` on every
+/// record, which made a data-plane module depend on the V8 runtime crate for a
+/// fact its own installer already knows. The tier is the reason: the procedure
+/// kind is ambient adapter state, and an engine that reads it directly is
+/// reaching up. The installer decides once; this records.
+struct Capture {
+    /// `false` installs an inert capture: entries are dropped rather than
+    /// buffered. Kept representable rather than refusing to install, because
+    /// the caller learns the kind and opens the scope at the same moment and
+    /// should not have to branch.
+    recording: bool,
+    entries: Vec<ReadSetEntry>,
+}
+
 thread_local! {
-    /// `Some(buffer)` when read-set capture is active on this thread.
+    /// `Some(capture)` when read-set capture is active on this thread.
     /// `None` outside any query handler (the default) — `record_if_active`
     /// is a no-op then.
-    static CURRENT_BUFFER: RefCell<Option<Vec<ReadSetEntry>>> = const { RefCell::new(None) };
+    static CURRENT_BUFFER: RefCell<Option<Capture>> = const { RefCell::new(None) };
 }
 
 /// RAII guard that activates read-set capture on construction and
@@ -392,14 +413,22 @@ pub struct Active {
 impl Active {
     /// Begin capturing. Subsequent [`record_if_active`] calls append to
     /// this guard's buffer until [`Active::take`] or drop.
-    pub fn begin() -> Self {
+    ///
+    /// `recording` is the caller's answer to "is the active procedure a
+    /// `Query`?" - read-set capture is a `query()`-only feature, and the layer
+    /// that opens the scope is the layer that knows the kind. Passing `false`
+    /// installs an inert scope: calls are dropped, `take` yields nothing.
+    pub fn begin(recording: bool) -> Self {
         CURRENT_BUFFER.with(|c| {
             let mut slot = c.borrow_mut();
             assert!(
                 slot.is_none(),
                 "read-set capture already active on this thread"
             );
-            *slot = Some(Vec::new());
+            *slot = Some(Capture {
+                recording,
+                entries: Vec::new(),
+            });
         });
         Self {
             _no_send: std::marker::PhantomData,
@@ -410,7 +439,10 @@ impl Active {
     /// inert; dropping it is a no-op.
     #[must_use]
     pub fn take(self) -> Vec<ReadSetEntry> {
-        CURRENT_BUFFER.with(|c| c.borrow_mut().take()).unwrap_or_default()
+        CURRENT_BUFFER
+            .with(|c| c.borrow_mut().take())
+            .map(|capture| capture.entries)
+            .unwrap_or_default()
     }
 }
 
@@ -439,6 +471,10 @@ pub fn is_active() -> bool {
 /// the DB freely but their reads should never invalidate any
 /// subscription.
 ///
+/// **That gate is carried by the capture, not looked up here.** The kind is
+/// ambient adapter state; whoever opened the scope resolved it once, at the one
+/// moment it is unambiguous. See [`Capture::recording`].
+///
 /// `schema` is the collection's descriptor entry; every call site already holds
 /// one because the read builder it just called takes the same value. It is
 /// needed to lower a predicate on a masked column - see [`normalise_filter`].
@@ -446,19 +482,15 @@ pub fn record_if_active(collection: &str, filter: &Value, schema: &Value) {
     if !is_active() {
         return;
     }
-    if !matches!(
-        zeroship_runtime::rpc::current_kind(),
-        Some(zeroship_runtime::rpc::ProcedureKind::Query)
-    ) {
-        return;
-    }
     let entry = ReadSetEntry {
         collection: collection.to_string(),
         predicate: normalise_filter(filter, schema),
     };
     CURRENT_BUFFER.with(|c| {
-        if let Some(buf) = c.borrow_mut().as_mut() {
-            buf.push(entry);
+        if let Some(capture) = c.borrow_mut().as_mut() {
+            if capture.recording {
+                capture.entries.push(entry);
+            }
         }
     });
 }
@@ -617,18 +649,34 @@ mod tests {
 
     #[test]
     fn record_no_op_outside_query_kind() {
-        let guard = Active::begin();
-        // No kind set on the thread — record_if_active should skip.
+        // No kind set on the thread, so the installer resolves `recording` to
+        // false and the scope is inert.
+        let guard = Active::begin(recording_for_current_kind());
         record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
         let entries = guard.take();
         assert!(entries.is_empty());
+    }
+
+    /// The kind gate, driven through the REAL runtime marker.
+    ///
+    /// `record_if_active` no longer reads `current_kind()` itself - the
+    /// installer does, once - so these three arms go through
+    /// [`recording_for_current_kind`], which is the decision the adapter makes
+    /// when it opens the scope. Keeping `KindGuard` here is deliberate: a test
+    /// that passed the boolean literally would still pass if the mapping from
+    /// kind to boolean were inverted.
+    fn recording_for_current_kind() -> bool {
+        matches!(
+            zeroship_runtime::rpc::current_kind(),
+            Some(zeroship_runtime::rpc::ProcedureKind::Query)
+        )
     }
 
     #[test]
     fn capture_in_query_kind_only() {
         use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
         let _kg = KindGuard::enter(ProcedureKind::Query);
-        let guard = Active::begin();
+        let guard = Active::begin(recording_for_current_kind());
         record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
         record_if_active("messages", &json!({}), &json!({}));
         let entries = guard.take();
@@ -642,16 +690,18 @@ mod tests {
     fn capture_skipped_in_mutation_kind() {
         use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
         let _kg = KindGuard::enter(ProcedureKind::Mutation);
-        let guard = Active::begin();
+        let guard = Active::begin(recording_for_current_kind());
         record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
         let entries = guard.take();
         assert!(entries.is_empty(), "mutations must not record read-set");
     }
 
+    /// **A recording scope still ends at its guard.** Distinct from the kind
+    /// gate: an inert scope drops entries, this one has none left to drop.
     #[test]
     fn drop_clears_buffer_even_without_take() {
         {
-            let _g = Active::begin();
+            let _g = Active::begin(true);
             assert!(is_active());
         }
         assert!(!is_active(), "drop must clear the buffer");
