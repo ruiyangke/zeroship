@@ -11187,3 +11187,138 @@ fn an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal() {
         );
     });
 }
+
+/// #134: the dev tier writes TWO timestamp spellings into one TEXT column, and
+/// bytewise collation then inverts same-day ordering.
+///
+/// Both values here come from the product's own emitters, not from hand-written
+/// literals:
+///   row A - the column DEFAULT, which the migration engine renders through
+///           `synth_now()` (`zeroship-migrate-sqlite/src/dml.rs:839-841`) as bare
+///           `CURRENT_TIMESTAMP` -> "YYYY-MM-DD HH:MM:SS", SPACE-separated.
+///   row B - the runtime's own INSERT builder, which since `bcd639b23` converts a
+///           Unix-ms bind via `strftime('%Y-%m-%dT%H:%M:%fZ', ...)`
+///           (`zeroship-schema/src/query.rs:3085`) -> "YYYY-MM-DDTHH:MM:SS.sssZ",
+///           with a T.
+///
+/// Row B is stamped one hour EARLIER than row A, so ascending order must return B
+/// first. It does not: ' ' is 0x20 and 'T' is 0x54, the three timestamp columns
+/// carry no COLLATE (`query.rs:322-331`, unlike their COLLATE BINARY siblings), so
+/// the comparison is bytewise and the later row sorts first.
+///
+/// This asserts the CORRECT behaviour and is RED until both emitters agree on one
+/// spelling. Fixing only the runtime side leaves this red.
+///
+/// MEASURED RED on 2026-09-02, and the ignore records the observation rather than
+/// a guess:
+///   A = "2026-09-02 07:32:37"        (engine default, space)
+///   B = "2026-09-02T06:32:37.000Z"   (runtime bind, T, one hour EARLIER)
+///   `ORDER BY occurred_at ASC` returned `a_default` first.
+/// Remove the `#[ignore]` in the same change that makes `synth_now()`
+/// (`zeroship-migrate-sqlite/src/dml.rs:839-841`) and `current_timestamp_expr()`
+/// (`zeroship-schema/src/query.rs:418-420`) emit one spelling. See task #134.
+#[test]
+#[ignore = "#134: RED by design - the engine writes 'YYYY-MM-DD HH:MM:SS' and the runtime writes \
+            'YYYY-MM-DDTHH:MM:SS.sssZ' into one column, so bytewise ORDER BY inverts same-day rows. \
+            Un-ignore with the fix that unifies both emitters."]
+fn dbbind134_sqlite_timestamp_spellings_invert_same_day_ordering() {
+    use zeroship_plugin_db::query::{SqlDialect, build_insert_with_dialect};
+
+    run(async {
+        let app = "t134_spelling";
+        let coll = "events";
+        let (backend, _dir) = fresh_backend();
+        backend.attach_app_file(app).await.expect("attach app file");
+
+        // The shape the engine emits for a creator timestamp column with a
+        // `now()` default.
+        backend
+            .pool_exec(
+                &format!(
+                    "CREATE TABLE \"{app}\".\"{coll}\" (\
+                       id TEXT PRIMARY KEY, \
+                       occurred_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+                ),
+                &[],
+            )
+            .await
+            .expect("create the engine-shaped table");
+
+        // Row A: let the DEFAULT write it. Space-separated, stamped "now".
+        backend
+            .pool_exec(
+                &format!("INSERT INTO \"{app}\".\"{coll}\" (id) VALUES ('a_default')"),
+                &[],
+            )
+            .await
+            .expect("insert row A via the column default");
+
+        let client = backend
+            .acquire_dedicated_client(app)
+            .await
+            .expect("acquire client");
+
+        // Take "now" from the same clock the DEFAULT used, so row B is provably
+        // earlier without depending on the host wall clock.
+        let now_rows = client
+            .query("SELECT strftime('%s','now')", &[])
+            .await
+            .expect("read the database clock");
+        let now_secs: i64 = now_rows[0][0]
+            .as_deref()
+            .expect("strftime never returns null")
+            .parse()
+            .expect("epoch seconds parse");
+        let one_hour_earlier_ms = (now_secs - 3600) * 1000;
+
+        // Row B: through the RUNTIME's builder, which applies the Unix-ms
+        // conversion for a declared timestamp column.
+        let schema = serde_json::json!({ "occurred_at": { "type": "date" } });
+        let doc = serde_json::json!({
+            "id": "b_bind",
+            "occurred_at": one_hour_earlier_ms,
+        });
+        let bq = build_insert_with_dialect(app, coll, &schema, &doc, SqlDialect::Sqlite)
+            .expect("build_insert_with_dialect");
+        assert!(
+            bq.sql.contains("strftime("),
+            "precondition: the builder must convert the Unix-ms bind, got {}",
+            bq.sql
+        );
+        // `build_insert` emits a RETURNING clause, so this goes through `query`
+        // rather than `pool_exec` - the latter refuses a statement that yields
+        // rows ("Execute returned results - did you mean to call query?").
+        let params: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        client
+            .query(&bq.sql, &params)
+            .await
+            .expect("insert row B through the runtime builder");
+
+        // Diagnostic: show the two spellings that actually landed.
+        let stored = client
+            .query(
+                &format!("SELECT id, occurred_at FROM \"{app}\".\"{coll}\" ORDER BY id"),
+                &[],
+            )
+            .await
+            .expect("read both stamps");
+        let a_stamp = stored[0][1].clone().unwrap_or_default();
+        let b_stamp = stored[1][1].clone().unwrap_or_default();
+
+        let rows = client
+            .query(
+                &format!("SELECT id FROM \"{app}\".\"{coll}\" ORDER BY occurred_at ASC"),
+                &[],
+            )
+            .await
+            .expect("order by the timestamp column");
+
+        assert_eq!(
+            rows[0][0].as_deref(),
+            Some("b_bind"),
+            "row B is stamped an hour EARLIER than row A, so it must sort first. \
+             Got A={a_stamp:?} B={b_stamp:?} - if those differ at index 10 (' ' vs 'T') \
+             the two emitters still disagree and the comparison is bytewise"
+        );
+    });
+}
