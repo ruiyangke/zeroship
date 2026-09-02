@@ -202,15 +202,11 @@ impl CleanupGoal {
 /// *indeterminate* and is documented as such
 /// (`libs/compio-postgres/src/client.rs:3170-3188`), and SQLite's
 /// `is_autocommit` sample.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CleanupAck {
-    /// The session reports no open transaction.
-    NoOpenTransaction,
-    /// The session reports the transaction was rolled back.
-    RolledBack,
-    /// The oracle cannot say.
-    Indeterminate,
-}
+///
+/// Defined in data-core beside [`SettleIntent`] and [`TerminalResult`], for the
+/// same reason: a backend that had to name a reducer type to answer a reducer
+/// question would depend upward on the protocol it serves.
+pub use zeroship_data_core::error::CleanupAck;
 
 /// Why a transaction is being force-ended.
 ///

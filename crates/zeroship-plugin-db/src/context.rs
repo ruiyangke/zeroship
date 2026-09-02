@@ -40,7 +40,7 @@ use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, PostgresBackend};
 use zeroship_data_core::binding::DbBinding;
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
-use zeroship_data_core::error::{DbError, SettleIntent, TerminalResult};
+use zeroship_data_core::error::{CleanupAck, DbError, SettleIntent, TerminalResult};
 use crate::service::DbResourceKey;
 use zeroship_core::change_event::ChangeEvent;
 
@@ -223,6 +223,21 @@ impl TxConnection {
                     Err(error) => (TerminalResult::Indeterminate, Some(error)),
                 }
             }
+        }
+    }
+
+    /// Roll this session back on SC-1's behalf and report what that PROVED.
+    ///
+    /// Distinct from [`Self::settle`], and not a special case of it: settle
+    /// performs the creator's intent and reports the outcome, while cleanup is
+    /// forced and reports only what the backend's health oracle can establish.
+    /// Each backend samples that oracle its own way and in an order that is
+    /// load-bearing - see the two implementations - so the choice of evidence
+    /// stays with the vendor and only the three-way verdict crosses back.
+    pub(crate) async fn cleanup(&self) -> CleanupAck {
+        match self {
+            Self::Postgres(pg) => crate::backend::postgres::cleanup(pg).await,
+            Self::Sqlite(handle) => crate::backend::sqlite::reservation::cleanup(handle).await,
         }
     }
 }

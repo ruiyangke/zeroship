@@ -22,7 +22,7 @@ use std::rc::Rc;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::diff::LiveSchema;
-use zeroship_data_core::error::{DbError, SettleIntent, TerminalResult};
+use zeroship_data_core::error::{CleanupAck, DbError, SettleIntent, TerminalResult};
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Backend;
@@ -1386,6 +1386,40 @@ pub(crate) fn terminal_from_tag(intent: SettleIntent, tag: Option<&str>) -> Term
         (SettleIntent::Commit, Some("ROLLBACK")) => TerminalResult::RolledBack,
         (SettleIntent::Commit, _) => TerminalResult::Committed,
         (SettleIntent::Rollback, _) => TerminalResult::RolledBack,
+    }
+}
+
+/// **Cleanup `ROLLBACK` first, health oracle second.**
+///
+/// `transaction_status()` returns `None` whenever a request is in flight, and a
+/// failed statement's trailing `ReadyForQuery` is not consumed when its `await`
+/// returns. Inside a poisoned block every data statement fails with `25P02`, so
+/// no retry makes the oracle answer - and `None` is indeterminate, which
+/// withdraws. Sampling on entry to `Cancelling` therefore destroys a healthy
+/// connection on **every** forced cleanup of a poisoned transaction.
+///
+/// `ROLLBACK` is accepted from a poisoned block, and answering it resolves the
+/// status byte. That is why the two lines below are in this order and must stay
+/// in it.
+pub(crate) async fn cleanup(client: &compio_postgres::Client) -> CleanupAck {
+    let rolled_back = client.batch_execute("ROLLBACK").await;
+    match client.transaction_status() {
+        Some(compio_postgres::TransactionStatus::Idle) => {
+            if rolled_back.is_ok() {
+                CleanupAck::RolledBack
+            } else {
+                // The statement errored but the session is provably out of any
+                // transaction block. Nothing is open; report the weaker proof.
+                CleanupAck::NoOpenTransaction
+            }
+        }
+        // Still in a block, or the oracle cannot say. Either way the cleanup is
+        // unproved.
+        Some(
+            compio_postgres::TransactionStatus::InTransaction
+            | compio_postgres::TransactionStatus::Failed,
+        )
+        | None => CleanupAck::Indeterminate,
     }
 }
 

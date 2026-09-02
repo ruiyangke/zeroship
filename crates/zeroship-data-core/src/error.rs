@@ -112,6 +112,30 @@ pub enum TerminalResult {
     Indeterminate,
 }
 
+/// What a forced cleanup proved about the session it acted on.
+///
+/// The third member of the backend seam's vocabulary, beside [`SettleIntent`]
+/// and [`TerminalResult`]. A cleanup is the one operation whose ANSWER is
+/// weaker than its request: the reducer asks for a rollback and gets back what
+/// the backend could actually establish, which on PostgreSQL is a command
+/// result plus a status byte and on SQLite is `is_autocommit` sampled inside the
+/// actor. The lane decides which of the three it can prove; the reducer decides
+/// whether that discharges the cleanup goal.
+///
+/// **The distinction between the first two arms is load-bearing and not
+/// cosmetic.** `NoOpenTransaction` is the weaker proof - the session is
+/// provably outside any block, but this cleanup is not what put it there - and
+/// SC-1 accepts it for some goals and not others.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CleanupAck {
+    /// The session reports no open transaction.
+    NoOpenTransaction,
+    /// The session reports the transaction was rolled back.
+    RolledBack,
+    /// The oracle cannot say.
+    Indeterminate,
+}
+
 /// Why a `Deny` was returned. Every reason is creator-visible, distinct, and
 /// non-retryable, and they differ in what the next action should be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

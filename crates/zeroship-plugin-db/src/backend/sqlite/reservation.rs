@@ -422,6 +422,29 @@ pub enum TerminalOutcome {
     AlreadyCompleted(Box<TerminalOutcome>),
 }
 
+/// The SQLite half of SC-1's forced cleanup.
+///
+/// Makes the same judgement as the PostgreSQL arm on different evidence: there
+/// is no command tag, so the authority is `is_autocommit` sampled inside the
+/// actor **after** the statement - the same "sample after, never before" rule,
+/// enforced by SC-2's own terminal classifier via [`terminal_result`] rather
+/// than restated here.
+pub(crate) async fn cleanup(
+    handle: &super::session::SqliteSessionHandle,
+) -> zeroship_data_core::error::CleanupAck {
+    use zeroship_data_core::error::{CleanupAck, TerminalResult};
+    match handle
+        .settle(super::session::TerminalIntent::Rollback)
+        .await
+    {
+        Ok(outcome) => match terminal_result(&outcome).0 {
+            TerminalResult::RolledBack => CleanupAck::RolledBack,
+            TerminalResult::Committed | TerminalResult::Indeterminate => CleanupAck::Indeterminate,
+        },
+        Err(_) => CleanupAck::Indeterminate,
+    }
+}
+
 /// Project SC-2's classified SQLite terminal outcome onto SC-1's.
 ///
 /// The vendor decides what happened; SC-1 decides what it means. Lives beside

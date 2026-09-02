@@ -19,11 +19,16 @@
 //! > that samples on entry to `Cancelling` would withdraw a perfectly healthy
 //! > connection on *every* forced cleanup.
 //!
-//! [`cleanup_postgres`] therefore issues the cleanup `ROLLBACK` **first** and
-//! samples **after** it. The `ROLLBACK` succeeds from a poisoned block, and
-//! answering it resolves the status byte. `a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection`
-//! in `tests/native_transaction.rs` is the arm that fails if the two are ever
+//! [`crate::backend::postgres::cleanup`] therefore issues the cleanup
+//! `ROLLBACK` **first** and samples **after** it. The `ROLLBACK` succeeds from a
+//! poisoned block, and answering it resolves the status byte.
+//! `a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection` in
+//! `tests/native_transaction.rs` is the arm that fails if the two are ever
 //! reordered.
+//!
+//! **That rule is now enforced where the evidence is.** Both cleanup arms live
+//! in their own backend and only [`CleanupAck`] crosses back, so this file
+//! states the constraint but no longer implements it for either vendor.
 //!
 //! ## Forced cleanup CANCELS; it withdraws only when it cannot prove a rollback
 //!
@@ -68,8 +73,6 @@
 
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
-
-use compio_postgres::TransactionStatus;
 
 use crate::context::TxConnection;
 use zeroship_data_core::error::{DbError, SessionSetupDisposition, SessionSetupError};
@@ -957,10 +960,7 @@ async fn cleanup(app_id: &str, token: CommandToken, goal: CleanupGoal) -> Cleanu
 async fn rollback_session_in_slot(app_id: &str) -> Option<CleanupAck> {
     let client = crate::context::with_mut(|c| c.take_tx_client_for(app_id))?;
 
-    let ack = match &client {
-        TxConnection::Postgres(pg) => cleanup_postgres(pg).await,
-        TxConnection::Sqlite(handle) => cleanup_sqlite(handle).await,
-    };
+    let ack = client.cleanup().await;
 
     // Put it back so the reducer's session disposition can act on it.
     crate::context::with_mut(|c| c.put_tx_client_for(app_id, client));
@@ -1060,56 +1060,6 @@ async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
     rollback_session_in_slot(app_id)
         .await
         .unwrap_or(CleanupAck::Indeterminate)
-}
-
-/// **Cleanup `ROLLBACK` first, health oracle second.**
-///
-/// `transaction_status()` returns `None` whenever a request is in flight, and a
-/// failed statement's trailing `ReadyForQuery` is not consumed when its `await`
-/// returns. Inside a poisoned block every data statement fails with `25P02`, so
-/// no retry makes the oracle answer - and `None` is indeterminate, which
-/// withdraws. Sampling on entry to `Cancelling` therefore destroys a healthy
-/// connection on **every** forced cleanup of a poisoned transaction.
-///
-/// `ROLLBACK` is accepted from a poisoned block, and answering it resolves the
-/// status byte. That is why the two lines below are in this order and must stay
-/// in it.
-async fn cleanup_postgres(client: &compio_postgres::Client) -> CleanupAck {
-    let rolled_back = client.batch_execute("ROLLBACK").await;
-    match client.transaction_status() {
-        Some(TransactionStatus::Idle) => {
-            if rolled_back.is_ok() {
-                CleanupAck::RolledBack
-            } else {
-                // The statement errored but the session is provably out of any
-                // transaction block. Nothing is open; report the weaker proof.
-                CleanupAck::NoOpenTransaction
-            }
-        }
-        // Still in a block, or the oracle cannot say. Either way the cleanup is
-        // unproved.
-        Some(TransactionStatus::InTransaction | TransactionStatus::Failed) | None => {
-            CleanupAck::Indeterminate
-        }
-    }
-}
-
-/// The SQLite arm makes the same judgement on different evidence.
-///
-/// There is no command tag, so the authority is `is_autocommit` sampled inside
-/// the actor **after** the statement - the same "sample after, never before"
-/// rule, enforced by SC-2's own terminal classifier rather than restated here.
-async fn cleanup_sqlite(
-    handle: &crate::backend::sqlite::session::SqliteSessionHandle,
-) -> CleanupAck {
-    use crate::backend::sqlite::session::TerminalIntent;
-    match handle.settle(TerminalIntent::Rollback).await {
-        Ok(outcome) => match crate::backend::sqlite::reservation::terminal_result(&outcome).0 {
-            TerminalResult::RolledBack => CleanupAck::RolledBack,
-            TerminalResult::Committed | TerminalResult::Indeterminate => CleanupAck::Indeterminate,
-        },
-        Err(_) => CleanupAck::Indeterminate,
-    }
 }
 
 // ---------------------------------------------------------------------------
