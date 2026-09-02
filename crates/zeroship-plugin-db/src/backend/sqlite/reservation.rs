@@ -422,6 +422,37 @@ pub enum TerminalOutcome {
     AlreadyCompleted(Box<TerminalOutcome>),
 }
 
+/// Project SC-2's classified SQLite terminal outcome onto SC-1's.
+///
+/// The vendor decides what happened; SC-1 decides what it means. Lives beside
+/// the enum it reads rather than in the driver, so the protocol never has to
+/// name a SQLite type to learn its own answer.
+pub(crate) fn terminal_result(
+    outcome: &TerminalOutcome,
+) -> (
+    zeroship_data_core::error::TerminalResult,
+    Option<zeroship_data_core::error::DbError>,
+) {
+    use zeroship_data_core::error::TerminalResult;
+    match outcome {
+        TerminalOutcome::Committed => (TerminalResult::Committed, None),
+        TerminalOutcome::RolledBack | TerminalOutcome::Cancelled { .. } => {
+            (TerminalResult::RolledBack, None)
+        }
+        TerminalOutcome::CommitFailed { message } => (
+            TerminalResult::RolledBack,
+            Some(DbError::internal(message.clone())),
+        ),
+        TerminalOutcome::CommitIndeterminate { message }
+        | TerminalOutcome::RollbackFailed { message }
+        | TerminalOutcome::CleanupIndeterminate { message } => (
+            TerminalResult::Indeterminate,
+            Some(DbError::internal(message.clone())),
+        ),
+        TerminalOutcome::AlreadyCompleted(inner) => terminal_result(inner),
+    }
+}
+
 impl TerminalOutcome {
     /// Does this outcome leave the connection in a state that must not be
     /// handed to the next reservation?

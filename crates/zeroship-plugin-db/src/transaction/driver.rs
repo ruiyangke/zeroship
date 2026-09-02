@@ -71,7 +71,6 @@ use std::time::{Duration, Instant};
 
 use compio_postgres::TransactionStatus;
 
-use crate::backend::pg_error;
 use crate::context::TxConnection;
 use zeroship_data_core::error::{DbError, SessionSetupDisposition, SessionSetupError};
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
@@ -752,15 +751,10 @@ async fn exec_on_session(app_id: &str, sql: &str, params: &[&str]) -> Result<(),
 /// `RELEASE`, so "anything but COMMIT is a failure" would reject every healthy
 /// nested commit.
 ///
-/// **The vendor is read off the pinned session, never off the thread's ambient
-/// backend.** Until 2026-09-02 this matched `(BackendHandle, TxConnection)` and
-/// needed a `_ => mismatch` arm to be total. The pair really can disagree - a
-/// `register` with a changed URL calls [`crate::context::ThreadDbContext::clear_pool`],
-/// which nulls `backend` and leaves `tx_conns` untouched - and when it did, an
-/// open transaction on a live connection settled `Indeterminate` and had its
-/// session withdrawn. The session is the authority on how to talk to itself:
-/// `TxConnection`'s two variants ARE the two `SqlExecutor::Client` associated
-/// types, so the variant already names the vendor.
+/// **The driver calls a method on the session; it never matches its variants.**
+/// [`crate::context::TxConnection::settle`] owns the dialect and the projection,
+/// so this function is the protocol's half alone: take the session, ask it to
+/// settle, put it back for the disposition action the reducer emits next.
 async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option<DbError>) {
     let Some(client) = crate::context::with_mut(|c| c.take_tx_client_for(app_id)) else {
         // The session is gone before terminal SQL was sent. This does NOT prove
@@ -774,28 +768,7 @@ async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option
         );
     };
 
-    let verb = intent.verb();
-    let outcome = match &client {
-        TxConnection::Postgres(pg) => match pg.batch_execute_reporting_tag(verb).await {
-            Ok(tag) => (pg_terminal_from_tag(intent, tag.as_deref()), None),
-            // Sample the status AFTER the statement answered, never before it.
-            Err(error) => (
-                pg_terminal_from_status(pg.transaction_status()),
-                Some(pg_error::classify(&error)),
-            ),
-        },
-        TxConnection::Sqlite(handle) => {
-            use crate::backend::sqlite::session::TerminalIntent;
-            let sqlite_intent = match intent {
-                SettleIntent::Commit => TerminalIntent::Commit,
-                SettleIntent::Rollback => TerminalIntent::Rollback,
-            };
-            match handle.settle(sqlite_intent).await {
-                Ok(outcome) => sqlite_terminal(&outcome),
-                Err(error) => (TerminalResult::Indeterminate, Some(error)),
-            }
-        }
-    };
+    let outcome = client.settle(intent).await;
 
     // The session is disposed of by `Action::ReleaseSession` / `WithdrawSession`,
     // which the reducer emits next, so put it back for that action to act on.
@@ -803,65 +776,6 @@ async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option
     // arm reach the physical connection at all.
     crate::context::with_mut(|c| c.put_tx_client_for(app_id, client));
     outcome
-}
-
-/// Project PostgreSQL's command tag onto SC-1's terminal result.
-///
-/// The PostgreSQL twin of [`sqlite_terminal`], which SQLite has had all along
-/// while this arm stayed inlined in [`terminal`]. Splitting it out is what makes
-/// the L8 rule testable without a server: the whole rule is a function of
-/// `(intent, tag)` and touches no connection.
-///
-/// **L8: a `COMMIT` answered `ROLLBACK` is a FAILED transaction.** PostgreSQL
-/// replies with the tag `ROLLBACK` when the transaction is in the failed state,
-/// and a driver reading only "did it error" reports a discarded transaction as
-/// committed - which is what published change events for writes that never
-/// landed. The check is deliberately scoped to the `Commit` arm: `RELEASE`
-/// answers with the tag `RELEASE`, so "anything but COMMIT is a failure" would
-/// reject every healthy nested commit.
-fn pg_terminal_from_tag(intent: SettleIntent, tag: Option<&str>) -> TerminalResult {
-    match (intent, tag) {
-        (SettleIntent::Commit, Some("ROLLBACK")) => TerminalResult::RolledBack,
-        (SettleIntent::Commit, _) => TerminalResult::Committed,
-        (SettleIntent::Rollback, _) => TerminalResult::RolledBack,
-    }
-}
-
-/// Project the post-failure transaction status onto SC-1's terminal result.
-///
-/// Reached only when the terminal statement itself failed, where the tag never
-/// arrived. `Idle` means the server ended the transaction, so the outcome is
-/// known: rolled back. Anything else - still in a transaction, in a FAILED
-/// transaction, or a status that could not be read at all - is DBR-03
-/// territory: not knowing is not the same as knowing it ended, so it settles
-/// `Indeterminate` and the session is withdrawn.
-const fn pg_terminal_from_status(status: Option<TransactionStatus>) -> TerminalResult {
-    match status {
-        Some(TransactionStatus::Idle) => TerminalResult::RolledBack,
-        _ => TerminalResult::Indeterminate,
-    }
-}
-
-/// Project SC-2's classified SQLite terminal outcome onto SC-1's.
-fn sqlite_terminal(
-    outcome: &crate::backend::sqlite::reservation::TerminalOutcome,
-) -> (TerminalResult, Option<DbError>) {
-    use crate::backend::sqlite::reservation::TerminalOutcome as Sqlite;
-    match outcome {
-        Sqlite::Committed => (TerminalResult::Committed, None),
-        Sqlite::RolledBack | Sqlite::Cancelled { .. } => (TerminalResult::RolledBack, None),
-        Sqlite::CommitFailed { message } => (
-            TerminalResult::RolledBack,
-            Some(DbError::internal(message.clone())),
-        ),
-        Sqlite::CommitIndeterminate { message }
-        | Sqlite::RollbackFailed { message }
-        | Sqlite::CleanupIndeterminate { message } => (
-            TerminalResult::Indeterminate,
-            Some(DbError::internal(message.clone())),
-        ),
-        Sqlite::AlreadyCompleted(inner) => sqlite_terminal(inner),
-    }
 }
 
 /// How long forced cleanup waits for a cancelled statement's holder to hand the
@@ -1105,7 +1019,7 @@ async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
             // SQLite's actor rolls back and retires the reservation BEFORE it
             // acknowledges, so its answer is the cleanup result. There is
             // nothing left to reclaim.
-            return match sqlite_terminal(&outcome).0 {
+            return match crate::backend::sqlite::reservation::terminal_result(&outcome).0 {
                 TerminalResult::RolledBack => CleanupAck::RolledBack,
                 TerminalResult::Committed | TerminalResult::Indeterminate => {
                     CleanupAck::Indeterminate
@@ -1190,7 +1104,7 @@ async fn cleanup_sqlite(
 ) -> CleanupAck {
     use crate::backend::sqlite::session::TerminalIntent;
     match handle.settle(TerminalIntent::Rollback).await {
-        Ok(outcome) => match sqlite_terminal(&outcome).0 {
+        Ok(outcome) => match crate::backend::sqlite::reservation::terminal_result(&outcome).0 {
             TerminalResult::RolledBack => CleanupAck::RolledBack,
             TerminalResult::Committed | TerminalResult::Indeterminate => CleanupAck::Indeterminate,
         },
@@ -1381,92 +1295,3 @@ pub(crate) fn outcome_error(
     }
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-#[cfg(test)]
-mod tests {
-    use super::{pg_terminal_from_status, pg_terminal_from_tag};
-    use super::{SettleIntent, TerminalResult, TransactionStatus};
-
-    /// **L8, without a database.** PostgreSQL answers `COMMIT` with the tag
-    /// `ROLLBACK` when the transaction is in the failed state, and reading that
-    /// as success reports discarded writes as durable.
-    ///
-    /// This rule was only reachable through a live server until 2026-09-02,
-    /// when the projection was split out of `terminal`. The live arm that
-    /// covered it - `commit_that_postgres_rolled_back_must_not_report_success_l8`
-    /// in `tests/native_transaction.rs` - had ALSO been failing for an unrelated
-    /// reason (it duplicated a platform-assigned `id`, so it never poisoned the
-    /// transaction at all), which means this rule went unbound in practice for
-    /// as long as that test was red. A pure arm cannot rot that way.
-    #[test]
-    fn a_commit_answered_rollback_is_a_rollback() {
-        assert_eq!(
-            pg_terminal_from_tag(SettleIntent::Commit, Some("ROLLBACK")),
-            TerminalResult::RolledBack
-        );
-    }
-
-    /// The control the L8 rule needs: a healthy commit differs from the case
-    /// above in the TAG ALONE, and must not be swept up by it.
-    #[test]
-    fn a_commit_answered_commit_is_a_commit() {
-        assert_eq!(
-            pg_terminal_from_tag(SettleIntent::Commit, Some("COMMIT")),
-            TerminalResult::Committed
-        );
-    }
-
-    /// **The scoping that keeps nested commits working.** `RELEASE` answers with
-    /// the tag `RELEASE`, so a rule shaped "anything but COMMIT is a failure"
-    /// would reject every healthy savepoint release. Only the literal `ROLLBACK`
-    /// tag means failure.
-    #[test]
-    fn a_commit_answered_release_is_not_treated_as_failure() {
-        assert_eq!(
-            pg_terminal_from_tag(SettleIntent::Commit, Some("RELEASE")),
-            TerminalResult::Committed
-        );
-        assert_eq!(
-            pg_terminal_from_tag(SettleIntent::Commit, None),
-            TerminalResult::Committed
-        );
-    }
-
-    /// A rollback is a rollback whatever the server called it - including when
-    /// the server says `COMMIT`, which `outcome_error` then reports as a
-    /// `settle_result_mismatch` rather than quietly accepting.
-    #[test]
-    fn a_rollback_is_a_rollback_for_every_tag() {
-        for tag in [Some("ROLLBACK"), Some("COMMIT"), Some("RELEASE"), None] {
-            assert_eq!(
-                pg_terminal_from_tag(SettleIntent::Rollback, tag),
-                TerminalResult::RolledBack,
-                "rollback misclassified for tag {tag:?}"
-            );
-        }
-    }
-
-    /// **DBR-03: not knowing is not the same as knowing it ended.** Only an
-    /// `Idle` status proves the server ended the transaction. Every other
-    /// reading - still in a transaction, in a failed transaction, or a status we
-    /// could not read at all - settles indeterminate and withdraws the session.
-    #[test]
-    fn only_idle_proves_a_failed_terminal_actually_rolled_back() {
-        assert_eq!(
-            pg_terminal_from_status(Some(TransactionStatus::Idle)),
-            TerminalResult::RolledBack
-        );
-        assert_eq!(
-            pg_terminal_from_status(Some(TransactionStatus::InTransaction)),
-            TerminalResult::Indeterminate
-        );
-        assert_eq!(
-            pg_terminal_from_status(Some(TransactionStatus::Failed)),
-            TerminalResult::Indeterminate
-        );
-        assert_eq!(pg_terminal_from_status(None), TerminalResult::Indeterminate);
-    }
-}
