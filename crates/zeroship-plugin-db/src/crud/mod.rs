@@ -2282,78 +2282,70 @@ pub(crate) fn dispatch_upsert<'s>(
 /// `_distance` synthetic column from pgvector. Errors are coded
 /// (`vector_extension_missing` / `vector_unsupported` / standard
 /// SQLSTATE) so the SDK can branch on `e.code`.
-pub(crate) fn dispatch_search<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    binding: DbBinding,
+/// The eagerly-decoded inputs of a vector `search`, produced by [`plan_search`]
+/// and consumed by [`run_search`].
+pub(crate) struct SearchPlan {
+    vector: Vec<f32>,
+    k: usize,
+    metric: crate::backend::VectorMetric,
+    column: String,
+    filter: Value,
+}
+
+/// The EAGER half of `search`: argument decoding plus the descriptor lookup the
+/// SQLite boolean lowering needs.
+///
+/// Every refusal here used to be a `spawn_rejection` with its own early
+/// `return promise`. They are plain `Err`s now, and the adapter feeds them to
+/// `settle`, whose error arm calls the SAME `reject_op` those rejections did
+/// (`crud/mod.rs:276-286` is literally
+/// `OpResult::JsValue { resolver, value: ResolveValue::RejectError(err.to_op_error()), request_id }`,
+/// and `spawn_rejection` is a one-line push of exactly that). Verified by
+/// reading both, not by test.
+///
+/// The decoding stays SYNCHRONOUS rather than moving into [`run_search`]: the
+/// ordering of a descriptor read against the dispatching turn is the same
+/// question [`plan_find`] documents, and this half is where the original put it.
+pub(crate) fn plan_search(
+    binding: &DbBinding,
     collection: &str,
-    args: Value,
-) -> v8::Local<'s, v8::Promise> {
-    let state = runtime_state(scope);
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
+    args: &Value,
+) -> Result<SearchPlan, DbError> {
     // Presence of `vector` selects the pgvector path.
-    let has_vector = args.get("vector").is_some();
-
-    if !has_vector {
-        // Reject synchronously via the typed error path so the SDK sees
-        // a coded error rather than a hang. Use `Configuration` because
-        // the failure is shape-level, not data-level.
-        spawn_rejection(
-            &state,
-            resolver,
-            request_id,
-            DbError::Configuration {
-                code: "invalid_search_args",
-                message: "search: args must include `vector`".to_string(),
-                hint: Some(
-                    "pass `{ vector: number[], k?: number, metric?, column?, filter? }` for vector search"
-                        .to_string(),
-                ),
-            },
-        );
-        return promise;
-    }
+    let Some(raw_vector) = args.get("vector") else {
+        // Use `Configuration` because the failure is shape-level, not
+        // data-level.
+        return Err(DbError::Configuration {
+            code: "invalid_search_args",
+            message: "search: args must include `vector`".to_string(),
+            hint: Some(
+                "pass `{ vector: number[], k?: number, metric?, column?, filter? }` for vector search"
+                    .to_string(),
+            ),
+        });
+    };
 
     // Decode `vector` into `Vec<f32>`. Reject anything that's not a
     // homogeneous number array at the boundary so the impl can stay
     // typed.
-    let vector: Vec<f32> = match args.get("vector").and_then(Value::as_array) {
-        Some(arr) => {
-            let mut v: Vec<f32> = Vec::with_capacity(arr.len());
-            for elem in arr {
-                if let Some(n) = elem.as_f64() {
-                    v.push(n as f32);
-                } else {
-                    spawn_rejection(
-                        &state,
-                        resolver,
-                        request_id,
-                        DbError::Configuration {
-                            code: "invalid_vector_arg",
-                            message: "search: every element of `vector` must be a number"
-                                .to_string(),
-                            hint: None,
-                        },
-                    );
-                    return promise;
-                }
-            }
-            v
-        }
-        None => {
-            spawn_rejection(
-                &state,
-                resolver,
-                request_id,
-                DbError::Configuration {
-                    code: "invalid_vector_arg",
-                    message: "search: `vector` must be an array of numbers".to_string(),
-                    hint: None,
-                },
-            );
-            return promise;
-        }
+    let Some(arr) = raw_vector.as_array() else {
+        return Err(DbError::Configuration {
+            code: "invalid_vector_arg",
+            message: "search: `vector` must be an array of numbers".to_string(),
+            hint: None,
+        });
     };
+    let mut vector: Vec<f32> = Vec::with_capacity(arr.len());
+    for elem in arr {
+        let Some(n) = elem.as_f64() else {
+            return Err(DbError::Configuration {
+                code: "invalid_vector_arg",
+                message: "search: every element of `vector` must be a number".to_string(),
+                hint: None,
+            });
+        };
+        vector.push(n as f32);
+    }
 
     let k = args
         .get("k")
@@ -2378,98 +2370,105 @@ pub(crate) fn dispatch_search<'s>(
         .get("filter")
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-    let coll = collection.to_string();
-    // The backend arms below resolve the same entry for their projection; this
-    // one is for the SQLite boolean lowering of the caller's filter. Refusing
-    // here keeps the rejection on the synchronous half, before the promise is
-    // handed a spawned op.
-    let schema = match crate::descriptor::collection_schema(&binding, collection) {
-        Ok(schema) => schema,
-        Err(e) => {
-            spawn_rejection(&state, resolver, request_id, e);
-            return promise;
-        }
-    };
+    // The backend arms resolve the same entry for their projection; this one is
+    // for the SQLite boolean lowering of the caller's filter.
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
     maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        // Reach the backend through the per-isolate context. The
-        // dispatch helper isn't generic over the backend; runtime
-        // wiring stashes a `BackendHandle` per isolate that we route
-        // through the existing `as_postgres()` accessor.
-        let result: Result<Vec<Value>, DbError> = async {
-            let backend = crate::exec::ensure_backend_for_shared_sql().await?;
-            let pg_path = || async {
-                let pg = backend
-                    .as_postgres()
-                    .ok_or_else(|| DbError::backend_unsupported("vector_search"))?;
-                use crate::backend::VectorIndex as _;
-                pg.vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
-                    .await
-            };
-            // SQLite arm routes through the pure-Rust flat-scan
-            // `VectorIndex` impl on `SqliteBackend`. We short-circuit
-            // BEFORE the PG path so a build with both arms compiled
-            // in (`--features "pg sqlite"` for tests) dispatches
-            // based on which arm the runtime is bound to, not on
-            // Cargo-feature ordering.
-            if let Some(sq) = backend.as_sqlite() {
-                sq.attach_app_file(binding.app_id()).await?;
-                use crate::backend::VectorIndex as _;
-                return sq
-                    .vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
-                    .await;
-            }
-            pg_path().await
-        }
-        .await;
+    Ok(SearchPlan {
+        vector,
+        k,
+        metric,
+        column,
+        filter,
+    })
+}
 
-        match result {
-            Ok(rows) => {
-                // Metering, success arm only. The search family is a read op on
-                // either backend and reaches the database WITHOUT passing
-                // through `exec::run_sql` - the PG arm goes to
-                // `PostgresBackend::query_roled_json`, the SQLite arm to its own
-                // scan - so until 2026-09-01 it was billed as nothing at all.
-                // Counted here at the op boundary rather than in either vendor:
-                // the vendor tier must not reach up into the engine for the
-                // meter handle, which is the cycle #110 just removed.
-                crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
-                let result = match read_pipeline::apply(
-                    &binding,
-                    &coll,
-                    rows,
-                    read_pipeline::ApplyOptions::default(),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(e) => {
-                        return zeroship_runtime::state::OpResult::JsValue {
-                            resolver,
-                            value: zeroship_runtime::state::ResolveValue::RejectError(
-                                e.to_op_error(),
-                            ),
-                            request_id,
-                        };
-                    }
-                };
-                zeroship_runtime::state::OpResult::JsValue {
-                    resolver,
-                    value: crate::v8_bridge::rows_as_json_array_masked(
-                        result.rows,
-                        result.has_masked,
-                    ),
-                    request_id,
-                }
-            }
-            Err(e) => zeroship_runtime::state::OpResult::JsValue {
-                resolver,
-                value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
+/// The DEFERRED half of `search`: no `scope`, no `v8::`, no `OpResult`.
+///
+/// This body still names both backends by their accessors, which is the subject
+/// of the backend-downcast inversion, not of this cut. Moving it here neither
+/// helps nor worsens that; it relocates the same code to the tier that will be
+/// fixed.
+pub(crate) async fn run_search(
+    binding: DbBinding,
+    coll: String,
+    plan: SearchPlan,
+) -> Result<read_pipeline::ApplyResult, DbError> {
+    let SearchPlan {
+        vector,
+        k,
+        metric,
+        column,
+        filter,
+    } = plan;
+
+    // Reach the backend through the per-isolate context. The
+    // dispatch helper isn't generic over the backend; runtime
+    // wiring stashes a `BackendHandle` per isolate that we route
+    // through the existing `as_postgres()` accessor.
+    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+    // SQLite arm routes through the pure-Rust flat-scan
+    // `VectorIndex` impl on `SqliteBackend`. We short-circuit
+    // BEFORE the PG path so a build with both arms compiled
+    // in (`--features "pg sqlite"` for tests) dispatches
+    // based on which arm the runtime is bound to, not on
+    // Cargo-feature ordering.
+    let rows = if let Some(sq) = backend.as_sqlite() {
+        sq.attach_app_file(binding.app_id()).await?;
+        use crate::backend::VectorIndex as _;
+        sq.vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
+            .await?
+    } else {
+        let pg = backend
+            .as_postgres()
+            .ok_or_else(|| DbError::backend_unsupported("vector_search"))?;
+        use crate::backend::VectorIndex as _;
+        pg.vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
+            .await?
+    };
+
+    // Metering, success arm only. The search family is a read op on
+    // either backend and reaches the database WITHOUT passing
+    // through `exec::run_sql` - the PG arm goes to
+    // `PostgresBackend::query_roled_json`, the SQLite arm to its own
+    // scan - so until 2026-09-01 it was billed as nothing at all.
+    // Counted here at the op boundary rather than in either vendor:
+    // the vendor tier must not reach up into the engine for the
+    // meter handle, which is the cycle #110 just removed.
+    //
+    // It stays AFTER the search and BEFORE the read pipeline, exactly where the
+    // hand-rolled `match result { Ok(rows) => ... }` put it: a read that
+    // succeeds and then fails to decrypt is still a read that hit the database.
+    crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
+
+    read_pipeline::apply(
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions::default(),
+    )
+    .await
+}
+
+pub(crate) fn dispatch_search<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    binding: DbBinding,
+    collection: &str,
+    args: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let planned = plan_search(&binding, collection, &args);
+
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+    let coll = collection.to_string();
+
+    state.borrow_mut().spawned_ops.push(Box::pin(settle(
+        resolver,
+        request_id,
+        async move { run_search(binding, coll, planned?).await },
+        |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
+    )));
 
     promise
 }
