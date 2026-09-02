@@ -6718,8 +6718,7 @@ async fn handshake_cut(process_id: i32, take_password: bool) -> String {
     )
     .await
     .expect("the hang-up peer left startup hanging instead of reporting closure")
-    .err()
-    .expect("startup succeeded against a peer that hung up");
+    .expect_err("startup succeeded against a peer that hung up");
     server.finish();
     common::error_chain(&error)
 }
