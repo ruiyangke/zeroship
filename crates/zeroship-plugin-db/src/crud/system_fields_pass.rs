@@ -154,13 +154,20 @@ pub(crate) fn derive_prefix_from_collection_name(collection: &str) -> String {
     truncated
 }
 
-/// Resolve the typed_id prefix for one collection.
+/// Resolve the typed_id prefix for one `typedId`-assigned column.
 ///
-/// 1. Read the `t.id(prefix)`-declared `idPrefix` off the `id` field of the
-///    descriptor entry the caller resolved.
+/// 1. Read the `t.id(prefix)`-declared `idPrefix` off THAT COLUMN's entry in
+///    the descriptor the caller resolved.
 /// 2. Fall back to [`derive_prefix_from_collection_name`] when the descriptor
 ///    declares no explicit prefix.
 /// 3. Validate either source through [`crate::query::validate_id_prefix`].
+///
+/// `column` is a parameter rather than the literal `"id"` because the charter
+/// is what decides which column a typed id is minted for. It happens to be
+/// `id` today; a charter naming a second `typedId` column, or renaming that
+/// one, would otherwise look up a descriptor key that does not exist and fall
+/// silently back to the collection-derived prefix - a defect that cannot occur
+/// while the pass hardcodes the name, and appears the moment it stops.
 ///
 /// `schema` is passed in rather than looked up. The write pipeline resolves the
 /// collection's entry once through [`crate::descriptor::collection_schema`] and
@@ -176,9 +183,10 @@ pub(crate) fn derive_prefix_from_collection_name(collection: &str) -> String {
 pub(crate) fn prefix_for_collection(
     schema: &Value,
     collection: &str,
+    column: &str,
 ) -> Result<String, DbError> {
     let prefix = schema
-        .get("id")
+        .get(column)
         .and_then(|id_def| id_def.get("idPrefix"))
         .and_then(|p| p.as_str())
         .map(str::to_string)
@@ -349,7 +357,7 @@ fn inject_into_object(
             // a creator-supplied id lives at the document boundary instead.
             AssignmentGenerator::TypedId => {
                 if !obj.contains_key(name) {
-                    let prefix = prefix_for_collection(schema, collection)?;
+                    let prefix = prefix_for_collection(schema, collection, name)?;
                     obj.insert(
                         name.to_string(),
                         Value::String(zeroship_core::typed_id::generate(&prefix)),
@@ -929,10 +937,39 @@ mod tests {
         // `prefix_for_collection` returns the declared prefix instead of
         // deriving from the collection name.
         assert_eq!(
-            prefix_for_collection(&schema_with_blog_id_prefix(), "posts")
+            prefix_for_collection(&schema_with_blog_id_prefix(), "posts", "id")
                 .expect("ordinary declared prefix must be accepted"),
             "blog"
         );
+    }
+
+    /// The prefix is looked up under the CHARTER'S column name, not `"id"`.
+    ///
+    /// A charter that minted a typed id into `row_key` would otherwise read
+    /// `schema["id"]["idPrefix"]`, miss, and fall back to the collection-derived
+    /// prefix while the descriptor plainly declared one.
+    #[test]
+    fn prefix_is_read_under_the_charter_column_not_the_literal_id() {
+        crate::reset_context_for_tests();
+        stamp_charter(
+            "  { name = \"row_key\", type = \"text\", nullable = false, assign = { by = \"typedId\", on = \"insert\" } },",
+        );
+        let schema = json!({
+            "row_key": { "type": "id", "idPrefix": "blog" },
+            "title": { "type": "string" },
+        });
+        let mut doc = json!({ "title": "hi" });
+        apply_system_fields_on_insert(&mut doc, &schema, "posts", None)
+            .expect("the charter's typed-id column must mint");
+        let minted = doc
+            .get("row_key")
+            .and_then(Value::as_str)
+            .expect("the charter's typed-id column must be minted");
+        assert!(
+            minted.starts_with("blog_"),
+            "the declared prefix must be read under the charter's column name, got {minted}",
+        );
+        crate::reset_context_for_tests();
     }
 
     #[test]
