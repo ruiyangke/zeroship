@@ -285,31 +285,6 @@ fn reject_op(
     }
 }
 
-/// Reject a freshly-allocated promise without doing any async work.
-///
-/// The search-family dispatchers validate argument SHAPE on the synchronous
-/// half, before a query exists to run. The runtime only ever resolves a
-/// promise from a spawned op, so even an argument rejection has to be handed
-/// back as a future - one that awaits nothing and rejects immediately.
-///
-/// Callers still write their own `return promise;`. That is deliberate: this
-/// was a `reject_sync!` macro local to `dispatch_near` that hid the early
-/// return inside the expansion, and `dispatch_search` open-coded the same
-/// eight lines four times rather than reach for it. A function takes
-/// `resolver` by value, which is what each site needs (a V8
-/// `Global<PromiseResolver>` is not `Copy` and must MOVE into the future),
-/// and leaves the control flow visible at the site that performs it.
-fn spawn_rejection(
-    state: &SharedState,
-    resolver: v8::Global<v8::PromiseResolver>,
-    request_id: Option<u64>,
-    err: DbError,
-) {
-    state.borrow_mut().spawned_ops.push(Box::pin(
-        async move { reject_op(resolver, request_id, err) },
-    ));
-}
-
 fn lower_boolean_doc_with_schema(schema: &Value, doc: &mut Value) {
     let Some(obj) = doc.as_object_mut() else {
         return;
@@ -2295,13 +2270,14 @@ pub(crate) struct SearchPlan {
 /// The EAGER half of `search`: argument decoding plus the descriptor lookup the
 /// SQLite boolean lowering needs.
 ///
-/// Every refusal here used to be a `spawn_rejection` with its own early
-/// `return promise`. They are plain `Err`s now, and the adapter feeds them to
-/// `settle`, whose error arm calls the SAME `reject_op` those rejections did
-/// (`crud/mod.rs:276-286` is literally
+/// Every refusal here used to be an eagerly-spawned rejection future with its
+/// own early `return promise`. They are plain `Err`s now, and the adapter feeds
+/// them to `settle`, whose error arm calls the SAME [`reject_op`] those
+/// rejections did - it is literally
 /// `OpResult::JsValue { resolver, value: ResolveValue::RejectError(err.to_op_error()), request_id }`,
-/// and `spawn_rejection` is a one-line push of exactly that). Verified by
-/// reading both, not by test.
+/// and the old helper was a one-line push of exactly that. Verified by reading
+/// both before the fold, not by test; the helper is now deleted, since folding
+/// the last two search-family dispatchers left it with no callers.
 ///
 /// The decoding stays SYNCHRONOUS rather than moving into [`run_search`]: the
 /// ordering of a descriptor read against the dispatching turn is the same
@@ -2488,81 +2464,67 @@ pub(crate) fn dispatch_search<'s>(
 /// `geography(POINT, 4326)` support or SQLite's pure-Rust haversine
 /// flat-scan implementation. Each returned row carries a synthetic
 /// `_distance_m` (`f64`) column.
-pub(crate) fn dispatch_near<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    binding: DbBinding,
-    collection: &str,
-    args: Value,
-) -> v8::Local<'s, v8::Promise> {
-    let state = runtime_state(scope);
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+/// The eagerly-decoded inputs of a spatial `near`, produced by [`plan_near`] and
+/// consumed by [`run_near`].
+pub(crate) struct NearPlan {
+    field: String,
+    point: crate::backend::GeoPoint,
+    radius_m: f64,
+    limit: Option<usize>,
+    filter: Value,
+}
 
+/// The EAGER half of `near`. Same rejection-folding as [`plan_search`]: the five
+/// eagerly-spawned rejections are plain `Err`s, and `settle`'s error arm makes
+/// the same [`reject_op`] call they did.
+///
+/// All four argument refusals share the `invalid_near_args` code; only the
+/// message distinguishes them. That is transcribed from the original, not
+/// tidied - the SDK branches on the code.
+pub(crate) fn plan_near(
+    binding: &DbBinding,
+    collection: &str,
+    args: &Value,
+) -> Result<NearPlan, DbError> {
     let field = match args.get("field").and_then(Value::as_str) {
         Some(s) if !s.is_empty() => s.to_string(),
         _ => {
-            spawn_rejection(
-                &state,
-                resolver,
-                request_id,
-                DbError::Configuration {
-                    code: "invalid_near_args",
-                    message: "near: `field` must be a non-empty string".to_string(),
-                    hint: Some("pass `{ field, point, radius, filter?, limit? }`".to_string()),
-                },
-            );
-            return promise;
+            return Err(DbError::Configuration {
+                code: "invalid_near_args",
+                message: "near: `field` must be a non-empty string".to_string(),
+                hint: Some("pass `{ field, point, radius, filter?, limit? }`".to_string()),
+            });
         }
     };
 
     let point_obj = args.get("point");
     let lat = point_obj.and_then(|p| p.get("lat")).and_then(Value::as_f64);
     let lng = point_obj.and_then(|p| p.get("lng")).and_then(Value::as_f64);
-    let (lat, lng) = match (lat, lng) {
-        (Some(la), Some(ln)) => (la, ln),
-        _ => {
-            spawn_rejection(
-                &state,
-                resolver,
-                request_id,
-                DbError::Configuration {
-                    code: "invalid_near_args",
-                    message: "near: `point` must be `{ lat: number, lng: number }`".to_string(),
-                    hint: None,
-                },
-            );
-            return promise;
-        }
+    let (Some(lat), Some(lng)) = (lat, lng) else {
+        return Err(DbError::Configuration {
+            code: "invalid_near_args",
+            message: "near: `point` must be `{ lat: number, lng: number }`".to_string(),
+            hint: None,
+        });
     };
     if !(-90.0..=90.0).contains(&lat) || !(-180.0..=180.0).contains(&lng) {
-        spawn_rejection(
-            &state,
-            resolver,
-            request_id,
-            DbError::Configuration {
-                code: "invalid_near_args",
-                message: format!(
-                    "near: `point` out of range: lat must be in [-90,90] and lng in [-180,180], got lat={lat} lng={lng}"
-                ),
-                hint: None,
-            },
-        );
-        return promise;
+        return Err(DbError::Configuration {
+            code: "invalid_near_args",
+            message: format!(
+                "near: `point` out of range: lat must be in [-90,90] and lng in [-180,180], got lat={lat} lng={lng}"
+            ),
+            hint: None,
+        });
     }
 
     let radius_m = match args.get("radius").and_then(Value::as_f64) {
         Some(r) if r > 0.0 && r.is_finite() => r,
         _ => {
-            spawn_rejection(
-                &state,
-                resolver,
-                request_id,
-                DbError::Configuration {
-                    code: "invalid_near_args",
-                    message: "near: `radius` must be a positive number (metres)".to_string(),
-                    hint: None,
-                },
-            );
-            return promise;
+            return Err(DbError::Configuration {
+                code: "invalid_near_args",
+                message: "near: `radius` must be a positive number (metres)".to_string(),
+                hint: None,
+            });
         }
     };
 
@@ -2575,90 +2537,97 @@ pub(crate) fn dispatch_near<'s>(
         .cloned()
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
 
-    let coll = collection.to_string();
-    // Same as `dispatch_search`: the backend arm resolves the entry again for
-    // its own projection; this one lowers the caller's filter, and refusing an
-    // undeclared collection here keeps the rejection synchronous.
-    let schema = match crate::descriptor::collection_schema(&binding, collection) {
-        Ok(schema) => schema,
-        Err(e) => {
-            spawn_rejection(&state, resolver, request_id, e);
-            return promise;
-        }
-    };
+    // Same as `plan_search`: the backend arm resolves the entry again for its
+    // own projection; this one lowers the caller's filter.
+    let schema = crate::descriptor::collection_schema(binding, collection)?;
     maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-    let point = crate::backend::GeoPoint { lat, lng };
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let result: Result<Vec<Value>, DbError> = async {
-            let backend = crate::exec::ensure_backend_for_shared_sql().await?;
-            // SQLite arm routes through the pure-Rust haversine
-            // flat-scan `SpatialIndex` impl on `SqliteBackend`.
-            // Short-circuit BEFORE the PG path so a build with both
-            // arms compiled in dispatches based on which arm the
-            // runtime is bound to.
-            if let Some(sq) = backend.as_sqlite() {
-                sq.attach_app_file(binding.app_id()).await?;
-                use crate::backend::SpatialIndex as _;
-                return sq
-                    .spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
-                    .await;
-            }
-            let pg = backend
-                .as_postgres()
-                .ok_or_else(|| DbError::backend_unsupported("spatial_near"))?;
-            use crate::backend::SpatialIndex as _;
-            pg.spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
-                .await
-        }
-        .await;
+    Ok(NearPlan {
+        field,
+        point: crate::backend::GeoPoint { lat, lng },
+        radius_m,
+        limit,
+        filter,
+    })
+}
 
-        match result {
-            Ok(rows) => {
-                // Metering, success arm only. The search family is a read op on
-                // either backend and reaches the database WITHOUT passing
-                // through `exec::run_sql` - the PG arm goes to
-                // `PostgresBackend::query_roled_json`, the SQLite arm to its own
-                // scan - so until 2026-09-01 it was billed as nothing at all.
-                // Counted here at the op boundary rather than in either vendor:
-                // the vendor tier must not reach up into the engine for the
-                // meter handle, which is the cycle #110 just removed.
-                crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
-                let result = match read_pipeline::apply(
-                    &binding,
-                    &coll,
-                    rows,
-                    read_pipeline::ApplyOptions::default(),
-                )
-                .await
-                {
-                    Ok(result) => result,
-                    Err(e) => {
-                        return zeroship_runtime::state::OpResult::JsValue {
-                            resolver,
-                            value: zeroship_runtime::state::ResolveValue::RejectError(
-                                e.to_op_error(),
-                            ),
-                            request_id,
-                        };
-                    }
-                };
-                zeroship_runtime::state::OpResult::JsValue {
-                    resolver,
-                    value: crate::v8_bridge::rows_as_json_array_masked(
-                        result.rows,
-                        result.has_masked,
-                    ),
-                    request_id,
-                }
-            }
-            Err(e) => zeroship_runtime::state::OpResult::JsValue {
-                resolver,
-                value: zeroship_runtime::state::ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
+/// The DEFERRED half of `near`: no `scope`, no `v8::`, no `OpResult`.
+///
+/// Like [`run_search`], this still names both backends by their accessors. That
+/// belongs to the backend-downcast inversion, not to this cut.
+pub(crate) async fn run_near(
+    binding: DbBinding,
+    coll: String,
+    plan: NearPlan,
+) -> Result<read_pipeline::ApplyResult, DbError> {
+    let NearPlan {
+        field,
+        point,
+        radius_m,
+        limit,
+        filter,
+    } = plan;
+
+    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+    // SQLite arm routes through the pure-Rust haversine
+    // flat-scan `SpatialIndex` impl on `SqliteBackend`.
+    // Short-circuit BEFORE the PG path so a build with both
+    // arms compiled in dispatches based on which arm the
+    // runtime is bound to.
+    let rows = if let Some(sq) = backend.as_sqlite() {
+        sq.attach_app_file(binding.app_id()).await?;
+        use crate::backend::SpatialIndex as _;
+        sq.spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
+            .await?
+    } else {
+        let pg = backend
+            .as_postgres()
+            .ok_or_else(|| DbError::backend_unsupported("spatial_near"))?;
+        use crate::backend::SpatialIndex as _;
+        pg.spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
+            .await?
+    };
+
+    // Metering, success arm only. The search family is a read op on
+    // either backend and reaches the database WITHOUT passing
+    // through `exec::run_sql` - the PG arm goes to
+    // `PostgresBackend::query_roled_json`, the SQLite arm to its own
+    // scan - so until 2026-09-01 it was billed as nothing at all.
+    // Counted here at the op boundary rather than in either vendor:
+    // the vendor tier must not reach up into the engine for the
+    // meter handle, which is the cycle #110 just removed.
+    //
+    // Position preserved from the hand-rolled `match result`: after the search,
+    // before the read pipeline.
+    crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
+
+    read_pipeline::apply(
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions::default(),
+    )
+    .await
+}
+
+pub(crate) fn dispatch_near<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    binding: DbBinding,
+    collection: &str,
+    args: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let planned = plan_near(&binding, collection, &args);
+
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+    let coll = collection.to_string();
+
+    state.borrow_mut().spawned_ops.push(Box::pin(settle(
+        resolver,
+        request_id,
+        async move { run_near(binding, coll, planned?).await },
+        |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
+    )));
 
     promise
 }
