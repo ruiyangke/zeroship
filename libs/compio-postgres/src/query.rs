@@ -136,9 +136,17 @@ impl ExecutionError {
     /// `BindComplete`.
     ///
     /// A copy response means the server is already in copy mode, so it is past
-    /// Bind however the exchange reached this point. Only `BeforeBindComplete`
-    /// licenses the stale-cache replay, and replaying would re-send Parse to a
-    /// backend that now expects `CopyData`.
+    /// Bind however the exchange reached this point, and `BeforeBindComplete`
+    /// is documented as the phase that can describe PostgreSQL rejecting the
+    /// named statement.
+    ///
+    /// This is defence in depth rather than a reachable replay. The phase is
+    /// only the FIRST of two gates: `reprepare_cached_statement_once` also
+    /// requires `cached_statement_error_is_stale`, and the
+    /// `Error::unexpected_message` raised here carries no `DbError`, so its
+    /// `code()` is `None` and that predicate is already false. Classifying by
+    /// the documented meaning keeps the phase honest instead of leaving it
+    /// resting on the second gate.
     pub(crate) fn pre_bind_mismatch(message: &Message) -> Self {
         match message {
             Message::CopyInResponse(_) | Message::CopyOutResponse(_) => {
