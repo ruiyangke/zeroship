@@ -240,6 +240,27 @@ fn count_notes(url: &str) -> i64 {
     })
 }
 
+/// Run one statement against the app schema as the owner.
+///
+/// For tests that need a constraint `reset_schema` does not create, because the
+/// constraint IS the fixture. See
+/// [`commit_that_postgres_rolled_back_must_not_report_success_l8`], which has to
+/// poison a transaction with a server-side error the platform cannot absorb.
+fn exec_owner_sql(url: &str, sql: &str) {
+    let url = url.to_string();
+    let sql = sql.to_string();
+    block_on(async move {
+        let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
+        compio::runtime::spawn(async move {
+            let _ = connection.run().await;
+        })
+        .detach();
+        client.batch_execute(&sql).await.unwrap();
+        drop(client);
+        drain_open_connections().await;
+    });
+}
+
 /// The table the deploy-time migration would have created for
 /// [`build_encrypted_users_src`]'s declared schema.
 ///
@@ -864,7 +885,10 @@ const _procedures = { commitOne };
     assert_eq!(status, 200, "commitOne failed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
-        inner.get("txResult").and_then(|v| v.as_str()),
+        inner
+            .get("txResult")
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.as_str()),
         Some("ok"),
         "transaction(fn) must resolve with the callback's return value; body={body}"
     );
@@ -988,7 +1012,10 @@ const _procedures = { nestedPartialFailure };
     assert_eq!(status, 200, "nested handler should succeed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
-        inner.get("txResult").and_then(|v| v.as_str()),
+        inner
+            .get("txResult")
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.as_str()),
         Some("outer-committed"),
         "outer tx must commit after the inner savepoint rolled back; body={body}"
     );
@@ -1104,7 +1131,10 @@ const _procedures = { nestedBothCommit };
     assert_eq!(status, 200, "nested handler should succeed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
-        inner.get("txResult").and_then(|v| v.as_str()),
+        inner
+            .get("txResult")
+            .and_then(|v| v.get("data"))
+            .and_then(|v| v.as_str()),
         Some("both-ok")
     );
     assert_eq!(
@@ -1195,7 +1225,13 @@ const _procedures = { probeTxView };
 
     let (status, body) = dispatch_zs(&url, &src, "probeTxView");
     assert_eq!(status, 200, "probe should succeed: {body}");
-    let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
+    // `transaction()` resolves with the `{ data, error }` envelope documented at
+    // `sdks/db/src/db-types.ts:39`, so the probe's own object sits under `data`.
+    let inner = body
+        .get("json")
+        .and_then(|v| v.get("data"))
+        .cloned()
+        .unwrap_or(serde_json::Value::Null);
     assert_eq!(
         inner.get("hasCommit").and_then(|v| v.as_str()),
         Some("undefined"),
@@ -1382,36 +1418,70 @@ const _procedures = { seed, failBulk };
 /// COMMIT;             -> ROLLBACK          (control: a clean tx replies COMMIT)
 /// ```
 ///
-/// The driver detects exactly this and turns it into an error
-/// (`libs/compio-postgres/src/transaction.rs:186-188`), but plugin-db's raw
-/// executor throws the command tag away - `client_exec` returns
-/// `Ok(rows.len() as u64)`
-/// (`crates/zeroship-plugin-db/src/backend/postgres.rs:201-212`) - and the
-/// explicit-transaction settle path sends its `COMMIT` through that same
-/// function (`crates/zeroship-plugin-db/src/transaction/mod.rs:1001`).
+/// The settle path reads that tag. `transaction::driver::terminal` sends
+/// terminal SQL through `batch_execute_reporting_tag` precisely so the tag
+/// survives, and classifies `(Commit, Some("ROLLBACK"))` as
+/// `TerminalResult::RolledBack`.
+///
+/// **The two paragraphs above replaced a description of the pre-fix world.**
+/// The old text said the settle path sends its COMMIT through `client_exec`,
+/// which throws the tag away. It does not, and
+/// `transaction/mod.rs`'s own header says so in as many words: terminal
+/// statements deliberately bypass `client_exec`. The classifier landed and this
+/// comment did not move.
 ///
 /// SCOPE: this drives an EXPLICIT creator transaction on purpose. The autocommit
-/// path already goes through the driver's own `tx.commit()` wrapper
-/// (`crates/zeroship-plugin-db/src/exec.rs:344`), which checks the tag, so the
-/// same test written against autocommit passes pre-fix and proves nothing.
+/// path goes through the driver's own `tx.commit()` wrapper, which checks the
+/// tag, so the same test written against autocommit proves nothing about this
+/// path.
 ///
-/// The callback swallows a genuine DB-level error so it RESOLVES: the
-/// orchestrator then proceeds to COMMIT a poisoned transaction, which is the
-/// state that reproduces the defect.
+/// ## Poisoning the transaction, and why the obvious way does not work
+///
+/// The callback must swallow a genuine SERVER-SIDE error so it RESOLVES; the
+/// orchestrator then commits a poisoned transaction, which is the state under
+/// test.
+///
+/// This test inserted the same `id` twice until 2026-09-02, expecting a
+/// duplicate-key violation. **It never got one.** `id` is platform-assigned: a
+/// creator-supplied value is discarded and a typed id minted in its place, so
+/// both inserts succeeded with different keys, the transaction committed
+/// cleanly, and the assertion failed against a HEALTHY commit while its message
+/// claimed "the row is gone (count=2)". Measured on the live server, the two
+/// surviving rows were `note_034HvhQfm7VR3Q3olk7zxc` and
+/// `note_034HvhQfTvtV3JZE1b9KdH`, not `l8-keep`. Same defect as the one closed
+/// on `#125`, in a second test.
+///
+/// The poison therefore has to be a constraint on a column the platform does
+/// NOT rewrite. `title` is creator data, so a unique index on it produces a real
+/// `23505` the runtime cannot absorb. The index is created here rather than in
+/// `reset_schema` because every other test in this file inserts duplicate
+/// titles freely.
 #[test]
 fn commit_that_postgres_rolled_back_must_not_report_success_l8() {
     let url = require_pg();
     reset_schema(&url);
 
+    // The poison. `title` is creator data and survives the write path intact, so
+    // a duplicate here is a real 23505 - unlike a duplicate `id`, which the
+    // platform silently makes unique.
+    exec_owner_sql(
+        &url,
+        &format!(
+            "CREATE UNIQUE INDEX \"notes_title_l8_uniq\" ON \"{APP_SCHEMA}\".\"notes\" (\"title\")"
+        ),
+    );
+
     let src = build_src(
         r#"
 async function poisonThenCommit(_input, _ctx) {
     const r = await env.db.transaction(async (tx) => {
-        await tx.notes.insert({ id: "l8-keep", title: "should be durable" });
+        await tx.notes.insert({ title: "l8-keep" });
         try {
-            // Duplicate primary key: a real server-side error, which puts the
-            // transaction into the failed state where COMMIT answers ROLLBACK.
-            await tx.notes.insert({ id: "l8-keep", title: "duplicate" });
+            // Duplicate TITLE against the unique index the fixture added: a real
+            // server-side 23505, which puts the transaction into the failed
+            // state where COMMIT answers ROLLBACK. Duplicating `id` does NOT
+            // work - see this test's doc comment.
+            await tx.notes.insert({ title: "l8-keep" });
         } catch (_e) {
             // Swallowed on purpose so the callback resolves.
         }
@@ -1427,13 +1497,22 @@ const _procedures = { poisonThenCommit };
     let (status, body) = dispatch_zs(&url, &src, "poisonThenCommit");
     let rows = count_notes(&url);
 
-    // The server rolled the transaction back, so the row is gone. The contract
-    // that must hold is simply: SUCCESS MEANS DURABLE. If the dispatch reported
-    // success, the write it claimed to commit has to be there.
-    if status == 200 {
+    // SUCCESS MEANS DURABLE, in both directions. What must never happen is a
+    // reported success whose writes are not there.
+    //
+    // **Success is the envelope's `error`, not the HTTP status.** An RPC that
+    // rejects still answers 200 and carries the failure in the body, so
+    // `status == 200` reads a failed commit as a successful one - which is how
+    // this arm reported "commit reported SUCCESS" while the body plainly said
+    // `{"error":{"code":"commit_rolled_back"}}`.
+    let tx_error = body
+        .pointer("/json/txResult/error")
+        .filter(|error| !error.is_null());
+
+    if tx_error.is_none() {
         assert_eq!(
             rows, 1,
-            "commit reported SUCCESS (status 200, body={body}) but PostgreSQL \
+            "commit reported SUCCESS (status {status}, body={body}) but PostgreSQL \
              rolled the transaction back and the row is gone (count={rows}). \
              A rolled-back commit must not be reported as committed."
         );
