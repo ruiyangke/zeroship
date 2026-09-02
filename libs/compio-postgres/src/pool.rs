@@ -2934,6 +2934,59 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Wake;
 
+    /// One waker panicking must not strand the waiters queued behind it.
+    ///
+    /// `wake_all` runs arbitrary caller wakers. Waking them in a bare loop
+    /// would let the first panic abandon the rest, and those waiters are
+    /// parked on a pool slot that has ALREADY been released - so they would
+    /// sleep until their acquire timeout rather than take the free connection.
+    ///
+    /// The panic is still the caller's, so it must resurface rather than be
+    /// swallowed. Both halves are asserted: a swallowed panic and a stranded
+    /// waiter are different bugs, and a test that checked only one would pass
+    /// on code that committed the other.
+    #[test]
+    fn a_panicking_waker_does_not_strand_the_waiters_behind_it() {
+        struct Panicking;
+        impl Wake for Panicking {
+            fn wake(self: Arc<Self>) {
+                panic!("scripted waker panic");
+            }
+        }
+
+        struct Recording(Arc<AtomicUsize>);
+        impl Wake for Recording {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let woken = Arc::new(AtomicUsize::new(0));
+        let wakers = vec![
+            std::task::Waker::from(Arc::new(Panicking)),
+            std::task::Waker::from(Arc::new(Recording(Arc::clone(&woken)))),
+            std::task::Waker::from(Arc::new(Recording(Arc::clone(&woken)))),
+        ];
+
+        // The scripted panic would otherwise print a backtrace and read like a
+        // real failure in the test log.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let unwound =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || wake_all(wakers)));
+        std::panic::set_hook(previous);
+
+        assert!(
+            unwound.is_err(),
+            "the waker's panic was swallowed instead of resumed"
+        );
+        assert_eq!(
+            woken.load(Ordering::Relaxed),
+            2,
+            "a panicking waker stranded the waiters queued behind it"
+        );
+    }
+
     /// Every `PoolConfig` getter must return its OWN field.
     ///
     /// Four of the five are `Duration`. Any permutation among those four type
