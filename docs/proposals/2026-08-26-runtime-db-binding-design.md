@@ -1163,14 +1163,38 @@ SHA is recorded for either**, so unlike the table above they cannot be checked
 with `git merge-base --is-ancestor`. Unverified; the SHAs are owed.
 
 **What is exactly zero:** the private module map, the artifact/init channel, the
-`DbIsolateBinding` itself, the deletion of `registerModel`, the mask-policy
-artifact wire, the operator ceiling as worker configuration, Fork C's identity
-substrate, `DbPlan`'s remaining families and its ledger, the SC-4 dev mechanism,
-and the masking storage flip. `v8_classes/db_platform.rs`'s `setMaskPolicy`
-(`:145`) is still live. Its sibling `registerModel` is NOT: the module, the V8
-method and the `installSchema` chain that drove it were all deleted on
-2026-08-30 (DELETED - `crates/zeroship-plugin-db/src/register_model/mod.rs`),
-and the descriptor entries it used to publish are now planted natively at boot.
+`DbIsolateBinding` itself, the mask-policy artifact wire, the operator ceiling as
+worker configuration, Fork C's identity substrate, `DbPlan`'s remaining families
+and its ledger, and the SC-4 dev mechanism.
+
+**THIS LIST CARRIED TWO ITEMS THAT HAD ALREADY SHIPPED, UNTIL 2026-09-01.** Both
+are removed above; both are recorded here rather than silently dropped, because
+the way each survived is the instructive part.
+
+*The deletion of `registerModel`* sat in the zero list while **the very next
+sentence of this same paragraph said it was deleted**. A contradiction inside one
+paragraph is not a stale citation - nothing external moved - it is a list edited
+without re-reading the prose beside it. Re-verified 2026-09-01:
+`crates/zeroship-plugin-db/src/register_model/` does not exist and `registerModel`
+occurs zero times in any `.rs` file.
+
+*The masking storage flip* was listed as zero while it is implemented and covered
+end to end: `raw_column_name` (`crates/zeroship-schema/src/query.rs:2218`) is the
+live split, and `crates/zeroship-plugin-db/tests/mask_flip.rs` exercises it
+against a real PostgreSQL - 9 passed / 0 failed, measured 2026-09-01 against
+PostgreSQL 18.6. Nothing in the tree reported this; the entry simply outlived the
+work.
+
+The rule this pays for: **a "what is zero" list decays in the opposite direction
+from a citation.** A stale citation points at something that moved and can be
+caught by a path check, which is why `tests/doc_citation_gate.sh` exists and is
+green. A stale zero-list entry points at nothing at all, so no gate can see it,
+and it reads as a to-do that someone will dutifully re-do. Check this list
+against the tree before trusting any entry.
+
+`v8_classes/db_platform.rs`'s `setMaskPolicy` (`:145`) is still live, and the
+descriptor entries `registerModel` used to publish are now planted natively at
+boot.
 That list names mechanisms, not documents: `DbPlan`'s shared core and read family
 exist as `crates/zeroship-data-plan`, and SC-5's service ownership partly landed
 as step 5a while SC-5 as a contract is unimplemented.
