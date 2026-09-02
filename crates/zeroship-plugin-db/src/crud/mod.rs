@@ -1288,6 +1288,44 @@ pub(crate) fn dispatch_update_many<'s>(
 
 /// Shared dispatch for `deleteOne`. See [`dispatch_insert`] for the
 /// capability-gate contract.
+/// The ENGINE half of `delete_one`. Peer of [`plan_count`] and [`plan_purge_one`],
+/// and the first that threads `actor_id`.
+///
+/// `actor_id` arrives as a PARAMETER rather than being read here, because reading
+/// it needs the runtime state and therefore `scope`. The adapter reads it at the
+/// synchronous boundary and passes it down - see the comment in `dispatch_insert`
+/// for why that read must not drift into an async tail.
+pub(crate) fn plan_delete_one(
+    binding: &DbBinding,
+    collection: &str,
+    filter: Value,
+    actor_id: Option<&str>,
+) -> Result<query::BuiltQuery, DbError> {
+    let app = binding.app_id();
+    let autobump = query::SystemFieldAutoBump {
+        actor_id,
+        ..Default::default()
+    };
+    // Resolve-then-build, folded into the one `Result` `run_op` already
+    // rejects on: an undeclared collection cannot be soft-deleted through a
+    // filter this deploy has no schema to lower.
+    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_soft_delete_one_with_system_fields(
+            app,
+            collection,
+            &schema,
+            &filter,
+            current_sql_dialect(),
+            &autobump,
+        )
+        .map_err(DbError::from)
+    })
+}
+
+/// The ADAPTER half of `delete_one`. See [`dispatch_purge_one`] for the
+/// outstanding second cut on the `async move` body below.
 pub(crate) fn dispatch_delete_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: DbBinding,
@@ -1299,30 +1337,11 @@ pub(crate) fn dispatch_delete_one<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let coll = collection.to_string();
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
-    let autobump = query::SystemFieldAutoBump {
-        actor_id: actor_id.as_deref(),
-        ..Default::default()
-    };
-    // Resolve-then-build, folded into the one `Result` `run_op` already
-    // rejects on: an undeclared collection cannot be soft-deleted through a
-    // filter this deploy has no schema to lower.
-    let built = crate::descriptor::collection_schema(&binding, &coll).and_then(|schema| {
-        let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-        query::build_soft_delete_one_with_system_fields(
-            &app,
-            &coll,
-            &schema,
-            &filter,
-            current_sql_dialect(),
-            &autobump,
-        )
-        .map_err(DbError::from)
-    });
+
+    let built = plan_delete_one(&binding, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -1356,6 +1375,36 @@ pub(crate) fn dispatch_delete_one<'s>(
 
 /// Shared dispatch for `deleteMany`. Resolves with the count of
 /// affected rows as a JS `number`.
+/// The ENGINE half of `delete_many`. Identical in shape to [`plan_delete_one`];
+/// only the builder differs.
+pub(crate) fn plan_delete_many(
+    binding: &DbBinding,
+    collection: &str,
+    filter: Value,
+    actor_id: Option<&str>,
+) -> Result<query::BuiltQuery, DbError> {
+    let app = binding.app_id();
+    let autobump = query::SystemFieldAutoBump {
+        actor_id,
+        ..Default::default()
+    };
+    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_soft_delete_many_with_system_fields(
+            app,
+            collection,
+            &schema,
+            &filter,
+            current_sql_dialect(),
+            &autobump,
+        )
+        .map_err(DbError::from)
+    })
+}
+
+/// The ADAPTER half of `delete_many`. See [`dispatch_purge_one`] for the
+/// outstanding second cut on the `async move` body.
 pub(crate) fn dispatch_delete_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: DbBinding,
@@ -1367,27 +1416,11 @@ pub(crate) fn dispatch_delete_many<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let coll = collection.to_string();
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
-    let autobump = query::SystemFieldAutoBump {
-        actor_id: actor_id.as_deref(),
-        ..Default::default()
-    };
-    let built = crate::descriptor::collection_schema(&binding, &coll).and_then(|schema| {
-        let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-        query::build_soft_delete_many_with_system_fields(
-            &app,
-            &coll,
-            &schema,
-            &filter,
-            current_sql_dialect(),
-            &autobump,
-        )
-        .map_err(DbError::from)
-    });
+
+    let built = plan_delete_many(&binding, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -1413,17 +1446,20 @@ pub(crate) fn dispatch_delete_many<'s>(
 ///
 /// `purge` does NOT respect the `deleted_at IS NULL` auto-filter —
 /// it removes both live and soft-deleted rows matching the filter.
-pub(crate) fn dispatch_purge_one<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    binding: DbBinding,
+/// The ENGINE half of `purge_one`. Peer of [`plan_count`]; see that function for
+/// the seam this follows and the proposal lines that require it.
+///
+/// `purge_one` is a MUTATION that needs no `actor_id`: a hard delete stamps
+/// nobody. That is why the 17-strong `dispatch_*` family divides into "needs
+/// `current_actor_id(&state)`" (9) and "does not" (8) rather than read vs write -
+/// this function is a write on the not-needed side.
+pub(crate) fn plan_purge_one(
+    binding: &DbBinding,
     collection: &str,
     filter: Value,
-) -> v8::Local<'s, v8::Promise> {
+) -> Result<query::BuiltQuery, DbError> {
     let app_id = binding.app_id();
-    let state = runtime_state(scope);
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
-    let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
+    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
         query::build_delete_one_with_dialect(
@@ -1434,7 +1470,29 @@ pub(crate) fn dispatch_purge_one<'s>(
             current_sql_dialect(),
         )
         .map_err(DbError::from)
-    });
+    })
+}
+
+/// The ADAPTER half of `purge_one`.
+///
+/// STILL CARRYING PIPELINE: the `async move` body below runs
+/// `exec_mutation_with_emit` and `read_pipeline::apply`, which
+/// `docs/proposals/2026-08-31-data-crate-shape.md:139-140` puts in the engine -
+/// "their `async move` bodies are not [the boundary] - those bodies are query
+/// pipeline". Extracting the plan is the first cut; hoisting these bodies into
+/// named engine functions is a SECOND cut this family still needs, and
+/// `dispatch_count` has the same debt.
+pub(crate) fn dispatch_purge_one<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    binding: DbBinding,
+    collection: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let built = plan_purge_one(&binding, collection, filter);
+
+    let app_id = binding.app_id();
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
@@ -1468,17 +1526,15 @@ pub(crate) fn dispatch_purge_one<'s>(
 }
 
 /// Bulk-purge entry point.
-pub(crate) fn dispatch_purge_many<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    binding: DbBinding,
+/// The ENGINE half of `purge_many`. Peer of [`plan_purge_one`]: a hard delete,
+/// so no `actor_id`.
+pub(crate) fn plan_purge_many(
+    binding: &DbBinding,
     collection: &str,
     filter: Value,
-) -> v8::Local<'s, v8::Promise> {
+) -> Result<query::BuiltQuery, DbError> {
     let app_id = binding.app_id();
-    let state = runtime_state(scope);
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
-    let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
+    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
         query::build_delete_many(
@@ -1489,7 +1545,22 @@ pub(crate) fn dispatch_purge_many<'s>(
             current_sql_dialect(),
         )
         .map_err(DbError::from)
-    });
+    })
+}
+
+/// The ADAPTER half of `purge_many`. See [`dispatch_purge_one`] for the
+/// outstanding second cut on the `async move` body.
+pub(crate) fn dispatch_purge_many<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    binding: DbBinding,
+    collection: &str,
+    filter: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let built = plan_purge_many(&binding, collection, filter);
+
+    let app_id = binding.app_id();
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
@@ -1514,6 +1585,40 @@ pub(crate) fn dispatch_purge_many<'s>(
 }
 
 /// Restore a soft-deleted row.
+/// The ENGINE half of `restore_one`.
+///
+/// NOT a copy of [`plan_delete_one`]: the autobump here also sets
+/// `dispatch_write: true`. Templating this family from a sibling would drop that
+/// flag silently, so each plan is transcribed from its own dispatch.
+pub(crate) fn plan_restore_one(
+    binding: &DbBinding,
+    collection: &str,
+    filter: Value,
+    actor_id: Option<&str>,
+) -> Result<query::BuiltQuery, DbError> {
+    let app = binding.app_id();
+    let autobump = query::SystemFieldAutoBump {
+        dispatch_write: true,
+        actor_id,
+        ..Default::default()
+    };
+    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_restore_one_with_system_fields(
+            app,
+            collection,
+            &schema,
+            &filter,
+            current_sql_dialect(),
+            &autobump,
+        )
+        .map_err(DbError::from)
+    })
+}
+
+/// The ADAPTER half of `restore_one`. See [`dispatch_purge_one`] for the
+/// outstanding second cut on the `async move` body.
 pub(crate) fn dispatch_restore_one<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: DbBinding,
@@ -1525,28 +1630,11 @@ pub(crate) fn dispatch_restore_one<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let coll = collection.to_string();
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
-    let autobump = query::SystemFieldAutoBump {
-        dispatch_write: true,
-        actor_id: actor_id.as_deref(),
-        ..Default::default()
-    };
-    let built = crate::descriptor::collection_schema(&binding, &coll).and_then(|schema| {
-        let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-        query::build_restore_one_with_system_fields(
-            &app,
-            &coll,
-            &schema,
-            &filter,
-            current_sql_dialect(),
-            &autobump,
-        )
-        .map_err(DbError::from)
-    });
+
+    let built = plan_restore_one(&binding, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -1576,6 +1664,37 @@ pub(crate) fn dispatch_restore_one<'s>(
 }
 
 /// Bulk-restore entry point.
+/// The ENGINE half of `restore_many`. Like [`plan_restore_one`], the autobump
+/// sets `dispatch_write: true`; only the builder differs.
+pub(crate) fn plan_restore_many(
+    binding: &DbBinding,
+    collection: &str,
+    filter: Value,
+    actor_id: Option<&str>,
+) -> Result<query::BuiltQuery, DbError> {
+    let app = binding.app_id();
+    let autobump = query::SystemFieldAutoBump {
+        dispatch_write: true,
+        actor_id,
+        ..Default::default()
+    };
+    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
+        let mut filter = filter;
+        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        query::build_restore_many_with_system_fields(
+            app,
+            collection,
+            &schema,
+            &filter,
+            current_sql_dialect(),
+            &autobump,
+        )
+        .map_err(DbError::from)
+    })
+}
+
+/// The ADAPTER half of `restore_many`. See [`dispatch_purge_one`] for the
+/// outstanding second cut on the `async move` body.
 pub(crate) fn dispatch_restore_many<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     binding: DbBinding,
@@ -1587,28 +1706,11 @@ pub(crate) fn dispatch_restore_many<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
     let coll = collection.to_string();
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = system_fields_pass::current_actor_id(&state);
-    let autobump = query::SystemFieldAutoBump {
-        dispatch_write: true,
-        actor_id: actor_id.as_deref(),
-        ..Default::default()
-    };
-    let built = crate::descriptor::collection_schema(&binding, &coll).and_then(|schema| {
-        let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-        query::build_restore_many_with_system_fields(
-            &app,
-            &coll,
-            &schema,
-            &filter,
-            current_sql_dialect(),
-            &autobump,
-        )
-        .map_err(DbError::from)
-    });
+
+    let built = plan_restore_many(&binding, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -1638,16 +1740,22 @@ pub(crate) fn dispatch_restore_many<'s>(
 /// `opts.include_deleted: true` opts out of the auto
 /// soft-delete `$match` (per Q-SF-J -- every read-side
 /// method auto-filters for consistency).
-pub(crate) fn dispatch_aggregate<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    binding: DbBinding,
+/// The ENGINE half of `aggregate`.
+///
+/// Returns a PAIR, unlike the seven single-`BuiltQuery` plans in this file:
+/// `build_aggregate_with_result_columns` yields the result-column list alongside
+/// the query, and the adapter needs it to shape the response. `distinct` is the
+/// other pair-returning member of this group.
+///
+/// `aggregate_group_fields(&pipeline)` deliberately stays on the adapter side for
+/// now. It is pipeline analysis and belongs here, but moving it would make this a
+/// three-value return; it travels with the outstanding second cut instead.
+pub(crate) fn plan_aggregate(
+    binding: &DbBinding,
     collection: &str,
-    pipeline: Value,
-    opts: Value,
-) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
-    let state = runtime_state(scope);
-
+    pipeline: &Value,
+    opts: &Value,
+) -> Result<(query::BuiltQuery, Option<Vec<String>>), DbError> {
     // Record into the active query's read-set so the broker can
     // narrow events. If the first stage is `$match`, capture its filter;
     // otherwise record a coarse-grained entry (empty filter) — the
@@ -1659,7 +1767,7 @@ pub(crate) fn dispatch_aggregate<'s>(
             .and_then(|stage| stage.get("$match"))
             .cloned()
             .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
-        record_read_set(&binding, collection, &captured_filter);
+        record_read_set(binding, collection, &captured_filter);
     }
 
     let include_deleted = opts
@@ -1668,26 +1776,42 @@ pub(crate) fn dispatch_aggregate<'s>(
         .unwrap_or(false);
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
 
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
-    let coll = collection.to_string();
-    let group_fields = aggregate_group_fields(&pipeline);
+    let app_id = binding.app_id();
     // The descriptor entry is the aggregate builder's identifier allowlist.
     // `$group.by` / `$sum` / `$sort` on a masked column read the field's own
     // column, which holds the mask - there is no sibling to lower to any more.
-    let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
+    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         query::build_aggregate_with_result_columns(
             app_id,
             collection,
-            &pipeline,
+            pipeline,
             filter_soft_deleted,
             &schema,
             current_sql_dialect(),
         )
         .map_err(DbError::from)
-    });
-    let (built, result_columns): (_, Option<Vec<String>>) = match built {
+    })
+}
+
+/// The ADAPTER half of `aggregate`. See [`dispatch_purge_one`] for the
+/// outstanding second cut on the `async move` body.
+pub(crate) fn dispatch_aggregate<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    binding: DbBinding,
+    collection: &str,
+    pipeline: Value,
+    opts: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let planned = plan_aggregate(&binding, collection, &pipeline, &opts);
+
+    let app_id = binding.app_id();
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = crate::tx_scope::capture_route(scope, app_id);
+    let coll = collection.to_string();
+    let group_fields = aggregate_group_fields(&pipeline);
+    let (built, result_columns): (_, Option<Vec<String>>) = match planned {
         Ok((bq, cols)) => (Ok(bq), cols),
         Err(e) => (Err(e), None),
     };
@@ -1730,6 +1854,64 @@ pub(crate) fn dispatch_aggregate<'s>(
     promise
 }
 
+/// The ENGINE half of `distinct`: no `scope`, no `v8::`, no `ResolveValue`.
+///
+/// Returns a PAIR, like [`plan_aggregate`] and unlike the other seven plans in
+/// this file. The second element is `distinct_reads_masked_sibling`, which the
+/// adapter cannot recompute: it is derived from the descriptor `schema_hint`,
+/// and the hint dies with this function.
+///
+/// The schema resolution that `dispatch_distinct` used to do inline, with its own
+/// `reject_op` and an early `return promise`, is now the `?` below. That is
+/// behaviour-preserving rather than a rewrite: `run_op`'s error arm at
+/// `crud/mod.rs:191` is literally `return reject_op(resolver, request_id, e)`,
+/// the same call the hand-rolled branch made, and both push one future onto
+/// `spawned_ops`. Verified by reading `run_op`, not by test.
+///
+/// NOTE for anyone extending this: `distinct` does NOT `record_read_set`, though
+/// [`plan_count`] and most siblings do. That asymmetry is transcribed from the
+/// original body, not an omission - do not "restore" it.
+pub(crate) fn plan_distinct(
+    binding: &DbBinding,
+    collection: &str,
+    field: &str,
+    filter: Value,
+    opts: &Value,
+) -> Result<(query::BuiltQuery, bool), DbError> {
+    let app_id = binding.app_id();
+
+    let include_deleted = opts
+        .get("include_deleted")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
+
+    // A DISTINCT over a masked column returns MASKS - the column with the
+    // field's own name is the one it selects, and that column holds the mask.
+    // So the read pipeline's decrypt stage has nothing to do for it, and would
+    // be handed a mask string where it expects base64. Derived from the same
+    // descriptor entry the builder uses; an undeclared collection rejects
+    // before either.
+    let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
+    let distinct_reads_masked_sibling = query::column_is_masked(field, &schema_hint);
+
+    let mut filter = filter;
+    maybe_lower_sqlite_boolean_filter(&schema_hint, &mut filter);
+
+    let built = query::build_distinct_with_soft_delete_with_dialect(
+        app_id,
+        collection,
+        field,
+        &filter,
+        filter_soft_deleted,
+        &schema_hint,
+        current_sql_dialect(),
+    )
+    .map_err(DbError::from)?;
+
+    Ok((built, distinct_reads_masked_sibling))
+}
+
 /// Shared dispatch for `distinct`. `field` is the column name; `filter`
 /// is the WHERE-clause JSON.
 ///
@@ -1743,45 +1925,20 @@ pub(crate) fn dispatch_distinct<'s>(
     filter: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    let planned = plan_distinct(&binding, collection, field, filter, &opts);
+
     let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-
-    let include_deleted = opts
-        .get("include_deleted")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
     let coll = collection.to_string();
-    // A DISTINCT over a masked column returns MASKS - the column with the
-    // field's own name is the one it selects, and that column holds the mask.
-    // So the read pipeline's decrypt stage has nothing to do for it, and would
-    // be handed a mask string where it expects base64. Derived from the same
-    // descriptor entry the builder uses; an undeclared collection rejects
-    // before either.
-    let schema_hint = match crate::descriptor::collection_schema(&binding, collection) {
-        Ok(schema) => schema,
-        Err(e) => {
-            let rejected = async move { reject_op(resolver, request_id, e) };
-            state.borrow_mut().spawned_ops.push(Box::pin(rejected));
-            return promise;
-        }
+    // The `false` is unobservable, not a default: on the error arm `run_op`
+    // rejects before it ever calls the closure that reads this flag.
+    let (built, distinct_reads_masked_sibling) = match planned {
+        Ok((bq, masked)) => (Ok(bq), masked),
+        Err(e) => (Err(e), false),
     };
-    let distinct_reads_masked_sibling = query::column_is_masked(field, &schema_hint);
-    let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(&schema_hint, &mut filter);
-    let built = query::build_distinct_with_soft_delete_with_dialect(
-        app_id,
-        collection,
-        field,
-        &filter,
-        filter_soft_deleted,
-        &schema_hint,
-        current_sql_dialect(),
-    )
-    .map_err(DbError::from);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -1828,18 +1985,33 @@ pub(crate) fn dispatch_distinct<'s>(
 ///
 /// `opts.include_deleted: true` opts out of the auto-
 /// filter.
-pub(crate) fn dispatch_count<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    binding: DbBinding,
+/// The ENGINE half of `count`: no `scope`, no `v8::`, no `ResolveValue`.
+///
+/// This is the cut the crate split requires, per
+/// `docs/proposals/2026-08-31-data-crate-shape.md:138-142` - "the 39 V8-signature
+/// functions belong in the thin layer, they ARE the boundary. Their `async move`
+/// bodies are not - those bodies are query pipeline. The engine must stop
+/// returning `OpResult`/`ResolveValue` and return data the adapter lowers."
+///
+/// It returns a `BuiltQuery`; `dispatch_count` below owns the promise, the route
+/// capture and the `i64 -> ResolveValue` lowering. This is the worked example for
+/// the other sixteen `dispatch_*` functions in this file.
+///
+/// ORDERING: `record_read_set` runs here, ahead of the V8 prologue, where it used
+/// to run between `runtime_state` and `setup_js_promise`. That is safe rather than
+/// merely convenient: it touches only the `read_set` thread-local and the
+/// descriptor cache, and none of `runtime_state` / `setup_js_promise` /
+/// `capture_route` reads or writes either. Reasoned from those three bodies, not
+/// proven by a test.
+pub(crate) fn plan_count(
+    binding: &DbBinding,
     collection: &str,
     filter: Value,
-    opts: Value,
-) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
-    let state = runtime_state(scope);
+    opts: &Value,
+) -> Result<query::BuiltQuery, DbError> {
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
-    record_read_set(&binding, collection, &filter);
+    record_read_set(binding, collection, &filter);
 
     let include_deleted = opts
         .get("include_deleted")
@@ -1847,10 +2019,8 @@ pub(crate) fn dispatch_count<'s>(
         .unwrap_or(false);
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
 
-    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
-    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
-    let built = crate::descriptor::collection_schema(&binding, collection).and_then(|schema| {
+    let app_id = binding.app_id();
+    crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
         query::build_count_with_soft_delete(
@@ -1862,7 +2032,28 @@ pub(crate) fn dispatch_count<'s>(
             current_sql_dialect(),
         )
         .map_err(DbError::from)
-    });
+    })
+}
+
+/// The ADAPTER half of `count`: the V8 boundary and nothing else.
+///
+/// Owns the promise, freezes the route while `scope` is live, spawns the op, and
+/// lowers the engine's `i64` into a `ResolveValue`. Every line of query pipeline
+/// lives in [`plan_count`].
+pub(crate) fn dispatch_count<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    binding: DbBinding,
+    collection: &str,
+    filter: Value,
+    opts: Value,
+) -> v8::Local<'s, v8::Promise> {
+    let built = plan_count(&binding, collection, filter, &opts);
+
+    let app_id = binding.app_id();
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+    // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    let route = crate::tx_scope::capture_route(scope, app_id);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
