@@ -283,7 +283,12 @@ fn parse_timestamp_millis(s: &str) -> Option<i64> {
     if b.len() < 19 {
         return None;
     }
-    if b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b' ' | b'T') || b[13] != b':' || b[16] != b':' {
+    if b[4] != b'-'
+        || b[7] != b'-'
+        || !matches!(b[10], b' ' | b'T')
+        || b[13] != b':'
+        || b[16] != b':'
+    {
         return None;
     }
 
@@ -366,7 +371,11 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
     if !(1..=12).contains(&m) || !(1..=31).contains(&d) {
         return None;
     }
-    let y = if m <= 2 { i64::from(y) - 1 } else { i64::from(y) };
+    let y = if m <= 2 {
+        i64::from(y) - 1
+    } else {
+        i64::from(y)
+    };
     let era = y.div_euclid(400);
     let yoe = (y - era * 400) as u64;
     let m = m as i64;
@@ -384,22 +393,15 @@ async fn decrypt_rows_on_read(
 ) -> Result<(), DbError> {
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-    if let Some(pg) = backend.as_encrypted_column_pg() {
-        for row in rows.iter_mut() {
-            crate::crud::encryption_pass::decrypt_row_on_read(
-                pg, app_id, collection, schema, row,
-            )
+    // One arm, not two. This was a PG branch and a SQLite branch calling the
+    // SAME function with the SAME arguments, differing only in the concrete
+    // type they passed - a monomorphisation artifact of the `EncryptedColumn`
+    // trait, deleted 2026-09-02. Column encryption never depended on the
+    // vendor; only key sourcing did, and both backends source identically.
+    let keys = backend.key_store();
+    for row in rows.iter_mut() {
+        crate::crud::encryption_pass::decrypt_row_on_read(keys, app_id, collection, schema, row)
             .await?;
-        }
-        return Ok(());
-    }
-    if let Some(sq) = backend.as_encrypted_column_sqlite() {
-        for row in rows.iter_mut() {
-            crate::crud::encryption_pass::decrypt_row_on_read(
-                sq, app_id, collection, schema, row,
-            )
-            .await?;
-        }
     }
     Ok(())
 }
@@ -516,9 +518,15 @@ mod tests {
         normalize_row_on_read(&crate::query::empty_read_schema(), &mut row).expect("normalize");
 
         assert_eq!(row["created_at"], serde_json::json!(1_778_115_723_004i64));
-        assert_eq!(row["published_at"], Value::String("2026-05-07T01:02:03.004Z".to_string()));
+        assert_eq!(
+            row["published_at"],
+            Value::String("2026-05-07T01:02:03.004Z".to_string())
+        );
         assert_eq!(row["active"], serde_json::json!(1));
-        assert_eq!(row["prefs"], Value::String("{\"theme\":\"dark\"}".to_string()));
+        assert_eq!(
+            row["prefs"],
+            Value::String("{\"theme\":\"dark\"}".to_string())
+        );
     }
 
     #[test]

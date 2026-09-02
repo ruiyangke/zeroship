@@ -47,9 +47,9 @@
 use serde_json::Value;
 use zeroize::Zeroizing;
 
-use crate::backend::EncryptedColumn;
 use crate::crud::mask_pass::apply_mask_kind;
 use crate::diff::{Classification, MaskKind};
+use crate::encryption::KeyStore;
 use zeroship_data_core::error::DbError;
 
 /// Default batch size for backfill / rewrite loops. We use 1000 here
@@ -104,13 +104,17 @@ pub fn parse_mask_sentinel(s: &str) -> Result<(MaskKind, Classification), DbErro
 /// pass writes nothing (matches `apply_mask_on_write`'s Q-MASK-L
 /// pass-through-null rule).
 ///
-/// The `B: EncryptedColumn` bound carries the decrypt path: an
-/// encrypted column resolves its key + recovers plaintext before the
-/// mask transform; plaintext columns (`enc_meta == None`) take the
-/// direct branch.
+/// The `keys` parameter carries the decrypt path: an encrypted column
+/// resolves its key + recovers plaintext before the mask transform;
+/// plaintext columns (`enc_meta == None`) never touch it and take the direct
+/// branch.
+///
+/// It was a `B: EncryptedColumn` bound until 2026-09-02, which made every
+/// caller pick a vendor to instantiate it with. A [`KeyStore`] is the whole of
+/// what that bound supplied.
 #[allow(clippy::too_many_arguments)]
-pub async fn apply_mask_to_one_row<B>(
-    backend: &B,
+pub async fn apply_mask_to_one_row(
+    keys: &KeyStore,
     app_id: &str,
     collection: &str,
     column: &str,
@@ -118,10 +122,7 @@ pub async fn apply_mask_to_one_row<B>(
     kind: MaskKind,
     row_pk: &str,
     value: &Value,
-) -> Result<Option<String>, DbError>
-where
-    B: EncryptedColumn,
-{
+) -> Result<Option<String>, DbError> {
     if value.is_null() {
         return Ok(None);
     }
@@ -139,7 +140,7 @@ where
             )));
         };
         let bytes = hex_to_bytes(hex_str)?;
-        let key = backend.resolve_key(app_id, &enc.key_id).await?;
+        let key = keys.resolve(app_id, &enc.key_id).await?;
         let aad = crate::encryption::aad::canonical_aad(
             collection,
             column,
@@ -148,7 +149,7 @@ where
                 crate::backend::EncryptionMode::Deterministic => None,
             },
         );
-        let plaintext_bytes = backend.decrypt(&key, enc.mode, &bytes, &aad)?;
+        let plaintext_bytes = crate::encryption::aead::decrypt(&key, &bytes, &aad)?;
         wrapped_bytes_to_string(&plaintext_bytes, enc.wraps)
     } else {
         plaintext_from_value(column, value)?

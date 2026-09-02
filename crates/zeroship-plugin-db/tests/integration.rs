@@ -36,8 +36,8 @@
 use compio_postgres::{NoTls, Pool};
 use serde_json::{Value, json};
 use uuid::Uuid;
-use zeroship_plugin_db::backend::ChangeStream;
 use zeroship_data_core::binding::DbBinding;
+use zeroship_plugin_db::backend::ChangeStream;
 
 const CDC_TEST_WORKER_ID: &str = "plugin-db-integration-worker";
 
@@ -3715,8 +3715,8 @@ fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
 
 #[test]
 fn cross_app_fk_rejected_at_parse() {
-    use zeroship_plugin_db::cross_app_fk::reject_cross_app_fk;
     use zeroship_data_core::error::DbError;
+    use zeroship_plugin_db::cross_app_fk::reject_cross_app_fk;
 
     let schema = serde_json::json!({
         "authorId": { "type": "ref", "refTarget": "other_app.users" }
@@ -3944,8 +3944,8 @@ async fn vector_search_returns_k_nearest() {
 /// part of the contract, not the drop itself.
 #[compio::test]
 async fn pgvector_extension_missing_reports_typed_error() {
-    use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
     use zeroship_data_core::error::DbError;
+    use zeroship_plugin_db::backend::{PostgresBackend, VectorIndex, VectorMetric};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4259,8 +4259,8 @@ async fn near_returns_within_radius() {
 /// probe arm and its cached arm separately.
 #[compio::test]
 async fn postgis_extension_missing_reports_typed_error() {
-    use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
     use zeroship_data_core::error::DbError;
+    use zeroship_plugin_db::backend::{GeoPoint, PostgresBackend, SpatialIndex};
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
@@ -4347,12 +4347,13 @@ async fn postgis_extension_missing_reports_typed_error() {
 // Imports are local to this section. Other test modules in this file
 // import `PostgresBackend` + `DbError` per-fn via `use ...` inside the
 // test body; here they are surfaced at module scope so the four tests
-// below can share one `use` block. The `as _` on `EncryptedColumn`
-// brings the trait methods into scope without aliasing the trait name
-// itself.
-use zeroship_plugin_db::backend::{EncryptedColumn as _, EncryptionMode, PostgresBackend};
-use zeroship_plugin_db::encryption;
+// below can share one `use` block. There used to be an `EncryptedColumn as _`
+// here, importing a capability trait for its methods; the trait was deleted on
+// 2026-09-02 and these tests now call `encryption::aead` directly with a key
+// from `backend.key_store()` - the same path production takes.
 use zeroship_data_core::error::DbError;
+use zeroship_plugin_db::backend::{EncryptionMode, PostgresBackend};
+use zeroship_plugin_db::encryption;
 
 /// Helper: hand this isolate a synthetic root key for `key_id`, so the
 /// `PostgresBackend` the test (or the CRUD path behind it) constructs
@@ -4410,14 +4411,19 @@ async fn encrypted_column_round_trip_randomised() {
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
     let key = backend
-        .resolve_key("app1", "default")
+        .key_store()
+        .resolve("app1", "default")
         .await
         .expect("resolve_key");
     let plaintext = b"123-45-6789";
     let aad = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a"));
-    let ct = backend
-        .encrypt(&key, EncryptionMode::Randomised, plaintext, &aad)
-        .expect("encrypt");
+    let ct = zeroship_plugin_db::encryption::aead::encrypt(
+        &key,
+        EncryptionMode::Randomised,
+        plaintext,
+        &aad,
+    )
+    .expect("encrypt");
 
     // Bind via base64 decode just like the build_insert layer does.
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct);
@@ -4452,9 +4458,8 @@ async fn encrypted_column_round_trip_randomised() {
         }
         out
     };
-    let recovered = backend
-        .decrypt(&key, EncryptionMode::Randomised, &raw, &aad)
-        .expect("decrypt");
+    let recovered =
+        zeroship_plugin_db::encryption::aead::decrypt(&key, &raw, &aad).expect("decrypt");
     assert_eq!(recovered, plaintext);
     drop(backend);
     release_pg(pool).await;
@@ -4488,24 +4493,26 @@ async fn encrypted_randomised_row_swap_rejected() {
     .unwrap();
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
-    let key = backend.resolve_key("app1", "default").await.unwrap();
+    let key = backend
+        .key_store()
+        .resolve("app1", "default")
+        .await
+        .unwrap();
     // Insert row A with its OWN AAD (binds row_pk = "row_a").
-    let ct_a = backend
-        .encrypt(
-            &key,
-            EncryptionMode::Randomised,
-            b"sensitive-A",
-            &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a")),
-        )
-        .unwrap();
-    let ct_b = backend
-        .encrypt(
-            &key,
-            EncryptionMode::Randomised,
-            b"sensitive-B",
-            &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b")),
-        )
-        .unwrap();
+    let ct_a = zeroship_plugin_db::encryption::aead::encrypt(
+        &key,
+        EncryptionMode::Randomised,
+        b"sensitive-A",
+        &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_a")),
+    )
+    .unwrap();
+    let ct_b = zeroship_plugin_db::encryption::aead::encrypt(
+        &key,
+        EncryptionMode::Randomised,
+        b"sensitive-B",
+        &encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b")),
+    )
+    .unwrap();
     for (id, ct) in [("row_a", &ct_a), ("row_b", &ct_b)] {
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ct);
         pool.execute(
@@ -4550,8 +4557,7 @@ async fn encrypted_randomised_row_swap_rejected() {
         out
     };
     let aad_b = encryption::canonical_aad("enc_notes", "ssn", Some(b"row_b"));
-    let err = backend
-        .decrypt(&key, EncryptionMode::Randomised, &raw, &aad_b)
+    let err = zeroship_plugin_db::encryption::aead::decrypt(&key, &raw, &aad_b)
         .expect_err("row-swap must fail AAD verification");
     match err {
         DbError::ValidationFailed { code, .. } => {
@@ -4599,15 +4605,23 @@ async fn encrypted_deterministic_equality_lookup() {
     .unwrap();
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
-    let key = backend.resolve_key("app1", "default").await.unwrap();
+    let key = backend
+        .key_store()
+        .resolve("app1", "default")
+        .await
+        .unwrap();
 
     // Insert 5 rows with the same SSN to confirm deterministic mode
     // produces identical ciphertext (we then query by exact ciphertext
     // and expect all 5 to come back).
     let aad = encryption::canonical_aad("enc_notes", "ssn", None);
-    let ct_shared = backend
-        .encrypt(&key, EncryptionMode::Deterministic, b"shared-ssn", &aad)
-        .unwrap();
+    let ct_shared = zeroship_plugin_db::encryption::aead::encrypt(
+        &key,
+        EncryptionMode::Deterministic,
+        b"shared-ssn",
+        &aad,
+    )
+    .unwrap();
     let b64_shared = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct_shared);
 
     for i in 0..5 {
@@ -4621,9 +4635,13 @@ async fn encrypted_deterministic_equality_lookup() {
         .unwrap();
     }
     // Plus a distinct row.
-    let ct_other = backend
-        .encrypt(&key, EncryptionMode::Deterministic, b"other-ssn", &aad)
-        .unwrap();
+    let ct_other = zeroship_plugin_db::encryption::aead::encrypt(
+        &key,
+        EncryptionMode::Deterministic,
+        b"other-ssn",
+        &aad,
+    )
+    .unwrap();
     let b64_other = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct_other);
     pool.execute(
         &format!(
@@ -5127,7 +5145,8 @@ async fn encrypted_column_missing_key_typed_error() {
 
     let backend = PostgresBackend::new(pool.clone(), url.clone());
     let err = backend
-        .resolve_key("app1", "missing_test")
+        .key_store()
+        .resolve("app1", "missing_test")
         .await
         .expect_err("missing key must yield a typed error");
     match err {
@@ -6472,13 +6491,18 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     // randomised mode (crud/unmask.rs:503-510).
     let backend = PostgresBackend::new(admin_pool.clone(), url.clone());
     let key = backend
-        .resolve_key(app, "default")
+        .key_store()
+        .resolve(app, "default")
         .await
         .expect("resolve_key");
     let aad = encryption::canonical_aad(coll, "ssn", Some(b"u1"));
-    let ct = backend
-        .encrypt(&key, EncryptionMode::Randomised, b"123-45-6789", &aad)
-        .expect("encrypt");
+    let ct = zeroship_plugin_db::encryption::aead::encrypt(
+        &key,
+        EncryptionMode::Randomised,
+        b"123-45-6789",
+        &aad,
+    )
+    .expect("encrypt");
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct);
     admin_pool
         .execute(

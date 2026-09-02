@@ -17,9 +17,9 @@
 //! 3. Look up the column's encryption metadata. If encrypted, SELECT
 //!    the BYTEA / BLOB ciphertext, reconstruct the canonical AAD
 //!    (Camp A — row_pk in AAD for Randomised, omitted for Deterministic),
-//!    and decrypt through the backend's [`crate::backend::EncryptedColumn`]
-//!    impl. If plaintext (mask-only, no encryption), SELECT the parent
-//!    column directly.
+//!    and decrypt through [`crate::encryption::aead`] with a key from the
+//!    backend handle's [`crate::encryption::KeyStore`]. If plaintext
+//!    (mask-only, no encryption), SELECT the parent column directly.
 //! 4. Emit a `granted`-outcome audit row to `__zeroship_audit_unmask`
 //!    in the app's own schema.
 //! 5. Return the plaintext.
@@ -542,8 +542,10 @@ fn meter_audit_write(app_id: &str) {
 
 /// Encrypted-column path: SELECT the BYTEA / BLOB ciphertext for
 /// `(collection, row_pk)`, reconstruct the canonical AAD per
-/// `EncryptionMode`, and decrypt through the backend-arm `EncryptedColumn`
-/// impl. Returns the plaintext as a UTF-8 string (for `wraps = string`)
+/// `EncryptionMode`, and decrypt through `encryption::aead`. The SELECT is
+/// still per-arm because the SQL differs; the decrypt is not, and stopped
+/// being so when `EncryptedColumn` was deleted on 2026-09-02.
+/// Returns the plaintext as a UTF-8 string (for `wraps = string`)
 /// or base64-encoded raw bytes (for `wraps = bytes`); `wraps = number`
 /// surfaces the f64's `to_string()` form.
 #[allow(unused_variables)]
@@ -565,8 +567,7 @@ async fn fetch_and_decrypt(
     );
 
     // ---- PG arm ----
-    if let Some(pg) = backend.as_encrypted_column_pg() {
-        use crate::backend::EncryptedColumn as _;
+    if let Some(pg) = backend.as_postgres() {
         use crate::backend::pg_autocommit::ScalarRead;
         // The real value lives in the RAW column - the field's own column
         // holds the mask. This function and its SQLite twin are the only
@@ -631,15 +632,21 @@ async fn fetch_and_decrypt(
             }
             ScalarRead::Value(bytes) => bytes,
         };
-        let key = pg.resolve_key(app_id, &enc_meta.key_id).await?;
-        let plaintext_bytes = pg.decrypt(&key, enc_meta.mode, &bytes, &aad)?;
+        // Key sourcing and AEAD are vendor-neutral; only the SELECT above is
+        // not. That is why the downcast on this arm is now `as_postgres` (for
+        // the roled read) rather than the deleted `as_encrypted_column_pg`.
+        let key = backend
+            .key_store()
+            .resolve(app_id, &enc_meta.key_id)
+            .await?;
+        let plaintext_bytes = crate::encryption::aead::decrypt(&key, &bytes, &aad)?;
         return wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps);
     }
 
     // ---- SQLite arm ----
-    if let Some(sq) = backend.as_encrypted_column_sqlite() {
+    if let Some(sq) = backend.as_sqlite() {
+        use crate::backend::DialectBuilder as _;
         use crate::backend::sqlite::session::TypedCell;
-        use crate::backend::{DialectBuilder as _, EncryptedColumn as _};
         let q_app = sq.quote_ident(app_id);
         let q_coll = sq.quote_ident(&args.collection);
         let q_col = sq.quote_ident(&crate::query::raw_column_name(&args.column));
@@ -676,8 +683,11 @@ async fn fetch_and_decrypt(
                 )));
             }
         };
-        let key = sq.resolve_key(app_id, &enc_meta.key_id).await?;
-        let plaintext_bytes = sq.decrypt(&key, enc_meta.mode, &bytes, &aad)?;
+        let key = backend
+            .key_store()
+            .resolve(app_id, &enc_meta.key_id)
+            .await?;
+        let plaintext_bytes = crate::encryption::aead::decrypt(&key, &bytes, &aad)?;
         return wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps);
     }
 
@@ -1561,7 +1571,6 @@ async fn write_audit_query_hint_row(
     write_audit_unmask_row(app_id, &synthetic, &class_joined, outcome).await
 }
 
-
 // ---------------------------------------------------------------------------
 // The DB-3 boundary, cfg-forked so an integration target can reach it
 // ---------------------------------------------------------------------------
@@ -1634,7 +1643,6 @@ fn require_string(obj: &serde_json::Map<String, Value>, key: &str) -> Result<Str
         })
         .map(str::to_string)
 }
-
 
 // The bulk half of the DB-3 boundary. Visibility is forked for the reason
 // spelled out above `parse_args`.
@@ -1782,10 +1790,7 @@ mod tests {
         // and neither is a refused CLAIM - nothing was claimed.
         assert_eq!(sanitize_app_actor(None).actor, None);
         assert_eq!(sanitize_app_actor(None).rejected_claim, None);
-        assert_eq!(
-            sanitize_app_actor(Some(json!({}))).actor,
-            Some(json!({}))
-        );
+        assert_eq!(sanitize_app_actor(Some(json!({}))).actor, Some(json!({})));
         assert_eq!(sanitize_app_actor(Some(json!({}))).rejected_claim, None);
     }
 

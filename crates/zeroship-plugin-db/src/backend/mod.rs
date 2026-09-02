@@ -1143,100 +1143,55 @@ pub trait SpatialIndex: 'static {
 pub use zeroship_schema::descriptors::GeoPoint;
 
 // ===========================================================================
-// EncryptedColumn + Backup capability traits
+// The Backup capability trait
 // ===========================================================================
 //
-// Two capability traits defined per
-// `docs/archive/p5-encryption-backup-implementation-plan.md` §2 + §9.
-// Neither joins the `Backend` super-trait composition. They are admin-surface
-// accessors routed via dedicated `BackendHandle::as_encrypted_column_*` /
-// `as_backup_*` accessors (mirror of the `as_change_stream_*` shape
-// the [`ChangeStream`] capability adopted).
+// ONE capability trait, `Backup`, defined per
+// `docs/archive/p5-encryption-backup-implementation-plan.md` §2 + §9. It does
+// not join the `Backend` super-trait composition; it is an admin-surface
+// accessor routed via a dedicated accessor (mirror of the `as_change_stream_*`
+// shape the [`ChangeStream`] capability adopted).
+//
+// THERE WERE TWO UNTIL 2026-09-02. `EncryptedColumn` is deleted, and its own
+// rustdoc is what condemned it: it said "PG and SQLite share the same AEAD
+// impl, so per-backend trait impls are thin delegations" and "Key sourcing no
+// longer differs" - the second having become true on 2026-08-27 when the admin
+// schema went. Measured before deleting: the two impls were identical line for
+// line, every `KeyHandle` in the tree (both backends, all three test stubs)
+// bound to `crate::encryption::aead::AeadKey`, and both backends held the same
+// `crate::encryption::KeyStore` built from the same `isolate_key_source()`.
+//
+// So the trait carried NO dialect knowledge, and its only effect was to make
+// the engine ask which vendor it was on in order to reach code that does not
+// depend on the answer - `as_encrypted_column_pg` / `as_encrypted_column_sqlite`
+// were 4 of the 10 production vendor downcasts in the engine tier. Encryption
+// is a property of the workspace, not of the database, so the key store is now
+// borrowed through one dialect-neutral `BackendHandle::key_store` and the CRUD
+// passes take `&KeyStore` directly.
+//
+// Do not reintroduce a per-backend encryption trait to "leave room" for a KMS
+// handle. That is the exact argument the deleted associated type carried, and
+// it bought a hypothetical variant at the cost of a real vendor coupling in
+// every caller. A KMS arm belongs inside `KeyStore`, which is already the one
+// type both backends name.
 //
 // This section brings:
-//   - the trait declarations themselves;
+//   - the `Backup` trait declaration;
 //   - the supporting [`EncryptionMode`] / [`BusyPolicy`] /
 //     [`SnapshotOpts`] / [`SnapshotHandle`] / [`PitrTarget`] types;
 //   - impls on `PostgresBackend` + `SqliteBackend`;
 //   - compile-time trait-shape pins in the `tests` module.
 //
-// The encryption module the impls delegate to is at
+// The encryption module the AEAD path delegates to is at
 // `crate::encryption`.
 
-/// AEAD encrypt/decrypt at the storage boundary.
-///
-/// **Why a capability trait** (not on the `Backend` super-trait):
-///
-/// - PG and SQLite share the same AEAD impl (`crate::encryption::aead`),
-///   so per-backend trait impls are thin delegations.
-/// - **Key sourcing no longer differs**: both backends read the same
-///   in-process `LocalKeySource` (supplied roots, else the
-///   `ZEROSHIP_COLUMN_KEY_<KEYID>` env var). PG used to ask a
-///   `get_column_key` getter first; that arm went with the admin schema
-///   on 2026-08-27 (see `crate::encryption::keys`). The trait's
-///   [`Self::KeyHandle`] associated type still lets each backend pick
-///   its own key-material container without forcing a common type on
-///   the read/write surface.
-/// - The 13 carved capability traits set the pattern: focused
-///   trait per capability, accessor-routed dispatch through
-///   [`BackendHandle`], no boxed dyn in the hot path.
-///
-/// **Per-row AAD policy** (the riskiest decision, resolved Camp A in
-/// `docs/archive/p5-encryption-backup-implementation-plan.md` §13):
-/// callers pass the row PK in AAD for `EncryptionMode::Randomised`
-/// (typed_id PKs are minted SDK-side so the PK is always available
-/// before INSERT — no chicken-and-egg). `EncryptionMode::Deterministic`
-/// omits the row PK so the B-tree-on-ciphertext equality index works.
-///
-/// **Not `Send + Sync`** — same Open Q4 reasoning as the rest of the
-/// backend traits: the compio runtime is single-threaded per worker.
-pub trait EncryptedColumn: 'static {
-    /// Backend-specific key handle. PG uses
-    /// `crate::encryption::aead::AeadKey`; SQLite likely uses the
-    /// same. The associated type leaves room for a PG variant that
-    /// wraps an opaque KMS handle in the future.
-    type KeyHandle: 'static;
-
-    /// Resolve (cache or derive) the AEAD key for `(app_id, key_id)`.
-    /// PG reads through the admin-schema SECURITY DEFINER
-    /// getter; SQLite reads the env var; both pass the bytes
-    /// through `crate::encryption::keys::KeyStore::resolve` which
-    /// does the HKDF expansion.
-    #[allow(async_fn_in_trait)]
-    async fn resolve_key(&self, app_id: &str, key_id: &str) -> Result<Self::KeyHandle, DbError>;
-
-    /// Encrypt `plaintext` under `key` and `aad`, returning the
-    /// packed wire blob produced by `crate::encryption::wire::pack`.
-    /// Mode chooses random vs synthetic nonce; the wire format is the
-    /// same.
-    fn encrypt(
-        &self,
-        key: &Self::KeyHandle,
-        mode: EncryptionMode,
-        plaintext: &[u8],
-        aad: &[u8],
-    ) -> Result<Vec<u8>, DbError>;
-
-    /// Decrypt a packed wire blob. Mode-agnostic on the read side —
-    /// the nonce is carried in the wire, AAD reconstruction by the
-    /// caller picks the mode-appropriate shape. Returns
-    /// `ValidationFailed { code: "encryption_aead_failed" }` on tag
-    /// mismatch.
-    fn decrypt(
-        &self,
-        key: &Self::KeyHandle,
-        mode: EncryptionMode,
-        ciphertext: &[u8],
-        aad: &[u8],
-    ) -> Result<Vec<u8>, DbError>;
-}
 
 // `EncryptionMode` is a schema-shape descriptor
 // (the `t.encrypted({mode})` facet; the DDL builder emits the `zsenc`
 // sentinel from it, and the data-plane AEAD path reconstructs the AAD from
 // it). It was relocated into the leaf crate `zeroship-schema` and is
 // re-exported here so existing `crate::backend::EncryptionMode` references
-// (the `EncryptedColumn` trait, `encryption::aad`, the CRUD passes) resolve
+// (`encryption::aad`, the CRUD passes) resolve
 // unchanged. The mode's semantics (AAD shape / nonce derivation) are
 // implemented by the data-plane crypto in plugin-db, which STAYS here.
 pub use zeroship_schema::descriptors::EncryptionMode;
@@ -1889,45 +1844,28 @@ impl BackendHandle {
     }
 
     // -----------------------------------------------------------------
-    // EncryptedColumn + Backup accessors
+    // Encryption key sourcing
     // -----------------------------------------------------------------
-    //
-    // Same shape as the `as_change_stream_*` accessors above: one
-    // accessor per (capability, backend arm) pair. Each returns
-    // `Some(&PostgresBackend)` / `Some(&SqliteBackend)` on its own arm
-    // and `None` on the other, so the orchestrator-side consumer sites
-    // keep a stable shape regardless of which backend is configured.
 
-    /// Borrow an [`EncryptedColumn`] capability over the PG arm.
+    /// Borrow the isolate's column-encryption key store.
     ///
-    /// Returns `Some(&PostgresBackend)` on the PG arm.
-    /// The `EncryptedColumn` impl wires the admin-schema SECURITY
-    /// DEFINER getter for `column_keys`.
+    /// **This answers a question that is not about the vendor**, which is why
+    /// it is one accessor rather than the `as_encrypted_column_pg` /
+    /// `as_encrypted_column_sqlite` pair it replaced on 2026-09-02. Both arms
+    /// hold the same [`crate::encryption::KeyStore`] type, both built from the
+    /// same `crate::context::isolate_key_source()`, and the AEAD itself is
+    /// `crate::encryption::aead` on either backend. The old pair made every
+    /// caller open a two-arm match to reach code identical on both sides - 4
+    /// of the 10 production vendor downcasts in the engine tier existed for
+    /// exactly that and nothing else.
     ///
-    /// Returns `Some` on the PG arm; `None` on the SQLite arm.
-    pub fn as_encrypted_column_pg(&self) -> Option<&PostgresBackend> {
+    /// Returning the store rather than performing the crypto is deliberate:
+    /// key SOURCING is the only part a backend ever contributed, and now that
+    /// both source identically the seam is a borrow, not a dispatch.
+    pub fn key_store(&self) -> &crate::encryption::KeyStore {
         match self {
-            Self::Postgres(b) => Some(b),
-            Self::Sqlite(_) => None,
-        }
-    }
-
-    /// Borrow an [`EncryptedColumn`] capability over the SQLite arm.
-    ///
-    /// Returns `Some(&SqliteBackend)` on the SQLite arm, `None` on the PG arm.
-    ///
-    /// The arm is a RUNTIME property of this handle, not a build
-    /// configuration. Both backends are compiled into every binary and the
-    /// url scheme picks one (`lib.rs`'s `postgres://` / `sqlite://` branch).
-    /// This comment used to say the SQLite impl was "gated only by
-    /// `feature = "sqlite"`"; there is no such feature on this crate.
-    ///
-    /// What distinguishes the SQLite impl is its key sourcing: env vars rather
-    /// than an admin schema.
-    pub fn as_encrypted_column_sqlite(&self) -> Option<&SqliteBackend> {
-        match self {
-            Self::Postgres(_) => None,
-            Self::Sqlite(b) => Some(b),
+            Self::Postgres(b) => b.key_store(),
+            Self::Sqlite(b) => b.key_store(),
         }
     }
 
@@ -2053,23 +1991,6 @@ mod tests {
     #[allow(dead_code)]
     fn _assert_spatial_index<T: SpatialIndex>() {}
 
-    /// Compile-time: the [`EncryptedColumn`] trait's shape
-    /// is pinned. Ships stub impls on both `PostgresBackend`
-    /// and `SqliteBackend` - see
-    /// `_assert_postgres_backend_impls_encrypted_column` /
-    /// `_assert_sqlite_backend_impls_encrypted_column` below for the
-    /// per-backend instantiations. This unparameterised pin checks that
-    /// the trait itself compiles (associated type + `async fn`
-    /// placement + signature shape).
-    ///
-    /// The two names above were previously written as
-    /// `_assert_encrypted_column_pg` / `_assert_encrypted_column_sqlite`,
-    /// which exist nowhere: a rename updated the sibling referrer below
-    /// and missed this one. Dropped the "(under `sqlite`)" qualifier at
-    /// the same time - this crate's only feature is `test-helpers`, so
-    /// there is no `sqlite` feature to be under.
-    #[allow(dead_code)]
-    fn _assert_encrypted_column<T: EncryptedColumn>() {}
 
     /// Compile-time: the [`Backup`] trait's shape is pinned. Both
     /// backends implement it; the per-backend instantiations are
@@ -2078,22 +1999,19 @@ mod tests {
     #[allow(dead_code)]
     fn _assert_backup<T: Backup>() {}
 
-    /// Compile-time: `PostgresBackend` satisfies
-    /// [`EncryptedColumn`], keyed through the admin-schema SECURITY
-    /// DEFINER getter.
+    /// Compile-time: both backends expose the encryption key store, and
+    /// `BackendHandle` reaches it without naming either.
+    ///
+    /// This replaces three `EncryptedColumn` trait-shape pins deleted with the
+    /// trait on 2026-09-02. What is worth pinning changed with it: the old pins
+    /// asserted that each vendor satisfied a per-vendor crypto trait, which is
+    /// the coupling we removed. What must not regress is the opposite - that
+    /// the key store stays reachable through ONE dialect-neutral accessor, so
+    /// no caller has to reopen a two-arm match to encrypt a column.
     #[allow(dead_code)]
-    fn _assert_postgres_backend_impls_encrypted_column() {
-        fn assert_impl<T: EncryptedColumn>() {}
-        assert_impl::<PostgresBackend>();
-    }
-
-    /// Compile-time: `SqliteBackend` satisfies
-    /// [`EncryptedColumn`] under the `sqlite` feature, keyed from the
-    /// env var rather than an admin schema.
-    #[allow(dead_code)]
-    fn _assert_sqlite_backend_impls_encrypted_column() {
-        fn assert_impl<T: EncryptedColumn>() {}
-        assert_impl::<SqliteBackend>();
+    fn _assert_key_store_is_dialect_neutral() {
+        fn assert_store<T: Fn(&BackendHandle) -> &crate::encryption::KeyStore>(_: T) {}
+        assert_store(BackendHandle::key_store);
     }
 
     /// Compile-time: `PostgresBackend` satisfies [`Backup`].

@@ -52,6 +52,31 @@ pub struct AeadKey {
     pub k_siv: [u8; 32],
 }
 
+/// Encrypt under the column's declared [`EncryptionMode`].
+///
+/// The mode-to-function mapping had no home of its own until 2026-09-02: it
+/// was the body of `EncryptedColumn::encrypt`, written identically on both
+/// backends, and deleting that trait would otherwise have scattered the same
+/// two-arm match across every caller. It belongs here, beside the two
+/// functions it chooses between, because the choice is a property of the
+/// cipher construction and not of any database.
+///
+/// There is deliberately no `decrypt` twin taking a mode: decryption is
+/// mode-agnostic (the wire blob carries the nonce and AES-GCM verifies the tag
+/// however it was produced), and both deleted `decrypt` impls took a `mode`
+/// they then ignored. [`decrypt`] therefore does not ask for one.
+pub fn encrypt(
+    key: &AeadKey,
+    mode: crate::backend::EncryptionMode,
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Result<Vec<u8>, DbError> {
+    match mode {
+        crate::backend::EncryptionMode::Randomised => encrypt_randomised(key, plaintext, aad),
+        crate::backend::EncryptionMode::Deterministic => encrypt_deterministic(key, plaintext, aad),
+    }
+}
+
 /// Encrypt with a per-write random nonce. Returns the packed wire
 /// blob (`[version_flag | nonce | ct+tag]`).
 ///
@@ -59,11 +84,7 @@ pub struct AeadKey {
 /// [`super::aad::canonical_aad`] — the caller is responsible for
 /// folding the right context in for the mode (per Camp-A,
 /// `(collection, column, row_pk_bytes)` for Randomised).
-pub fn encrypt_randomised(
-    key: &AeadKey,
-    plaintext: &[u8],
-    aad: &[u8],
-) -> Result<Vec<u8>, DbError> {
+pub fn encrypt_randomised(key: &AeadKey, plaintext: &[u8], aad: &[u8]) -> Result<Vec<u8>, DbError> {
     let nonce_arr = Aes256Gcm::generate_nonce(&mut OsRng);
     // `Aes256Gcm::generate_nonce` returns a `GenericArray<u8, 12>`
     // — copy out so we can hand the same 12-byte buffer to
@@ -143,9 +164,8 @@ fn encrypt_with_nonce(
 /// state — not a user-visible failure mode.
 pub fn decrypt(key: &AeadKey, blob: &[u8], aad: &[u8]) -> Result<Vec<u8>, DbError> {
     let (nonce, ct_and_tag) = wire::unpack(blob)?;
-    let cipher = Aes256Gcm::new_from_slice(&key.k_enc).map_err(|_| {
-        DbError::internal("encryption::decrypt: AES-256 key must be 32 bytes")
-    })?;
+    let cipher = Aes256Gcm::new_from_slice(&key.k_enc)
+        .map_err(|_| DbError::internal("encryption::decrypt: AES-256 key must be 32 bytes"))?;
     cipher
         .decrypt(
             Nonce::from_slice(nonce),
@@ -370,10 +390,8 @@ mod tests {
         let ptr = slot.as_mut_ptr();
         unsafe {
             std::ptr::drop_in_place(ptr);
-            let bytes = std::slice::from_raw_parts(
-                ptr.cast::<u8>(),
-                std::mem::size_of::<AeadKey>(),
-            );
+            let bytes =
+                std::slice::from_raw_parts(ptr.cast::<u8>(), std::mem::size_of::<AeadKey>());
             assert!(
                 bytes.iter().all(|b| *b == 0),
                 "AeadKey drop must zeroize both key halves"

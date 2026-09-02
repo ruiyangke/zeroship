@@ -57,9 +57,9 @@
 
 use serde_json::Value;
 
-use zeroship_data_core::binding::DbBinding;
 use crate::crud::mask_pass::apply_mask_kind;
 use crate::diff::MaskKind;
+use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
 
 /// Absolute cap on rows sampled per column per run. Even when the
@@ -560,7 +560,7 @@ async fn sample_rows_sqlite(
 /// - Plaintext column: parent arrives as `ParentValue::Plain`; we
 ///   feed it directly to `apply_mask_kind`.
 /// - Encrypted column: decrypt through the backend-arm
-///   `EncryptedColumn` impl using the column's `EncryptionMode`-
+///   `encryption::aead` using the column's `EncryptionMode`-
 ///   appropriate AAD (Randomised binds `row_pk`; Deterministic
 ///   omits it). Plaintext bytes are then decoded per `wraps`
 ///   (string → UTF-8, number → f64, bytes → base64) so the result
@@ -627,47 +627,29 @@ async fn decrypt_parent_value(
         },
     );
 
-    // ---- PG arm ----
-    if let Some(pg) = backend.as_encrypted_column_pg() {
-        use crate::backend::EncryptedColumn as _;
-        let hex_str = match parent {
-            ParentValue::PgHex(s) => s.as_str(),
-            ParentValue::Plain(_) => {
-                return Err(DbError::internal(
-                    "drift_check: encrypted column on PG arrived as plain text",
-                ));
-            }
-            ParentValue::SqliteBlob(_) => {
-                return Err(DbError::internal(
-                    "drift_check: PG path received SQLite BLOB value",
-                ));
-            }
-        };
-        let bytes = hex_to_bytes(hex_str)?;
-        let key = pg.resolve_key(app_id, &enc.key_id).await?;
-        return pg.decrypt(&key, enc.mode, &bytes, &aad);
-    }
-
-    // ---- SQLite arm ----
-    if let Some(sq) = backend.as_encrypted_column_sqlite() {
-        use crate::backend::EncryptedColumn as _;
-        let bytes: &[u8] = match parent {
-            ParentValue::SqliteBlob(b) => b.as_slice(),
-            ParentValue::PgHex(_) | ParentValue::Plain(_) => {
-                return Err(DbError::internal(
-                    "drift_check: encrypted column on SQLite arrived in non-BLOB shape",
-                ));
-            }
-        };
-        let key = sq.resolve_key(app_id, &enc.key_id).await?;
-        return sq.decrypt(&key, enc.mode, bytes, &aad);
-    }
-
-    Err(DbError::Configuration {
-        code: "encryption_unavailable",
-        message: "drift_check: no backend arm available for encryption".to_string(),
-        hint: None,
-    })
+    // ONE arm. This was a PG arm and a SQLite arm, selected by downcasting the
+    // backend; the two differed only in which `ParentValue` shape they
+    // accepted, and `ParentValue` already SAYS which shape it is. Asking the
+    // backend which vendor it was, in order to learn what the value in hand
+    // has been telling us all along, is the coupling `EncryptedColumn` existed
+    // to create - see the note on its deletion in `backend/mod.rs`.
+    //
+    // The cross-checks the old arms carried ("PG path received SQLite BLOB")
+    // are gone with them, and nothing is lost: they compared a backend arm
+    // against a value shape produced BY that same backend, so a mismatch was
+    // never reachable from a caller. The refusal that did the real work - a
+    // value that is not ciphertext at all - is kept below.
+    let bytes: Vec<u8> = match parent {
+        ParentValue::PgHex(s) => hex_to_bytes(s.as_str())?,
+        ParentValue::SqliteBlob(b) => b.clone(),
+        ParentValue::Plain(_) => {
+            return Err(DbError::internal(
+                "drift_check: encrypted column arrived as plain text",
+            ));
+        }
+    };
+    let key = backend.key_store().resolve(app_id, &enc.key_id).await?;
+    crate::encryption::aead::decrypt(&key, &bytes, &aad)
 }
 
 #[allow(dead_code)]

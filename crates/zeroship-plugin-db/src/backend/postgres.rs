@@ -22,9 +22,7 @@ use std::rc::Rc;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::diff::LiveSchema;
-use zeroship_data_core::error::{
-    BeginIntent, CleanupAck, DbError, SettleIntent, TerminalResult,
-};
+use zeroship_data_core::error::{BeginIntent, CleanupAck, DbError, SettleIntent, TerminalResult};
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Backend;
@@ -783,11 +781,11 @@ impl DialectBuilder for PostgresBackend {
 impl Backend for PostgresBackend {}
 
 // ===========================================================================
-// EncryptedColumn + Backup impls on PostgresBackend
+// Key-store accessor + Backup impl on PostgresBackend
 // ===========================================================================
 //
 // Both impls are unconditional on the PG arm:
-//   * `EncryptedColumn` -- PG key sourcing is in-process only, the same
+//   * key sourcing -- PG is in-process only, the same
 //     `LocalKeySource` the SQLite arm uses. The database-backed variant
 //     was deleted on 2026-08-27 with the admin schema it read.
 //   * `Backup` -- the PITR placeholder writes to
@@ -801,49 +799,17 @@ impl Backend for PostgresBackend {}
 //     mask-policy store, so it is the one admin-schema reference this
 //     crate still issues.
 
-// Real `EncryptedColumn` body. Delegates to the workspace
-// `crate::encryption::aead` module (mode-dispatch on encrypt; mode-
-// agnostic on decrypt because the wire format carries the nonce). Key
-// resolution goes through `self.key_store`, which reads this isolate's
-// in-process root key source.
-impl crate::backend::EncryptedColumn for PostgresBackend {
-    type KeyHandle = crate::encryption::aead::AeadKey;
-
-    async fn resolve_key(&self, app_id: &str, key_id: &str) -> Result<Self::KeyHandle, DbError> {
-        self.key_store.resolve(app_id, key_id).await
-    }
-
-    fn encrypt(
-        &self,
-        key: &Self::KeyHandle,
-        mode: crate::backend::EncryptionMode,
-        plaintext: &[u8],
-        aad: &[u8],
-    ) -> Result<Vec<u8>, DbError> {
-        match mode {
-            crate::backend::EncryptionMode::Randomised => {
-                crate::encryption::aead::encrypt_randomised(key, plaintext, aad)
-            }
-            crate::backend::EncryptionMode::Deterministic => {
-                crate::encryption::aead::encrypt_deterministic(key, plaintext, aad)
-            }
-        }
-    }
-
-    fn decrypt(
-        &self,
-        key: &Self::KeyHandle,
-        _mode: crate::backend::EncryptionMode,
-        ciphertext: &[u8],
-        aad: &[u8],
-    ) -> Result<Vec<u8>, DbError> {
-        // Decrypt is mode-agnostic: the wire format carries the nonce,
-        // and AES-GCM verifies the tag regardless of how the nonce was
-        // produced on the write side. The caller picks the
-        // mode-appropriate AAD (Camp A: row_pk in AAD for Randomised,
-        // omitted for Deterministic) — see
-        // `crate::crud::encryption_pass`.
-        crate::encryption::aead::decrypt(key, ciphertext, aad)
+impl PostgresBackend {
+    /// Borrow this isolate's column-encryption key store.
+    ///
+    /// This is all that remains of the `EncryptedColumn` impl deleted on
+    /// 2026-09-02: key SOURCING was the only part of column encryption a
+    /// backend ever contributed, and PG stopped differing from SQLite on it
+    /// when the admin-schema `get_column_key` getter went on 2026-08-27. The
+    /// AEAD is `crate::encryption::aead` for both, so the CRUD passes call it
+    /// directly rather than through a per-vendor trait.
+    pub fn key_store(&self) -> &crate::encryption::KeyStore {
+        &self.key_store
     }
 }
 
