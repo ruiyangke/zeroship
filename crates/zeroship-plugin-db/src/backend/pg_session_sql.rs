@@ -33,7 +33,7 @@ use zeroship_data_core::error::DbError;
 ///
 /// Returns a typed database error if the complete role name exceeds
 /// PostgreSQL's identifier limit.
-pub fn tx_session_setup_sql(app_id: &str) -> Result<String, DbError> {
+pub(crate) fn tx_session_setup_sql(app_id: &str) -> Result<String, DbError> {
     let role = crate::query::quote_ident(&per_app_role_name(app_id)?);
     Ok(format!(
         "SET LOCAL ROLE {role}; \
@@ -60,7 +60,7 @@ pub fn tx_session_setup_sql(app_id: &str) -> Result<String, DbError> {
 ///
 /// Returns a typed database error if the complete role name exceeds
 /// PostgreSQL's identifier limit.
-pub fn autocommit_local_session_setup_sql(app_id: &str) -> Result<String, DbError> {
+pub(crate) fn autocommit_local_session_setup_sql(app_id: &str) -> Result<String, DbError> {
     let role = crate::query::quote_ident(&per_app_role_name(app_id)?);
     Ok(format!(
         "SET LOCAL ROLE {role}; \
