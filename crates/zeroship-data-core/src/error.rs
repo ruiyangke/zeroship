@@ -179,6 +179,33 @@ pub enum BeginIntent {
     Isolation(IsolationLevel),
 }
 
+/// Why opening a transaction session failed.
+///
+/// The fourth member of the backend seam's vocabulary. Keeping the two variants
+/// typed is what lets the reducer carry an outcome without parsing the
+/// creator-facing error code: a startup failure before or during `BEGIN` is
+/// terminal, while one classified at the per-app setup boundary can be
+/// retryable - and only the classifier knows which.
+#[derive(Debug)]
+pub enum OpenSessionError {
+    /// The session could not be acquired, or `BEGIN` itself failed.
+    Failed(DbError),
+    /// The session opened but narrowing its authority did not.
+    Setup(SessionSetupError),
+}
+
+impl From<DbError> for OpenSessionError {
+    fn from(error: DbError) -> Self {
+        Self::Failed(error)
+    }
+}
+
+impl From<SessionSetupError> for OpenSessionError {
+    fn from(error: SessionSetupError) -> Self {
+        Self::Setup(error)
+    }
+}
+
 /// What a forced cleanup proved about the session it acted on.
 ///
 /// The third member of the backend seam's vocabulary, beside [`SettleIntent`]

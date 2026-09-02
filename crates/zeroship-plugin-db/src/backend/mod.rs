@@ -67,7 +67,7 @@
 use std::rc::Rc;
 
 use zeroship_data_core::binding::DbBinding;
-use zeroship_data_core::error::DbError;
+use zeroship_data_core::error::{BeginIntent, DbError, OpenSessionError};
 
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod lock_guard;
@@ -1616,6 +1616,56 @@ impl SpatialIndex for BackendHandle {
 }
 
 impl BackendHandle {
+    /// Open a dedicated transaction session and return it as a lane.
+    ///
+    /// **What SC-1 asks for, in each backend's terms.** The protocol needs a
+    /// session that is open, narrowed to the app's authority, and inside a
+    /// transaction block. How that is reached differs enough that it cannot be
+    /// written once: PostgreSQL checks a lease out of the pool, sends the
+    /// rendered `BEGIN`, then narrows with `SET LOCAL ROLE` - in that order,
+    /// because `SET LOCAL` needs a transaction to be local to. SQLite must bind
+    /// the app's file into the session BEFORE the connection is opened, because
+    /// the connection reads its path from the session's attachment list.
+    ///
+    /// **Every statement the driver later issues runs narrowed, and `BEGIN` is
+    /// why that is checkable.** The pooled checkout arrives carrying the shared
+    /// login role. Exactly ONE statement runs before
+    /// [`postgres::apply_per_app_role`] narrows it, and that statement is
+    /// `BEGIN`, which touches no object and needs no privilege. From there the
+    /// session is the app role's until it settles.
+    ///
+    /// If narrowing fails, this returns `Err` and the lease drops un-installed.
+    /// It goes back to the pool with a transaction open, which
+    /// `Pool::return_client` handles: it rolls back any session it cannot prove
+    /// `Idle` before publishing it.
+    pub(crate) async fn open_tx_session(
+        &self,
+        app_id: &str,
+        begin: BeginIntent,
+    ) -> Result<crate::context::TxConnection, OpenSessionError> {
+        match self {
+            Self::Postgres(pg) => {
+                let client = pg.acquire_dedicated_client(app_id).await?;
+                let begin_sql = postgres::render_begin(begin);
+                pg.client_exec(&client, &begin_sql, &[]).await?;
+                postgres::apply_per_app_role(&client, app_id).await?;
+                Ok(crate::context::TxConnection::Postgres(client))
+            }
+            Self::Sqlite(sq) => {
+                sq.attach_app_file(app_id).await?;
+                let client = sq.acquire_dedicated_client(app_id).await?;
+                // **SQLite spells every intent `BEGIN`, and that is a
+                // documented divergence rather than a dropped request.** It has
+                // one isolation level - serialisable, enforced by the
+                // single-writer actor - so there is no weaker level to ask for
+                // and no stronger one to grant. See
+                // `docs/reference/sqlite-divergences.md`.
+                sq.client_exec(&client, "BEGIN", &[]).await?;
+                Ok(crate::context::TxConnection::Sqlite(client))
+            }
+        }
+    }
+
     /// Run `f` against the inner [`PostgresBackend`].
     ///
     /// **No `dyn Backend` anywhere**: dispatching to the concrete
