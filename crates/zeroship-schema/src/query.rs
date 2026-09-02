@@ -4288,15 +4288,25 @@ pub fn build_set_clauses_with_system_fields(
         set_clauses.push(format!("\"updated_at\" = {ts_expr}"));
     }
 
-    // `updated_by` auto-bump — actor-bound. Fires only on the CRUD
-    // dispatch path when an actor is in scope (anonymous writes leave
-    // `updated_by` untouched, mirroring the INSERT "NULL when no
-    // session actor" rule).
-    if let Some(actor) = autobump.actor_id {
-        if !autobump.skip_updated_by && !already_has_updated_by {
-            params.push(actor.to_string());
-            let n = params.len();
-            set_clauses.push(format!("\"updated_by\" = ${n}"));
+    // `updated_by` auto-bump — actor-bound, and it RUNS on every dispatch
+    // write, yielding NULL when nobody is signed in.
+    //
+    // It used to be skipped entirely on an anonymous write, which left the
+    // column naming the actor of some EARLIER write - a false claim about who
+    // touched the row, believed by anything reading `updated_by` for audit or
+    // authorization. Absent attribution is honest; stale attribution is not.
+    //
+    // Keyed on `dispatch_write` rather than on the actor: a direct builder
+    // caller (`build_set_clauses_with_dialect`) is not writing on anyone's
+    // behalf, so it must still emit no clause at all.
+    if on_pr4_dispatch_path && !autobump.skip_updated_by && !already_has_updated_by {
+        match autobump.actor_id {
+            Some(actor) => {
+                params.push(actor.to_string());
+                let n = params.len();
+                set_clauses.push(format!("\"updated_by\" = ${n}"));
+            }
+            None => set_clauses.push("\"updated_by\" = NULL".to_string()),
         }
     }
 
@@ -4772,14 +4782,32 @@ fn build_soft_delete_set_clauses(
     if !autobump.skip_updated_at {
         clauses.push(format!("\"updated_at\" = {now}"));
     }
-    if let Some(actor) = autobump.actor_id {
-        if !autobump.skip_updated_by {
+    push_updated_by_clause(&mut clauses, params, autobump);
+    clauses
+}
+
+/// The `updated_by` assignment shared by the soft-delete and restore builders.
+///
+/// Unconditional - no `dispatch_write` test - because these two builders exist
+/// only for the CRUD dispatch path. A delete or restore always writes on
+/// somebody's behalf, or on nobody's, and NULL is what "nobody" means. Leaving
+/// the column would have it name the actor of an earlier write.
+fn push_updated_by_clause(
+    clauses: &mut Vec<String>,
+    params: &mut Vec<String>,
+    autobump: &SystemFieldAutoBump<'_>,
+) {
+    if autobump.skip_updated_by {
+        return;
+    }
+    match autobump.actor_id {
+        Some(actor) => {
             params.push(actor.to_string());
             let n = params.len();
             clauses.push(format!("\"updated_by\" = ${n}"));
         }
+        None => clauses.push("\"updated_by\" = NULL".to_string()),
     }
-    clauses
 }
 
 /// Compose the SET clauses for `restore()`: clear
@@ -4799,13 +4827,7 @@ fn build_restore_set_clauses(
     if !autobump.skip_updated_at {
         clauses.push(format!("\"updated_at\" = {now}"));
     }
-    if let Some(actor) = autobump.actor_id {
-        if !autobump.skip_updated_by {
-            params.push(actor.to_string());
-            let n = params.len();
-            clauses.push(format!("\"updated_by\" = ${n}"));
-        }
-    }
+    push_updated_by_clause(&mut clauses, params, autobump);
     clauses
 }
 
@@ -8987,7 +9009,12 @@ mod tests {
     fn update_appends_updated_by_from_session_actor() {
         let filter = json!({ "id": "post_x" });
         let update = json!({ "title": "new" });
+        // `dispatch_write` is now what gates the `updated_by` assignment, not
+        // the actor's presence. It had to move: an anonymous dispatch write
+        // assigns NULL, so "an actor is bound" can no longer distinguish a
+        // dispatch write from a direct builder call.
         let autobump = SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: Some("usr_session"),
             ..Default::default()
         };
@@ -9166,6 +9193,7 @@ mod tests {
             "__zsbin__secret": true,
         });
         let autobump = SystemFieldAutoBump {
+            dispatch_write: true,
             actor_id: Some("usr_actor"),
             ..Default::default()
         };
@@ -13410,8 +13438,14 @@ mod tests {
         assert!(q.sql.ends_with(&treturning()), "sql: {}", q.sql);
     }
 
+    /// An anonymous soft delete must CLEAR `updated_by`, not leave it.
+    ///
+    /// Omitting the SET clause leaves the column naming whoever last wrote the
+    /// row under a session - an actor who did not perform this delete. That is
+    /// a false claim about who touched the row, and anything reading
+    /// `updated_by` for audit or authorization is entitled to believe it.
     #[test]
-    fn build_soft_delete_one_no_actor_omits_updated_by_clause() {
+    fn build_soft_delete_one_no_actor_nulls_updated_by() {
         let filter = serde_json::json!({ "id": "post_x" });
         let autobump = SystemFieldAutoBump::default();
         let q = build_soft_delete_one_with_system_fields(
@@ -13424,11 +13458,78 @@ mod tests {
         )
         .unwrap();
         assert!(
-            !set_clause_of(&q.sql).contains("\"updated_by\""),
-            "no actor → no updated_by SET clause: {}",
+            set_clause_of(&q.sql).contains("\"updated_by\" = NULL"),
+            "an anonymous soft delete must null updated_by rather than leave a stale actor: {}",
             q.sql
         );
         assert!(q.sql.contains("\"deleted_at\" = NOW()"));
+    }
+
+    /// The same for `restore()`, which shares the bump triple.
+    #[test]
+    fn build_restore_one_no_actor_nulls_updated_by() {
+        let filter = serde_json::json!({ "id": "post_x" });
+        let autobump = SystemFieldAutoBump::default();
+        let q = build_restore_one_with_system_fields(
+            "app1",
+            "posts",
+            &tschema(),
+            &filter,
+            SqlDialect::Postgres,
+            &autobump,
+        )
+        .unwrap();
+        assert!(
+            set_clause_of(&q.sql).contains("\"updated_by\" = NULL"),
+            "an anonymous restore must null updated_by: {}",
+            q.sql
+        );
+    }
+
+    /// And for a plain anonymous UPDATE arriving on the dispatch path.
+    ///
+    /// Keyed on `dispatch_write`, not on the actor being absent: a DIRECT
+    /// builder caller (`build_set_clauses_with_dialect`) passes
+    /// `SystemFieldAutoBump::default()` and must keep emitting no `updated_by`
+    /// clause at all, because it is not writing on any actor's behalf.
+    #[test]
+    fn build_update_one_anonymous_dispatch_write_nulls_updated_by() {
+        let filter = serde_json::json!({ "id": "post_x" });
+        let update = serde_json::json!({ "title": "x" });
+        let dispatched = build_update_one_with_system_fields(
+            "app1",
+            "posts",
+            &tschema(),
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+            &SystemFieldAutoBump {
+                dispatch_write: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            set_clause_of(&dispatched.sql).contains("\"updated_by\" = NULL"),
+            "an anonymous dispatch write must null updated_by: {}",
+            dispatched.sql
+        );
+
+        let direct = build_update_one_with_dialect(
+            "app1",
+            "posts",
+            &tschema(),
+            &filter,
+            &update,
+            SqlDialect::Postgres,
+        )
+        .unwrap();
+        assert!(
+            !set_clause_of(&direct.sql).contains("\"updated_by\""),
+            "a direct builder caller writes on nobody's behalf and must not touch \
+             updated_by: {}",
+            direct.sql
+        );
     }
 
     #[test]
