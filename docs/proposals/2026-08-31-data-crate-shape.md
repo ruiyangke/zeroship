@@ -64,10 +64,24 @@ anyone adds a line.
 about a crate *holding a value* of that type, and one is handed across today through a public field:
 
 - `crates/zeroship-schema/src/error.rs:31` declares `pub source: compio_postgres::Error`.
-- `crates/zeroship-plugin-db/src/error.rs:942` is `impl From<SchemaError> for DbError`, and its body
-  passes that live value into a Postgres classifier.
-- **The token `compio_postgres` does not appear on the line.** A `data-core` whose manifest omits the
+- A `From<SchemaError> for DbError` impl passes that live value into a Postgres classifier.
+- **The token `compio_postgres` does not appear on the line.** A crate whose manifest omits the
   driver compiles it, because inference never needs the path.
+
+**THIS DOCUMENT CITED THAT IMPL AT `plugin-db/src/error.rs:942`, AND ITS OWN SEQUENCED WORK MOVED
+IT.** Re-measured 2026-09-01: `error.rs` names `SchemaError` **zero** times. Move 1 (`6f3a482f6`)
+relocated the impl into `backend/pg_error.rs` - the PostgreSQL vendor tier, where naming a vendor is
+legitimate rather than a violation.
+
+The mechanism above still stands: a public field of vendor type crosses a boundary without spelling
+the path, and no manifest fence can see it. What no longer stands is the instance - the impl that
+would have dragged the driver into the core has already moved out of the core's way. So the claim
+narrows to the structural one: the dependency CLOSURE `data-core -> zeroship-schema ->
+compio-postgres` is real and stays real until `zeroship-schema` drops the driver. No vendor VALUE
+need cross for that to bind.
+
+Recorded because it is this document's own warning coming true: a claim and the move that falsifies
+it, edited independently. The claim was not re-measured after the move it sequenced.
 
 `data-core` must declare `zeroship-schema`, because it owns `DbError` and two **unconditional `impl`
 blocks** over `zeroship-schema` types. An `impl` with no `cfg` compiles in every build whether or not
