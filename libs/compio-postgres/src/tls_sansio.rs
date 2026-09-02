@@ -1389,6 +1389,50 @@ mod tests {
         );
     }
 
+    /// The sibling test above binds `plain` alone. The recurring claim about
+    /// this split is about CIPHERTEXT: bytes already read off the socket that
+    /// rustls has not taken yet, which is exactly the window
+    /// `cipher[cipher_read..cipher_len]`.
+    ///
+    /// `try_into_split` carries them because it destructures `TlsReader`
+    /// exhaustively, so a new buffer field cannot be dropped without a compile
+    /// error. That is a strong guarantee against ADDING state and no guarantee
+    /// at all against rewriting these three, which nothing asserted: clearing
+    /// them here truncates the TLS record stream with no error anywhere.
+    #[test]
+    fn tls_split_preserves_unconsumed_ciphertext() {
+        let (client, _server) = handshaken_pair();
+        let mut stream = TlsStreamCore::new(SplitStateSocket, share(client));
+        let record: Vec<u8> = (0..512).map(|i| (i % 251) as u8).collect();
+        stream.reader.cipher = record.clone();
+        stream.reader.cipher_len = 400;
+        stream.reader.cipher_read = 128;
+        let cipher_ptr = stream.reader.cipher.as_ptr();
+
+        let Ok((read, _write)) = stream.try_into_split() else {
+            panic!("the state-carry TLS stream refused to split");
+        };
+
+        assert_eq!(
+            read.reader.cipher_len, 400,
+            "the split lost how much ciphertext the last socket read produced"
+        );
+        assert_eq!(
+            read.reader.cipher_read, 128,
+            "the split lost how much ciphertext rustls had already taken"
+        );
+        assert_eq!(
+            &read.reader.cipher[read.reader.cipher_read..read.reader.cipher_len],
+            &record[128..400],
+            "the split discarded the ciphertext rustls had not yet taken"
+        );
+        assert_eq!(
+            read.reader.cipher.as_ptr(),
+            cipher_ptr,
+            "the split replaced the TLS reader's ciphertext allocation"
+        );
+    }
+
     #[compio::test]
     async fn tls_write_half_shutdown_sends_close_notify() {
         let (client, mut server) = handshaken_pair();
