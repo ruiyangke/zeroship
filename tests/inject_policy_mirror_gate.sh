@@ -89,12 +89,34 @@
 #     not only DDL input. `implicit_read_projection_parts`
 #     (crates/zeroship-schema/src/query.rs) walks it to build the SELECT column
 #     list, reached from four production builders in that file, and
-#     `read_surface_columns` derives from it. So an eighth column added to the
-#     fragment alone would be created by the migration and assigned by the
-#     runtime write pass - which iterates the charter and names no column - and
-#     then never projected by any SELECT. The creator could not read the value
-#     the platform had just written to their row, and every existing test would
-#     stay green, because no test names a column that does not yet exist.
+#     `read_surface_columns` derives from it.
+#
+#     THE FIRST DRAFT OF THIS ARM GOT THE CONSEQUENCE WRONG, and the wrong
+#     version is the intuitive one, so it is written out here rather than
+#     silently replaced. It said an eighth column added to the fragment alone
+#     would never be projected. It would be. `implicit_read_projection_parts`
+#     runs TWO loops: the const first, then every readable descriptor key not
+#     already covered, and real descriptors carry the injected columns as
+#     ordinary readable fields (examples/db-todos/generated/zeroship/
+#     schema.runtime.json), generated from this same fragment.
+#
+#     The real asymmetry is sharper, and it runs both ways.
+#
+#     Const-only (a name here that the fragment does not inject): the first loop
+#     projects it UNCONDITIONALLY, so every SELECT and every RETURNING names a
+#     column no migration created. That is not a degraded read, it is every read
+#     and every write of every collection failing on `column does not exist`.
+#
+#     Fragment-only (an eighth injected column not added here): it is created,
+#     assigned, and projected - but only via the SECOND loop, which honours
+#     `readable`. The seven in the const are projected without consulting it.
+#     So the const is what makes the platform's own columns unhideable by a
+#     hand-edited descriptor, and an eighth column would not inherit that: the
+#     creator could drop the key or set `readable: false` and stop projecting
+#     the value the platform still writes to their row.
+#
+#     Either way the two lists have to move together, which is what this arm
+#     enforces. Only the failure mode differs.
 #   - It reads TRACKED files only, via `git ls-files`. Build output
 #     (sdks/vite-plugin/dist/), node_modules, target/, and sibling worktrees
 #     under .worktrees/ are all ignored and therefore unscanned. That is
@@ -466,9 +488,15 @@ if [ "$fragment_names" != "$rust_names" ]; then
     echo
     echo "        These are not interchangeable copies. The fragment drives the"
     echo "        migration that CREATES the columns and the runtime pass that"
-    echo "        ASSIGNS them; the const drives the SELECT projection that READS"
-    echo "        them (implicit_read_projection_parts). A column in one and not"
-    echo "        the other is written but unreadable, or projected but absent."
+    echo "        ASSIGNS them; the const drives the SELECT and RETURNING lists"
+    echo "        (implicit_read_projection_parts), which project it whether or"
+    echo "        not the descriptor says the field is readable."
+    echo
+    echo "        In the const and not the fragment: every read and every write"
+    echo "        of every collection fails on a column no migration created."
+    echo "        In the fragment and not the const: the column works, but its"
+    echo "        projection now depends on the creator-authored descriptor, so"
+    echo "        the creator can hide a value the platform still writes."
     echo "        Change both in the same commit."
     gate_arms_finish || true
     exit 2
