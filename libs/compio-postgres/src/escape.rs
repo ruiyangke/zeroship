@@ -77,7 +77,7 @@ pub(crate) fn rollback_savepoint(name: &str) -> String {
 /// doubling and nothing else - no `E'...'`, and no backslash escapes to
 /// defend against. A backslash inside a publication name reaches pgoutput
 /// intact through the plain form, which
-/// `tests/replication_publication_names.rs` now pins.
+/// `tests/suite/replication_publication_names.rs` now pins.
 ///
 /// Verifying the escape by evaluating it with `SELECT` is what makes this
 /// mistake attractive: `SELECT E'...'` works perfectly and exercises a

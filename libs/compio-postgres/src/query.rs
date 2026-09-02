@@ -705,7 +705,7 @@ where
 /// happily inserted.
 ///
 /// THAT REWIND IS DEFENSIVE AND UNEXERCISED, measured rather than assumed:
-/// deleting it leaves `tests/domain_parameters.rs` green. `to_sql_checked`
+/// deleting it leaves `tests/suite/domain_parameters.rs` green. `to_sql_checked`
 /// consults `accepts` BEFORE calling `to_sql`, so the rejection this function
 /// exists to recover from writes no bytes at all. The rewind covers the other
 /// shape -- an impl whose `accepts` admits the domain and whose `to_sql` then

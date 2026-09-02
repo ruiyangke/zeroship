@@ -3798,7 +3798,7 @@ mod tests {
     //
     // So: adding a variant means adding a LIVE test for it, not just a round
     // trip here. `parse_lsn`/`format_lsn` above are the cautionary case - they
-    // had only the self-referential test until `tests/lsn_server_parity.rs`.
+    // had only the self-referential test until `tests/suite/lsn_server_parity.rs`.
     #[test]
     fn pgoutput_decode_begin() {
         let bytes = pgoutput::encode::begin(0x16B3750, 700_000_000_000, 42);
@@ -4423,7 +4423,7 @@ mod tests {
     /// invisible from here: `decode` answers `UnexpectedEof` on this frame
     /// whether the capacity came from the frame or from the claimed count,
     /// so deleting the clamp leaves the assertion below green. The
-    /// reservation is measured in `tests/pgoutput_allocation.rs`, which
+    /// reservation is measured in `tests/suite/pgoutput_allocation.rs`, which
     /// watches the process's own peak address space instead - the sibling
     /// above (`pgoutput_decode_accepts_a_truncate_larger_than_any_fixed_cap`)
     /// already carried that exclusion; this one kept the claim.
@@ -5436,7 +5436,7 @@ mod tests {
 
     /// Randomised CopyBoth frames against the bespoke replication framer.
     ///
-    /// `codec.rs` has `tests/frame_fuzz.rs`; this framer has had nothing. It is
+    /// `codec.rs` has `tests/suite/frame_fuzz.rs`; this framer has had nothing. It is
     /// a SEPARATE, hand-rolled framer -- [`read_header`] plus `next_inner` --
     /// with its own length arithmetic ([`WireHeader::body_len`] subtracts 4 and
     /// documents that underflowing it hands a `usize::MAX`-ish size to
@@ -5445,7 +5445,7 @@ mod tests {
     /// corpus, because a replication stream never goes through
     /// `Message::parse`.
     ///
-    /// Same bargain as `tests/frame_fuzz.rs`: weak per-case assertions, many
+    /// Same bargain as `tests/suite/frame_fuzz.rs`: weak per-case assertions, many
     /// cases. ASSERTED -- the framer terminates, does not panic, and once it
     /// has REFUSED the stream (`Error::cancelled`, which only `InFlight::enter`
     /// produces and which nothing clears) it never decodes another message.
@@ -5475,7 +5475,7 @@ mod tests {
         const MAX_FRAMES_READ: usize = 24;
 
         /// xorshift64*, inline so this adds no dependency (as in
-        /// `tests/frame_fuzz.rs`).
+        /// `tests/suite/frame_fuzz.rs`).
         struct Rng(u64);
         impl Rng {
             fn new(seed: u64) -> Self {
