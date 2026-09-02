@@ -286,7 +286,13 @@ impl SchemaRenderer for SqliteSchemaRenderer {
     }
 
     fn current_timestamp_expr(&self) -> &'static str {
-        "CURRENT_TIMESTAMP"
+        // Must match `synth_now()` in this crate's `dml.rs` and `SQLITE_NOW_EXPR`
+        // in `zeroship-schema`. Bare `CURRENT_TIMESTAMP` renders space-separated
+        // ("YYYY-MM-DD HH:MM:SS") while the data plane binds ISO-T; these columns
+        // are compared BYTEWISE (' ' = 0x20 < 'T' = 0x54), so two spellings in one
+        // column invert same-day ordering. The parentheses are required by SQLite
+        // in a DEFAULT clause and harmless in an assignment.
+        "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
     }
 
     fn column_comment_statements(

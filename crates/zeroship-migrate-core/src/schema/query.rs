@@ -4505,12 +4505,12 @@ columns = [
         )
         .expect("build ok");
         assert!(
-            sql.contains("created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "SQLite created_at must be TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP: {sql}"
+            sql.contains("created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"),
+            "SQLite created_at must be TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')): {sql}"
         );
         assert!(
-            sql.contains("updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"),
-            "SQLite updated_at must be TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP: {sql}"
+            sql.contains("updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))"),
+            "SQLite updated_at must be TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')): {sql}"
         );
         // SQLite arm must NEVER emit PG-specific tokens.
         assert!(

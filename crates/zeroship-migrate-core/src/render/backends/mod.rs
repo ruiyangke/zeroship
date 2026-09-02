@@ -418,7 +418,11 @@ mod tests {
         );
         assert_eq!(
             renderer(crate::test_fixtures::VENDORS, &SQLITE).synth_now(),
-            "CURRENT_TIMESTAMP"
+            // NOT bare `CURRENT_TIMESTAMP`: SQLite renders that space-separated
+            // while the data plane binds the ISO-T spelling, and the two are
+            // compared bytewise. The parentheses let one spelling serve both a
+            // `DEFAULT (...)` clause and a `col = (...)` assignment.
+            "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
         );
         assert_eq!(
             renderer(crate::test_fixtures::VENDORS, &MYSQL).synth_now(),
