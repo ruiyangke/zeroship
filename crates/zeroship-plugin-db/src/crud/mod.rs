@@ -233,6 +233,72 @@ pub(crate) async fn exec_mutation_then_read(
     .await
 }
 
+/// The ENGINE composition behind `aggregate`. It gets its own function rather
+/// than sharing [`exec_mutation_then_read`] because its `ApplyOptions` are not
+/// the default ones and cannot be reached by a parameter on that signature.
+///
+/// `group_fields` and `result_columns` are owned rather than borrowed because
+/// `ApplyOptions` holds SLICES of them, so both have to outlive the `apply`
+/// call inside this future - a caller-side borrow could not.
+pub(crate) async fn exec_aggregate_read(
+    binding: DbBinding,
+    coll: String,
+    route: crate::tx_route::TxRoute,
+    bq: query::BuiltQuery,
+    group_fields: Vec<String>,
+    result_columns: Option<Vec<String>>,
+) -> Result<read_pipeline::ApplyResult, DbError> {
+    let rows = exec_query(&route, bq).await?;
+    read_pipeline::apply(
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions {
+            unmask_columns: &[],
+            schema_field_scope: if group_fields.is_empty() {
+                read_pipeline::SchemaFieldScope::All
+            } else {
+                read_pipeline::SchemaFieldScope::Only(group_fields.as_slice())
+            },
+            // A `$group` result's keys are accumulator aliases, which no
+            // descriptor declares, so the declared surface would drop
+            // every one of them. This is the ONLY call site in the crate
+            // that names a surface; every other one takes the default.
+            row_surface: match &result_columns {
+                Some(cols) => read_pipeline::RowSurface::Projected(cols.as_slice()),
+                None => read_pipeline::RowSurface::Declared,
+            },
+            ..read_pipeline::ApplyOptions::default()
+        },
+    )
+    .await
+}
+
+/// The ENGINE composition behind `distinct`. Also non-default `ApplyOptions`,
+/// and different ones again from [`exec_aggregate_read`]: a DISTINCT over a
+/// masked column selects the column holding the MASK, so the decrypt stage has
+/// nothing to do and would be handed a mask string where it expects base64.
+pub(crate) async fn exec_distinct_read(
+    binding: DbBinding,
+    coll: String,
+    route: crate::tx_route::TxRoute,
+    bq: query::BuiltQuery,
+    reads_masked_sibling: bool,
+) -> Result<read_pipeline::ApplyResult, DbError> {
+    let rows = exec_query(&route, bq).await?;
+    read_pipeline::apply(
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions {
+            apply_decrypt: !reads_masked_sibling,
+            wrap_masked: false,
+            ..read_pipeline::ApplyOptions::default()
+        },
+    )
+    .await
+}
+
 /// Record `(collection, filter)` into the active query's read-set.
 ///
 /// Resolves the descriptor entry the predicate has to be lowered against - a
@@ -1922,32 +1988,7 @@ pub(crate) fn dispatch_aggregate<'s>(
         resolver,
         request_id,
         built,
-        move |bq| async move {
-            let rows = exec_query(&route, bq).await?;
-            read_pipeline::apply(
-                &binding,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions {
-                    unmask_columns: &[],
-                    schema_field_scope: if group_fields.is_empty() {
-                        read_pipeline::SchemaFieldScope::All
-                    } else {
-                        read_pipeline::SchemaFieldScope::Only(group_fields.as_slice())
-                    },
-                    // A `$group` result's keys are accumulator aliases, which no
-                    // descriptor declares, so the declared surface would drop
-                    // every one of them. This is the ONLY call site in the crate
-                    // that names a surface; every other one takes the default.
-                    row_surface: match &result_columns {
-                        Some(cols) => read_pipeline::RowSurface::Projected(cols.as_slice()),
-                        None => read_pipeline::RowSurface::Declared,
-                    },
-                    ..read_pipeline::ApplyOptions::default()
-                },
-            )
-            .await
-        },
+        move |bq| exec_aggregate_read(binding, coll, route, bq, group_fields, result_columns),
         |result: read_pipeline::ApplyResult| {
             crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked)
         },
@@ -2046,20 +2087,7 @@ pub(crate) fn dispatch_distinct<'s>(
         resolver,
         request_id,
         built,
-        move |bq| async move {
-            let rows = exec_query(&route, bq).await?;
-            read_pipeline::apply(
-                &binding,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions {
-                    apply_decrypt: !distinct_reads_masked_sibling,
-                    wrap_masked: false,
-                    ..read_pipeline::ApplyOptions::default()
-                },
-            )
-            .await
-        },
+        move |bq| exec_distinct_read(binding, coll, route, bq, distinct_reads_masked_sibling),
         |result: read_pipeline::ApplyResult| {
             // Extract single-column values into a flat array. `rows`
             // is the pre-decoded result set — no JSON parse needed
