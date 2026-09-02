@@ -118,11 +118,6 @@ impl AssignmentPlan {
         &self.columns
     }
 
-    /// The assignment governing `name`, if the charter assigns it.
-    pub(crate) fn assignment_for(&self, name: &str) -> Option<&AssignedColumn> {
-        self.columns.iter().find(|column| column.name == name)
-    }
-
     /// Columns whose value is fixed when the row is created and may never be
     /// re-assigned: `on = "insert"`.
     ///

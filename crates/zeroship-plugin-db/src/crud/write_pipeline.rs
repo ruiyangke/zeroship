@@ -32,11 +32,19 @@ pub(crate) enum ApplyMode<'a> {
     },
 }
 
+/// Run the UPDATE-time assignment pass: refuse a patch that rewrites a column
+/// the platform fixed at insert, and STRIP the columns it re-assigns on every
+/// write so the builder's own bumps are the only assignment to them.
+///
+/// Takes the patch by `&mut` because the strip is the point. It ran before the
+/// strip existed and returned a set of "the creator supplied this, skip your
+/// bump" hints; under `assign` there is no such thing as a creator-supplied
+/// value for an assigned column.
 pub(crate) fn inspect_update(
     app_id: &str,
     collection: &str,
-    patch: &Value,
-) -> Result<super::system_fields_pass::UpdateAutoBumpHints, DbError> {
+    patch: &mut Value,
+) -> Result<(), DbError> {
     super::system_fields_pass::apply_system_fields_on_update(patch, app_id, collection)
 }
 
@@ -1072,11 +1080,15 @@ mod tests {
                     "updated_by": "usr_override"
                 }
             });
-            let update_hints =
-                inspect_update(app_id, collection, &update_patch).expect("inspect update patch");
-            assert!(
-                update_hints.creator_supplied_updated_by,
-                "update system-field pre-pass should surface creator overrides",
+            inspect_update(app_id, collection, &mut update_patch).expect("inspect update patch");
+            assert_eq!(
+                update_patch
+                    .get("$set")
+                    .and_then(Value::as_object)
+                    .map(|set| set.contains_key("updated_by")),
+                Some(false),
+                "the update pre-pass must strip a supplied updated_by from the nested $set, \
+                 so the builder's own actor bump is the only assignment to it",
             );
             apply(
                 &binding,
@@ -1091,11 +1103,6 @@ mod tests {
             let update_target = update_patch
                 .get("$set")
                 .expect("update target should stay nested under $set");
-            assert_eq!(
-                update_target.get("updated_by").and_then(Value::as_str),
-                Some("usr_override"),
-                "update pipeline must preserve explicit updated_by override",
-            );
             assert_eq!(
                 update_target.get("ssn").and_then(Value::as_str),
                 Some(last4_mask("555-55-5555").as_str()),
