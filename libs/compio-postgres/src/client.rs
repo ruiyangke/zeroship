@@ -3401,6 +3401,108 @@ impl fmt::Debug for Client {
     }
 }
 
+/// `inspect_frontend_frames` keeps a name -> SQL map so a later failure can be
+/// reported against the statement that caused it. These are the arms that take
+/// entries OUT of that map, and nothing exercised them.
+///
+/// A stale entry is not a crash, which is why it needs a test rather than a
+/// panic to find it: the map would answer for a name the server no longer
+/// holds, and the error would be attributed to whatever SQL used to own it.
+/// Every case below is judged by what `Execute` on the name ANSWERS, not by
+/// reading the map, because attribution is the only reason the map exists.
+#[cfg(test)]
+mod frontend_registry_invalidation_tests {
+    use super::{FrontendRegistry, QueryProtocol, inspect_frontend_frames};
+
+    /// tag + 4-byte length (counting itself) + body.
+    fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        out.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn parse(name: &str, sql: &str) -> Vec<u8> {
+        let mut body = format!("{name}\0{sql}\0").into_bytes();
+        body.extend_from_slice(&[0, 0]);
+        frame(b'P', &body)
+    }
+
+    fn bind(portal: &str, statement: &str) -> Vec<u8> {
+        frame(b'B', format!("{portal}\0{statement}\0").as_bytes())
+    }
+
+    fn execute(portal: &str) -> Vec<u8> {
+        frame(b'E', format!("{portal}\0\0\0\0\0").as_bytes())
+    }
+
+    fn close(kind: u8, name: &str) -> Vec<u8> {
+        let mut body = vec![kind];
+        body.extend_from_slice(format!("{name}\0").as_bytes());
+        frame(b'C', &body)
+    }
+
+    #[test]
+    fn a_closed_portal_no_longer_names_the_sql_it_held() {
+        let mut registry = FrontendRegistry::default();
+
+        let mut live = parse("s", "SELECT 1");
+        live.extend_from_slice(&bind("p", "s"));
+        live.extend_from_slice(&execute("p"));
+        let attributed = inspect_frontend_frames(&live, &mut registry)
+            .expect("a live portal must name the SQL its statement was prepared with");
+        assert_eq!(&*attributed.0, "SELECT 1");
+        assert!(matches!(attributed.1, QueryProtocol::Extended));
+
+        let mut closed = close(b'P', "p");
+        closed.extend_from_slice(&execute("p"));
+        assert!(
+            inspect_frontend_frames(&closed, &mut registry).is_none(),
+            "a closed portal still named SQL, so a later error would be blamed on it"
+        );
+    }
+
+    #[test]
+    fn a_closed_statement_stops_a_new_portal_inheriting_its_sql() {
+        let mut registry = FrontendRegistry::default();
+        let mut setup = parse("s", "SELECT 2");
+        setup.extend_from_slice(&bind("p", "s"));
+        assert!(inspect_frontend_frames(&setup, &mut registry).is_none());
+
+        let mut reused = close(b'S', "s");
+        reused.extend_from_slice(&bind("p2", "s"));
+        reused.extend_from_slice(&execute("p2"));
+        assert!(
+            inspect_frontend_frames(&reused, &mut registry).is_none(),
+            "a portal bound to a closed statement inherited the SQL anyway"
+        );
+    }
+
+    /// The `else` arm of `Bind`: binding a portal name to a statement the
+    /// registry does not know must REMOVE that portal, not leave whatever it
+    /// held before. Rebinding a LIVE portal name is how a stale entry survives.
+    #[test]
+    fn rebinding_a_portal_to_an_unknown_statement_clears_it() {
+        let mut registry = FrontendRegistry::default();
+        let mut setup = parse("s", "SELECT 3");
+        setup.extend_from_slice(&bind("p", "s"));
+        setup.extend_from_slice(&execute("p"));
+        assert_eq!(
+            &*inspect_frontend_frames(&setup, &mut registry)
+                .expect("the portal is live here")
+                .0,
+            "SELECT 3"
+        );
+
+        let mut rebound = bind("p", "never-prepared");
+        rebound.extend_from_slice(&execute("p"));
+        assert!(
+            inspect_frontend_frames(&rebound, &mut registry).is_none(),
+            "the portal kept its old SQL after being rebound to an unknown statement"
+        );
+    }
+}
+
 #[cfg(test)]
 mod query_observer_reentrancy_tests {
     use super::{
