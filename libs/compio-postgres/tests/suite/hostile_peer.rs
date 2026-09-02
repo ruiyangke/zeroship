@@ -5333,6 +5333,39 @@ async fn a_misplaced_message_after_the_parameter_description_is_refused() {
     .expect("misplaced post-ParameterDescription test exceeded its outer watchdog");
 }
 
+/// The FOURTH expectation, and the one the other three left uncovered.
+///
+/// `prepare.rs` waits for `ReadyForQuery` after the description because a
+/// complete Parse/Describe prefix is not the outcome of the exchange - a
+/// terminal `ErrorResponse` can still follow it. `prepare_preserves_a_terminal
+/// _error_after_its_description` drives exactly that error case, so the arm
+/// that refuses a NON-error frame in the same slot (`prepare.rs:285`) had
+/// never run: the three siblings above stop one message earlier.
+///
+/// A second `ParseComplete` is the payload because it is well framed and
+/// individually legal; only its POSITION is wrong. Accepting it would hand
+/// back a Statement whose Sync-terminated exchange was never confirmed.
+#[compio::test]
+async fn a_misplaced_message_where_ready_for_query_is_owed_is_refused() {
+    // `Box::pin` where the three siblings above have none: the future is over
+    // clippy's large-future threshold, and this file already carries 56 of
+    // those warnings. Pinning here keeps the count from growing.
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'1', b"");
+        response.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        response.extend_from_slice(&backend_frame(b'n', b""));
+        response.extend_from_slice(&backend_frame(b'1', b""));
+        let chain = hostile_prepare_retires_session(304, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "a misplaced pre-ReadyForQuery message reported {chain:?} rather than an \
+             out-of-order message"
+        );
+    }))
+    .await
+    .expect("misplaced pre-ReadyForQuery test exceeded its outer watchdog");
+}
+
 // ---------------------------------------------------------------------------
 // COPY sub-protocol violations.
 //
