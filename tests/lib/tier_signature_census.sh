@@ -191,8 +191,17 @@ imported_names() {
 # Destination crate per module, from the proposal's assignment table.
 tier() {
   case "$1" in
-    # tx_scope.rs is ADAPTER: all six of its production functions are V8
-    # context-map manipulation, so the proposal moves the file whole.
+    # tx_scope.rs is ADAPTER: all SEVEN of its production functions take a
+    # `&mut v8::PinScope` and do V8 context-map manipulation, so the proposal
+    # moves the file whole. It has no test module, so production == the file.
+    #
+    # This comment said SIX until 2026-09-02, and was correct when written
+    # (e81ff8783, 08-31 22:11). `capture_route` landed 85 minutes later in
+    # ced6daf1c and nobody re-ran the count. The tier map below was never
+    # affected - it classifies the FILE - so the census kept behaving
+    # correctly while its own comment described a file that no longer existed.
+    # Re-derive with `grep -c 'scope: &mut v8::PinScope' tx_scope.rs` rather
+    # than trusting this number.
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo "ADAPTER" ;;
     ./crud/*|./transaction/*|./exec.rs|./broker.rs|./backend_selection.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs|./cross_app_fk.rs) echo "ENGINE" ;;
     ./auth/bootstrap.rs)                                 echo "ENGINE" ;;
