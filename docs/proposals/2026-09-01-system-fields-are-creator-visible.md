@@ -469,6 +469,26 @@ second assignment to the same column (`:6313-6333`) - two assignments to one
 column in one `DO UPDATE SET`, which PostgreSQL refuses. Strip at the pass and
 make the bump unconditional as ONE change.
 
+**THERE IS A SECOND PRODUCER OF `version`, AND THIS DOCUMENT NEVER NAMED IT.**
+Found and measured 2026-09-01. `sdks/bootstrap/src/install-schema.ts:599-600`
+injects `normalized.version = { type: "number", required: false, default: 1 }`
+when versioning is enabled - and it does so AFTER `normalizeSchema` at `:591`,
+which is where the charter stamp happens. So it carries no `assign`, never
+passes through the assignment projection, and falls into `validateDoc`'s
+`default` arm, which MATERIALISES the seed. A probe with `versioning: true` and
+a descriptor lacking `version` produced the row `{"path":"/x","version":1}`
+reaching the native op.
+
+That is exactly the key the paragraph above says must not reach `build_upsert`.
+This document named only the `deletedAt` injection at `:594-595` as the ad-hoc
+producer to delete - **`:599-600` is its unnamed twin, and it is the one that
+actually writes a value.** `deletedAt` carries no default, so it is skipped;
+`version` does, so it is not.
+
+Consequence for the ordering inside `validate.ts`: the `assign` check must sit
+ABOVE the `default` arm, because `version` is the one charter column carrying
+both an `assign` and a `DEFAULT 1`. Reversed, the seed is written.
+
 **"At the pass" holds for `version` and NOT for `id`** - see step 5. `version`
 has no minting step whose output the pass could mistake for a caller's value;
 `id` does, and the pass is documented and tested as idempotent, so a
