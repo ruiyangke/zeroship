@@ -6,8 +6,8 @@
 //! count, is in `tests/parameters_never_carry_values.rs`, because that is a
 //! property of rendering.
 
-use zeroship_data_plan::render::postgres::{self, RenderError};
-use zeroship_data_plan::{
+use zeroship_data_query_builder::render::postgres::{self, RenderError};
+use zeroship_data_query_builder::{
     AggregateFunc, AggregateRef, CompareOp, Direction, FieldPath, Ident, IdentRole, JsonKey,
     Literal, NullOrder, Operand, OrderKey, PlanError, Predicate, ProjectedField, Projection,
     RowLimit, RowOffset, Select, MAX_ROW_LIMIT, MAX_ROW_OFFSET,

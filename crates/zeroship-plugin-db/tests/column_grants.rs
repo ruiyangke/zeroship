@@ -51,8 +51,8 @@ use std::collections::BTreeSet;
 
 use compio_postgres::{Client, NoTls};
 use serde_json::{Value, json};
-use zeroship_data_plan::render::postgres::{render_delete, render_update};
-use zeroship_data_plan::{
+use zeroship_data_query_builder::render::postgres::{render_delete, render_update};
+use zeroship_data_query_builder::{
     Assignment as PlanAssignment, ColumnAssignment as PlanColumnAssignment,
     CompareOp as PlanCompareOp, Delete as PlanDelete, Ident as PlanIdent, IdentRole as PlanIdentRole,
     Literal as PlanLiteral, Operand as PlanOperand, Predicate as PlanPredicate,
@@ -384,7 +384,7 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
 
 /// Render the replacement data-plan's two bounded PostgreSQL writes against
 /// the same physical fixture as the shipped builders.
-fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, zeroship_data_plan::RenderedSql)> {
+fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, zeroship_data_query_builder::RenderedSql)> {
     let namespace = PlanIdent::parse_as(app, PlanIdentRole::Namespace).expect("namespace");
     let collection =
         PlanIdent::parse_as(COLLECTION, PlanIdentRole::Collection).expect("collection");

@@ -5,8 +5,8 @@
 //! must clear, following the repository's gate discipline: a check that examines
 //! nothing and a clean tree print the same thing.
 
-use zeroship_data_plan::render::postgres::{self, RenderError};
-use zeroship_data_plan::{
+use zeroship_data_query_builder::render::postgres::{self, RenderError};
+use zeroship_data_query_builder::{
     AggregateRef, Arithmetic, ArithmeticOp, Assignment, BindBudget, ColumnAssignment, ColumnValue,
     CompareOp, Delete, FieldPath, Ident, IdentRole, Insert, JsonKey, Literal, Operand, PlanError,
     Predicate, ProjectedField, Projection, Returning, RowLimit, Update, WriteError, WriteValue,
@@ -62,15 +62,15 @@ fn delete_one(returning: Returning) -> Delete {
         .expect("valid delete")
 }
 
-fn sql_of(plan: &zeroship_data_plan::DbPlan) -> String {
+fn sql_of(plan: &zeroship_data_query_builder::DbPlan) -> String {
     postgres::render(plan).expect("renders").sql().to_string()
 }
 
-fn all_three_writes(returning: &Returning) -> Vec<zeroship_data_plan::DbPlan> {
+fn all_three_writes(returning: &Returning) -> Vec<zeroship_data_query_builder::DbPlan> {
     vec![
-        zeroship_data_plan::DbPlan::Insert(insert_one(returning.clone())),
-        zeroship_data_plan::DbPlan::Update(update_one(returning.clone())),
-        zeroship_data_plan::DbPlan::Delete(delete_one(returning.clone())),
+        zeroship_data_query_builder::DbPlan::Insert(insert_one(returning.clone())),
+        zeroship_data_query_builder::DbPlan::Update(update_one(returning.clone())),
+        zeroship_data_query_builder::DbPlan::Delete(delete_one(returning.clone())),
     ]
 }
 
@@ -162,7 +162,7 @@ fn a_returning_list_over_a_masked_column_renders_the_sibling() {
 /// encrypted column binds into its AEAD tag.
 #[test]
 fn a_returning_list_keeps_every_platform_field() {
-    let sql = sql_of(&zeroship_data_plan::DbPlan::Insert(insert_one(
+    let sql = sql_of(&zeroship_data_query_builder::DbPlan::Insert(insert_one(
         returning_name(),
     )));
     let mut ruled_on = 0_usize;
@@ -814,9 +814,9 @@ fn an_unservable_node_in_a_write_is_refused_with_a_typed_error() {
     // In the RETURNING list.
     let returning = Returning::rows(
         Projection::rows(vec![ProjectedField {
-            source: zeroship_data_plan::ProjectionSource::Path(nested()),
+            source: zeroship_data_query_builder::ProjectionSource::Path(nested()),
             alias: alias("customer"),
-            exposure: zeroship_data_plan::Exposure::Declared,
+            exposure: zeroship_data_query_builder::Exposure::Declared,
         }])
         .expect("row projection"),
     )

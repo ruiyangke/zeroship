@@ -25,7 +25,7 @@
 //!
 //! Every arm declares the number of items it ruled on and a floor.
 
-use zeroship_data_plan::{
+use zeroship_data_query_builder::{
     Assignment, ColumnAssignment, CompareOp, Delete, Ident, IdentRole, Literal, Operand, PlanError,
     Predicate, PredicateError, ProjectedField, Projection, Returning, RowLimit, Select, Update,
     WriteError, MAX_PREDICATE_DEPTH,
@@ -288,7 +288,7 @@ fn a_plan_at_the_limit_renders_with_its_full_depth() {
         .filter(at)
         .build()
         .expect("at the limit");
-    let rendered = zeroship_data_plan::render::postgres::render_select(&plan).expect("renders");
+    let rendered = zeroship_data_query_builder::render::postgres::render_select(&plan).expect("renders");
     let sql = rendered.sql();
     // Every level has exactly two children, so it contributes exactly one
     // joiner; a leaf contributes none.

@@ -100,7 +100,7 @@ zeroship-test-support = { workspace = true }
 # search family's lowering is exercised by `tests/search_ir_live.rs`, which
 # executes the SQL it renders against a real server - the half its own crate
 # cannot reach, having no dependencies at all.
-zeroship-data-plan = { workspace = true }
+zeroship-data-query-builder = { workspace = true }
 compio = { workspace = true }
 serde_json = { workspace = true }
 # Test-only constructors (`row_for_test` / `column_for_test`) for the
@@ -230,7 +230,7 @@ name = "missing_role"
 path = "tests/missing_role.rs"
 required-features = ["test-helpers"]
 
-# The DbPlan search family, executed. `zeroship-data-plan` renders SQL with no
+# The DbPlan search family, executed. `zeroship-data-query-builder` renders SQL with no
 # database in reach, so its own tests can only compare strings; this target runs
 # the same statements against real PostgreSQL with pgvector and PostGIS, and
 # holds the one arm that needs both backends in one process - the metric

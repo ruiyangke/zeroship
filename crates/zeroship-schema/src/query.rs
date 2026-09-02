@@ -10907,7 +10907,7 @@ mod tests {
         );
         assert_eq!(
             PLATFORM_RESERVED_COLLECTION_PREFIXES,
-            zeroship_data_plan::ident::PLATFORM_RESERVED_COLLECTION_PREFIXES,
+            zeroship_data_query_builder::ident::PLATFORM_RESERVED_COLLECTION_PREFIXES,
             "data-plane and runtime-plan collection prefixes diverged"
         );
     }
@@ -10933,7 +10933,7 @@ mod tests {
     }
 
     fn assert_reserved_identifier_behavior_matches(
-        role: zeroship_data_plan::ident::IdentRole,
+        role: zeroship_data_query_builder::ident::IdentRole,
         names: &[String],
     ) {
         let vendors = zeroship_migrate::shipping_vendors();
@@ -10941,29 +10941,29 @@ mod tests {
 
         for name in names {
             let engine_accepts = match role {
-                zeroship_data_plan::ident::IdentRole::Collection => {
+                zeroship_data_query_builder::ident::IdentRole::Collection => {
                     zeroship_migrate_core::schema::query::validate_collection(vendors, name).is_ok()
                 }
-                zeroship_data_plan::ident::IdentRole::Column => {
+                zeroship_data_query_builder::ident::IdentRole::Column => {
                     zeroship_migrate_core::schema::query::validate_field_name(vendors, name).is_ok()
                 }
                 other => panic!("parity corpus does not cover {other:?}"),
             };
             let schema_accepts = match role {
-                zeroship_data_plan::ident::IdentRole::Collection => {
+                zeroship_data_query_builder::ident::IdentRole::Collection => {
                     validate_collection(name).is_ok()
                 }
-                zeroship_data_plan::ident::IdentRole::Column => {
+                zeroship_data_query_builder::ident::IdentRole::Column => {
                     validate_field_name(name).is_ok()
                 }
                 other => panic!("parity corpus does not cover {other:?}"),
             };
             let plan_accepts =
-                zeroship_data_plan::ident::Ident::parse_as(name, role).is_ok();
+                zeroship_data_query_builder::ident::Ident::parse_as(name, role).is_ok();
 
             if engine_accepts != schema_accepts || engine_accepts != plan_accepts {
                 mismatches.push(format!(
-                    "{name:?}: engine={engine_accepts}, zeroship-schema={schema_accepts}, zeroship-data-plan={plan_accepts}"
+                    "{name:?}: engine={engine_accepts}, zeroship-schema={schema_accepts}, zeroship-data-query-builder={plan_accepts}"
                 ));
             }
         }
@@ -10995,7 +10995,7 @@ mod tests {
         names.extend(shipping_catalog_reservation_witnesses());
 
         assert_reserved_identifier_behavior_matches(
-            zeroship_data_plan::ident::IdentRole::Collection,
+            zeroship_data_query_builder::ident::IdentRole::Collection,
             &names,
         );
     }
@@ -11027,7 +11027,7 @@ mod tests {
         names.extend(shipping_catalog_reservation_witnesses());
 
         assert_reserved_identifier_behavior_matches(
-            zeroship_data_plan::ident::IdentRole::Column,
+            zeroship_data_query_builder::ident::IdentRole::Column,
             &names,
         );
     }

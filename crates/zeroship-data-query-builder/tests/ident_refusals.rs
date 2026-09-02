@@ -6,12 +6,12 @@
 //!
 //! The compile-time half of this property is not here. It cannot be - a test
 //! that fails to compile does not run - and it lives as `compile_fail`
-//! doctests on the [`zeroship_data_plan::ident`] module, which `cargo test`
+//! doctests on the [`zeroship_data_query_builder::ident`] module, which `cargo test`
 //! executes as part of the doc-test target. Those cover the three ways a
 //! validated newtype is usually laundered: the struct literal, the private
 //! field, and a `From<String>`.
 
-use zeroship_data_plan::{Ident, IdentError, IdentRole};
+use zeroship_data_query_builder::{Ident, IdentError, IdentRole};
 
 const ALL_ROLES: [IdentRole; 6] = [
     IdentRole::Namespace,
@@ -215,7 +215,7 @@ fn an_alias_may_carry_a_platform_underscore_name_that_a_column_may_not() {
 #[test]
 fn the_system_field_names_are_referenceable_columns() {
     let mut ruled_on = 0_usize;
-    for name in zeroship_data_plan::PLATFORM_FIELD_NAMES {
+    for name in zeroship_data_query_builder::PLATFORM_FIELD_NAMES {
         assert!(
             Ident::parse_as(name, IdentRole::Column).is_ok(),
             "the platform field {name:?} is not referenceable as a column"

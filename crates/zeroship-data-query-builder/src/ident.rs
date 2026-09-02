@@ -22,10 +22,10 @@
 //! The control for the three `compile_fail` blocks below. A `compile_fail`
 //! doctest passes on ANY compile error, including a typo in a path, so without
 //! a companion block that does compile over the same names they would all be
-//! satisfied by `zeroship_data_plann` and prove nothing.
+//! satisfied by `zeroship_data_query_buildern` and prove nothing.
 //!
 //! ```
-//! use zeroship_data_plan::{Ident, IdentRole};
+//! use zeroship_data_query_builder::{Ident, IdentRole};
 //! let id = Ident::parse_as("users", IdentRole::Collection).expect("valid");
 //! assert_eq!(id.as_str(), "users");
 //! assert!(Ident::parse_as("users\"; DROP TABLE users; --", IdentRole::Collection).is_err());
@@ -33,18 +33,18 @@
 //!
 //! ```compile_fail
 //! // The private field means the newtype cannot be forged.
-//! let forged = zeroship_data_plan::Ident("users\"; DROP TABLE users; --".to_string());
+//! let forged = zeroship_data_query_builder::Ident("users\"; DROP TABLE users; --".to_string());
 //! ```
 //!
 //! ```compile_fail
 //! // ... and it cannot be opened up either.
-//! let id = zeroship_data_plan::Ident::parse_as("users", zeroship_data_plan::IdentRole::Collection).unwrap();
+//! let id = zeroship_data_query_builder::Ident::parse_as("users", zeroship_data_query_builder::IdentRole::Collection).unwrap();
 //! let raw: String = id.0;
 //! ```
 //!
 //! ```compile_fail
 //! // There is no blanket conversion from text.
-//! let id: zeroship_data_plan::Ident = "users".to_string().into();
+//! let id: zeroship_data_query_builder::Ident = "users".to_string().into();
 //! ```
 //!
 //! # Why the role is a parameter and not decoration

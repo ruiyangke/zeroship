@@ -531,7 +531,7 @@ its SQLite stub (`backend/sqlite/mod.rs:2362`).
 
 **`DbPlan` is defined by SC-3.** This document does not contain the grammar and
 does not claim to. Its shared core and read family exist on disk as
-`crates/zeroship-data-plan`, which depends on nothing and needs no database.
+`crates/zeroship-data-query-builder`, which depends on nothing and needs no database.
 
 #### What the SPI must cover
 
@@ -1235,7 +1235,7 @@ against the tree before trusting any entry.
 descriptor entries `registerModel` used to publish are now planted natively at
 boot.
 That list names mechanisms, not documents: `DbPlan`'s shared core and read family
-exist as `crates/zeroship-data-plan`, and SC-5's service ownership partly landed
+exist as `crates/zeroship-data-query-builder`, and SC-5's service ownership partly landed
 as step 5a while SC-5 as a contract is unimplemented.
 
 **One coverage gap opened by `632c1d1fa`, stated because it is invisible from a
@@ -1285,7 +1285,7 @@ without.
 and the effects family (the publication a committed mutation owes the broker)
 follow the service's wire contract. The shared normative core, read, write,
 search and unmask families have no transport dependency, and the existence proof
-is `crates/zeroship-data-plan`.
+is `crates/zeroship-data-query-builder`.
 
 ### Open: Fork C's identity state has no home
 

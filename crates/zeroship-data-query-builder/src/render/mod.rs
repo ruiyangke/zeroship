@@ -93,7 +93,7 @@ use crate::literal::Literal;
 /// A full implementation compiles:
 ///
 /// ```
-/// use zeroship_data_plan::render::ValueFormat;
+/// use zeroship_data_query_builder::render::ValueFormat;
 /// struct Whole;
 /// impl ValueFormat for Whole {
 ///     fn dialect_name(&self) -> &'static str { "whole" }
@@ -111,7 +111,7 @@ use crate::literal::Literal;
 /// A partial one does not, which is the property this trait exists for:
 ///
 /// ```compile_fail
-/// use zeroship_data_plan::render::ValueFormat;
+/// use zeroship_data_query_builder::render::ValueFormat;
 /// struct Half;
 /// impl ValueFormat for Half {
 ///     fn dialect_name(&self) -> &'static str { "half" }
@@ -124,7 +124,7 @@ use crate::literal::Literal;
 /// would have let through:
 ///
 /// ```compile_fail
-/// use zeroship_data_plan::render::ValueFormat;
+/// use zeroship_data_query_builder::render::ValueFormat;
 /// struct PlaceholdersOnly;
 /// impl ValueFormat for PlaceholdersOnly {
 ///     fn dialect_name(&self) -> &'static str { "placeholders-only" }
@@ -144,7 +144,7 @@ use crate::literal::Literal;
 /// mechanisms described on [`ValueFormat::vector_placeholder`] came to exist.
 ///
 /// ```compile_fail
-/// use zeroship_data_plan::render::ValueFormat;
+/// use zeroship_data_query_builder::render::ValueFormat;
 /// struct BeforeSearch;
 /// impl ValueFormat for BeforeSearch {
 ///     fn dialect_name(&self) -> &'static str { "before-search" }

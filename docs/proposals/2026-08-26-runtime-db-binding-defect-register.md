@@ -436,7 +436,7 @@ refuses the `CREATE` itself, so nothing is created and nothing is shadowed. The
 cost is a bad diagnostic and a fence that does not mean what it says.
 
 **Fix:** move `sqlite_` to `validate_collection` and decide deliberately whether it
-stays on columns as well. `zeroship-data-plan` fences it on **both** roles and
+stays on columns as well. `zeroship-data-query-builder` fences it on **both** roles and
 records the divergence in its own comments; when that port lands, one of the two
 behaviours has to win explicitly rather than by whichever file the reader opened.
 

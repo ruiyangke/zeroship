@@ -11,8 +11,8 @@
 //! that looks like SQL, a value that looks like a quote, a value that looks
 //! like a comment.
 
-use zeroship_data_plan::render::postgres;
-use zeroship_data_plan::{
+use zeroship_data_query_builder::render::postgres;
+use zeroship_data_query_builder::{
     ArithmeticOp, Assignment, BindBudget, ColumnAssignment, ColumnValue, CompareOp, Delete,
     EscapeChar, Ident, IdentRole, Insert, Literal, MembershipOp, Operand, PatternOp, Predicate,
     ProjectedField, Projection, Returning, RowLimit, RowOffset, Select, TextPattern, Update,
@@ -27,7 +27,7 @@ fn users() -> Ident {
     Ident::parse_as("users", IdentRole::Collection).expect("collection")
 }
 
-fn read_with(filter: Predicate) -> zeroship_data_plan::RenderedSql {
+fn read_with(filter: Predicate) -> zeroship_data_query_builder::RenderedSql {
     let projection = Projection::rows(vec![
         ProjectedField::column(column("name")).expect("projectable")
     ])
@@ -123,7 +123,7 @@ fn every_placeholder_has_exactly_one_parameter() {
             Operand::column(column("age")),
             Operand::Lit(Literal::Int(18)),
             Operand::Lit(Literal::Int(65)),
-            zeroship_data_plan::RangeBounds::InclusiveBoth,
+            zeroship_data_query_builder::RangeBounds::InclusiveBoth,
         ),
         Predicate::is_null(Operand::column(column("deleted_at"))),
     ];
