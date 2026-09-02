@@ -187,3 +187,51 @@ impl Column {
         &self.r#type
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Client;
+    use crate::config::{SslMode, SslNegotiation};
+    use futures_channel::mpsc;
+
+    fn scripted_client() -> (Client, mpsc::UnboundedReceiver<crate::connection::Request>) {
+        let (request_sender, requests) = mpsc::unbounded();
+        let client = Client::new(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        (client, requests)
+    }
+
+    /// A statement name that cannot be encoded queues NOTHING.
+    ///
+    /// `frontend::close` refuses a name holding an interior NUL, and at that
+    /// point the buffer contains a half-written frame. Sending it would
+    /// desynchronise the connection for every later request, so the encode
+    /// failure has to abandon the whole message rather than flush what it
+    /// managed to write.
+    ///
+    /// The control is the same call with an encodable name: it DOES queue, so
+    /// the empty queue above is the refusal and not a fixture that never sends.
+    #[test]
+    fn an_unencodable_statement_name_queues_no_close() {
+        let (client, mut requests) = scripted_client();
+
+        close_statement(client.inner(), "interior\0nul");
+        assert!(
+            requests.try_recv().is_err(),
+            "a Close for an unencodable name was queued anyway"
+        );
+
+        close_statement(client.inner(), "encodable_name");
+        assert!(
+            requests.try_recv().is_ok(),
+            "a Close for an encodable name was not queued"
+        );
+    }
+}
