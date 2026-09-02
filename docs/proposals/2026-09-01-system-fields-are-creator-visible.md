@@ -64,6 +64,38 @@ A field declares **who computes its value, and when**:
 `increment(1)` is legal: the seed `1` is one value for every table of every app,
 which is exactly what a `scope = "all"` inject can attest.
 
+**But that argument currently has no reader, and the shape makes the gap
+invisible. OPEN, and it needs a decision before another generator takes an
+argument.** Measured 2026-09-01 across the whole tree.
+`AssignmentGenerator::Increment(i64)` is declared at
+`crates/zeroship-migrate-policy/src/rule.rs:153`, parsed at `:220`,
+`Display`-round-tripped at `:190`, and folded into the policy seal at
+`crates/zeroship-migrate-policy/src/seal.rs:517`. That is the complete set of
+readers. The write pass matches it as `Increment(_)` and DISCARDS the amount
+(`crates/zeroship-plugin-db/src/crud/system_fields_pass.rs:383`); the actual
+step is a literal `+ 1` emitted from three places in `zeroship-schema`
+(`query.rs:4279` update, `:4780` soft delete, `:4825` restore) plus the PG
+upsert's `COALESCE(..., 0) + 1` at `:6476`.
+
+So `increment(2)` in the charter parses, passes the root-only fence, **changes
+the sealed policy identity** - and the runtime still adds 1. Typed, sealed,
+mirrored, and false. Note what does NOT catch it: `inject_policy_mirror_gate.sh`
+arm 5 compares column NAMES, so a charter whose only edit is the increment
+argument passes every arm.
+
+This is a defect the data-driven pass CREATED. Before it, `by` never reached the
+runtime, so there was no argument to ignore.
+
+**Recommended: honour the amount rather than fence it.** Threading `n` into
+those four emitters is small and bounded, and it is the end state; a fence
+refusing `n != 1` is a second intermediate shape to throw away later, which this
+project's own pre-launch stance argues against. The fence is only the right
+answer if the amount turns out to need per-dialect care that makes honouring it
+expensive - decide that by trying, not by assuming. Whichever is chosen, the
+rule generalises: **an argument the charter can express and the runtime cannot
+honour must be refused at parse time, never silently dropped**, because the seal
+makes it look attested.
+
 **Per-collection creator data is never a charter argument.** An earlier draft
 wrote `typedId(...)`, implying the prefix rides in the charter. It cannot, and
 the contradiction was internal to this document: the inject rule is
@@ -606,6 +638,23 @@ than inventing a gate for it.
 ---
 
 ## Acceptance
+
+**Acceptance item 0a, and it is the one currently missing: a test must register
+a `DbPlugin` and assert the context carries a plan.** `system_shape_charter::plan()`
+returns the context-stamped projection if one is present and otherwise derives
+its own from the same `include_str!` bytes and stamps that. Every test in
+`--lib` and in `sqlite_integration` reaches the pass WITHOUT a registered
+plugin, so all of them exercise the fallback. Delete the `set_assignment_plan`
+call from `DbPlugin::register` and the whole suite stays green; what you would
+get instead is a `dead_code` warning, in a crate that already emits dozens, so
+in practice nothing.
+
+That matters because the fallback is what makes the deletion invisible, and the
+fallback is deliberate - it is what lets unit tests and the `test-helpers`
+targets drive the pass at all. The `grep -c 'allow(dead_code'` check proves the
+attribute is gone from the field; it does not prove the field is READ on the
+path a production worker takes. Only a registering test binds that, and none
+exists.
 
 0. `insert({ path: "/x" })` on a descriptor-installed collection succeeds. It
    does NOT today once the strip is removed: `id`/`created_at`/`updated_at` are
