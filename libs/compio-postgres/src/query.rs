@@ -956,6 +956,70 @@ mod tests {
         frame
     }
 
+    /// Drive `start` against one scripted backend frame.
+    async fn start_against(frame: Vec<u8>) -> Result<(), crate::Error> {
+        use crate::client::ResponseMessages;
+        use crate::codec::BackendMessages;
+        use futures_util::StreamExt;
+        use std::sync::Arc;
+
+        let (client, mut receiver) = test_client();
+        let inner = Arc::clone(client.inner());
+        let statement = Statement::new(&inner, "s_start".to_string(), vec![], vec![], false);
+        let start = super::start(
+            &inner,
+            bytes::Bytes::from_static(b"B\0\0\0\x04"),
+            &statement,
+        );
+        let respond = async {
+            let mut request = receiver
+                .next()
+                .await
+                .expect("start did not enqueue its request");
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    BytesMut::from(&frame[..]),
+                )))
+                .expect("deliver the scripted start response");
+        };
+        let (result, ()) = futures_util::join!(start, respond);
+        result.map(|_| ())
+    }
+
+    /// `start` refuses anything but `BindComplete` as the first reply.
+    ///
+    /// It is the shared prelude of every prepared-statement query path, and
+    /// its refusal arm had never run. Accepting a different frame would hand
+    /// the caller a `Responses` positioned mid-exchange, so the rows that
+    /// follow belong to a step the caller never asked for.
+    ///
+    /// `ParseComplete` is the payload: legal, well framed, and owed earlier in
+    /// a different exchange rather than here.
+    #[compio::test]
+    async fn start_refuses_a_first_reply_that_is_not_bind_complete() {
+        let error = start_against(scripted_backend_frame(b'1', b""))
+            .await
+            .expect_err("start accepted a frame that was not BindComplete");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("unexpected message from server"),
+            "start reported {rendered:?} rather than an out-of-order message"
+        );
+        assert!(
+            error.code().is_none(),
+            "start reported a server SQLSTATE, so the refusal was not local"
+        );
+    }
+
+    /// The one-variable control: the same path with the frame it is owed.
+    #[compio::test]
+    async fn start_accepts_bind_complete() {
+        start_against(scripted_backend_frame(b'2', b""))
+            .await
+            .expect("start rejected a well-formed BindComplete");
+    }
+
     /// Drive `sync` against one scripted backend frame.
     async fn sync_against(frame: Vec<u8>) -> Result<(), crate::Error> {
         use crate::client::ResponseMessages;
