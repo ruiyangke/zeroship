@@ -76,7 +76,7 @@ use std::time::{Duration, Instant};
 
 use crate::context::TxConnection;
 use zeroship_data_core::error::{
-    BeginIntent, DbError, IsolationLevel, SessionSetupDisposition, SessionSetupError,
+    BeginIntent, DbError, IsolationLevel, OpenSessionError, SessionSetupDisposition,
 };
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 
@@ -653,76 +653,21 @@ fn current_frame(app_id: &str) -> Option<FrameId> {
 // The I/O each action turns into
 // ---------------------------------------------------------------------------
 
-/// A startup error before or during `BEGIN`, versus one classified at the
-/// per-app setup boundary. Keeping these variants typed is what lets the event
-/// carry a reducer outcome without parsing the creator-facing error code.
-enum OpenSessionError {
-    Failed(DbError),
-    Setup(SessionSetupError),
-}
-
-impl From<DbError> for OpenSessionError {
-    fn from(error: DbError) -> Self {
-        Self::Failed(error)
-    }
-}
-
-impl From<SessionSetupError> for OpenSessionError {
-    fn from(error: SessionSetupError) -> Self {
-        Self::Setup(error)
-    }
-}
-
-/// Acquire the session, send `BEGIN`, and apply the per-app role.
+/// Ask the backend for an open, narrowed session and install it.
 ///
-/// Ordering is the existing one: `BEGIN` first, then `SET LOCAL ROLE` + the DB-1
-/// guards, because `SET LOCAL` needs a transaction to be local to.
+/// **The protocol's half of opening, which is the whole of what SC-1 knows
+/// about it.** How a session is acquired, what dialect spells the `BEGIN`, and
+/// what narrowing its authority means are
+/// [`BackendHandle::open_tx_session`]'s; this decides only that a session is
+/// due and where it goes.
 ///
-/// ## Every statement this driver issues runs narrowed, and `BEGIN` is why that
-/// is checkable
-///
-/// The pooled checkout arrives carrying the shared login role. Exactly ONE
-/// statement runs before [`super::apply_per_app_role`] narrows it, and that
-/// statement is `BEGIN`, which touches no object and needs no privilege. From
-/// there the session is the app role's until it settles, and every later action
-/// runs on that same narrowed session rather than on a fresh checkout: data SQL,
-/// `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`, terminal SQL, and the forced-cleanup
-/// `ROLLBACK`. So this driver has no ambient-privilege path to lose if the
-/// worker role stops inheriting app roles.
-///
-/// If `apply_per_app_role` itself fails, `open_session` returns `Err` and the
-/// lease drops un-installed. It goes back to the pool with a transaction open,
-/// which `Pool::return_client` handles: it rolls back any session it cannot
-/// prove `Idle` before publishing it.
+/// Every later action runs on that same narrowed session rather than on a fresh
+/// checkout - data SQL, `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`, terminal SQL and
+/// the forced-cleanup `ROLLBACK` - so this driver has no ambient-privilege path
+/// to lose if the worker role stops inheriting app roles.
 async fn open_session(app_id: &str, begin: BeginIntent) -> Result<(), OpenSessionError> {
     let backend = crate::exec::ensure_backend_for_shared_sql().await?;
-
-    match &backend {
-        crate::backend::BackendHandle::Postgres(pg) => {
-            use crate::backend::SqlExecutor;
-            let client = pg.acquire_dedicated_client(app_id).await?;
-            let begin_sql = crate::backend::postgres::render_begin(begin);
-            pg.client_exec(&client, &begin_sql, &[]).await?;
-            crate::backend::postgres::apply_per_app_role(&client, app_id).await?;
-            install(app_id, TxConnection::Postgres(client));
-        }
-        crate::backend::BackendHandle::Sqlite(sq) => {
-            use crate::backend::SqlExecutor;
-            // Bind the app's file into the session BEFORE its transaction
-            // connection is opened: the connection reads the path from the
-            // session's attachment list, so an app that has never been attached
-            // gets a lane that cannot see its own tables.
-            sq.attach_app_file(app_id).await?;
-            let client = sq.acquire_dedicated_client(app_id).await?;
-            // **SQLite spells every intent `BEGIN`, and that is a documented
-            // divergence rather than a dropped request.** It has one isolation
-            // level - serialisable, enforced by the single-writer actor - so
-            // there is no weaker level to ask for and no stronger one to grant.
-            // See `docs/reference/sqlite-divergences.md`.
-            sq.client_exec(&client, "BEGIN", &[]).await?;
-            install(app_id, TxConnection::Sqlite(client));
-        }
-    }
+    install(app_id, backend.open_tx_session(app_id, begin).await?);
     // Drop any broker residue from an interrupted prior run so it cannot leak
     // into this transaction's drain.
     clear_pending_emits(app_id);
