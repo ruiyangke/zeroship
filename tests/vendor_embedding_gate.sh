@@ -120,35 +120,49 @@ key_to_path() {
 # public field. Every entry carries the task that DELETES it - an entry with no
 # owner is a permanent exception, and this list does not have those.
 #
-# RE-MEASURED 2026-09-02 from this gate's own arm-2 output: NINE files, 14
-# production mentions. The per-file counts in the comments below were written
-# against the older figure and are not all current - `exec.rs` says 5 and the
-# gate reports 1. Trust the gate's output over these comments; they are an
-# index, not a census. Re-derive a count before citing one.
+# RE-MEASURED 2026-09-02 from this gate's own arm-2 output: SEVEN files, 11
+# production mentions.
+#
+# The notes below CARRIED A PER-FILE COUNT COLUMN until 2026-09-02, and it had
+# already rotted: `exec.rs` said 5 while the gate reported 1. The column is
+# deleted rather than corrected. Arm 2 prints the live count for every entry on
+# every run, so a number written here can only ever duplicate that output or
+# contradict it - and a stale one reads exactly like a measured one. What a
+# comment CAN say that the gate cannot is why the entry exists and what deletes
+# it, so that is all these lines say now.
 BASELINE_FILES="
 zeroship-plugin-db/exec.rs
 zeroship-plugin-db/backend/mod.rs
 zeroship-plugin-db/backend/cancel.rs
 zeroship-plugin-db/auth/bootstrap.rs
-zeroship-plugin-db/backend/lock_guard.rs
 zeroship-plugin-db/context.rs
-zeroship-plugin-db/drop_namespace.rs
 zeroship-plugin-db/lib.rs
 zeroship-plugin-db/service.rs
 "
-# exec.rs              5  Pool + Vec<Row> - the unsettled row vocabulary. Blocked on
+# exec.rs                 Pool + Vec<Row> - the unsettled row vocabulary. Blocked on
 #                         the neutral-row decision; see roled_rows in pg_autocommit.
-# backend/mod.rs       4  BackendHandle names BOTH vendors, which is why this file
+# backend/mod.rs          BackendHandle names BOTH vendors, which is why this file
 #                         has no tier at all. #119.
-# backend/cancel.rs    1  CancelToken, Pool. Was transaction/cancel.rs; moved into
+# backend/cancel.rs       CancelToken, Pool. Was transaction/cancel.rs; moved into
 #                         the vendor tier by #122. See the note below on why a
 #                         move does not clear an entry, only relocates it.
-# auth/bootstrap.rs    2  session setup reaching the driver. Follows #110's cut.
-# backend/lock_guard.rs 2 advisory-lock guard over a vendor client. Unjudged file.
-# context.rs           1  holds a live Pool in a field. #100 - placement unsettled.
-# drop_namespace.rs    1  DROP SCHEMA via a vendor pool. DDL; see #120's note.
-# lib.rs               1  the thin adapter still links the driver. #109.
-# service.rs           1  unjudged file; no destination decided yet.
+# auth/bootstrap.rs       session setup reaching the driver. Follows #110's cut.
+# context.rs              holds a live Pool in a field. #100 - placement unsettled.
+# drop_namespace.rs       ENTRY DELETED 2026-09-02, and NOT because the code
+# backend/lock_guard.rs   changed. Each module is gated at its single
+#                         declaration - lib.rs:259 and backend/mod.rs:82 - so
+#                         neither is in a shipped binary, and neither was ever a
+#                         file this gate should have ruled on.
+#                         `module_is_test_gated` skips them in arm 1 now, which
+#                         is what makes the entries wrong: an entry arm 1 cannot
+#                         reach can never be RETIRED by fixing the file, only
+#                         held green forever by arm 2. Both files still contain
+#                         `use compio_postgres::...` - do not read either
+#                         deletion as the coupling having gone. Arm 2 now
+#                         refuses such an entry outright, so this pairing cannot
+#                         be reintroduced by hand.
+# lib.rs                  the thin adapter still links the driver. #109.
+# service.rs              unjudged file; no destination decided yet.
 #
 # **THE ENTRIES RETIRE TWO DIFFERENT WAYS, and conflating them reads the list
 # as more alarming than it is.** Three came off on 2026-09-02 the first way:
@@ -167,6 +181,67 @@ in_baseline() {
   printf '%s\n' "$BASELINE_FILES" | grep -qx -- "$1"
 }
 
+# A module can be gated where it is DECLARED rather than where it is defined,
+# and the production-region filter below cannot see that: the attribute is in
+# the PARENT file.
+#
+#     // lib.rs:259
+#     #[cfg(any(test, feature = "test-helpers"))]
+#     pub mod drop_namespace;
+#
+# `drop_namespace.rs` carries no cfg of its own, so this gate counted its
+# `use compio_postgres::Pool` and carried a baseline entry for a module that is
+# in no shipped binary. tests/lib/tier_signature_census.sh had the identical
+# blind spot and was fixed the same day; this is the same rule, so the two
+# instruments agree about which files exist to rule on.
+#
+# TWO THINGS MAKE IT CORRECT, and both were learned by getting them wrong in the
+# census first:
+#
+#   * EVERY declaration must be gated, not merely one. This crate declares most
+#     modules through a two-arm visibility ladder (`#[cfg(not(feature =
+#     "test-helpers"))] pub(crate) mod exec;` plus its `pub` twin), so "any
+#     gated declaration" would exclude nearly the whole crate.
+#   * A `not(...)` wrapper is the SHIPPED arm and must be skipped before the
+#     substring test - `"test-helpers"` CONTAINS `test`, and matching it
+#     naively took the census to zero rows while printing that as calmly as a
+#     real number.
+module_is_test_gated() {   # $1 = a path under one of $ROOTS
+  local file="$1" name decls gated
+  name=$(basename "$file" .rs)
+  if [ "$name" = "mod" ]; then
+    name=$(basename "$(dirname "$file")")
+  fi
+  [ -z "$name" ] && return 1
+
+  decls=0
+  gated=0
+  while IFS= read -r hit; do
+    local decl_file decl_line prev i
+    decl_file="${hit%%:*}"
+    decl_line="${hit#*:}"
+    decl_line="${decl_line%%:*}"
+    decls=$((decls + 1))
+    i=$((decl_line - 1))
+    while [ "$i" -ge 1 ]; do
+      prev=$(sed -n "${i}p" "$decl_file")
+      case "$prev" in
+        *"#[cfg("*)
+          case "$prev" in
+            *"not("*) break ;;
+            *test*) gated=$((gated + 1)); break ;;
+            *) break ;;
+          esac
+          ;;
+        "#["*|*"//"*|"") i=$((i - 1)) ;;
+        *) break ;;
+      esac
+    done
+  done < <(grep -rn -E "^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${name}[[:space:]]*;" $ROOTS 2>/dev/null)
+
+  [ "$decls" -gt 0 ] && [ "$decls" -eq "$gated" ]
+}
+
 # --------------------------------------------------------------------------
 # Arm 1: no non-vendor production file names a vendor.
 # --------------------------------------------------------------------------
@@ -176,6 +251,10 @@ n_ruled=0
 n_new=0
 while IFS= read -r f; do
   is_vendor_tier "$f" && continue
+  # A module that is not compiled into any shipped binary cannot embed a vendor
+  # into one. Skipped BEFORE n_ruled so the arm's count stays honest: it reports
+  # what it decided, and it decided nothing about this file.
+  module_is_test_gated "$f" && continue
   rel="$(file_key "$f")"
   n_ruled=$((n_ruled + 1))
 
@@ -236,6 +315,17 @@ while IFS= read -r rel; do
   f="$(key_to_path "$rel")"
   if [ ! -f "$f" ]; then
     bad "baseline names $rel, which does not exist - delete the entry"
+    continue
+  fi
+  # An entry arm 1 SKIPS is unreachable, not satisfied. Arm 1 declines to rule
+  # on a test-gated module, so nothing about that file can ever retire its
+  # entry; the check below would hold it green off the file's own text forever,
+  # and the two arms would disagree about which files exist to rule on. This is
+  # not hypothetical - lock_guard.rs and drop_namespace.rs were both in that
+  # state on 2026-09-02, and the gate was GREEN throughout, because each arm was
+  # individually self-consistent. Keep the arms agreeing by construction.
+  if module_is_test_gated "$f"; then
+    bad "baseline names $rel, but it is test-gated at its declaration so arm 1 never rules on it - delete the entry"
     continue
   fi
   # The production region ends at the file's test MODULE, not at its first
