@@ -185,25 +185,24 @@ pub fn set_local_role_sql(app_id: &str) -> Result<String, DbError> {
 // have sent them to the wrong crate at the split: either PG dialect into the
 // core, or the SQLite deadline losing the constant it reads.
 //
-// Re-exported here so the two builders below, and existing `bootstrap::DB_*`
-// callers, keep resolving.
-pub use crate::budgets::{DB_IDLE_IN_TX_TIMEOUT_MS, DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS};
-
 // `tx_session_setup_sql` and `autocommit_local_session_setup_sql` moved to
-// `crate::backend::pg_session_sql` on 2026-09-01. They render PostgreSQL GUCs -
-// `SET LOCAL ROLE`, statement_timeout, idle_in_transaction_session_timeout,
-// lock_timeout - which is vendor DIALECT, while this module is tiered ENGINE.
+// `crate::backend::pg_session_sql` on 2026-09-01, and the `DB_*` budgets to
+// `crate::budgets`. They render PostgreSQL GUCs - `SET LOCAL ROLE`,
+// statement_timeout, idle_in_transaction_session_timeout, lock_timeout - which
+// is vendor DIALECT, while this module is tiered ENGINE.
 //
-// The move is a prerequisite, not tidiness: the roled autocommit funnel is going
-// down into the PG tier to break the PG -> ENGINE cycle, and it calls the
-// autocommit builder. Leaving the builder here would have re-formed that exact
-// cycle under a different symbol.
+// **Both moves left a `pub use` behind, and both are deleted as of 2026-09-02.**
+// The re-exports were justified as keeping "existing callers" resolving, on the
+// grounds that "a `pub use` names no type and adds no edge". That is wrong, and
+// `tests/lib/tier_direction_census.sh` proved it: a caller reaching a PG builder
+// THROUGH this module is an edge from the caller to THIS file, whatever the
+// symbol resolves to. The day `apply_per_app_role` moved into the PG tier the
+// census reported `PG backend/postgres.rs -> ENGINE crate::auth::bootstrap`,
+// and the only thing behind it was that `pub use`.
 //
-// Re-exported so existing `bootstrap::*_session_setup_sql` callers keep
-// resolving; a `pub use` names no type and adds no edge.
-pub use crate::backend::pg_session_sql::{
-    autocommit_local_session_setup_sql, tx_session_setup_sql,
-};
+// The `DB_*` re-export had ZERO callers when it was deleted - measured, not
+// assumed - despite its comment naming callers it was keeping alive. Call the
+// real paths.
 
 /// Result of [`ensure_per_app_role`] — distinguishes "created the role
 /// now" from "role already existed" for idempotency telemetry.
@@ -642,6 +641,11 @@ mod tests {
 mod live_reserved_sweep_tests {
     use super::*;
     use compio_postgres::{Client, NoTls};
+
+    // Named explicitly rather than reached through `super::*`: this module used
+    // the re-export deleted above, and `cargo check --all-targets` did not
+    // notice, because that command skips a target whose feature is off.
+    use crate::backend::pg_session_sql::tx_session_setup_sql;
 
     /// The DSN comes from typed config
     /// (`zeroship_core::config::test_database_url`, backed by the overlay at
