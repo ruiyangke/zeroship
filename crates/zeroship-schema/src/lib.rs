@@ -33,9 +33,8 @@
 //!
 //! ## What does NOT live here (the *transform* layer — stays in plugin-db)
 //!
-//! Vendor catalog introspection, AEAD encrypt/decrypt, the mask read-pass, the
-//! backfill *runner* (`run_mask_backfill` / `run_mask_rewrite`), CRUD /
-//! transactions / `SET LOCAL ROLE`, and metering. Those are data-plane or
+//! Vendor catalog introspection, AEAD encrypt/decrypt, the mask read-pass,
+//! CRUD / transactions / `SET LOCAL ROLE`, and metering. Those are data-plane or
 //! vendor-tier concerns; they call *into* this crate for neutral schema values,
 //! DDL, diffing, and codecs.
 //!

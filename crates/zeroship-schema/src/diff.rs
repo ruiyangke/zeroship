@@ -104,8 +104,11 @@ pub enum ChangeKind {
     /// an existing masked column's `.mask({...})` kind or classification
     /// changes. Touches every row (no IS NULL filter); the sibling
     /// column already exists + is NOT NULL so no schema mutation is
-    /// needed. Driven by
-    /// `zeroship_plugin_db::crud::mask_backfill::run_mask_rewrite`.
+    /// needed. Driven by the migration engine's own backfill (#30).
+    ///
+    /// This said `zeroship_plugin_db::crud::mask_backfill::run_mask_rewrite`
+    /// until 2026-09-02, and that function NEVER EXISTED - the module's own
+    /// header said so in its first four lines. The module is now deleted too.
     MaskRewrite {
         collection: String,
         column: String,

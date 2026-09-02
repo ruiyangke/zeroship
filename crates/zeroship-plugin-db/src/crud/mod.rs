@@ -73,11 +73,26 @@ pub(crate) mod mask_policy;
 pub mod mask_policy;
 
 
-// Mask backfill / rewrite / removal jobs driven by the migration service.
-// Same visibility pattern: `pub` under `test-helpers` so integration tests
-// can drive the helpers directly without standing up the full orchestrator.
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod mask_backfill;
+// `mask_backfill` WAS DECLARED HERE and is deleted (2026-09-02), under the
+// split's Phase 0.5 dead-code decision. Its header called it "mask backfill /
+// rewrite / removal jobs driven by the migration service", and #30 wired that
+// transition onto THE ENGINE'S OWN BACKFILL - so this was the superseded copy,
+// kept alive only by its own tests.
+//
+// Measured before deleting: all six entry points were either one-line
+// delegations to a live function elsewhere (`parse_mask_sentinel` ->
+// `zeroship_schema::mask_codec`, which `pg_introspect.rs` and `sqlite/mod.rs`
+// already call directly; `compute_masked_for_plaintext` -> `apply_mask_kind`
+// in `mask_pass.rs`) or helpers with zero callers anywhere
+// (`apply_mask_to_one_row`, `backfill_audit_name`, `rewrite_audit_name`,
+// `compute_masked_pairs_for_row`). Its sentinel tests duplicated
+// `zeroship-schema/src/mask_codec.rs`'s under the same names; the rest
+// exercised the zero-caller helpers.
+//
+// The module itself had already named the hazard, about its own column-name
+// derivation: leaving it would keep "a second, wrong derivation ... alive in a
+// module nothing calls, which is exactly how one gets copied back into a live
+// path". Deleting is that reasoning carried to the module.
 
 // Drift detection: sample masked-column siblings vs.
 // recomputed mask of decrypt(parent). Same visibility pattern so the

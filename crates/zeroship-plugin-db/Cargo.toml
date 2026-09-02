@@ -18,9 +18,12 @@ zeroship-core = { workspace = true }
 # lives in the leaf crate `zeroship-schema`. plugin-db's data plane and vendor
 # tiers call *into* it for DDL / diff / codec / metadata values, and re-export
 # the moved neutral items from their original module paths
-# (`crate::query`, `crate::diff`, `crate::backend::{VectorMetric,…}`,
-# `crate::crud::mask_backfill::{build,parse}_mask_sentinel`) so existing
-# neutral call sites resolve unchanged. PostgreSQL introspection stays here in
+# (`crate::query`, `crate::diff`, `crate::backend::{VectorMetric,…}`) so
+# neutral call sites resolve unchanged. This also listed
+# `crate::crud::mask_backfill::{build,parse}_mask_sentinel` until 2026-09-02;
+# that module is deleted, and its two live consumers (`backend::pg_introspect`,
+# `backend::sqlite`) call `zeroship_schema::mask_codec` directly rather than
+# through any re-export. PostgreSQL introspection stays here in
 # `backend::pg_introspect`; no vendor type crosses into the schema crate.
 zeroship-schema = { workspace = true }
 # The data plane's domain tier. `DbError` and `DbBinding` moved out of this

@@ -4,15 +4,17 @@
 //!
 //! Split out of the original data-plane `crud::mask_backfill` module because
 //! the *codec* (build/parse the `zero-migrate:mask:` sentinel string) is a
-//! schema-shape concern and lives here; the backfill *runner*
-//! (`run_mask_backfill` / `run_mask_rewrite`, which execute UPDATE
-//! backfills) stays in the data plane.
+//! schema-shape concern and lives here.
+//!
+//! **This block said the backfill RUNNER - `run_mask_backfill` /
+//! `run_mask_rewrite` - "stays in the data plane". Neither function ever
+//! existed there**; `crud::mask_backfill`'s own header said so in its first
+//! four lines, and three crates repeated the claim anyway. The runner is the
+//! engine's (#30), and that module was deleted on 2026-09-02 with zero
+//! callers.
 //!
 //! The `(MaskKind, Classification)` types this codec round-trips live in
-//! `crate::schema::diff` (the schema metadata types). plugin-db re-exports both
-//! the codec and the types from their original module paths so existing
-//! `crate::crud::mask_backfill::{build,parse}_mask_sentinel` references
-//! keep resolving unchanged.
+//! `crate::schema::diff` (the schema metadata types).
 
 use crate::descriptors::EncryptionMode;
 use crate::mask_meta::{Classification, EncryptionMeta, MaskKind, WrappedType};
