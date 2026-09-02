@@ -80,32 +80,6 @@
 #     only in the crate owning DbError, so it CANNOT follow from_pg down into
 #     data-postgres. data-core keeps the driver dependency, or the impl is
 #     deleted, or the pg error is newtyped. A design decision, not a TODO.
-#   - A MODULE GATED WHERE IT IS DECLARED, NOT WHERE IT IS DEFINED. Every cfg
-#     rule below reads the file being scanned. It cannot see the attribute that
-#     decides whether the file is compiled at all, because that attribute is in
-#     the PARENT:
-#
-#         // lib.rs:259
-#         #[cfg(any(test, feature = "test-helpers"))]
-#         pub mod drop_namespace;
-#
-#     MEASURED 2026-09-02: `drop_namespace` has exactly ONE declaration, it is
-#     gated, and it has zero `drop_namespace::` callers in src/. It is in no
-#     shipped binary - its own header says "real code in a build nobody ships" -
-#     and this census reports its `use compio_postgres::Pool` as a live
-#     ENGINE violation anyway. So does tests/vendor_embedding_gate.sh, which
-#     carries it in the baseline. BOTH instruments over-report by that one file,
-#     for the same reason, and neither is wrong about anything else.
-#
-#     Read the headline as "N, of which drop_namespace.rs does not ship" until
-#     this is fixed. A FIX WAS ATTEMPTED AND REVERTED the same day: resolving
-#     each file's `mod` declaration and skipping the gated ones took the whole
-#     census to ZERO rows - it began excluding every file, not just the gated
-#     one - and an instrument that reports nothing is worse than one that
-#     over-reports by one. The cause was not diagnosed. Anyone retrying should
-#     check the count is 2-minus-1 and not 0 before believing it, because both
-#     outcomes look like "the number went down".
-#
 #   - ASSOCIATED-TYPE BINDINGS. `type LiveSchema = crate::diff::LiveSchema;`
 #     (backend/postgres.rs:340, backend/sqlite/mod.rs:803) binds a contract's
 #     associated type to a zeroship-schema type through two renames; grepping
@@ -166,6 +140,77 @@ cd "$SRC" || exit 1
 # line that is exactly `}` at column 0. That is unambiguous regardless of what
 # the body contains. Nested modules never reach column 0, so they are excised
 # with their parent for free.
+# DEFECT 12: a module gated where it is DECLARED, not where it is defined.
+#
+# `region_filter` below reads one file and finds every cfg inside it. It cannot
+# see the attribute that decides whether the file is compiled AT ALL, because
+# that attribute is in the PARENT:
+#
+#     // lib.rs:259
+#     #[cfg(any(test, feature = "test-helpers"))]
+#     pub mod drop_namespace;
+#
+# `drop_namespace.rs` contains no cfg of its own, so every line read as
+# production and the census reported its `use compio_postgres::Pool` as a live
+# ENGINE violation. Measured: one declaration, gated, zero callers in src/, and
+# its own header says "real code in a build nobody ships".
+#
+# THE RULE IS "EVERY DECLARATION IS GATED", NOT "SOME DECLARATION IS", and the
+# difference is the whole fix. This crate declares most modules through a
+# two-arm visibility ladder:
+#
+#     #[cfg(not(feature = "test-helpers"))] pub(crate) mod exec;
+#     #[cfg(feature = "test-helpers")]      pub mod exec;
+#
+# Both lines carry a cfg. Requiring ALL of them to be gated keeps `exec` (one
+# gated arm, one shipped arm) out of the exclusion, where "any" would have
+# excluded it.
+#
+# AND `not(...)` HAS TO BE READ, NOT PATTERN-MATCHED. The first attempt tested
+# the attribute for the substring `test`. `"test-helpers"` CONTAINS `test`, so
+# `#[cfg(not(feature = "test-helpers"))]` - the SHIPPED arm - counted as gated,
+# every laddered module was excluded, and the census went to ZERO rows. It
+# printed that as calmly as it prints a real number. A `not(` wrapper is the
+# production arm by construction and is skipped before the substring test.
+module_is_test_gated() {   # $1 = path like ./drop_namespace.rs
+  local file="$1" name decls gated
+  name=$(basename "$file" .rs)
+  # `foo/mod.rs` is declared as `mod foo;`, not `mod mod;`.
+  if [ "$name" = "mod" ]; then
+    name=$(basename "$(dirname "$file")")
+  fi
+  [ -z "$name" ] && return 1
+
+  decls=0
+  gated=0
+  while IFS= read -r hit; do
+    local decl_file decl_line prev i
+    decl_file="${hit%%:*}"
+    decl_line="${hit#*:}"
+    decl_line="${decl_line%%:*}"
+    decls=$((decls + 1))
+    # Walk back over attributes and comments to the nearest cfg; stop at the
+    # first line that is neither.
+    i=$((decl_line - 1))
+    while [ "$i" -ge 1 ]; do
+      prev=$(sed -n "${i}p" "$decl_file")
+      case "$prev" in
+        *"#[cfg("*)
+          case "$prev" in
+            *"not("*) break ;;
+            *test*) gated=$((gated + 1)); break ;;
+            *) break ;;
+          esac
+          ;;
+        "#["*|*"//"*|"") i=$((i - 1)) ;;
+        *) break ;;
+      esac
+    done
+  done < <(grep -rn -E "^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${name}[[:space:]]*;" . 2>/dev/null)
+
+  [ "$decls" -gt 0 ] && [ "$decls" -eq "$gated" ]
+}
+
 region_filter() {   # $1 = file, $2 = "prod" | "test"
   awk -v WANT="$2" '
     /^[[:space:]]*(\/\/\/|\/\/!|\/\/)/ { next }
@@ -233,7 +278,14 @@ region_filter() {   # $1 = file, $2 = "prod" | "test"
     WANT == "prod" { print }
   ' "$1"
 }
-prod_lines() { region_filter "$1" prod; }
+# A file whose module is gated at its declaration has NO production region -
+# not "a production region that happens to be empty". Returning nothing is what
+# makes the tier question stop applying, exactly as it stops applying inside a
+# `#[cfg(test)] mod`.
+prod_lines() {
+  module_is_test_gated "$1" && return 0
+  region_filter "$1" prod
+}
 test_lines() { region_filter "$1" test; }
 
 # Does this file have any test region at all?
