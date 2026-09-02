@@ -76,6 +76,49 @@ fn structured_array(rng: &mut Rng) -> Vec<u8> {
     out
 }
 
+/// A `varbit` body: a bit length, then ceil(len/8) bytes. Random bytes never
+/// satisfy that relation - a probe panic in the decoder body went unhit by the
+/// whole random sweep, so this pair swept nothing until the generator existed.
+fn structured_varbit(rng: &mut Rng) -> Vec<u8> {
+    const BITS: &[i32] = &[0, 1, 7, 8, 9, 16, 31, 64, -1, i32::MAX];
+    let bits = BITS[rng.below(BITS.len())];
+    let mut out = bits.to_be_bytes().to_vec();
+    let needed = if bits <= 0 {
+        0
+    } else {
+        (bits as usize).div_ceil(8)
+    };
+    // Sometimes emit the wrong count so the length check is swept as well.
+    let emit = if rng.below(4) == 0 {
+        needed + 1
+    } else {
+        needed
+    };
+    for _ in 0..emit.min(64) {
+        out.push(rng.byte());
+    }
+    out
+}
+
+/// An `inet`/`cidr` body: address family, netmask bits, a cidr flag, the
+/// address length, then that many address bytes. Also never reached by random
+/// input - same probe, same result.
+fn structured_inet(rng: &mut Rng) -> Vec<u8> {
+    const FAMILY: &[u8] = &[2, 3, 0, 255];
+    const NB: &[u8] = &[4, 16, 0, 8];
+    let nb = NB[rng.below(NB.len())];
+    let mut out = vec![
+        FAMILY[rng.below(FAMILY.len())],
+        rng.below(140) as u8,
+        rng.below(2) as u8,
+        nb,
+    ];
+    for _ in 0..nb {
+        out.push(rng.byte());
+    }
+    out
+}
+
 /// Decode one (Rust type, PostgreSQL type) pair, counting outcomes. A panic
 /// here fails the test, which is the whole point.
 macro_rules! sweep {
@@ -97,6 +140,7 @@ fn hostile_value_bytes_are_refused_rather_than_panicking() {
     let mut rng = Rng(0x7A11_C0DE_5EED_0001);
     let (mut ok, mut err) = (0u32, 0u32);
     let mut array_ok = 0u32;
+    let mut structured_ok = 0u32;
 
     sweep!(
         &mut rng, ok, err,
@@ -123,7 +167,13 @@ fn hostile_value_bytes_are_refused_rather_than_panicking() {
         }
     }
     #[cfg(feature = "with-bit-vec-0_9")]
-    sweep!(&mut rng, ok, err, bit_vec::BitVec => Type::VARBIT, bit_vec::BitVec => Type::BIT);
+    for _ in 0..4_000 {
+        let raw = structured_varbit(&mut rng);
+        match <bit_vec::BitVec as FromSql>::from_sql(&Type::VARBIT, &raw) {
+            Ok(_) => structured_ok += 1,
+            Err(_) => err += 1,
+        }
+    }
     #[cfg(feature = "with-serde_json-1")]
     sweep!(&mut rng, ok, err, serde_json::Value => Type::JSONB, serde_json::Value => Type::JSON);
     #[cfg(feature = "with-uuid-1")]
@@ -133,7 +183,13 @@ fn hostile_value_bytes_are_refused_rather_than_panicking() {
     #[cfg(feature = "with-geo-types-0_7")]
     sweep!(&mut rng, ok, err, geo_types::Point<f64> => Type::POINT, geo_types::Rect<f64> => Type::BOX);
     #[cfg(feature = "with-cidr-0_3")]
-    sweep!(&mut rng, ok, err, cidr::IpInet => Type::INET, cidr::IpCidr => Type::CIDR);
+    for _ in 0..4_000 {
+        let raw = structured_inet(&mut rng);
+        match <cidr::IpInet as FromSql>::from_sql(&Type::INET, &raw) {
+            Ok(_) => structured_ok += 1,
+            Err(_) => err += 1,
+        }
+    }
     #[cfg(feature = "with-chrono-0_4")]
     sweep!(&mut rng, ok, err, chrono::NaiveDateTime => Type::TIMESTAMP, chrono::NaiveDate => Type::DATE, chrono::NaiveTime => Type::TIME);
     #[cfg(feature = "with-time-0_3")]
@@ -141,7 +197,9 @@ fn hostile_value_bytes_are_refused_rather_than_panicking() {
     #[cfg(feature = "with-jiff-0_2")]
     sweep!(&mut rng, ok, err, jiff::Timestamp => Type::TIMESTAMPTZ, jiff::civil::Date => Type::DATE);
 
-    eprintln!("value-decoder fuzz: ok={ok} array_ok={array_ok} err={err}");
+    eprintln!(
+        "value-decoder fuzz: ok={ok} array_ok={array_ok} structured_ok={structured_ok} err={err}"
+    );
     assert!(
         ok > 200,
         "the generator never produced a decodable value, so it swept nothing: ok={ok}"
@@ -149,6 +207,12 @@ fn hostile_value_bytes_are_refused_rather_than_panicking() {
     assert!(
         err > 200,
         "the generator never exercised a refusal: err={err}"
+    );
+    #[cfg(any(feature = "with-bit-vec-0_9", feature = "with-cidr-0_3"))]
+    assert!(
+        structured_ok > 100,
+        "no generated varbit or inet decoded, so those bodies were never swept: \
+         structured_ok={structured_ok}"
     );
     #[cfg(feature = "array-impls")]
     assert!(
