@@ -1509,24 +1509,69 @@ async fn temporal_and_vector_core_arrays_match_binary_copy() {
     .await;
 }
 
-/// A core empty `Vec` emits one zero-length dimension instead of the server's
-/// canonical zero-dimensional header. Binary COPY accepts it, stores an equal
-/// array, and canonicalizes the header when emitting the stored value.
+/// A core empty `Vec` emits the server's own canonical zero-dimensional
+/// header. Binary COPY accepts it and stores an equal array.
 #[compio::test]
-async fn empty_vec_array_is_valid_but_noncanonical() {
+async fn empty_vec_array_matches_the_servers_canonical_header() {
     let client = compio_client().await;
     let empty = Vec::<i32>::new();
     let ours = outbound_wire(&empty, &Type::INT4_ARRAY);
     let server = server_wire(&client, "'{}'::int4[]").await;
-    assert_eq!(decode_array_wire(&ours).dimensions, [(0, 1)]);
+    assert!(
+        decode_array_wire(&ours).dimensions.is_empty(),
+        "an empty array must carry no dimension header"
+    );
     assert!(decode_array_wire(&server).dimensions.is_empty());
-    assert_ne!(ours, server);
+    assert_eq!(ours, server);
 
     let feedback =
         copy_feedback(&client, "empty_int4_array", "int4[]", &ours, "'{}'::int4[]").await;
     assert!(feedback.equal, "empty array must remain SQL-equal");
     assert_eq!(feedback.stored_text, "{}");
     assert_eq!(feedback.stored_wire, server);
+}
+
+/// `oidvector` and `int2vector` are the exception, and the exception is the
+/// server's, not ours: they keep ONE zero-length dimension when empty, with the
+/// zero lower bound those two types require. Ordinary arrays drop the header
+/// entirely (above), so a single "empty means ndim = 0" rule would encode these
+/// two wrongly and discard their lower bound with the dimension.
+///
+/// Both cases assert against `server_wire`, so PostgreSQL is the oracle rather
+/// than a constant transcribed from it.
+#[compio::test]
+async fn empty_oid_and_int2_vectors_keep_their_zero_lower_bound_dimension() {
+    let client = compio_client().await;
+
+    assert_array_server_wire(
+        &client,
+        "empty int2vector Vec",
+        "''::int2vector",
+        &Vec::<i16>::new(),
+        &Type::INT2_VECTOR,
+        ArrayExpectation {
+            element_type: &Type::INT2,
+            dimensions: &[(0, 0)],
+            has_null: false,
+            element_count: 0,
+        },
+    )
+    .await;
+
+    assert_array_server_wire(
+        &client,
+        "empty oidvector Vec",
+        "''::oidvector",
+        &Vec::<u32>::new(),
+        &Type::OID_VECTOR,
+        ArrayExpectation {
+            element_type: &Type::OID,
+            dimensions: &[(0, 0)],
+            has_null: false,
+            element_count: 0,
+        },
+    )
+    .await;
 }
 
 const RANGE_EMPTY: u8 = 0x01;

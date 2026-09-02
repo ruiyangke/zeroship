@@ -1018,13 +1018,34 @@ impl<T: ToSql> ToSql for &[T] {
             _ => 1,
         };
 
-        let dimension = ArrayDimension {
-            len: downcast(self.len())?,
-            lower_bound,
+        // PostgreSQL emits an empty array as ndim = 0 with NO dimension header,
+        // and `array_recv` canonicalises a one-dimensional zero-length array
+        // back to exactly that. Upstream always writes one dimension, so its
+        // empty-array wire is a shape the server itself never produces.
+        // `array_to_sql` counts the dimensions it is given, so an empty
+        // iterator is what writes ndim = 0.
+        //
+        // oidvector and int2vector are EXCLUDED, measured against PostgreSQL
+        // 16 rather than assumed. They keep one dimension even when empty:
+        //
+        //   encode(array_send('{}'::int4[]), 'hex')      000000000000000000000017
+        //   encode(oidvectorsend(''::oidvector), 'hex')  00000001000000000000001a0000000000000000
+        //   encode(int2vectorsend(''::int2vector),'hex') 0000000100000000000000150000000000000000
+        //
+        // They are the same two types that need the zero lower bound above, and
+        // ndim = 0 would discard that bound along with the dimension.
+        let keeps_empty_dimension = matches!(*ty, Type::OID_VECTOR | Type::INT2_VECTOR);
+        let dimensions = if self.is_empty() && !keeps_empty_dimension {
+            None
+        } else {
+            Some(ArrayDimension {
+                len: downcast(self.len())?,
+                lower_bound,
+            })
         };
 
         types::array_to_sql(
-            Some(dimension),
+            dimensions,
             member_type.oid(),
             self.iter(),
             |e, w| match e.to_sql(member_type, w)? {
