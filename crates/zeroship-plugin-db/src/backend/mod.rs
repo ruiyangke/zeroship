@@ -1676,6 +1676,29 @@ impl BackendHandle {
         }
     }
 
+    /// Make this backend ready to serve `app_id`, whatever that takes.
+    ///
+    /// **PostgreSQL needs nothing; SQLite must bind the app's file into the
+    /// session first.** A connection reads its path from the session's
+    /// attachment list, so an app that has never been attached gets a
+    /// connection that cannot see its own tables. Cheap to repeat:
+    /// `attach_app_file` returns on a cache hit before issuing any SQL.
+    ///
+    /// Callers that already hold a concrete `SqliteBackend` - the SQLite
+    /// executor paths in `exec.rs` - call it directly and do not need this.
+    /// This exists for the ones holding a handle, which otherwise downcast to
+    /// SQLite purely to ask for a prerequisite PostgreSQL does not have.
+    ///
+    /// # Errors
+    ///
+    /// The SQLite attach failure. The PostgreSQL arm cannot fail.
+    pub(crate) async fn prepare_for_app(&self, app_id: &str) -> Result<(), DbError> {
+        match self {
+            Self::Postgres(_) => Ok(()),
+            Self::Sqlite(sq) => sq.attach_app_file(app_id).await,
+        }
+    }
+
     /// Persist an app's mask policy wherever this backend keeps one.
     ///
     /// **PostgreSQL stores nothing, and that is not a gap.** Its policy is held

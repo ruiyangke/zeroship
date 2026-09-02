@@ -430,10 +430,10 @@ async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
 /// restoring a per-collection boot RPC.
 async fn ensure_unmask_backend(app_id: &str) -> Result<(), DbError> {
     let backend = crate::exec::ensure_backend_for_shared_sql().await?;
-    if let Some(sqlite) = backend.as_sqlite() {
-        sqlite.attach_app_file(app_id).await?;
-    }
-    Ok(())
+    // Asked, not downcast. What "ready for this app" means is the backend's
+    // business - SQLite must attach the app file, PostgreSQL needs nothing -
+    // and this path only needs it to have happened.
+    backend.prepare_for_app(app_id).await
 }
 
 // ---------------------------------------------------------------------------
