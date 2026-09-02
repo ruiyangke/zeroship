@@ -129,6 +129,42 @@ behind it is four named owners instead of eleven loose maps.
   same time, and they have different schemas." It is not lane state and does not
   join the struct.
 
+## CORRECTION, from building it the same day
+
+**"The claim brackets the session" does not hold on every reachable path, and
+the design above rests on it.** The implementation was written, compiled clean
+and passed all 711 lib tests - then broke two live arms that pass at HEAD:
+
+```
+sc1_driver::a_cleanup_that_outlived_its_transaction_leaves_the_slot_alone
+sc1_driver::a_withdrawn_session_never_comes_back_from_the_pool
+```
+
+Both production callers of `release_tx_claim` remove the session first -
+`Action::ReleaseAdmission` runs after the reducer emitted `ReleaseSession` or
+`WithdrawSession`, and `TxAdmission::drop` calls `withdraw_tx_session` before
+releasing. But `probe::abandon_reducer` retires and releases with a session
+still parked, which is the state the first arm exists to test: a stale cleanup
+"must not send ROLLBACK to whatever session it finds in the slot - the
+transaction there is still open, and in production it would belong to the NEXT
+caller". Making the entry the claim drops that session, the pool rolls it back,
+and the assertion fails on backend state.
+
+Reverted rather than patched: the available fix was to edit the probe so my own
+refactor passed, on an arm guarding a cross-tenant session hazard.
+
+**The open question this leaves, which must be settled before a second attempt:**
+is "the claim released while a session is parked" a state to make
+unrepresentable, or one to support? If the former, `release_tx_claim` should
+refuse loudly rather than silently destroy, and the probe models something
+production cannot reach. If the latter, the lane cannot own the session outright,
+the entry cannot be the claim, and the central argument above has to be
+re-derived.
+
+Everything else in this document survives: the nine maps are still one entity,
+the destructor is still hand-written, and the placement question is still
+downstream of modelling it.
+
 ## Cost
 
 - 55 accessors rewritten, most mechanically
