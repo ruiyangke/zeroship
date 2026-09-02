@@ -6528,3 +6528,79 @@ async fn protocol_copy_done_without_the_binary_trailer_is_a_parse_error() {
     .await
     .expect("missing binary trailer test exceeded its outer watchdog");
 }
+
+/// A `RowDescription` format code outside {0, 1} is refused by name.
+///
+/// `SimpleQueryFormat::from_code` accepts 0 for text and 1 for binary and
+/// errors on anything else, and `simple_query.rs:41-44` never ran: a real
+/// server only ever sends those two, so only a hostile peer reaches it.
+///
+/// The value is that the refusal is EXPLICIT. The field is an `i16` the peer
+/// controls, and a driver that treated "not 1" as text would hand the caller
+/// bytes decoded under the wrong format for every unknown code a future
+/// protocol revision introduces - silently, and as data rather than an error.
+#[compio::test]
+async fn a_row_description_format_code_outside_text_or_binary_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 941);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+
+            // One int4 column, format code 2: legal framing, illegal value.
+            let mut description = Vec::new();
+            description.extend_from_slice(&1u16.to_be_bytes());
+            description.extend_from_slice(b"n\0");
+            description.extend_from_slice(&0u32.to_be_bytes());
+            description.extend_from_slice(&0u16.to_be_bytes());
+            description.extend_from_slice(&23u32.to_be_bytes());
+            description.extend_from_slice(&4i16.to_be_bytes());
+            description.extend_from_slice(&(-1i32).to_be_bytes());
+            description.extend_from_slice(&2u16.to_be_bytes());
+
+            let mut response = backend_frame(b'T', &description);
+            response.extend_from_slice(&backend_frame(b'C', b"SELECT 0\0"));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write the malformed RowDescription");
+            stream.flush().expect("flush the malformed RowDescription");
+
+            let mut rest = Vec::new();
+            let _ = stream.read_to_end(&mut rest);
+        });
+
+        let stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting to the format-code peer hung")
+        .expect("connect to the format-code peer");
+        let config = stub_config(server.addr);
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(stream, compio_postgres::NoTls),
+        )
+        .await
+        .expect("raw startup for the format-code test hung")
+        .expect("complete raw startup for the format-code test");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the malformed RowDescription hung instead of erroring")
+            .expect_err("format code 2 must be refused, not decoded");
+        let rendered = common::error_chain(&error);
+        assert!(
+            rendered.contains("invalid format code 2"),
+            "the refusal did not name the offending code: {rendered}"
+        );
+
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        server.finish();
+    }))
+    .await
+    .expect("the format-code test exceeded its watchdog");
+}
