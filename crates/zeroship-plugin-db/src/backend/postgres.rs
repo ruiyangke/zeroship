@@ -209,6 +209,33 @@ impl PostgresBackend {
     ) -> Result<(), DbError> {
         pg_autocommit::roled_statement(&self.pool, app_id, sql, params).await
     }
+
+    /// Run `sql` under this app's role and render the rows as JSON, keeping the
+    /// `compio_postgres::Row` inside this tier.
+    ///
+    /// The missing fifth sibling of the four above until 2026-09-02. Because it
+    /// did not exist, `crate::exec` fetched the pool itself - an
+    /// `ensure_postgres_pool_for_shared_sql` returning `Rc<Pool>` - and called
+    /// `pg_autocommit::roled_rows` directly, which put two vendor signatures in
+    /// an ENGINE-tiered file for want of a method that every neighbouring call
+    /// already had.
+    ///
+    /// The JSON conversion happens HERE rather than at the caller for the same
+    /// reason: `row_to_json` is this tier's business, and the engine wants
+    /// `Vec<Value>` either way - it is what the SQLite arm has always returned.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::query_roled_json`].
+    pub(crate) async fn query_roled_rows_as_json(
+        &self,
+        app_id: &str,
+        sql: &str,
+        params: &[&str],
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        let rows = pg_autocommit::roled_rows(&self.pool, app_id, sql, params).await?;
+        Ok(super::pg_row_json::rows_to_json_value(&rows))
+    }
 }
 
 // Capability impls -- four blocks, one per sub-trait:
