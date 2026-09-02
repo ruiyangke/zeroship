@@ -119,12 +119,16 @@ key_to_path() {
 # scope is an order of magnitude wider than #97 alone, which named exactly one
 # public field. Every entry carries the task that DELETES it - an entry with no
 # owner is a permanent exception, and this list does not have those.
+#
+# RE-MEASURED 2026-09-02 from this gate's own arm-2 output: NINE files, 14
+# production mentions. The per-file counts in the comments below were written
+# against the older figure and are not all current - `exec.rs` says 5 and the
+# gate reports 1. Trust the gate's output over these comments; they are an
+# index, not a census. Re-derive a count before citing one.
 BASELINE_FILES="
 zeroship-plugin-db/exec.rs
 zeroship-plugin-db/backend/mod.rs
-zeroship-plugin-db/transaction/driver.rs
-zeroship-plugin-db/transaction/mod.rs
-zeroship-plugin-db/transaction/cancel.rs
+zeroship-plugin-db/backend/cancel.rs
 zeroship-plugin-db/auth/bootstrap.rs
 zeroship-plugin-db/backend/lock_guard.rs
 zeroship-plugin-db/context.rs
@@ -136,15 +140,28 @@ zeroship-plugin-db/service.rs
 #                         the neutral-row decision; see roled_rows in pg_autocommit.
 # backend/mod.rs       4  BackendHandle names BOTH vendors, which is why this file
 #                         has no tier at all. #119.
-# transaction/driver.rs 2 TransactionStatus, Client - transaction MECHANICS. #122.
-# transaction/mod.rs   1  Client in a signature - same seam. #122.
-# transaction/cancel.rs 1 CancelToken, Pool - cancellation is vendor mechanics. #122.
+# backend/cancel.rs    1  CancelToken, Pool. Was transaction/cancel.rs; moved into
+#                         the vendor tier by #122. See the note below on why a
+#                         move does not clear an entry, only relocates it.
 # auth/bootstrap.rs    2  session setup reaching the driver. Follows #110's cut.
 # backend/lock_guard.rs 2 advisory-lock guard over a vendor client. Unjudged file.
 # context.rs           1  holds a live Pool in a field. #100 - placement unsettled.
 # drop_namespace.rs    1  DROP SCHEMA via a vendor pool. DDL; see #120's note.
 # lib.rs               1  the thin adapter still links the driver. #109.
 # service.rs           1  unjudged file; no destination decided yet.
+#
+# **THE ENTRIES RETIRE TWO DIFFERENT WAYS, and conflating them reads the list
+# as more alarming than it is.** Three came off on 2026-09-02 the first way:
+# transaction/driver.rs, transaction/mod.rs and transaction/cancel.rs, when #122
+# separated the SC-1 protocol from the vendor lane. driver.rs and mod.rs stopped
+# naming a vendor at all; cancel.rs MOVED, so its entry did not disappear, it
+# became backend/cancel.rs above.
+#
+# The rest come off the second way: by the crate split itself. backend/mod.rs,
+# backend/cancel.rs and backend/lock_guard.rs are already in the tier that is
+# ALLOWED to name a driver - they are listed only because plugin-db is still one
+# crate, and this gate's rule is about crates. They need no code move; they need
+# `backend/` to become zeroship-data-postgres. Do not chase them as defects.
 
 in_baseline() {
   printf '%s\n' "$BASELINE_FILES" | grep -qx -- "$1"
