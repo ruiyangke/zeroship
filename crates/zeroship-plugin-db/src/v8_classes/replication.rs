@@ -17,8 +17,43 @@ use zeroship_runtime::state::OpError;
 #[allow(unused_imports)]
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method, v8_name};
 
-use crate::replication_ops::replication_watchdog_dispatch;
-use crate::v8_bridge::read_json_arg;
+use zeroship_runtime::state::ResolveValue;
+
+use crate::exec::ensure_pool;
+use crate::v8_bridge::{read_json_arg, runtime_state, setup_js_promise};
+use crate::v8_classes::dispatch::settle;
+
+/// `db.replication.watchdog()` dispatch.
+///
+/// Lived in a 48-line `replication_ops.rs` of its own until 2026-09-02, with
+/// this as its only item and the method below as its only caller. That file
+/// matched no arm of the tier census's map, so it fell to `CONTESTED` - a
+/// bucket the census exempts from every rule, on the grounds that a module with
+/// no assigned destination cannot violate one. The effect was that a live
+/// `v8::PinScope` dispatch sat in the ENGINE-shaped half of the crate and the
+/// instrument reported nothing. Being here makes it ADAPTER by path.
+///
+/// The body was also a hand-rolled `settle`: three arms building
+/// `OpResult::JsValue` by hand, two of them byte-identical to `reject_op`.
+fn replication_watchdog_dispatch<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    app_id: String,
+) -> v8::Local<'s, v8::Promise> {
+    let state = runtime_state(scope);
+    let (resolver, request_id, promise) = setup_js_promise(scope, &state);
+
+    state.borrow_mut().spawned_ops.push(Box::pin(settle(
+        resolver,
+        request_id,
+        async move {
+            let pool = ensure_pool().await?;
+            crate::replication::watchdog_query(&pool, &app_id).await
+        },
+        |rows| ResolveValue::String(crate::replication::watchdog_to_json(&rows)),
+    )));
+
+    promise
+}
 
 pub struct Replication {
     /// app_id stamped at mint time from the parent Db wrapper. Never

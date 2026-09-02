@@ -256,11 +256,6 @@ pub mod replication;
 pub mod slot_reaper;
 
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod replication_ops;
-#[cfg(feature = "test-helpers")]
-pub mod replication_ops;
-
-#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod transaction;
 #[cfg(feature = "test-helpers")]
 pub mod transaction;

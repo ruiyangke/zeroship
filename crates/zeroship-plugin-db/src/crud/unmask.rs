@@ -1559,47 +1559,6 @@ async fn write_audit_query_hint_row(
     write_audit_unmask_row(app_id, &synthetic, &class_joined, outcome).await
 }
 
-// ---------------------------------------------------------------------------
-// V8 dispatch glue
-// ---------------------------------------------------------------------------
-
-use zeroship_runtime::state::ResolveValue;
-
-/// V8-facing dispatch helper. Returns the unresolved Promise; the
-/// `dispatch_unmask` body runs as a spawned op and resolves with
-/// `{ plaintext }` on success or rejects with the typed `OpError`.
-///
-/// Called from `v8_classes::db::Db::unmask_field` (the `#[v8_method]`
-/// wrapping this entry point).
-pub(crate) fn dispatch_unmask_field<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    binding: &DbBinding,
-    args_v: Value,
-) -> v8::Local<'s, v8::Promise> {
-    let state = crate::v8_bridge::runtime_state(scope);
-    let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
-
-    // Parse the args eagerly so a malformed shape surfaces a typed
-    // error synchronously rather than racing the spawn.
-    let parsed = parse_args(&args_v);
-    let binding = binding.clone();
-
-    // The parse error folds into `settle`'s error arm via `?`; it made the same
-    // `reject_op` call the hand-rolled arm here did.
-    state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
-        resolver,
-        request_id,
-        async move { dispatch_unmask(&binding, parsed?).await },
-        |result| {
-            // Wire shape: `{ plaintext: <string> }`. The SDK reads
-            // `result.plaintext` directly; for `wraps = bytes` the
-            // SDK base64-decodes on its side.
-            ResolveValue::Json(serde_json::json!({ "plaintext": result.plaintext }).to_string())
-        },
-    )));
-
-    promise
-}
 
 // ---------------------------------------------------------------------------
 // The DB-3 boundary, cfg-forked so an integration target can reach it
@@ -1674,51 +1633,6 @@ fn require_string(obj: &serde_json::Map<String, Value>, key: &str) -> Result<Str
         .map(str::to_string)
 }
 
-// ---------------------------------------------------------------------------
-// V8 dispatch glue for `bulkUnmaskFields`
-// ---------------------------------------------------------------------------
-
-/// V8-facing dispatch helper for `zeroship.db.bulkUnmaskFields`.
-///
-/// Mirrors [`dispatch_unmask_field`]: parses the args eagerly so a
-/// malformed shape surfaces synchronously, then spawns the bulk
-/// dispatcher and resolves with `{ results: { <rowPk>: { <col>: <pt> } } }`
-/// on success or rejects with the typed `OpError` on failure (most
-/// commonly `bulk_unmask_partial_unauthorized`).
-pub(crate) fn dispatch_bulk_unmask_field<'s>(
-    scope: &mut v8::PinScope<'s, '_>,
-    binding: &DbBinding,
-    args_v: Value,
-) -> v8::Local<'s, v8::Promise> {
-    let state = crate::v8_bridge::runtime_state(scope);
-    let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
-
-    let parsed = parse_bulk_args(&args_v);
-    let binding = binding.clone();
-
-    state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
-        resolver,
-        request_id,
-        async move { dispatch_bulk_unmask(&binding, parsed?).await },
-        |result| {
-            // Wire shape: `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
-            // `BTreeMap` serialises as a JSON object with sorted
-            // keys — deterministic for golden-snapshot tests. The reshaping is
-            // JS-wire lowering, so it belongs on this side of the boundary.
-            let mut obj = serde_json::Map::with_capacity(result.results.len());
-            for (row_pk, cols) in result.results {
-                let mut col_obj = serde_json::Map::with_capacity(cols.len());
-                for (c, pt) in cols {
-                    col_obj.insert(c, Value::String(pt));
-                }
-                obj.insert(row_pk, Value::Object(col_obj));
-            }
-            ResolveValue::Json(serde_json::json!({ "results": Value::Object(obj) }).to_string())
-        },
-    )));
-
-    promise
-}
 
 // The bulk half of the DB-3 boundary. Visibility is forked for the reason
 // spelled out above `parse_args`.
