@@ -315,7 +315,7 @@ impl KeyStore {
 /// is zeroship-owned and read on the worker path, and it has no generated
 /// declaration yet.
 fn env_lookup_root(key_id: &str) -> Result<[u8; 32], DbError> {
-    const COLUMN_KEY_FAMILY: DeclaredEnvFamily<String, crate::PluginDbConsumer> =
+    const COLUMN_KEY_FAMILY: DeclaredEnvFamily<String, super::EncryptionConsumer> =
         DeclaredEnvFamily::platform("ZEROSHIP_COLUMN_KEY_");
     let suffix = key_id.to_uppercase();
     // Derived from the family so the diagnostics cannot drift from the name
@@ -325,7 +325,7 @@ fn env_lookup_root(key_id: &str) -> Result<[u8; 32], DbError> {
         zeroship_core::read_declared_env_family!(
             COLUMN_KEY_FAMILY,
             &suffix,
-            crate::PluginDbConsumer
+            super::EncryptionConsumer
         )
         .ok()
         .flatten()
