@@ -448,8 +448,25 @@ follows each is what was actually verified, not what was intended.
    "Strip at the pass" is right for `version`, whose hazard is two assignments
    reaching one `DO UPDATE SET`. It is wrong for `id`, because the pass is the
    one place that cannot tell whose value it is looking at.
-6. **The SDK stops requiring and stops materialising** for assigned fields, and
-   `stripRuntimeSystemFields` goes.
+6. ~~**The SDK stops requiring and stops materialising** for assigned fields, and
+   `stripRuntimeSystemFields` goes.~~ **DONE.** `validateDoc` reads `def.assign`
+   and drops the key from its OWN result object - never from the caller's
+   document. The seven-name lists in `install-schema.ts` and `collection.ts` now
+   read a committed generated projection derived from the charter, and
+   `policies/codegen.mjs` emits it to a second target so `@zeroship/db` can
+   import it without a package cycle.
+
+   Verified: bootstrap 77/1 -> **78/0**, `@zeroship/db` 517 -> **528**, mirror
+   gate exit 2 -> **exit 0**. The stale-dist hazard was closed by MUTATION, not
+   by mtime: deleting `assign` from `created_at` in the fragment, regenerating,
+   and rebuilding turned bootstrap back to 77/1 with `created_at is required`;
+   restoring returned 78/0. A stale dist cannot follow a source mutation.
+
+   **It also exposed the second `version` producer** described above, which is
+   now fixed: both post-normalization injections take the charter stamp, so the
+   `DEFAULT 1` seed no longer reaches the write. Before the fix an insert
+   arrived at the native op as `{"title":"hello","version":1}`; the regression
+   test asserts against a recording native stub rather than an internal shape.
 7. **Soft-delete routes through the native op** (`crud.ts:513-532`, `:556-573`)
    BEFORE any `deleted_at` refusal, or the refusal rejects the platform's own
    `delete()`.
