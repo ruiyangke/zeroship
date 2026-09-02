@@ -137,7 +137,6 @@ pub mod driver;
 
 /// The out-of-band canceller forced cleanup uses to reach a session another
 /// future is holding.
-pub(crate) mod cancel;
 
 /// The `test-helpers` seam onto the driver, for integration targets that need a
 /// live server. Not compiled into a production build.

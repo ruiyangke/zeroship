@@ -69,6 +69,16 @@ use std::rc::Rc;
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::{BeginIntent, DbError, OpenSessionError};
 
+/// Out-of-band cancellation for a pinned transaction session.
+///
+/// Lives here rather than under `transaction/`, where it sat until 2026-09-02,
+/// because both its types are vendor: `PostgresCanceller` holds a
+/// `compio_postgres` pool and cancel token, and the SQLite arm holds a handle to
+/// the session actor. SC-1 asks a session for its canceller and later asks that
+/// canceller to fire; neither call needs the protocol to know which backend
+/// answered.
+pub(crate) mod cancel;
+
 #[cfg(any(test, feature = "test-helpers"))]
 pub(crate) mod lock_guard;
 /// PostgreSQL row -> JSON decoding. Travels with `postgres` into the Postgres

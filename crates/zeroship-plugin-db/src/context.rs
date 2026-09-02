@@ -69,7 +69,7 @@ pub(crate) struct TxLane {
     /// How to reach the session out-of-band. Captured at install, because the
     /// one moment forced cleanup needs it is the one moment it cannot borrow
     /// the session.
-    canceller: Option<crate::transaction::cancel::TxCanceller>,
+    canceller: Option<crate::backend::cancel::TxCanceller>,
 
     /// Parked on this lane ending, so a second top-level `transaction()` for
     /// the same app waits instead of racing.
@@ -1071,7 +1071,7 @@ impl ThreadDbContext {
     pub(crate) fn install_tx_canceller(
         &mut self,
         app_id: &str,
-        canceller: crate::transaction::cancel::TxCanceller,
+        canceller: crate::backend::cancel::TxCanceller,
     ) {
         self.lanes.entry(app_id.to_string()).or_default().canceller = Some(canceller);
     }
@@ -1083,7 +1083,7 @@ impl ThreadDbContext {
     pub(crate) fn tx_canceller_for(
         &self,
         app_id: &str,
-    ) -> Option<crate::transaction::cancel::TxCanceller> {
+    ) -> Option<crate::backend::cancel::TxCanceller> {
         self.lanes.get(app_id).and_then(|lane| lane.canceller.clone())
     }
 
