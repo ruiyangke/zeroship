@@ -2124,6 +2124,58 @@ mod tests {
         );
     }
 
+    /// `begin_startup_info` refuses unless authentication actually ran.
+    ///
+    /// Bound only incidentally before this: mutating the guard to `if false`
+    /// reddened `a_connector_that_verifies_nothing_cannot_serve_a_verifying_sslmode`
+    /// in `tls_live`, a test about sslmode that says nothing about startup
+    /// phases, and the refusal's own message appeared nowhere outside its
+    /// definition. A guard whose only witness is named for something else
+    /// still fails a regression, but reports it as the wrong defect.
+    ///
+    /// Every phase other than `Authenticating` is walked, so the guard cannot
+    /// be narrowed to reject just one of them.
+    #[test]
+    fn startup_info_is_refused_unless_authentication_ran() {
+        let mut ruled_on = 0usize;
+        for phase in [
+            HandshakePhase::AwaitingAuthentication,
+            HandshakePhase::ReadingStartupInfo,
+            HandshakePhase::Complete,
+        ] {
+            let mut handshake = empty_handshake();
+            handshake.phase = phase;
+            let error = handshake
+                .begin_startup_info()
+                .expect_err("startup info was accepted without authentication");
+            let mut chain = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                chain.push_str(": ");
+                chain.push_str(&cause.to_string());
+                source = std::error::Error::source(cause);
+            }
+            assert!(
+                chain.contains("authentication completed in an invalid startup phase"),
+                "the refusal for {phase:?} did not name the phase violation: {chain}"
+            );
+            ruled_on += 1;
+        }
+        assert_eq!(
+            ruled_on, 3,
+            "every non-authenticating phase must be ruled on"
+        );
+
+        // Control: the one phase that must be ACCEPTED, or "always refuses"
+        // would satisfy the assertions above.
+        let mut handshake = empty_handshake();
+        handshake.phase = HandshakePhase::Authenticating;
+        handshake
+            .begin_startup_info()
+            .expect("authentication having run must admit startup info");
+        assert_eq!(handshake.phase, HandshakePhase::ReadingStartupInfo);
+    }
+
     /// `Handshake::new` reads the config but does not hold it, so a local one
     /// is enough and the returned value borrows nothing.
     fn empty_handshake() -> Handshake<HandshakeWriteSuccess, crate::tls::NoTlsStream> {
