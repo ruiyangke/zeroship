@@ -320,6 +320,18 @@ fn verifier_for(
             .build()
         {
             Ok(verifier) => verifier,
+            // The `is_some()` guard is provably redundant, and the `expect`
+            // below it therefore cannot fire. File CRLs are built ALONE above,
+            // and a rustls-rejected file CRL is CLEARED there rather than
+            // carried forward, so by the time this combined build runs the only
+            // possible source of `InvalidCrl` is the directory - which means a
+            // directory was configured. Established by reading, not by probe:
+            // this arm has zero executed coverage regions, because reaching it
+            // needs a CRL our own parser accepts and rustls rejects.
+            //
+            // Kept as defence rather than deleted: the argument depends on the
+            // earlier clear-on-reject staying where it is, and the `Err(error)`
+            // arm below already handles the case this guard excludes.
             Err(VerifierBuilderError::InvalidCrl(error)) if directory_path.is_some() => {
                 return Err(Error::tls(
                     format!(
@@ -2504,6 +2516,41 @@ mod tests {
         assert!(tls_server_end_point(&cert).is_none());
     }
 
+    /// A name that is entirely whitespace canonicalises to nothing, and must do so
+    /// by the early return rather than by panicking. `rposition` below that
+    /// return carries an `expect` reading "the first non-space byte proved one
+    /// exists" - true only because the early return already handled the case
+    /// where there is no such byte.
+    ///
+    /// This matters because the input is a CRL ISSUER NAME: it comes from
+    /// whoever wrote the CRL, not from us. Removing the early return leaves the
+    /// whole suite green, so nothing was checking that an all-space name is
+    /// answered rather than fatal.
+    #[test]
+    fn crl_issuer_all_whitespace_name_canonicalises_to_empty() {
+        for spaces in [&b" "[..], &b"\t\n\r"[..], &[b' ', 0x0b, 0x0c, b'\t'][..]] {
+            let value = Any::from_tag_and_data(Tag::PrintableString, spaces);
+            let canonical = openssl_canonical_string(&value)
+                .expect("an all-space name is well formed, just empty")
+                .expect("PrintableString is an OpenSSL-canonical string type");
+            assert!(
+                canonical.is_empty(),
+                "an all-space issuer name must canonicalise to nothing, got {canonical:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn crl_issuer_utf8_string_containing_only_c_whitespace_is_empty() {
+        let value = Any::from_tag_and_data(Tag::Utf8String, b" \t\n\x0b\x0c\r");
+
+        assert_eq!(
+            openssl_canonical_string(&value),
+            Ok(Some(Vec::new())),
+            "an issuer containing only C whitespace must canonicalize to the empty string"
+        );
+    }
+
     #[test]
     fn crl_issuer_bmp_string_decodes_big_endian_two_byte_units() {
         // BMPString stores each Unicode scalar as one two-byte, big-endian unit.
@@ -2639,6 +2686,93 @@ mod tests {
         ] {
             assert_eq!(hashed_crl_name(OsStr::new(name)), expected, "{name}");
         }
+    }
+
+    /// A file that parses as a CRL and then has bytes left over is not a CRL,
+    /// it is a CRL followed by something else - a truncated append, two
+    /// concatenated files, or a deliberate suffix. Hashing the issuer out of
+    /// the part that did parse would silently accept whichever half we happened
+    /// to read, so the whole input has to be consumed.
+    ///
+    /// The untouched fixture is the control: it differs from the refused input
+    /// by exactly the one appended byte.
+    #[test]
+    fn a_crl_with_trailing_bytes_is_refused() {
+        let pem = include_str!("../tests/data/stale_guard_crl.pem");
+        let crl = CertificateRevocationListDer::from_pem_slice(pem.as_bytes())
+            .expect("parse the CRL fixture");
+        openssl_crl_issuer(&crl).expect("the fixture on its own must parse to completion");
+
+        let mut der = crl.as_ref().to_vec();
+        der.push(0x00);
+        let padded = CertificateRevocationListDer::from(der);
+
+        let error =
+            openssl_crl_issuer(&padded).expect_err("a CRL with bytes after its end was accepted");
+        assert!(
+            error.contains("trailing data after CRL"),
+            "unexpected refusal: {error}"
+        );
+    }
+
+    /// A CRL whose `thisUpdate` has not arrived yet cannot be trusted to list
+    /// current revocations - it is either a clock disagreement or a forged
+    /// file, and treating it as authoritative would mean honouring a revocation
+    /// list that does not claim to be in force.
+    ///
+    /// `thisUpdate` is the first `UTCTime` in the TBSCertList, encoded as tag
+    /// `0x17`, length 13, `YYMMDDHHMMSSZ`. Rewriting ONLY the two year digits
+    /// keeps every DER length identical, so nothing needs re-encoding, and 49
+    /// stays inside UTCTime's 2000-2049 window. The signature is not checked by
+    /// this path, so a patched body still parses.
+    ///
+    /// The assertion on the parsed timestamp is what makes this sound: it
+    /// proves the patch landed on `thisUpdate` rather than trusting the byte
+    /// offset to have found the right field.
+    #[test]
+    fn a_crl_dated_in_the_future_is_refused() {
+        let pem = include_str!("../tests/data/stale_guard_crl.pem");
+        let crl = CertificateRevocationListDer::from_pem_slice(pem.as_bytes())
+            .expect("parse the CRL fixture");
+        let now = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("the system clock is after the unix epoch")
+                .as_secs(),
+        )
+        .expect("the system clock fits an X.509 timestamp");
+
+        // Control: as shipped, the fixture has already started.
+        let (_, shipped) = openssl_crl_issuer(&crl).expect("read the fixture thisUpdate");
+        assert!(
+            shipped <= now,
+            "the fixture is no longer in the past; it needs regenerating"
+        );
+        ensure_crls_started(std::slice::from_ref(&crl))
+            .expect("the shipped fixture must be accepted");
+
+        let mut der = crl.as_ref().to_vec();
+        let at = der
+            .windows(2)
+            .position(|window| window == [0x17, 0x0d])
+            .expect("the fixture carries no 13-byte UTCTime");
+        der[at + 2] = b'4';
+        der[at + 3] = b'9';
+        let future = CertificateRevocationListDer::from(der);
+
+        let (_, patched) =
+            openssl_crl_issuer(&future).expect("the year-patched CRL must still parse");
+        assert!(
+            patched > now,
+            "the year patch did not move thisUpdate into the future"
+        );
+
+        let error = ensure_crls_started(std::slice::from_ref(&future))
+            .expect_err("a CRL whose thisUpdate has not arrived was accepted");
+        assert!(
+            error.contains("thisUpdate is in the future"),
+            "unexpected refusal: {error}"
+        );
     }
 
     #[test]

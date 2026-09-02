@@ -5333,6 +5333,39 @@ async fn a_misplaced_message_after_the_parameter_description_is_refused() {
     .expect("misplaced post-ParameterDescription test exceeded its outer watchdog");
 }
 
+/// The FOURTH expectation, and the one the other three left uncovered.
+///
+/// `prepare.rs` waits for `ReadyForQuery` after the description because a
+/// complete Parse/Describe prefix is not the outcome of the exchange - a
+/// terminal `ErrorResponse` can still follow it. `prepare_preserves_a_terminal
+/// _error_after_its_description` drives exactly that error case, so the arm
+/// that refuses a NON-error frame in the same slot (`prepare.rs:285`) had
+/// never run: the three siblings above stop one message earlier.
+///
+/// A second `ParseComplete` is the payload because it is well framed and
+/// individually legal; only its POSITION is wrong. Accepting it would hand
+/// back a Statement whose Sync-terminated exchange was never confirmed.
+#[compio::test]
+async fn a_misplaced_message_where_ready_for_query_is_owed_is_refused() {
+    // `Box::pin` where the three siblings above have none: the future is over
+    // clippy's large-future threshold, and this file already carries 56 of
+    // those warnings. Pinning here keeps the count from growing.
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let mut response = backend_frame(b'1', b"");
+        response.extend_from_slice(&backend_frame(b't', &0u16.to_be_bytes()));
+        response.extend_from_slice(&backend_frame(b'n', b""));
+        response.extend_from_slice(&backend_frame(b'1', b""));
+        let chain = hostile_prepare_retires_session(304, response).await;
+        assert!(
+            chain.contains("unexpected message from server"),
+            "a misplaced pre-ReadyForQuery message reported {chain:?} rather than an \
+             out-of-order message"
+        );
+    }))
+    .await
+    .expect("misplaced pre-ReadyForQuery test exceeded its outer watchdog");
+}
+
 // ---------------------------------------------------------------------------
 // COPY sub-protocol violations.
 //
@@ -6527,4 +6560,181 @@ async fn protocol_copy_done_without_the_binary_trailer_is_a_parse_error() {
     })
     .await
     .expect("missing binary trailer test exceeded its outer watchdog");
+}
+
+/// A `RowDescription` format code outside {0, 1} is refused by name.
+///
+/// `SimpleQueryFormat::from_code` accepts 0 for text and 1 for binary and
+/// errors on anything else, and `simple_query.rs:41-44` never ran: a real
+/// server only ever sends those two, so only a hostile peer reaches it.
+///
+/// The value is that the refusal is EXPLICIT. The field is an `i16` the peer
+/// controls, and a driver that treated "not 1" as text would hand the caller
+/// bytes decoded under the wrong format for every unknown code a future
+/// protocol revision introduces - silently, and as data rather than an error.
+#[compio::test]
+async fn a_row_description_format_code_outside_text_or_binary_is_refused() {
+    Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
+        let server = StubServer::spawn(move |listener| {
+            let mut stream = accept_bounded(&listener);
+            complete_startup(&mut stream, 941);
+            assert_eq!(expect_simple_query(&mut stream), b"SELECT 1\0");
+
+            // One int4 column, format code 2: legal framing, illegal value.
+            let mut description = Vec::new();
+            description.extend_from_slice(&1u16.to_be_bytes());
+            description.extend_from_slice(b"n\0");
+            description.extend_from_slice(&0u32.to_be_bytes());
+            description.extend_from_slice(&0u16.to_be_bytes());
+            description.extend_from_slice(&23u32.to_be_bytes());
+            description.extend_from_slice(&4i16.to_be_bytes());
+            description.extend_from_slice(&(-1i32).to_be_bytes());
+            description.extend_from_slice(&2u16.to_be_bytes());
+
+            let mut response = backend_frame(b'T', &description);
+            response.extend_from_slice(&backend_frame(b'C', b"SELECT 0\0"));
+            response.extend_from_slice(&backend_frame(b'Z', b"I"));
+            stream
+                .write_all(&response)
+                .expect("write the malformed RowDescription");
+            stream.flush().expect("flush the malformed RowDescription");
+
+            let mut rest = Vec::new();
+            let _ = stream.read_to_end(&mut rest);
+        });
+
+        let stream = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            compio::net::TcpStream::connect(server.addr),
+        )
+        .await
+        .expect("connecting to the format-code peer hung")
+        .expect("connect to the format-code peer");
+        let config = stub_config(server.addr);
+        let (client, connection) = compio::time::timeout(
+            OPERATION_WATCHDOG,
+            config.connect_raw(stream, compio_postgres::NoTls),
+        )
+        .await
+        .expect("raw startup for the format-code test hung")
+        .expect("complete raw startup for the format-code test");
+        let driver = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = compio::time::timeout(OPERATION_WATCHDOG, client.simple_query("SELECT 1"))
+            .await
+            .expect("the malformed RowDescription hung instead of erroring")
+            .expect_err("format code 2 must be refused, not decoded");
+        let rendered = common::error_chain(&error);
+        assert!(
+            rendered.contains("invalid format code 2"),
+            "the refusal did not name the offending code: {rendered}"
+        );
+
+        drop(client);
+        let _ = compio::time::timeout(OPERATION_WATCHDOG, driver).await;
+        server.finish();
+    }))
+    .await
+    .expect("the format-code test exceeded its watchdog");
+}
+
+/// A peer that hangs up mid-handshake is reported as a closed connection, at
+/// both points the authentication exchange can be cut.
+///
+/// This does NOT reach `connect_raw.rs`'s `None => Err(Error::closed())` arms,
+/// and an earlier version of this doc claimed it did. Mutating those arms left
+/// the test green, which is how the claim was caught. `Handshake::next` is a
+/// `loop` with no `break` whose only success returns are two `Ok(Some(..))`,
+/// so it can never yield `Ok(None)`: those five arms are unreachable by
+/// construction, not merely untested, and no peer behaviour reaches them.
+///
+/// What a hang-up actually produces is the `UnexpectedEof` from
+/// `buf_stream.rs`, surfaced by the `?` on the read. That is the behaviour
+/// worth pinning: at both cut points the driver reports a closed connection
+/// rather than hanging, and the two differ in what it has already done - the
+/// second has PUT THE PASSWORD ON THE WIRE before the peer vanished.
+#[compio::test]
+async fn a_peer_that_hangs_up_during_authentication_is_reported_as_closed() {
+    // Cut 1: hang up after reading startup, before any authentication request.
+    let before_request = Box::pin(handshake_cut(951, false)).await;
+    assert!(
+        before_request.contains("connection closed"),
+        "hanging up before the authentication request reported {before_request:?}"
+    );
+
+    // Cut 2: request a cleartext password, take it, then hang up.
+    let after_credentials = Box::pin(handshake_cut(952, true)).await;
+    assert!(
+        after_credentials.contains("connection closed"),
+        "hanging up after the credentials reported {after_credentials:?}"
+    );
+}
+
+/// Run one startup against a peer that hangs up, and return the rendered error.
+///
+/// With `take_password` the peer first asks for a cleartext password and reads
+/// the reply, so the driver is waiting on `AuthenticationOk` when the socket
+/// goes away; without it the driver is still waiting for the request itself.
+async fn handshake_cut(process_id: i32, take_password: bool) -> String {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+
+        let mut length = [0u8; 4];
+        stream.read_exact(&mut length).expect("read startup length");
+        let length = u32::from_be_bytes(length) as usize;
+        let mut body = vec![0u8; length - 4];
+        stream.read_exact(&mut body).expect("read startup body");
+
+        if take_password {
+            // AuthenticationCleartextPassword is `R` carrying int32 3.
+            stream
+                .write_all(&backend_frame(b'R', &3u32.to_be_bytes()))
+                .expect("request a cleartext password");
+            stream.flush().expect("flush the password request");
+            let (tag, _) = read_frontend_frame_any(&mut stream);
+            assert_eq!(
+                tag, b'p',
+                "the driver did not answer with a password message"
+            );
+        }
+        // Hang up. `drop` closes the socket, which is the whole scenario.
+        drop(stream);
+    });
+
+    let _ = process_id;
+    let stream = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        compio::net::TcpStream::connect(server.addr),
+    )
+    .await
+    .expect("connecting to the hang-up peer timed out")
+    .expect("connect to the hang-up peer");
+
+    let mut config = stub_config(server.addr);
+    config.password("scripted-password");
+    let error = compio::time::timeout(
+        OPERATION_WATCHDOG,
+        config.connect_raw(stream, compio_postgres::NoTls),
+    )
+    .await
+    .expect("the hang-up peer left startup hanging instead of reporting closure")
+    .expect_err("startup succeeded against a peer that hung up");
+    server.finish();
+    common::error_chain(&error)
+}
+
+/// Read one frontend frame whatever its tag.
+fn read_frontend_frame_any(stream: &mut impl Read) -> (u8, Vec<u8>) {
+    let mut tag = [0u8; 1];
+    stream.read_exact(&mut tag).expect("read frontend tag");
+    let mut length = [0u8; 4];
+    stream
+        .read_exact(&mut length)
+        .expect("read frontend frame length");
+    let length = u32::from_be_bytes(length) as usize;
+    let mut body = vec![0u8; length - 4];
+    stream
+        .read_exact(&mut body)
+        .expect("read frontend frame body");
+    (tag[0], body)
 }

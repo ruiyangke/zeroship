@@ -653,6 +653,125 @@ async fn an_unreceived_lsn_is_not_reported_as_flushed() {
     .expect("future-flush live test exceeded its watchdog");
 }
 
+/// The received and the processed LSN must not report each other.
+///
+/// Both are `u64` on the same struct and mean opposite things: `received`
+/// tracks what the WIRE delivered, `processed` what the CALLER confirmed. A
+/// getter wired to its neighbour is silent and, in one direction, destructive
+/// - `flush_lsn` is built from `processed`, so reporting `received` there
+/// tells the server it may recycle WAL this caller has not handled, and a
+/// restart resumes past data it never saw.
+///
+/// `an_unreceived_lsn_is_not_reported_as_flushed` cannot catch that: it
+/// observes them only while BOTH are zero, where a swap reads identically.
+/// The window below is the one that separates them - a keepalive has arrived,
+/// so `received` has moved, and nothing has been confirmed, so `processed`
+/// has not.
+#[compio::test]
+async fn the_received_and_processed_lsns_do_not_report_each_other() {
+    Box::pin(compio::time::timeout(Duration::from_secs(20), async {
+        let url = test_url();
+        let (setup, connection) = match compio_postgres::connect(&url, common::suite_tls()).await {
+            Ok(pair) => pair,
+            Err(error) => common::postgres_unreachable(&url, &error),
+        };
+        compio::runtime::spawn(async move {
+            if let Err(error) = connection.run().await {
+                eprintln!("connection error: {}", common::error_chain(&error));
+            }
+        })
+        .detach();
+
+        common::sweep_stale_test_objects(&setup).await;
+        let base = common::test_object_name("cpg replication lsn split");
+        let publication = format!("{base}_p");
+        let slot = format!("{base}_s");
+        setup
+            .batch_execute(&format!("CREATE PUBLICATION {publication}"))
+            .await
+            .expect("publication setup failed");
+        setup
+            .batch_execute(&format!(
+                "SELECT pg_create_logical_replication_slot('{slot}', 'pgoutput')"
+            ))
+            .await
+            .expect("slot setup failed");
+
+        let replication = compio_postgres::replication::connect_replication(
+            common::suite_tls(),
+            &common::replication_config(&base),
+        )
+        .await
+        .expect("replication connect failed");
+        let mut stream = replication
+            .start_logical_replication(StartReplicationOptions {
+                slot_name: &slot,
+                start_lsn: "0/0",
+                proto_version: 1,
+                publication_names: &[&publication],
+                ..Default::default()
+            })
+            .await
+            .expect("START_REPLICATION failed");
+
+        // Ask for a keepalive without confirming anything. That moves the
+        // received position and must leave the processed one alone.
+        stream
+            .send_standby_status_update(true)
+            .await
+            .expect("send the status update requesting a reply");
+        match stream
+            .next()
+            .await
+            .expect("read the requested server reply")
+        {
+            Some(ReplicationMessage::PrimaryKeepalive { .. }) => {}
+            other => panic!("expected the requested PrimaryKeepalive, got {other:?}"),
+        }
+
+        let received = stream.last_received_lsn();
+        let processed = stream.last_processed_lsn();
+
+        // Confirm the position that actually arrived, which is the only value
+        // `advance_lsn` accepts, then read both again.
+        stream.advance_lsn(received);
+        let processed_after = stream.last_processed_lsn();
+        let received_after = stream.last_received_lsn();
+
+        drop(stream);
+        common::drop_replication_slot(&setup, &slot)
+            .await
+            .unwrap_or_else(|error| eprintln!("could not drop slot {slot}: {error}"));
+        let _ = setup
+            .batch_execute(&format!("DROP PUBLICATION IF EXISTS {publication}"))
+            .await;
+
+        assert!(
+            received > 0,
+            "the keepalive did not advance the received LSN, so this test \
+             never reached the window where the two positions differ"
+        );
+        assert_eq!(
+            processed,
+            0,
+            "the processed LSN reported the received one: nothing had been \
+             confirmed, but it stood at {}",
+            format_lsn(processed)
+        );
+        assert_eq!(
+            processed_after, received,
+            "confirming the received position did not advance the processed one"
+        );
+        assert_eq!(
+            received_after, received,
+            "confirming a position moved the received LSN, which only the \
+             wire may advance"
+        );
+    }))
+    .await
+    .expect("the LSN split live test exceeded its watchdog");
+}
+
 /// `connect_replication`'s TLS refusal is keyed to the CONTRADICTION, not to
 /// the endpoint.
 ///

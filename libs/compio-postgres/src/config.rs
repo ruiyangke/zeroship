@@ -3413,6 +3413,126 @@ mod tests {
     use std::num::NonZeroUsize;
     use std::time::Duration;
 
+    /// Getters that share a return type with a sibling, and so cannot report a
+    /// mix-up.
+    ///
+    /// `get_service` and `get_service_file` are both `Option<&str>`;
+    /// `get_ssl_min_protocol_version` and `get_ssl_max_protocol_version` are
+    /// both built from `SslProtocolVersion`. Wire either pair to the other's
+    /// field and everything still compiles and still returns something a
+    /// caller would believe - a real path, a real TLS version. The min/max
+    /// pair is the one with teeth: a policy check reading the floor where it
+    /// meant the ceiling accepts versions it meant to refuse.
+    ///
+    /// Distinct values on both sides of each pair are the whole test. Equal
+    /// ones would pass for a swap.
+    ///
+    /// What each side actually binds, measured rather than assumed:
+    /// `get_service_file` and the `ssl_max_protocol_version` SETTER were the
+    /// unreached ones. `get_ssl_max_protocol_version` was already covered -
+    /// mutating it also failed
+    /// `tls_protocol_bounds_parse_with_libpq_defaults_and_spelling`, which
+    /// reaches it through DSN parsing rather than the setter.
+    /// Options whose REFUSAL of a bad value never ran.
+    ///
+    /// Eight `InvalidValue` arms in `set_parameter` were uncovered. Each is a
+    /// one-line parse away, and each guards a value that would otherwise be
+    /// taken as something reasonable:
+    ///
+    /// - an empty `passfile`, `service`, `servicefile` or `sslkeylogfile`
+    ///   would read as "use the default", which for `service` means silently
+    ///   ignoring the whole service lookup the caller asked for;
+    /// - `max_message_size=0` would mean "no message may arrive";
+    /// - `gssdelegation`, `sslcompression` and `requiressl` take `0` or `1`,
+    ///   and anything else is a typo the caller wants told about, not
+    ///   rounded to a default.
+    ///
+    /// The error must NAME the option, because a connection string is often
+    /// assembled from several sources and "invalid value" alone does not say
+    /// which key to look at.
+    mod bad_option_values_are_refused_by_name {
+        use super::super::Config;
+
+        #[test]
+        fn each_named_option_refuses_its_bad_value() {
+            for (dsn, option) in [
+                ("host=127.0.0.1 max_message_size=0", "max_message_size"),
+                ("host=127.0.0.1 max_message_size=nine", "max_message_size"),
+                ("host=127.0.0.1 gssdelegation=yes", "gssdelegation"),
+                ("host=127.0.0.1 sslcompression=yes", "sslcompression"),
+                ("host=127.0.0.1 requiressl=yes", "requiressl"),
+                ("host=127.0.0.1 passfile=", "passfile"),
+                ("host=127.0.0.1 service=", "service"),
+                ("host=127.0.0.1 servicefile=", "servicefile"),
+                ("host=127.0.0.1 sslkeylogfile=", "sslkeylogfile"),
+            ] {
+                let error = dsn
+                    .parse::<Config>()
+                    .expect_err(&format!("{dsn} was accepted"));
+                let rendered = format!(
+                    "{}",
+                    std::error::Error::source(&error).expect("a config-parse source")
+                );
+                assert_eq!(
+                    rendered,
+                    format!("invalid value for option `{option}`"),
+                    "{dsn} did not refuse by name"
+                );
+            }
+        }
+
+        /// The one-variable control: the same options with values they accept.
+        /// Without it, every assertion above also passes for a parser that
+        /// refuses these keys outright.
+        #[test]
+        fn the_same_options_accept_their_good_values() {
+            for dsn in [
+                "host=127.0.0.1 max_message_size=1024",
+                "host=127.0.0.1 gssdelegation=0",
+                "host=127.0.0.1 sslcompression=0",
+                "host=127.0.0.1 requiressl=0",
+                "host=127.0.0.1 passfile=/tmp/pgpass",
+                "host=127.0.0.1 servicefile=/tmp/pg_service.conf",
+                "host=127.0.0.1 sslkeylogfile=/tmp/keys.log",
+            ] {
+                dsn.parse::<Config>()
+                    .unwrap_or_else(|error| panic!("{dsn} was refused: {error}"));
+            }
+        }
+    }
+
+    mod getters_distinguish_their_siblings {
+        use super::super::{Config, SslProtocolVersion};
+
+        #[test]
+        fn service_and_service_file_do_not_return_each_other() {
+            let mut config = Config::new();
+            config.service("the-service-name");
+            config.service_file("/etc/pg_service.conf");
+
+            assert_eq!(config.get_service(), Some("the-service-name"));
+            assert_eq!(config.get_service_file(), Some("/etc/pg_service.conf"));
+        }
+
+        #[test]
+        fn the_tls_floor_and_ceiling_do_not_return_each_other() {
+            let mut config = Config::new();
+            config.ssl_min_protocol_version(SslProtocolVersion::TlsV1_2);
+            config.ssl_max_protocol_version(SslProtocolVersion::TlsV1_3);
+
+            assert_eq!(
+                config.get_ssl_min_protocol_version(),
+                SslProtocolVersion::TlsV1_2,
+                "the floor must not report the ceiling"
+            );
+            assert_eq!(
+                config.get_ssl_max_protocol_version(),
+                Some(SslProtocolVersion::TlsV1_3),
+                "the ceiling must not report the floor"
+            );
+        }
+    }
+
     /// What every parameter means when the caller says NOTHING.
     ///
     /// A wrong default is invisible in the same way a wrong unit is, and for

@@ -3,16 +3,37 @@
 # do not survive transaction pooling, so these failures are the contract,
 # not a regression.
 #
-# commit:   57af3991a
+# commit:   a6f45cd9b
 # features: tls,live-tls-tests,live-unix-socket   target: --test suite
-# observed: 69 failures this run, 670 passing
-# flapper:  read_timeout::copy_input_time_is_not_charged_as_server_read_silence
-#           appeared in 2 of 3 runs at f4ad1e5a0 and in 0 of 1 here; it is
-#           NOT listed, so a run with or without it still matches.
+# observed: two full runs at THIS commit, 69 failures and 65 failures.
 #
-# Since f4ad1e5a0 this list gained exactly two names, both tests ADDED by
-# 023c1701c. Every growth so far has been a new test meeting the pooler,
-# never an existing test starting to fail.
+# Two flapper entries, and both are UNLISTED so a run with or without them
+# still matches this file:
+#
+#   read_timeout::copy_input_time_is_not_charged_as_server_read_silence
+#       2 of 3 runs at f4ad1e5a0, 0 of 1 at 57af3991a.
+#
+#   differential_tokio::a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one
+#   differential_tokio::both_drivers_agree_on_binary_copy_roundtrip
+#   differential_tokio::both_drivers_agree_on_copy_in_results
+#   differential_tokio::both_drivers_agree_on_copy_out_bytes
+#       These four move AS A GROUP - all four fail or all four pass - and
+#       did exactly that across two runs at bea404133 (absent, then present).
+#       They looked like four tests fixed by the intervening 38 commits; only
+#       11 production lines changed in those, none touching COPY, and a second
+#       run at the same commit brought all four back. Each also passes on its
+#       own every time (3 of 3), which proves nothing: running alone is the
+#       case pgbouncer handles, so isolation cannot rank a pooling flapper.
+#
+# Growth rule, still holding: every name this list has gained was a test
+# ADDED since the previous baseline meeting the pooler for the first time,
+# never an existing test starting to fail. The newest entry,
+# transaction_forwarding::a_transactions_cancel_token_cancels_that_transactions_query,
+# is the tenth cancellation test here and fails the same way as the nine
+# cancel_request ones: a CancelRequest names a backend PID and secret, and a
+# transaction pooler does not route it to the backend that holds the query.
+# It panics on its own 20s deadline, and passes against the direct server at
+# the same commit.
 backend_termination::a_checked_out_idle_pool_backend_is_discarded_after_termination
 backend_termination::a_checked_out_pool_backend_killed_mid_query_is_discarded
 backend_termination::all_idle_pool_backends_are_replaced_after_mass_termination
@@ -26,14 +47,10 @@ cancel_request::raw_cancel_interrupts_running_query_and_preserves_session
 cancel_request::running_query_cancel_returns_57014_and_preserves_session
 cancel_request::two_cancels_for_one_running_query_leave_the_session_usable
 connection_churn::sustained_connection_and_pool_churn_leaves_nothing_behind
-differential_tokio::a_copy_without_a_producer_costs_tokio_the_connection_and_not_this_one
-differential_tokio::both_drivers_agree_on_binary_copy_roundtrip
-differential_tokio::both_drivers_agree_on_copy_in_results
-differential_tokio::both_drivers_agree_on_copy_out_bytes
 differential_tokio::both_drivers_agree_on_listen_notify_routing
 differential_tokio::the_implicit_cache_retries_a_stale_plan_outside_a_transaction
-integration::abandoned_copy_in_startup_rejection_does_not_poison_the_next_operation
 integration::a_template_clone_is_not_blocked_by_the_previous_runtime
+integration::abandoned_copy_in_startup_rejection_does_not_poison_the_next_operation
 integration::cancelled_cached_plan_error_is_not_handed_to_the_next_borrower
 integration::cancelled_name_collision_preserves_existing_statement
 integration::cancelled_prepare_does_not_leak_a_server_statement
@@ -80,5 +97,6 @@ query_observer::observer_reports_dropped_in_flight_future_cancelled_once
 startup_options::options_reaches_the_backend_in_both_connection_string_forms
 target_session_attrs_live::primary_accepts_a_read_only_session
 target_session_attrs_live::read_only_accepts_a_session_configured_read_only
+transaction_forwarding::a_transactions_cancel_token_cancels_that_transactions_query
 type_cache_residue::abandoned_stale_typeinfo_lookup_cleans_the_cache_for_the_next_lookup
 type_cache_residue::stale_typeinfo_statement_failure_cleans_the_cache_for_the_next_lookup

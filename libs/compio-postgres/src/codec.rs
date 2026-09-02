@@ -492,6 +492,17 @@ where
                             }
                         }
                         .map_err(Error::io)?
+                        // Which line enforces that guarantee differs by arm, and
+                        // only one of them is this `expect`. Deleting the
+                        // completeness check for async tags fails exactly
+                        // `connect_raw::tests::handshake_charges_a_padded_notice_its_whole_frame`,
+                        // and it panics at the `[..frame_len]` slice above with
+                        // "range end index 131111 out of range for slice of length
+                        // 16375" - the Detached arm never reaches here. `Shared`
+                        // hands the whole buffer to `parse`, which answers
+                        // `Ok(None)` on a short frame, so this message describes
+                        // that arm alone. No test drives it; both arms are guarded
+                        // by the same check, and the slice is the one that bites.
                         .expect(
                             "the preceding frame-length check guarantees a complete async message",
                         );
@@ -702,6 +713,49 @@ mod tests {
         frame.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
         frame.extend_from_slice(&payload);
         frame
+    }
+
+    /// `take_raw_frame` is reached during startup, where the caller hands over
+    /// whatever bytes have arrived rather than a guaranteed whole frame. A
+    /// header declaring more than the buffer holds is therefore an ordinary
+    /// short read, but it must not be taken as complete: `split_to(total_len)`
+    /// panics once `total_len` exceeds the buffer.
+    ///
+    /// The two halves differ in ONE variable - how many of the eight declared
+    /// body bytes are present - so the refusal is pinned to the shortfall and
+    /// not to anything else about the frame.
+    #[test]
+    fn a_startup_frame_shorter_than_its_declared_length_is_refused() {
+        // 'K' + Int32(12) declares 13 bytes total; only 9 are here.
+        let mut truncated = BytesMut::new();
+        truncated.extend_from_slice(&[b'K']);
+        truncated.extend_from_slice(&12i32.to_be_bytes());
+        truncated.extend_from_slice(&[0u8; 4]);
+        assert_eq!(truncated.len(), 9);
+
+        let error = BackendMessages::from_test_bytes(truncated)
+            .take_raw_frame(b'K')
+            .expect_err("a truncated BackendKeyData frame was taken as complete");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(
+            error
+                .to_string()
+                .contains("incomplete PostgreSQL startup frame"),
+            "the short frame was not refused by name: {error}"
+        );
+
+        // Control: the same frame with all eight body bytes present is taken.
+        let mut whole = BytesMut::new();
+        whole.extend_from_slice(&[b'K']);
+        whole.extend_from_slice(&12i32.to_be_bytes());
+        whole.extend_from_slice(&[0u8; 8]);
+        assert_eq!(whole.len(), 13);
+
+        let body = BackendMessages::from_test_bytes(whole)
+            .take_raw_frame(b'K')
+            .expect("a complete BackendKeyData frame was refused")
+            .expect("a complete BackendKeyData frame was reported as absent");
+        assert_eq!(body.len(), 8, "the tag and length header leaked into body");
     }
 
     /// A complete ErrorResponse owns the diagnosis for the request even when
@@ -1130,6 +1184,39 @@ mod tests {
         frame.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
         frame.extend_from_slice(body);
         frame
+    }
+
+    /// The frame scan refuses a malformed header instead of walking through it.
+    /// A declared length below 4 is impossible on the wire - the length counts
+    /// its own four bytes - and advancing past it one byte at a time re-reads
+    /// the length field as a frame header, so a payload byte can be reported as
+    /// a frame tag. That is a false answer to "did the backend enter COPY
+    /// mode".
+    ///
+    /// **The two halves of that condition are bound as a PAIR, not
+    /// individually, and this was measured rather than assumed.** Removing
+    /// `length < 4 || next > self.0.len()` entirely fails this test. Removing
+    /// EITHER half alone does not: with only `length < 4`, the sub-minimum
+    /// frame is refused directly; with only `next > self.0.len()`, the one-byte
+    /// advance lands on a length field reading 0x70 and overruns the batch, so
+    /// the other half catches it one iteration later. Both roads end at `None`.
+    ///
+    /// A first version of this test asserted two cases and bound NEITHER - both
+    /// mutations left it green, because the bounds-checked `get` at the top of
+    /// the loop already returns `None` for an offset past the end. The probe is
+    /// what caught that; the test passing did not.
+    #[test]
+    fn first_matching_tag_refuses_a_sub_minimum_frame_length() {
+        let mut short = vec![b'X'];
+        short.extend_from_slice(&0u32.to_be_bytes()); // impossible: length < 4
+        short.extend_from_slice(b"payload");
+        let messages = BackendMessages::from_test_bytes(BytesMut::from(short.as_slice()));
+
+        assert_eq!(
+            messages.first_matching_tag(&[0x00]),
+            None,
+            "a sub-minimum length let the scan re-read the length field as a header"
+        );
     }
 
     #[test]

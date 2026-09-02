@@ -3021,6 +3021,111 @@ mod tests {
     use std::task::{Context, Wake, Waker};
     use std::time::Duration;
 
+    /// With neither a read deadline nor COPY tracking, `ReadObligation::new`
+    /// allocates no inner state at all - that is the default request path, kept
+    /// allocation-free on purpose. Every transition must then be inert.
+    ///
+    /// These four early returns are the whole of that guarantee, and none of
+    /// them had ever run. They are the dangerous direction: each one guards a
+    /// `self.inner` unwrap, so a missing guard is a panic on the default path
+    /// rather than a wrong answer.
+    #[test]
+    fn an_untracked_read_obligation_ignores_every_copy_transition() {
+        let obligation = ReadObligation::new(None, false);
+        assert!(
+            obligation.inner.is_none(),
+            "the default path allocated inner state"
+        );
+
+        assert!(
+            !obligation.pause_for_copy_input(),
+            "an untracked obligation claimed a producer had been displaced"
+        );
+        assert!(
+            !obligation.prepare_copy_terminal(),
+            "an untracked obligation claimed a paused read phase to resume"
+        );
+        // Inert, and must stay inert: these have no return value to assert on,
+        // so the binding claim is that they neither panic nor create state.
+        obligation.enter_copy_output();
+        obligation.activate_copy_terminal();
+        obligation.activate_initial();
+        obligation.set_copy_terminal_has_sync(true);
+        obligation.observe_server_error();
+        assert!(
+            !obligation.copy_error_may_owe_extra_ready(),
+            "an untracked obligation owed an extra ReadyForQuery"
+        );
+        assert!(
+            obligation.inner.is_none(),
+            "a transition allocated inner state on the default path"
+        );
+    }
+
+    /// Once the connection has selected and queued the terminal COPY frame, no
+    /// producer remains that can legally answer a further `CopyInResponse`, so
+    /// `pause_for_copy_input` must report the displacement rather than pausing
+    /// the read clock a second time.
+    ///
+    /// The sequence is the real one: a COPY IN request pauses for input, the
+    /// connection queues its terminal, the terminal finishes flushing, and only
+    /// then does another CopyInResponse arrive.
+    ///
+    /// **The `activate_copy_terminal` step is load-bearing, not narrative.**
+    /// Stopping at `PendingCopyTerminalFlush` proves nothing: that state has its
+    /// own `=> return true` arm in the match below, so deleting the
+    /// `copy_terminal_queued` guard entirely still yields `true` and the test
+    /// stays green. Measured - the shorter version passed against the mutated
+    /// driver. Activating moves the state to `Active`, whose arm pauses and
+    /// returns `false`, so the queued-terminal guard becomes the only thing
+    /// that can answer `true`. Do not "simplify" this step away.
+    #[test]
+    fn a_queued_copy_terminal_displaces_a_later_copy_input_pause() {
+        let obligation = ReadObligation::new(None, true);
+        let inner = obligation
+            .inner
+            .as_ref()
+            .expect("tracking a COPY producer must allocate inner state");
+        assert_eq!(inner.state.get(), ReadObligationState::PendingInitialFlush);
+
+        assert!(
+            !obligation.pause_for_copy_input(),
+            "the first CopyInResponse displaced a producer that was still present"
+        );
+        assert_eq!(inner.state.get(), ReadObligationState::PausedForCopyInput);
+
+        assert!(
+            obligation.prepare_copy_terminal(),
+            "a paused COPY IN had no read phase to resume"
+        );
+        assert!(inner.copy_terminal_queued.get());
+        assert_eq!(
+            inner.state.get(),
+            ReadObligationState::PendingCopyTerminalFlush
+        );
+
+        // The terminal finished flushing, so the state leaves
+        // PendingCopyTerminalFlush while the queued bit survives it.
+        obligation.activate_copy_terminal();
+        assert_eq!(inner.state.get(), ReadObligationState::Active);
+        assert!(
+            inner.copy_terminal_queued.get(),
+            "the queued terminal must survive its own flush"
+        );
+
+        // The arm under test. `Active` on its own would pause and return false,
+        // so only the queued-terminal guard can produce true here.
+        assert!(
+            obligation.pause_for_copy_input(),
+            "a second CopyInResponse found a producer that no longer exists"
+        );
+        assert_eq!(
+            inner.state.get(),
+            ReadObligationState::Active,
+            "the displaced pause re-paused a response the terminal had released"
+        );
+    }
+
     struct ObservedSocket {
         inner: Socket,
         read_ended: Option<oneshot::Sender<()>>,
@@ -4804,6 +4909,177 @@ mod tests {
     }
 
     #[compio::test]
+    async fn flush_retirement_drains_the_tail_after_flush_completes() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+            panic!("the yielding-write fixture did not split");
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        let (acknowledgement, acknowledged) = oneshot::channel();
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: unsupported_encoding_message(),
+                acknowledgement: Some(acknowledgement),
+            }))
+            .expect("queue the encoding change");
+        let producer = compio::runtime::spawn(async move {
+            acknowledged
+                .await
+                .expect("retirement did not acknowledge the encoding change");
+            read_tx
+                .send(ReadEvent::Message(ReadEnvelope {
+                    message: BackendMessage::Normal {
+                        messages: error_response_batch("22012", "scripted division by zero"),
+                        request_complete: true,
+                        deferred_error: None,
+                    },
+                    acknowledgement: None,
+                }))
+                .await
+                .expect("queue the just-flushed tail response");
+            std::future::pending::<()>().await;
+        });
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (tail_tx, _tail_rx) = mpsc::channel(1);
+        let tail_server_error = Arc::default();
+        let tail_response = Response {
+            sender: tail_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::clone(&tail_server_error),
+        };
+        let mut responses = VecDeque::from([tail_response]);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut responses,
+            &mut VecDeque::new(),
+            None,
+            &AtomicU8::new(b'I'),
+            &AtomicUsize::new(1),
+            &Mutex::new(None),
+            &Cell::new(false),
+            true,
+        )
+        .await;
+        let _ = producer.cancel().await;
+
+        assert_eq!(
+            tail_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("22012"),
+            "retirement skipped the response sent by the completed flush"
+        );
+        let error = write_result.expect_err("the unsupported encoding left the flush reusable");
+        assert!(error.is_config());
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+    }
+
+    #[compio::test]
+    async fn flush_retirement_drains_the_already_flushed_response_prefix() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+            panic!("the yielding-write fixture did not split");
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        let (acknowledgement, acknowledged) = oneshot::channel();
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: unsupported_encoding_message(),
+                acknowledgement: Some(acknowledgement),
+            }))
+            .expect("queue the encoding change");
+        let producer = compio::runtime::spawn(async move {
+            acknowledged
+                .await
+                .expect("retirement did not acknowledge the encoding change");
+            read_tx
+                .send(ReadEvent::Message(ReadEnvelope {
+                    message: BackendMessage::Normal {
+                        messages: error_response_batch("22012", "scripted division by zero"),
+                        request_complete: true,
+                        deferred_error: None,
+                    },
+                    acknowledgement: None,
+                }))
+                .await
+                .expect("queue the already-flushed response");
+            std::future::pending::<()>().await;
+        });
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (prefix_tx, _prefix_rx) = mpsc::channel(1);
+        let prefix_server_error = Arc::default();
+        let prefix_response = Response {
+            sender: prefix_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            bind_complete_seen: false,
+            read_obligation: ReadObligation::new(None, false),
+            request_server_error: Arc::clone(&prefix_server_error),
+        };
+        let (tail_tx, _tail_rx) = mpsc::channel(1);
+        let mut responses = VecDeque::from([prefix_response, scripted_awaited_response(tail_tx)]);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut responses,
+            &mut VecDeque::new(),
+            None,
+            &AtomicU8::new(b'I'),
+            &AtomicUsize::new(2),
+            &Mutex::new(None),
+            &Cell::new(false),
+            false,
+        )
+        .await;
+        let _ = producer.cancel().await;
+
+        assert_eq!(
+            prefix_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("22012"),
+            "retirement skipped the already-flushed response prefix"
+        );
+        let error = write_result.expect_err("the unsupported encoding left the flush reusable");
+        assert!(error.is_config());
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+    }
+
+    #[compio::test]
     async fn flush_time_encoding_retirement_preserves_a_queued_server_error() {
         let stream = BufStream::new(YieldingWriteSplitStream);
         let (read_half, mut write_half) = match stream.try_into_split() {
@@ -5200,6 +5476,72 @@ mod tests {
     }
 
     #[compio::test]
+    async fn flush_encoding_retirement_poisons_before_reader_acknowledgement() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+            panic!("the yielding-write fixture did not split");
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let tx_status = Arc::new(AtomicU8::new(b'I'));
+        let recorder = StatusRecordingWake::new(&tx_status);
+        let waker = Waker::from(Arc::clone(&recorder));
+        let mut context = Context::from_waker(&waker);
+        let (acknowledgement, mut acknowledged) = oneshot::channel();
+        assert!(
+            std::future::Future::poll(std::pin::Pin::new(&mut acknowledged), &mut context)
+                .is_pending(),
+            "the acknowledgement completed before dispatch"
+        );
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: unsupported_encoding_message(),
+                acknowledgement: Some(acknowledgement),
+            }))
+            .expect("queue the encoding change");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut VecDeque::new(),
+            &mut VecDeque::new(),
+            None,
+            &tx_status,
+            &AtomicUsize::new(0),
+            &Mutex::new(None),
+            &Cell::new(false),
+            false,
+        )
+        .await;
+
+        let error = write_result.expect_err("the unsupported encoding left the flush reusable");
+        assert!(error.is_config());
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+        acknowledged
+            .await
+            .expect("dispatch did not acknowledge the encoding retirement");
+        assert!(
+            recorder.observed.load(Ordering::Acquire),
+            "the acknowledgement did not wake its waiter"
+        );
+        assert_eq!(
+            recorder.seen.load(Ordering::Acquire),
+            READ_RETIRED_STATUS,
+            "encoding retirement acknowledged the reader before pool poison"
+        );
+    }
+
+    #[compio::test]
     async fn flush_retirement_stops_at_copy_input() {
         compio::time::timeout(Duration::from_secs(1), async {
             let write_started = Rc::new(Cell::new(false));
@@ -5275,6 +5617,127 @@ mod tests {
         })
         .await
         .expect("copy-input flush retirement exceeded its watchdog");
+    }
+
+    #[compio::test]
+    async fn flush_dispatch_records_terminal_server_error_in_the_supplied_slot() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+            panic!("the yielding-write fixture did not split");
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        let (acknowledgement, acknowledged) = oneshot::channel();
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: BackendMessages::from_test_bytes(BytesMut::from(
+                        server_error_frame("FATAL", "57P01", "scripted administrator shutdown")
+                            .as_slice(),
+                    )),
+                    request_complete: false,
+                    deferred_error: None,
+                },
+                acknowledgement: Some(acknowledgement),
+            }))
+            .expect("queue the terminal server diagnosis");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+        let (response_tx, _response_rx) = mpsc::channel(1);
+        let mut responses = VecDeque::from([scripted_awaited_response(response_tx)]);
+        let terminal_server_error = Mutex::new(None);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut responses,
+            &mut VecDeque::new(),
+            None,
+            &AtomicU8::new(b'I'),
+            &AtomicUsize::new(1),
+            &terminal_server_error,
+            &Cell::new(false),
+            true,
+        )
+        .await;
+
+        write_result.expect("the yielding flush failed");
+        acknowledged
+            .await
+            .expect("dispatch did not acknowledge the terminal diagnosis");
+        assert!(terminal.is_none(), "the fixture invented a read failure");
+        assert_eq!(
+            terminal_server_error
+                .lock()
+                .as_ref()
+                .map(|error: &DbError| error.code().code()),
+            Some("57P01"),
+            "flush dispatch did not update the supplied terminal-error slot"
+        );
+    }
+
+    #[compio::test]
+    async fn flush_dispatch_consumes_the_copy_recovery_ready_state() {
+        let stream = BufStream::new(YieldingWriteSplitStream);
+        let Ok((read_half, mut write_half)) = stream.try_into_split() else {
+            panic!("the yielding-write fixture did not split");
+        };
+        drop(read_half);
+        write_frontend(
+            &mut write_half,
+            FrontendMessage::Raw(bytes::Bytes::from_static(b"scripted request")),
+        )
+        .expect("buffer the scripted request");
+
+        let (mut read_tx, mut read_rx) = mpsc::channel(1);
+        let (acknowledgement, acknowledged) = oneshot::channel();
+        read_tx
+            .try_send(ReadEvent::Message(ReadEnvelope {
+                message: BackendMessage::Normal {
+                    messages: BackendMessages::from_test_bytes(BytesMut::from(
+                        &b"Z\0\0\0\x05I"[..],
+                    )),
+                    request_complete: true,
+                    deferred_error: None,
+                },
+                acknowledgement: Some(acknowledgement),
+            }))
+            .expect("queue the COPY recovery ReadyForQuery");
+        let (_read_terminal_tx, mut read_terminal_rx) = mpsc::unbounded();
+        let copy_error_may_owe_extra_ready = Cell::new(true);
+
+        let (write_result, terminal) = flush_with_read_draining(
+            &mut write_half,
+            &mut read_rx,
+            &mut read_terminal_rx,
+            &Mutex::new(HashMap::new()),
+            &mut VecDeque::new(),
+            &mut VecDeque::new(),
+            None,
+            &AtomicU8::new(b'I'),
+            &AtomicUsize::new(0),
+            &Mutex::new(None),
+            &copy_error_may_owe_extra_ready,
+            true,
+        )
+        .await;
+
+        write_result.expect("the yielding flush failed");
+        acknowledged
+            .await
+            .expect("dispatch did not acknowledge the COPY recovery reply");
+        assert!(terminal.is_none(), "dispatch rejected the extra reply");
+        assert!(
+            !copy_error_may_owe_extra_ready.get(),
+            "flush dispatch did not consume the real COPY recovery state"
+        );
     }
 
     #[compio::test]
@@ -7164,6 +7627,18 @@ mod tests {
         flushes: usize,
     }
 
+    #[derive(Default)]
+    struct SerializedTeardownObservation {
+        writes: Vec<u8>,
+        events: Vec<&'static str>,
+    }
+
+    struct SerializedTeardownProbe {
+        chunks: VecDeque<Vec<u8>>,
+        observed: Rc<Mutex<SerializedTeardownObservation>>,
+        flush_fails: bool,
+    }
+
     /// A serialized peer whose clean-shutdown call fails after accepting every
     /// frontend write. The call counter makes the teardown path observable.
     struct SerializedShutdownFailure {
@@ -7217,6 +7692,40 @@ mod tests {
         }
 
         async fn shutdown(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl AsyncRead for SerializedTeardownProbe {
+        async fn read<B: IoBufMut>(&mut self, buf: B) -> BufResult<usize, B> {
+            read_scripted(&mut self.chunks, &mut None, buf).await
+        }
+    }
+
+    impl AsyncWrite for SerializedTeardownProbe {
+        async fn write<B: IoBuf>(&mut self, buf: B) -> BufResult<usize, B> {
+            let len = buf.buf_len();
+            let mut observed = self.observed.lock();
+            observed.events.push("write");
+            observed.writes.extend_from_slice(buf.as_init());
+            drop(observed);
+            BufResult(Ok(len), buf)
+        }
+
+        async fn flush(&mut self) -> std::io::Result<()> {
+            self.observed.lock().events.push("flush");
+            if self.flush_fails {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "scripted final flush failure",
+                ))
+            } else {
+                Ok(())
+            }
+        }
+
+        async fn shutdown(&mut self) -> std::io::Result<()> {
+            self.observed.lock().events.push("shutdown");
             Ok(())
         }
     }
@@ -7285,6 +7794,36 @@ mod tests {
             },
             receiver,
         )
+    }
+
+    fn serialized_teardown_probe(
+        prebuffer: &[u8],
+        flush_fails: bool,
+    ) -> (
+        Connection<SerializedTeardownProbe, SerializedTeardownProbe>,
+        Rc<Mutex<SerializedTeardownObservation>>,
+    ) {
+        let (request_sender, request_receiver) = mpsc::unbounded();
+        drop(request_sender);
+        let observed = Rc::new(Mutex::new(SerializedTeardownObservation::default()));
+        let mut stream = BufStream::new(MaybeTlsStream::Raw(SerializedTeardownProbe {
+            chunks: VecDeque::new(),
+            observed: Rc::clone(&observed),
+            flush_fails,
+        }));
+        stream.write(prebuffer);
+        let connection = Connection::new(
+            stream,
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_receiver,
+            Arc::new(AtomicU8::new(b'I')),
+            Arc::default(),
+            Arc::default(),
+            None,
+        );
+        (connection, observed)
     }
 
     /// An in-flight read has already delivered the awaited response when the
@@ -7360,6 +7899,32 @@ mod tests {
             result.is_ok(),
             "idle housekeeping write escaped: {result:?}"
         );
+    }
+
+    #[compio::test]
+    async fn serialized_teardown_attempts_a_failing_final_flush_before_shutdown() {
+        let (connection, observed) = serialized_teardown_probe(b"prebuffered sentinel", true);
+
+        connection
+            .run_serialized()
+            .await
+            .expect("final flush failure escaped serialized teardown");
+
+        let observed = observed.lock();
+        assert_eq!(observed.events.as_slice(), ["write", "flush", "shutdown"]);
+    }
+
+    #[compio::test]
+    async fn serialized_teardown_writes_the_postgres_terminate_frame() {
+        let (connection, observed) = serialized_teardown_probe(b"", false);
+
+        connection
+            .run_serialized()
+            .await
+            .expect("serialized teardown failed");
+
+        let observed = observed.lock();
+        assert_eq!(observed.writes.as_slice(), b"X\0\0\0\x04");
     }
 
     /// Socket shutdown is best effort after the client has gone. An unusual
@@ -7915,6 +8480,140 @@ mod tests {
     /// A `CopyInResponse` frame with no columns, as PostgreSQL sends it.
     fn copy_in_response_frame() -> Vec<u8> {
         vec![b'G', 0, 0, 0, 7, 0, 0, 0]
+    }
+
+    #[compio::test]
+    async fn serialized_buffered_frame_drain_preserves_stashed_batch_order() {
+        let mut wire = notice_frame("prime buffered response");
+        wire.extend_from_slice(&completed_response_batch(b'I'));
+        let (mut connection, mut response, copy_request) =
+            connection_with_stashed_batch(vec![wire]);
+        drop(copy_request);
+
+        assert!(matches!(
+            read_backend(&mut connection.stream)
+                .await
+                .expect("read the priming notice"),
+            BackendMessage::Async {
+                message: Message::NoticeResponse(_),
+                ..
+            }
+        ));
+        connection
+            .drain_buffered_backend_frames()
+            .await
+            .expect("drain the over-read response frame");
+
+        let mut tags = Vec::new();
+        while let Ok(mut batch) = response.try_recv() {
+            tags.extend(batch_tags(&mut batch));
+        }
+        assert_eq!(
+            tags,
+            ["STASHED", "SELECT 1"],
+            "the buffered-frame drain overtook its existing response stash"
+        );
+    }
+
+    #[compio::test]
+    async fn serialized_copy_startup_delivers_stash_before_waiting_for_producer() {
+        struct NoopWake;
+        impl Wake for NoopWake {
+            fn wake(self: Arc<Self>) {}
+        }
+
+        let (mut response_tx, mut response_rx) = mpsc::channel(1);
+        for _ in 0..2 {
+            response_tx
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .expect("prime the COPY response channel");
+        }
+        assert!(
+            response_tx
+                .try_send(ResponseMessages::Raw(BackendMessages::empty()))
+                .is_err(),
+            "the COPY response sender was not capacity-full"
+        );
+
+        let (copy_in, _producer) = CopyInReceiver::for_connection_test(
+            Some(FrontendMessage::Raw(bytes::Bytes::from_static(
+                b"scripted COPY startup",
+            ))),
+            None,
+        );
+        let request = Request {
+            messages: RequestMessages::CopyIn(copy_in),
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            request_server_error: Arc::default(),
+        };
+        let (_request_tx, request_rx) = mpsc::unbounded();
+        let mut connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                chunks: VecDeque::from([vec![b'2', 0, 0, 0, 4], copy_in_response_frame()]),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_rx,
+            Arc::new(AtomicU8::new(b'I')),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::default(),
+            None,
+        );
+
+        let mut handling = Box::pin(connection.handle_request(request));
+        let waker = Waker::from(Arc::new(NoopWake));
+        let mut context = Context::from_waker(&waker);
+        assert!(
+            std::future::Future::poll(handling.as_mut(), &mut context).is_pending(),
+            "COPY startup did not park on its open producer"
+        );
+
+        response_rx.try_recv().expect("read first priming batch");
+        response_rx.try_recv().expect("read second priming batch");
+        let bind_complete = response_rx
+            .try_recv()
+            .expect("BindComplete was not drained before the second startup read");
+        assert!(matches!(
+            bind_complete,
+            ResponseMessages::Raw(messages) | ResponseMessages::Filtered(messages)
+                if messages.contains_tag(postgres_protocol::message::backend::BIND_COMPLETE_TAG)
+        ));
+        let copy_in_response = response_rx
+            .try_recv()
+            .expect("CopyInResponse was not drained before the producer wait");
+        assert!(matches!(
+            copy_in_response,
+            ResponseMessages::Raw(messages) | ResponseMessages::Filtered(messages)
+                if messages.contains_tag(postgres_protocol::message::backend::COPY_IN_RESPONSE_TAG)
+        ));
+    }
+
+    #[compio::test]
+    async fn serialized_main_loop_preserves_stashed_batch_order() {
+        let (connection, mut response, copy_request) =
+            connection_with_stashed_batch(vec![completed_response_batch(b'I')]);
+        drop(copy_request);
+
+        compio::time::timeout(Duration::from_secs(1), connection.run_serialized())
+            .await
+            .expect("serialized main loop exceeded its watchdog")
+            .expect("serialized main loop failed");
+
+        let mut tags = Vec::new();
+        while let Ok(mut batch) = response.try_recv() {
+            tags.extend(batch_tags(&mut batch));
+        }
+        assert_eq!(
+            tags,
+            ["STASHED", "SELECT 1"],
+            "the next backend batch overtook the serialized-loop stash"
+        );
     }
 
     /// THE CASE. While `handle_request` reads through COPY startup, a batch

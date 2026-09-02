@@ -19,6 +19,7 @@
 //! resolved against the wrong relation.
 
 use compio_postgres::Client;
+use compio_postgres::SimpleQueryMessage;
 use compio_postgres::types::Type;
 use std::num::NonZeroUsize;
 
@@ -296,4 +297,89 @@ async fn query_typed_row_description_preserves_table_oid() {
         Some(expected_oid),
         "query_typed must retain its RowDescription's source relation"
     );
+}
+
+/// A row with no columns is a real shape, and `is_empty` is the only accessor
+/// that reports it.
+///
+/// `Row::is_empty` and `SimpleQueryRow::is_empty` are both `self.len() == 0`
+/// over two different column stores, and neither is named anywhere in
+/// `tests/`. Every other test in this suite selects at least one column, so
+/// both would return `false` for every row the suite has ever built and an
+/// implementation hardcoding `false` would pass all of them.
+///
+/// `PostgreSQL` makes the zero-column case reachable: `CREATE TABLE t()` is
+/// legal, a `DEFAULT VALUES` insert gives it a row, and selecting it sends a
+/// `DataRow` with no fields. The non-empty arm beside it is the one-variable
+/// control - same client, same session, differing only in how many columns the
+/// query names.
+#[compio::test]
+async fn a_row_with_no_columns_reports_itself_empty() {
+    let url = test_url();
+    let client = connect_client(&url).await;
+    let table = common::test_object_name("cpg_zero_column");
+    client
+        .batch_execute(&format!(
+            "CREATE TEMPORARY TABLE {table}(); INSERT INTO {table} DEFAULT VALUES"
+        ))
+        .await
+        .expect("create a zero-column table and give it a row");
+
+    let rows = client
+        .query(&format!("SELECT * FROM {table}"), &[])
+        .await
+        .expect("select the zero-column row");
+    assert_eq!(rows.len(), 1, "the zero-column table must yield one row");
+    assert!(
+        rows[0].is_empty(),
+        "a row with no columns must report itself empty"
+    );
+    assert_eq!(rows[0].len(), 0);
+    assert!(rows[0].columns().is_empty());
+
+    // Control: identical client and session, one column instead of none.
+    let populated = client
+        .query_one("SELECT 1", &[])
+        .await
+        .expect("select one column");
+    assert!(
+        !populated.is_empty(),
+        "a row with a column must not report itself empty"
+    );
+    assert_eq!(populated.len(), 1);
+    assert_eq!(populated.columns().len(), 1);
+
+    // The simple-query path carries its own row type and its own column store.
+    let mut simple_rows = 0;
+    for message in client
+        .simple_query(&format!("SELECT * FROM {table}"))
+        .await
+        .expect("simple_query the zero-column row")
+    {
+        if let SimpleQueryMessage::Row(row) = message {
+            simple_rows += 1;
+            assert!(
+                row.is_empty(),
+                "a simple-query row with no columns must report itself empty"
+            );
+            assert_eq!(row.len(), 0);
+            assert!(row.columns().is_empty());
+        }
+    }
+    assert_eq!(simple_rows, 1, "the simple query must yield one row");
+
+    for message in client
+        .simple_query("SELECT 1")
+        .await
+        .expect("simple_query one column")
+    {
+        if let SimpleQueryMessage::Row(row) = message {
+            assert!(
+                !row.is_empty(),
+                "a simple-query row with a column must not report itself empty"
+            );
+            assert_eq!(row.len(), 1);
+            assert_eq!(row.columns().len(), 1);
+        }
+    }
 }
