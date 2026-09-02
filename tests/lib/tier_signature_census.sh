@@ -149,13 +149,42 @@ region_filter() {   # $1 = file, $2 = "prod" | "test"
     # `use compio_postgres::{Client, NoTls}` into the production import set -
     # which then matched every mention of `Client`, including the SqlExecutor
     # ASSOCIATED TYPE, reporting 11 where the answer is 3.
-    !intest && /^#\[cfg\(/ && /(^|[^A-Za-z_])test([^A-Za-z_]|$)/ { pend = 1; next }
+    !intest && !initem && /^#\[cfg\(/ && /(^|[^A-Za-z_])test([^A-Za-z_]|$)/ { pend = 1; next }
     pend && /^(pub )?mod [A-Za-z_]+ \{/ { pend = 0; intest = 1; if (WANT=="test") print; next }
+    # DEFECT 10: a test cfg on a single ITEM was read as production. Defect 9
+    # taught this filter to match compound cfgs, but the only thing it would
+    # SKIP was a `mod X {`; a gated `fn` fell through to `{ pend = 0 }` and its
+    # signature was scanned as shipped code.
+    #
+    # That is not hypothetical. On 2026-09-02 six `auth/bootstrap.rs` role
+    # provisioners - all with zero production callers, measured across every
+    # crate - were put behind `#[cfg(any(test, feature = "test-helpers"))]`, and
+    # this census reported the identical 16 afterwards. `test-helpers` is
+    # enabled ONLY by `[[test]]` targets via `required-features`; no shipped
+    # binary turns it on (zeroship-worker and zeroship-cli both take plugin-db
+    # with no features), so that code is in no production build and the tier
+    # question does not apply to it - exactly the reasoning that already
+    # excludes `#[cfg(test)]`.
+    #
+    # A single-line item (`use ...;`) ends on its own line; a block item ends at
+    # the first column-0 `}`, the same terminator the signature scanner uses.
+    pend && /^(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?(fn|struct|enum|trait|impl|use|const|static|type|mod)[[:space:]]/ {
+      pend = 0
+      if (WANT == "test") print
+      if ($0 ~ /;[[:space:]]*$/) next   # single-line item: done
+      initem = 1
+      next
+    }
     pend && /^[[:space:]]*$/ { next }
     { pend = 0 }
     intest {
       if (WANT == "test") print
       if ($0 == "}") intest = 0      # column-0 close ends the module
+      next
+    }
+    initem {
+      if (WANT == "test") print
+      if ($0 ~ /^}/) initem = 0      # column-0 close ends the item
       next
     }
     WANT == "prod" { print }
