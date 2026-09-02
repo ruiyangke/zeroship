@@ -921,7 +921,8 @@ pub(crate) fn dispatch_update_one<'s>(
         resolver,
         request_id,
         async move {
-            let hints = write_pipeline::inspect_update(&app, &coll, &update)?;
+            let mut update = update;
+            write_pipeline::inspect_update(&app, &coll, &mut update)?;
             // Detect creator-supplied CAS version + reject
             // the unsupported "version filter without id" shape eagerly.
             let cas_version = system_fields_pass::extract_cas_version(&filter, &coll)?;
@@ -993,12 +994,13 @@ pub(crate) fn dispatch_update_one<'s>(
             // Auto-bump via the system-fields-aware builder.
             // Actor flows into the `updated_by` bind; the `hints` from the
             // pre-pass tell the builder which auto-bumps to suppress.
+            // No `skip_*` knob is set: the pass stripped every column the
+            // charter re-assigns on write, so the patch cannot carry a
+            // competing assignment for the builder to defer to.
             let autobump = query::SystemFieldAutoBump {
                 dispatch_write: true,
                 actor_id: actor_id.as_deref(),
-                skip_version: hints.creator_supplied_version,
-                skip_updated_at: hints.creator_supplied_updated_at,
-                skip_updated_by: hints.creator_supplied_updated_by,
+                ..Default::default()
             };
             let built = query::build_update_one_with_system_fields(
                 &app,
@@ -1091,7 +1093,8 @@ pub(crate) fn dispatch_update_many<'s>(
         resolver,
         request_id,
         async move {
-            let hints = write_pipeline::inspect_update(&app, &coll, &update)?;
+            let mut update = update;
+            write_pipeline::inspect_update(&app, &coll, &mut update)?;
             let cas_version = system_fields_pass::extract_cas_version(&filter, &coll)?;
             if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
                 return Err(DbError::multi_row_version_filter_unsupported(&coll));
@@ -1103,12 +1106,13 @@ pub(crate) fn dispatch_update_many<'s>(
             let schema = crate::descriptor::collection_schema(&binding, &coll)?;
             let per_row_encrypted_update =
                 write_pipeline::update_requires_per_row_encryption(&schema, &update);
+            // No `skip_*` knob is set: the pass stripped every column the
+            // charter re-assigns on write, so the patch cannot carry a
+            // competing assignment for the builder to defer to.
             let autobump = query::SystemFieldAutoBump {
                 dispatch_write: true,
                 actor_id: actor_id.as_deref(),
-                skip_version: hints.creator_supplied_version,
-                skip_updated_at: hints.creator_supplied_updated_at,
-                skip_updated_by: hints.creator_supplied_updated_by,
+                ..Default::default()
             };
             if per_row_encrypted_update {
                 let frame = crate::transaction::AtomicWriteFrame::begin(route).await?;

@@ -1,49 +1,79 @@
-//! INSERT-time auto-population pass for the seven
-//! platform-managed system fields.
+//! The write-time assignment pass: the platform's own columns, computed by the
+//! platform.
 //!
-//! Sits between [`crate::crud::dispatch_insert`] (and `dispatch_insert_many`)
-//! and the `query::build_insert*` SQL builders. Before validation, the
-//! pass inspects the inbound row JSON and:
+//! **This module names no platform column.** It iterates the operator charter
+//! (`policies/confined-system-shape.inject.toml`, compiled into the worker and
+//! projected by [`crate::system_shape_charter::AssignmentPlan`]) and invokes the
+//! generator each column declares. Adding an eighth platform column is a charter
+//! line, not a change here.
 //!
-//! 1. **`id`** — if absent, mints a fresh typed_id via
-//!    [`zeroship_core::typed_id::generate`] using the
-//!    [`prefix_for_collection`]-derived prefix. Creator-supplied `id`
-//!    is honoured as-is (Q-SF-B: "Allow user-supplied IF the value
-//!    passes typed_id format validation" — the allow path ships now;
-//!    format validation can layer on later without a wire-format
-//!    change).
-//! 2. **`created_by` / `updated_by`** — if absent, populated from the
-//!    request's authenticated user (the gateway-injected
-//!    `ZeroShip-User` header; surfaced via
-//!    `RuntimeState::per_request_user`). If no user is bound (system-
-//!    initiated writes — migrations, background jobs, raw `serve` mode),
-//!    the columns are left absent so the DB's `NULL` default fires.
-//! 3. **`created_at` / `updated_at` / `version` / `deleted_at`** — NOT
-//!    injected here. The DDL emits `DEFAULT NOW()` /
-//!    `DEFAULT CURRENT_TIMESTAMP` / `DEFAULT 1` / nullable, so a row
-//!    INSERT that omits the column lets the engine populate the
-//!    canonical value. Creator-supplied overrides for these fields
-//!    flow through untouched (rare but legitimate for migration code
-//!    that pre-seeds historical timestamps or a specific version).
+//! # The shape it reads
 //!
-//! Rust-side minting (rather than SDK-side) is the design choice so
-//! non-SDK deploys (raw `default = { fetch }` apps that call
-//! `zeroship.db.*` directly) also receive auto-mint. The SDK reads the
-//! minted id back from the INSERT's `RETURNING` row.
+//! Every charter column carries one property, `assign = { by, on }`: WHO
+//! computes the value and WHEN. `on` is `insert` | `write` | `delete`, and
+//! `write` covers insert - `updated_by` is `on = "write"` and must still be
+//! stamped when the row is created.
+//!
+//! # What the pass emits, and what it leaves to the database
+//!
+//! The runtime emits a value only for the generators the DATABASE cannot
+//! compute:
+//!
+//! * `typedId` - minted here via [`zeroship_core::typed_id::generate`] with the
+//!   [`prefix_for_collection`]-resolved prefix, because the prefix is
+//!   per-collection creator data the charter deliberately does not carry.
+//! * `actor` - the request's authenticated user, or **`null`** when there is
+//!   none. The generator runs on every write; stale attribution is a false
+//!   claim about who touched a row.
+//!
+//! `now`, `increment(n)` and `identity` emit NOTHING. Their value is produced by
+//! the column's own DDL - `DEFAULT NOW()` / `DEFAULT CURRENT_TIMESTAMP`,
+//! `DEFAULT 1`, and the identity sequence - which is the same authority
+//! rendering the same expression the UPDATE auto-bump uses. That is not a gap:
+//! it is what keeps ONE writer and ONE spelling per dialect. A Rust-side
+//! timestamp formatter would be a third spelling on SQLite, where the DDL
+//! default is space-separated `CURRENT_TIMESTAMP` and a creator value arrives
+//! `T`-separated, and TEXT comparison is bytewise.
+//!
+//! # A supplied value is REMOVED, not refused
+//!
+//! `assign` is not overridable, so a value the creator supplied for an assigned
+//! column is dropped before the SQL builder sees it. Removal, not refusal,
+//! because this pass is documented and tested as IDEMPOTENT: a check keyed on a
+//! field being PRESENT cannot tell a creator's value from one an earlier call
+//! minted. The refusal that needs provenance lives at the document boundary
+//! (`write_pipeline::refuse_platform_assigned_id`), which runs on the raw
+//! document before any pass.
+//!
+//! `id` is the one column this pass does not remove: it MINTS when absent and
+//! leaves a present value alone, precisely so a second call cannot re-mint. Its
+//! creator-supplied case is the boundary's to refuse.
+//!
+//! Rust-side assignment (rather than SDK-side) is the design choice so non-SDK
+//! deploys (raw `default = { fetch }` apps that call `zeroship.db.*` directly)
+//! are assigned too. The SDK reads the values back from the INSERT's
+//! `RETURNING` row.
+
+use std::rc::Rc;
 
 use serde_json::{Map, Value};
+use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
 use zeroship_runtime::state::SharedState;
 
 use crate::error::DbError;
-use crate::query::SYSTEM_FIELD_NAMES;
+use crate::system_shape_charter::AssignmentPlan;
 
-/// Write-once system field names that the UPDATE pass
-/// refuses to accept on the patch side. Even though all 7 names live in
-/// [`SYSTEM_FIELD_NAMES`], only these 3 are immutable post-INSERT
-/// (`updated_at` / `updated_by` / `version` are auto-bumped each
-/// UPDATE — see `apply_system_fields_on_update`; `deleted_at` is
-/// owned by `delete()` / `restore()`).
-pub(crate) const IMMUTABLE_SYSTEM_FIELDS: &[&str] = &["id", "created_at", "created_by"];
+/// Does `event` fire while a row is being created?
+///
+/// `write` covers insert, so `updated_at` / `updated_by` / `version` are
+/// assigned when the row is born as well as when it changes. `delete` does not:
+/// a row is not born soft-deleted.
+const fn fires_on_insert(event: AssignmentEvent) -> bool {
+    match event {
+        AssignmentEvent::Insert | AssignmentEvent::Write => true,
+        AssignmentEvent::Delete => false,
+    }
+}
 
 /// Maximum typed_id prefix length. Matches the convention used by
 /// `crates/core/src/typed_id.rs` for well-known prefixes
@@ -194,10 +224,17 @@ fn apply_system_fields_on_insert_impl(
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
+    let plan = assignment_plan()?;
     let Some(obj) = doc.as_object_mut() else {
         return Ok(());
     };
-    inject_into_object(obj, schema, collection, actor_id)
+    inject_into_object(obj, &plan, schema, collection, actor_id)
+}
+
+/// This thread's charter projection - the authority every arm of this pass
+/// reads instead of naming a column.
+fn assignment_plan() -> Result<Rc<AssignmentPlan>, DbError> {
+    crate::system_shape_charter::plan()
 }
 
 /// Run the auto-population pass over every doc in an `insertMany`
@@ -237,12 +274,18 @@ fn apply_system_fields_on_insert_many_impl(
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
+    // ONE plan for the whole batch, and the removal is keyed on the COLUMN
+    // rather than on what a row happened to supply. That is what survives
+    // `build_insert_many`'s column union (`query.rs`): a per-row decision would
+    // let one row's supplied `created_at` pull the name into the union and bind
+    // an explicit NULL into `created_at NOT NULL` for every other row.
+    let plan = assignment_plan()?;
     let Some(arr) = docs.as_array_mut() else {
         return Ok(());
     };
     for doc in arr.iter_mut() {
         if let Some(obj) = doc.as_object_mut() {
-            inject_into_object(obj, schema, collection, actor_id)?;
+            inject_into_object(obj, &plan, schema, collection, actor_id)?;
         }
     }
     Ok(())
@@ -250,56 +293,58 @@ fn apply_system_fields_on_insert_many_impl(
 
 fn inject_into_object(
     obj: &mut Map<String, Value>,
+    plan: &AssignmentPlan,
     schema: &Value,
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
-    // `id` — auto-mint when absent.
-    //
-    // A creator-supplied `id` is still honoured here, and that is a KNOWN GAP
-    // rather than the intended end state: the prefix validator fences the
-    // descriptor vector, but a document carrying `id: "usr_..."` is written
-    // verbatim. See `insert_refuses_a_creator_supplied_id`, which is ignored
-    // with the reason.
-    //
-    // The refusal cannot live in this function. This pass is documented and
-    // tested as IDEMPOTENT, and a check keyed on `id` being present cannot
-    // distinguish a creator's value from one this pass minted on an earlier
-    // call. It belongs at the caller boundary, where "supplied by the creator"
-    // is still knowable.
-    if !obj.contains_key("id") {
-        let prefix = prefix_for_collection(schema, collection)?;
-        let minted = zeroship_core::typed_id::generate(&prefix);
-        obj.insert("id".to_string(), Value::String(minted));
-    }
+    for column in plan.columns() {
+        let name = column.name.as_str();
 
-    // `created_by` / `updated_by` — only inject when an actor is in
-    // scope AND the column isn't already set. No actor → leave absent
-    // so the DDL's `NULL` default fires.
-    if let Some(actor) = actor_id {
-        if !obj.contains_key("created_by") {
-            obj.insert("created_by".to_string(), Value::String(actor.to_string()));
+        if !fires_on_insert(column.on) {
+            // The charter assigns this column on another event, so its value is
+            // still not the creator's to supply. Drop it and let the row be
+            // born without it - `deleted_at` is the live instance, and a row
+            // born soft-deleted is invisible to every read.
+            obj.remove(name);
+            continue;
         }
-        if !obj.contains_key("updated_by") {
-            obj.insert("updated_by".to_string(), Value::String(actor.to_string()));
+
+        match column.by {
+            // MINT WHEN ABSENT, deliberately not remove-then-mint. That is what
+            // keeps this pass idempotent, and idempotence is why the refusal of
+            // a creator-supplied id lives at the document boundary instead.
+            AssignmentGenerator::TypedId => {
+                if !obj.contains_key(name) {
+                    let prefix = prefix_for_collection(schema, collection)?;
+                    obj.insert(
+                        name.to_string(),
+                        Value::String(zeroship_core::typed_id::generate(&prefix)),
+                    );
+                }
+            }
+            // The generator RUNS on every write and yields NULL when there is
+            // no actor. Injecting rather than skipping is what stops a supplied
+            // `created_by` from standing in for one - the anonymous arm is
+            // exactly where the naive patch leaves a passthrough.
+            AssignmentGenerator::Actor => {
+                obj.insert(
+                    name.to_string(),
+                    actor_id.map_or(Value::Null, |actor| Value::String(actor.to_string())),
+                );
+            }
+            // The DATABASE computes these: `DEFAULT NOW()` /
+            // `DEFAULT CURRENT_TIMESTAMP`, `DEFAULT 1`, the identity sequence.
+            // Emit nothing so its expression fires - one writer, one spelling
+            // per dialect. Removing any supplied value is the whole of this
+            // pass's job for them.
+            AssignmentGenerator::Now
+            | AssignmentGenerator::Increment(_)
+            | AssignmentGenerator::Identity => {
+                obj.remove(name);
+            }
         }
     }
-
-    // `created_at` / `updated_at` / `version` / `deleted_at` are
-    // intentionally NOT injected — the DB default fires when absent,
-    // creator overrides flow through when present. See
-    // `build_system_field_columns` in `query.rs` for the DDL defaults.
-    //
-    // `SYSTEM_FIELD_NAMES` is referenced here only via the
-    // `debug_assert!` below — every value we touch must be in the
-    // canonical list, otherwise a future emitter regression silently
-    // writes to a creator-shaped column.
-    debug_assert!(
-        ["id", "created_by", "updated_by"]
-            .iter()
-            .all(|n| SYSTEM_FIELD_NAMES.contains(n)),
-        "apply_system_fields_on_insert touched a name not in SYSTEM_FIELD_NAMES",
-    );
     Ok(())
 }
 
@@ -307,150 +352,109 @@ fn inject_into_object(
 // UPDATE-time validation pass + CAS-version extraction.
 // ---------------------------------------------------------------------------
 
-/// Result of running [`apply_system_fields_on_update`] against an
-/// UPDATE patch. Carries the post-validation knobs the SQL builder
-/// needs to compose the auto-bump SET clauses correctly.
+/// Run the UPDATE-time assignment pass over an UPDATE patch, in place.
 ///
-/// `creator_supplied_version` / `creator_supplied_updated_at` /
-/// `creator_supplied_updated_by` cover Q-SF-B's "creator can override"
-/// rule for the three auto-bumped columns: when set, the builder must
-/// emit the creator's value verbatim AND skip the corresponding
-/// auto-bump SET clause (the explicit value wins).
-#[derive(Debug, Clone, Default)]
-pub struct UpdateAutoBumpHints {
-    /// `true` when the patch carries an explicit `version` key. The
-    /// builder must NOT append `"version" = "version" + 1` (the
-    /// creator's value flows through the standard SET clause).
-    pub creator_supplied_version: bool,
-    /// `true` when the patch carries an explicit `updated_at`. Same
-    /// rationale — the builder skips the dialect-appropriate
-    /// `NOW()` / `CURRENT_TIMESTAMP` auto-bump.
-    pub creator_supplied_updated_at: bool,
-    /// `true` when the patch carries an explicit `updated_by`. Builder
-    /// skips appending the actor-bound `$N` placeholder.
-    pub creator_supplied_updated_by: bool,
-}
-
-/// Run the UPDATE-time validation pass over an UPDATE patch.
+/// The charter decides both arms; this function names no column.
 ///
-/// Two rejections, one inspection:
+/// 1. **Fixed at insert** (`on = "insert"`) — the patch may not carry the
+///    column at all. Returns a typed
+///    `DbError::ValidationFailed { code: "immutable_system_field" }` via
+///    `QueryError::ImmutableSystemField`. Refusal rather than removal is right
+///    HERE and only here: an update patch is entirely creator-authored, so
+///    "the creator sent it" is knowable, and silently discarding an attempt to
+///    rewrite `created_by` would let the caller believe it landed.
+/// 2. **Re-assigned on every write** (`on = "write"`) — the key is REMOVED.
+///    The SQL builder then appends its own `version` / `updated_at` /
+///    `updated_by` clauses unconditionally, because the patch can no longer
+///    carry a competing assignment to the same column.
+/// 3. **Assigned on delete** (`on = "delete"`) — left exactly as the caller
+///    sent it, and that is a DEPENDENCY, not an exemption. The SDK's own soft
+///    delete is an UPDATE carrying `deleted_at`
+///    (`sdks/db/src/collection/crud.ts:519-523` and `:562-566`; restore is
+///    `:745-748`), so touching it here would refuse the platform's own
+///    `delete()`. Soft delete has to route through the native op first.
 ///
-/// 1. **Immutable fields** — the patch must not carry `id`,
-///    `created_at`, or `created_by`. Those are auto-populated at
-///    INSERT and write-once. Returns a typed
-///    `DbError::ValidationFailed { code: "immutable_system_field" }`
-///    via `QueryError::ImmutableSystemField`.
-/// 2. **Creator-supplied overrides** — `version` / `updated_at` /
-///    `updated_by` are inspected (not refused). The returned
-///    [`UpdateAutoBumpHints`] tells the SQL builder whether to skip
-///    each auto-bump.
+/// Both arms cover the top-level keys, the nested `$set`, and the arithmetic
+/// operators `$inc` / `$dec` / `$mul`, matching the flattening
+/// `build_set_clauses` performs.
 ///
-/// The pass also strips `$set`-flattened patches so the immutable-field
-/// check covers both top-level keys and nested `$set` entries.
+/// A patch whose ONLY key was a re-assigned column comes out empty and the SQL
+/// builder rejects it with `update fields cannot be empty`. That is a true
+/// statement about the request - nothing remained to write - and it is the
+/// builder's own message rather than a second refusal here.
 ///
 /// Visibility: `pub(crate)` in release builds; `pub` under
 /// `test-helpers` so integration tests can drive the helper directly.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) fn apply_system_fields_on_update(
-    patch: &Value,
+    patch: &mut Value,
     app_id: &str,
     collection: &str,
-) -> Result<UpdateAutoBumpHints, DbError> {
+) -> Result<(), DbError> {
     apply_system_fields_on_update_impl(patch, app_id, collection)
 }
 
 #[cfg(feature = "test-helpers")]
 pub fn apply_system_fields_on_update(
-    patch: &Value,
+    patch: &mut Value,
     app_id: &str,
     collection: &str,
-) -> Result<UpdateAutoBumpHints, DbError> {
+) -> Result<(), DbError> {
     apply_system_fields_on_update_impl(patch, app_id, collection)
 }
 
 fn apply_system_fields_on_update_impl(
-    patch: &Value,
+    patch: &mut Value,
     _app_id: &str,
     _collection: &str,
-) -> Result<UpdateAutoBumpHints, DbError> {
-    let Some(obj) = patch.as_object() else {
+) -> Result<(), DbError> {
+    let plan = assignment_plan()?;
+    let immutable: Vec<String> = plan
+        .immutable_after_insert()
+        .map(str::to_string)
+        .collect();
+    let reassigned: Vec<String> = plan.reassigned_on_write().map(str::to_string).collect();
+
+    let Some(obj) = patch.as_object_mut() else {
         // Non-object patches are the SQL builder's problem (they get a
         // typed `InvalidFilter` there). The pass has nothing to do.
-        return Ok(UpdateAutoBumpHints::default());
+        return Ok(());
     };
 
-    // The patch can carry top-level keys AND a nested `$set`. Inspect
-    // both so creator overrides + immutability checks cover either
-    // shape uniformly with the SQL builder's `build_set_clauses`
-    // flattening.
-    let mut hints = UpdateAutoBumpHints::default();
-    check_keys_for_immutable_and_overrides(obj, &mut hints)?;
-    if let Some(set_obj) = obj.get("$set").and_then(|v| v.as_object()) {
-        check_keys_for_immutable_and_overrides(set_obj, &mut hints)?;
+    refuse_and_strip(obj, &immutable, &reassigned, None)?;
+    // `$set` and the arithmetic operators nest one level; the builder flattens
+    // them into the same SET list, so an assignment hidden under one is the
+    // same assignment.
+    for op_key in ["$set", "$inc", "$dec", "$mul"] {
+        let Some(nested) = obj.get_mut(op_key).and_then(Value::as_object_mut) else {
+            continue;
+        };
+        refuse_and_strip(nested, &immutable, &reassigned, Some(op_key))?;
     }
-    // Defensive: older SDK versions augmented the update with
-    // `$inc: { version: 1 }`. The runtime now auto-bumps too —
-    // a naive double-bump would advance version by 2 instead of 1.
-    // Detect the legacy operator-nested version key on `$inc` / `$dec`
-    // / `$mul` and suppress our own bump so the creator's explicit
-    // operator wins (matching the `Q-SF-B` "creator override" rule).
-    for op_key in &["$inc", "$dec", "$mul"] {
-        if let Some(op_obj) = obj.get(*op_key).and_then(|v| v.as_object()) {
-            if op_obj.contains_key("version") {
-                hints.creator_supplied_version = true;
-            }
-            if op_obj.contains_key("updated_at") {
-                hints.creator_supplied_updated_at = true;
-            }
-            if op_obj.contains_key("updated_by") {
-                hints.creator_supplied_updated_by = true;
-            }
-            // Immutable fields under an operator must also be refused.
-            for imm in IMMUTABLE_SYSTEM_FIELDS {
-                if op_obj.contains_key(*imm) {
-                    return Err(crate::query::QueryError::ImmutableSystemField(
-                        format!(
-                            "UPDATE patch attempted to overwrite immutable system field `{imm}` \
-                             under `{op_key}` (write-once on INSERT)"
-                        ),
-                    )
-                    .into());
-                }
-            }
-        }
-    }
-    Ok(hints)
+    Ok(())
 }
 
-/// Run the immutable-field + creator-override inspection over a single
-/// key/value map (called once for the top-level patch and again for any
-/// `$set` nesting).
-fn check_keys_for_immutable_and_overrides(
-    obj: &Map<String, Value>,
-    hints: &mut UpdateAutoBumpHints,
+/// Refuse every insert-fixed column and strip every write-re-assigned one from
+/// a single key/value map. `under` names the operator this map hangs off, for
+/// the error message.
+fn refuse_and_strip(
+    obj: &mut Map<String, Value>,
+    immutable: &[String],
+    reassigned: &[String],
+    under: Option<&str>,
 ) -> Result<(), DbError> {
-    for (key, _value) in obj.iter() {
-        if key.starts_with('$') {
-            // Skip operator keys like `$set` / `$inc` / `$push` — the
-            // SQL builder unpacks them. The nested-`$set` branch in
-            // the caller covers `$set`-nested immutable-field attempts.
-            continue;
-        }
-        if IMMUTABLE_SYSTEM_FIELDS.contains(&key.as_str()) {
-            return Err(crate::query::QueryError::ImmutableSystemField(
-                format!(
-                    "UPDATE patch attempted to overwrite immutable system field `{key}` \
-                     (write-once on INSERT)"
-                ),
-            )
+    for name in immutable {
+        if obj.contains_key(name) {
+            let where_ = under.map_or_else(String::new, |op| format!(" under `{op}`"));
+            return Err(crate::query::QueryError::ImmutableSystemField(format!(
+                "UPDATE patch attempted to overwrite immutable system field `{name}`{where_} \
+                 (assigned by the platform when the row was created)"
+            ))
             .into());
         }
-        match key.as_str() {
-            "version" => hints.creator_supplied_version = true,
-            "updated_at" => hints.creator_supplied_updated_at = true,
-            "updated_by" => hints.creator_supplied_updated_by = true,
-            _ => {}
-        }
+    }
+    for name in reassigned {
+        obj.remove(name);
     }
     Ok(())
 }
@@ -568,6 +572,207 @@ pub(crate) fn should_filter_soft_deleted(
 mod tests {
     use super::*;
     use serde_json::json;
+    use zeroship_migrate_policy::{PolicyRegistry, RootCharter};
+
+    // ---- the charter drives the pass -------------------------------
+
+    /// Stamp a charter of the test's own making onto this thread, so a test can
+    /// ask what the pass does with an authority the operator has not shipped.
+    ///
+    /// The fragment is spelled the way `policies/confined-system-shape.inject.toml`
+    /// spells it, and takes the same synthetic header
+    /// `crate::system_shape_charter` prepends.
+    fn stamp_charter(columns_toml: &str) {
+        let toml = format!(
+            "policy_version = 1\n\n[[inject]]\nscope = \"all\"\nmandatory = true\n\
+             primary_key = [\"id\"]\nauthor_primary_key = \"forbid\"\ncolumns = [\n{columns_toml}\n]\n"
+        );
+        let charter = RootCharter::parse_toml(&toml, &PolicyRegistry::empty())
+            .expect("the test charter must parse");
+        let plan = std::rc::Rc::new(
+            crate::system_shape_charter::AssignmentPlan::from_charter(&charter),
+        );
+        crate::context::with_mut(|c| c.set_assignment_plan(plan));
+    }
+
+    /// The deliverable, stated as a test: an eighth platform column is a
+    /// CHARTER LINE, not a code change. Nothing in `system_fields_pass.rs`
+    /// names `tenant_id`, and the pass assigns it anyway.
+    #[test]
+    fn an_eighth_charter_column_is_assigned_without_a_code_change() {
+        crate::reset_context_for_tests();
+        stamp_charter(
+            "  { name = \"id\", type = \"text\", nullable = false, assign = { by = \"typedId\", on = \"insert\" } },\n\
+             \x20 { name = \"tenant_id\", type = \"text\", nullable = true, assign = { by = \"actor\", on = \"insert\" } },",
+        );
+        let mut doc = json!({ "title": "hi" });
+        apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_tenant"),
+        )
+        .expect("the charter's own columns must be assignable");
+        assert_eq!(
+            doc.get("tenant_id").and_then(Value::as_str),
+            Some("usr_tenant"),
+            "a column only the charter names must still be assigned: {doc}",
+        );
+        crate::reset_context_for_tests();
+    }
+
+    /// `by = "identity"` means the column's own DDL identity supplies the
+    /// value. The runtime must emit NOTHING for it - including no minted
+    /// typed id - so the INSERT default fires.
+    ///
+    /// The charter ships no `identity` column today, so this is the only place
+    /// that generator has a caller. It exists because the resolver rewrites
+    /// `typedId` to `identity` when a creator declares an integer identity
+    /// `id`, and the pass must already be correct on the day that arrives.
+    #[test]
+    fn an_identity_id_is_left_to_the_database() {
+        crate::reset_context_for_tests();
+        stamp_charter(
+            "  { name = \"id\", type = \"integer\", nullable = false, assign = { by = \"identity\", on = \"insert\" } },",
+        );
+        let mut doc = json!({ "title": "hi" });
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("an identity id must not be refused");
+        assert!(
+            doc.get("id").is_none(),
+            "an identity-assigned id must not be minted by the runtime: {doc}",
+        );
+        crate::reset_context_for_tests();
+    }
+
+    // ---- a supplied value for an assigned column is removed ---------
+
+    #[test]
+    fn insert_removes_a_supplied_created_at_and_version() {
+        crate::reset_context_for_tests();
+        let mut doc = json!({
+            "title": "hi",
+            "version": 5,
+            "created_at": 1_700_000_000_000_i64,
+            "updated_at": 1_700_000_000_000_i64,
+        });
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
+        let obj = doc.as_object().expect("object");
+        assert!(!obj.contains_key("version"), "supplied version survived: {doc}");
+        assert!(
+            !obj.contains_key("created_at"),
+            "supplied created_at survived: {doc}",
+        );
+        assert!(
+            !obj.contains_key("updated_at"),
+            "supplied updated_at survived: {doc}",
+        );
+    }
+
+    #[test]
+    fn insert_removes_a_supplied_deleted_at() {
+        crate::reset_context_for_tests();
+        let mut doc = json!({ "title": "hi", "deleted_at": 1_700_000_000_000_i64 });
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
+        assert!(
+            !doc.as_object().expect("object").contains_key("deleted_at"),
+            "a row must not be born soft-deleted by a supplied value: {doc}",
+        );
+    }
+
+    /// Acceptance 7: a supplied `created_by` does not survive, and the bound
+    /// actor is what lands.
+    #[test]
+    fn insert_overwrites_a_supplied_created_by_with_the_bound_actor() {
+        crate::reset_context_for_tests();
+        let mut doc = json!({ "title": "hi", "created_by": "usr_SOMEONE_ELSE" });
+        apply_system_fields_on_insert(
+            &mut doc,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_session_actor"),
+        )
+        .expect("derived prefix must be accepted");
+        assert_eq!(
+            doc.get("created_by").and_then(Value::as_str),
+            Some("usr_session_actor"),
+            "a supplied created_by must not outrank the bound actor: {doc}",
+        );
+    }
+
+    /// The same, on an ANONYMOUS request - the arm the naive patch leaves as a
+    /// passthrough because it flips the guards inside `if let Some(actor)`.
+    #[test]
+    fn insert_overwrites_a_supplied_created_by_on_an_anonymous_write() {
+        crate::reset_context_for_tests();
+        let mut doc = json!({ "title": "hi", "created_by": "usr_SOMEONE_ELSE" });
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
+        assert_eq!(
+            doc.get("created_by"),
+            Some(&Value::Null),
+            "an anonymous write must yield NULL, never the supplied actor: {doc}",
+        );
+    }
+
+    /// The actor generator runs on every write and yields NULL when there is no
+    /// actor. Absent and NULL store the same thing on an INSERT; what this pins
+    /// is that the generator RAN, which is what makes the UPDATE arm's
+    /// staleness fix the same rule rather than a special case.
+    #[test]
+    fn insert_stamps_null_actor_columns_when_anonymous() {
+        crate::reset_context_for_tests();
+        let mut doc = json!({ "title": "hi" });
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
+        assert_eq!(doc.get("created_by"), Some(&Value::Null), "doc: {doc}");
+        assert_eq!(doc.get("updated_by"), Some(&Value::Null), "doc: {doc}");
+    }
+
+    /// `insertMany` unions the column set across documents and binds NULL for
+    /// every missing cell (`query.rs`'s `build_insert_many_with_dialect`), so a
+    /// per-document removal that depended on what the row supplied would drive
+    /// an explicit NULL into `created_at NOT NULL`.
+    ///
+    /// The pass removes by COLUMN, not by value, so the union never sees the
+    /// name at all. This asserts against the built SQL rather than the
+    /// documents, because the union is the builder's behaviour and not the
+    /// pass's.
+    #[test]
+    fn insert_many_keeps_a_supplied_value_out_of_the_batch_union() {
+        crate::reset_context_for_tests();
+        let mut docs = json!([
+            { "title": "a", "created_at": 1_700_000_000_000_i64 },
+            { "title": "b" },
+        ]);
+        apply_system_fields_on_insert_many(
+            &mut docs,
+            &schema_without_id_prefix(),
+            "posts",
+            Some("usr_x"),
+        )
+        .expect("derived prefix must be accepted");
+        let built =
+            crate::query::build_insert_many("app1", "posts", &schema_without_id_prefix(), &docs)
+                .expect("build_insert_many");
+        let columns = built
+            .sql
+            .split_once(" VALUES ")
+            .expect("the INSERT names its columns")
+            .0;
+        assert!(
+            !columns.contains("\"created_at\""),
+            "an assigned column reached the batch union: {}",
+            built.sql,
+        );
+        assert!(
+            !built.sql.contains("NULL"),
+            "the batch bound a NULL cell: {}",
+            built.sql,
+        );
+    }
 
     // ---- prefix derivation -----------------------------------------
 
@@ -782,42 +987,6 @@ mod tests {
     }
 
     #[test]
-    fn insert_leaves_created_by_absent_when_no_actor() {
-        let mut doc = json!({ "title": "hi" });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
-            .expect("derived prefix must be accepted");
-        assert!(
-            !doc.as_object().unwrap().contains_key("created_by"),
-            "no actor → no created_by injection (DB default NULL fires)"
-        );
-        assert!(
-            !doc.as_object().unwrap().contains_key("updated_by"),
-            "no actor → no updated_by injection (DB default NULL fires)"
-        );
-    }
-
-    #[test]
-    fn insert_respects_creator_supplied_created_by() {
-        let mut doc = json!({
-            "title": "hi",
-            "created_by": "usr_override",
-        });
-        apply_system_fields_on_insert(
-            &mut doc,
-            &schema_without_id_prefix(),
-            "posts",
-            Some("usr_session_actor"),
-        )
-        .expect("derived prefix must be accepted");
-        // Creator's explicit value wins over the session actor — same
-        // pattern as `id` above (Q-SF-B).
-        assert_eq!(
-            doc.get("created_by").and_then(|v| v.as_str()),
-            Some("usr_override")
-        );
-    }
-
-    #[test]
     fn insert_does_not_inject_created_at_or_updated_at_or_version() {
         let mut doc = json!({ "title": "hi" });
         apply_system_fields_on_insert(
@@ -834,27 +1003,20 @@ mod tests {
         assert!(!obj.contains_key("deleted_at"), "DB default must fire");
     }
 
-    #[test]
-    fn insert_respects_creator_supplied_version() {
-        let mut doc = json!({
-            "title": "hi",
-            "version": 5,
-            "created_at": 1700000000000_i64,
-        });
-        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
-            .expect("derived prefix must be accepted");
-        // Creator-supplied overrides for the DB-defaulted columns flow
-        // through untouched — migration code uses this to pre-seed
-        // historical timestamps + version pointers.
-        assert_eq!(doc.get("version").and_then(|v| v.as_i64()), Some(5));
-        assert_eq!(
-            doc.get("created_at").and_then(|v| v.as_i64()),
-            Some(1700000000000)
-        );
-    }
-
+    /// Idempotence, stated correctly: the SAME inputs applied twice produce the
+    /// same document.
+    ///
+    /// This test used to run the second call with a DIFFERENT actor and assert
+    /// the first actor survived. That is not idempotence - `f(f(x))` and
+    /// `f(x)` are only comparable when the arguments are the same - and the
+    /// property it actually pinned ("a later actor cannot restamp the row") is
+    /// what let a supplied `created_by` stand in for one. The load-bearing half
+    /// is the id: a second call must not re-mint, which is why the `typedId`
+    /// arm mints-when-absent instead of removing and re-minting, and why the
+    /// refusal of a creator-supplied id lives at the document boundary.
     #[test]
     fn insert_pass_is_idempotent() {
+        crate::reset_context_for_tests();
         let mut doc = json!({ "title": "hi" });
         apply_system_fields_on_insert(
             &mut doc,
@@ -863,24 +1025,32 @@ mod tests {
             Some("usr_x"),
         )
         .expect("derived prefix must be accepted");
-        let id_after_first = doc.get("id").unwrap().as_str().unwrap().to_string();
+        let after_first = doc.clone();
         apply_system_fields_on_insert(
             &mut doc,
             &schema_without_id_prefix(),
             "posts",
-            Some("usr_y"),
+            Some("usr_x"),
         )
         .expect("derived prefix must be accepted");
-        // Second pass must NOT re-mint id and must NOT overwrite
-        // created_by — pass is "inject when absent".
         assert_eq!(
-            doc.get("id").unwrap().as_str(),
-            Some(id_after_first.as_str())
+            doc, after_first,
+            "a second pass over the same document with the same actor must change nothing",
         );
-        assert_eq!(
-            doc.get("created_by").and_then(|v| v.as_str()),
-            Some("usr_x")
-        );
+    }
+
+    /// The anonymous batch is idempotent too, and it is the arm where the
+    /// `actor` generator writes rather than skips.
+    #[test]
+    fn insert_pass_is_idempotent_without_an_actor() {
+        crate::reset_context_for_tests();
+        let mut doc = json!({ "title": "hi" });
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
+        let after_first = doc.clone();
+        apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
+        assert_eq!(doc, after_first);
     }
 
     #[test]
@@ -983,21 +1153,31 @@ mod tests {
         }
     }
 
-    /// When no actor is bound the INSERT VALUES must NOT carry
-    /// created_by / updated_by so the DDL's `created_by TEXT NULL`
-    /// default fires.
+    /// When no actor is bound the INSERT still names `created_by` /
+    /// `updated_by`, bound to SQL NULL. Absent and NULL store the same value
+    /// here; what the explicit NULL buys is that the batch shape does not
+    /// depend on who was signed in, and that the `actor` generator has one
+    /// behaviour rather than two.
     #[test]
-    fn insert_pass_omits_actor_columns_when_no_actor() {
+    fn insert_pass_binds_null_actor_columns_when_no_actor() {
+        crate::reset_context_for_tests();
         let mut doc = json!({ "title": "hi" });
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
         let obj = doc.as_object().unwrap();
-        // Only id is injected (auto-mint always runs).
-        assert_eq!(obj.len(), 2, "doc keys: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(obj.len(), 4, "doc keys: {:?}", obj.keys().collect::<Vec<_>>());
         assert!(obj.contains_key("id"));
         assert!(obj.contains_key("title"));
-        assert!(!obj.contains_key("created_by"));
-        assert!(!obj.contains_key("updated_by"));
+        assert_eq!(obj.get("created_by"), Some(&Value::Null));
+        assert_eq!(obj.get("updated_by"), Some(&Value::Null));
+
+        let built = crate::query::build_insert("app1", "posts", &schema_without_id_prefix(), &doc)
+            .expect("build_insert");
+        assert!(
+            built.sql.contains("\"created_by\""),
+            "the NULL actor column must still be named: {}",
+            built.sql,
+        );
     }
 
     /// Confirms the SQL builder integration — the INSERT statement carries all
@@ -1042,126 +1222,145 @@ mod tests {
         assert_eq!(built.params.len(), 4, "params: {:?}", built.params);
     }
 
-    // ---- UPDATE pass: immutable fields, CAS extraction --
+    // ---- UPDATE pass: insert-fixed refusal, write-assigned strip --
 
-    #[test]
-    fn update_refuses_creator_supplied_id_change() {
-        let patch = json!({ "id": "post_other", "title": "x" });
-        let err = apply_system_fields_on_update(&patch, "app1", "posts_imid")
-            .expect_err("UPDATE must refuse id overwrite");
+    /// Refuse the column, then prove the refusal is charter-DERIVED rather
+    /// than a coincidence with the three names that used to be hardcoded: the
+    /// same helper reads `immutable_after_insert()` off the plan.
+    fn expect_immutable_refusal(mut patch: Value, collection: &str) {
+        let err = apply_system_fields_on_update(&mut patch, "app1", collection)
+            .expect_err("UPDATE must refuse a column the platform fixed at insert");
         match err {
             DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "immutable_system_field");
             }
             other => panic!("expected ValidationFailed, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn update_refuses_creator_supplied_id_change() {
+        expect_immutable_refusal(json!({ "id": "post_other", "title": "x" }), "posts_imid");
     }
 
     #[test]
     fn update_refuses_creator_supplied_created_at_change() {
-        let patch = json!({ "created_at": 1700000000000_i64 });
-        let err = apply_system_fields_on_update(&patch, "app1", "posts_imca")
-            .expect_err("UPDATE must refuse created_at overwrite");
-        match err {
-            DbError::ValidationFailed { code, .. } => {
-                assert_eq!(code, "immutable_system_field");
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
-        }
+        expect_immutable_refusal(json!({ "created_at": 1700000000000_i64 }), "posts_imca");
     }
 
     #[test]
     fn update_refuses_creator_supplied_created_by_change() {
-        let patch = json!({ "created_by": "usr_other" });
-        let err = apply_system_fields_on_update(&patch, "app1", "posts_imcb")
-            .expect_err("UPDATE must refuse created_by overwrite");
-        match err {
-            DbError::ValidationFailed { code, .. } => {
-                assert_eq!(code, "immutable_system_field");
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
-        }
+        expect_immutable_refusal(json!({ "created_by": "usr_other" }), "posts_imcb");
     }
 
     #[test]
     fn update_refuses_immutable_fields_under_dollar_set() {
-        // Nested $set form must be caught too — the SDK can produce
+        // Nested $set form must be caught too - the SDK can produce
         // either shape.
-        let patch = json!({ "$set": { "id": "post_other" } });
-        let err = apply_system_fields_on_update(&patch, "app1", "posts_imset")
-            .expect_err("UPDATE must refuse id overwrite inside $set");
-        match err {
-            DbError::ValidationFailed { code, .. } => {
-                assert_eq!(code, "immutable_system_field");
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
-        }
-    }
-
-    #[test]
-    fn update_respects_creator_supplied_version() {
-        let patch = json!({ "title": "x", "version": 42 });
-        let hints = apply_system_fields_on_update(&patch, "app1", "posts_csv")
-            .expect("passes immutable check");
-        assert!(
-            hints.creator_supplied_version,
-            "explicit version on patch must set the hint"
-        );
-    }
-
-    #[test]
-    fn update_respects_creator_supplied_updated_at() {
-        let patch = json!({ "title": "x", "updated_at": "2026-01-01T00:00:00Z" });
-        let hints = apply_system_fields_on_update(&patch, "app1", "posts_csua")
-            .expect("passes immutable check");
-        assert!(hints.creator_supplied_updated_at);
-    }
-
-    #[test]
-    fn update_respects_creator_supplied_updated_by() {
-        let patch = json!({ "title": "x", "updated_by": "usr_explicit" });
-        let hints = apply_system_fields_on_update(&patch, "app1", "posts_csub")
-            .expect("passes immutable check");
-        assert!(hints.creator_supplied_updated_by);
-    }
-
-    #[test]
-    fn update_detects_legacy_dollar_inc_version_as_creator_supplied() {
-        // Legacy SDK shape: `{ $inc: { version: 1 } }`. The pass must
-        // set `creator_supplied_version` so the SQL builder skips its
-        // own auto-bump (otherwise a double-bump lands version at +2).
-        let patch = json!({ "$inc": { "version": 1 } });
-        let hints = apply_system_fields_on_update(&patch, "app1", "posts_legacyinc")
-            .expect("passes");
-        assert!(
-            hints.creator_supplied_version,
-            "legacy $inc.version must mark creator-supplied to avoid double-bump"
-        );
+        expect_immutable_refusal(json!({ "$set": { "id": "post_other" } }), "posts_imset");
     }
 
     #[test]
     fn update_refuses_immutable_field_under_dollar_inc() {
         // Defence-in-depth: $inc.id / $inc.created_at / $inc.created_by
-        // should be refused for the same reason as top-level overwrites.
-        let patch = json!({ "$inc": { "created_by": 1 } });
-        let err = apply_system_fields_on_update(&patch, "app1", "posts_immut_inc")
-            .expect_err("immutable field under $inc must refuse");
-        match err {
-            DbError::ValidationFailed { code, .. } => {
-                assert_eq!(code, "immutable_system_field");
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
+        // are refused for the same reason as top-level overwrites.
+        expect_immutable_refusal(json!({ "$inc": { "created_by": 1 } }), "posts_immut_inc");
+    }
+
+    /// Every column the charter fixes at insert is refused, whatever it is
+    /// named. This is the arm that would have to change if the charter gained
+    /// an eighth `on = "insert"` column, and it does not name one.
+    #[test]
+    fn update_refuses_every_column_the_charter_fixes_at_insert() {
+        crate::reset_context_for_tests();
+        let plan = crate::system_shape_charter::plan().expect("the compiled charter must project");
+        let fixed: Vec<String> = plan.immutable_after_insert().map(str::to_string).collect();
+        assert!(!fixed.is_empty(), "the charter must fix at least one column at insert");
+        for name in fixed {
+            expect_immutable_refusal(json!({ name.clone(): "x" }), "posts_charter_immutable");
         }
     }
 
     #[test]
-    fn update_creator_hints_default_to_false() {
-        let patch = json!({ "title": "x" });
-        let hints = apply_system_fields_on_update(&patch, "app1", "posts_defaults")
-            .expect("passes");
-        assert!(!hints.creator_supplied_version);
-        assert!(!hints.creator_supplied_updated_at);
-        assert!(!hints.creator_supplied_updated_by);
+    fn update_strips_a_supplied_version() {
+        crate::reset_context_for_tests();
+        let mut patch = json!({ "title": "x", "version": 42 });
+        apply_system_fields_on_update(&mut patch, "app1", "posts_csv").expect("passes");
+        assert!(
+            !patch.as_object().expect("object").contains_key("version"),
+            "a supplied version must not reach the builder beside its own bump: {patch}",
+        );
+        assert_eq!(patch.get("title").and_then(Value::as_str), Some("x"));
+    }
+
+    #[test]
+    fn update_strips_a_supplied_updated_at_and_updated_by() {
+        crate::reset_context_for_tests();
+        let mut patch = json!({
+            "title": "x",
+            "updated_at": "2026-01-01T00:00:00Z",
+            "updated_by": "usr_explicit",
+        });
+        apply_system_fields_on_update(&mut patch, "app1", "posts_csua").expect("passes");
+        let obj = patch.as_object().expect("object");
+        assert!(!obj.contains_key("updated_at"), "patch: {patch}");
+        assert!(!obj.contains_key("updated_by"), "patch: {patch}");
+    }
+
+    #[test]
+    fn update_strips_write_assigned_columns_under_dollar_set() {
+        crate::reset_context_for_tests();
+        let mut patch = json!({ "$set": { "title": "x", "updated_by": "usr_explicit" } });
+        apply_system_fields_on_update(&mut patch, "app1", "posts_setstrip").expect("passes");
+        let set_obj = patch
+            .get("$set")
+            .and_then(Value::as_object)
+            .expect("$set survives");
+        assert!(!set_obj.contains_key("updated_by"), "patch: {patch}");
+        assert!(set_obj.contains_key("title"), "patch: {patch}");
+    }
+
+    /// The legacy `{ $inc: { version: 1 } }` shape used to be DETECTED so the
+    /// runtime could stand down and let it win. Under `assign` there is no
+    /// competing assignment to stand down for: the operator is stripped and the
+    /// platform's own bump is the only one emitted, which is what keeps a
+    /// double bump impossible rather than merely unlikely.
+    #[test]
+    fn update_strips_the_legacy_dollar_inc_version() {
+        crate::reset_context_for_tests();
+        let mut patch = json!({ "$inc": { "version": 1, "views": 1 } });
+        apply_system_fields_on_update(&mut patch, "app1", "posts_legacyinc").expect("passes");
+        let inc = patch
+            .get("$inc")
+            .and_then(Value::as_object)
+            .expect("$inc survives");
+        assert!(!inc.contains_key("version"), "patch: {patch}");
+        assert!(inc.contains_key("views"), "patch: {patch}");
+    }
+
+    /// `deleted_at` is `on = "delete"`, and the pass must leave it exactly
+    /// where it found it. This is a DEPENDENCY on soft delete still routing
+    /// through an UPDATE (`sdks/db/src/collection/crud.ts:519-523`): strip or
+    /// refuse it here and the platform's own `delete()` stops working.
+    #[test]
+    fn update_leaves_the_delete_assigned_column_alone() {
+        crate::reset_context_for_tests();
+        let mut patch = json!({ "deleted_at": 1_700_000_000_000_i64 });
+        apply_system_fields_on_update(&mut patch, "app1", "posts_softdelete")
+            .expect("the platform's own soft delete must not be refused");
+        assert_eq!(
+            patch.get("deleted_at").and_then(Value::as_i64),
+            Some(1_700_000_000_000),
+            "patch: {patch}",
+        );
+    }
+
+    #[test]
+    fn update_leaves_an_ordinary_patch_untouched() {
+        crate::reset_context_for_tests();
+        let mut patch = json!({ "title": "x" });
+        apply_system_fields_on_update(&mut patch, "app1", "posts_defaults").expect("passes");
+        assert_eq!(patch, json!({ "title": "x" }));
     }
 
     #[test]
