@@ -218,6 +218,28 @@ resolution:
    `crate::broker::SuppressGuard::activate(app_id)` directly in BOTH the Postgres and the SQLite
    arm. The surviving `ChangeStream` is then genuinely core-safe.
 
+   **ALL THREE GROUNDS VERIFIED 2026-09-02, AND THE CUT IS STILL NOT A DELETION OF TWO METHODS.**
+   The grounds hold exactly as written: `cdc_lifecycle.rs:273` and `:287` both call
+   `broker::SuppressGuard::activate(app_id)` directly, and the two impls
+   (`change_stream_pg.rs:269,276` and `backend/sqlite/cdc.rs:785,792`) are byte-identical and
+   never touch `self` - free constructors wearing a trait method's clothes.
+
+   What the decision does not account for is WHO ELSE REACHES THE GUARDS. Both
+   `BrokerPauseGuard::new` and `SchemaPendingGuard::new` are `pub(crate)`
+   (`backend/mod.rs:989`, `:1353`), and `tests/sqlite_integration.rs` is a separate crate. Three
+   integration tests reach the guards ONLY through these methods or through
+   `SqliteBackend::{pause_broker,engage_schema_pending}_for_tests`, which exist precisely BECAUSE
+   the constructors are crate-private. One of the three
+   (`sqlite_integration.rs:1679`) exists specifically to fence the trait method against being
+   detached from the guard construction, so deleting the method deletes that test's subject.
+
+   So the cut costs a decision the paragraph above does not make: either widen
+   `Guard::new` to `pub` under `test-helpers` (the exact fence-widening Phase 0.5's first audit is
+   trying to reduce), or delete all three tests, or keep a test-only accessor - which is what
+   `*_for_tests` already is. Deleting the trait methods does NOT remove the need for the wrappers.
+   Direction unchanged; the cost is larger than two methods and should be decided, not discovered
+   mid-edit.
+
    **The SQLite arm says why, and the reason is a behaviour difference rather than a preference** -
    it takes "the startup-only suppression guard, whose Drop merely re-enables delivery; the general
    pause guard emits a Resync on Drop and would add a synthetic first message to every SQLite
