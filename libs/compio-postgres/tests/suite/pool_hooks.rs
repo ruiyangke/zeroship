@@ -1045,6 +1045,91 @@ async fn before_acquire_false_discards_and_retries() {
     );
 }
 
+/// A `before_acquire` that FAILS is not a rejection. `Ok(false)` means "this
+/// candidate is unfit, try another"; `Err` means the check itself could not be
+/// completed, and the caller has to hear about it rather than be handed some
+/// other connection as though nothing happened.
+///
+/// The candidate is still evicted - a connection whose validation blew up is
+/// not fit to hand back to the idle set.
+///
+/// **`calls == 1` is what separates this from the `Ok(false)` arm above**, and
+/// is the whole reason the hook counts its invocations. Both arms evict, so an
+/// eviction count alone cannot tell them apart; only `Ok(false)` loops round to
+/// inspect a second candidate. A run that called the hook twice would mean the
+/// error had been swallowed and retried.
+#[compio::test]
+async fn a_failing_before_acquire_evicts_and_reaches_the_caller() {
+    let url = test_url();
+    let calls = Rc::new(Cell::new(0));
+    let hook_calls = Rc::clone(&calls);
+    // Two warm connections so a retry has somewhere to go: if the error were
+    // swallowed there IS a second candidate to move on to, which is what makes
+    // the single call below meaningful rather than forced.
+    let mut config = config(2, 2);
+    config.before_acquire(move |client| {
+        let hook_calls = Rc::clone(&hook_calls);
+        Box::pin(async move {
+            let invocation = hook_calls.get() + 1;
+            hook_calls.set(invocation);
+            if invocation == 1 {
+                // A validation query that fails is how this hook errors in
+                // practice; the `?` is the path under test.
+                client.batch_execute("SELECT 1 / 0").await?;
+            }
+            client.simple_query("").await?;
+            Ok(true)
+        })
+    });
+    let pool = connect_pool(&url, config).await;
+
+    let evictions_before = pool.metrics.evictions.get();
+    let idle_before = pool.idle_count();
+    assert_eq!(idle_before, 2, "both warm connections should be idle");
+
+    let error = pool
+        .get()
+        .await
+        .expect_err("a failing before_acquire was retried away");
+
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::DIVISION_BY_ZERO),
+        "the caller got a synthesised pool error instead of the hook's own: {error}"
+    );
+    assert_eq!(
+        calls.get(),
+        1,
+        "the hook error was swallowed and retried onto a second candidate"
+    );
+    assert_eq!(
+        pool.metrics.evictions.get(),
+        evictions_before + 1,
+        "the candidate whose validation failed was not counted as an eviction"
+    );
+    assert_eq!(
+        pool.active_count(),
+        0,
+        "a failed acquire left the slot marked active"
+    );
+
+    // The pool is still usable: the surviving idle connection serves the next
+    // caller, so the failure retired one candidate and not the pool.
+    let client = pool
+        .get()
+        .await
+        .expect("the failed acquire poisoned the whole pool");
+    assert_eq!(
+        client
+            .query_one("SELECT 42::int4", &[])
+            .await
+            .unwrap()
+            .get::<_, i32>(0),
+        42
+    );
+    assert_eq!(calls.get(), 2, "the second acquire skipped before_acquire");
+}
+
 #[compio::test]
 async fn cancelling_an_async_hook_releases_its_capacity_slot() {
     let url = test_url();
