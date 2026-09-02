@@ -558,6 +558,98 @@ impl Stream for SimpleQueryStream {
 mod tests {
     use super::may_enter_copy_in;
 
+    use crate::client::{Client, ResponseMessages};
+    use crate::codec::BackendMessages;
+    use crate::config::{SslMode, SslNegotiation};
+    use bytes::BytesMut;
+    use futures_util::StreamExt;
+    use std::sync::Arc;
+
+    fn scripted_backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(body.len() + 5);
+        frame.push(tag);
+        frame.extend_from_slice(&(u32::try_from(body.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    /// Start a batch and answer it with one scripted frame, returning whatever
+    /// the supplied finisher makes of it.
+    async fn batch_against<T, F, Fut>(frame: Vec<u8>, finish: F) -> Result<T, crate::Error>
+    where
+        F: FnOnce(crate::client::Responses) -> Fut,
+        Fut: std::future::Future<Output = Result<T, crate::Error>>,
+    {
+        let (sender, mut receiver) = futures_channel::mpsc::unbounded();
+        let client = Client::new(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let inner = Arc::clone(client.inner());
+        let responses = super::start_batch_execute(&inner, "SELECT 1")
+            .expect("the batch did not enqueue its request");
+        let mut request = receiver
+            .next()
+            .await
+            .expect("the batch did not enqueue its request");
+        request
+            .sender
+            .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                BytesMut::from(&frame[..]),
+            )))
+            .expect("deliver the scripted batch response");
+        finish(responses).await
+    }
+
+    /// Both batch finishers refuse a frame that belongs to no step of theirs.
+    ///
+    /// `finish_batch_execute` and `finish_batch_execute_reporting_tag` are
+    /// twins - the second exists only so `batch_execute_reporting_tag` can see
+    /// the command tag - and BOTH refusal arms were uncovered. They are what
+    /// stops a batch reporting success on a stream that has gone out of step,
+    /// which for the reporting twin would also hand back a tag the server
+    /// never sent for that statement.
+    ///
+    /// `BindComplete` is the payload: well framed, legal elsewhere, and not
+    /// part of the simple-query protocol at all.
+    #[compio::test]
+    async fn both_batch_finishers_refuse_a_frame_from_no_step_of_theirs() {
+        let misplaced = scripted_backend_frame(b'2', b"");
+
+        let error = batch_against(misplaced.clone(), super::finish_batch_execute)
+            .await
+            .expect_err("finish_batch_execute accepted a misplaced frame");
+        assert!(
+            format!("{error}").contains("unexpected message from server"),
+            "finish_batch_execute reported {error} rather than an out-of-order message"
+        );
+
+        let error = batch_against(misplaced, super::finish_batch_execute_reporting_tag)
+            .await
+            .expect_err("the reporting finisher accepted a misplaced frame");
+        assert!(
+            format!("{error}").contains("unexpected message from server"),
+            "the reporting finisher reported {error} rather than an out-of-order message"
+        );
+    }
+
+    /// The one-variable control: the same finishers on the frame they are owed.
+    #[compio::test]
+    async fn both_batch_finishers_accept_ready_for_query() {
+        let ready = scripted_backend_frame(b'Z', b"I");
+        batch_against(ready.clone(), super::finish_batch_execute)
+            .await
+            .expect("finish_batch_execute rejected a well-formed ReadyForQuery");
+        let tag = batch_against(ready, super::finish_batch_execute_reporting_tag)
+            .await
+            .expect("the reporting finisher rejected a well-formed ReadyForQuery");
+        assert_eq!(tag, None, "no CommandComplete was sent, so there is no tag");
+    }
+
     #[test]
     fn copy_in_classifier_finds_frontend_copy_sources() {
         for query in [
