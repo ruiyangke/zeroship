@@ -330,6 +330,40 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
          information about the values at all; got {sweep:?}",
     );
 
+    // ---- the sweep above rules on NOTHING without this arm. Measured, 2026-09-01.
+    //
+    // Every one of the six probes returns ZERO rows (`sweep` is six empty vectors),
+    // so `assert_ne!(ids.len(), 1)` compares 0 against 1 six times and the
+    // constancy check compares [] to [] five times. Both pass on an
+    // implementation that returns nothing at all for any filter whatsoever.
+    //
+    // And it is empty BY CONSTRUCTION, not by accident: the stored mask begins
+    // with `*` (0x2A) while every probe above begins with a digit (0x30+), so
+    // under the bytewise collation these columns pin, no probe can ever exceed a
+    // mask. The six probes were chosen to look like SSNs, which is exactly what
+    // makes them unable to match one.
+    //
+    // The `nickname` control below does not close this. It differs from the
+    // masked probe in TWO variables - a different column AND an unmasked one -
+    // so it cannot distinguish "the mask hid the ordering" from "this filter
+    // returns nothing". This arm differs in ONE: same column, same operator,
+    // same masked path, a bound chosen to sit BELOW every mask rather than
+    // above it. A correct implementation must return both rows.
+    let below_every_mask =
+        run_find(&pool, app, &json!({ "ssn": { "$gt": "!" } }), &schema).await;
+    let mut reached: Vec<String> = below_every_mask
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    reached.sort();
+    assert_eq!(
+        reached, minted,
+        "a `$gt` bound below every mask must still reach both rows through the \
+         masked column. If this is empty, the sweep above proved nothing: it was \
+         constant because the filter matched nothing, not because the mask hid \
+         the ordering. Got {below_every_mask:?}",
+    );
+
     // THE CONTROL, differing in one variable: the same shape of query over the
     // unmasked `nickname` column MUST separate the rows. Without this arm an
     // implementation that refused every filter, or returned no rows at all,
