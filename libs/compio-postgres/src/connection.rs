@@ -3126,6 +3126,33 @@ mod tests {
         );
     }
 
+    /// `route_async` handles exactly the three frames PostgreSQL may deliver
+    /// out of band - NoticeResponse, NotificationResponse and ParameterStatus.
+    /// Anything else arriving on that path means the decoder classified a
+    /// synchronous frame as asynchronous, which would hand a response belonging
+    /// to an in-flight request to the notification channel instead. Refusing
+    /// retires the connection rather than silently losing that reply.
+    ///
+    /// A `ReadyForQuery` is the sharpest probe: it is unambiguously
+    /// synchronous, so routing it here can only be a misclassification.
+    #[test]
+    fn routing_a_synchronous_frame_as_asynchronous_is_refused() {
+        let parameters = Mutex::new(HashMap::new());
+        let mut frame = BytesMut::from(&b"Z\0\0\0\x05I"[..]);
+        let ready_for_query = Message::parse(&mut frame)
+            .expect("decode the scripted ReadyForQuery")
+            .expect("the scripted ReadyForQuery was incomplete");
+
+        let Err(error) = route_async(&parameters, None, ready_for_query) else {
+            panic!("a synchronous frame was accepted on the asynchronous path")
+        };
+        assert_eq!(error.to_string(), "unexpected message from server");
+        assert!(
+            parameters.lock().is_empty(),
+            "the refused frame still mutated the parameter map"
+        );
+    }
+
     struct ObservedSocket {
         inner: Socket,
         read_ended: Option<oneshot::Sender<()>>,
