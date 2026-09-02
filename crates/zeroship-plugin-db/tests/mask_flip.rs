@@ -117,8 +117,29 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
     zeroship_plugin_db::cache_schema_for_tests(app, collection, schema.clone());
 }
 
+/// What one write through the pipeline left behind.
+///
+/// `id` is PLATFORM-ASSIGNED: the write pipeline refuses a document that
+/// carries one, so no fixture in this file may choose a row's identity. Every
+/// test below learns it from the write that created the row, which makes each
+/// assertion on an id a statement that identity round-trips through the
+/// platform's own minting rather than a comparison against a literal the
+/// fixture and the assertion both made up.
+struct Inserted {
+    /// The id the platform minted for this row.
+    ///
+    /// Read off the PREPARED DOCUMENT, before the SQL runs. That is the value
+    /// the pipeline itself treated as the row's identity - the stage that binds
+    /// per-row derivations to the primary key (encryption's `row_pk` AAD) reads
+    /// it from exactly here - and taking it from before the round trip is what
+    /// lets `rows[0]["id"] == id` be a real assertion instead of a tautology.
+    id: String,
+    /// The `RETURNING` row(s) the database handed back.
+    rows: Vec<Value>,
+}
+
 /// Insert one document through the REAL write pipeline and the REAL insert
-/// builder, and return the `RETURNING` row.
+/// builder, and return the minted id with the `RETURNING` row.
 ///
 /// This asserted `RETURNING *` and said "this suite is written against it".
 /// The write path now names its columns, so the shape this suite is written
@@ -131,11 +152,15 @@ async fn insert_through_the_pipeline(
     collection: &str,
     schema: &Value,
     doc: Value,
-) -> Vec<Value> {
+) -> Inserted {
     let mut docs = json!([doc]);
     zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, collection, None)
         .await
         .expect("write pipeline");
+    let id = docs[0]["id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the write pipeline must mint an id: {}", docs[0]))
+        .to_string();
     let bq = build_insert(app, collection, schema, &docs[0]).expect("insert builder");
     assert!(
         !bq.sql.contains("RETURNING *") && bq.sql.contains(r#"RETURNING "id""#),
@@ -147,7 +172,10 @@ async fn insert_through_the_pipeline(
         .query_text_params(&bq.sql, &param_refs)
         .await
         .unwrap_or_else(|e| panic!("insert must apply: {e}\n{}", bq.sql));
-    rows.iter().map(row_to_json).collect()
+    Inserted {
+        id,
+        rows: rows.iter().map(row_to_json).collect(),
+    }
 }
 
 /// Every column of a returned row as a JSON string value, keyed by column name.
@@ -200,27 +228,46 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
     let schema = flip_schema();
     fixture(&pool, &url, app, "people", &schema).await;
 
-    insert_through_the_pipeline(
+    // The two rows are told apart by the ids the PLATFORM minted for them, not
+    // by ids this fixture chose - it may not choose one. `low` is the row whose
+    // real SSN sits at the bottom of the range, `high` the one at the top.
+    let low = insert_through_the_pipeline(
         &pool,
         app,
         "people",
         &schema,
-        json!({ "id": "psn_low", "ssn": "111-11-1111", "nickname": "aaa" }),
+        json!({ "ssn": "111-11-1111", "nickname": "aaa" }),
     )
-    .await;
-    insert_through_the_pipeline(
+    .await
+    .id;
+    let high = insert_through_the_pipeline(
         &pool,
         app,
         "people",
         &schema,
-        json!({ "id": "psn_high", "ssn": "999-99-9999", "nickname": "zzz" }),
+        json!({ "ssn": "999-99-9999", "nickname": "zzz" }),
     )
-    .await;
+    .await
+    .id;
 
     // Control zero: both rows are there. A fixture that inserted nothing would
-    // make every arm below vacuous.
+    // make every arm below vacuous. The set is compared against the two minted
+    // ids rather than counted, so this also pins that each write's identity
+    // survived the round trip - a row read back under some other id would
+    // satisfy a bare count.
     let all = run_find(&pool, app, &json!({}), &schema).await;
     assert_eq!(all.len(), 2, "both rows must be present: {all:?}");
+    let mut present: Vec<String> = all
+        .iter()
+        .map(|r| r["id"].as_str().unwrap().to_string())
+        .collect();
+    present.sort();
+    let mut minted = vec![low.clone(), high.clone()];
+    minted.sort();
+    assert_eq!(
+        present, minted,
+        "the rows read back must be the two the platform minted: {all:?}",
+    );
 
     let probes = [
         "000-00-0000",
@@ -264,7 +311,9 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
         1,
         "the unmasked control column must still be range-filterable: {rows:?}",
     );
-    assert_eq!(rows[0]["id"], json!("psn_high"));
+    // And it selects the RIGHT one: the row inserted second, named by the id
+    // the platform minted for it.
+    assert_eq!(rows[0]["id"], json!(high));
 
     // And the ordering channel is closed the same way: `orderBy` on a masked
     // column sorts by the mask, so a `limit 1` cannot name the largest SSN.
@@ -307,12 +356,16 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
     let schema = flip_schema();
     fixture(&pool, &url, app, "people", &schema).await;
 
-    insert_through_the_pipeline(
+    // The platform mints the id; the row is addressed by that value from here
+    // on. `row_pk` below is the same value, which matters beyond addressing:
+    // it is the identity the write pipeline binds per-row derivations to, so a
+    // stand-in would not merely miss the row, it would fail to decrypt one.
+    let person = insert_through_the_pipeline(
         &pool,
         app,
         "people",
         &schema,
-        json!({ "id": "psn_1", "ssn": "123-45-6789", "nickname": "ada" }),
+        json!({ "ssn": "123-45-6789", "nickname": "ada" }),
     )
     .await;
 
@@ -323,10 +376,15 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
                 "SELECT \"ssn\" AS mask, \"{raw_col}\" AS raw \
                  FROM \"{app}\".\"people\" WHERE id = $1"
             ),
-            &["psn_1"],
+            &[person.id.as_str()],
         )
         .await
         .unwrap();
+    assert_eq!(
+        stored.len(),
+        1,
+        "the minted id must address the row the write created",
+    );
     assert_eq!(
         stored[0].get::<_, String>("mask"),
         "***",
@@ -361,7 +419,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
         &zeroship_plugin_db::binding::DbBinding::cold_start(app),
         zeroship_plugin_db::crud::unmask::UnmaskFieldArgs {
             collection: "people".to_string(),
-            row_pk: "psn_1".to_string(),
+            row_pk: person.id.clone(),
             column: "ssn".to_string(),
             actor: Some(json!({ "kind": "auto", "id": null })),
             reason: Some("mask_flip integration test".to_string()),
@@ -425,12 +483,15 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
     let schema = flip_schema();
     fixture(&pool, &url, app, "people", &schema).await;
 
-    let returned = insert_through_the_pipeline(
+    let Inserted {
+        id: minted_id,
+        rows: returned,
+    } = insert_through_the_pipeline(
         &pool,
         app,
         "people",
         &schema,
-        json!({ "id": "psn_ret", "ssn": "123-45-6789", "nickname": "ada" }),
+        json!({ "ssn": "123-45-6789", "nickname": "ada" }),
     )
     .await;
     assert_eq!(returned.len(), 1);
@@ -447,8 +508,11 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
         returned[0],
     );
     // Paired with the control that the row is a real row and not an empty one -
-    // otherwise "no raw column" is satisfied by returning nothing.
-    assert_eq!(returned[0]["id"], json!("psn_ret"));
+    // otherwise "no raw column" is satisfied by returning nothing. The id is
+    // the one the pipeline minted BEFORE the statement ran, so this arm is also
+    // the projection's round trip: `RETURNING "id"` hands back the identity the
+    // write assigned.
+    assert_eq!(returned[0]["id"], json!(minted_id));
     assert!(
         returned[0].get("ssn").is_some(),
         "the masked column must still come back: {:?}",
@@ -462,7 +526,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
                 r#"SELECT {} AS raw FROM "{app}"."people" WHERE "id" = $1"#,
                 zeroship_plugin_db::query::quote_ident(&raw_column_name("ssn")),
             ),
-            &["psn_ret"],
+            &[minted_id.as_str()],
         )
         .await
         .expect("read the raw column directly");
@@ -493,7 +557,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
     // returning an empty row.
     assert_eq!(finalized[0]["ssn"]["masked"], json!("***"));
     assert_eq!(finalized[0]["nickname"], json!("ada"));
-    assert_eq!(finalized[0]["id"], json!("psn_ret"));
+    assert_eq!(finalized[0]["id"], json!(minted_id));
 
     // ---- and the arm that binds the SURFACE stage specifically ----
     //
@@ -776,12 +840,12 @@ async fn the_declared_type_and_constraints_travel_to_the_raw_column() {
     );
 
     // And it accepts a write. This is what a mistake in the swap breaks.
-    insert_through_the_pipeline(
+    let account = insert_through_the_pipeline(
         &pool,
         app,
         "accounts",
         &schema,
-        json!({ "id": "acc_1", "score": 42.5, "tier": "gold", "plain": 7.0 }),
+        json!({ "score": 42.5, "tier": "gold", "plain": 7.0 }),
     )
     .await;
 
@@ -795,10 +859,15 @@ async fn the_declared_type_and_constraints_travel_to_the_raw_column() {
                 raw_column_name("score"),
                 raw_column_name("tier"),
             ),
-            &["acc_1"],
+            &[account.id.as_str()],
         )
         .await
         .unwrap();
+    assert_eq!(
+        stored.len(),
+        1,
+        "the minted id must address the row the write created",
+    );
     assert_eq!(stored[0].get::<_, String>("mask"), "***");
     assert_eq!(stored[0].get::<_, String>("raw"), "42.5");
     assert_eq!(stored[0].get::<_, String>("tier_mask"), "***");
@@ -837,21 +906,23 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
             .unwrap_or_else(|e| panic!("index must build: {e}\n{}", spec.sql));
     }
 
-    // Two rows whose real values differ but whose masks are identical.
-    insert_through_the_pipeline(
+    // Two rows whose real values differ but whose masks are identical. Neither
+    // names its own id - the platform mints one per row, which is what makes
+    // them two rows rather than one overwritten one.
+    let first = insert_through_the_pipeline(
         &pool,
         app,
         "people",
         &schema,
-        json!({ "id": "psn_a", "ssn": "111-11-1234" }),
+        json!({ "ssn": "111-11-1234" }),
     )
     .await;
-    insert_through_the_pipeline(
+    let second = insert_through_the_pipeline(
         &pool,
         app,
         "people",
         &schema,
-        json!({ "id": "psn_b", "ssn": "999-99-1234" }),
+        json!({ "ssn": "999-99-1234" }),
     )
     .await;
 
@@ -867,10 +938,30 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
         "2",
         "two rows sharing the mask ***-**-1234 must both insert",
     );
+    // ...and they are the two the writes created, addressed by the ids the
+    // platform minted for them.
+    let named = pool
+        .query_text_params(
+            &format!(
+                "SELECT count(*)::text AS n FROM \"{app}\".\"people\" \
+                 WHERE \"id\" IN ($1, $2)"
+            ),
+            &[first.id.as_str(), second.id.as_str()],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        named[0].get::<_, String>("n"),
+        "2",
+        "both minted ids must address a stored row",
+    );
 
     // The control: uniqueness over the REAL value is still enforced, so this is
     // not a green from dropping the constraint.
-    let mut docs = json!([{ "id": "psn_c", "ssn": "111-11-1234" }]);
+    // A third row whose REAL value collides with the first. Its id is minted
+    // like every other, so the only thing that can be refused below is the
+    // duplicate value on the raw column.
+    let mut docs = json!([{ "ssn": "111-11-1234" }]);
     zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
