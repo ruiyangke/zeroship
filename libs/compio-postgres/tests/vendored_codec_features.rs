@@ -21,6 +21,9 @@ use std::collections::BTreeSet;
 /// How a passthrough names a fork feature inside this crate's own manifest.
 const PASSTHROUGH_PREFIX: &str = "postgres-types/";
 
+/// How a codec feature is handed to the differential oracle.
+const ORACLE_PREFIX: &str = "tokio-postgres/";
+
 /// `with-*` feature names declared in the fork's own `[features]` table.
 fn fork_codec_features() -> BTreeSet<String> {
     let manifest = std::fs::read_to_string(concat!(
@@ -106,5 +109,56 @@ fn every_vendored_codec_feature_is_reachable_from_this_crate() {
         "this crate forwards {} feature(s) the vendored fork does not declare, \
          which cargo rejects at resolve time: {dangling:?}",
         dangling.len()
+    );
+}
+
+/// Every codec this crate exposes must also reach the differential oracle.
+///
+/// `tokio-postgres` is a dev-dependency for one reason: running it beside this
+/// driver against the same server is the strongest check a port has. That only
+/// works for a type BOTH sides can decode. A `with-*` feature forwarded to the
+/// vendored fork but not to `tokio-postgres` leaves our codec with no oracle
+/// at all, which is how `with-bit-vec-0_8` came to be the one codec no
+/// differential could compare - `tokio-postgres` offers the feature, we simply
+/// never handed it over.
+///
+/// Two ways of reaching the oracle count, because both are in use:
+/// forwarding `tokio-postgres/<feature>` from this crate's own feature, and
+/// naming the feature directly in the `[dev-dependencies]` entry, which is how
+/// chrono and time are wired.
+#[test]
+fn every_codec_feature_reaches_the_differential_oracle() {
+    let manifest = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/Cargo.toml"))
+        .expect("read the compio-postgres manifest");
+    let dev_dependencies = manifest
+        .split_once("[dev-dependencies]")
+        .map_or("", |(_, tail)| tail);
+
+    let mut blind = Vec::new();
+    let mut ruled_on = 0usize;
+    for feature in forwarded_codec_features() {
+        ruled_on += 1;
+        let forwarded_to_oracle = manifest.contains(&format!("{ORACLE_PREFIX}{feature}"));
+        // The dev-dependency entry lists bare feature names, so match the
+        // quoted form rather than a bare substring: `"with-time-0_3"` must not
+        // be satisfied by some longer feature that merely contains it.
+        let named_in_dev_dependency = dev_dependencies.contains(&format!("\"{feature}\""));
+        if !forwarded_to_oracle && !named_in_dev_dependency {
+            blind.push(feature);
+        }
+    }
+
+    assert!(
+        ruled_on >= 8,
+        "only {ruled_on} codec features were examined, so the parser is what \
+         this test measured"
+    );
+    assert!(
+        blind.is_empty(),
+        "{} codec feature(s) reach our fork but not the oracle, so no \
+         differential can compare them: {blind:?}. Add \
+         `tokio-postgres/<feature>` to this crate's feature, or name it in the \
+         tokio-postgres dev-dependency.",
+        blind.len()
     );
 }

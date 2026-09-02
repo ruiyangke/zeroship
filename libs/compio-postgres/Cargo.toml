@@ -28,7 +28,10 @@ with-uuid-1 = [
     "tokio-postgres/with-uuid-1",
 ]
 with-time-0_3 = ["postgres-types/with-time-0_3"]
-with-bit-vec-0_8 = ["postgres-types/with-bit-vec-0_8"]
+with-bit-vec-0_8 = [
+    "postgres-types/with-bit-vec-0_8",
+    "tokio-postgres/with-bit-vec-0_8",
+]
 with-bit-vec-0_9 = [
     "postgres-types/with-bit-vec-0_9",
     "tokio-postgres/with-bit-vec-0_9",
