@@ -553,23 +553,55 @@ column. Normalise the batch, group by shape, or emit `DEFAULT`.
 
 **`on` is a lattice, not a set of disjoint events.** The native soft-delete and
 restore builders bump `version`, `updated_at` and `updated_by` in the same
-statement (`query.rs:4693-4714`, `:4720-4741`), so delete and restore must count
+statement (`build_soft_delete_set_clauses`, `query.rs:4772`;
+`build_restore_set_clauses`, `:4817`), so delete and restore must count
 as "write" for those three while remaining distinct events for `deleted_at`.
 And "write" must cover insert, or `updated_at` and `version` lose their DDL
 defaults. This is what makes `restore`-as-inverse cheap: it is not a fourth arm
 of the lattice, it is `write` plus the clearing of the `on = "delete"` fields.
 
-**Anonymous writes resolve to NULL, not to a stale actor.** `created_by`/
-`updated_by` are injected only when an actor is bound
-(`system_fields_pass.rs:266`), and the update builder omits the SET clause the
-same way (`query.rs:4228-4232`), leaving `updated_by` naming an actor who did
-not make the last write. **Decided: the generator runs on every write and yields
-NULL when unauthenticated.** Stale attribution is worse than absent attribution -
-it is a false claim about who touched a row, and anything reading `updated_by`
-for audit or authorization is entitled to believe it. This is a behaviour change
-and needs its own test. The naive patch reproduces today's staleness, and the
-existing test `insert_leaves_created_by_absent_when_no_actor` (`:707-719`) stays
-green through it, because its input never had the key.
+**The pass does not yet encode that lattice, and step 7 is where it will bite.**
+`system_fields_pass.rs:104` answers only one question - does this event fire
+while a row is being created - and returns `false` for `Delete`. That is correct
+for what the pass does today, because delete and restore never reach it: they go
+through the two builders above, which name `deleted_at`, `version`, `updated_at`
+and `updated_by` literally. Those two functions are a FIFTH hand-written
+restatement of charter semantics, and they are the ones that decide the lattice.
+
+So step 7 cannot be a straight re-point of delete onto the pass. Done naively, a
+soft delete would stamp `deleted_at` and stop bumping `version` - which is what
+optimistic concurrency reads, so a stale-version update would start matching a
+row that had been deleted underneath it. The behaviour is correct today and the
+refactor is what would break it; a `deleted_at`-only regression would pass every
+test that checks a delete marks the row deleted. Step 7 must carry the lattice
+rule (`delete` implies `write`, plus the delete stamp) and a test that a soft
+delete still increments `version`, before the builders are retired.
+
+**Anonymous writes resolve to NULL, not to a stale actor. SHIPPED, `8e2f89759`.**
+The rule as decided: the generator runs on every write and yields NULL when
+unauthenticated, because stale attribution is worse than absent attribution - it
+is a false claim about who touched a row, and anything reading `updated_by` for
+audit or authorization is entitled to believe it.
+
+What landed, and where, because the gate on the SET clause is not where a reader
+would look for it. The update path keys on `autobump.dispatch_write`
+(`query.rs:4302`) rather than on the actor's presence, so a direct builder caller
+- which writes on nobody's behalf - still emits no clause at all, while every
+CRUD dispatch write emits one. Delete and restore take the same rule through a
+shared helper, `push_updated_by_clause` (`:4795`), unconditionally: those two
+builders exist only for the dispatch path, so there is no third case to exclude.
+
+The four production sites that now stamp NULL are `dispatch_update_one`,
+`dispatch_update_many`, `dispatch_restore_one` and `dispatch_restore_many`
+(`crud/mod.rs:1001`, `:1113`, `:1528`, `:1590`), plus soft delete via the shared
+helper. Checked against the platform's own reads: nothing in `plugin-db` or
+`zeroship-schema` makes an authorization decision from `updated_by`, so clearing
+it cannot widen access; it can only stop a creator's own query from believing a
+name that was already wrong.
+
+`version` had been gated on `dispatch_write` all along (`query.rs:4278`), so this
+change makes attribution follow the rule the version bump already followed rather
+than inventing a gate for it.
 
 ---
 
