@@ -406,6 +406,16 @@ pub fn audit_unmask_table_sql(app_schema: &str) -> String {
             ts              TIMESTAMPTZ NOT NULL DEFAULT NOW(),
             actor_id        TEXT NULL,
             actor_role      TEXT NULL,
+            -- The actor claim the DB-3 fence REFUSED, verbatim, as sent.
+            --
+            -- `sanitize_app_actor` strips a claim naming a reserved system kind
+            -- so app code cannot impersonate the platform. Stripping it also
+            -- erased the only evidence anyone tried: a forged `kind: "auto"`
+            -- and a caller who sent no actor both arrived as `actor: None` and
+            -- audited identically. This column keeps the attempt without ever
+            -- letting it reach `actor_id` / `actor_role`, which stay empty for
+            -- an unauthenticated call. UNTRUSTED - it is what a handler sent.
+            claimed_actor   TEXT NULL,
             collection      TEXT NOT NULL,
             row_pk          TEXT NOT NULL,
             "column"        TEXT NOT NULL,

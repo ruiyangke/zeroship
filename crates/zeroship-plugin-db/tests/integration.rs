@@ -6344,6 +6344,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
             column: "ssn".to_string(),
             actor: Some(json!({ "kind": "auto" })),
             reason: Some("security regression".to_string()),
+            rejected_claim: None,
         },
     )
     .await
@@ -6465,6 +6466,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
             column: "ssn".to_string(),
             actor: Some(json!({ "kind": "auto" })),
             reason: Some("encrypted unmask regression".to_string()),
+            rejected_claim: None,
         },
     )
     .await;
@@ -6603,6 +6605,7 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
             column: "ssn".to_string(),
             actor: Some(json!({ "kind": "auto" })),
             reason: Some("audit fence regression".to_string()),
+            rejected_claim: None,
         },
     )
     .await
@@ -6726,6 +6729,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             column: "ssn".to_string(),
             actor: Some(json!({ "kind": "support" })),
             reason: Some("declared policy grant".to_string()),
+            rejected_claim: None,
         },
     )
     .await
@@ -6743,6 +6747,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
             column: "ssn".to_string(),
             actor: Some(json!({ "kind": "intern" })),
             reason: Some("declared policy deny".to_string()),
+            rejected_claim: None,
         },
     )
     .await

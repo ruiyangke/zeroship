@@ -657,9 +657,11 @@ pub(crate) fn dispatch_find<'s>(
     let unmask_columns = parse_unmask_opt(opts.get("unmask"));
     // DB-3: strip an app-supplied reserved `auto` system actor — a find with
     // `{unmask, actor:{kind:"auto"}}` must not impersonate the platform.
-    let unmask_actor = crate::crud::unmask::sanitize_app_actor(
+    let unmask_sanitized = crate::crud::unmask::sanitize_app_actor(
         opts.get("actor").cloned().filter(|v| !v.is_null()),
     );
+    let unmask_actor = unmask_sanitized.actor;
+    let unmask_rejected_claim = unmask_sanitized.rejected_claim;
     let unmask_reason = opts
         .get("unmaskReason")
         .and_then(|v| v.as_str())
@@ -688,6 +690,7 @@ pub(crate) fn dispatch_find<'s>(
                     &coll,
                     &unmask_columns,
                     &unmask_actor,
+                    unmask_rejected_claim.as_ref(),
                     &unmask_reason,
                 )
                 .await?;
@@ -740,6 +743,7 @@ pub(crate) fn dispatch_find<'s>(
                     &coll,
                     &unmask_columns,
                     &unmask_actor,
+                    unmask_rejected_claim.as_ref(),
                     &unmask_reason,
                 )
                 .await?;
