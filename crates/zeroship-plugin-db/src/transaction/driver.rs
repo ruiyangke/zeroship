@@ -75,7 +75,9 @@ use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
 use crate::context::TxConnection;
-use zeroship_data_core::error::{DbError, SessionSetupDisposition, SessionSetupError};
+use zeroship_data_core::error::{
+    BeginIntent, DbError, IsolationLevel, SessionSetupDisposition, SessionSetupError,
+};
 use crate::exec::{clear_pending_emits, drain_pending_emits_on_commit};
 
 use super::reducer::deadline::{DeadlineGeneration, DeadlineKind};
@@ -177,9 +179,15 @@ impl Driven {
 /// Per-step inputs the reducer does not model but the driver needs.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct StepConfig {
-    /// The already-validated `BEGIN [ISOLATION LEVEL ...]` statement, for the
-    /// step that runs [`Action::IssueBegin`].
-    pub(crate) begin_sql: Option<String>,
+    /// How to open the transaction, for the step that runs
+    /// [`Action::IssueBegin`].
+    ///
+    /// **An intent, never a statement.** This carried a rendered
+    /// `BEGIN [ISOLATION LEVEL ...]` string until 2026-09-02 - PostgreSQL
+    /// dialect threaded through the vendor-neutral state machine, which the
+    /// SQLite arm then ignored in favour of a hardcoded `BEGIN`. Each lane
+    /// spells the intent now.
+    pub(crate) begin: BeginIntent,
 }
 
 /// Admit a top-level transaction, then drive it to `Idle`.
@@ -195,13 +203,11 @@ pub(crate) struct StepConfig {
 /// held. The orchestrator no longer has to remember to release it per-arm.
 pub(crate) async fn begin_top_level(
     app_id: &str,
-    isolation_level: Option<&str>,
+    isolation_level: Option<IsolationLevel>,
 ) -> Result<Driven, DbError> {
-    let begin_sql = super::build_begin_sql(isolation_level)?;
+    let begin = isolation_level.map_or(BeginIntent::Default, BeginIntent::Isolation);
     let admit = admit_in_preparing(app_id);
-    let config = StepConfig {
-        begin_sql: Some(begin_sql),
-    };
+    let config = StepConfig { begin };
     // The admission actions are only ever `ScheduleTimer`; run them through the
     // same interpreter so no action has a second, quieter implementation.
     let mut driven = run(app_id, admit, &config).await;
@@ -448,8 +454,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
 
             Action::IssueBegin { token } => {
                 let generation = crate::context::with_mut(|c| c.next_backend_generation());
-                let begin_sql = config.begin_sql.as_deref().unwrap_or("BEGIN");
-                let outcome = match open_session(app_id, begin_sql).await {
+                let outcome = match open_session(app_id, config.begin).await {
                     Ok(()) => BeginOutcome::Opened(BackendGeneration(generation)),
                     Err(OpenSessionError::Failed(error)) => {
                         driven.error = Some(error);
@@ -689,14 +694,15 @@ impl From<SessionSetupError> for OpenSessionError {
 /// lease drops un-installed. It goes back to the pool with a transaction open,
 /// which `Pool::return_client` handles: it rolls back any session it cannot
 /// prove `Idle` before publishing it.
-async fn open_session(app_id: &str, begin_sql: &str) -> Result<(), OpenSessionError> {
+async fn open_session(app_id: &str, begin: BeginIntent) -> Result<(), OpenSessionError> {
     let backend = crate::exec::ensure_backend_for_shared_sql().await?;
 
     match &backend {
         crate::backend::BackendHandle::Postgres(pg) => {
             use crate::backend::SqlExecutor;
             let client = pg.acquire_dedicated_client(app_id).await?;
-            pg.client_exec(&client, begin_sql, &[]).await?;
+            let begin_sql = crate::backend::postgres::render_begin(begin);
+            pg.client_exec(&client, &begin_sql, &[]).await?;
             crate::backend::postgres::apply_per_app_role(&client, app_id).await?;
             install(app_id, TxConnection::Postgres(client));
         }
@@ -708,6 +714,11 @@ async fn open_session(app_id: &str, begin_sql: &str) -> Result<(), OpenSessionEr
             // gets a lane that cannot see its own tables.
             sq.attach_app_file(app_id).await?;
             let client = sq.acquire_dedicated_client(app_id).await?;
+            // **SQLite spells every intent `BEGIN`, and that is a documented
+            // divergence rather than a dropped request.** It has one isolation
+            // level - serialisable, enforced by the single-writer actor - so
+            // there is no weaker level to ask for and no stronger one to grant.
+            // See `docs/reference/sqlite-divergences.md`.
             sq.client_exec(&client, "BEGIN", &[]).await?;
             install(app_id, TxConnection::Sqlite(client));
         }

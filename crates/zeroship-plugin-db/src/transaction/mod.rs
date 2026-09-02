@@ -158,13 +158,6 @@ use crate::tx_route::TxRoute;
 /// guard, not a workload limit.
 pub const MAX_SAVEPOINT_DEPTH: u32 = 8;
 
-/// Allowed isolation levels (uppercased for validation).
-const VALID_ISOLATION_LEVELS: &[&str] = &[
-    "READ UNCOMMITTED",
-    "READ COMMITTED",
-    "REPEATABLE READ",
-    "SERIALIZABLE",
-];
 
 
 // ---------------------------------------------------------------------------
@@ -412,7 +405,7 @@ impl Drop for AtomicWriteFrame {
 /// frame minted.
 pub(crate) async fn exec_begin_or_savepoint(
     nested: bool,
-    isolation_level: Option<&str>,
+    isolation_level: Option<zeroship_data_core::error::IsolationLevel>,
     app_id: &str,
 ) -> Result<Option<reducer::frames::FrameId>, DbError> {
     if nested {
@@ -479,26 +472,6 @@ fn frame_refusal(refusal: reducer::TxProtocolError, detail: Option<DbError>) -> 
     driver::protocol_error(refusal, detail)
 }
 
-/// Build the `BEGIN [ISOLATION LEVEL ...]` statement, validating the
-/// (already-normalised) isolation string defensively.
-fn build_begin_sql(isolation_level: Option<&str>) -> Result<String, DbError> {
-    match isolation_level {
-        Some(level) => {
-            let upper = level.to_uppercase();
-            if !VALID_ISOLATION_LEVELS.contains(&upper.as_str()) {
-                return Err(DbError::validation(
-                    "invalid_isolation_level",
-                    format!(
-                        "db.transaction: invalid isolation level: {level}. Must be one of: \
-                         read uncommitted, read committed, repeatable read, serializable"
-                    ),
-                ));
-            }
-            Ok(format!("BEGIN ISOLATION LEVEL {upper}"))
-        }
-        None => Ok("BEGIN".to_string()),
-    }
-}
 
 /// Run one creator data statement inside `app_id`'s open transaction.
 ///
@@ -802,30 +775,6 @@ mod tests {
     }
 
     #[test]
-    fn build_begin_sql_plain_and_isolation() {
-        assert_eq!(build_begin_sql(None).unwrap(), "BEGIN");
-        assert_eq!(
-            build_begin_sql(Some("SERIALIZABLE")).unwrap(),
-            "BEGIN ISOLATION LEVEL SERIALIZABLE"
-        );
-        assert_eq!(
-            build_begin_sql(Some("read committed")).unwrap(),
-            "BEGIN ISOLATION LEVEL READ COMMITTED"
-        );
-    }
-
-    #[test]
-    fn build_begin_sql_rejects_unknown_level() {
-        let err = build_begin_sql(Some("bananas")).unwrap_err();
-        match err {
-            DbError::ValidationFailed { code, .. } => {
-                assert_eq!(code, "invalid_isolation_level");
-            }
-            other => panic!("expected ValidationFailed, got {other:?}"),
-        }
-    }
-
-    #[test]
     fn max_savepoint_depth_is_eight() {
         // Pin the proposal's depth cap so a future change is a deliberate
         // edit, not an accidental drift.
@@ -960,7 +909,11 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, Some("SERIALIZABLE"), "app_sqlite")
+            exec_begin_or_savepoint(
+                false,
+                Some(zeroship_data_core::error::IsolationLevel::Serializable),
+                "app_sqlite",
+            )
                 .await
                 .expect("begin sqlite tx");
             run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('kept')")

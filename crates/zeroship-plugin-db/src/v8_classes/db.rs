@@ -45,6 +45,7 @@ use zeroship_runtime_macros::v8_class;
 use zeroship_runtime_macros::{v8_constructor, v8_getter, v8_method};
 
 use zeroship_data_core::binding::{COLD_START_DEPLOY_TOKEN, DbBinding};
+use zeroship_data_core::error::IsolationLevel;
 use crate::v8_classes::transaction::transaction_dispatch;
 use crate::v8_bridge::v8_value_to_serde_json;
 use crate::v8_classes::collection::mint_collection;
@@ -265,17 +266,27 @@ fn js_type_name(v: v8::Local<v8::Value>) -> &'static str {
     }
 }
 
-/// Normalise a JS-supplied isolation-level identifier into the SQL
-/// form Postgres expects. Accepts both camelCase (`"readCommitted"`)
-/// and the literal SQL string (`"read committed"`). Rejects anything
-/// else with a `TypeError`.
-fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
+/// Resolve a JS-supplied isolation-level identifier to the closed set.
+///
+/// Accepts both camelCase (`"readCommitted"`) and the literal SQL string
+/// (`"read committed"`). Rejects anything else with a `TypeError`.
+///
+/// **This returns a variant, not a normalised string, and that is the point.**
+/// It used to hand back `"READ COMMITTED"` for the engine to re-validate
+/// against its own list - two lists, accepting different things (only this one
+/// takes camelCase), agreeing only because this one always ran first. A caller
+/// that reached the engine directly with the creator's spelling would have been
+/// refused by the second list for a level the first accepts. Past this
+/// function the value cannot be a typo.
+fn normalize_isolation_level(raw: &str) -> Result<IsolationLevel, OpError> {
     let trimmed = raw.trim();
-    let sql = match trimmed {
-        "readUncommitted" | "read uncommitted" | "READ UNCOMMITTED" => "READ UNCOMMITTED",
-        "readCommitted" | "read committed" | "READ COMMITTED" => "READ COMMITTED",
-        "repeatableRead" | "repeatable read" | "REPEATABLE READ" => "REPEATABLE READ",
-        "serializable" | "SERIALIZABLE" => "SERIALIZABLE",
+    let level = match trimmed {
+        "readUncommitted" | "read uncommitted" | "READ UNCOMMITTED" => {
+            IsolationLevel::ReadUncommitted
+        }
+        "readCommitted" | "read committed" | "READ COMMITTED" => IsolationLevel::ReadCommitted,
+        "repeatableRead" | "repeatable read" | "REPEATABLE READ" => IsolationLevel::RepeatableRead,
+        "serializable" | "SERIALIZABLE" => IsolationLevel::Serializable,
         _ => {
             // Name every level the match above accepts. This listed three
             // while the first arm admitted `readUncommitted`, so the one
@@ -293,7 +304,7 @@ fn normalize_isolation_level(raw: &str) -> Result<String, OpError> {
             )));
         }
     };
-    Ok(sql.to_string())
+    Ok(level)
 }
 
 // ---------------------------------------------------------------------------
