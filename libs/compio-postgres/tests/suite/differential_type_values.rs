@@ -1480,7 +1480,7 @@ async fn native_array_codecs_must_not_discard_lower_bounds() {
 }
 
 #[cfg(feature = "array-impls")]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 struct NativeFixedArrayObservation {
     decoded_exact: [i32; 3],
     decoded_nullable: [Option<i32>; 3],
@@ -1762,7 +1762,16 @@ async fn compio_native_fixed_array_observation() -> NativeFixedArrayObservation 
 async fn native_fixed_array_codecs_match_values_and_pin_shared_wire_defects() {
     let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
     let ours = compio_native_fixed_array_observation().await;
-    assert_eq!(ours, theirs);
+
+    // `outbound_wires` is the ONE field where the local codec deliberately
+    // diverges: it emits PostgreSQL's canonical empty array where upstream
+    // emits a one-dimensional zero-length one. Every other field must still
+    // match upstream exactly, so exempt that field by copying it across rather
+    // than listing the twenty-odd fields that must agree - a hand-written list
+    // would silently stop covering any field added later.
+    let mut expected = theirs.clone();
+    expected.outbound_wires = ours.outbound_wires.clone();
+    assert_eq!(ours, expected);
 
     assert_eq!(ours.decoded_exact, [1, 2, 3]);
     assert_eq!(
@@ -1806,10 +1815,16 @@ async fn native_fixed_array_codecs_match_values_and_pin_shared_wire_defects() {
     assert_eq!(hex(&ours.outbound_wires[0]), exact_wire);
     assert_eq!(hex(&ours.outbound_wires[1]), nullable_wire);
 
-    // Both fixed-array codecs write a one-dimensional, zero-length array that
-    // PostgreSQL never emits. The server canonicalizes it back to ndim = 0.
-    assert_eq!(hex(&ours.outbound_wires[2]), noncanonical_empty_wire);
-    assert_ne!(ours.outbound_wires[2], ours.server_wires[2].0);
+    // The local codec emits PostgreSQL's own empty-array shape: ndim = 0 with
+    // no dimension header. Upstream writes a one-dimensional, zero-length
+    // array that PostgreSQL never emits and then canonicalizes away.
+    assert_eq!(hex(&ours.outbound_wires[2]), canonical_empty_wire);
+    assert_eq!(ours.outbound_wires[2], ours.server_wires[2].0);
+    assert_eq!(
+        hex(&theirs.outbound_wires[2]),
+        noncanonical_empty_wire,
+        "upstream changed its empty-array wire; the local override can go"
+    );
     assert_eq!(hex(&ours.rebound_wires[2].0), canonical_empty_wire);
 
     // A fixed Rust array has no lower-bound slot, so both codecs normalize the
@@ -1846,10 +1861,19 @@ async fn native_fixed_array_codecs_match_values_and_pin_shared_wire_defects() {
     assert_eq!(ours.bytea_rebound_wire.0, [0x00, 0x80, 0xff]);
 }
 
-/// Desired invariant blocked by both fixed-array codecs emitting an empty
-/// array as one zero-length dimension instead of `PostgreSQL`'s canonical wire.
+/// Desired invariant now HALF met: the local codec emits `PostgreSQL`'s
+/// canonical empty array (ndim = 0, no dimension header), upstream still emits
+/// one zero-length dimension. The assertion on `ours` is covered by the wire
+/// test above; this one stays ignored solely for its second line, which rules
+/// on tokio.
+///
+/// Severity, measured against the server rather than inferred: NOT corruption.
+/// `array_recv` canonicalises the one-dimensional form back to ndim = 0, so
+/// both wires store and compare identically. This was wire nonconformance
+/// only - the same class as the CIDR `is_cidr` flag and the BOX corner order,
+/// and fixed the same way.
 #[cfg(feature = "array-impls")]
-#[ignore = "both postgres-types fixed-array codecs emit noncanonical empty-array wire"]
+#[ignore = "upstream postgres-types fixed-array codec still emits noncanonical empty-array wire"]
 #[compio::test]
 async fn native_fixed_array_codecs_must_emit_canonical_empty_wire() {
     let theirs = tokio_native_fixed_array_observation(common::plaintext_url());
@@ -5524,7 +5548,7 @@ async fn finite_system_time_round_trips_identically_for_both_timestamp_types() {
     assert_eq!(ours.timestamptz, system_time_cases());
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 enum ValueOutcome<T> {
     Value(T),
     LocalFailure,
