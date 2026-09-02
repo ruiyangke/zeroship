@@ -224,7 +224,7 @@ zeroship-schema = { path = "crates/zeroship-schema" }
 # runtime or an isolate, and what makes `Serialize` impossible to derive on a
 # plan rather than merely discouraged. Nothing consumes it yet; porting
 # `zeroship-schema`'s runtime query builders onto it is a later step.
-zeroship-data-plan = { path = "crates/zeroship-data-plan" }
+zeroship-data-query-builder = { path = "crates/zeroship-data-query-builder" }
 # The `zeroship-migrate` engine, a full member of this workspace. It was a git submodule
 # pinned to a commit recorded here; its history was grafted in so the engine and its
 # consumers move together and a wire-format change is one commit, not two repos in

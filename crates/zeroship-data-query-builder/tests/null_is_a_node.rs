@@ -12,8 +12,8 @@
 //! These arms check the two halves separately, because the type half is what
 //! makes the behaviour half durable.
 
-use zeroship_data_plan::render::postgres;
-use zeroship_data_plan::{
+use zeroship_data_query_builder::render::postgres;
+use zeroship_data_query_builder::{
     Ident, IdentRole, Literal, LiteralError, LiteralSet, MembershipOp, Operand, Predicate,
     ProjectedField, Projection, Select,
 };
@@ -164,7 +164,7 @@ fn a_heterogeneous_membership_set_is_refused() {
 /// (`:5374`, `:5415`, `:5717`).
 #[test]
 fn the_membership_cap_travels_with_the_type() {
-    let cap = zeroship_data_plan::MAX_MEMBERSHIP_LIST_LEN;
+    let cap = zeroship_data_query_builder::MAX_MEMBERSHIP_LIST_LEN;
     let at_cap: Vec<Literal> = (0..i64::try_from(cap).expect("cap fits an i64")).map(Literal::Int).collect();
     let over_cap: Vec<Literal> = (0..=i64::try_from(cap).expect("cap fits an i64")).map(Literal::Int).collect();
     assert!(LiteralSet::new(at_cap).is_ok());

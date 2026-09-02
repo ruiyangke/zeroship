@@ -48,14 +48,14 @@ time, for everyone, forever. No lint, no reviewer, no census run.
 
 **This repository already uses the technique, and it is already enforced on the exact crate the split
 renames.** `serialize_derive_is_structurally_impossible`
-(`crates/zeroship-data-plan/tests/no_sql_text_escape_hatch.rs:210`) reads the crate's own manifest,
+(`crates/zeroship-data-query-builder/tests/no_sql_text_escape_hatch.rs:210`) reads the crate's own manifest,
 collects every name declared under `[dependencies]`, `[dev-dependencies]` and
 `[build-dependencies]`, and asserts the set is **empty** - its own comment: "the manifest declares no
 dependencies at all, so `serde` is not in scope and the derive would not compile even if someone
 wrote it."
 
 Two consequences worth naming. It enforces **zero dependencies**, not "no serde", so it is already
-the fence this document wants rather than an analogy to it. And it guards `zeroship-data-plan`,
+the fence this document wants rather than an analogy to it. And it guards `zeroship-data-query-builder`,
 which becomes `data-query-builder` - so "ZERO dependencies, LEAF, and that stays load-bearing" in the
 target block is not an aspiration a future reviewer must uphold. It is a test that fails the moment
 anyone adds a line.
@@ -99,7 +99,7 @@ move rather than after - see the caveat in the execution order.
 libs/compio-postgres            driver, unchanged
 
 zeroship-data-query-builder     the typed query grammar. ZERO dependencies, LEAF, and that stays
-                                load-bearing. (today's zeroship-data-plan, renamed)
+                                load-bearing. (today's zeroship-data-query-builder, renamed)
 zeroship-data-core              the contract every backend implements, PLUS the backend-neutral
                                 layer both already share: encryption, MaskKind, TypedCell/TypedRows.
                                 -> data-query-builder
@@ -306,7 +306,7 @@ it holds.
    Option<&PostgresBackend>`, then `pg.vector_search(...)` under `use crate::backend::VectorIndex as _`
    - a TRAIT method on a CONCRETE receiver obtained by downcast. Tracked as #119.
 
-**And the typed IR that would deliver portability is not wired at all:** `grep -c zeroship_data_plan`
+**And the typed IR that would deliver portability is not wired at all:** `grep -c zeroship_data_query_builder`
 across `crates/zeroship-plugin-db/src/` returns **0**. `data-core -> data-query-builder` is not an
 edge that exists and is not one relocation away; it appears only after the executor is retyped.
 

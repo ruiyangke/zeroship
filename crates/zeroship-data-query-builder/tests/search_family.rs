@@ -15,12 +15,12 @@
 //!    `crates/zeroship-plugin-db/tests/search_ir_live.rs`, which executes these
 //!    same statements against a real server.
 //! 2. **That the shipped product path uses any of it.** It does not yet - no
-//!    crate outside this one depends on `zeroship-data-plan`. These arms rule
+//!    crate outside this one depends on `zeroship-data-query-builder`. These arms rule
 //!    on a grammar, not on a call graph, and a green run here says nothing
 //!    about `env.db.<coll>.search(...)`.
 
-use zeroship_data_plan::render::postgres::{render, render_search, RenderError};
-use zeroship_data_plan::{
+use zeroship_data_query_builder::render::postgres::{render, render_search, RenderError};
+use zeroship_data_query_builder::{
     CompareOp, DbPlan, Direction, GeoPoint, Ident, IdentRole, Literal, LiteralError, NullOrder,
     Operand, OrderKey, PlanError, Predicate, ProjectedField, Projection, ProjectionError,
     ProjectionSource, QueryVector, RadiusMetres, RowLimit, Search, SearchCriterion, SearchError,
@@ -623,7 +623,7 @@ fn a_tiebreak_pins_the_order_of_equal_distances_and_spells_its_null_placement() 
         rows(&["title"]),
     )
     .tiebreak(vec![OrderKey {
-        path: zeroship_data_plan::FieldPath::column(column("created_at")),
+        path: zeroship_data_query_builder::FieldPath::column(column("created_at")),
         direction: Direction::Descending,
         nulls: NullOrder::Last,
     }])
@@ -678,7 +678,7 @@ fn the_ranking_key_cannot_be_named_by_a_caller() {
         rows(&["title"]),
     )
     .tiebreak(vec![OrderKey {
-        path: zeroship_data_plan::FieldPath::column(smuggled),
+        path: zeroship_data_query_builder::FieldPath::column(smuggled),
         direction: Direction::Ascending,
         nulls: NullOrder::Last,
     }])
@@ -704,7 +704,7 @@ fn a_ranking_scalar_is_unreachable_outside_a_search() {
     let stray = ProjectedField {
         source: ProjectionSource::SearchScalar(SearchScalarKind::VectorDistance),
         alias: Ident::parse_as("_distance", IdentRole::Alias).expect("alias"),
-        exposure: zeroship_data_plan::Exposure::Declared,
+        exposure: zeroship_data_query_builder::Exposure::Declared,
     };
 
     // 1. A row projection refuses it.
@@ -715,7 +715,7 @@ fn a_ranking_scalar_is_unreachable_outside_a_search() {
 
     // 2. So does an aggregate projection.
     let counted = ProjectedField::aggregate(
-        zeroship_data_plan::AggregateRef::count_rows(),
+        zeroship_data_query_builder::AggregateRef::count_rows(),
         Ident::parse_as("n", IdentRole::Alias).expect("alias"),
     );
     assert!(matches!(
@@ -734,13 +734,13 @@ fn a_ranking_scalar_is_unreachable_outside_a_search() {
     )
     .build()
     .expect("buildable");
-    let select = zeroship_data_plan::Select::builder(
+    let select = zeroship_data_query_builder::Select::builder(
         collection("docs"),
         search.projection().clone(),
     )
     .build()
     .expect("a Select accepts the projection value; the refusal is at render");
-    match zeroship_data_plan::render::postgres::render_select(&select) {
+    match zeroship_data_query_builder::render::postgres::render_select(&select) {
         Err(RenderError::Unsupported { node, .. }) => {
             assert_eq!(node, "a search scalar outside a search");
         }
@@ -752,7 +752,7 @@ fn a_ranking_scalar_is_unreachable_outside_a_search() {
 #[test]
 fn an_aggregate_projection_is_refused_by_a_search() {
     let aggregate = Projection::aggregate(vec![ProjectedField::aggregate(
-        zeroship_data_plan::AggregateRef::count_rows(),
+        zeroship_data_query_builder::AggregateRef::count_rows(),
         Ident::parse_as("n", IdentRole::Alias).expect("alias"),
     )])
     .expect("aggregate projection");
@@ -773,7 +773,7 @@ fn an_aggregate_projection_is_refused_by_a_search() {
 #[test]
 fn an_aggregate_operand_in_a_search_filter_is_refused() {
     let filter = Predicate::Compare {
-        lhs: Operand::Aggregate(zeroship_data_plan::AggregateRef::count_rows()),
+        lhs: Operand::Aggregate(zeroship_data_query_builder::AggregateRef::count_rows()),
         op: CompareOp::Gt,
         rhs: Operand::Lit(Literal::Int(1)),
     };
@@ -889,7 +889,7 @@ fn the_latitude_refusal_names_the_transposition_hazard() {
 #[test]
 fn tiebreak_keys_dedupe_but_do_not_reorder() {
     let key = |name: &str, direction| OrderKey {
-        path: zeroship_data_plan::FieldPath::column(column(name)),
+        path: zeroship_data_query_builder::FieldPath::column(column(name)),
         direction,
         nulls: NullOrder::Last,
     };

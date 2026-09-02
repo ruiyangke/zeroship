@@ -13,8 +13,8 @@
 //!   plaintext, because the column arrives under the name the caller asked for
 //!   either way - which is the whole failure.
 
-use zeroship_data_plan::render::postgres;
-use zeroship_data_plan::{
+use zeroship_data_query_builder::render::postgres;
+use zeroship_data_query_builder::{
     AggregateFunc, AggregateRef, Exposure, Ident, IdentRole, ProjectedField, Projection,
     ProjectionError, ProjectionKind, Select, PLATFORM_FIELD_NAMES,
 };

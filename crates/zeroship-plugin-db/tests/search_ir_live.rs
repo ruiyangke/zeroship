@@ -2,7 +2,7 @@
 //!
 //! # Why this target exists separately from the IR's own tests
 //!
-//! `zeroship-data-plan` declares no dependencies at all, so its tests can
+//! `zeroship-data-query-builder` declares no dependencies at all, so its tests can
 //! compare the SQL it renders against a fixture string and nothing more. A
 //! string comparison cannot tell whether `"embedding" <=> $1::vector` is
 //! syntax `pgvector` accepts, whether `ST_DWithin` over a `geography` column
@@ -30,7 +30,7 @@
 //! # What these arms do NOT establish
 //!
 //! **The shipped product path does not use the IR.** No crate outside
-//! `zeroship-data-plan` depends on it - the dependency this target adds is a
+//! `zeroship-data-query-builder` depends on it - the dependency this target adds is a
 //! `[dev-dependencies]` one, declared for these tests. `env.db.<coll>.search()`
 //! still reaches `zeroship_schema::query::build_vector_search`
 //! (`crates/zeroship-plugin-db/src/backend/postgres.rs:456`).
@@ -50,8 +50,8 @@
 
 use compio_postgres::Pool;
 use serde_json::json;
-use zeroship_data_plan::render::postgres::render_search;
-use zeroship_data_plan::{
+use zeroship_data_query_builder::render::postgres::render_search;
+use zeroship_data_query_builder::{
     CompareOp, GeoPoint, Ident, IdentRole, Literal, Operand, Predicate, ProjectedField, Projection,
     QueryVector, RadiusMetres, RowLimit, Search, SearchCriterion, VectorMetric,
 };
@@ -183,7 +183,7 @@ fn vector_text(values: &[f32]) -> String {
     out
 }
 
-/// The seam a consumer of [`zeroship_data_plan::RenderedSql`] must implement:
+/// The seam a consumer of [`zeroship_data_query_builder::RenderedSql`] must implement:
 /// a typed parameter to whatever the driver takes.
 ///
 /// It is written **here** rather than in the IR because it is the driver's
@@ -273,7 +273,7 @@ async fn ranked_ids(pool: &Pool, plan: &Search) -> Vec<String> {
 /// server - so no `ToSql` impl can be written against it in advance.
 ///
 /// That is precisely the constraint
-/// [`zeroship_data_plan::render::ValueFormat::vector_placeholder`] documents,
+/// [`zeroship_data_query_builder::render::ValueFormat::vector_placeholder`] documents,
 /// observed rather than quoted, and it is why `query_text_params` (an empty OID
 /// list, server-side inference) is the channel both this fixture and the
 /// shipped path use.

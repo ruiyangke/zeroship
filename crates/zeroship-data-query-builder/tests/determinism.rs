@@ -19,8 +19,8 @@
 //! statement text. A rendering that iterated an unordered map would pass every
 //! correctness test in this repository and miss the cache on every call.
 
-use zeroship_data_plan::render::postgres;
-use zeroship_data_plan::{
+use zeroship_data_query_builder::render::postgres;
+use zeroship_data_query_builder::{
     ArithmeticOp, Assignment, BindBudget, ColumnAssignment, ColumnValue, CompareOp, Direction,
     Ident, IdentRole, Insert, Literal, MembershipOp, NullOrder, Operand, OrderKey, Predicate,
     ProjectedField, Projection, Returning, RowLimit, Select, Update, WriteValue,
@@ -70,7 +70,7 @@ fn plan(projection_order: [&str; 2], conjunct_order: [(&str, i64); 2]) -> Select
             .expect("within the depth bound"),
     )
     .order_by(vec![OrderKey {
-        path: zeroship_data_plan::FieldPath::column(column("name")),
+        path: zeroship_data_query_builder::FieldPath::column(column("name")),
         direction: Direction::Ascending,
         nulls: NullOrder::Last,
     }])
@@ -374,7 +374,7 @@ fn insert_rows_keep_their_authored_order() {
 #[test]
 fn order_by_keys_keep_their_authored_order() {
     let key = |name: &str| OrderKey {
-        path: zeroship_data_plan::FieldPath::column(column(name)),
+        path: zeroship_data_query_builder::FieldPath::column(column(name)),
         direction: Direction::Ascending,
         nulls: NullOrder::Last,
     };

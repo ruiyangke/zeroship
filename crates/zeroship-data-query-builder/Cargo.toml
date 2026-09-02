@@ -1,5 +1,5 @@
 [package]
-name = "zeroship-data-plan"
+name = "zeroship-data-query-builder"
 version = "0.1.0"
 edition = "2021"
 description = "The DbPlan runtime query plan: an identifier-validated, backend-neutral operation tree in which a fragment of SQL text is not a representable value. Values are always parameters, identifiers are always role-validated, and nullness is a node rather than a literal. A true LEAF: no v8, no runtime, no plugin-db, no schema crate, and NO dependencies at all."
