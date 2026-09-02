@@ -458,7 +458,7 @@ said until 2026-08-20.
 No, and it is worth being exact about which code makes that true, because two
 plausible-looking answers are wrong.
 
-**It was not `crates/zeroship-plugin-db/src/cross_app_fk.rs`, and that file no
+**It was not `crates/zeroship-plugin-db/src/cross_app_fk.rs (DELETED)`, and that file no
 longer exists.** It held a `reject_cross_app_fk` validator scanning `refTarget`
 for an `<other_app>.` prefix and returning `cross_app_fk_forbidden`, and it is
 the mechanism this page used to cite. It had **no production call site** -
