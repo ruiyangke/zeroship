@@ -1335,3 +1335,114 @@ mod tests {
         assert_eq!(ruled_on, 6, "the valid COPY metadata matrix shrank");
     }
 }
+
+/// Randomised totality checks for the backend frame decoder.
+///
+/// Every byte the decoder sees is chosen by the peer, so the contract is
+/// TOTALITY: `next()` must return `Ok` or `Err` for any input and never panic,
+/// slice out of bounds, or spin. Hand-written cases in `hostile_peer.rs` cover
+/// the shapes we thought of; this covers the ones we did not.
+///
+/// Both generators assert how much they actually PARSED. A generator that only
+/// produces incomplete frames is answered with `Ok(None)` - "await more bytes",
+/// the correct reply - and would exercise no message parser at all while still
+/// reporting a pass. The first draft of this module did exactly that: uniformly
+/// random bytes put a huge value in the four-byte length field, so all 20000
+/// iterations returned `Ok(None)` with parsed=0 and err=0.
+#[cfg(test)]
+mod decoder_fuzz {
+    use super::BackendMessages;
+    use bytes::{BufMut, BytesMut};
+    use fallible_iterator::FallibleIterator;
+
+    /// Deterministic xorshift64* - no dev-dependency, and a failing run is
+    /// reproducible from the seed constant.
+    struct Rng(u64);
+    impl Rng {
+        fn next_u64(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x >> 12;
+            x ^= x << 25;
+            x ^= x >> 27;
+            self.0 = x;
+            x.wrapping_mul(0x2545_F491_4F6C_DD1D)
+        }
+        fn below(&mut self, n: u32) -> u32 {
+            (self.next_u64() >> 33) as u32 % n
+        }
+        fn byte(&mut self) -> u8 {
+            (self.next_u64() & 0xff) as u8
+        }
+    }
+
+    /// Backend tags the driver can be handed, plus junk it must also refuse.
+    const TAGS: &[u8] = b"123AcCdDEGHIKnNRSstTZVWv\x00\xff";
+
+    fn drain(bytes: BytesMut) -> u32 {
+        let mut parsed = 0;
+        let mut batch = BackendMessages::from_test_bytes(bytes);
+        for _ in 0..64 {
+            match batch.next() {
+                Ok(Some(_)) => parsed += 1,
+                Ok(None) | Err(_) => break,
+            }
+        }
+        parsed
+    }
+
+    /// Declared lengths chosen to sit on the boundaries: below the 4-byte
+    /// minimum the header parser enforces, exactly at it, and at `u32::MAX`.
+    #[test]
+    fn a_frame_stream_with_hostile_declared_lengths_is_refused_rather_than_panicking() {
+        let mut rng = Rng(0x0DDB_1A5E_5EED_1234);
+        let mut parsed = 0;
+        for _ in 0..20_000 {
+            let mut buf = BytesMut::new();
+            for _ in 0..=rng.below(3) {
+                let declared: u32 = match rng.below(6) {
+                    0 => 0,
+                    1 => 1,
+                    2 => 3,
+                    3 => 4,
+                    4 => u32::MAX,
+                    _ => rng.below(64) + 4,
+                };
+                buf.put_u8(TAGS[rng.below(TAGS.len() as u32) as usize]);
+                buf.put_u32(declared);
+                for _ in 0..rng.below(48) {
+                    buf.put_u8(rng.byte());
+                }
+            }
+            parsed += drain(buf);
+        }
+        assert!(
+            parsed > 500,
+            "the generator never reached a message parser: parsed={parsed}"
+        );
+    }
+
+    /// Well-framed envelopes with random bodies. The length field agrees with
+    /// the bytes present, so every frame COMPLETES and the per-message parser
+    /// runs - this is what reaches the body decoders rather than the header.
+    #[test]
+    fn well_framed_random_bodies_are_refused_rather_than_panicking() {
+        let mut rng = Rng(0xFACE_B00C_1234_5678);
+        let mut parsed = 0;
+        for _ in 0..20_000 {
+            let mut buf = BytesMut::new();
+            for _ in 0..=rng.below(3) {
+                let body_len = rng.below(64);
+                buf.put_u8(TAGS[rng.below(TAGS.len() as u32) as usize]);
+                buf.put_u32(body_len + 4);
+                for _ in 0..body_len {
+                    buf.put_u8(rng.byte());
+                }
+            }
+            parsed += drain(buf);
+        }
+        assert!(
+            parsed > 5_000,
+            "well-framed input should reach the body decoders: parsed={parsed}"
+        );
+    }
+}
