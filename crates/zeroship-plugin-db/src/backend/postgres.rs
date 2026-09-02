@@ -1363,6 +1363,47 @@ mod backup_pg {
     }
 }
 
+/// Apply the §17.5 per-app PG role to a transaction's dedicated client.
+///
+/// Issues `SET LOCAL ROLE "<per-app role>"` on `client` so every
+/// statement in the surrounding transaction executes under the
+/// constrained per-app role rather than the platform login role. `SET
+/// LOCAL` auto-reverts at COMMIT / ROLLBACK, so a pooled / dedicated
+/// connection can never leak the role to a later use.
+///
+/// The per-app role is provisioned by the migration service. The WAL
+/// consumer + §17.6 watchdog + §17.7 drop step 3 deliberately do NOT
+/// call this - they stay on the platform role (the only connection
+/// crossing the per-app trust boundary).
+///
+/// **Lives here, not in the SC-1 driver, because SQLite has no roles.** The
+/// protocol says "narrow the session's authority before the creator's first
+/// statement"; `SET LOCAL ROLE` is one dialect's answer to that, and the engine
+/// asking for it by name was the last thing making `transaction/mod.rs` name
+/// `compio_postgres`.
+pub(crate) async fn apply_per_app_role(
+    client: &compio_postgres::Client,
+    app_id: &str,
+) -> Result<(), zeroship_data_core::error::SessionSetupError> {
+    // SET LOCAL ROLE + the DB-1 timeout guards (statement / idle-in-tx / lock)
+    // in one simple-query batch - all SET LOCAL, so they revert at the tx end.
+    // The idle-in-tx guard is the load-bearing defense: a creator callback that
+    // never resolves can no longer pin this dedicated connection forever and
+    // exhaust the shared Postgres for other tenants.
+    let sql = crate::auth::bootstrap::tx_session_setup_sql(app_id)
+        .map_err(zeroship_data_core::error::SessionSetupError::failed)?;
+    client.simple_query(&sql).await.map_err(|e| {
+        let mut classified =
+            crate::backend::pg_error::classify_pg_per_app_session_setup(&e, app_id);
+        zeroship_data_core::error::prefix_message(
+            classified.error_mut(),
+            "db: tx session setup (per-app section 17.5 + DB-1 guards): ",
+        );
+        classified
+    })?;
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // SC-1 terminal projection
 // ---------------------------------------------------------------------------

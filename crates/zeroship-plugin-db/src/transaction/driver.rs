@@ -697,7 +697,7 @@ async fn open_session(app_id: &str, begin_sql: &str) -> Result<(), OpenSessionEr
             use crate::backend::SqlExecutor;
             let client = pg.acquire_dedicated_client(app_id).await?;
             pg.client_exec(&client, begin_sql, &[]).await?;
-            super::apply_per_app_role(&client, app_id).await?;
+            crate::backend::postgres::apply_per_app_role(&client, app_id).await?;
             install(app_id, TxConnection::Postgres(client));
         }
         crate::backend::BackendHandle::Sqlite(sq) => {
