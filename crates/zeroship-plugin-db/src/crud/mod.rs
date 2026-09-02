@@ -27,7 +27,7 @@ use crate::op_error::ToOpError;
 use std::future::Future;
 
 use serde_json::Value;
-use zeroship_runtime::state::{OpResult, ResolveValue, SharedState};
+use zeroship_runtime::state::{OpResult, ResolveValue};
 
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;

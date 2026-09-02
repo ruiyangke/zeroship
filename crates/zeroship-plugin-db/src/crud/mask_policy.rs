@@ -57,7 +57,6 @@
 //! a misbehaving SDK can't poison the storage, and an arbitrary RPC
 //! call can't bypass the SDK-side check.
 
-use crate::op_error::ToOpError;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
@@ -420,7 +419,7 @@ fn load_sqlite_blocking(path: PathBuf, app_id: String) -> Result<Option<MaskPoli
 // V8 dispatch glue
 // ---------------------------------------------------------------------------
 
-use zeroship_runtime::state::{OpResult, ResolveValue};
+use zeroship_runtime::state::ResolveValue;
 
 /// V8-facing dispatch helper for `zeroship.db.setMaskPolicy`. Returns
 /// the unresolved Promise; the dispatcher body runs as a spawned op
@@ -438,20 +437,15 @@ pub(crate) fn dispatch_set_mask_policy_field<'s>(
     let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
     let app = app_id.to_string();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        match dispatch_set_mask_policy(&app, policy_v).await {
-            Ok(()) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::Json("{}".to_string()),
-                request_id,
-            },
-            Err(e) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
+    // The engine half already existed as a separate `async fn`; what was here
+    // was a hand-rolled copy of `settle`'s two arms. Its error arm and
+    // `settle`'s are the same `reject_op` call.
+    state.borrow_mut().spawned_ops.push(Box::pin(super::settle(
+        resolver,
+        request_id,
+        async move { dispatch_set_mask_policy(&app, policy_v).await },
+        |()| ResolveValue::Json("{}".to_string()),
+    )));
 
     promise
 }
