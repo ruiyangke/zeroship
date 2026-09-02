@@ -6738,3 +6738,85 @@ fn read_frontend_frame_any(stream: &mut impl Read) -> (u8, Vec<u8>) {
         .expect("read frontend frame body");
     (tag[0], body)
 }
+
+/// A command-timeout recovery that never finishes must DISCARD the session.
+///
+/// `run_pool_command` wraps recovery in `COMMAND_TIMEOUT_RECOVERY_GRACE` and
+/// calls `recovery_guard.disarm()` in exactly ONE arm: the one where rollback,
+/// `check_connection` and the idle-status check all completed. Every other
+/// path leaves the guard armed so the entry is dropped instead of returned,
+/// which is what stops a half-recovered backend reaching the next borrower.
+///
+/// The grace arm is the one no test reached. The peer that never answers
+/// reaches the neighbouring `Ok(Err(..))` arm instead, because a socket error
+/// arrives before five seconds elapse. Reaching the grace needs a peer that
+/// keeps the connection OPEN and silent, with no `Config::read_timeout` set,
+/// so nothing else can end the recovery first.
+///
+/// Slow on purpose: the grace is five seconds and this test has to outlast it,
+/// which is why it carries its own watchdog rather than `OPERATION_WATCHDOG`.
+#[compio::test]
+async fn a_command_timeout_whose_recovery_never_finishes_discards_the_session() {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        let _ = read_startup_protocol(&mut stream);
+        stream
+            .write_all(&successful_startup_frames(4242, b"scripted"))
+            .expect("write scripted startup");
+        stream.flush().expect("flush scripted startup");
+        // Take the query and answer NOTHING. The socket stays open and
+        // readable for longer than the recovery grace, so the driver's own
+        // deadline is the only thing that can end the attempt.
+        let _ = expect_frontend_frame_from(&mut stream, b'Q');
+        // Long enough to outlast the five-second grace measured from when
+        // recovery starts, short enough that this thread is already finished
+        // when `finish()` waits on it under THREAD_WATCHDOG.
+        thread::sleep(Duration::from_millis(6_500));
+    });
+
+    let mut pool_config = compio_postgres::PoolConfig::new();
+    pool_config.max_size(1);
+    pool_config.min_idle(0);
+    pool_config.command_timeout(Duration::from_millis(300));
+
+    let pool = compio_postgres::Pool::connect_with_config(stub_config(server.addr), pool_config)
+        .await
+        .expect("build a pool against the silent peer");
+    let mut client = pool.get().await.expect("lease the pooled connection");
+
+    let outcome = compio::time::timeout(
+        Duration::from_secs(20),
+        client.command(async |client| client.simple_query("SELECT 1").await.map(|_| ())),
+    )
+    .await
+    .expect("the stalled recovery outlived this test's own watchdog");
+    let error = outcome.expect_err("a silent peer cannot answer, so this must fail");
+
+    let chain = common::error_chain(&error);
+    assert!(
+        chain.contains("CancelRequest recovery did not reach ReadyForQuery"),
+        "the stalled recovery did not report its own deadline: {chain}"
+    );
+    assert!(
+        chain.contains("the pooled session was discarded"),
+        "the refusal must say the session was dropped rather than reused: {chain}"
+    );
+
+    // The message above says the session was discarded; this checks it was.
+    //
+    // It binds the OUTCOME, not the recovery guard: measured by adding
+    // `recovery_guard.disarm()` to the grace arm, this stays 0 and all 95
+    // hostile_peer tests still pass, because a stalled backend is kept out of
+    // the idle set by more than the guard alone. The assertions that isolate
+    // this arm are the two message checks above - only the grace arm renders
+    // that deadline. Do not read this line as a guard test.
+    drop(client);
+    assert_eq!(
+        pool.idle_count(),
+        0,
+        "a backend whose recovery never finished was handed to the next borrower"
+    );
+
+    drop(pool);
+    server.finish();
+}
