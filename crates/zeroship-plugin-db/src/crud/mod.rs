@@ -2188,6 +2188,58 @@ pub(crate) fn dispatch_count<'s>(
 // upsert — INSERT … ON CONFLICT path
 // ---------------------------------------------------------------------------
 
+/// The ENGINE half of `upsert`. `actor_id` is eager for the reason given on
+/// [`run_insert`]; `route` is borrowed twice here, so it is taken by value.
+pub(crate) async fn run_upsert(
+    binding: DbBinding,
+    coll: String,
+    route: crate::tx_route::TxRoute,
+    doc: Value,
+    conflict_fields: Value,
+    actor_id: Option<String>,
+) -> Result<read_pipeline::ApplyResult, DbError> {
+    let mut doc = doc;
+    prepare_upsert_doc_for_write(
+        &mut doc,
+        &binding,
+        &route,
+        &coll,
+        actor_id.as_deref(),
+        &conflict_fields,
+    )
+    .await?;
+    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
+    maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
+    let bq = query::build_upsert_with_dialect(
+        binding.app_id(),
+        &coll,
+        &schema,
+        &doc,
+        &conflict_fields,
+        current_sql_dialect(),
+    )
+    .map_err(DbError::from)?;
+    // Upsert can be either INSERT (new row) or UPDATE (existing).
+    // We tag as Update because the subscriber's reaction is the
+    // same -- re-fetch. Finer-grained read-set narrowing could
+    // distinguish INSERT from UPDATE; this coarser tagging
+    // doesn't need to.
+    let rows = exec_mutation_with_emit(
+        bq,
+        &route,
+        &coll,
+        zeroship_core::change_event::ChangeOp::Update,
+    )
+    .await?;
+    read_pipeline::apply(
+        &binding,
+        &coll,
+        rows,
+        read_pipeline::ApplyOptions::default(),
+    )
+    .await
+}
+
 /// Shared dispatch for `upsert`. See [`dispatch_insert`] for the
 /// capability-gate contract. `conflict_fields` is the JSON array of
 /// column names that form the ON CONFLICT target.
@@ -2203,55 +2255,13 @@ pub(crate) fn dispatch_upsert<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let actor_id = system_fields_pass::current_actor_id(&state);
     let coll = collection.to_string();
-    let app = app_id.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     let route = crate::tx_scope::capture_route(scope, app_id);
 
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        async move {
-            let mut doc = doc;
-            prepare_upsert_doc_for_write(
-                &mut doc,
-                &binding,
-                &route,
-                &coll,
-                actor_id.as_deref(),
-                &conflict_fields,
-            )
-            .await?;
-            let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-            maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
-            let bq = query::build_upsert_with_dialect(
-                &app,
-                &coll,
-                &schema,
-                &doc,
-                &conflict_fields,
-                current_sql_dialect(),
-            )
-            .map_err(DbError::from)?;
-            // Upsert can be either INSERT (new row) or UPDATE (existing).
-            // We tag as Update because the subscriber's reaction is the
-            // same -- re-fetch. Finer-grained read-set narrowing could
-            // distinguish INSERT from UPDATE; this coarser tagging
-            // doesn't need to.
-            let rows = exec_mutation_with_emit(
-                bq,
-                &route,
-                &coll,
-                zeroship_core::change_event::ChangeOp::Update,
-            )
-            .await?;
-            read_pipeline::apply(
-                &binding,
-                &coll,
-                rows,
-                read_pipeline::ApplyOptions::default(),
-            )
-            .await
-        },
+        run_upsert(binding, coll, route, doc, conflict_fields, actor_id),
         |result| crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
     )));
 
