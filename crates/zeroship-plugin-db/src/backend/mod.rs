@@ -766,11 +766,31 @@ pub trait DialectBuilder: 'static {
 /// `backend.pool_handle()`. See `docs/archive/p0-implementation-plan.md`
 /// §3 Q1 and `docs/archive/db-system-design.md` §7.
 ///
-/// **Feature gating**: this trait is unconditional at HEAD. The `impl`
-/// side moves onto the PG backend only; a hypothetical
-/// `SqliteBackend` would not implement this trait — it would have its
-/// own audit-helper signatures (a `SqliteExecutor` accessor returning
-/// `&sqlite::Connection`, etc.).
+/// **Feature gating: TEST-ONLY as of 2026-09-01, and that is the point.**
+///
+/// This trait hands out the raw pool, and a bare checkout carries the shared
+/// `zeroship_worker` login role with NO `SET LOCAL ROLE` - so every call is a
+/// chance to reach a tenant schema outside the per-app role fence. The tree
+/// records one occasion the option was taken: `crud/unmask.rs`'s audit INSERT
+/// used `pool_handle()` until 2026-09-01 and was the single ungated production
+/// path in this crate reaching a tenant schema unfenced.
+///
+/// It was unconditional until now, which made the escape hatch DISCOURAGED
+/// rather than IMPOSSIBLE. Its only four callers are in `crud::mask_drift`,
+/// which is itself `#[cfg(any(test, feature = "test-helpers"))]`, so gating the
+/// trait removes it from release builds and changes no behaviour. Three of
+/// those callers issue DDL the per-app role is not granted and so cannot be
+/// routed through the roled funnel - which is why the accessor is GATED here
+/// rather than deleted.
+///
+/// If a production path ever needs the pool, that is a design question, not a
+/// feature-flag question: route it through `PostgresBackend`'s roled entry
+/// points, or argue why the fence should not apply.
+///
+/// The `impl` side is PG-only; a hypothetical `SqliteBackend` would not
+/// implement this trait — it would have its own audit-helper signatures (a
+/// `SqliteExecutor` accessor returning `&sqlite::Connection`, etc.).
+#[cfg(any(test, feature = "test-helpers"))]
 pub trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::OwnedPooledClient> {
     /// Borrow the underlying `compio_postgres::Pool`. Free-function
     /// audit helpers in [`crate::audit`] take `&Pool` directly; this

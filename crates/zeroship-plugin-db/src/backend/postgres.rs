@@ -29,11 +29,10 @@ use super::Backend;
 #[cfg(any(test, feature = "test-helpers"))]
 use super::pg_introspect;
 use super::{
-    DialectBuilder, GeoPoint, LockManager, PgSqlExecutor, SpatialIndex, SqlExecutor, VectorIndex,
-    VectorMetric,
+    DialectBuilder, GeoPoint, LockManager, SpatialIndex, SqlExecutor, VectorIndex, VectorMetric,
 };
 #[cfg(any(test, feature = "test-helpers"))]
-use super::{PgLockManager, SchemaIntrospect};
+use super::{PgLockManager, PgSqlExecutor, SchemaIntrospect};
 use super::{pg_autocommit, pg_error};
 
 /// Single concrete impl of `Backend` backed by `compio_postgres`.
@@ -433,6 +432,7 @@ impl SchemaIntrospect for PostgresBackend {
     }
 }
 
+#[cfg(any(test, feature = "test-helpers"))]
 impl PgSqlExecutor for PostgresBackend {
     fn pool_handle(&self) -> &Rc<compio_postgres::Pool> {
         &self.pool
