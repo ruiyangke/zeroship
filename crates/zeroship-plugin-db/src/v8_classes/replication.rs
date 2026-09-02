@@ -19,7 +19,7 @@ use zeroship_runtime_macros::{v8_class, v8_constructor, v8_method, v8_name};
 
 use zeroship_runtime::state::ResolveValue;
 
-use crate::exec::ensure_pool;
+
 use crate::v8_bridge::{read_json_arg, runtime_state, setup_js_promise};
 use crate::v8_classes::dispatch::settle;
 
@@ -45,10 +45,7 @@ fn replication_watchdog_dispatch<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        async move {
-            let pool = ensure_pool().await?;
-            crate::replication::watchdog_query(&pool, &app_id).await
-        },
+        async move { crate::exec::replication_watchdog(&app_id).await },
         |rows| ResolveValue::String(crate::replication::watchdog_to_json(&rows)),
     )));
 

@@ -91,16 +91,22 @@ pub(crate) async fn ensure_backend_for_shared_sql() -> Result<BackendHandle, DbE
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized".to_string()))
 }
 
-async fn ensure_postgres_pool_for_shared_sql() -> Result<Rc<compio_postgres::Pool>, DbError> {
-    if matches!(
-        ensure_backend_for_shared_sql().await?,
-        crate::backend::BackendHandle::Sqlite(_)
-    ) {
-        return Err(sqlite_shared_crud_unavailable());
+/// The Postgres backend for a shared-SQL (non-transactional) op.
+///
+/// **Returns the backend, not its pool.** This was
+/// `ensure_postgres_pool_for_shared_sql -> Result<Rc<compio_postgres::Pool>>`
+/// until 2026-09-02, which handed the raw driver handle to an ENGINE-tiered
+/// file so it could call `pg_autocommit::roled_rows` directly. The backend
+/// already owned four methods of exactly that shape (`query_roled_json`,
+/// `read_roled_scalar_bytes`, `read_roled_scalar_text`, `execute_roled`); the
+/// rows variant was simply missing, so this path reached past the abstraction
+/// its four neighbours went through.
+async fn ensure_postgres_backend_for_shared_sql()
+-> Result<Rc<crate::backend::PostgresBackend>, DbError> {
+    match ensure_backend_for_shared_sql().await? {
+        crate::backend::BackendHandle::Postgres(pg) => Ok(pg),
+        crate::backend::BackendHandle::Sqlite(_) => Err(sqlite_shared_crud_unavailable()),
     }
-
-    context::with(|c| c.pool())
-        .ok_or_else(|| DbError::config("not_configured", "db: pool not initialized".to_string()))
 }
 
 /// The op was dispatched inside a `db.transaction(fn)` callback whose
@@ -159,7 +165,7 @@ pub(crate) async fn run_sql(
     route: &TxRoute,
     sql: &str,
     params: &[&str],
-) -> Result<Vec<compio_postgres::Row>, DbError> {
+) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     // Structural, not temporal: `route.in_tx()` was frozen at the V8
     // dispatch frame from the continuation-preserved transaction scope,
@@ -180,7 +186,9 @@ pub(crate) async fn run_sql(
         };
         // Put it back
         context::with_mut(|c| c.put_tx_client_for(app_id, client));
-        return result.map_err(|e| pg_error::classify(&e));
+        return result
+            .map(|rows| rows_to_json_value(&rows))
+            .map_err(|e| pg_error::classify(&e));
     }
 
     // No transaction — use pool. On the SQLite arm the shared CRUD
@@ -208,7 +216,7 @@ pub(crate) async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Va
     }
     let rows = run_sql(route, &bq.sql, &param_refs).await?;
     emit_db_metric(app_id, DB_READS, 1);
-    Ok(rows_to_json_value(&rows))
+    Ok(rows)
 }
 
 /// Execute a built query expecting a count result.
@@ -232,7 +240,17 @@ pub(crate) async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, D
     let rows = run_sql(route, &bq.sql, &param_refs).await?;
     emit_db_metric(app_id, DB_READS, 1);
 
-    Ok(rows.first().map(|r| r.get::<_, i64>("count")).unwrap_or(0))
+    // Byte-identical to the SQLite arm above, and that is the point: since
+    // `run_sql` returns JSON rather than `compio_postgres::Row`, the two
+    // dialects agree on the shape a count comes back in. PostgreSQL renders
+    // `count(*)` as INT8 (OID 20), which `row_to_json` maps to an exact
+    // `Number::from(i64)` - so `as_i64` reads it back losslessly rather than
+    // going via `f64` the way the FLOAT arms do.
+    Ok(rows
+        .first()
+        .and_then(|row| row.get("count"))
+        .and_then(Value::as_i64)
+        .unwrap_or(0))
 }
 
 /// Execute an insert/update/delete query, returning the affected
@@ -253,26 +271,30 @@ pub(crate) async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec
         emit_db_metric(app_id, DB_ROWS_WRITTEN, rows.len() as u64);
         return Ok(rows);
     }
-    let rows = run_sql(route, &bq.sql, &param_refs).await?;
-    let values = rows_to_json_value(&rows);
+    let values = run_sql(route, &bq.sql, &param_refs).await?;
     emit_db_metric(app_id, DB_WRITES, 1);
     emit_db_metric(app_id, DB_ROWS_WRITTEN, values.len() as u64);
     Ok(values)
 }
 
-/// Resolve the shared pool and run `sql` on it under `app_id`'s role.
+/// Run `sql` on the shared Postgres backend under `app_id`'s role.
 ///
 /// The role fence, the `SET LOCAL` batch and the surrounding transaction are
 /// PostgreSQL dialect and live in [`crate::backend::pg_autocommit`]. They sat
 /// here until 2026-09-01, which put them one tier ABOVE the Postgres backend
-/// that called into them - the upward half of the `PG <-> ENGINE` cycle.
+/// that called into them - the upward half of the `PG <-> ENGINE` cycle. On
+/// 2026-09-02 the last half of that reach went too: this took the pool out of
+/// the backend and called `pg_autocommit` itself, so the `Row` type came back
+/// here to be converted. Now the backend does both and returns JSON.
 async fn exec_postgres_autocommit_with_role(
     app_id: &str,
     sql: &str,
     params: &[&str],
-) -> Result<Vec<compio_postgres::Row>, DbError> {
-    let pool = ensure_postgres_pool_for_shared_sql().await?;
-    crate::backend::pg_autocommit::roled_rows(&pool, app_id, sql, params).await
+) -> Result<Vec<Value>, DbError> {
+    ensure_postgres_backend_for_shared_sql()
+        .await?
+        .query_roled_rows_as_json(app_id, sql, params)
+        .await
 }
 
 async fn exec_sqlite_json(
@@ -546,12 +568,23 @@ pub(crate) fn clear_pending_emits(app_id: &str) {
     context::with_mut(|c| c.clear_pending_emits_for(app_id));
 }
 
-/// Lazy pool accessor shared by every async helper that needs the
-/// pooled connection. First call kicks off `init_pool_async` (Postgres
-/// connect + warm-up); subsequent calls clone the `Rc<Pool>` out of
-/// the per-thread cell.
-pub(crate) async fn ensure_pool() -> Result<Rc<compio_postgres::Pool>, DbError> {
-    ensure_postgres_pool_for_shared_sql().await
+/// Read this app's replication-slot health.
+///
+/// Replaces `ensure_pool() -> Result<Rc<compio_postgres::Pool>>`, whose docs
+/// called it "shared by every async helper that needs the pooled connection"
+/// and which by 2026-09-02 had exactly ONE caller: the `db.replication
+/// .watchdog()` dispatch, which took the pool only to hand it straight to
+/// `replication::watchdog_query`. Naming the operation instead of the handle
+/// keeps `Rc<Pool>` inside the tier that owns it.
+///
+/// The query filters `pg_replication_slots` by this app's slot prefix, so a
+/// tenant cannot enumerate a co-tenant's slots - see
+/// [`crate::v8_classes::replication`] for the scoping guarantee this preserves.
+pub(crate) async fn replication_watchdog(
+    app_id: &str,
+) -> Result<Vec<crate::replication::SlotHealth>, DbError> {
+    let backend = ensure_postgres_backend_for_shared_sql().await?;
+    crate::replication::watchdog_query(backend.pool(), app_id).await
 }
 
 /// **Test-only**: end-to-end wrapper around [`exec_mutation_with_emit`]
