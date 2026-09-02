@@ -590,14 +590,35 @@ export function model<S extends Record<string, unknown>>(
   // both record-of-fields and a top-level `t.union(...)` input.
   const normalized = normalizeSchema(schema as Parameters<typeof normalizeSchema>[0]);
 
+  // Both injections below run AFTER `normalizeSchema`, which is where
+  // `withPlatformAssignment` stamps the charter's `assign` onto a platform
+  // column. So each must take the stamp explicitly, or it arrives with no
+  // `assign` and `validateDoc` falls through to the `default` arm - which
+  // MATERIALISES the value into the caller's document.
+  //
+  // That is harmless for `deletedAt`, which declares no default, and is not for
+  // `version`: its `default: 1` is the DDL seed, and the design forbids that key
+  // reaching `build_upsert`, where the generic loop emits
+  // `"version" = EXCLUDED."version"` while the auto-bump emits a second
+  // assignment to the same column - two assignments to one column in one
+  // `DO UPDATE SET`, which PostgreSQL refuses. Measured before this fix: an
+  // insert reached the native op as `{"title":"hello","version":1}`.
+
   // When soft delete is enabled, inject the deletedAt field into the schema
   if (softDelete && !normalized.deletedAt) {
-    normalized.deletedAt = { type: "date", required: false };
+    normalized.deletedAt = withPlatformAssignment("deletedAt", {
+      type: "date",
+      required: false,
+    });
   }
 
   // D4 — when versioning is enabled, inject a `version` column.
   if (versioning && !normalized.version) {
-    normalized.version = { type: "number", required: false, default: 1 };
+    normalized.version = withPlatformAssignment("version", {
+      type: "number",
+      required: false,
+      default: 1,
+    });
   }
 
   return new Collection<S>(name, normalized, native, {
