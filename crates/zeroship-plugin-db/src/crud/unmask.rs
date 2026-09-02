@@ -1523,10 +1523,37 @@ pub(crate) fn dispatch_unmask_field<'s>(
     promise
 }
 
+// ---------------------------------------------------------------------------
+// The DB-3 boundary, cfg-forked so an integration target can reach it
+// ---------------------------------------------------------------------------
+//
+// `parse_args` and `parse_bulk_args` are the two places where an `actor`
+// supplied by APP JS meets `sanitize_app_actor`. That call IS the DB-3 fix, and
+// while both parsers were private `fn` no integration target could drive them:
+// every live-PG test in `tests/mask_flip.rs` built `UnmaskFieldArgs` /
+// `BulkUnmaskArgs` in Rust and so entered BELOW the fence, leaving the fence
+// itself covered only by in-module units that call `sanitize_app_actor`
+// directly with no database behind it. A fence no integration test can reach is
+// a fence nobody re-checks.
+//
+// Same shape as `backend` / `binding` / `crud` in `lib.rs`: `pub` under the
+// test gate, `pub(crate)` in release, so the shipped surface is unchanged. The
+// forked item is the thin visibility wrapper; the body below it is shared by
+// both arms, so the two builds cannot drift.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
+    parse_args_inner(v)
+}
+
+#[cfg(not(any(test, feature = "test-helpers")))]
+pub(crate) fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
+    parse_args_inner(v)
+}
+
 /// Decode the JSON args coming from V8 into [`UnmaskFieldArgs`]. The
 /// V8 boundary already converted the JS object to `serde_json::Value`
 /// via `read_json_arg`; we just pluck the typed fields.
-fn parse_args(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
+fn parse_args_inner(v: &Value) -> Result<UnmaskFieldArgs, DbError> {
     let obj = v.as_object().ok_or_else(|| DbError::ValidationFailed {
         code: "invalid_unmask_args",
         message: "unmaskField: args must be an object".into(),
@@ -1632,13 +1659,25 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
     promise
 }
 
+// The bulk half of the DB-3 boundary. Visibility is forked for the reason
+// spelled out above `parse_args`.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn parse_bulk_args(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
+    parse_bulk_args_inner(v)
+}
+
+#[cfg(not(any(test, feature = "test-helpers")))]
+pub(crate) fn parse_bulk_args(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
+    parse_bulk_args_inner(v)
+}
+
 /// Parse the JS-side `{ collection, items: [{ rowPk, columns }], actor?, reason? }`
 /// shape into [`BulkUnmaskArgs`]. Refuses non-object args, missing
 /// fields, items that aren't an array, items missing `rowPk` /
 /// `columns`, and columns arrays containing non-strings — every error
 /// surfaces a typed `ValidationFailed { code: "invalid_bulk_unmask_args" }`
 /// so the SDK can branch on `.code` deterministically.
-fn parse_bulk_args(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
+fn parse_bulk_args_inner(v: &Value) -> Result<BulkUnmaskArgs, DbError> {
     let obj = v.as_object().ok_or_else(|| DbError::ValidationFailed {
         code: "invalid_bulk_unmask_args",
         message: "bulkUnmaskFields: args must be an object".into(),
