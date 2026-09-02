@@ -408,12 +408,14 @@ async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
         None => return Ok(()), // backend not initialised — auth path's default-deny stub handles it
     };
 
-    // ---- SQLite arm (the only durable store left) ----
-    if let Some(sq) = backend.as_sqlite() {
-        let loaded = crate::crud::mask_policy::load_sqlite(sq, app_id).await?;
-        if let Some(p) = loaded {
-            crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(p)));
-        }
+    // Ask the backend for whatever it durably stored. `None` covers both "this
+    // backend stores nothing" (PostgreSQL, which reinstalls on boot) and "this
+    // app has no stored entry", and the caller wants the same thing in either
+    // case: leave the cache alone. Asking rather than downcasting is what keeps
+    // SQLite's sidecar out of this file.
+    if let Some(stored) = backend.load_mask_policy(app_id).await? {
+        let policy = crate::crud::mask_policy::MaskPolicy::from_json(&stored)?;
+        crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy)));
     }
     Ok(())
 }

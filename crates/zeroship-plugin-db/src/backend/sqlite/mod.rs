@@ -49,6 +49,10 @@ pub(crate) mod cdc;
 pub(crate) mod dialect;
 pub(crate) mod error;
 pub(crate) mod lock;
+/// Sidecar storage for an app's mask policy. Moved out of `crud/mask_policy.rs`
+/// on 2026-09-02: a file path, a lock registry and an atomic rename are SQLite
+/// implementation, not engine logic.
+pub(crate) mod mask_policy_store;
 /// SQLite typed-row -> JSON decoding, beside the `TypedCell`/`TypedRows` it
 /// reads. Peer of `backend::pg_row_json`; see that module for why the two are
 /// deliberately not shared.
