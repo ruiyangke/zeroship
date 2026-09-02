@@ -75,6 +75,7 @@ VENDORS='compio_postgres|rusqlite'
 ROOTS="
 crates/zeroship-plugin-db/src
 crates/zeroship-schema/src
+crates/zeroship-data-core/src
 "
 
 # Files that are ALLOWED to name a vendor: the vendor tiers themselves, plus the
