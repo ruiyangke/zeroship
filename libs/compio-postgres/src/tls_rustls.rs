@@ -2002,12 +2002,17 @@ mod tests {
     /// would fail on permissions before reaching the branch under test.
     #[cfg(unix)]
     fn sslkey_fixture(pem: &str) -> tempfile::NamedTempFile {
+        sslkey_fixture_bytes(pem.as_bytes())
+    }
+
+    /// The bytes form, so a fixture can be something `str` cannot hold.
+    #[cfg(unix)]
+    fn sslkey_fixture_bytes(pem: &[u8]) -> tempfile::NamedTempFile {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
         let mut key = tempfile::NamedTempFile::new().expect("create a private key fixture");
-        key.write_all(pem.as_bytes())
-            .expect("write the private key fixture");
+        key.write_all(pem).expect("write the private key fixture");
         std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o600))
             .expect("set private key fixture permissions");
         key
@@ -2054,6 +2059,43 @@ mod tests {
             chain.contains("encrypted private key requires a non-empty sslpassword"),
             "an empty sslpassword must be treated as absent: {chain}"
         );
+    }
+
+    /// A file that is not a PEM document at all - or not even UTF-8 - keeps the
+    /// rustls PEM error too.
+    ///
+    /// The sibling below covers a well-formed PEM carrying the wrong label. It
+    /// reaches the label check, so it leaves both EARLIER refusals untested:
+    /// the UTF-8 decode and `SecretDocument::from_pem`. Those are what an
+    /// `sslkey` pointed at a binary file, or at a config file, actually hits.
+    ///
+    /// A passphrase is supplied deliberately. With `None` the function can only
+    /// report a PEM problem, so the assertion would hold even if the code
+    /// blamed the passphrase whenever one existed; supplying one makes the
+    /// misreport possible, and therefore makes the test meaningful.
+    #[cfg(unix)]
+    #[test]
+    fn an_unparseable_sslkey_is_not_reported_as_a_passphrase_problem() {
+        for (name, bytes) in [
+            (
+                "not a PEM document",
+                &b"sslkey was pointed at a config file, not a key\n"[..],
+            ),
+            ("not even UTF-8", &[0xff_u8, 0xfe, 0x00, 0x01][..]),
+        ] {
+            let key = sslkey_fixture_bytes(bytes);
+            let error = private_key_from_config(key.path().to_str().unwrap(), Some(b"hunter2"))
+                .expect_err("an unparseable file is not a private key");
+            let chain = sslkey_error_chain(&error);
+            assert!(
+                chain.contains("cannot read PEM"),
+                "{name}: the error must report a PEM problem: {chain}"
+            );
+            assert!(
+                !chain.contains("sslpassword"),
+                "{name}: an unreadable key was blamed on the passphrase: {chain}"
+            );
+        }
     }
 
     /// A PEM that is not a private key at all must keep the rustls PEM error.
