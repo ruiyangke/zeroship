@@ -2926,6 +2926,50 @@ mod tests {
         );
     }
 
+    /// A hashed entry that is not exactly ONE loadable PEM CRL ends the
+    /// directory read, rather than contributing part of itself.
+    ///
+    /// OpenSSL's convention is one CRL per `<hash>.r<n>` file, and rustls
+    /// selects the FIRST CRL matching an issuer. A file holding two therefore
+    /// makes the choice between them arbitrary, which is the same stale-
+    /// revocation hazard the same-issuer guards refuse elsewhere; a file
+    /// holding none means the operator's revocation policy is partly missing
+    /// with nothing to say so. Both are refused by NAME so the offending path
+    /// is actionable.
+    ///
+    /// The two arms are distinct in the source but share one entry point, so
+    /// they are exercised through the same file name, rewritten between them.
+    /// `crls_from_pem_file` answers `None` BOTH when the PEM fails to parse
+    /// and when it parses to nothing, so garbage reaches the load arm rather
+    /// than the count arm.
+    #[test]
+    fn a_hashed_crl_entry_must_be_exactly_one_loadable_pem_crl() {
+        let directory = tempfile::tempdir().expect("create a hashed CRL directory");
+        let entry = directory.path().join("00000000.r0");
+
+        std::fs::write(&entry, b"-----BEGIN X509 CRL-----\nnot base64\n")
+            .expect("write the unloadable entry");
+        let error = crls_from_hashed_directory(directory.path())
+            .expect_err("an unloadable hashed entry must not be skipped");
+        assert!(
+            error.contains("cannot load hashed PEM CRL entry"),
+            "an unloadable entry must be named as such: {error}"
+        );
+        assert!(
+            error.contains("00000000.r0"),
+            "the refusal must name the offending path: {error}"
+        );
+
+        let pem = include_str!("../tests/data/stale_guard_crl.pem");
+        std::fs::write(&entry, format!("{pem}{pem}")).expect("write the two-CRL entry");
+        let error = crls_from_hashed_directory(directory.path())
+            .expect_err("two CRLs in one hashed entry make rustls's first match arbitrary");
+        assert!(
+            error.contains("must contain exactly one PEM CRL"),
+            "a multi-CRL entry must be named as such: {error}"
+        );
+    }
+
     /// `sslcrldir` naming a directory with nothing usable in it must FAIL,
     /// because the alternative is silently verifying without revocation.
     ///
