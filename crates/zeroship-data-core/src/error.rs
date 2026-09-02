@@ -66,6 +66,52 @@
 
 use std::fmt;
 
+/// What the creator asked settlement to do.
+///
+/// Vocabulary, not logic. The SC-1 reducer DECIDES which intent to settle with;
+/// a backend lane only performs it. Both name this type, which is why it is
+/// here rather than in either - the same placement `DenyReason` below got when
+/// it turned out to be a domain concept the reducer merely used.
+///
+/// [`Self::verb`] is the ANSI spelling and both supported backends accept it
+/// verbatim; a dialect that did not would render its own from the intent rather
+/// than have this grow a case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettleIntent {
+    Commit,
+    Rollback,
+}
+
+impl SettleIntent {
+    #[must_use]
+    pub const fn verb(self) -> &'static str {
+        match self {
+            Self::Commit => "COMMIT",
+            Self::Rollback => "ROLLBACK",
+        }
+    }
+}
+
+/// What the backend actually did with the terminal statement.
+///
+/// The other half of the settle vocabulary: the intent goes down to the lane,
+/// this comes back up. The lane decides WHICH of the three happened, from
+/// whatever its dialect told it; the reducer decides what that MEANS for the
+/// transaction. Neither type belongs to either side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalResult {
+    /// The command tag confirmed a commit. The only arm that publishes.
+    Committed,
+    /// The transaction rolled back - including a `COMMIT` PostgreSQL answered
+    /// with the tag `ROLLBACK`, which is a failed transaction, not a
+    /// successful one.
+    RolledBack,
+    /// The terminal statement's outcome cannot be determined. DBR-03: not
+    /// knowing is not the same as knowing it ended, so this withdraws the
+    /// session rather than assuming a rollback.
+    Indeterminate,
+}
+
 /// Why a `Deny` was returned. Every reason is creator-visible, distinct, and
 /// non-retryable, and they differ in what the next action should be.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
