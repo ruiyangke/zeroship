@@ -317,9 +317,28 @@ edge that exists and is not one relocation away; it appears only after the execu
 | destination | modules |
 | --- | --- |
 | `plugin-db` (thin) | `v8_classes/`, `v8_bridge.rs`, `lib.rs` (the `DbPlugin` part), `tx_scope.rs` |
-| `data-engine` | `crud/`, `transaction/`, `exec.rs`, `broker.rs`, `read_set.rs`, `tx_route.rs`, `drop_namespace.rs`, `cross_app_fk.rs`, `BackendHandle` |
+| `data-engine` | `crud/`, `transaction/`, `exec.rs`, `broker.rs`, `read_set.rs`, `tx_route.rs`, `drop_namespace.rs`, `BackendHandle` |
 | `data-core` | `error.rs` (less `to_op_error`), `descriptor.rs`, the six vendor-free capability traits |
-| `data-encryption` (if split) | `encryption/`, plus `EncryptedColumn` |
+| `data-encryption` (if split) | `encryption/` |
+
+**Two entries left this table on 2026-09-02, under Phase 0.5's own audits.**
+
+`cross_app_fk.rs` is **deleted**, which is the dead-code decision reaching its
+first verdict rather than a change of assignment. 235 lines and eleven tests,
+exported `pub` and ungated so it shipped in every binary, with zero production
+callers - its own rustdoc said "in a default build, nobody". It could not be
+wired: decision 10 removed all DDL from the crate, so nothing there sees a
+`refTarget` any more. The live refusal is the engine's `validate_ident`, and its
+two surviving tests moved beside it (`bare_identifier_tests` in
+`zeroship-migrate-core/src/render/declarative.rs`) because nothing had ever
+asserted that refusal.
+
+`EncryptedColumn` is **deleted** too, so `data-encryption` would carry only
+`encryption/`. Its two impls were identical line for line, every `KeyHandle` in
+the tree bound to `AeadKey`, and both backends held the same `KeyStore` from the
+same source - a vendor-shaped trait with no vendor content, whose only effect
+was making the engine ask which backend it was on to reach code that does not
+depend on the answer.
 | `data-postgres` | `backend/postgres.rs`, `pg_error.rs`, `pg_introspect.rs`, `PgSqlExecutor` |
 | `data-sqlite` | `backend/sqlite/` |
 | `data-cdc-server` | `wal_consumer.rs`, `replication.rs`, `slot_reaper.rs` |

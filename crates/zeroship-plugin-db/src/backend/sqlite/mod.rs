@@ -92,11 +92,12 @@ pub(crate) mod vector;
 // `session_minter.rs` so the cryptography stays out of the
 // orchestration body.
 pub(crate) mod session_minter;
-// `fk_parse` was lifted out of this cfg-gated subtree so it would
-// compile on a PG-only build; it lives at `crate::cross_app_fk`. It is
-// compiled unconditionally but CALLED from nowhere a request reaches -
-// see that module's header for the enumeration, and do not cite it as
-// the thing keeping FKs inside an app. The module's design lineage
+// `fk_parse` was lifted out of this cfg-gated subtree so it would compile on a
+// PG-only build, became `crate::cross_app_fk`, and was DELETED on 2026-09-02:
+// compiled unconditionally, called from nowhere a request reaches. What keeps
+// FKs inside an app is the migration engine's `validate_ident` refusing a
+// dot-qualified name, plus the per-connection alias fence below. The design
+// lineage
 // (SQLite ATTACH file isolation per design section 18 Q1) is documented
 // there too.
 

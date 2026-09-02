@@ -683,41 +683,6 @@ fn introspect_after_create_table_round_trip() {
 // `__zeroship_migrations` fixture they provisioned went with them.
 // ---------------------------------------------------------------------------
 
-#[test]
-fn cross_app_fk_rejected_at_parse() {
-    // Pure-Rust validator — no DB round-trip required. The PG-side
-    // `tests/integration.rs::cross_app_fk_rejected_at_parse` is the
-    // mirror assertion; both reach the same `crate::cross_app_fk`
-    // module so a regression here would fail both targets.
-    use zeroship_plugin_db::cross_app_fk::reject_cross_app_fk;
-
-    let schema = serde_json::json!({
-        "authorId": { "type": "ref", "refTarget": "other_app.users" }
-    });
-    let err = reject_cross_app_fk(&schema, "app_demo")
-        .expect_err("cross-app ref must reject at parse time");
-    match err {
-        DbError::Configuration {
-            code,
-            message,
-            hint,
-        } => {
-            assert_eq!(code, "cross_app_fk_forbidden");
-            assert!(
-                message.contains("other_app.users"),
-                "message must name the offending target: {message}"
-            );
-            assert!(
-                hint.as_deref()
-                    .map(|h| h.contains("Drop the"))
-                    .unwrap_or(false),
-                "hint must point at remediation: {hint:?}"
-            );
-        }
-        other => panic!("expected DbError::Configuration, got {other:?}"),
-    }
-}
-
 // ---------------------------------------------------------------------------
 // SqliteCdcDispatcher (preupdate/commit/rollback hooks) +
 // worker->compio publisher integration tests.
@@ -10894,9 +10859,13 @@ fn two_apps_hold_transactions_at_the_same_time() {
 /// The control for the arm above, and a boundary rather than a convention: the
 /// shared connection had every attached app's alias on it, so this same
 /// `DELETE` **succeeded** and removed another tenant's row. Nothing in the SQL
-/// builders emits a foreign alias today (`cross_app_fk.rs` refuses one at parse
-/// time and has no production caller), which is exactly why the connection is
-/// the place to enforce it.
+/// builders emits a foreign alias today - the engine's `validate_ident` refuses
+/// a dot-qualified name before any SQL is rendered - which is exactly why the
+/// connection is ALSO the place to enforce it. This cited `cross_app_fk.rs`
+/// until 2026-09-02, itself noting it "has no production caller"; that module
+/// is deleted, and citing a checker nothing calls is not the reassurance this
+/// sentence needs. The guarantee below rests on the connection, not on either
+/// validator.
 #[test]
 fn a_transaction_lane_cannot_address_another_apps_tables() {
     run(async {

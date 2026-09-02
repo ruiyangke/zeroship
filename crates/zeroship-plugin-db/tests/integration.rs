@@ -3587,17 +3587,6 @@ fn err_chain(e: &dyn std::error::Error) -> String {
     s.to_lowercase()
 }
 
-// ---------------------------------------------------------------------------
-// Cross-app FK parse-time check (PG arm mirror).
-//
-// The validator lives at `crate::cross_app_fk::reject_cross_app_fk`
-// and runs on BOTH backends -- the SQLite-side mirror is at
-// `tests/sqlite_integration.rs::cross_app_fk_rejected_at_parse`. This test
-// exercises the plugin-db helper directly rather than driving it through the
-// migration engine; the engine enforces its boundary independently. Keeping
-// this test pure avoids a database dependency.
-// ---------------------------------------------------------------------------
-
 /// Operator deprovisioning performs NO second URL parse, and opens ONE operator
 /// pool for a whole run of deletions - not none, and not one per app.
 ///
@@ -3711,38 +3700,6 @@ fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
     })
     .join()
     .expect("operator lifecycle thread");
-}
-
-#[test]
-fn cross_app_fk_rejected_at_parse() {
-    use zeroship_data_core::error::DbError;
-    use zeroship_plugin_db::cross_app_fk::reject_cross_app_fk;
-
-    let schema = serde_json::json!({
-        "authorId": { "type": "ref", "refTarget": "other_app.users" }
-    });
-    let err = reject_cross_app_fk(&schema, "app_demo")
-        .expect_err("cross-app ref must reject at parse time");
-    match err {
-        DbError::Configuration {
-            code,
-            message,
-            hint,
-        } => {
-            assert_eq!(code, "cross_app_fk_forbidden");
-            assert!(
-                message.contains("other_app.users"),
-                "message must name the offending target: {message}"
-            );
-            assert!(
-                hint.as_deref()
-                    .map(|h| h.contains("Drop the"))
-                    .unwrap_or(false),
-                "hint must point at remediation: {hint:?}"
-            );
-        }
-        other => panic!("expected DbError::Configuration, got {other:?}"),
-    }
 }
 
 // ---------------------------------------------------------------------------

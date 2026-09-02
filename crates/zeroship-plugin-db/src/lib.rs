@@ -126,16 +126,23 @@ pub(crate) mod context;
 // because nothing outside the crate has business reading the assignment
 // authority - the descriptor mirror is what consumers verify against.
 pub(crate) mod system_shape_charter;
-// `cross_app_fk` is `pub` (not `pub(crate)`) because integration tests
-// in both `tests/integration.rs` (PG arm) and
-// `tests/sqlite_integration.rs` (SQLite arm) call the validator
-// directly to pin the rejection contract. The function is a pure JSON
-// walk — no DB round-trip — so exposing it has zero runtime impact;
-// those integration tests are, as of 2026-08-20, its ONLY reachable
-// callers. The production FK-stays-in-app property is enforced by
-// `zeroship_schema::query`; this helper remains test-only evidence for the
-// policy-level validator.
-pub mod cross_app_fk;
+// `cross_app_fk` WAS DECLARED HERE and is deleted (2026-09-02), under the
+// split's Phase 0.5 dead-code decision: "giving dead code a crate is how the
+// existing clusters got there". 235 lines and eleven tests, exported `pub` and
+// UNGATED - so it shipped in every binary - with zero production callers; its
+// own rustdoc said "in a default build, nobody".
+//
+// It could not be wired where it lived. Decision 10 removed all DDL from this
+// crate, so no path here sees a `refTarget` before DDL any more. What refuses
+// `other_app.users` today is the charset rule in the engine's `validate_ident`
+// (`zeroship-migrate-core/src/render/declarative.rs`), which `validate_desired`
+// runs over every desired table name; a dot is neither alphanumeric nor `_`.
+// Its two surviving tests moved there as `bare_identifier_tests`, because
+// nothing had ever asserted that refusal.
+//
+// Do NOT read the engine's `validate_cross_app_fk_targets` as the replacement.
+// That is a dangling-target check and explicitly PERMITS a target owned by
+// another member app - the opposite policy, under a confusingly similar name.
 // `crud` is crate-private in release builds; `pub`
 // under `test-helpers` so `tests/sqlite_integration.rs` can reach
 // `crud::encryption_pass::{encrypt_row_on_write, decrypt_row_on_read}`

@@ -458,13 +458,15 @@ said until 2026-08-20.
 No, and it is worth being exact about which code makes that true, because two
 plausible-looking answers are wrong.
 
-**It is not `crates/zeroship-plugin-db/src/cross_app_fk.rs`.** That file holds a
-`reject_cross_app_fk` validator that scans `refTarget` for an `<other_app>.`
-prefix and returns `cross_app_fk_forbidden`, and it is the mechanism this page
-used to cite. It has **no production call site**; integration tests call it
-directly to pin the policy-level refusal. Nor is it `crates/zeroship-schema`;
-the migration engine carries its own copy of that renderer and does not depend
-on the crate.
+**It was not `crates/zeroship-plugin-db/src/cross_app_fk.rs`, and that file no
+longer exists.** It held a `reject_cross_app_fk` validator scanning `refTarget`
+for an `<other_app>.` prefix and returning `cross_app_fk_forbidden`, and it is
+the mechanism this page used to cite. It had **no production call site** -
+only integration tests, calling it directly to pin a refusal nothing reached -
+and it was deleted on 2026-09-02 rather than wired, because the data plane no
+longer emits DDL and so has nowhere to wire it to. Nor is it
+`crates/zeroship-schema`; the migration engine carries its own copy of that
+renderer and does not depend on the crate.
 
 **Schema is applied by the migration engine at deploy**, and that is where the
 answer lives. Four things hold there, in order:
