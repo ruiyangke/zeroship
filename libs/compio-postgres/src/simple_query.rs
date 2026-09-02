@@ -573,6 +573,74 @@ mod tests {
         frame
     }
 
+    /// Answer one `simple_query` with a scripted frame and drain its stream.
+    ///
+    /// `simple_query` hands the stream back without reading anything, so the
+    /// frame lands on the first arm of `SimpleQueryStream::poll_next`.
+    async fn simple_query_stream_against(frame: Vec<u8>) -> Result<usize, crate::Error> {
+        use futures_util::TryStreamExt;
+
+        let (sender, mut receiver) = futures_channel::mpsc::unbounded();
+        let client = Client::new(
+            sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+        );
+        let inner = Arc::clone(client.inner());
+        let stream = super::simple_query(&inner, "SELECT 1")
+            .await
+            .expect("simple_query did not enqueue its request");
+        let mut request = receiver
+            .next()
+            .await
+            .expect("simple_query did not enqueue its request");
+        request
+            .sender
+            .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                BytesMut::from(&frame[..]),
+            )))
+            .expect("deliver the scripted simple-query response");
+
+        let mut stream = Box::pin(stream);
+        let mut seen = 0;
+        while stream.as_mut().try_next().await?.is_some() {
+            seen += 1;
+        }
+        Ok(seen)
+    }
+
+    /// The simple-query stream refuses a frame its own poll does not name.
+    ///
+    /// Twin of `RowStream::poll_next`, and uncovered for the same reason: the
+    /// batch finishers above consume their own messages, so nothing drove the
+    /// STREAM past a frame it does not name. Accepting one would surface it to
+    /// the caller as a `SimpleQueryMessage`, or drop it and keep polling.
+    ///
+    /// `BindComplete` is the stray: extended-protocol, legal, and not one of
+    /// the kinds this stream names.
+    #[compio::test]
+    async fn the_simple_query_stream_refuses_a_frame_its_poll_does_not_name() {
+        let error = simple_query_stream_against(scripted_backend_frame(b'2', b""))
+            .await
+            .expect_err("the simple-query stream accepted a frame its poll does not name");
+        assert!(
+            format!("{error}").contains("unexpected message from server"),
+            "the simple-query stream reported {error} rather than an out-of-order message"
+        );
+    }
+
+    /// The one-variable control: the same stream ended by a frame it does name.
+    #[compio::test]
+    async fn the_simple_query_stream_accepts_ready_for_query_as_its_end() {
+        let seen = simple_query_stream_against(scripted_backend_frame(b'Z', b"I"))
+            .await
+            .expect("the simple-query stream rejected a well-formed ReadyForQuery");
+        assert_eq!(seen, 0, "no rows or tags were sent, so nothing is yielded");
+    }
+
     /// Start a batch and answer it with one scripted frame, returning whatever
     /// the supplied finisher makes of it.
     async fn batch_against<T, F, Fut>(frame: Vec<u8>, finish: F) -> Result<T, crate::Error>
