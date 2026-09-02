@@ -5821,6 +5821,53 @@ mod tests {
         }
     }
 
+    /// A `CopyData` frame carries a one-byte sub-tag naming the replication
+    /// message, so a zero-length body has no tag to dispatch on. Indexing
+    /// `body[0]` for that sub-tag would panic, which makes this refusal the
+    /// bounds check for every message type below it.
+    ///
+    /// Unlike the malformed `CopyDone` below, this does NOT retire the stream:
+    /// the frame was fully consumed, so the reader stays frame-aligned and the
+    /// next message still parses. The second half of this test pins that
+    /// contrast, and is the whole of what it settles - whether a peer sending
+    /// protocol garbage OUGHT to retire the stream is a separate question this
+    /// test deliberately does not answer.
+    #[compio::test]
+    async fn an_empty_copydata_frame_is_refused_without_retiring_the_stream() {
+        let mut wire = startup_frame(COPY_DATA_TAG, &[]);
+        let mut keepalive = vec![PRIMARY_KEEPALIVE_TAG];
+        keepalive.extend_from_slice(&0x16B_4000u64.to_be_bytes());
+        keepalive.extend_from_slice(&700_000_000_000i64.to_be_bytes());
+        keepalive.push(0);
+        wire.extend_from_slice(&startup_frame(COPY_DATA_TAG, &keepalive));
+
+        let mut stream = stream_over(wire);
+        let error = stream
+            .next()
+            .await
+            .expect_err("an empty CopyData frame was dispatched on a sub-tag it does not carry");
+        let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+            std::error::Error::source(*source)
+        })
+        .fold(error.to_string(), |chain, source| {
+            format!("{chain}: {source}")
+        });
+        assert!(
+            chain.contains("empty CopyData frame"),
+            "the empty CopyData frame was not refused by name: {chain}"
+        );
+
+        // Frame-aligned: the keepalive queued behind the bad frame still reads.
+        let next = stream
+            .next()
+            .await
+            .expect("the refused empty frame left the reader misaligned");
+        assert!(
+            matches!(next, Some(ReplicationMessage::PrimaryKeepalive { .. })),
+            "the message after an empty CopyData frame did not parse: {next:?}"
+        );
+    }
+
     /// CopyDone is exactly a tag plus Int32(4); it has no body. Accepting a
     /// payload silently changes malformed bytes into a clean CopyBoth state
     /// transition, so reject it by name and retire the stream.
