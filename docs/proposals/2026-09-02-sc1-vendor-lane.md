@@ -230,7 +230,20 @@ of this step.
    two remaining rows are elsewhere: `crud/system_fields_pass.rs`
    (`zeroship_runtime`) and `drop_namespace.rs` (`compio_postgres`, in a
    test-gated module the census tiers by path).
-6. `cancel.rs` becomes the lane's `canceller()`.
+6. **DONE, `f61682839` + `7c4b1551f`.** `TxCanceller::capture(&TxConnection)`
+   became `TxConnection::canceller()`, completing the five-operation lane, and
+   the module itself moved from `transaction/cancel.rs` to
+   `backend/cancel.rs` - both its types are vendor, so it was vendor code
+   sitting in the protocol's directory.
+
+7. **NOT IN THE ORIGINAL PLAN, and it was the last structural coupling:
+   `67948acf2`.** `open_session` matched `BackendHandle` to acquire a client,
+   spell a `BEGIN`, narrow the authority and wrap the result in a
+   `TxConnection` variant - so the protocol carried PostgreSQL's
+   role-after-`BEGIN` ordering AND SQLite's attach-before-open rule, neither of
+   which it can act on. Both are now `BackendHandle::open_tx_session`; the
+   driver decides only that a session is due and where it goes.
+   `OpenSessionError` went to data-core for the same reason `CleanupAck` did.
 
 Each step compiles and keeps the suite green on its own. Steps 1-3 remove both
 census violations; 4-6 remove the coupling the census cannot see.
@@ -247,6 +260,37 @@ dependents - `cargo check -p` alone is blind to both test cfg and dependents
 End state, checkable: `grep -c 'compio_postgres\|backend::sqlite' transaction/`
 returns 0 outside `#[cfg(test)]`, and `tests/lib/tier_signature_census.sh`
 reports no `transaction/` row.
+
+## Reached, measured 2026-09-02
+
+`tests/lib/tier_signature_census.sh` reports **no `transaction/` row** (total
+4 -> 2; the two survivors are `crud/system_fields_pass.rs` and
+`drop_namespace.rs`). `driver.rs` no longer imports `compio_postgres` at all.
+
+The grep is **not** 0, and the three survivors are each accounted for rather
+than waved past:
+
+| site | what it is |
+| --- | --- |
+| `driver.rs:58` | rustdoc prose explaining why a withdrawal is not a drop |
+| `driver.rs:978` | one call to `backend::sqlite::reservation::terminal_result` - engine calling vendor, which is DOWNWARD and legal |
+| `mod.rs:662` | `use crate::backend::sqlite::SqliteBackend` inside `#[cfg(test)] mod tests` (opens line 649) |
+
+So the production coupling the proposal set out to remove is gone, and what is
+left is one legal downward call plus two things the grep cannot distinguish from
+code. Anyone re-running that command should expect `2` and `1`, not `0`.
+
+**Every step was verified the same way**, because the live suite on this target
+is flaky (#105, #143) and a total proves nothing: `cargo test --lib` for both
+crates, `cargo check --all-targets` on the default AND `test-helpers` feature
+sets (different builds since `b589cabe9`), `cargo check` on
+`zeroship-worker`/`zeroship-runtime` for dependents, and the live
+`native_transaction` suite compared **by failing NAME** against a baseline
+measured at the pre-lane commit - identical every time, at 19 passed / 5 failed.
+
+Where a moved rule could have gone slack it was mutation-checked in its new
+home: sampling `transaction_status()` before the cleanup `ROLLBACK` still turns
+`a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection` red.
 
 **The census is necessary and not sufficient here.** It scans signature
 positions, so it never saw `StepConfig::begin_sql` - a `String` field carrying
