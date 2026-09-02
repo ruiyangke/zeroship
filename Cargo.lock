@@ -4419,6 +4419,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "851ca9db4932932d69f3ea811b1abe63087a0f740a47692619dd40d4899b68be"
 dependencies = [
  "array-init",
+ "bit-vec 0.8.0",
  "bit-vec 0.9.1",
  "bytes",
  "chrono",
