@@ -65,7 +65,7 @@ use zeroship_data_core::error::DbError;
 
 /// The six canonical classification values. Mirrors the SDK's
 /// `Classification` type (`sdks/db/src/types.ts`) and `crate::diff::Classification`.
-pub const VALID_CLASSIFICATIONS: &[&str] = &["public", "pii", "spi", "phi", "pci", "internal"];
+pub(crate) const VALID_CLASSIFICATIONS: &[&str] = &["public", "pii", "spi", "phi", "pci", "internal"];
 
 /// Per-app mask policy. Maps actor-role string → set
 /// of classifications the role is permitted to unmask.
@@ -76,7 +76,7 @@ pub const VALID_CLASSIFICATIONS: &[&str] = &["public", "pii", "spi", "phi", "pci
 /// on this isolate" — [`crate::crud::unmask::check_unmask_authorization`]
 /// then falls back to the default-deny rule (only `auto` allowed).
 #[derive(Debug, Clone, Default)]
-pub struct MaskPolicy {
+pub(crate) struct MaskPolicy {
     /// `role -> set of classifications`. Roles missing from the map
     /// have no privileges (every classification request is denied).
     pub roles: HashMap<String, HashSet<String>>,
@@ -88,7 +88,7 @@ impl MaskPolicy {
     /// [`Self::allows`] short-circuits on the `auto` role.
     #[must_use]
     #[cfg(test)]
-    pub fn empty() -> Self {
+    pub(crate) fn empty() -> Self {
         Self {
             roles: HashMap::new(),
         }
@@ -110,7 +110,7 @@ impl MaskPolicy {
     ///
     /// 3. **Unknown role**: deny.
     #[must_use]
-    pub fn allows(&self, role: &str, classification: &str) -> bool {
+    pub(crate) fn allows(&self, role: &str, classification: &str) -> bool {
         match self.roles.get(role) {
             Some(set) => set.contains(classification),
             None => {
@@ -137,7 +137,7 @@ impl MaskPolicy {
     ///   role value is not an array of strings.
     /// - `invalid_mask_classification` — a classification is not one of
     ///   the six built-ins.
-    pub fn from_json(v: &Value) -> Result<Self, DbError> {
+    pub(crate) fn from_json(v: &Value) -> Result<Self, DbError> {
         let obj = v.as_object().ok_or_else(|| DbError::ValidationFailed {
             code: "invalid_mask_policy_shape",
             message: "mask policy: must be an object mapping role strings \
@@ -195,7 +195,7 @@ impl MaskPolicy {
     /// Sorted by role and classification so the wire bytes are
     /// deterministic — operators reading the storage column see a
     /// stable form regardless of HashMap iteration order.
-    pub fn to_json(&self) -> Value {
+    pub(crate) fn to_json(&self) -> Value {
         let mut role_names: Vec<&String> = self.roles.keys().collect();
         role_names.sort();
         let mut obj = serde_json::Map::with_capacity(role_names.len());

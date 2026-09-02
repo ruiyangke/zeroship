@@ -511,7 +511,7 @@ fn nibble(c: u8) -> Result<u8, DbError> {
 /// placeholder. The markers must NOT survive to the parameter list (PG
 /// has no such column).
 #[cfg(any(test, feature = "test-helpers"))]
-pub fn strip_encryption_markers(row: &mut Value) {
+pub(crate) fn strip_encryption_markers(row: &mut Value) {
     if let Some(obj) = row.as_object_mut() {
         obj.retain(|k, _| !k.starts_with("__zsbin__"));
     }
