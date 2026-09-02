@@ -67,7 +67,6 @@
 //! access to non-system callers. Without a configured policy, only the
 //! `auto` system actor can unmask.
 
-use crate::op_error::ToOpError;
 use base64::Engine as _;
 use serde_json::Value;
 
@@ -1564,7 +1563,7 @@ async fn write_audit_query_hint_row(
 // V8 dispatch glue
 // ---------------------------------------------------------------------------
 
-use zeroship_runtime::state::{OpResult, ResolveValue};
+use zeroship_runtime::state::ResolveValue;
 
 /// V8-facing dispatch helper. Returns the unresolved Promise; the
 /// `dispatch_unmask` body runs as a spawned op and resolves with
@@ -1585,36 +1584,19 @@ pub(crate) fn dispatch_unmask_field<'s>(
     let parsed = parse_args(&args_v);
     let binding = binding.clone();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let args = match parsed {
-            Ok(a) => a,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                };
-            }
-        };
-        match dispatch_unmask(&binding, args).await {
-            Ok(result) => {
-                // Wire shape: `{ plaintext: <string> }`. The SDK reads
-                // `result.plaintext` directly; for `wraps = bytes` the
-                // SDK base64-decodes on its side.
-                let payload = serde_json::json!({ "plaintext": result.plaintext });
-                OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::Json(payload.to_string()),
-                    request_id,
-                }
-            }
-            Err(e) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
+    // The parse error folds into `settle`'s error arm via `?`; it made the same
+    // `reject_op` call the hand-rolled arm here did.
+    state.borrow_mut().spawned_ops.push(Box::pin(super::settle(
+        resolver,
+        request_id,
+        async move { dispatch_unmask(&binding, parsed?).await },
+        |result| {
+            // Wire shape: `{ plaintext: <string> }`. The SDK reads
+            // `result.plaintext` directly; for `wraps = bytes` the
+            // SDK base64-decodes on its side.
+            ResolveValue::Json(serde_json::json!({ "plaintext": result.plaintext }).to_string())
+        },
+    )));
 
     promise
 }
@@ -1714,44 +1696,26 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
     let parsed = parse_bulk_args(&args_v);
     let binding = binding.clone();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(async move {
-        let args = match parsed {
-            Ok(a) => a,
-            Err(e) => {
-                return OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::RejectError(e.to_op_error()),
-                    request_id,
-                };
-            }
-        };
-        match dispatch_bulk_unmask(&binding, args).await {
-            Ok(result) => {
-                // Wire shape: `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
-                // `BTreeMap` serialises as a JSON object with sorted
-                // keys — deterministic for golden-snapshot tests.
-                let mut obj = serde_json::Map::with_capacity(result.results.len());
-                for (row_pk, cols) in result.results {
-                    let mut col_obj = serde_json::Map::with_capacity(cols.len());
-                    for (c, pt) in cols {
-                        col_obj.insert(c, Value::String(pt));
-                    }
-                    obj.insert(row_pk, Value::Object(col_obj));
+    state.borrow_mut().spawned_ops.push(Box::pin(super::settle(
+        resolver,
+        request_id,
+        async move { dispatch_bulk_unmask(&binding, parsed?).await },
+        |result| {
+            // Wire shape: `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
+            // `BTreeMap` serialises as a JSON object with sorted
+            // keys — deterministic for golden-snapshot tests. The reshaping is
+            // JS-wire lowering, so it belongs on this side of the boundary.
+            let mut obj = serde_json::Map::with_capacity(result.results.len());
+            for (row_pk, cols) in result.results {
+                let mut col_obj = serde_json::Map::with_capacity(cols.len());
+                for (c, pt) in cols {
+                    col_obj.insert(c, Value::String(pt));
                 }
-                let payload = serde_json::json!({ "results": Value::Object(obj) });
-                OpResult::JsValue {
-                    resolver,
-                    value: ResolveValue::Json(payload.to_string()),
-                    request_id,
-                }
+                obj.insert(row_pk, Value::Object(col_obj));
             }
-            Err(e) => OpResult::JsValue {
-                resolver,
-                value: ResolveValue::RejectError(e.to_op_error()),
-                request_id,
-            },
-        }
-    }));
+            ResolveValue::Json(serde_json::json!({ "results": Value::Object(obj) }).to_string())
+        },
+    )));
 
     promise
 }
