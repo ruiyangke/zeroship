@@ -694,11 +694,7 @@ async fn open_session(app_id: &str, begin_sql: &str) -> Result<(), OpenSessionEr
         crate::backend::BackendHandle::Postgres(pg) => {
             use crate::backend::SqlExecutor;
             let client = pg.acquire_dedicated_client(app_id).await?;
-            let tx_client = TxConnection::Postgres(client);
-            super::client_exec_on_tx(&backend, &tx_client, begin_sql, &[]).await?;
-            let TxConnection::Postgres(client) = tx_client else {
-                unreachable!("just constructed a Postgres tx client")
-            };
+            pg.client_exec(&client, begin_sql, &[]).await?;
             super::apply_per_app_role(&client, app_id).await?;
             install(app_id, TxConnection::Postgres(client));
         }
@@ -710,11 +706,7 @@ async fn open_session(app_id: &str, begin_sql: &str) -> Result<(), OpenSessionEr
             // gets a lane that cannot see its own tables.
             sq.attach_app_file(app_id).await?;
             let client = sq.acquire_dedicated_client(app_id).await?;
-            let tx_client = TxConnection::Sqlite(client);
-            super::client_exec_on_tx(&backend, &tx_client, "BEGIN", &[]).await?;
-            let TxConnection::Sqlite(client) = tx_client else {
-                unreachable!("just constructed a SQLite tx client")
-            };
+            sq.client_exec(&client, "BEGIN", &[]).await?;
             install(app_id, TxConnection::Sqlite(client));
         }
     }
@@ -746,12 +738,8 @@ fn install(app_id: &str, client: TxConnection) {
 
 /// Run one statement on the app's pinned transaction session.
 async fn exec_on_session(app_id: &str, sql: &str, params: &[&str]) -> Result<(), DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: not configured"))?;
     let client = crate::context::TxClientSlotGuard::take(app_id)?;
-    super::client_exec_on_tx(&backend, client.client(), sql, params)
-        .await
-        .map(|_| ())
+    client.client().exec(sql, params).await.map(|_| ())
 }
 
 /// Send terminal SQL and classify what the backend actually did.
@@ -763,13 +751,17 @@ async fn exec_on_session(app_id: &str, sql: &str, params: &[&str]) -> Result<(),
 /// scoped to the PostgreSQL `COMMIT` arm: `RELEASE` answers with the tag
 /// `RELEASE`, so "anything but COMMIT is a failure" would reject every healthy
 /// nested commit.
+///
+/// **The vendor is read off the pinned session, never off the thread's ambient
+/// backend.** Until 2026-09-02 this matched `(BackendHandle, TxConnection)` and
+/// needed a `_ => mismatch` arm to be total. The pair really can disagree - a
+/// `register` with a changed URL calls [`crate::context::ThreadDbContext::clear_pool`],
+/// which nulls `backend` and leaves `tx_conns` untouched - and when it did, an
+/// open transaction on a live connection settled `Indeterminate` and had its
+/// session withdrawn. The session is the authority on how to talk to itself:
+/// `TxConnection`'s two variants ARE the two `SqlExecutor::Client` associated
+/// types, so the variant already names the vendor.
 async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option<DbError>) {
-    let Some(backend) = crate::context::with(|c| c.backend()) else {
-        return (
-            TerminalResult::Indeterminate,
-            Some(DbError::config("not_configured", "db: not configured")),
-        );
-    };
     let Some(client) = crate::context::with_mut(|c| c.take_tx_client_for(app_id)) else {
         // The session is gone before terminal SQL was sent. This does NOT prove
         // the transaction ended - that inference is DBR-03 - so it is
@@ -783,8 +775,8 @@ async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option
     };
 
     let verb = intent.verb();
-    let outcome = match (&backend, &client) {
-        (crate::backend::BackendHandle::Postgres(_), TxConnection::Postgres(pg)) => {
+    let outcome = match &client {
+        TxConnection::Postgres(pg) => {
             match pg.batch_execute_reporting_tag(verb).await {
                 Ok(tag) => match (intent, tag.as_deref()) {
                     // The L8 case: a COMMIT PostgreSQL answered ROLLBACK is a
@@ -805,7 +797,7 @@ async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option
                 }
             }
         }
-        (crate::backend::BackendHandle::Sqlite(_), TxConnection::Sqlite(handle)) => {
+        TxConnection::Sqlite(handle) => {
             use crate::backend::sqlite::session::TerminalIntent;
             let sqlite_intent = match intent {
                 SettleIntent::Commit => TerminalIntent::Commit,
@@ -816,10 +808,6 @@ async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option
                 Err(error) => (TerminalResult::Indeterminate, Some(error)),
             }
         }
-        _ => (
-            TerminalResult::Indeterminate,
-            Some(DbError::internal("db: transaction backend/client mismatch")),
-        ),
     };
 
     // The session is disposed of by `Action::ReleaseSession` / `WithdrawSession`,
@@ -1029,17 +1017,11 @@ async fn cleanup(app_id: &str, token: CommandToken, goal: CleanupGoal) -> Cleanu
 /// `None` means the slot was empty - which is a question about ownership, not an
 /// answer, and the caller resolves it.
 async fn rollback_session_in_slot(app_id: &str) -> Option<CleanupAck> {
-    let backend = crate::context::with(|c| c.backend());
     let client = crate::context::with_mut(|c| c.take_tx_client_for(app_id))?;
 
-    let ack = match (&backend, &client) {
-        (Some(crate::backend::BackendHandle::Postgres(_)), TxConnection::Postgres(pg)) => {
-            cleanup_postgres(pg).await
-        }
-        (Some(crate::backend::BackendHandle::Sqlite(_)), TxConnection::Sqlite(handle)) => {
-            cleanup_sqlite(handle).await
-        }
-        _ => CleanupAck::Indeterminate,
+    let ack = match &client {
+        TxConnection::Postgres(pg) => cleanup_postgres(pg).await,
+        TxConnection::Sqlite(handle) => cleanup_sqlite(handle).await,
     };
 
     // Put it back so the reducer's session disposition can act on it.

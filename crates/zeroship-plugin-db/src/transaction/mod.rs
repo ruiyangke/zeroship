@@ -164,38 +164,6 @@ const VALID_ISOLATION_LEVELS: &[&str] = &[
     "SERIALIZABLE",
 ];
 
-/// Execute a control statement (`BEGIN`, `SAVEPOINT`, `RELEASE`,
-/// `ROLLBACK TO`) against the backend-specific pinned tx client.
-///
-/// **Terminal statements do NOT come through here.** A terminal statement's
-/// command tag is not cosmetic - PostgreSQL answers `COMMIT` with the tag
-/// `ROLLBACK` when the transaction is in a failed state, and this path goes
-/// through `client_exec`, which returns `Ok(rows.len())` and throws the tag
-/// away. `driver::terminal` reads the tag and classifies the three-way
-/// [`reducer::TerminalResult`] the state machine needs.
-pub(crate) async fn client_exec_on_tx(
-    backend: &crate::backend::BackendHandle,
-    client: &crate::context::TxConnection,
-    sql: &str,
-    params: &[&str],
-) -> Result<u64, zeroship_data_core::error::DbError> {
-    use crate::backend::SqlExecutor;
-    use crate::context::TxConnection;
-
-    match (backend, client) {
-        (crate::backend::BackendHandle::Postgres(pg), TxConnection::Postgres(client)) => {
-            pg.client_exec(client, sql, params).await
-        }
-        (crate::backend::BackendHandle::Sqlite(sq), TxConnection::Sqlite(client)) => {
-            sq.client_exec(client, sql, params).await
-        }
-        (crate::backend::BackendHandle::Postgres(_), TxConnection::Sqlite(_))
-        | (crate::backend::BackendHandle::Sqlite(_), TxConnection::Postgres(_)) => Err(
-            zeroship_data_core::error::DbError::internal("db: transaction backend/client mismatch"),
-        ),
-    }
-}
-
 /// Apply the §17.5 per-app PG role to a transaction's dedicated client.
 ///
 /// Issues `SET LOCAL ROLE "<per-app role>"` on `client` so every
@@ -1528,6 +1496,73 @@ mod tests {
                 .await
                 .expect("count notes after commit");
             assert_eq!(rows[0][0].as_deref(), Some("1"));
+            assert!(!crate::context::with(|c| c.has_tx_for("app_sqlite")));
+        });
+    }
+
+    /// **An open transaction survives the thread's backend being cleared.**
+    ///
+    /// `ThreadDbContext::clear_pool` nulls `backend` and leaves `tx_conns`
+    /// untouched, so a `register` with a changed URL puts the thread in a state
+    /// where a live pinned session exists and the ambient backend does not.
+    /// Until 2026-09-02 both the operation path and the settle path read that
+    /// ambient handle to decide which vendor they were talking to:
+    /// `exec_on_session` refused with `not_configured`, and `terminal` returned
+    /// `Indeterminate`, so a transaction on a perfectly healthy connection lost
+    /// its writes and had its session withdrawn.
+    ///
+    /// The session is the authority on how to talk to itself.
+    /// [`crate::context::TxConnection`]'s two variants ARE the two
+    /// `SqlExecutor::Client` associated types, so the variant already names the
+    /// vendor and no second handle is consulted.
+    ///
+    /// Restoring either read reddens this: re-add the `not_configured` guard to
+    /// `exec_on_session` and the second insert panics; restore `terminal`'s
+    /// `match (&backend, &client)` with its `_ => mismatch` arm and the commit
+    /// comes back `Indeterminate` with zero rows committed.
+    #[test]
+    fn an_open_transaction_outlives_the_threads_backend_being_cleared() {
+        run(async {
+            let (backend, _dir, _reset) = install_sqlite_backend_for_test();
+            // Taken from the backend we own, not from the context, so it stays
+            // usable as an oracle after the context's handle is dropped.
+            let probe = backend.autocommit_client();
+            backend
+                .client_exec(
+                    &probe,
+                    "CREATE TABLE notes (id INTEGER PRIMARY KEY, title TEXT)",
+                    &[],
+                )
+                .await
+                .expect("create table");
+
+            exec_begin_or_savepoint(false, None, "app_sqlite")
+                .await
+                .expect("begin sqlite tx");
+            run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('before')")
+                .await
+                .expect("insert before the backend is cleared");
+
+            // The window this test exists for: ambient backend gone, pinned
+            // session still open and still perfectly usable.
+            crate::context::with_mut(|c| c.clear_pool());
+            assert!(crate::context::with(|c| c.backend()).is_none());
+            assert!(crate::context::with(|c| c.has_tx_for("app_sqlite")));
+
+            run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('after')")
+                .await
+                .expect("insert after the backend is cleared");
+
+            match exec_settle("app_sqlite", true, None).await {
+                SettleOutcome::Ok => {}
+                other => panic!("expected Ok settle outcome, got {other:?}"),
+            }
+
+            let rows = probe
+                .query_internal("SELECT COUNT(*) FROM notes", &[])
+                .await
+                .expect("count notes after commit");
+            assert_eq!(rows[0][0].as_deref(), Some("2"));
             assert!(!crate::context::with(|c| c.has_tx_for("app_sqlite")));
         });
     }
