@@ -197,8 +197,27 @@ of this step.
    `a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection` red with
    `Indeterminate(Cancelled)` where `Cancelled(Cancelled)` is required. The
    order rule survived the move as a rule, not just as a comment.
-4. Introduce `BeginIntent`; move `build_begin_sql` into the PG lane; change
-   `StepConfig`.
+4. **DONE, `61b6b75df`.** `BeginIntent` and `IsolationLevel` are in data-core;
+   `StepConfig::begin_sql: Option<String>` is `begin: BeginIntent`;
+   `build_begin_sql` is deleted and `backend::postgres::render_begin` renders
+   the PostgreSQL spelling. The SQLite arm's hardcoded `BEGIN` now carries the
+   reason it is correct rather than looking like a dropped request.
+
+   **Reading the type turned up a defect the plan did not have.** The creator's
+   string was validated TWICE - `v8_classes::db::normalize_isolation_level` at
+   the boundary, then `build_begin_sql` again in the engine - by two lists that
+   accept DIFFERENT sets. Only the boundary took camelCase (`readCommitted`),
+   so the engine's list would have refused a spelling the boundary publishes;
+   they agreed only because the boundary always ran first and emitted uppercase.
+   The boundary now returns the variant, the second list is gone, and the string
+   stops existing at the one place it is interpreted.
+
+   The two tests that covered `build_begin_sql` moved rather than died, and
+   split along the same seam: rendering to
+   `backend::postgres::begin_render_tests` (all four levels, up from three),
+   parsing to data-core's `isolation_level_tests` (three arms including a
+   round trip through `ansi_name`, which is what stops the two halves drifting
+   into separate lists again).
 5. **DONE, `65812a5e0`.** `apply_per_app_role` moved to
    `backend::postgres::apply_per_app_role`. Not folded INTO `open` - it stays a
    named function, because `open_session` calls it between acquiring the client
