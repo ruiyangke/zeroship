@@ -6,7 +6,28 @@
 //! would let stale or wrong masked text into every default read, silently
 //! weakening the masking privacy guarantee.
 //!
-//! This module periodically samples rows for every masked column on
+//! **NOTHING PERIODIC EXISTS. This module does not run in production, and did
+//! not on 2026-09-01 when that was measured.** Two independent reasons, either
+//! of which alone would be enough:
+//!
+//! * `crud/mod.rs:90` declares it `#[cfg(any(test, feature = "test-helpers"))]`,
+//!   so it is not compiled into a release worker.
+//! * `run_drift_check_for_column` has ZERO callers outside this file other than
+//!   five sites in `tests/sqlite_integration.rs`. There is no scheduler in
+//!   `zeroship-worker`, and no cron in `zeroship-control`, that names it.
+//!
+//! So the sampling described below is a design that is fully built and entirely
+//! unwired. The paragraphs that follow said "periodically samples" in the
+//! present tense, which reads as a running defence; it is a dormant one. That
+//! matters because the thing it would detect - a masked column whose stored
+//! mask has drifted from its raw value - is exactly what a creator can cause by
+//! deleting one descriptor key, and the deletion also removes the column from
+//! this check's own enumeration (it resolves the collection schema). See the
+//! task on encryption being decided from the creator-authored descriptor.
+//!
+//! What follows describes the SHAPE, not the behaviour of a deployed worker.
+//!
+//! This module samples rows for every masked column on
 //! every collection and verifies the equation
 //!
 //! ```text
