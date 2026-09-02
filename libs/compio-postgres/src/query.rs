@@ -948,6 +948,77 @@ mod tests {
         (client, receiver)
     }
 
+    fn scripted_backend_frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut frame = Vec::with_capacity(body.len() + 5);
+        frame.push(tag);
+        frame.extend_from_slice(&(u32::try_from(body.len()).unwrap() + 4).to_be_bytes());
+        frame.extend_from_slice(body);
+        frame
+    }
+
+    /// Drive `sync` against one scripted backend frame.
+    async fn sync_against(frame: Vec<u8>) -> Result<(), crate::Error> {
+        use crate::client::ResponseMessages;
+        use crate::codec::BackendMessages;
+        use futures_util::StreamExt;
+        use std::sync::Arc;
+
+        let (client, mut receiver) = test_client();
+        let inner = Arc::clone(client.inner());
+        let sync = super::sync(&inner);
+        let respond = async {
+            let mut request = receiver
+                .next()
+                .await
+                .expect("sync did not enqueue its Sync request");
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    BytesMut::from(&frame[..]),
+                )))
+                .expect("deliver the scripted sync response");
+        };
+        let (result, ()) = futures_util::join!(sync, respond);
+        result
+    }
+
+    /// `Client::check_connection` must not call a desynchronised session
+    /// healthy.
+    ///
+    /// `sync` is the whole body of that public method: it sends a bare Sync
+    /// and accepts only `ReadyForQuery`. The refusal arm had never run, and it
+    /// is the one that matters - a health check reporting `Ok` after the peer
+    /// answered with something else tells the caller the connection is usable
+    /// when the next request will find the stream out of step.
+    ///
+    /// `BindComplete` is the payload because it is well framed and legal in
+    /// its own right; only its position is wrong.
+    #[compio::test]
+    async fn check_connection_refuses_a_reply_that_is_not_ready_for_query() {
+        let error = sync_against(scripted_backend_frame(b'2', b""))
+            .await
+            .expect_err("sync accepted a frame that was not ReadyForQuery");
+        let rendered = format!("{error}");
+        assert!(
+            rendered.contains("unexpected message from server"),
+            "sync reported {rendered:?} rather than an out-of-order message"
+        );
+        assert!(
+            error.code().is_none(),
+            "sync reported a server SQLSTATE, so the refusal was not local"
+        );
+    }
+
+    /// The one-variable control: the same path with the frame it is owed.
+    /// Without it the refusal above also passes for a `sync` that never
+    /// succeeds at all.
+    #[compio::test]
+    async fn check_connection_accepts_ready_for_query() {
+        sync_against(scripted_backend_frame(b'Z', b"I"))
+            .await
+            .expect("sync rejected a well-formed ReadyForQuery");
+    }
+
     fn frontend_frames(mut batch: &[u8]) -> Vec<(u8, Vec<u8>)> {
         let mut frames = Vec::new();
         while !batch.is_empty() {
