@@ -1760,6 +1760,9 @@ mod tests {
     //! caller fails at a more distant site.
 
     use super::*;
+    // `DbError` lives in `zeroship-data-core`; the lowering to an `OpError` is
+    // the ADAPTER's, so it arrives as a trait rather than an inherent method.
+    use crate::op_error::ToOpError;
 
     /// Compile-time: the canonical impl [`PostgresBackend`] satisfies
     /// the `Backend` trait. Function body type-checks at build time;

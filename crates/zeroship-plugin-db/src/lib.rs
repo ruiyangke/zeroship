@@ -551,7 +551,7 @@ mod runtime_descriptor_binding_tests {
             .bind_runtime_descriptor(scope, APP, Some(&runtime_descriptor))
             .expect("bind descriptor");
 
-        let binding = binding::DbBinding::new(APP, DEPLOY);
+        let binding = zeroship_data_core::binding::DbBinding::new(APP, DEPLOY);
         let schema = descriptor::collection_schema(&binding, "users")
             .expect("declared collection must resolve before any read");
         assert_eq!(
@@ -589,7 +589,7 @@ mod runtime_descriptor_binding_tests {
             .bind_runtime_descriptor(scope, APP, None)
             .expect("bind schema-less runtime");
 
-        let binding = binding::DbBinding::new(APP, DEPLOY);
+        let binding = zeroship_data_core::binding::DbBinding::new(APP, DEPLOY);
         let error = descriptor::collection_schema(&binding, "stale")
             .expect_err("schema-less binding must declare no collection");
         assert!(
@@ -764,7 +764,11 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json::Value) {
-    cache_schema_for_deploy_for_tests(&binding::DbBinding::cold_start(app_id), collection, schema);
+    cache_schema_for_deploy_for_tests(
+        &zeroship_data_core::binding::DbBinding::cold_start(app_id),
+        collection,
+        schema,
+    );
 }
 
 /// Test helper: [`cache_schema_for_tests`] for an explicit binding, so a
@@ -773,7 +777,7 @@ pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn cache_schema_for_deploy_for_tests(
-    binding: &binding::DbBinding,
+    binding: &zeroship_data_core::binding::DbBinding,
     collection: &str,
     schema: serde_json::Value,
 ) {
@@ -919,7 +923,7 @@ pub async fn drop_pooled_lock_guard_without_release_for_tests(
     };
     let guard = backend::lock_guard::LockGuard::acquire(&backend, client, &scope)
         .await
-        .map_err(error::DbError::into_string)?;
+        .map_err(DbError::into_string)?;
     drop(guard);
     Ok(())
 }

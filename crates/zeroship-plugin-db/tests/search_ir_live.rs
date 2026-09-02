@@ -498,7 +498,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
 
         // The SQLite half: the same metric, refused.
         use zeroship_plugin_db::backend::{VectorIndex, VectorMetric as BackendMetric};
-        use zeroship_plugin_db::binding::DbBinding;
+        use zeroship_data_core::binding::DbBinding;
         let dir = tempfile::tempdir().expect("tempdir");
         let sqlite = zeroship_plugin_db::backend_selection::new_sqlite_backend(
             std::path::PathBuf::from(dir.path()),
@@ -518,7 +518,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
             .await
             .expect_err("vec0 has no inner-product metric");
         let refused_code = match &refused {
-            zeroship_plugin_db::error::DbError::Configuration { code, .. } => *code,
+            zeroship_data_core::error::DbError::Configuration { code, .. } => *code,
             other => panic!("expected a typed Configuration refusal, got {other:?}"),
         };
         assert_eq!(refused_code, "vector_unsupported_metric");
@@ -540,7 +540,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
             .await
             .expect_err("there is no table, so this fails too - but for another reason");
         let other_code = match &other {
-            zeroship_plugin_db::error::DbError::Configuration { code, .. } => Some(*code),
+            zeroship_data_core::error::DbError::Configuration { code, .. } => Some(*code),
             _ => None,
         };
         assert_ne!(

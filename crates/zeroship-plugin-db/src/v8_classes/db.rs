@@ -400,7 +400,8 @@ mod tests {
     use zeroship_runtime::Runtime;
 
     use super::normalize_isolation_level;
-    use crate::{binding::DbBinding, v8_classes::collection::Collection};
+    use crate::v8_classes::collection::Collection;
+    use zeroship_data_core::binding::DbBinding;
 
     fn runtime_for_deploy(app_id: &str, deploy_token: &str) -> Runtime {
         Runtime::builder()

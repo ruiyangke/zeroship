@@ -579,6 +579,9 @@ fn err_is_undefined_object(e: &compio_postgres::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // `DbError` lives in `zeroship-data-core`; the lowering to an `OpError` is
+    // the ADAPTER's, so it arrives as a trait rather than an inherent method.
+    use crate::op_error::ToOpError;
 
     #[test]
     fn worker_setup_only_probes_for_the_migrated_publication() {

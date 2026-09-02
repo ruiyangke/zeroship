@@ -42,7 +42,7 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// this environment name; the flag comes from the same declaration.
 const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
 
-type SlotReaperTask = compio::runtime::JoinHandle<Result<(), zeroship_plugin_db::error::DbError>>;
+type SlotReaperTask = compio::runtime::JoinHandle<Result<(), zeroship_data_core::error::DbError>>;
 
 async fn run_server_with_slot_reaper<S>(
     server: S,
@@ -787,7 +787,7 @@ mod tests {
     #[compio::test]
     async fn reaper_failure_stops_the_worker_server() {
         let task = compio::runtime::spawn(async {
-            Err(zeroship_plugin_db::error::DbError::Internal {
+            Err(zeroship_data_core::error::DbError::Internal {
                 message: "lost maintenance lease".to_string(),
             })
         });
