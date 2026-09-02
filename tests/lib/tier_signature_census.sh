@@ -80,6 +80,32 @@
 #     only in the crate owning DbError, so it CANNOT follow from_pg down into
 #     data-postgres. data-core keeps the driver dependency, or the impl is
 #     deleted, or the pg error is newtyped. A design decision, not a TODO.
+#   - A MODULE GATED WHERE IT IS DECLARED, NOT WHERE IT IS DEFINED. Every cfg
+#     rule below reads the file being scanned. It cannot see the attribute that
+#     decides whether the file is compiled at all, because that attribute is in
+#     the PARENT:
+#
+#         // lib.rs:259
+#         #[cfg(any(test, feature = "test-helpers"))]
+#         pub mod drop_namespace;
+#
+#     MEASURED 2026-09-02: `drop_namespace` has exactly ONE declaration, it is
+#     gated, and it has zero `drop_namespace::` callers in src/. It is in no
+#     shipped binary - its own header says "real code in a build nobody ships" -
+#     and this census reports its `use compio_postgres::Pool` as a live
+#     ENGINE violation anyway. So does tests/vendor_embedding_gate.sh, which
+#     carries it in the baseline. BOTH instruments over-report by that one file,
+#     for the same reason, and neither is wrong about anything else.
+#
+#     Read the headline as "N, of which drop_namespace.rs does not ship" until
+#     this is fixed. A FIX WAS ATTEMPTED AND REVERTED the same day: resolving
+#     each file's `mod` declaration and skipping the gated ones took the whole
+#     census to ZERO rows - it began excluding every file, not just the gated
+#     one - and an instrument that reports nothing is worse than one that
+#     over-reports by one. The cause was not diagnosed. Anyone retrying should
+#     check the count is 2-minus-1 and not 0 before believing it, because both
+#     outcomes look like "the number went down".
+#
 #   - ASSOCIATED-TYPE BINDINGS. `type LiveSchema = crate::diff::LiveSchema;`
 #     (backend/postgres.rs:340, backend/sqlite/mod.rs:803) binds a contract's
 #     associated type to a zeroship-schema type through two renames; grepping
