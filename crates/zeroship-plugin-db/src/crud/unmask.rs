@@ -1586,7 +1586,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
 
     // The parse error folds into `settle`'s error arm via `?`; it made the same
     // `reject_op` call the hand-rolled arm here did.
-    state.borrow_mut().spawned_ops.push(Box::pin(super::settle(
+    state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
         resolver,
         request_id,
         async move { dispatch_unmask(&binding, parsed?).await },
@@ -1696,7 +1696,7 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
     let parsed = parse_bulk_args(&args_v);
     let binding = binding.clone();
 
-    state.borrow_mut().spawned_ops.push(Box::pin(super::settle(
+    state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
         resolver,
         request_id,
         async move { dispatch_bulk_unmask(&binding, parsed?).await },

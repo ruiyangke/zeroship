@@ -440,7 +440,7 @@ pub(crate) fn dispatch_set_mask_policy_field<'s>(
     // The engine half already existed as a separate `async fn`; what was here
     // was a hand-rolled copy of `settle`'s two arms. Its error arm and
     // `settle`'s are the same `reject_op` call.
-    state.borrow_mut().spawned_ops.push(Box::pin(super::settle(
+    state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
         resolver,
         request_id,
         async move { dispatch_set_mask_policy(&app, policy_v).await },

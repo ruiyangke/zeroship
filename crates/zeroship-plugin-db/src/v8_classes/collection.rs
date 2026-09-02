@@ -14,14 +14,14 @@ use zeroship_runtime::state::OpError;
 use zeroship_runtime_macros::{v8_class, v8_constructor, v8_getter, v8_method, v8_name};
 
 use zeroship_data_core::binding::DbBinding;
-use crate::crud::{
-    dispatch_aggregate, dispatch_bulk_unmask_field, dispatch_count, dispatch_delete_many,
-    dispatch_delete_one, dispatch_distinct, dispatch_find, dispatch_insert, dispatch_insert_many,
-    dispatch_near, dispatch_purge_many, dispatch_purge_one, dispatch_restore_many,
-    dispatch_restore_one, dispatch_search, dispatch_unmask_field, dispatch_update_many,
-    dispatch_update_one, dispatch_upsert,
-};
+use crate::crud::{dispatch_bulk_unmask_field, dispatch_unmask_field};
 use crate::v8_bridge::{read_json_arg, refuse_if_query_capability};
+use super::dispatch::{
+    dispatch_aggregate, dispatch_count, dispatch_delete_many, dispatch_delete_one,
+    dispatch_distinct, dispatch_find, dispatch_insert, dispatch_insert_many, dispatch_near,
+    dispatch_purge_many, dispatch_purge_one, dispatch_restore_many, dispatch_restore_one,
+    dispatch_search, dispatch_update_many, dispatch_update_one, dispatch_upsert,
+};
 
 // ---------------------------------------------------------------------------
 // Collection state
