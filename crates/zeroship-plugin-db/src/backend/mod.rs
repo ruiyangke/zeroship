@@ -1700,30 +1700,6 @@ impl BackendHandle {
         }
     }
 
-    /// Run `f` against the inner [`PostgresBackend`].
-    ///
-    /// **No `dyn Backend` anywhere**: dispatching to the concrete
-    /// impl through an enum match keeps
-    /// every consumer site monomorphised over `PostgresBackend` — the
-    /// trait-method calls inline through the PG impl exactly as they
-    /// did when the field was `Option<Rc<PostgresBackend>>`. No
-    /// allocation, no vtable, no per-call overhead.
-    ///
-    /// The SQLite arm is reachable, so the closure
-    /// must convey "not the PG arm" rather than always running.
-    /// Return type became `Option<R>` (mirrors [`Self::as_postgres`])
-    /// — the closure runs and yields `Some(R)` on the PG arm; the
-    /// SQLite arm yields `None`. Call sites previously written as
-    /// `handle.with_postgres(|pg| …)` now write
-    /// `handle.with_postgres(|pg| …).ok_or_else(|| backend_unsupported_err())?`
-    /// — the same shape `as_postgres()` consumers already use.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn with_postgres<R>(&self, f: impl FnOnce(&PostgresBackend) -> R) -> Option<R> {
-        match self {
-            Self::Postgres(b) => Some(f(b)),
-            Self::Sqlite(_) => None,
-        }
-    }
 
     /// Borrow the inner [`PostgresBackend`] as a `&PostgresBackend`
     /// reference — the async-friendly companion to `BackendHandle::with_postgres`.
@@ -1756,27 +1732,6 @@ impl BackendHandle {
         }
     }
 
-    /// Run `f` against the inner [`SqliteBackend`], yielding
-    /// `Some(R)` on the SQLite arm or `None` otherwise.
-    ///
-    /// Symmetric counterpart to `BackendHandle::with_postgres`.
-    /// The `Option`-shaped return makes the consumer code style
-    /// identical across backend arms.
-    ///
-    /// Consumers still on the PG arm pattern typically write:
-    ///
-    /// ```ignore
-    /// let pg = backend.as_postgres().ok_or_else(|| backend_unsupported(...))?;
-    /// ```
-    ///
-    /// — the same shape works for SQLite via this accessor.
-    #[cfg(feature = "test-helpers")]
-    pub fn with_sqlite<R>(&self, f: impl FnOnce(&SqliteBackend) -> R) -> Option<R> {
-        match self {
-            Self::Postgres(_) => None,
-            Self::Sqlite(b) => Some(f(b)),
-        }
-    }
 
     /// Borrow the inner [`SqliteBackend`] as a `&SqliteBackend`
     /// reference — async-friendly companion to `BackendHandle::with_sqlite`.
@@ -2079,8 +2034,15 @@ mod tests {
     /// Construct a `BackendHandle::Postgres(…)` arm via the public API
     /// surface. Pins the variant name so a future rename trips
     /// compilation here rather than at every consumer site, and
-    /// proves [`BackendHandle::with_postgres`] / [`BackendHandle::as_postgres`]
-    /// dispatch through the PG arm without panic.
+    /// proves [`BackendHandle::as_postgres`] dispatches through the PG
+    /// arm without panic.
+    ///
+    /// It also exercised a `with_postgres` closure accessor until
+    /// 2026-09-02. That accessor and its SQLite twin were DELETED: they had
+    /// no caller anywhere except this pin, and a pin is not a use. The
+    /// `as_*` reference forms are what the crate actually calls - six
+    /// production sites in `crud/unmask.rs` alone - so the shape this test
+    /// protects is unchanged.
     ///
     /// Skipped under `--cfg miri` (the only sandbox where the PG
     /// `Rc<…>` construction below would be problematic): the test
@@ -2099,9 +2061,8 @@ mod tests {
         // PostgresBackend lives in tests/integration.rs (which spins
         // up Postgres). This test pins the *type* shape.
         fn _shape_check(handle: BackendHandle) -> bool {
-            // Both accessors return `Option<…>` (the PG
+            // The accessor returns `Option<…>` (the PG
             // arm yields `Some(…)`; the SQLite arm yields `None`).
-            let _: Option<()> = handle.with_postgres(|_b: &PostgresBackend| ());
             let _: Option<&PostgresBackend> = handle.as_postgres();
             true
         }
