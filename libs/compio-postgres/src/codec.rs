@@ -715,6 +715,49 @@ mod tests {
         frame
     }
 
+    /// `take_raw_frame` is reached during startup, where the caller hands over
+    /// whatever bytes have arrived rather than a guaranteed whole frame. A
+    /// header declaring more than the buffer holds is therefore an ordinary
+    /// short read, but it must not be taken as complete: `split_to(total_len)`
+    /// panics once `total_len` exceeds the buffer.
+    ///
+    /// The two halves differ in ONE variable - how many of the eight declared
+    /// body bytes are present - so the refusal is pinned to the shortfall and
+    /// not to anything else about the frame.
+    #[test]
+    fn a_startup_frame_shorter_than_its_declared_length_is_refused() {
+        // 'K' + Int32(12) declares 13 bytes total; only 9 are here.
+        let mut truncated = BytesMut::new();
+        truncated.extend_from_slice(&[b'K']);
+        truncated.extend_from_slice(&12i32.to_be_bytes());
+        truncated.extend_from_slice(&[0u8; 4]);
+        assert_eq!(truncated.len(), 9);
+
+        let error = BackendMessages::from_test_bytes(truncated)
+            .take_raw_frame(b'K')
+            .expect_err("a truncated BackendKeyData frame was taken as complete");
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        assert!(
+            error
+                .to_string()
+                .contains("incomplete PostgreSQL startup frame"),
+            "the short frame was not refused by name: {error}"
+        );
+
+        // Control: the same frame with all eight body bytes present is taken.
+        let mut whole = BytesMut::new();
+        whole.extend_from_slice(&[b'K']);
+        whole.extend_from_slice(&12i32.to_be_bytes());
+        whole.extend_from_slice(&[0u8; 8]);
+        assert_eq!(whole.len(), 13);
+
+        let body = BackendMessages::from_test_bytes(whole)
+            .take_raw_frame(b'K')
+            .expect("a complete BackendKeyData frame was refused")
+            .expect("a complete BackendKeyData frame was reported as absent");
+        assert_eq!(body.len(), 8, "the tag and length header leaked into body");
+    }
+
     /// A complete ErrorResponse owns the diagnosis for the request even when
     /// malformed bytes later in the same socket read retire the session. The
     /// decoder must split that valid prefix from the local framing failure so
