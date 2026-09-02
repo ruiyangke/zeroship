@@ -502,6 +502,74 @@ if [ "$fragment_names" != "$rust_names" ]; then
     exit 2
 fi
 
+# ---------------------------------------------------------------------------
+# Arm 6 (the same drift, one level down): the fragment's three system INDEXES
+# are restated in Rust as `SYSTEM_INDEXED_COLS` - once per dialect, three
+# identical copies in one file. Prove all three still match the fragment.
+#
+# Arm 5 compares assigned COLUMNS and is blind to this: an index set can drift
+# with every column name still agreeing. The consequence is quieter than arm 5's
+# and therefore more likely to survive review - nothing errors, the platform
+# simply stops indexing a column it indexes on the other two dialects, and the
+# first symptom is a sequential scan on someone's production soft-delete filter.
+#
+# Order is compared here too. These are single-column indexes, so order carries
+# no semantics for the database, but the three copies are maintained by hand
+# against the fragment and a divergence in order is the cheapest available
+# signal that one of them was edited in isolation.
+# ---------------------------------------------------------------------------
+charter_index_cols=$(
+    sed -n '/^\[\[inject\]\]/,/^\[\[/p' "$ROOT/$FRAGMENT" \
+        | grep -E '^\s*\{ *name *= *"ix_' \
+        | sed -E 's/.*columns *= *\[([^]]*)\].*/\1/' \
+        | tr -d '" ' | tr ',' '\n' | grep . \
+        || true
+)
+charter_index_n=$(printf '%s\n' "$charter_index_cols" | grep -c . || true)
+
+# Every Rust restatement, normalised to one comma-joined line each. Compared
+# individually rather than through `sort -u`: collapsing them first would hide
+# the case where two dialects agree with the fragment and the third does not.
+mapfile -t rust_index_decls < <(
+    grep -h 'SYSTEM_INDEXED_COLS: &\[&str\] = ' "$ROOT/$RUST_NAMES_FILE" \
+        | sed -E 's/.*= *&\[([^]]*)\].*/\1/' \
+        | tr -d '" ' \
+        || true
+)
+charter_index_joined=$(printf '%s\n' "$charter_index_cols" | paste -sd, -)
+
+# Examined = Rust declarations this arm actually compared. Gated on the charter
+# side having produced something: with an empty fragment list every declaration
+# would "disagree" for a reason that is about the extractor, not the tree.
+index_examined=0
+[ "$charter_index_n" -gt 0 ] && index_examined=${#rust_index_decls[@]}
+
+# Floor 2 against today's 3: one dialect may legitimately be retired, all three
+# vanishing at once means the grep stopped matching.
+if ! gate_arm index_agreement "$index_examined" 2; then
+    echo "  FAIL: the fragment yielded $charter_index_n system index column(s) and"
+    echo "        ${#rust_index_decls[@]} SYSTEM_INDEXED_COLS declaration(s) were found."
+    echo "        The extraction broke; re-point this arm, do not lower the floor."
+    gate_arms_finish || true
+    exit 2
+fi
+
+index_drift=0
+for decl in "${rust_index_decls[@]}"; do
+    [ "$decl" = "$charter_index_joined" ] && continue
+    index_drift=1
+    echo "  FAIL: a SYSTEM_INDEXED_COLS copy has drifted from the fragment."
+    echo "        $FRAGMENT system indexes: $charter_index_joined"
+    echo "        $RUST_NAMES_FILE copy:    $decl"
+done
+if [ "$index_drift" -ne 0 ]; then
+    echo "        The fragment creates these indexes; the Rust copies tell each"
+    echo "        dialect's DDL builder which columns to index. A copy that"
+    echo "        drifts silently unindexes a column on one dialect only."
+    gate_arms_finish || true
+    exit 2
+fi
+
 echo "  ok: one [[inject]] rule ($rule_lines semantic lines), $consumers_n consumers," \
      "generated view fresh, $name_agreement_n platform column names agree with" \
      "SYSTEM_FIELD_NAMES"
