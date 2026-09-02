@@ -42,7 +42,7 @@ use std::cell::Cell;
 use zeroship_runtime::state::{OpError, OpResult, ResolveValue, SharedState};
 
 use zeroship_data_core::binding::DbBinding;
-use zeroship_data_core::error::DbError;
+use zeroship_data_core::error::{DbError, IsolationLevel};
 use crate::op_error::ToOpError;
 use crate::transaction::{
     exec_begin_or_savepoint, exec_settle, reducer, SettleOutcome, TxAdmission,
@@ -158,13 +158,13 @@ struct TxFinalizer {
 /// then spawns the begin/savepoint op. Returns the outer promise; the
 /// creator callback runs once the begin op completes (see the module
 /// comment for the full 8-step flow). `asyncFn` is validated to be a
-/// function here; `opts.isolationLevel` is parsed + normalised by the
-/// caller (`Db::transaction`) and arrives as an already-validated SQL
-/// string.
+/// function here; `opts.isolationLevel` is resolved by the caller
+/// (`Db::transaction`) and arrives as a variant, so nothing downstream can
+/// receive a spelling it has to interpret.
 pub fn transaction_dispatch<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     user_fn: v8::Local<v8::Function>,
-    isolation_level: Option<String>,
+    isolation_level: Option<IsolationLevel>,
     binding: DbBinding,
 ) -> v8::Local<'s, v8::Promise> {
     let app_id = binding.app_id().to_string();
@@ -254,7 +254,7 @@ pub fn transaction_dispatch<'s>(
         } else {
             Some(TxAdmission::acquire(app_id.clone()).await)
         };
-        match exec_begin_or_savepoint(nested, isolation_level.as_deref(), &app_id).await {
+        match exec_begin_or_savepoint(nested, isolation_level, &app_id).await {
             Ok(frame) => {
                 // The session is installed and the reducer is in `Idle`. Every
                 // path out of there emits `ReleaseAdmission`, so the claim's

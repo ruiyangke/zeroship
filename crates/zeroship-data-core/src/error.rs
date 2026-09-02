@@ -112,6 +112,73 @@ pub enum TerminalResult {
     Indeterminate,
 }
 
+/// The isolation a creator asked their transaction to run at.
+///
+/// The four ANSI levels, held as a closed set rather than a validated string.
+/// A string would have to be re-validated by anything that trusted it, and
+/// would carry one dialect's spelling through code that is supposed to be
+/// dialect-free; [`Self::ansi_name`] is the rendering, on the same terms as
+/// [`SettleIntent::verb`] - a backend whose spelling differed would render its
+/// own rather than have this grow a case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IsolationLevel {
+    ReadUncommitted,
+    ReadCommitted,
+    RepeatableRead,
+    Serializable,
+}
+
+impl IsolationLevel {
+    /// Parse a creator-supplied level, case-insensitively.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_isolation_level` when the string names no ANSI level. This is
+    /// the ONLY place the creator's string is interpreted; past this point the
+    /// value is a variant and cannot be a typo.
+    pub fn parse(raw: &str) -> Result<Self, DbError> {
+        match raw.to_uppercase().as_str() {
+            "READ UNCOMMITTED" => Ok(Self::ReadUncommitted),
+            "READ COMMITTED" => Ok(Self::ReadCommitted),
+            "REPEATABLE READ" => Ok(Self::RepeatableRead),
+            "SERIALIZABLE" => Ok(Self::Serializable),
+            _ => Err(DbError::validation(
+                "invalid_isolation_level",
+                format!(
+                    "db.transaction: invalid isolation level: {raw}. Must be one of: \
+                     read uncommitted, read committed, repeatable read, serializable"
+                ),
+            )),
+        }
+    }
+
+    #[must_use]
+    pub const fn ansi_name(self) -> &'static str {
+        match self {
+            Self::ReadUncommitted => "READ UNCOMMITTED",
+            Self::ReadCommitted => "READ COMMITTED",
+            Self::RepeatableRead => "REPEATABLE READ",
+            Self::Serializable => "SERIALIZABLE",
+        }
+    }
+}
+
+/// How a transaction should be opened.
+///
+/// **The protocol transports this, not SQL.** SC-1's step configuration used to
+/// carry a rendered `BEGIN [ISOLATION LEVEL ...]` string - a PostgreSQL dialect
+/// artifact threaded through the vendor-neutral state machine for the benefit of
+/// exactly one of the two backends, since the SQLite arm ignored it and sent a
+/// hardcoded `BEGIN`. The intent goes down; each lane spells it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BeginIntent {
+    /// Open at the backend's default isolation.
+    #[default]
+    Default,
+    /// Open at a level the creator named.
+    Isolation(IsolationLevel),
+}
+
 /// What a forced cleanup proved about the session it acted on.
 ///
 /// The third member of the backend seam's vocabulary, beside [`SettleIntent`]
@@ -773,3 +840,57 @@ impl From<zeroship_schema::error::MaskSentinelError> for DbError {
     }
 }
 
+
+#[cfg(test)]
+mod isolation_level_tests {
+    use super::{DbError, IsolationLevel};
+
+    /// The validation half of what `transaction::build_begin_sql` used to do
+    /// in the engine, before the protocol stopped transporting SQL. Parsing is
+    /// the ONLY place a creator's string is interpreted; the rendering half is
+    /// `backend::postgres::render_begin`.
+    #[test]
+    fn every_ansi_level_parses_case_insensitively() {
+        assert_eq!(
+            IsolationLevel::parse("SERIALIZABLE").unwrap(),
+            IsolationLevel::Serializable
+        );
+        assert_eq!(
+            IsolationLevel::parse("read committed").unwrap(),
+            IsolationLevel::ReadCommitted
+        );
+        assert_eq!(
+            IsolationLevel::parse("Repeatable Read").unwrap(),
+            IsolationLevel::RepeatableRead
+        );
+        assert_eq!(
+            IsolationLevel::parse("READ UNCOMMITTED").unwrap(),
+            IsolationLevel::ReadUncommitted
+        );
+    }
+
+    #[test]
+    fn an_unknown_level_is_a_validation_refusal() {
+        let err = IsolationLevel::parse("bananas").unwrap_err();
+        match err {
+            DbError::ValidationFailed { code, .. } => {
+                assert_eq!(code, "invalid_isolation_level");
+            }
+            other => panic!("expected ValidationFailed, got {other:?}"),
+        }
+    }
+
+    /// A round trip, which is what makes the two halves one rule rather than
+    /// two lists that can drift apart.
+    #[test]
+    fn ansi_name_round_trips_through_parse() {
+        for level in [
+            IsolationLevel::ReadUncommitted,
+            IsolationLevel::ReadCommitted,
+            IsolationLevel::RepeatableRead,
+            IsolationLevel::Serializable,
+        ] {
+            assert_eq!(IsolationLevel::parse(level.ansi_name()).unwrap(), level);
+        }
+    }
+}

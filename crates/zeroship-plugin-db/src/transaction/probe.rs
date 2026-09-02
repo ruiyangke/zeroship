@@ -34,7 +34,10 @@ pub struct ProbeOutcome {
 /// # Errors
 ///
 /// The backend error behind a `BEGIN` that did not open.
-pub async fn begin(app_id: &str, isolation_level: Option<&str>) -> Result<(), DbError> {
+pub async fn begin(
+    app_id: &str,
+    isolation_level: Option<zeroship_data_core::error::IsolationLevel>,
+) -> Result<(), DbError> {
     let driven = driver::begin_top_level(app_id, isolation_level).await?;
     if let Some(outcome) = driven.outcome() {
         return Err(driven.error.unwrap_or_else(|| {

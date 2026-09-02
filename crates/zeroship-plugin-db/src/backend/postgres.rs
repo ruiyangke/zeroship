@@ -22,7 +22,9 @@ use std::rc::Rc;
 
 #[cfg(any(test, feature = "test-helpers"))]
 use crate::diff::LiveSchema;
-use zeroship_data_core::error::{CleanupAck, DbError, SettleIntent, TerminalResult};
+use zeroship_data_core::error::{
+    BeginIntent, CleanupAck, DbError, SettleIntent, TerminalResult,
+};
 
 #[cfg(any(test, feature = "test-helpers"))]
 use super::Backend;
@@ -1363,6 +1365,20 @@ mod backup_pg {
     }
 }
 
+/// Render SC-1's [`BeginIntent`] as PostgreSQL's `BEGIN` statement.
+///
+/// The dialect lives here, not in the protocol. PostgreSQL spells the ANSI
+/// levels verbatim, so this is a `format!` today; a backend that did not would
+/// still only have to change its own renderer.
+pub(crate) fn render_begin(intent: BeginIntent) -> String {
+    match intent {
+        BeginIntent::Default => "BEGIN".to_string(),
+        BeginIntent::Isolation(level) => {
+            format!("BEGIN ISOLATION LEVEL {}", level.ansi_name())
+        }
+    }
+}
+
 /// Apply the §17.5 per-app PG role to a transaction's dedicated client.
 ///
 /// Issues `SET LOCAL ROLE "<per-app role>"` on `client` so every
@@ -1685,6 +1701,37 @@ mod tests {
         let _ = assert_postgres_backend_is_static as fn();
     }
 }
+#[cfg(test)]
+mod begin_render_tests {
+    use super::render_begin;
+    use zeroship_data_core::error::{BeginIntent, IsolationLevel};
+
+    /// The dialect half of what `build_begin_sql` used to do in the engine.
+    /// Its validation half is now `IsolationLevel::parse`, tested in data-core -
+    /// the split is the point: a typo cannot reach here, because the only way
+    /// in is a variant.
+    #[test]
+    fn every_intent_renders_its_postgres_statement() {
+        assert_eq!(render_begin(BeginIntent::Default), "BEGIN");
+        assert_eq!(
+            render_begin(BeginIntent::Isolation(IsolationLevel::Serializable)),
+            "BEGIN ISOLATION LEVEL SERIALIZABLE"
+        );
+        assert_eq!(
+            render_begin(BeginIntent::Isolation(IsolationLevel::ReadCommitted)),
+            "BEGIN ISOLATION LEVEL READ COMMITTED"
+        );
+        assert_eq!(
+            render_begin(BeginIntent::Isolation(IsolationLevel::ReadUncommitted)),
+            "BEGIN ISOLATION LEVEL READ UNCOMMITTED"
+        );
+        assert_eq!(
+            render_begin(BeginIntent::Isolation(IsolationLevel::RepeatableRead)),
+            "BEGIN ISOLATION LEVEL REPEATABLE READ"
+        );
+    }
+}
+
 #[cfg(test)]
 mod terminal_projection_tests {
     use super::{terminal_from_status, terminal_from_tag};
