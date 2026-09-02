@@ -91,11 +91,7 @@ async fn start(
             .map_err(ExecutionError::before_bind_complete)?
         {
             Message::ParseComplete => {}
-            _ => {
-                return Err(ExecutionError::before_bind_complete(
-                    Error::unexpected_message(),
-                ));
-            }
+            other => return Err(ExecutionError::pre_bind_mismatch(&other)),
         }
     }
 
@@ -105,11 +101,7 @@ async fn start(
         .map_err(ExecutionError::before_bind_complete)?
     {
         Message::BindComplete => {}
-        _ => {
-            return Err(ExecutionError::before_bind_complete(
-                Error::unexpected_message(),
-            ));
-        }
+        other => return Err(ExecutionError::pre_bind_mismatch(&other)),
     }
 
     // A non-COPY command can complete Execute and then fail while Sync closes
@@ -226,6 +218,95 @@ impl Stream for CopyOutStream {
                     return Poll::Ready(Some(Err(error)));
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::start;
+    use crate::Statement;
+    use crate::client::{Client, ResponseMessages};
+    use crate::config::{SslMode, SslNegotiation};
+    use crate::connection::Request;
+    use bytes::{BufMut, Bytes, BytesMut};
+    use futures_channel::mpsc;
+    use futures_util::StreamExt;
+    use postgres_protocol::message::backend::Message;
+    use std::collections::VecDeque;
+
+    /// `G` (CopyInResponse) and `H` (CopyOutResponse) share a body: Int8
+    /// overall format, Int16 column count.
+    fn copy_response_message(tag: u8) -> Message {
+        let mut frame = BytesMut::new();
+        frame.put_u8(tag);
+        frame.put_u32(4 + 3);
+        frame.put_u8(0);
+        frame.put_i16(0);
+        Message::parse(&mut frame)
+            .expect("parse the scripted copy response")
+            .expect("the scripted copy response was incomplete")
+    }
+
+    /// Either copy response standing where `BindComplete` was due means the
+    /// server is already in copy mode. `ExecutionError::BeforeBindComplete` is
+    /// documented as the phase that can describe PostgreSQL rejecting the named
+    /// statement, and it licenses the stale-cache replay in `Client::copy_out`;
+    /// a server past Bind is not a rejected statement.
+    ///
+    /// The `CopyInResponse` arm one exchange later already reasons that "the
+    /// server entered COPY IN when it sent this response". This asserts the
+    /// Bind slot draws the same conclusion.
+    #[compio::test]
+    async fn a_copy_response_standing_in_for_bind_complete_forbids_replay() {
+        for (tag, reparsed) in [
+            (b'G', false),
+            (b'H', false),
+            // `reparsed` puts the scripted response in the ParseComplete slot
+            // instead, one exchange earlier - still past Bind.
+            (b'G', true),
+            (b'H', true),
+        ] {
+            let (request_sender, mut requests) = mpsc::unbounded();
+            let client = Client::new(
+                request_sender,
+                SslMode::Disable,
+                SslNegotiation::Postgres,
+                0,
+                Some(0.into()),
+                None,
+            );
+            let statement = Statement::unnamed(Vec::new(), Vec::new());
+            let run = start(
+                client.inner(),
+                Bytes::from_static(b""),
+                &statement,
+                reparsed,
+            );
+            let connection = async move {
+                let Request {
+                    sender: mut response_sender,
+                    ..
+                } = requests.next().await.expect("COPY OUT enqueued no request");
+                response_sender
+                    .try_send(ResponseMessages::Observed(VecDeque::from([Ok(
+                        copy_response_message(tag),
+                    )])))
+                    .expect("deliver the scripted copy response");
+            };
+
+            let (result, ()) = futures_util::future::join(run, connection).await;
+            let failure = match result {
+                Ok(_) => panic!("a copy response in the Bind slot started COPY OUT"),
+                Err(failure) => failure,
+            };
+            let (_, before_bind_complete) = failure.into_parts();
+            assert!(
+                !before_bind_complete,
+                "a '{}' (reparsed={}) in a pre-Bind slot was classified as replay-safe",
+                char::from(tag),
+                reparsed
+            );
         }
     }
 }

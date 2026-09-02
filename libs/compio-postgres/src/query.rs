@@ -132,6 +132,22 @@ impl ExecutionError {
         Self::AfterBindComplete(error)
     }
 
+    /// Classify a message that stood in for an expected `ParseComplete` or
+    /// `BindComplete`.
+    ///
+    /// A copy response means the server is already in copy mode, so it is past
+    /// Bind however the exchange reached this point. Only `BeforeBindComplete`
+    /// licenses the stale-cache replay, and replaying would re-send Parse to a
+    /// backend that now expects `CopyData`.
+    pub(crate) fn pre_bind_mismatch(message: &Message) -> Self {
+        match message {
+            Message::CopyInResponse(_) | Message::CopyOutResponse(_) => {
+                Self::after_bind_complete(Error::unexpected_message())
+            }
+            _ => Self::before_bind_complete(Error::unexpected_message()),
+        }
+    }
+
     pub(crate) fn error(&self) -> &Error {
         match self {
             Self::BeforeBindComplete(error) | Self::AfterBindComplete(error) => error,

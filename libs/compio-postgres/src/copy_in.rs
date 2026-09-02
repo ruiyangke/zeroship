@@ -647,11 +647,9 @@ where
     if unnamed_sql.is_some() {
         match responses.next().await {
             Ok(Message::ParseComplete) => {}
-            Ok(_) => {
+            Ok(other) => {
                 abort(&mut sender).await;
-                return Err(ExecutionError::before_bind_complete(
-                    Error::unexpected_message(),
-                ));
+                return Err(ExecutionError::pre_bind_mismatch(&other));
             }
             Err(e) => {
                 abort(&mut sender).await;
@@ -662,11 +660,9 @@ where
 
     match responses.next().await {
         Ok(Message::BindComplete) => {}
-        Ok(_) => {
+        Ok(other) => {
             abort(&mut sender).await;
-            return Err(ExecutionError::before_bind_complete(
-                Error::unexpected_message(),
-            ));
+            return Err(ExecutionError::pre_bind_mismatch(&other));
         }
         Err(e) => {
             statement.invalidate_cache_on_error(&e);
@@ -1186,6 +1182,7 @@ mod tests {
     async fn assert_pre_bind_mismatch_suppresses_copy_terminal(
         unnamed_sql: Option<&str>,
         unexpected: Message,
+        expect_replay_permitted: bool,
     ) {
         let (request_sender, mut requests) = mpsc::unbounded();
         let client = Client::new(
@@ -1245,9 +1242,9 @@ mod tests {
             Err(failure) => failure,
         };
         let (error, before_bind_complete) = failure.into_parts();
-        assert!(
-            before_bind_complete,
-            "the pre-Bind mismatch was classified after BindComplete"
+        assert_eq!(
+            before_bind_complete, expect_replay_permitted,
+            "the pre-Bind mismatch was classified for the wrong protocol phase"
         );
         assert_eq!(error.to_string(), "unexpected message from server");
     }
@@ -1257,13 +1254,60 @@ mod tests {
         assert_pre_bind_mismatch_suppresses_copy_terminal(
             Some("COPY scripted FROM STDIN"),
             Message::BindComplete,
+            true,
         )
         .await;
     }
 
     #[compio::test]
     async fn unexpected_bind_slot_message_suppresses_copy_terminal() {
-        assert_pre_bind_mismatch_suppresses_copy_terminal(None, Message::ParseComplete).await;
+        assert_pre_bind_mismatch_suppresses_copy_terminal(None, Message::ParseComplete, true).await;
+    }
+
+    /// A `CopyInResponse` standing where `BindComplete` was due means the server
+    /// is ALREADY in copy mode. `ExecutionError::BeforeBindComplete` is
+    /// documented as the phase that "can describe PostgreSQL rejecting the
+    /// named statement itself", and it is what licenses the stale-cache replay
+    /// in `Client::copy_in`. A server past Bind is not a rejected statement, so
+    /// replaying re-sends Parse while the backend expects CopyData.
+    ///
+    /// Real PostgreSQL always sends `BindComplete` first, so this needs a
+    /// non-conforming peer or proxy - the same threat model `hostile_peer.rs`
+    /// exists for.
+    #[compio::test]
+    async fn a_copy_in_response_standing_in_for_bind_complete_forbids_replay() {
+        // 'G': Int8 overall format, Int16 column count.
+        let mut frame = BytesMut::new();
+        frame.put_u8(b'G');
+        frame.put_u32(4 + 3);
+        frame.put_u8(0);
+        frame.put_i16(0);
+        let copy_in_response = Message::parse(&mut frame)
+            .expect("parse the scripted CopyInResponse")
+            .expect("the scripted CopyInResponse was incomplete");
+
+        assert_pre_bind_mismatch_suppresses_copy_terminal(None, copy_in_response, false).await;
+    }
+
+    /// The same reasoning one exchange earlier: a server that answers the
+    /// re-`Parse` with a copy response is past Parse *and* Bind.
+    #[compio::test]
+    async fn a_copy_in_response_standing_in_for_parse_complete_forbids_replay() {
+        let mut frame = BytesMut::new();
+        frame.put_u8(b'G');
+        frame.put_u32(4 + 3);
+        frame.put_u8(0);
+        frame.put_i16(0);
+        let copy_in_response = Message::parse(&mut frame)
+            .expect("parse the scripted CopyInResponse")
+            .expect("the scripted CopyInResponse was incomplete");
+
+        assert_pre_bind_mismatch_suppresses_copy_terminal(
+            Some("COPY scripted FROM STDIN"),
+            copy_in_response,
+            false,
+        )
+        .await;
     }
 
     #[compio::test]
