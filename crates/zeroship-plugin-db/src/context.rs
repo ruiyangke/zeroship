@@ -40,7 +40,7 @@ use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, PostgresBackend};
 use zeroship_data_core::binding::DbBinding;
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
-use zeroship_data_core::error::DbError;
+use zeroship_data_core::error::{DbError, SettleIntent, TerminalResult};
 use crate::service::DbResourceKey;
 use zeroship_core::change_event::ChangeEvent;
 
@@ -176,6 +176,53 @@ impl TxConnection {
                 Ok(rows.len() as u64)
             }
             Self::Sqlite(handle) => handle.exec(sql, params).await,
+        }
+    }
+
+    /// Send terminal SQL and report what the backend actually did.
+    ///
+    /// **The vendor decides what happened; SC-1 decides what it means.** Each
+    /// arm answers with its own projection - `postgres::terminal_from_tag` /
+    /// `terminal_from_status`, `reservation::terminal_result` - so the protocol
+    /// never reads a command tag or a rusqlite outcome itself.
+    ///
+    /// **The vendor is read off the pinned session, never off the thread's
+    /// ambient backend.** The pair really can disagree: a `register` with a
+    /// changed URL calls [`ThreadDbContext::clear_pool`], which nulls `backend`
+    /// and leaves the lanes untouched. When it did, an open transaction on a
+    /// live connection settled `Indeterminate` and had its session withdrawn.
+    /// The variants ARE the two `SqlExecutor::Client` associated types, so the
+    /// session is the authority on how to talk to itself.
+    pub(crate) async fn settle(
+        &self,
+        intent: SettleIntent,
+    ) -> (TerminalResult, Option<DbError>) {
+        match self {
+            Self::Postgres(pg) => match pg.batch_execute_reporting_tag(intent.verb()).await {
+                Ok(tag) => (
+                    crate::backend::postgres::terminal_from_tag(intent, tag.as_deref()),
+                    None,
+                ),
+                // Sample the status AFTER the statement answered, never before
+                // it: inside a poisoned block no retry makes the oracle speak.
+                Err(error) => (
+                    crate::backend::postgres::terminal_from_status(pg.transaction_status()),
+                    Some(crate::backend::pg_error::classify(&error)),
+                ),
+            },
+            Self::Sqlite(handle) => {
+                use crate::backend::sqlite::session::TerminalIntent;
+                let sqlite_intent = match intent {
+                    SettleIntent::Commit => TerminalIntent::Commit,
+                    SettleIntent::Rollback => TerminalIntent::Rollback,
+                };
+                match handle.settle(sqlite_intent).await {
+                    Ok(outcome) => {
+                        crate::backend::sqlite::reservation::terminal_result(&outcome)
+                    }
+                    Err(error) => (TerminalResult::Indeterminate, Some(error)),
+                }
+            }
         }
     }
 }
