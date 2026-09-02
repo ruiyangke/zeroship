@@ -95,7 +95,8 @@ where
     };
     let responses = match start(client, buf, &statement).await {
         Ok(responses) => responses,
-        Err(error) => {
+        Err(failure) => {
+            let error = failure.into_error();
             // A pre-BindComplete ErrorResponse has already crossed the
             // connection dispatcher, which invalidates this same statement
             // before waking the response consumer. This idempotent call is a
@@ -568,9 +569,9 @@ where
     };
     let mut responses = match start(client, buf, &statement).await {
         Ok(responses) => responses,
-        Err(error) => {
-            statement.invalidate_cache_on_error(&error);
-            return Err(ExecutionError::before_bind_complete(error));
+        Err(failure) => {
+            statement.invalidate_cache_on_error(failure.error());
+            return Err(failure);
         }
     };
 
@@ -612,15 +613,18 @@ async fn start(
     client: &InnerClient,
     buf: Bytes,
     statement: &Statement,
-) -> Result<Responses, Error> {
-    let mut responses = client.send_statement(
-        producerless_request(buf, statement.may_enter_copy_in()),
-        statement,
-    )?;
+) -> Result<Responses, ExecutionError> {
+    let mut responses = client
+        .send_statement(
+            producerless_request(buf, statement.may_enter_copy_in()),
+            statement,
+        )
+        .map_err(ExecutionError::before_bind_complete)?;
 
-    match responses.next().await? {
-        Message::BindComplete => {}
-        _ => return Err(Error::unexpected_message()),
+    match responses.next().await {
+        Ok(Message::BindComplete) => {}
+        Ok(other) => return Err(ExecutionError::pre_bind_mismatch(&other)),
+        Err(error) => return Err(ExecutionError::before_bind_complete(error)),
     }
 
     Ok(responses)
@@ -945,7 +949,7 @@ pub async fn sync(client: &InnerClient) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_bind, map_execute_text_bind_error, query_text_params};
+    use super::{ExecutionError, encode_bind, map_execute_text_bind_error, query_text_params};
     use crate::Statement;
     use crate::client::Client;
     use crate::codec::FrontendMessage;
@@ -978,6 +982,52 @@ mod tests {
         frame.extend_from_slice(&(u32::try_from(body.len()).unwrap() + 4).to_be_bytes());
         frame.extend_from_slice(body);
         frame
+    }
+
+    /// `execute` classified every `start` failure as `BeforeBindComplete` - the
+    /// phase documented as PostgreSQL rejecting the named statement, and the
+    /// one that gates the stale-cache replay. A copy response standing where
+    /// `BindComplete` was due means the server is already in copy mode, so it
+    /// is past Bind and cannot be a rejected statement.
+    ///
+    /// Unreachable today: the replay also requires
+    /// `cached_statement_error_is_stale`, which `unexpected_message` fails.
+    /// This pins the phase so the contract does not rest on that second gate.
+    #[compio::test]
+    async fn a_copy_response_in_the_bind_slot_is_not_a_rejected_statement() {
+        use crate::client::ResponseMessages;
+        use futures_util::StreamExt;
+        use postgres_protocol::message::backend::Message;
+        use std::collections::VecDeque;
+
+        let (client, mut requests) = test_client();
+        let statement = Statement::unnamed(Vec::new(), Vec::new());
+        let run = super::execute_inner(client.inner(), statement, crate::slice_iter(&[]));
+        let connection = async move {
+            let crate::connection::Request {
+                sender: mut response_sender,
+                ..
+            } = requests.next().await.expect("execute enqueued no request");
+            // 'G' CopyInResponse: Int8 overall format, Int16 column count.
+            let mut frame = BytesMut::from(&scripted_backend_frame(b'G', &[0, 0, 0])[..]);
+            let message = Message::parse(&mut frame)
+                .expect("parse the scripted CopyInResponse")
+                .expect("the scripted CopyInResponse was incomplete");
+            response_sender
+                .try_send(ResponseMessages::Observed(VecDeque::from([Ok(message)])))
+                .expect("deliver the scripted CopyInResponse");
+        };
+
+        let (result, ()) = futures_util::future::join(run, connection).await;
+        let failure = match result {
+            Ok(_) => panic!("a copy response in the Bind slot completed execute"),
+            Err(failure) => failure,
+        };
+        let (_, before_bind_complete) = failure.into_parts();
+        assert!(
+            !before_bind_complete,
+            "a copy response in the Bind slot was classified as a rejected statement"
+        );
     }
 
     /// The row stream refuses a frame its own poll does not name.
@@ -1156,7 +1206,7 @@ mod tests {
                 .expect("deliver the scripted start response");
         };
         let (result, ()) = futures_util::join!(start, respond);
-        result.map(|_| ())
+        result.map(|_| ()).map_err(ExecutionError::into_error)
     }
 
     /// `start` refuses anything but `BindComplete` as the first reply.
