@@ -82,7 +82,6 @@ impl std::fmt::Debug for DbPlatform {
 // ---------------------------------------------------------------------------
 
 #[v8_class]
-#[allow(dead_code)]
 impl DbPlatform {
     /// `new DbPlatform()` from JS rejects with `TypeError("illegal
     /// constructor")`. Real instances are minted only by

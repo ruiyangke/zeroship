@@ -70,7 +70,6 @@ impl Collection {
 // ---------------------------------------------------------------------------
 
 #[v8_class]
-#[allow(dead_code)]
 impl Collection {
     /// `new Collection()` from JS rejects — real instances come from
     /// [`mint_collection`] via `Db::collection(name)`, which stamps

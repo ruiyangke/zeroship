@@ -70,7 +70,6 @@ impl std::fmt::Debug for Replication {
 }
 
 #[v8_class]
-#[allow(dead_code)]
 impl Replication {
     #[v8_constructor]
     fn new() -> Result<Replication, OpError> {
