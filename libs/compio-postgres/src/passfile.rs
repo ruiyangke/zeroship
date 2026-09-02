@@ -307,6 +307,58 @@ mod tests {
         assert_eq!(found.as_deref(), Some("secret"));
     }
 
+    /// A field must match WHOLLY, not merely start the entry's field.
+    ///
+    /// The matcher walks the token and the field together; when the token runs
+    /// out but the field has not reached its colon, the entry is longer than
+    /// what was asked for and must be rejected. Accepting it would hand the
+    /// password for `10.0.0.11` to a connection to `10.0.0.1` - a different
+    /// host, and one the file never authorised.
+    ///
+    /// Both directions are checked, because a prefix test that only tries the
+    /// short side would pass on a matcher that compares `min(len)` bytes.
+    #[test]
+    fn a_field_that_only_prefixes_the_entry_does_not_match() {
+        let file = "10.0.0.11:5432:db:alice:secret\n";
+        assert_eq!(
+            find(file, key("10.0.0.1", "5432", "db", "alice")),
+            None,
+            "a shorter host borrowed a longer entry's password"
+        );
+        assert_eq!(
+            find(
+                "10.0.0.1:5432:db:alice:secret\n",
+                key("10.0.0.11", "5432", "db", "alice")
+            ),
+            None,
+            "a longer host matched a shorter entry"
+        );
+        // Control: the exact host still matches, so the refusal is the length
+        // difference and not the matcher rejecting everything.
+        assert_eq!(
+            find(file, key("10.0.0.11", "5432", "db", "alice")).as_deref(),
+            Some("secret")
+        );
+    }
+
+    /// A non-matching field skips only THAT line; the scan continues to the
+    /// next one. A file whose first entry differs by port must still find the
+    /// later entry that matches, rather than stopping at the first miss.
+    #[test]
+    fn a_port_mismatch_skips_the_line_and_keeps_scanning() {
+        let file = "10.0.0.1:5432:db:alice:wrong\n10.0.0.1:5433:db:alice:right\n";
+        assert_eq!(
+            find(file, key("10.0.0.1", "5433", "db", "alice")).as_deref(),
+            Some("right"),
+            "the scan stopped at the first port mismatch instead of continuing"
+        );
+        // Control: the first line is reachable on its own port.
+        assert_eq!(
+            find(file, key("10.0.0.1", "5432", "db", "alice")).as_deref(),
+            Some("wrong")
+        );
+    }
+
     /// The control for every match test below: the same file, one field
     /// changed, must NOT match. Without it a matcher that accepts everything
     /// passes the whole suite.
