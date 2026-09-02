@@ -289,7 +289,7 @@ pub enum SessionOwnership {
 /// A token minted per backend command. Guard order step 2: every completion
 /// must carry the token its current action minted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct CommandToken(u64);
+pub struct CommandToken(u64);
 
 impl CommandToken {
     #[must_use]
@@ -372,7 +372,7 @@ pub(crate) enum BeginOutcome {
 
 /// Every event the reducer accepts. Closed.
 #[derive(Debug, Clone)]
-pub enum TxEvent {
+pub(crate) enum TxEvent {
     /// An authority observation, from any of the three sources: the read
     /// `Preparing` waits on, the read an operation takes before its own data
     /// SQL, or an unsolicited publisher observation.
@@ -440,7 +440,7 @@ pub enum TxEvent {
 
 /// What the driver must do. The reducer performs no I/O.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Action {
+pub(crate) enum Action {
     /// Spawn a timer task carrying only these fields plus the transaction key
     /// and the event sender - no session, no client, no settle future.
     ScheduleTimer(ScheduleTimer),
@@ -598,7 +598,7 @@ impl Default for TxBudgets {
 
 /// One transaction's reducer.
 #[derive(Debug)]
-pub struct TxReducer {
+pub(crate) struct TxReducer {
     state: TxState,
     expected: ExpectedAuthority,
     budgets: TxBudgets,

@@ -561,7 +561,7 @@ impl SqliteBackend {
     /// [`session::SqliteSession::arm_next_command_gate_for_tests`]; the gate is
     /// per-session, so it cannot be tripped by another backend's traffic.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub fn arm_next_command_gate_for_tests(&self) -> session::NextCommandGate {
+    pub(crate) fn arm_next_command_gate_for_tests(&self) -> session::NextCommandGate {
         self.session.arm_next_command_gate_for_tests()
     }
 
