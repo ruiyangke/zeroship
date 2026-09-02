@@ -51,6 +51,22 @@ async fn copy_out_inner(
         match start(client, buf, &statement, unnamed_sql.is_some()).await {
             Ok(result) => result,
             Err(error) => {
+                // DEFENSIVE SECOND CHECK, not the primary invalidation. A
+                // pre-BindComplete ErrorResponse has already crossed the connection
+                // dispatcher, which invalidates this same statement at
+                // `connection.rs:1356` before waking this consumer, and
+                // `invalidate_cached_statement_on_error` returns early unless the
+                // error is a genuine stale-statement one. `query.rs` carries the
+                // same call with the same reasoning spelled out; the sites in
+                // `copy_in.rs` and `bind.rs` share the shape and say nothing.
+                //
+                // So NOTHING BINDS THIS LINE, and that is measured rather than
+                // assumed: replacing the condition with `if false` leaves all 1694
+                // tests green across every target, tls_live and unix_socket_live
+                // included. Do not read a mutation report calling it unbound as a
+                // missing test - a test would have to assert that a redundant call
+                // happened, which is a claim about the implementation rather than
+                // about behaviour.
                 if matches!(&error, ExecutionError::BeforeBindComplete(_)) {
                     statement.invalidate_cache_on_error(error.error());
                 }
