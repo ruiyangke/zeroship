@@ -411,6 +411,70 @@ pub(crate) fn setup_js_promise<'s>(
     (global_resolver, request_id, promise)
 }
 
+
+// ---------------------------------------------------------------------------
+// Result lowering: engine value -> runtime ResolveValue
+// ---------------------------------------------------------------------------
+//
+// Moved out of `crud/mod.rs` on 2026-08-31. Every one of these returns a
+// `zeroship_runtime::state::ResolveValue`, so they were already adapter work
+// filed in the engine - but `maybe_rehydrate` was the one that mattered: it
+// selected `crate::v8_classes::masked_value::rehydrate_masked_values`, an
+// ADAPTER function pointer whose type is
+// `fn(&mut v8::PinScope, v8::Local<Value>) -> Option<v8::Local<Value>>`, on a
+// data predicate (`has_masked`). An engine module was choosing V8 behaviour
+// while spelling no `v8::` token, which is invisible to every marker-based
+// instrument in this repository.
+//
+// It sits on the masked read path - reached from twelve dispatch bodies - so
+// every masked read routed through it. The adapter now picks its own callback,
+// and the engine says only whether the result carries masked columns.
+
+/// `first_row_or_null` variant that, when `has_masked` is
+/// set, resolves via [`ResolveValue::JsonWithRehydration`] so the pump
+/// walks the parsed value and replaces `__zsmask__` sentinels with
+/// native `MaskedValue` instances. When `has_masked` is `false` this is
+/// identical to `first_row_or_null` (plain `JSON.parse`, no walk).
+pub(crate) fn first_row_or_null_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
+    let value = rows.into_iter().next().unwrap_or(Value::Null).to_string();
+    maybe_rehydrate(value, has_masked)
+}
+
+/// Lower a `Vec<Value>` result to the row count, as a JS `number`.
+/// Used by `updateMany` / `deleteMany` (resolves to the affected-row
+/// count).
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn row_count_as_f64(rows: Vec<Value>) -> ResolveValue {
+    ResolveValue::F64(rows.len() as f64)
+}
+
+#[allow(clippy::cast_precision_loss)]
+pub(crate) fn usize_count_as_f64(count: usize) -> ResolveValue {
+    ResolveValue::F64(count as f64)
+}
+
+/// `rows_as_json_array` variant that resolves via
+/// [`ResolveValue::JsonWithRehydration`] when `has_masked` is set. See
+/// [`first_row_or_null_masked`].
+pub(crate) fn rows_as_json_array_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
+    let value = Value::Array(rows).to_string();
+    maybe_rehydrate(value, has_masked)
+}
+
+/// Pick `ResolveValue::JsonWithRehydration` (walk the
+/// parsed value, mint `MaskedValue` for `__zsmask__` sentinels) when the
+/// result is known to carry masked columns; otherwise the plain
+/// `ResolveValue::Json` fast path (bulk `JSON.parse`, no walk).
+pub(crate) fn maybe_rehydrate(json: String, has_masked: bool) -> ResolveValue {
+    if has_masked {
+        ResolveValue::JsonWithRehydration {
+            json,
+            transform: crate::v8_classes::masked_value::rehydrate_masked_values,
+        }
+    } else {
+        ResolveValue::Json(json)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -628,69 +692,5 @@ mod tests {
             Err(DecodeError::Budget("node count")),
             "a sparse array past the node budget must refuse before allocating"
         );
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Result lowering: engine value -> runtime ResolveValue
-// ---------------------------------------------------------------------------
-//
-// Moved out of `crud/mod.rs` on 2026-08-31. Every one of these returns a
-// `zeroship_runtime::state::ResolveValue`, so they were already adapter work
-// filed in the engine - but `maybe_rehydrate` was the one that mattered: it
-// selected `crate::v8_classes::masked_value::rehydrate_masked_values`, an
-// ADAPTER function pointer whose type is
-// `fn(&mut v8::PinScope, v8::Local<Value>) -> Option<v8::Local<Value>>`, on a
-// data predicate (`has_masked`). An engine module was choosing V8 behaviour
-// while spelling no `v8::` token, which is invisible to every marker-based
-// instrument in this repository.
-//
-// It sits on the masked read path - reached from twelve dispatch bodies - so
-// every masked read routed through it. The adapter now picks its own callback,
-// and the engine says only whether the result carries masked columns.
-
-/// `first_row_or_null` variant that, when `has_masked` is
-/// set, resolves via [`ResolveValue::JsonWithRehydration`] so the pump
-/// walks the parsed value and replaces `__zsmask__` sentinels with
-/// native `MaskedValue` instances. When `has_masked` is `false` this is
-/// identical to `first_row_or_null` (plain `JSON.parse`, no walk).
-pub(crate) fn first_row_or_null_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
-    let value = rows.into_iter().next().unwrap_or(Value::Null).to_string();
-    maybe_rehydrate(value, has_masked)
-}
-
-/// Lower a `Vec<Value>` result to the row count, as a JS `number`.
-/// Used by `updateMany` / `deleteMany` (resolves to the affected-row
-/// count).
-#[allow(clippy::cast_precision_loss)]
-pub(crate) fn row_count_as_f64(rows: Vec<Value>) -> ResolveValue {
-    ResolveValue::F64(rows.len() as f64)
-}
-
-#[allow(clippy::cast_precision_loss)]
-pub(crate) fn usize_count_as_f64(count: usize) -> ResolveValue {
-    ResolveValue::F64(count as f64)
-}
-
-/// `rows_as_json_array` variant that resolves via
-/// [`ResolveValue::JsonWithRehydration`] when `has_masked` is set. See
-/// [`first_row_or_null_masked`].
-pub(crate) fn rows_as_json_array_masked(rows: Vec<Value>, has_masked: bool) -> ResolveValue {
-    let value = Value::Array(rows).to_string();
-    maybe_rehydrate(value, has_masked)
-}
-
-/// Pick `ResolveValue::JsonWithRehydration` (walk the
-/// parsed value, mint `MaskedValue` for `__zsmask__` sentinels) when the
-/// result is known to carry masked columns; otherwise the plain
-/// `ResolveValue::Json` fast path (bulk `JSON.parse`, no walk).
-pub(crate) fn maybe_rehydrate(json: String, has_masked: bool) -> ResolveValue {
-    if has_masked {
-        ResolveValue::JsonWithRehydration {
-            json,
-            transform: crate::v8_classes::masked_value::rehydrate_masked_values,
-        }
-    } else {
-        ResolveValue::Json(json)
     }
 }

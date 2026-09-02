@@ -720,11 +720,6 @@ impl std::fmt::Debug for Broker {
 
 static BROKER: LazyLock<Mutex<Broker>> = LazyLock::new(|| Mutex::new(Broker::new()));
 
-/// Schema-pending decoder window (design section 16.7).
-///
-/// This is process-wide for the same reason as the broker: a deploy on
-/// one worker thread must reject a subscription opened concurrently on
-/// another worker thread in the same process.
 // ---------------------------------------------------------------------------
 // Per-app emit suppression
 // ---------------------------------------------------------------------------
@@ -859,6 +854,17 @@ pub fn emit_local(
     });
 }
 
+/// Schema-pending decoder window (design section 16.7).
+///
+/// This is process-wide for the same reason as the broker: a deploy on
+/// one worker thread must reject a subscription opened concurrently on
+/// another worker thread in the same process.
+///
+/// This doc block sat 139 lines above, orphaned from its item by the
+/// suppression section banner that `746cdd123` inserted between them. That is
+/// not a formatting nit: `clippy::empty_line_after_doc_comments` is deny-level
+/// here, so the lib failed to lint, and because cargo ABORTS SCHEDULING on a
+/// lib error, every test target in this crate went unlinted with it.
 static SCHEMA_PENDING_APPS: LazyLock<Mutex<HashSet<String>>> =
     LazyLock::new(|| Mutex::new(HashSet::new()));
 
