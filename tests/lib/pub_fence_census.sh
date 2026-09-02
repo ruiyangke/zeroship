@@ -30,6 +30,42 @@
 # already reachable through a `pub use` elsewhere is counted here as fenced
 # when it is not. Treat the total as an UPPER bound on newly-public items and
 # the per-module rows as the worklist.
+#
+# ---------------------------------------------------------------------------
+# HOW TO WORK A ROW, and the two ways of deciding that DO NOT work
+# ---------------------------------------------------------------------------
+#
+# 1. COUNTING REFERENCES BY BARE NAME IS USELESS. Measured 2026-09-02 while
+#    working `encryption`: `new` returned 140990 hits across the workspace,
+#    `insert` 3455, `resolve` 16048, and `Row` 51 - every same-named item
+#    anywhere. Only the zeros carried information.
+#
+# 2. COUNTING BY QUALIFIED PATH (`aead::decrypt`, `session::TypedRows`) fixes
+#    the collisions AND IS BLIND TO METHODS, because a method call is
+#    `receiver.method()` and never `module::method`. Every method row in such a
+#    measurement is meaningless rather than merely noisy.
+#
+# 3. THE COMPILER IS THE ORACLE. Narrow the candidates, build with
+#    `--features test-helpers --all-targets`, read the errors. It is the only
+#    instrument here that sees methods, `pub use` re-exports and inference.
+#
+# AND THE RULE THAT COST THREE ROUND TRIPS TO LEARN:
+#
+#   A ZERO READER COUNT IS NOT A LICENCE TO NARROW.
+#
+# An item in a PUBLIC SIGNATURE must stay public however few callers name it,
+# because callers obtain it by inference. Three items hit this in one day, each
+# found only by the compiler refusing the narrowing:
+#
+#   encryption::aead::AeadKey            return of `KeyStore::resolve`
+#   backend::sqlite::session::TypedRows  return of `query_typed`     (39 errors)
+#   backend::sqlite::reservation::Reservation
+#                                        return of
+#                                        `spent_autocommit_reservation_for_tests`
+#
+# So ask two SEPARATE questions per item: "does anything name it?" picks the
+# candidate; "is it in a public signature?" decides. Only the second is
+# authoritative, and only the compiler answers it reliably.
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
