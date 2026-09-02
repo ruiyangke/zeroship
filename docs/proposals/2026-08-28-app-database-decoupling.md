@@ -370,7 +370,7 @@ sufficient; the map is readable.
 
 **The vehicle instead is the channel that already exists.** `DbServiceConfig`
 (`crates/zeroship-plugin-db/src/lib.rs:454`) already carries the DSN to the plugin without passing
-through V8, and `DbBinding` (`crates/zeroship-plugin-db/src/binding.rs`) is already the per-isolate
+through V8, and `DbBinding` (`crates/zeroship-data-core/src/binding.rs`) is already the per-isolate
 identity every `Db` and `Collection` wrapper travels with. The binding extends that struct rather
 than adding a fourth env var. App JS never needs these values: `env.db` methods are native ops, so
 the plugin reads the binding in Rust at the moment the op runs, and nothing is serialised into the
@@ -1109,9 +1109,9 @@ in section 13 and must be measured before the role graph ships.
 **The SQLSTATEs separate cleanly for revocation, and collide for the epoch.**
 `is_missing_per_app_session_role` today matches SQLSTATE **22023 `invalid_parameter_value`** with the
 exact message `role "<X>" does not exist`
-(`crates/zeroship-plugin-db/src/error.rs:230-243`), and
+(`crates/zeroship-data-core/src/error.rs-243`), and
 `from_pg_per_app_session_setup` collapses it into `SCHEMA_NOT_PROVISIONED`
-(`crates/zeroship-plugin-db/src/error.rs:251-268`, `:191`). A revoked grant is **42501** with
+(`crates/zeroship-data-core/src/error.rs-268`, `:191`). A revoked grant is **42501** with
 `permission denied to set role`, measured above. So:
 
 - `42501` at the session-setup site -> `GRANT_REVOKED`. Terminal, 403-shaped, never retried, never
@@ -1124,7 +1124,7 @@ epoch role is *dropped*, so a stale isolate gets `22023 role "zs_bind_<gid>_e<E>
 the same code and the same message shape as "this app was never migrated", which is a different
 condition with a different remedy. Telling those apart needs no message sniffing, because the
 classifier already composes the exact role name it expects and matches the server's message against
-it (`crates/zeroship-plugin-db/src/error.rs:237-242`); it only needs to compose the epoch-bearing
+it (`crates/zeroship-data-core/src/error.rs-242`); it only needs to compose the epoch-bearing
 name and to know, from the injected binding, whether the app holds a live grant at all. A missing
 epoch role under a live grant is `SCHEMA_EPOCH_STALE` and is **retryable** - the same condition
 `Verdict::ReResolve` already carries
@@ -1231,7 +1231,7 @@ a probe connected as `postgres` sees the second case succeed:
 
 So `SCHEMA_NOT_PROVISIONED` and `GRANT_REVOKED` split on the code, with no
 message sniffing. The existing classifier already matches on `SqlState`
-(`crates/zeroship-plugin-db/src/error.rs:230-243` pins `22023` **plus** the
+(`crates/zeroship-data-core/src/error.rs-243` pins `22023` **plus** the
 exact role name, because `22023` is the generic bad-GUC code shared with
 `SET statement_timeout = 'yes'`); `42501` needs no such qualifier, being
 specific to the membership check.
@@ -1415,7 +1415,7 @@ The plugin constraint that motivated the binding level is also moot: a second pl
 `db` namespace panics by design (`crates/zeroship-runtime/src/core/plugin.rs:191-193`), but one
 database per app means one plugin, one binding, no contention.
 
-`DbBinding` gains a third field, `database_id` (`crates/zeroship-plugin-db/src/binding.rs:14-18`). It
+`DbBinding` gains a third field, `database_id` (`crates/zeroship-data-core/src/binding.rs-18`). It
 is already `Clone + Eq + Hash`, already minted once per isolate from live state, and already the key
 for the descriptor store (`crates/zeroship-plugin-db/src/context.rs:616-623`), so threading it is
 mechanical. Deciding what goes in the field is section 2; the type change is cheap.
@@ -1530,7 +1530,7 @@ discovered:
   PostgreSQL would not impose, so a shared database behaves *worse* in dev than in production - the
   inverse of the usual direction, and the one that gets filed as a bug.
 
-The cross-app FK validator in `crates/zeroship-plugin-db/src/cross_app_fk.rs` is dead code - its own
+The cross-app FK validator in `crates/zeroship-plugin-db/src/cross_app_fk.rs (DELETED)` is dead code - its own
 header says "THIS VALIDATOR HAS NO PRODUCTION CALL SITE" and its only caller is
 `cfg(any(test, feature = "test-helpers"))` (`:20-30`) - and is **deleted, not updated**. The live rule
 is `reject_cross_app_ref` in the engine plus schema-qualified REFERENCES rendering, restated as **"a
@@ -1745,7 +1745,7 @@ role DDL must never be run against `:5455`, `:5440` or any shared instance.
 - **`compio-postgres` must surface SQLSTATE 42501 distinguishably from the multi-statement
   session-setup batch.** The taxonomy in section 6 splits `GRANT_REVOKED` from
   `SCHEMA_NOT_PROVISIONED` on the code, and the existing classifier
-  (`crates/zeroship-plugin-db/src/error.rs:230-243`) matches provenance plus an exact role name. If
+  (`crates/zeroship-data-core/src/error.rs-243`) matches provenance plus an exact role name. If
   the driver collapses or reorders errors from a simple-query batch whose first statement fails, the
   split does not exist. Unverified.
 - **The pooled-connection reset must be re-proved against a narrowed role.** The mechanism is already

@@ -1058,7 +1058,7 @@ that can even notice a deploy change, and it notices it against a value L10
 shows is wrong.
 
 **What the fix does, and what it deliberately leaves.** A new `DbBinding`
-(`crates/zeroship-plugin-db/src/binding.rs`) captures `ZEROSHIP_DEPLOY_ID` from
+(`crates/zeroship-data-core/src/binding.rs`) captures `ZEROSHIP_DEPLOY_ID` from
 the **active runtime's own environment** at `mint_db`, is stored immutably on the
 `Db` and every `Collection` it mints, and is threaded through each asynchronous
 CRUD continuation. The token is therefore never recovered from process-global
