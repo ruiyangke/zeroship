@@ -524,7 +524,7 @@ signatures.
 **The SPI carries no policy-store capability and no PITR capability.** Policy
 ownership is resolved before the isolate exists (D3), so an SPI capability for
 it would reinstate the owner this design removes; and D2 deletes
-`Backup::pitr_replay` (`crates/zeroship-plugin-db/src/backend/mod.rs:1370`)
+`Backup::pitr_replay` (`crates/zeroship-data-core/src/storage.rs:603`)
 along with its PostgreSQL implementation, which does nothing but
 `INSERT INTO __zeroship_admin.pitr_targets` (`backend/postgres.rs:1727`), and
 its SQLite stub (`backend/sqlite/mod.rs:2362`).
