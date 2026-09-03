@@ -349,52 +349,17 @@ pub struct ThreadDbContext {
     /// different values.
     cdc_worker_id: Option<String>,
 
-    /// Every app's open transaction, one entry each.
+    /// Every app's open transaction, plus the withdrawal tombstones that must
+    /// outlive a lane. Both moved into [`TxLanes`] on 2026-09-02: they were one
+    /// owner - 25 methods touch these two fields and NOTHING else on this
+    /// struct, so they are separable as a unit.
     ///
-    /// **The entry IS the claim.** This map replaced nine parallel
-    /// `HashMap<String, _>` on 2026-09-02 - the session, the reducer, the
-    /// canceller, the withdrawal tombstone, two waiter lists, the savepoint
-    /// emit marks, the pending-emit queue, and a `tx_claims: HashSet<String>`
-    /// that existed only to say "one of these is in flight". They were created
-    /// together, mutated together and destroyed together, so they were one
-    /// entity written nine ways.
-    ///
-    /// What that buys, beyond the crate boundary it unblocks
-    /// (`docs/proposals/2026-09-02-thread-context-ownership.md`):
-    ///
-    /// * "One top-level BEGIN per app" is now `HashMap::entry` - occupied or
-    ///   vacant - rather than an invariant two containers had to agree on. The
-    ///   window the old claim existed to cover, between taking it and filling
-    ///   the connection slot, is `TxLane { session: None, .. }`: representable.
-    ///   A session with no claim, which was a bug, is not.
-    /// * [`Self::retire_transaction`] was a hand-written destructor across
-    ///   three maps whose doc warned that "leaving the watermarks would let the
-    ///   next transaction's first savepoint pop a stale mark and truncate that
-    ///   transaction's buffer to an unrelated length". Dropping one struct
-    ///   cannot half-happen.
-    ///
-    /// SEC-1 is unchanged and still the reason for the key: a worker OS thread
-    /// multiplexes up to ~200 isolates, and a creator's
-    /// `env.db.transaction(async () => await fetch(slow))` parks its session
-    /// here across the `await`. Keying by `app_id` makes app A's lane invisible
-    /// and untouchable to co-resident app B, which would otherwise run B's SQL
-    /// inside A's transaction, snapshot and per-app role.
-    lanes: HashMap<String, TxLane>,
+    /// The accessors below forward, so the ~55 call sites across the crate are
+    /// unchanged. What moved is the state.
+    lanes: TxLanes,
 
-    /// Apps whose transaction session was withdrawn: anything returning to the
-    /// slot is destroyed rather than parked.
     ///
-    /// **Thread-level, NOT per-lane, and the reason is the whole point of a
-    /// tombstone: it has to outlive the thing it marks.** SC-1 withdraws a
-    /// session and retires its lane in the same settle, but the session itself
-    /// can be out of the slot in another future's hands, and that future's
-    /// `Drop` returns it afterwards - to a lane that no longer exists. A flag
-    /// inside [`TxLane`] would die with the lane and let a session the protocol
-    /// condemned reach the pool, and from there the next borrower.
-    ///
-    /// Cleared by [`Self::admit_transaction`], never by retirement: the
-    /// tombstone belongs to the withdrawn session, not to the app.
-    withdrawn_tx_sessions: HashSet<String>,
+
 
     /// The backend generation stamped on the next installed transaction
     /// session, for SC-1's guard order step 4.
@@ -538,8 +503,7 @@ impl ThreadDbContext {
             pool: None,
             db_url: None,
             cdc_worker_id: None,
-            lanes: HashMap::new(),
-            withdrawn_tx_sessions: HashSet::new(),
+            lanes: TxLanes::default(),
             backend_generation: 0,
             schemas: SchemaCache::new(),
             resource_key: DbResourceKey::UNBOUND,
@@ -879,6 +843,758 @@ impl ThreadDbContext {
         self.mask_policies.contains_key(app_id)
     }
 
+    // ----- TX LANES (delegating) ---------------------------------------
+    //
+    // The lane owner moved to [`TxLanes`] on 2026-09-02. These forward so that
+    // every call site in the crate is unchanged; the state, the SEC-1 per-app
+    // keying and the tombstone discipline live on that type now.
+    //
+    // Why forward rather than expose the field: `ThreadDbContext` is the
+    // composition root, and a `pub(crate) lanes` would let any module reach past
+    // it into the map. The forwarding list IS the lane surface, and it is
+    // exactly 25 methods wide.
+
+    pub(crate) fn has_tx_for(&self, app_id: &str) -> bool {
+        self.lanes.has_tx_for(app_id)
+    }
+
+    pub(crate) fn try_claim_tx(&mut self, app_id: &str) -> bool {
+        self.lanes.try_claim_tx(app_id)
+    }
+
+    pub(crate) fn tx_claimed_by(&self, app_id: &str) -> bool {
+        self.lanes.tx_claimed_by(app_id)
+    }
+
+    pub(crate) fn release_tx_claim(&mut self, app_id: &str) {
+        self.lanes.release_tx_claim(app_id);
+    }
+
+    pub(crate) fn push_tx_waiter(&mut self, app_id: &str, waker: std::task::Waker) {
+        self.lanes.push_tx_waiter(app_id, waker);
+    }
+
+    pub(crate) fn install_tx_client(
+        &mut self,
+        app_id: &str,
+        client: TxConnection,
+    ) -> Option<TxConnection> {
+        self.lanes.install_tx_client(app_id, client)
+    }
+
+    pub(crate) fn take_tx_client_for(&mut self, app_id: &str) -> Option<TxConnection> {
+        self.lanes.take_tx_client_for(app_id)
+    }
+
+    pub(crate) fn put_tx_client_for(&mut self, app_id: &str, client: TxConnection) {
+        self.lanes.put_tx_client_for(app_id, client);
+    }
+
+    pub(crate) fn push_tx_slot_waiter(&mut self, app_id: &str, waker: &std::task::Waker) {
+        self.lanes.push_tx_slot_waiter(app_id, waker);
+    }
+
+    pub(crate) fn install_tx_canceller(
+        &mut self,
+        app_id: &str,
+        canceller: crate::backend::cancel::TxCanceller,
+    ) {
+        self.lanes.install_tx_canceller(app_id, canceller);
+    }
+
+    pub(crate) fn tx_canceller_for(
+        &self,
+        app_id: &str,
+    ) -> Option<crate::backend::cancel::TxCanceller> {
+        self.lanes.tx_canceller_for(app_id)
+    }
+
+    pub(crate) fn remove_tx_canceller(&mut self, app_id: &str) {
+        self.lanes.remove_tx_canceller(app_id);
+    }
+
+    pub(crate) fn admit_transaction(
+        &mut self,
+        app_id: &str,
+        expected: crate::transaction::reducer::identity::ExpectedAuthority,
+        budgets: crate::transaction::reducer::TxBudgets,
+        now: std::time::Instant,
+        max_depth: u32,
+    ) -> Vec<crate::transaction::reducer::Action> {
+        self.lanes
+            .admit_transaction(app_id, expected, budgets, now, max_depth)
+    }
+
+    pub(crate) fn apply_transaction_event(
+        &mut self,
+        app_id: &str,
+        event: crate::transaction::reducer::TxEvent,
+        now: std::time::Instant,
+    ) -> Option<Vec<crate::transaction::reducer::Action>> {
+        self.lanes.apply_transaction_event(app_id, event, now)
+    }
+
+    pub(crate) fn transaction_reducer(
+        &self,
+        app_id: &str,
+    ) -> Option<&crate::transaction::reducer::TxReducer> {
+        self.lanes.transaction_reducer(app_id)
+    }
+
+    pub(crate) fn transaction_expected_authority(
+        &self,
+        app_id: &str,
+    ) -> Option<&crate::transaction::reducer::identity::ExpectedAuthority> {
+        self.lanes.transaction_expected_authority(app_id)
+    }
+
+    pub(crate) fn retire_transaction(&mut self, app_id: &str) {
+        self.lanes.retire_transaction(app_id);
+    }
+
+    pub(crate) fn withdraw_tx_session(&mut self, app_id: &str) -> Option<TxConnection> {
+        self.lanes.withdraw_tx_session(app_id)
+    }
+
+    pub(crate) fn tx_session_withdrawn(&self, app_id: &str) -> bool {
+        self.lanes.tx_session_withdrawn(app_id)
+    }
+
+    pub(crate) fn push_frame_emit_mark(&mut self, app_id: &str) {
+        self.lanes.push_frame_emit_mark(app_id);
+    }
+
+    pub(crate) fn pop_frame_emit_mark(&mut self, app_id: &str) -> Option<usize> {
+        self.lanes.pop_frame_emit_mark(app_id)
+    }
+
+    pub(crate) fn discard_frame_effects(&mut self, app_id: &str) {
+        self.lanes.discard_frame_effects(app_id);
+    }
+
+    pub(crate) fn push_pending_emit(&mut self, ev: ChangeEvent) {
+        self.lanes.push_pending_emit(ev);
+    }
+
+    pub(crate) fn drain_pending_emits_for(&mut self, app_id: &str) -> Vec<ChangeEvent> {
+        self.lanes.drain_pending_emits_for(app_id)
+    }
+
+    pub(crate) fn clear_pending_emits_for(&mut self, app_id: &str) {
+        self.lanes.clear_pending_emits_for(app_id);
+    }
+
+    /// Mint the backend generation for the next installed session.
+    pub(crate) const fn next_backend_generation(&mut self) -> u64 {
+        self.backend_generation += 1;
+        self.backend_generation
+    }
+}
+
+impl Default for ThreadDbContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+thread_local! {
+    /// The DB context shared by all isolates on this worker thread. Replaces
+    /// the slot-per-thread-local
+    /// lattice that previously lived in `lib.rs`, `migrations.rs`, and
+    /// `replication_ops.rs`.
+    pub(crate) static THREAD_DB_CTX: RefCell<ThreadDbContext> =
+        RefCell::new(ThreadDbContext::new());
+}
+
+/// Run `f` with a shared reference to the per-worker-thread DB context.
+///
+/// The compio runtime is single-threaded per worker; this never
+/// contends. Callers must NOT re-enter [`with`] / [`with_mut`] from
+/// inside `f` (the underlying `RefCell` will panic).
+pub fn with<R>(f: impl FnOnce(&ThreadDbContext) -> R) -> R {
+    THREAD_DB_CTX.with(|c| f(&c.borrow()))
+}
+
+/// Run `f` with an exclusive reference to the per-worker-thread DB context.
+/// Same re-entrancy rule as [`with`].
+pub fn with_mut<R>(f: impl FnOnce(&mut ThreadDbContext) -> R) -> R {
+    THREAD_DB_CTX.with(|c| f(&mut c.borrow_mut()))
+}
+
+/// The column-key source for a backend that constructs itself rather than
+/// being built by [`ThreadDbContext::set_pool`].
+///
+/// Both backends are in that position: `SqliteBackend::{new, open}` and
+/// `PostgresBackend::new` are called directly (by `init_pool_async`, and
+/// by tests) and then handed to the context, so they read the worker
+/// thread's installed root keys here. One function serves both because
+/// key sourcing no longer differs by backend -- see
+/// `crate::encryption::keys`. Same re-entrancy rule as [`with`] - do not
+/// call this from inside a context closure. `set_pool` does NOT call it:
+/// it already holds `&mut` on the context and reads
+/// [`ThreadDbContext::local_key_source`] off `self` instead.
+pub(crate) fn isolate_key_source() -> crate::encryption::LocalKeySource {
+    with(ThreadDbContext::local_key_source)
+}
+
+#[cfg(test)]
+mod tests {
+    //! Unit tests for the per-worker-thread DB context state machine.
+    //!
+    //! Every test constructs a fresh [`ThreadDbContext`] directly via
+    //! [`ThreadDbContext::new`] — the thread-local [`THREAD_DB_CTX`] is
+    //! avoided so test ordering on the same OS thread cannot cause one
+    //! test to observe state another mutated.
+    //!
+    //! ## Why some accessors aren't covered here
+    //!
+    //! The slots that store a live transaction client
+    //! (`tx_conn`) need a real backend handle to
+    //! exercise. The Postgres side still needs a `compio_postgres::Client`
+    //! (`Client::new` is `pub(crate)` on the driver), and the SQLite side
+    //! would need a live session actor. These unit tests stay pure-state;
+    //! end-to-end slot round-trips live in the integration targets.
+    //!
+    //! Concretely, the following can only be exercised by
+    //! `tests/integration.rs` (which spins up a real PG):
+    //!
+    //! * [`ThreadDbContext::install_tx_client`] /
+    //!   [`ThreadDbContext::take_tx_client`] /
+    //!   [`ThreadDbContext::put_tx_client`] round-trip with a real
+    //!   backend client.
+    //! * The `debug_assert!` inside [`ThreadDbContext::push_savepoint`]
+    //!   that a savepoint requires an active `tx_conn` — same constraint;
+    //!   the pop/reset arms (no such precondition) are unit-tested.
+    //!
+    //! For [`ThreadDbContext::set_pool`] / [`ThreadDbContext::backend`]
+    //! we need an `Rc<Pool>`, which only `Pool::connect` produces. Those
+    //! lifecycles are covered by `tests/integration.rs`.
+
+    use super::*;
+
+    use crate::BackendUrl;
+    use std::collections::HashMap;
+    use zeroship_core::change_event::{ChangeEvent, ChangeOp};
+
+    fn dummy_event(collection: &str) -> ChangeEvent {
+        ChangeEvent {
+            app_id: "app_t".into(),
+            collection: collection.into(),
+            op: ChangeOp::Insert,
+            pk: Some("1".to_string()),
+            changed_columns: Vec::new(),
+            new_tuple: HashMap::new(),
+            old_tuple: None,
+        }
+    }
+
+    // ----- ThreadDbContext::new / Default -------------------------------
+
+    #[test]
+    fn new_yields_fully_cleared_slots() {
+        let ctx = ThreadDbContext::new();
+        assert!(ctx.pool().is_none());
+        assert!(!ctx.pool_initialised());
+        assert!(ctx.backend().is_none());
+        assert!(ctx.db_url().is_none());
+        assert!(!ctx.has_tx_for("a"));
+        assert!(ctx.transaction_reducer("a").is_none());
+        assert!(!ctx.tx_session_withdrawn("a"));
+        // pending_emits starts empty (each app's queue is allocated
+        // lazily on first push).
+        assert!(ctx.lanes.by_app().values().all(|lane| lane.pending_emits.is_empty()));
+    }
+
+    #[test]
+    fn default_matches_new() {
+        let a = ThreadDbContext::default();
+        let b = ThreadDbContext::new();
+        // Compare observable state (no PartialEq on the struct).
+        assert_eq!(a.pool_initialised(), b.pool_initialised());
+        assert_eq!(
+            a.transaction_reducer("a").is_none(),
+            b.transaction_reducer("a").is_none()
+        );
+        assert_eq!(a.has_tx_for("a"), b.has_tx_for("a"));
+        assert_eq!(a.db_url(), b.db_url());
+    }
+
+    // ----- installed DB resources ----------------------------------------
+
+    /// Install the resources a service over `url` would hand this thread.
+    fn install(ctx: &mut ThreadDbContext, url: &str) -> bool {
+        ctx.install_db_resources(
+            url,
+            DbResourceKey::for_url(url),
+            crate::service::select_backend(url).expect("test URLs must be valid"),
+        )
+    }
+
+    #[test]
+    fn installing_a_new_database_reports_the_change() {
+        let mut ctx = ThreadDbContext::new();
+        assert!(install(&mut ctx, "postgres://a"));
+        assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
+        assert_eq!(ctx.resource_key(), DbResourceKey::for_url("postgres://a"));
+    }
+
+    #[test]
+    fn reinstalling_the_same_database_reports_no_change() {
+        let mut ctx = ThreadDbContext::new();
+        assert!(install(&mut ctx, "postgres://a"));
+        assert!(!install(&mut ctx, "postgres://a"));
+        assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
+    }
+
+    #[test]
+    fn installing_a_second_database_reports_the_change() {
+        let mut ctx = ThreadDbContext::new();
+        install(&mut ctx, "postgres://a");
+        assert!(install(&mut ctx, "postgres://b"));
+        assert_eq!(ctx.db_url().as_deref(), Some("postgres://b"));
+        assert_ne!(ctx.resource_key(), DbResourceKey::for_url("postgres://a"));
+    }
+
+    /// The URL and its backend selection are installed together, so no reader
+    /// can observe one without the other. `init_pool_async` depends on that:
+    /// it opens the pool from this selection rather than re-parsing the URL.
+    #[test]
+    fn the_url_and_its_backend_selection_are_installed_together() {
+        let mut ctx = ThreadDbContext::new();
+        assert!(ctx.db_url().is_none() && ctx.backend_selection().is_none());
+
+        install(&mut ctx, "postgres://a");
+        assert!(matches!(
+            ctx.backend_selection(),
+            Some(BackendUrl::Postgres)
+        ));
+
+        install(&mut ctx, "sqlite:/tmp/ctx-install.sqlite");
+        assert!(matches!(
+            ctx.backend_selection(),
+            Some(BackendUrl::Sqlite { .. })
+        ));
+    }
+
+    #[test]
+    fn installing_resources_does_not_touch_the_pool_slot() {
+        // `install_db_resources` is *just* the configuration slots; the caller
+        // (lib.rs) invokes `clear_pool` when the resource changed. We can't
+        // install a real pool here (Pool::connect needs PG), but we can pin
+        // that the installer itself leaves the pool/backend slots alone.
+        let mut ctx = ThreadDbContext::new();
+        install(&mut ctx, "postgres://a");
+        assert!(ctx.pool().is_none());
+        assert!(ctx.backend().is_none());
+        let _ = install(&mut ctx, "postgres://a"); // no-op
+        assert!(ctx.pool().is_none());
+        assert!(ctx.backend().is_none());
+    }
+
+    // ----- clear_pool ----------------------------------------------------
+
+    #[test]
+    fn clear_pool_when_unset_is_noop() {
+        let mut ctx = ThreadDbContext::new();
+        ctx.clear_pool();
+        assert!(ctx.pool().is_none());
+        assert!(ctx.backend().is_none());
+    }
+
+    // ----- backend cold-init single-flight -------------------------------
+
+    #[test]
+    fn backend_init_slot_allows_one_initializer_at_a_time() {
+        let mut ctx = ThreadDbContext::new();
+
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::Acquired
+        ));
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::InProgress
+        ));
+
+        ctx.finish_backend_init();
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::Acquired
+        ));
+        ctx.finish_backend_init();
+    }
+
+    #[test]
+    fn clear_pool_releases_backend_init_slot() {
+        let mut ctx = ThreadDbContext::new();
+
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::Acquired
+        ));
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::InProgress
+        ));
+
+        ctx.clear_pool();
+        assert!(matches!(
+            ctx.begin_backend_init(),
+            BackendInitState::Acquired
+        ));
+        ctx.finish_backend_init();
+    }
+
+    // ----- TX token monotonic counter ------------------------------------
+
+    #[test]
+    fn frame_emit_marks_never_discard_an_enclosing_frames_events() {
+        let mut ctx = ThreadDbContext::new();
+        // No frame is open, so there is no watermark to pop.
+        assert_eq!(
+            ctx.pop_frame_emit_mark("app_t"),
+            None,
+            "no open frame yields no watermark"
+        );
+
+        // Discarding with no watermark on the stack must leave the buffer ALONE
+        // rather than truncating to zero, which would drop the enclosing
+        // frame's events. Over-publishing is a bug; silently dropping a
+        // committed row's event is a worse one.
+        ctx.push_pending_emit(dummy_event("c1"));
+        ctx.discard_frame_effects("app_t");
+        assert_eq!(
+            ctx.lanes.by_app().get("app_t").map(|lane| lane.pending_emits.len()),
+            Some(1),
+            "a missing watermark must not discard the enclosing frame's events"
+        );
+
+        // A real watermark discards exactly the frame's own events: the mark is
+        // taken when the frame opens, so everything queued after it is the
+        // frame's and everything before it is the parent's.
+        ctx.push_frame_emit_mark("app_t");
+        ctx.push_pending_emit(dummy_event("c2"));
+        ctx.discard_frame_effects("app_t");
+        let kept = &ctx.lanes.by_app().get("app_t").expect("lane").pending_emits;
+        assert_eq!(kept.len(), 1, "truncate to the frame's watermark");
+        assert_eq!(
+            kept[0].collection, "c1",
+            "the enclosing frame's event survives"
+        );
+
+        // `discard_frame_effects` does NOT pop: a rolled-back frame is not
+        // closed until its RELEASE lands, and that is the call that pops.
+        assert_eq!(ctx.pop_frame_emit_mark("app_t"), Some(1));
+        assert_eq!(ctx.pop_frame_emit_mark("app_t"), None);
+    }
+
+    /// `retire_transaction` drops the watermarks that died with the frames.
+    ///
+    /// Leaving them would let the next transaction's first savepoint pop a
+    /// stale mark and truncate that transaction's buffer to an unrelated
+    /// length.
+    #[test]
+    fn retiring_a_transaction_drops_its_frame_watermarks() {
+        let mut ctx = ThreadDbContext::new();
+        ctx.push_pending_emit(dummy_event("c1"));
+        ctx.push_frame_emit_mark("app_t");
+        ctx.retire_transaction("app_t");
+        assert_eq!(
+            ctx.pop_frame_emit_mark("app_t"),
+            None,
+            "a retired transaction leaves no watermark behind"
+        );
+    }
+
+    /// The backend generation is monotonic and never restarts.
+    ///
+    /// A counter that restarted would let a stale completion authenticate
+    /// against a later session by arithmetic coincidence, which is exactly what
+    /// SC-1's guard order step 4 exists to refuse.
+    #[test]
+    fn backend_generations_are_monotonic() {
+        let mut ctx = ThreadDbContext::new();
+        let first = ctx.next_backend_generation();
+        let second = ctx.next_backend_generation();
+        assert!(second > first, "generations must strictly increase");
+        ctx.retire_transaction("app_t");
+        assert!(
+            ctx.next_backend_generation() > second,
+            "retiring a transaction must not restart the sequence"
+        );
+    }
+
+    // ----- PENDING_EMITS state machine -----------------------------------
+
+    #[test]
+    fn pending_emits_start_empty() {
+        let ctx = ThreadDbContext::new();
+        assert!(ctx.lanes.by_app().values().all(|lane| lane.pending_emits.is_empty()));
+    }
+
+    #[test]
+    fn push_pending_emit_allocates_slot_lazily() {
+        // dummy_event tags app_id "app_t"; the queue keys on that.
+        let mut ctx = ThreadDbContext::new();
+        assert!(ctx.lanes.by_app().values().all(|lane| lane.pending_emits.is_empty()));
+        ctx.push_pending_emit(dummy_event("c1"));
+        assert!(ctx.lanes.by_app().contains_key("app_t"));
+        assert_eq!(ctx.lanes.by_app().get("app_t").unwrap().pending_emits.len(), 1);
+    }
+
+    #[test]
+    fn push_pending_emit_accumulates() {
+        let mut ctx = ThreadDbContext::new();
+        ctx.push_pending_emit(dummy_event("c1"));
+        ctx.push_pending_emit(dummy_event("c2"));
+        ctx.push_pending_emit(dummy_event("c3"));
+        let evs = &ctx.lanes.by_app().get("app_t").unwrap().pending_emits;
+        assert_eq!(evs.len(), 3);
+        assert_eq!(evs[0].collection, "c1");
+        assert_eq!(evs[1].collection, "c2");
+        assert_eq!(evs[2].collection, "c3");
+    }
+
+    #[test]
+    fn drain_pending_emits_returns_and_clears() {
+        let mut ctx = ThreadDbContext::new();
+        ctx.push_pending_emit(dummy_event("c1"));
+        ctx.push_pending_emit(dummy_event("c2"));
+        let drained = ctx.drain_pending_emits_for("app_t");
+        assert_eq!(drained.len(), 2);
+        // After drain the app's queue is cleared — subsequent pushes
+        // re-allocate.
+        assert!(ctx.lanes.by_app().get("app_t").is_none_or(|lane| lane.pending_emits.is_empty()));
+    }
+
+    #[test]
+    fn drain_pending_emits_on_empty_returns_empty_vec() {
+        let mut ctx = ThreadDbContext::new();
+        let drained = ctx.drain_pending_emits_for("app_t");
+        assert!(drained.is_empty());
+        assert!(ctx.lanes.by_app().values().all(|lane| lane.pending_emits.is_empty()));
+    }
+
+    #[test]
+    fn drain_then_push_starts_fresh() {
+        let mut ctx = ThreadDbContext::new();
+        ctx.push_pending_emit(dummy_event("c1"));
+        let _ = ctx.drain_pending_emits_for("app_t");
+        ctx.push_pending_emit(dummy_event("c2"));
+        let evs = &ctx.lanes.by_app().get("app_t").unwrap().pending_emits;
+        assert_eq!(evs.len(), 1);
+        assert_eq!(evs[0].collection, "c2");
+    }
+
+    #[test]
+    fn clear_pending_emits_drops_without_returning() {
+        let mut ctx = ThreadDbContext::new();
+        ctx.push_pending_emit(dummy_event("c1"));
+        ctx.push_pending_emit(dummy_event("c2"));
+        ctx.clear_pending_emits_for("app_t");
+        assert!(ctx.lanes.by_app().get("app_t").is_none_or(|lane| lane.pending_emits.is_empty()));
+        // A subsequent drain returns empty (queue is gone).
+        assert!(ctx.drain_pending_emits_for("app_t").is_empty());
+    }
+
+    #[test]
+    fn clear_pending_emits_on_empty_is_idempotent() {
+        let mut ctx = ThreadDbContext::new();
+        ctx.clear_pending_emits_for("app_t");
+        ctx.clear_pending_emits_for("app_t");
+        assert!(ctx.lanes.by_app().values().all(|lane| lane.pending_emits.is_empty()));
+    }
+
+    // ----- SEC-1: per-app scoping of the tx / savepoint / emit slots
+
+    // A worker thread multiplexes up to ~200 isolates (one per app).
+    // Every slot below used to be a single per-OS-thread cell shared by
+    // ALL co-resident apps: app B could observe and drain app A's
+    // parked transaction client (running B's SQL inside A's
+    // transaction, snapshot, and per-app role), corrupt A's savepoint
+    // bookkeeping, and drain A's pre-commit broker queue. These tests
+    // pin the per-app ownership contract.
+
+    fn run_async<F: std::future::Future>(f: F) -> F::Output {
+        compio::runtime::Runtime::new()
+            .expect("compio runtime build")
+            .block_on(f)
+    }
+
+    /// Build a parkable [`TxConnection`] without a live Postgres: the
+    /// embedded SQLite backend hands out a real session handle from a
+    /// tempdir-backed store. No SQL is executed on it — these tests
+    /// exercise the slot state machine only.
+    async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> TxConnection {
+        use crate::backend::SqlExecutor as _;
+        let backend =
+            crate::backend_selection::new_sqlite_backend(std::path::PathBuf::from(dir.path()))
+                .expect("open sqlite backend");
+        let client = backend
+            .acquire_dedicated_client("slot_state_probe")
+            .await
+            .expect("acquire sqlite client");
+        TxConnection::Sqlite(client)
+    }
+
+    #[test]
+    fn sec1_tx_parked_by_app_a_is_invisible_and_untakable_for_app_b() {
+        run_async(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut ctx = ThreadDbContext::new();
+            let prev = ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
+            assert!(prev.is_none(), "tx slot must start empty");
+
+            assert!(
+                ctx.has_tx_for("app_a"),
+                "the owning app must see its own parked tx",
+            );
+            assert!(
+                !ctx.has_tx_for("app_b"),
+                "SEC-1: app_b must NOT observe app_a's parked tx \
+                 (a hit here routes app_b's SQL onto app_a's tx connection)",
+            );
+            assert!(
+                ctx.take_tx_client_for("app_b").is_none(),
+                "SEC-1: app_b must NOT be able to drain app_a's tx client",
+            );
+            assert!(
+                ctx.has_tx_for("app_a"),
+                "app_a's parked tx must survive app_b's probe unmodified",
+            );
+            // The owner can still take its own client back out.
+            assert!(
+                ctx.take_tx_client_for("app_a").is_some(),
+                "the owner must still be able to take its own tx client",
+            );
+        });
+    }
+
+    #[test]
+    fn sec1_frame_watermarks_are_scoped_per_app() {
+        run_async(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let mut ctx = ThreadDbContext::new();
+            ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
+
+            ctx.push_frame_emit_mark("app_a");
+            ctx.push_frame_emit_mark("app_a");
+            assert_eq!(
+                ctx.pop_frame_emit_mark("app_b"),
+                None,
+                "SEC-1: app_b must not inherit app_a's frame watermarks \
+                 (a shared stack lets one app truncate the other's queue)",
+            );
+
+            // app_b settling its own (nonexistent) transaction must not clobber
+            // app_a's live frame bookkeeping.
+            ctx.retire_transaction("app_b");
+            assert_eq!(
+                ctx.pop_frame_emit_mark("app_a"),
+                Some(0),
+                "SEC-1: app_b's settle must not drop app_a's frame watermarks",
+            );
+            assert_eq!(ctx.pop_frame_emit_mark("app_a"), Some(0));
+            assert_eq!(ctx.pop_frame_emit_mark("app_a"), None);
+        });
+    }
+
+    #[test]
+    fn sec1_pending_emits_drain_is_scoped_per_app() {
+        let mut ctx = ThreadDbContext::new();
+        let mut ev_a = dummy_event("orders");
+        ev_a.app_id = "app_a".to_string();
+        let mut ev_b = dummy_event("messages");
+        ev_b.app_id = "app_b".to_string();
+        ctx.push_pending_emit(ev_a);
+        ctx.push_pending_emit(ev_b);
+
+        let drained_b = ctx.drain_pending_emits_for("app_b");
+        assert_eq!(
+            drained_b.len(),
+            1,
+            "SEC-1: app_b's commit drain must only fire app_b's queued events",
+        );
+        assert_eq!(drained_b[0].app_id, "app_b");
+
+        let drained_a = ctx.drain_pending_emits_for("app_a");
+        assert_eq!(
+            drained_a.len(),
+            1,
+            "SEC-1: app_a's queued events must survive app_b's drain \
+             (firing them early breaks the Gap-B pre-commit fence)",
+        );
+        assert_eq!(drained_a[0].app_id, "app_a");
+    }
+}
+
+/// Every app's open transaction on this worker thread, plus the withdrawal
+/// tombstones that must outlive a lane.
+///
+/// # Why this is one owner, and its own type
+///
+/// `docs/proposals/2026-09-02-thread-context-ownership.md` calls `context.rs`
+/// four owners wearing one struct, and this is the largest. Measured
+/// 2026-09-02: 25 methods touch `lanes` and `withdrawn_tx_sessions` and NOTHING
+/// else on `ThreadDbContext` - no pool, no descriptor cache, no generation
+/// counter. They were separable as a unit, and the separation is what lets the
+/// engine tier move to its own crate without dragging the adapter's
+/// per-isolate state along.
+///
+/// The bodies below moved BYTE-FOR-BYTE. That was possible because the field
+/// names are unchanged, so every `self.lanes` / `self.withdrawn_tx_sessions`
+/// still resolves - now to this struct. Nothing was rewritten, which is the
+/// property that made it safe to do to the transaction hot path.
+///
+/// # SEC-1 is the reason for the key, and it is unchanged
+///
+/// A worker OS thread multiplexes up to ~200 isolates, and a creator's
+/// `env.db.transaction(async () => await fetch(slow))` parks its session here
+/// across the `await`. Keying by `app_id` makes app A's lane invisible and
+/// untouchable to co-resident app B, which would otherwise run B's SQL inside
+/// A's transaction, snapshot and per-app role.
+///
+/// # The tombstone is beside the lanes, not inside them
+///
+/// `withdrawn_tx_sessions` marks a session the protocol condemned. SC-1
+/// withdraws a session and retires its lane in the same settle, but the session
+/// can be out of the slot in another future's hands, and that future's `Drop`
+/// returns it afterwards - to a lane that no longer exists. A flag inside
+/// [`TxLane`] would die with the lane and let a condemned session reach the
+/// pool, and from there the next borrower. A tombstone cannot live inside the
+/// thing it is a tombstone for.
+#[derive(Default)]
+pub(crate) struct TxLanes {
+    /// Every app's open transaction, one entry each.
+    ///
+    /// **The entry IS the claim.** This map replaced nine parallel
+    /// `HashMap<String, _>` on 2026-09-02 - the session, the reducer, the
+    /// canceller, the withdrawal tombstone, two waiter lists, the savepoint
+    /// emit marks, the pending-emit queue, and a `tx_claims: HashSet<String>`
+    /// that existed only to say "one of these is in flight". They were created
+    /// together, mutated together and destroyed together, so they were one
+    /// entity written nine ways.
+    lanes: HashMap<String, TxLane>,
+
+    /// Apps whose transaction session was withdrawn: anything returning to the
+    /// slot is destroyed rather than parked. Cleared by
+    /// [`Self::admit_transaction`], never by retirement - the tombstone belongs
+    /// to the withdrawn session, not to the app.
+    withdrawn_tx_sessions: HashSet<String>,
+}
+
+impl TxLanes {
+    /// The lane map, for this module's SEC-1 scoping tests only.
+    ///
+    /// Named `by_app` rather than exposing the field so the call reads
+    /// `ctx.lanes.by_app()` instead of `ctx.lanes.lanes` - and so the field
+    /// itself stays private, keeping the 25 forwarding methods the whole lane
+    /// surface.
+    #[cfg(test)]
+    fn by_app(&self) -> &HashMap<String, TxLane> {
+        &self.lanes
+    }
+
     // ----- TX_CONN / SAVEPOINT_DEPTH ------
 
     /// `true` if a transaction connection is currently parked **for
@@ -1193,11 +1909,6 @@ impl ThreadDbContext {
         self.wake_tx_slot_waiters(app_id);
     }
 
-    /// Mint the backend generation for the next installed session.
-    pub(crate) const fn next_backend_generation(&mut self) -> u64 {
-        self.backend_generation += 1;
-        self.backend_generation
-    }
 
     /// SC-1 `Action::WithdrawSession`: mark `app_id`'s session withdrawn and
     /// hand the caller whatever is in the slot to destroy.
@@ -1293,542 +2004,5 @@ impl ThreadDbContext {
         if let Some(lane) = self.lanes.get_mut(app_id) {
             lane.pending_emits.clear();
         }
-    }
-}
-
-impl Default for ThreadDbContext {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-thread_local! {
-    /// The DB context shared by all isolates on this worker thread. Replaces
-    /// the slot-per-thread-local
-    /// lattice that previously lived in `lib.rs`, `migrations.rs`, and
-    /// `replication_ops.rs`.
-    pub(crate) static THREAD_DB_CTX: RefCell<ThreadDbContext> =
-        RefCell::new(ThreadDbContext::new());
-}
-
-/// Run `f` with a shared reference to the per-worker-thread DB context.
-///
-/// The compio runtime is single-threaded per worker; this never
-/// contends. Callers must NOT re-enter [`with`] / [`with_mut`] from
-/// inside `f` (the underlying `RefCell` will panic).
-pub fn with<R>(f: impl FnOnce(&ThreadDbContext) -> R) -> R {
-    THREAD_DB_CTX.with(|c| f(&c.borrow()))
-}
-
-/// Run `f` with an exclusive reference to the per-worker-thread DB context.
-/// Same re-entrancy rule as [`with`].
-pub fn with_mut<R>(f: impl FnOnce(&mut ThreadDbContext) -> R) -> R {
-    THREAD_DB_CTX.with(|c| f(&mut c.borrow_mut()))
-}
-
-/// The column-key source for a backend that constructs itself rather than
-/// being built by [`ThreadDbContext::set_pool`].
-///
-/// Both backends are in that position: `SqliteBackend::{new, open}` and
-/// `PostgresBackend::new` are called directly (by `init_pool_async`, and
-/// by tests) and then handed to the context, so they read the worker
-/// thread's installed root keys here. One function serves both because
-/// key sourcing no longer differs by backend -- see
-/// `crate::encryption::keys`. Same re-entrancy rule as [`with`] - do not
-/// call this from inside a context closure. `set_pool` does NOT call it:
-/// it already holds `&mut` on the context and reads
-/// [`ThreadDbContext::local_key_source`] off `self` instead.
-pub(crate) fn isolate_key_source() -> crate::encryption::LocalKeySource {
-    with(ThreadDbContext::local_key_source)
-}
-
-#[cfg(test)]
-mod tests {
-    //! Unit tests for the per-worker-thread DB context state machine.
-    //!
-    //! Every test constructs a fresh [`ThreadDbContext`] directly via
-    //! [`ThreadDbContext::new`] — the thread-local [`THREAD_DB_CTX`] is
-    //! avoided so test ordering on the same OS thread cannot cause one
-    //! test to observe state another mutated.
-    //!
-    //! ## Why some accessors aren't covered here
-    //!
-    //! The slots that store a live transaction client
-    //! (`tx_conn`) need a real backend handle to
-    //! exercise. The Postgres side still needs a `compio_postgres::Client`
-    //! (`Client::new` is `pub(crate)` on the driver), and the SQLite side
-    //! would need a live session actor. These unit tests stay pure-state;
-    //! end-to-end slot round-trips live in the integration targets.
-    //!
-    //! Concretely, the following can only be exercised by
-    //! `tests/integration.rs` (which spins up a real PG):
-    //!
-    //! * [`ThreadDbContext::install_tx_client`] /
-    //!   [`ThreadDbContext::take_tx_client`] /
-    //!   [`ThreadDbContext::put_tx_client`] round-trip with a real
-    //!   backend client.
-    //! * The `debug_assert!` inside [`ThreadDbContext::push_savepoint`]
-    //!   that a savepoint requires an active `tx_conn` — same constraint;
-    //!   the pop/reset arms (no such precondition) are unit-tested.
-    //!
-    //! For [`ThreadDbContext::set_pool`] / [`ThreadDbContext::backend`]
-    //! we need an `Rc<Pool>`, which only `Pool::connect` produces. Those
-    //! lifecycles are covered by `tests/integration.rs`.
-
-    use super::*;
-
-    use crate::BackendUrl;
-    use std::collections::HashMap;
-    use zeroship_core::change_event::{ChangeEvent, ChangeOp};
-
-    fn dummy_event(collection: &str) -> ChangeEvent {
-        ChangeEvent {
-            app_id: "app_t".into(),
-            collection: collection.into(),
-            op: ChangeOp::Insert,
-            pk: Some("1".to_string()),
-            changed_columns: Vec::new(),
-            new_tuple: HashMap::new(),
-            old_tuple: None,
-        }
-    }
-
-    // ----- ThreadDbContext::new / Default -------------------------------
-
-    #[test]
-    fn new_yields_fully_cleared_slots() {
-        let ctx = ThreadDbContext::new();
-        assert!(ctx.pool().is_none());
-        assert!(!ctx.pool_initialised());
-        assert!(ctx.backend().is_none());
-        assert!(ctx.db_url().is_none());
-        assert!(!ctx.has_tx_for("a"));
-        assert!(ctx.transaction_reducer("a").is_none());
-        assert!(!ctx.tx_session_withdrawn("a"));
-        // pending_emits starts empty (each app's queue is allocated
-        // lazily on first push).
-        assert!(ctx.lanes.values().all(|lane| lane.pending_emits.is_empty()));
-    }
-
-    #[test]
-    fn default_matches_new() {
-        let a = ThreadDbContext::default();
-        let b = ThreadDbContext::new();
-        // Compare observable state (no PartialEq on the struct).
-        assert_eq!(a.pool_initialised(), b.pool_initialised());
-        assert_eq!(
-            a.transaction_reducer("a").is_none(),
-            b.transaction_reducer("a").is_none()
-        );
-        assert_eq!(a.has_tx_for("a"), b.has_tx_for("a"));
-        assert_eq!(a.db_url(), b.db_url());
-    }
-
-    // ----- installed DB resources ----------------------------------------
-
-    /// Install the resources a service over `url` would hand this thread.
-    fn install(ctx: &mut ThreadDbContext, url: &str) -> bool {
-        ctx.install_db_resources(
-            url,
-            DbResourceKey::for_url(url),
-            crate::service::select_backend(url).expect("test URLs must be valid"),
-        )
-    }
-
-    #[test]
-    fn installing_a_new_database_reports_the_change() {
-        let mut ctx = ThreadDbContext::new();
-        assert!(install(&mut ctx, "postgres://a"));
-        assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
-        assert_eq!(ctx.resource_key(), DbResourceKey::for_url("postgres://a"));
-    }
-
-    #[test]
-    fn reinstalling_the_same_database_reports_no_change() {
-        let mut ctx = ThreadDbContext::new();
-        assert!(install(&mut ctx, "postgres://a"));
-        assert!(!install(&mut ctx, "postgres://a"));
-        assert_eq!(ctx.db_url().as_deref(), Some("postgres://a"));
-    }
-
-    #[test]
-    fn installing_a_second_database_reports_the_change() {
-        let mut ctx = ThreadDbContext::new();
-        install(&mut ctx, "postgres://a");
-        assert!(install(&mut ctx, "postgres://b"));
-        assert_eq!(ctx.db_url().as_deref(), Some("postgres://b"));
-        assert_ne!(ctx.resource_key(), DbResourceKey::for_url("postgres://a"));
-    }
-
-    /// The URL and its backend selection are installed together, so no reader
-    /// can observe one without the other. `init_pool_async` depends on that:
-    /// it opens the pool from this selection rather than re-parsing the URL.
-    #[test]
-    fn the_url_and_its_backend_selection_are_installed_together() {
-        let mut ctx = ThreadDbContext::new();
-        assert!(ctx.db_url().is_none() && ctx.backend_selection().is_none());
-
-        install(&mut ctx, "postgres://a");
-        assert!(matches!(
-            ctx.backend_selection(),
-            Some(BackendUrl::Postgres)
-        ));
-
-        install(&mut ctx, "sqlite:/tmp/ctx-install.sqlite");
-        assert!(matches!(
-            ctx.backend_selection(),
-            Some(BackendUrl::Sqlite { .. })
-        ));
-    }
-
-    #[test]
-    fn installing_resources_does_not_touch_the_pool_slot() {
-        // `install_db_resources` is *just* the configuration slots; the caller
-        // (lib.rs) invokes `clear_pool` when the resource changed. We can't
-        // install a real pool here (Pool::connect needs PG), but we can pin
-        // that the installer itself leaves the pool/backend slots alone.
-        let mut ctx = ThreadDbContext::new();
-        install(&mut ctx, "postgres://a");
-        assert!(ctx.pool().is_none());
-        assert!(ctx.backend().is_none());
-        let _ = install(&mut ctx, "postgres://a"); // no-op
-        assert!(ctx.pool().is_none());
-        assert!(ctx.backend().is_none());
-    }
-
-    // ----- clear_pool ----------------------------------------------------
-
-    #[test]
-    fn clear_pool_when_unset_is_noop() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.clear_pool();
-        assert!(ctx.pool().is_none());
-        assert!(ctx.backend().is_none());
-    }
-
-    // ----- backend cold-init single-flight -------------------------------
-
-    #[test]
-    fn backend_init_slot_allows_one_initializer_at_a_time() {
-        let mut ctx = ThreadDbContext::new();
-
-        assert!(matches!(
-            ctx.begin_backend_init(),
-            BackendInitState::Acquired
-        ));
-        assert!(matches!(
-            ctx.begin_backend_init(),
-            BackendInitState::InProgress
-        ));
-
-        ctx.finish_backend_init();
-        assert!(matches!(
-            ctx.begin_backend_init(),
-            BackendInitState::Acquired
-        ));
-        ctx.finish_backend_init();
-    }
-
-    #[test]
-    fn clear_pool_releases_backend_init_slot() {
-        let mut ctx = ThreadDbContext::new();
-
-        assert!(matches!(
-            ctx.begin_backend_init(),
-            BackendInitState::Acquired
-        ));
-        assert!(matches!(
-            ctx.begin_backend_init(),
-            BackendInitState::InProgress
-        ));
-
-        ctx.clear_pool();
-        assert!(matches!(
-            ctx.begin_backend_init(),
-            BackendInitState::Acquired
-        ));
-        ctx.finish_backend_init();
-    }
-
-    // ----- TX token monotonic counter ------------------------------------
-
-    #[test]
-    fn frame_emit_marks_never_discard_an_enclosing_frames_events() {
-        let mut ctx = ThreadDbContext::new();
-        // No frame is open, so there is no watermark to pop.
-        assert_eq!(
-            ctx.pop_frame_emit_mark("app_t"),
-            None,
-            "no open frame yields no watermark"
-        );
-
-        // Discarding with no watermark on the stack must leave the buffer ALONE
-        // rather than truncating to zero, which would drop the enclosing
-        // frame's events. Over-publishing is a bug; silently dropping a
-        // committed row's event is a worse one.
-        ctx.push_pending_emit(dummy_event("c1"));
-        ctx.discard_frame_effects("app_t");
-        assert_eq!(
-            ctx.lanes.get("app_t").map(|lane| lane.pending_emits.len()),
-            Some(1),
-            "a missing watermark must not discard the enclosing frame's events"
-        );
-
-        // A real watermark discards exactly the frame's own events: the mark is
-        // taken when the frame opens, so everything queued after it is the
-        // frame's and everything before it is the parent's.
-        ctx.push_frame_emit_mark("app_t");
-        ctx.push_pending_emit(dummy_event("c2"));
-        ctx.discard_frame_effects("app_t");
-        let kept = &ctx.lanes.get("app_t").expect("lane").pending_emits;
-        assert_eq!(kept.len(), 1, "truncate to the frame's watermark");
-        assert_eq!(
-            kept[0].collection, "c1",
-            "the enclosing frame's event survives"
-        );
-
-        // `discard_frame_effects` does NOT pop: a rolled-back frame is not
-        // closed until its RELEASE lands, and that is the call that pops.
-        assert_eq!(ctx.pop_frame_emit_mark("app_t"), Some(1));
-        assert_eq!(ctx.pop_frame_emit_mark("app_t"), None);
-    }
-
-    /// `retire_transaction` drops the watermarks that died with the frames.
-    ///
-    /// Leaving them would let the next transaction's first savepoint pop a
-    /// stale mark and truncate that transaction's buffer to an unrelated
-    /// length.
-    #[test]
-    fn retiring_a_transaction_drops_its_frame_watermarks() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.push_pending_emit(dummy_event("c1"));
-        ctx.push_frame_emit_mark("app_t");
-        ctx.retire_transaction("app_t");
-        assert_eq!(
-            ctx.pop_frame_emit_mark("app_t"),
-            None,
-            "a retired transaction leaves no watermark behind"
-        );
-    }
-
-    /// The backend generation is monotonic and never restarts.
-    ///
-    /// A counter that restarted would let a stale completion authenticate
-    /// against a later session by arithmetic coincidence, which is exactly what
-    /// SC-1's guard order step 4 exists to refuse.
-    #[test]
-    fn backend_generations_are_monotonic() {
-        let mut ctx = ThreadDbContext::new();
-        let first = ctx.next_backend_generation();
-        let second = ctx.next_backend_generation();
-        assert!(second > first, "generations must strictly increase");
-        ctx.retire_transaction("app_t");
-        assert!(
-            ctx.next_backend_generation() > second,
-            "retiring a transaction must not restart the sequence"
-        );
-    }
-
-    // ----- PENDING_EMITS state machine -----------------------------------
-
-    #[test]
-    fn pending_emits_start_empty() {
-        let ctx = ThreadDbContext::new();
-        assert!(ctx.lanes.values().all(|lane| lane.pending_emits.is_empty()));
-    }
-
-    #[test]
-    fn push_pending_emit_allocates_slot_lazily() {
-        // dummy_event tags app_id "app_t"; the queue keys on that.
-        let mut ctx = ThreadDbContext::new();
-        assert!(ctx.lanes.values().all(|lane| lane.pending_emits.is_empty()));
-        ctx.push_pending_emit(dummy_event("c1"));
-        assert!(ctx.lanes.contains_key("app_t"));
-        assert_eq!(ctx.lanes.get("app_t").unwrap().pending_emits.len(), 1);
-    }
-
-    #[test]
-    fn push_pending_emit_accumulates() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.push_pending_emit(dummy_event("c1"));
-        ctx.push_pending_emit(dummy_event("c2"));
-        ctx.push_pending_emit(dummy_event("c3"));
-        let evs = &ctx.lanes.get("app_t").unwrap().pending_emits;
-        assert_eq!(evs.len(), 3);
-        assert_eq!(evs[0].collection, "c1");
-        assert_eq!(evs[1].collection, "c2");
-        assert_eq!(evs[2].collection, "c3");
-    }
-
-    #[test]
-    fn drain_pending_emits_returns_and_clears() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.push_pending_emit(dummy_event("c1"));
-        ctx.push_pending_emit(dummy_event("c2"));
-        let drained = ctx.drain_pending_emits_for("app_t");
-        assert_eq!(drained.len(), 2);
-        // After drain the app's queue is cleared — subsequent pushes
-        // re-allocate.
-        assert!(ctx.lanes.get("app_t").is_none_or(|lane| lane.pending_emits.is_empty()));
-    }
-
-    #[test]
-    fn drain_pending_emits_on_empty_returns_empty_vec() {
-        let mut ctx = ThreadDbContext::new();
-        let drained = ctx.drain_pending_emits_for("app_t");
-        assert!(drained.is_empty());
-        assert!(ctx.lanes.values().all(|lane| lane.pending_emits.is_empty()));
-    }
-
-    #[test]
-    fn drain_then_push_starts_fresh() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.push_pending_emit(dummy_event("c1"));
-        let _ = ctx.drain_pending_emits_for("app_t");
-        ctx.push_pending_emit(dummy_event("c2"));
-        let evs = &ctx.lanes.get("app_t").unwrap().pending_emits;
-        assert_eq!(evs.len(), 1);
-        assert_eq!(evs[0].collection, "c2");
-    }
-
-    #[test]
-    fn clear_pending_emits_drops_without_returning() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.push_pending_emit(dummy_event("c1"));
-        ctx.push_pending_emit(dummy_event("c2"));
-        ctx.clear_pending_emits_for("app_t");
-        assert!(ctx.lanes.get("app_t").is_none_or(|lane| lane.pending_emits.is_empty()));
-        // A subsequent drain returns empty (queue is gone).
-        assert!(ctx.drain_pending_emits_for("app_t").is_empty());
-    }
-
-    #[test]
-    fn clear_pending_emits_on_empty_is_idempotent() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.clear_pending_emits_for("app_t");
-        ctx.clear_pending_emits_for("app_t");
-        assert!(ctx.lanes.values().all(|lane| lane.pending_emits.is_empty()));
-    }
-
-    // ----- SEC-1: per-app scoping of the tx / savepoint / emit slots
-
-    // A worker thread multiplexes up to ~200 isolates (one per app).
-    // Every slot below used to be a single per-OS-thread cell shared by
-    // ALL co-resident apps: app B could observe and drain app A's
-    // parked transaction client (running B's SQL inside A's
-    // transaction, snapshot, and per-app role), corrupt A's savepoint
-    // bookkeeping, and drain A's pre-commit broker queue. These tests
-    // pin the per-app ownership contract.
-
-    fn run_async<F: std::future::Future>(f: F) -> F::Output {
-        compio::runtime::Runtime::new()
-            .expect("compio runtime build")
-            .block_on(f)
-    }
-
-    /// Build a parkable [`TxConnection`] without a live Postgres: the
-    /// embedded SQLite backend hands out a real session handle from a
-    /// tempdir-backed store. No SQL is executed on it — these tests
-    /// exercise the slot state machine only.
-    async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> TxConnection {
-        use crate::backend::SqlExecutor as _;
-        let backend =
-            crate::backend_selection::new_sqlite_backend(std::path::PathBuf::from(dir.path()))
-                .expect("open sqlite backend");
-        let client = backend
-            .acquire_dedicated_client("slot_state_probe")
-            .await
-            .expect("acquire sqlite client");
-        TxConnection::Sqlite(client)
-    }
-
-    #[test]
-    fn sec1_tx_parked_by_app_a_is_invisible_and_untakable_for_app_b() {
-        run_async(async {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let mut ctx = ThreadDbContext::new();
-            let prev = ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
-            assert!(prev.is_none(), "tx slot must start empty");
-
-            assert!(
-                ctx.has_tx_for("app_a"),
-                "the owning app must see its own parked tx",
-            );
-            assert!(
-                !ctx.has_tx_for("app_b"),
-                "SEC-1: app_b must NOT observe app_a's parked tx \
-                 (a hit here routes app_b's SQL onto app_a's tx connection)",
-            );
-            assert!(
-                ctx.take_tx_client_for("app_b").is_none(),
-                "SEC-1: app_b must NOT be able to drain app_a's tx client",
-            );
-            assert!(
-                ctx.has_tx_for("app_a"),
-                "app_a's parked tx must survive app_b's probe unmodified",
-            );
-            // The owner can still take its own client back out.
-            assert!(
-                ctx.take_tx_client_for("app_a").is_some(),
-                "the owner must still be able to take its own tx client",
-            );
-        });
-    }
-
-    #[test]
-    fn sec1_frame_watermarks_are_scoped_per_app() {
-        run_async(async {
-            let dir = tempfile::tempdir().expect("tempdir");
-            let mut ctx = ThreadDbContext::new();
-            ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
-
-            ctx.push_frame_emit_mark("app_a");
-            ctx.push_frame_emit_mark("app_a");
-            assert_eq!(
-                ctx.pop_frame_emit_mark("app_b"),
-                None,
-                "SEC-1: app_b must not inherit app_a's frame watermarks \
-                 (a shared stack lets one app truncate the other's queue)",
-            );
-
-            // app_b settling its own (nonexistent) transaction must not clobber
-            // app_a's live frame bookkeeping.
-            ctx.retire_transaction("app_b");
-            assert_eq!(
-                ctx.pop_frame_emit_mark("app_a"),
-                Some(0),
-                "SEC-1: app_b's settle must not drop app_a's frame watermarks",
-            );
-            assert_eq!(ctx.pop_frame_emit_mark("app_a"), Some(0));
-            assert_eq!(ctx.pop_frame_emit_mark("app_a"), None);
-        });
-    }
-
-    #[test]
-    fn sec1_pending_emits_drain_is_scoped_per_app() {
-        let mut ctx = ThreadDbContext::new();
-        let mut ev_a = dummy_event("orders");
-        ev_a.app_id = "app_a".to_string();
-        let mut ev_b = dummy_event("messages");
-        ev_b.app_id = "app_b".to_string();
-        ctx.push_pending_emit(ev_a);
-        ctx.push_pending_emit(ev_b);
-
-        let drained_b = ctx.drain_pending_emits_for("app_b");
-        assert_eq!(
-            drained_b.len(),
-            1,
-            "SEC-1: app_b's commit drain must only fire app_b's queued events",
-        );
-        assert_eq!(drained_b[0].app_id, "app_b");
-
-        let drained_a = ctx.drain_pending_emits_for("app_a");
-        assert_eq!(
-            drained_a.len(),
-            1,
-            "SEC-1: app_a's queued events must survive app_b's drain \
-             (firing them early breaks the Gap-B pre-commit fence)",
-        );
-        assert_eq!(drained_a[0].app_id, "app_a");
     }
 }
