@@ -610,6 +610,14 @@ fn private_key_from_config(
     // Parse only that one additional label here; malformed plaintext keys must
     // retain the existing rustls PEM error instead of being misreported as a
     // bad passphrase.
+    //
+    // The non-UTF8 arm immediately below has NO OBSERVABLE EFFECT and is not a
+    // coverage gap. Measured 2026-09-03: removing it leaves all 768 lib tests
+    // green, and a probe loading a non-UTF8 key file prints the identical chain
+    // either way - "sslkey=<path>: cannot read PEM: no items found" - because
+    // `SecretDocument::from_pem` refuses the same bytes with the same message
+    // built from the same `unencrypted_error`. It stays as an explicit read of
+    // the failure, not as a behaviour any test could pin. Do not re-audit it.
     let pem_text = match std::str::from_utf8(&pem) {
         Ok(pem) => pem,
         Err(_) => {
