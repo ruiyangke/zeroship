@@ -3855,7 +3855,8 @@ async fn vector_search_returns_k_nearest() {
         10,
         VectorMetric::Cosine,
         &serde_json::Value::Null,
-        &serde_json::Value::Null,
+        &zeroship_plugin_db::collection_schema(&DbBinding::cold_start(app), coll)
+            .expect("descriptor slice for the search fixture"),
     )
     .await
     .unwrap_or_else(|e| panic!("vector_search failed: {e:?}"));
@@ -6178,7 +6179,8 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
         1,
         VectorMetric::Cosine,
         &Value::Null,
-        &serde_json::Value::Null,
+        &zeroship_plugin_db::collection_schema(&DbBinding::cold_start(app), coll)
+            .expect("descriptor slice for the search fixture"),
     )
     .await
     .unwrap_or_else(|e| panic!("vector_search failed: {e:?}"));
