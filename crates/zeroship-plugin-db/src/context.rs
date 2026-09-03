@@ -39,6 +39,7 @@ use compio_postgres::{OwnedPooledClient, Pool};
 use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, PostgresBackend};
 use zeroship_data_core::binding::DbBinding;
+use zeroship_data_core::schema_cache::SchemaCache;
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
 use zeroship_data_core::error::{CleanupAck, DbError, SettleIntent, TerminalResult};
 use crate::service::DbResourceKey;
@@ -425,7 +426,7 @@ pub struct ThreadDbContext {
     /// have different schemas. The declared cache was keyed `"{app}:{coll}"` and
     /// would have aliased them; only the deleted introspection cache was
     /// deploy-keyed. Consolidating onto one map keeps the stronger key.
-    schemas: HashMap<String, Arc<serde_json::Value>>,
+    schemas: SchemaCache,
 
     /// The identity of the database this thread's resources belong to.
     ///
@@ -540,7 +541,7 @@ impl ThreadDbContext {
             lanes: HashMap::new(),
             withdrawn_tx_sessions: HashSet::new(),
             backend_generation: 0,
-            schemas: HashMap::new(),
+            schemas: SchemaCache::new(),
             resource_key: DbResourceKey::UNBOUND,
             backend_selection: None,
             mask_policies: HashMap::new(),
@@ -783,16 +784,6 @@ impl ThreadDbContext {
         self.cdc_worker_id = Some(worker_id.to_string());
     }
 
-    /// The descriptor-store key for one collection under one binding.
-    fn schema_key(binding: &DbBinding, collection: &str) -> String {
-        format!(
-            "{}:{}:{}",
-            binding.app_id(),
-            binding.deploy_token(),
-            collection
-        )
-    }
-
     /// Install one collection's descriptor entry for this binding.
     /// Test fixtures use this narrow helper; production boot replaces the
     /// binding's complete descriptor through [`Self::replace_schemas`].
@@ -803,8 +794,7 @@ impl ThreadDbContext {
         collection: &str,
         schema: serde_json::Value,
     ) {
-        self.schemas
-            .insert(Self::schema_key(binding, collection), Arc::new(schema));
+        self.schemas.insert_one(binding, collection, schema);
     }
 
     /// Replace the complete descriptor for one app-at-deploy binding.
@@ -819,12 +809,7 @@ impl ThreadDbContext {
         binding: &DbBinding,
         schemas: Vec<(String, serde_json::Value)>,
     ) {
-        let prefix = format!("{}:{}:", binding.app_id(), binding.deploy_token());
-        self.schemas.retain(|key, _| !key.starts_with(&prefix));
-        for (collection, schema) in schemas {
-            self.schemas
-                .insert(Self::schema_key(binding, &collection), Arc::new(schema));
-        }
+        self.schemas.replace_for_binding(binding, schemas);
     }
 
     /// The descriptor entry for one collection under one binding.
@@ -838,9 +823,7 @@ impl ThreadDbContext {
         binding: &DbBinding,
         collection: &str,
     ) -> Option<Arc<serde_json::Value>> {
-        self.schemas
-            .get(&Self::schema_key(binding, collection))
-            .cloned()
+        self.schemas.get(binding, collection)
     }
 
     /// Enumerate every `(collection, schema)` pair the descriptor store holds
@@ -849,20 +832,13 @@ impl ThreadDbContext {
     /// every declared collection. Empty when the isolate has installed no
     /// schema.
     ///
-    /// Key shape: `<app_id>:<deploy_token>:<collection>` (the same format
-    /// [`Self::schema_key`] writes); the collection name is the suffix.
+    /// Key shape is `SchemaCache`'s concern now; the collection name is what
+    /// comes back.
     pub(crate) fn cached_schemas_for_binding(
         &self,
         binding: &DbBinding,
     ) -> Vec<(String, Arc<serde_json::Value>)> {
-        let prefix = format!("{}:{}:", binding.app_id(), binding.deploy_token());
-        self.schemas
-            .iter()
-            .filter_map(|(k, v)| {
-                k.strip_prefix(&prefix)
-                    .map(|coll| (coll.to_string(), v.clone()))
-            })
-            .collect()
+        self.schemas.entries_for_binding(binding)
     }
 
     // ----- MASK_POLICIES ---------------------------------------------

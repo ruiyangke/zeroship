@@ -44,5 +44,6 @@ pub mod budgets;
 pub mod capability;
 pub mod encryption;
 pub mod lock_policy;
+pub mod schema_cache;
 pub mod storage;
 pub mod error;
