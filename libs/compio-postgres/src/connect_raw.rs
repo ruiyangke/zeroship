@@ -2285,6 +2285,44 @@ mod tests {
         frame(b'T', &body)
     }
 
+    /// `single_text_value` refuses a probe row carrying more than one column.
+    ///
+    /// Measured 2026-09-02: deleting the surplus-column check left the lib
+    /// suite (763) and the integration suite (797) green. The scripted probe
+    /// tests all send well-formed one-column rows, so nothing drove the arm.
+    ///
+    /// The one-column case is asserted alongside it, or "refuse everything"
+    /// would satisfy the first assertion on its own.
+    #[test]
+    fn a_target_probe_row_with_surplus_columns_is_refused() {
+        fn data_row_body(frame_bytes: Vec<u8>) -> DataRowBody {
+            let mut buf = BytesMut::from(&frame_bytes[..]);
+            match Message::parse(&mut buf)
+                .expect("parse the scripted DataRow")
+                .expect("the scripted DataRow was incomplete")
+            {
+                Message::DataRow(body) => body,
+                _ => panic!("expected a DataRow"),
+            }
+        }
+
+        // Control: exactly one column is what the probes expect.
+        let row = data_row_body(single_column_data_row(b"on"));
+        assert_eq!(
+            single_text_value(&row).expect("a one-column probe row is valid"),
+            b"on",
+            "the accepted row did not yield its only column"
+        );
+
+        // A second column means the server answered a different query shape.
+        let mut body = 2i16.to_be_bytes().to_vec();
+        for value in [b"on".as_slice(), b"off".as_slice()] {
+            body.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
+            body.extend_from_slice(value);
+        }
+        let row = data_row_body(frame(b'D', &body));
+        single_text_value(&row).expect_err("a two-column probe row was accepted");
+    }
     fn single_column_data_row(value: &[u8]) -> Vec<u8> {
         let mut body = 1i16.to_be_bytes().to_vec();
         body.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
