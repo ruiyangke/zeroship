@@ -42,5 +42,6 @@
 pub mod binding;
 pub mod budgets;
 pub mod capability;
+pub mod encryption;
 pub mod storage;
 pub mod error;

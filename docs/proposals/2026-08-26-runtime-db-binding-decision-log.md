@@ -881,7 +881,7 @@ same shape.)*
 `ensure_admin_schema` and every installer are
 `#[cfg(any(test, feature = "test-helpers"))]`
 (`crates/zeroship-plugin-db/src/auth/bootstrap.rs:95-96`), no migration or SQL
-file created it, and `crates/zeroship-plugin-db/src/encryption/keys.rs:495`
+file created it, and `crates/zeroship-data-core/src/encryption/keys.rs:495`
 instructs operators to run a bootstrap migration **that does not exist**. The
 epoch design would therefore have landed the *first* production provisioner for
 that schema; decision 7 deleted the subject instead. Per the no-back-compat rule

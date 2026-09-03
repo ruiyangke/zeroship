@@ -67,7 +67,7 @@ use zeroize::Zeroizing;
 use zeroship_core::config::DeclaredEnvFamily;
 
 use super::aead::AeadKey;
-use zeroship_data_core::error::DbError;
+use crate::error::DbError;
 
 /// Root key material handed to the process directly, addressed by key id.
 ///
@@ -219,7 +219,7 @@ impl LocalKeySource {
 /// Per-isolate column-key store. Caches derived `AeadKey` material
 /// keyed by `(app_id, key_id)`.
 ///
-/// Construct one per [`crate::backend`] impl; clear on backend drop.
+/// Construct one per backend impl; clear on backend drop.
 /// The PG impl wires through this.
 pub struct KeyStore {
     cache: RefCell<HashMap<(String, String), AeadKey>>,
@@ -399,7 +399,7 @@ fn derive_key(root: &[u8; 32], app_id: &str) -> Result<AeadKey, DbError> {
 }
 
 /// Tiny local hex decoder — keeps the encryption module independent
-/// of `crate::auth::util` and avoids adding a `hex` crate dependency
+/// of the plugin's auth helpers and avoids adding a `hex` crate dependency
 /// just for one call site.
 fn hex_decode(s: &str) -> Result<Vec<u8>, String> {
     if !s.len().is_multiple_of(2) {

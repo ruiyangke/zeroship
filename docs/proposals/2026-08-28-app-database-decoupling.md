@@ -1184,11 +1184,11 @@ writes and the worker only reads:
 ## 7. Encryption
 
 Today the key is `Hkdf::<Sha256>::new(Some(app_id.as_bytes()), root)`
-(`crates/zeroship-plugin-db/src/encryption/keys.rs:373-374`, reached via `derive_key(&root, app_id)`
+(`crates/zeroship-data-core/src/encryption/keys.rs:373-374`, reached via `derive_key(&root, app_id)`
 at `:297`), the root is process-wide and scoped only by `key_id`
 (`lookup_root(&self, key_id)` at `:208`), and `canonical_aad(collection, column, row_pk)` binds the
 wire version, collection, column and pk and **nothing namespacing**
-(`crates/zeroship-plugin-db/src/encryption/aad.rs:75-98`). It fails in opposite directions on the two
+(`crates/zeroship-data-core/src/encryption/aad.rs:75-98`). It fails in opposite directions on the two
 new axes: co-grant-holders derive different keys and get an AEAD failure on data they are entitled to
 read; one app across two databases derives one key with no database in the AAD, so a ciphertext for
 `(users, ssn, usr_01)` lifted from one database verifies in the other - the exact relocation oracle
@@ -1201,7 +1201,7 @@ derive_key(root, database_id)
 canonical_aad(WIRE_VERSION_V2, database_id, collection, column, row_pk)
 ```
 
-`crates/zeroship-plugin-db/src/encryption/aad.rs:87-93` already says the version MUST become a
+`crates/zeroship-data-core/src/encryption/aad.rs:87-93` already says the version MUST become a
 parameter when `0x02` ships and that binding it
 first makes a downgrade fail the tag. This is that change.
 

@@ -28,7 +28,7 @@ use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use super::wire;
-use zeroship_data_core::error::DbError;
+use crate::error::DbError;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -52,7 +52,7 @@ pub struct AeadKey {
     pub k_siv: [u8; 32],
 }
 
-/// Encrypt under the column's declared [`crate::backend::EncryptionMode`].
+/// Encrypt under the column's declared [`zeroship_schema::descriptors::EncryptionMode`].
 ///
 /// The mode-to-function mapping had no home of its own until 2026-09-02: it
 /// was the body of `EncryptedColumn::encrypt`, written identically on both
@@ -67,13 +67,13 @@ pub struct AeadKey {
 /// they then ignored. [`decrypt`] therefore does not ask for one.
 pub fn encrypt(
     key: &AeadKey,
-    mode: crate::backend::EncryptionMode,
+    mode: zeroship_schema::descriptors::EncryptionMode,
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, DbError> {
     match mode {
-        crate::backend::EncryptionMode::Randomised => encrypt_randomised(key, plaintext, aad),
-        crate::backend::EncryptionMode::Deterministic => encrypt_deterministic(key, plaintext, aad),
+        zeroship_schema::descriptors::EncryptionMode::Randomised => encrypt_randomised(key, plaintext, aad),
+        zeroship_schema::descriptors::EncryptionMode::Deterministic => encrypt_deterministic(key, plaintext, aad),
     }
 }
 
