@@ -585,6 +585,47 @@ reason. **The verification standard for every remaining move is therefore three
 commands, not one**: the crate alone with helpers and all targets, the crate
 alone WITHOUT them, and at least one dependent.
 
+### The vendor cut's public surface is 21 items, 12 of which need promoting
+
+Measured 2026-09-02, after the three blockers below were cleared. A crate
+boundary caps visibility: a `pub(crate)` item becomes invisible to the engine
+the moment the vendor is its own crate, and **the compiler cannot warn about it
+in the current tree**, because the boundary does not exist yet. So the promotion
+list has to be derived before the move, exactly as Phase 0.5 audit 1 was.
+
+| tier | items the engine reaches for | already `pub` | need promoting |
+| --- | --- | --- | --- |
+| Postgres | 8 | 2 | 6 |
+| SQLite | 13 | 7 | 6 |
+
+**Postgres** - `pg_error::classify` and `postgres::PostgresBackend` are already
+`pub`. Promote `postgres::{terminal_from_tag, terminal_from_status, cleanup}`,
+`pg_session_sql::tx_session_setup_sql`, `pg_row_json::rows_to_json_value`,
+`pg_autocommit::roled_rows`. Both `terminal_*` are called from `context.rs:203`
+and `:209`.
+
+**SQLite** - the seven types are already `pub` (`SqliteBackend`,
+`SqliteChangeStream`, `TypedCell`, `TerminalIntent`, `SqliteSessionHandle`,
+`SqliteCancelHandle`, `TerminalOutcome`). Promote
+`vector::vec_to_le_bytes`, `spatial::point_to_blob`,
+`reservation::{terminal_result, cleanup}`,
+`row_json::typed_rows_to_json_value`, and the `change_sink` module itself.
+
+**Two measurement notes, because both instruments were wrong first.**
+
+A bare `\bname\b` sweep for these identifiers is worthless: `new`, `id`, `kind`,
+`open`, `lock`, `error`, `session`, `vector` and `spatial` are all declared
+`pub(crate)` somewhere in a vendor tier AND appear in most files in the crate.
+The first run "found" cross-boundary uses in `broker.rs`, `op_error.rs` and
+`lock_policy.rs` for nine such names, every one of them spelling rather than
+reachability. Match QUALIFIED paths (`crate::backend::sqlite::…::name`) and
+`use` lines instead - a cross-crate use has to name the path at least once.
+
+The visibility check then under-reported by one, because its regex expected
+`pub(crate) fn` and `terminal_from_status` is `pub(crate) const fn`. Read the
+list as a floor and re-derive it against the compiler once the crates exist:
+the promotion set is what `cargo check` will name, one error at a time.
+
 ### The vendor cut is blocked by three names, not by twelve thousand lines
 
 Measured 2026-09-02, after the traits landed in `data-core`. The two vendor
