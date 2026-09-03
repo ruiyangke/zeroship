@@ -43,21 +43,10 @@ use crate::backend::pg_error;
 use crate::backend::pg_session_sql::autocommit_local_session_setup_sql;
 use zeroship_data_core::error::DbError;
 
-/// The result of selecting a single cell: `SELECT <col> FROM <t> WHERE id = $1`.
-///
-/// Two independent things can go missing, and callers give each its own error,
-/// so collapsing them into one `Option` would throw away the distinction. The
-/// unmask readers report [`Self::NoRow`] as `unmask_not_found` and [`Self::Null`]
-/// as `unmask_value_null`; those codes are engine-tier policy and are minted by
-/// the caller, not here.
-pub(crate) enum ScalarRead<T> {
-    /// The query matched no row.
-    NoRow,
-    /// The row exists and the selected column is SQL NULL.
-    Null,
-    /// The row exists and the column holds a value.
-    Value(T),
-}
+// `ScalarRead` moved to `crate::backend` on 2026-09-02: SQLite returns it too
+// now that the unmask reads dispatch through `BackendHandle`, and a shared
+// return type living in the PostgreSQL module is the shape #119 is about.
+pub(crate) use super::ScalarRead;
 
 /// Run `sql` on a pooled connection narrowed to `app_id`'s role, returning the
 /// raw driver rows.

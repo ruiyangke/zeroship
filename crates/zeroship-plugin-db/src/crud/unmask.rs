@@ -70,6 +70,7 @@
 use base64::Engine as _;
 use serde_json::Value;
 
+use crate::backend::ScalarRead;
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
 
@@ -566,19 +567,18 @@ async fn fetch_and_decrypt(
         },
     );
 
-    // ---- PG arm ----
-    if let Some(pg) = backend.as_postgres() {
-        use crate::backend::pg_autocommit::ScalarRead;
+    // ---- read the ciphertext ----
+    //
+    // The vendor split moved into `BackendHandle::read_raw_column_bytes` on
+    // 2026-09-02 (#119). Everything below the read - key resolution, AEAD,
+    // the `wraps` unwrap - was already vendor-neutral and was duplicated
+    // VERBATIM in the two arms this replaces.
+    {
         // The real value lives in the RAW column - the field's own column
-        // holds the mask. This function and its SQLite twin are the only
-        // readers of that column in the tree, and they sit behind
+        // holds the mask. This read and its plaintext sibling are the only
+        // readers of that column in the tree, and both sit behind
         // `check_unmask_authorization` and the `__zeroship_audit_unmask` row.
-        let sql = format!(
-            "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
-            crate::query::raw_column_name(&args.column),
-            app_id,
-            args.collection
-        );
+        //
         // READ THE RAW SIBLING AS BYTES, NOT TEXT.
         //
         // The raw sibling of an ENCRYPTED column is BYTEA, and the funnel binds
@@ -606,8 +606,13 @@ async fn fetch_and_decrypt(
         // masked but UNENCRYPTED column, and the SQLite twin below reads
         // `TypedCell::Blob` and was always correct. The regression test is
         // `unmask_encrypted_column_on_pg_reads_bytea_raw_sibling`.
-        let bytes = match pg
-            .read_roled_scalar_bytes(app_id, &sql, &[&args.row_pk])
+        let bytes = match backend
+            .read_raw_column_bytes(
+                app_id,
+                &args.collection,
+                &crate::query::raw_column_name(&args.column),
+                &args.row_pk,
+            )
             .await?
         {
             ScalarRead::NoRow => {
@@ -632,70 +637,15 @@ async fn fetch_and_decrypt(
             }
             ScalarRead::Value(bytes) => bytes,
         };
-        // Key sourcing and AEAD are vendor-neutral; only the SELECT above is
-        // not. That is why the downcast on this arm is now `as_postgres` (for
-        // the roled read) rather than the deleted `as_encrypted_column_pg`.
+        // Key sourcing and AEAD are vendor-neutral; only the read above was
+        // not, and it now dispatches inside `BackendHandle`.
         let key = backend
             .key_store()
             .resolve(app_id, &enc_meta.key_id)
             .await?;
         let plaintext_bytes = crate::encryption::aead::decrypt(&key, &bytes, &aad)?;
-        return wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps);
+        wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps)
     }
-
-    // ---- SQLite arm ----
-    if let Some(sq) = backend.as_sqlite() {
-        use crate::backend::DialectBuilder as _;
-        use crate::backend::sqlite::session::TypedCell;
-        let q_app = sq.quote_ident(app_id);
-        let q_coll = sq.quote_ident(&args.collection);
-        let q_col = sq.quote_ident(&crate::query::raw_column_name(&args.column));
-        let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-        let handle = sq.autocommit_client();
-        let typed = handle
-            .query_typed_internal(&sql, &[args.row_pk.as_str()])
-            .await?;
-        if typed.rows.is_empty() {
-            return Err(DbError::ValidationFailed {
-                code: "unmask_not_found",
-                message: format!(
-                    "row '{}' not found in '{}.{}'",
-                    args.row_pk, app_id, args.collection
-                ),
-                hint: None,
-            });
-        }
-        let bytes = match &typed.rows[0][0] {
-            TypedCell::Blob(b) => b.clone(),
-            TypedCell::Null => {
-                return Err(DbError::ValidationFailed {
-                    code: "unmask_value_null",
-                    message: format!(
-                        "column '{}' on row '{}' is NULL; nothing to unmask",
-                        args.column, args.row_pk
-                    ),
-                    hint: None,
-                });
-            }
-            other => {
-                return Err(DbError::internal(format!(
-                    "unmask: expected BLOB for encrypted column, got {other:?}"
-                )));
-            }
-        };
-        let key = backend
-            .key_store()
-            .resolve(app_id, &enc_meta.key_id)
-            .await?;
-        let plaintext_bytes = crate::encryption::aead::decrypt(&key, &bytes, &aad)?;
-        return wrap_plaintext_per_wraps(&plaintext_bytes, enc_meta.wraps);
-    }
-
-    Err(DbError::Configuration {
-        code: "encryption_unavailable",
-        message: "db: no backend arm available for column encryption".to_string(),
-        hint: None,
-    })
 }
 
 /// Plaintext-storage path: SELECT the parent column directly. Used
@@ -706,86 +656,45 @@ async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
 
-    // ---- PG arm ----
-    if let Some(pg) = backend.as_postgres() {
-        use crate::backend::pg_autocommit::ScalarRead;
-        // The real value lives in the RAW column - the field's own column
-        // holds the mask. This function and its SQLite twin are the only
-        // readers of that column in the tree, and they sit behind
-        // `check_unmask_authorization` and the `__zeroship_audit_unmask` row.
-        //
-        // Text, not bytes: this is the PLAINTEXT-storage path, so the raw
-        // sibling is the column's own declared type. The encrypted path above
-        // reads BYTEA and must use `read_roled_scalar_bytes`.
-        let sql = format!(
-            "SELECT \"{}\" FROM \"{}\".\"{}\" WHERE id = $1",
-            crate::query::raw_column_name(&args.column),
+    // The real value lives in the RAW column - the field's own column holds
+    // the mask. This read and its encrypted sibling are the only readers of
+    // that column in the tree, and both sit behind
+    // `check_unmask_authorization` and the `__zeroship_audit_unmask` row.
+    //
+    // Text, not bytes: this is the PLAINTEXT-storage path, so the raw sibling
+    // is the column's own declared type. The encrypted path above reads bytes.
+    //
+    // The vendor split moved into `BackendHandle::read_raw_column_text` on
+    // 2026-09-02 (#119); the two error codes below are engine-tier policy and
+    // stay here, which is why the backend returns a tri-state rather than
+    // minting them itself.
+    match backend
+        .read_raw_column_text(
             app_id,
-            args.collection
-        );
-        return match pg
-            .read_roled_scalar_text(app_id, &sql, &[&args.row_pk])
-            .await?
-        {
-            ScalarRead::NoRow => Err(DbError::ValidationFailed {
-                code: "unmask_not_found",
-                message: format!(
-                    "row '{}' not found in '{}.{}'",
-                    args.row_pk, app_id, args.collection
-                ),
-                hint: None,
-            }),
-            ScalarRead::Null => Err(DbError::ValidationFailed {
-                code: "unmask_value_null",
-                message: format!(
-                    "column '{}' on row '{}' is NULL; nothing to unmask",
-                    args.column, args.row_pk
-                ),
-                hint: None,
-            }),
-            ScalarRead::Value(text) => Ok(text),
-        };
+            &args.collection,
+            &crate::query::raw_column_name(&args.column),
+            &args.row_pk,
+        )
+        .await?
+    {
+        ScalarRead::NoRow => Err(DbError::ValidationFailed {
+            code: "unmask_not_found",
+            message: format!(
+                "row '{}' not found in '{}.{}'",
+                args.row_pk, app_id, args.collection
+            ),
+            hint: None,
+        }),
+        ScalarRead::Null => Err(DbError::ValidationFailed {
+            code: "unmask_value_null",
+            message: format!(
+                "column '{}' on row '{}' is NULL; nothing to unmask",
+                args.column, args.row_pk
+            ),
+            hint: None,
+        }),
+        ScalarRead::Value(text) => Ok(text),
     }
-
-    // ---- SQLite arm ----
-    if let Some(sq) = backend.as_sqlite() {
-        use crate::backend::DialectBuilder as _;
-        let q_app = sq.quote_ident(app_id);
-        let q_coll = sq.quote_ident(&args.collection);
-        let q_col = sq.quote_ident(&crate::query::raw_column_name(&args.column));
-        let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-        let handle = sq.autocommit_client();
-        let rows = handle.query_internal(&sql, &[args.row_pk.as_str()]).await?;
-        if rows.is_empty() {
-            return Err(DbError::ValidationFailed {
-                code: "unmask_not_found",
-                message: format!(
-                    "row '{}' not found in '{}.{}'",
-                    args.row_pk, app_id, args.collection
-                ),
-                hint: None,
-            });
-        }
-        let value =
-            rows[0]
-                .first()
-                .and_then(|c| c.clone())
-                .ok_or_else(|| DbError::ValidationFailed {
-                    code: "unmask_value_null",
-                    message: format!(
-                        "column '{}' on row '{}' is NULL; nothing to unmask",
-                        args.column, args.row_pk
-                    ),
-                    hint: None,
-                })?;
-        return Ok(value);
-    }
-
-    Err(DbError::Configuration {
-        code: "backend_unsupported",
-        message: "db: no backend arm available for unmask".to_string(),
-        hint: None,
-    })
 }
 
 /// Convert decrypted plaintext bytes into the JSON-wire string form per
@@ -894,117 +803,41 @@ async fn write_audit_unmask_row(
     let backend = crate::context::with(|c| c.backend())
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
 
-    // ---- PG arm ----
-    if let Some(pg) = backend.as_postgres() {
-        let sql = format!(
-            r#"INSERT INTO "{app_id}"."__zeroship_audit_unmask"
-               (actor_id, actor_role, claimed_actor, collection, row_pk, "column",
-                classification, reason, outcome)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#
-        );
-        let actor_id_s: String = actor_id.unwrap_or_default();
-        let actor_role_s: String = actor_role.unwrap_or_default();
-        // The refused claim, serialised whole. Whole rather than picked apart
-        // into id/kind because it is UNTRUSTED INPUT: an operator reading it is
-        // reading what a handler SENT, and splitting it into the same shape as
-        // the trusted columns is how the two get confused at a glance.
-        let claimed_actor_s: String = args
-            .rejected_claim
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let reason_s: String = args.reason.clone().unwrap_or_default();
-        // text params: empty strings serve as NULL placeholders;
-        // pg interprets `''` as TEXT, so we ROUTE truly-null fields
-        // through `Option`-shaped params via NULLIF on the wire.
-        // Simpler: just store empty strings as ''-typed text rows;
-        // operators can `WHERE actor_id = ''` to filter. Trading
-        // perfect NULL fidelity for codepath simplicity is fine
-        // here — the audit table is operator-read-only.
-        //
-        // THROUGH THE FENCE, not around it. This used to call
-        // `pool.query_text_params` on a bare checkout, which is a fresh pool
-        // connection carrying the shared `zeroship_worker` login role and NO
-        // `SET LOCAL ROLE` - the single ungated production path in this crate
-        // that reached a tenant schema unfenced, while the two sibling readers
-        // above (`fetch_and_decrypt`, `fetch_plaintext_parent`) took the same
-        // pool and routed it through the roled funnel. Since
-        // `runtime_dependents_sql` grants the runtime role `WITH INHERIT
-        // FALSE`, the bare form no longer has the privilege and this INSERT
-        // fails with `permission denied for table __zeroship_audit_unmask` -
-        // which, because an unmask whose audit row cannot be written must not
-        // return plaintext, would have failed every unmask rather than leaking
-        // one. The funnel also brings the DB-1 statement/lock timeouts, which
-        // the bare call never had.
-        //
-        // As of 2026-09-01 no production caller reaches a pool at all: this
-        // file was the last one, and it now goes through `PostgresBackend`'s
-        // roled entry points. `PgSqlExecutor::pool_handle` still EXISTS, so
-        // the bare form is discouraged rather than impossible - its four
-        // remaining callers are all in the `test-helpers`-gated
-        // `crud::mask_drift`, and three of them issue DDL the per-app role is
-        // not granted, so they cannot simply be routed through this fence.
-        // Removing the accessor is tracked separately.
-        pg.execute_roled(
+    // The refused claim, serialised whole. Whole rather than picked apart into
+    // id/kind because it is UNTRUSTED INPUT: an operator reading it is reading
+    // what a handler SENT, and splitting it into the same shape as the trusted
+    // columns is how the two get confused at a glance.
+    let claimed_actor_s: String = args
+        .rejected_claim
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_default();
+    let actor_id_s: String = actor_id.unwrap_or_default();
+    let actor_role_s: String = actor_role.unwrap_or_default();
+    let reason_s: String = args.reason.clone().unwrap_or_default();
+
+    // The two INSERTs this replaces differed only in placeholder syntax and
+    // identifier quoting, and the six lines above were written out twice - once
+    // per vendor - behind an `as_postgres()` / `as_sqlite()` downcast. Both
+    // statements now live in `BackendHandle::append_unmask_audit`, which also
+    // carries the note about routing PostgreSQL through the role fence rather
+    // than a bare pool checkout.
+    backend
+        .append_unmask_audit(
             app_id,
-            &sql,
-            &[
-                &actor_id_s,
-                &actor_role_s,
-                &claimed_actor_s,
-                &args.collection,
-                &args.row_pk,
-                &args.column,
+            &crate::backend::UnmaskAuditRow {
+                actor_id: &actor_id_s,
+                actor_role: &actor_role_s,
+                claimed_actor: &claimed_actor_s,
+                collection: &args.collection,
+                row_pk: &args.row_pk,
+                column: &args.column,
                 classification,
-                &reason_s,
+                reason: &reason_s,
                 outcome,
-            ],
+            },
         )
-        .await?;
-        return Ok(());
-    }
-
-    // ---- SQLite arm ----
-    if let Some(sq) = backend.as_sqlite() {
-        use crate::backend::{DialectBuilder as _, SqlExecutor as _};
-        let q_app = sq.quote_ident(app_id);
-        let sql = format!(
-            r#"INSERT INTO {q_app}."__zeroship_audit_unmask"
-               (actor_id, actor_role, claimed_actor, collection, row_pk, "column",
-                classification, reason, outcome)
-               VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#
-        );
-        let actor_id_s: String = actor_id.unwrap_or_default();
-        let actor_role_s: String = actor_role.unwrap_or_default();
-        let claimed_actor_s: String = args
-            .rejected_claim
-            .as_ref()
-            .map(ToString::to_string)
-            .unwrap_or_default();
-        let reason_s: String = args.reason.clone().unwrap_or_default();
-        sq.pool_exec(
-            &sql,
-            &[
-                actor_id_s.as_str(),
-                actor_role_s.as_str(),
-                claimed_actor_s.as_str(),
-                args.collection.as_str(),
-                args.row_pk.as_str(),
-                args.column.as_str(),
-                classification,
-                reason_s.as_str(),
-                outcome,
-            ],
-        )
-        .await?;
-        return Ok(());
-    }
-
-    Err(DbError::Configuration {
-        code: "backend_unsupported",
-        message: "db: no backend arm available for unmask audit".to_string(),
-        hint: None,
-    })
+        .await
 }
 
 // ===========================================================================
