@@ -497,7 +497,7 @@ pub async fn dispatch_unmask(
         // Audit-then-refuse. The audit row carries `outcome = "denied"`
         // so operators see every attempted access — including the
         // `canUnmask()` probe path the SDK uses.
-        write_audit_unmask_row(app_id, &args, &mask_meta.classification, "denied").await?;
+        write_audit_unmask_row(&backend, app_id, &args, &mask_meta.classification, "denied").await?;
         // The REFUSED unmask still wrote an audit row, and that row cost a
         // statement. Metering counts work performed, not permission granted.
         meter_audit_write(app_id);
@@ -515,8 +515,8 @@ pub async fn dispatch_unmask(
 
     // Step 3 — fetch + decrypt (or fetch-plaintext).
     let plaintext = match lookup_encryption_meta(&schema, &args.column)? {
-        Some(enc_meta) => fetch_and_decrypt(app_id, &args, &enc_meta).await?,
-        None => fetch_plaintext_parent(app_id, &args).await?,
+        Some(enc_meta) => fetch_and_decrypt(&backend, app_id, &args, &enc_meta).await?,
+        None => fetch_plaintext_parent(&backend, app_id, &args).await?,
     };
     // Both arms ran exactly one SELECT and both `?`, so reaching here means it
     // succeeded. Neither goes through `exec::run_sql`, so neither was billed
@@ -527,7 +527,7 @@ pub async fn dispatch_unmask(
     // is in hand so a SELECT failure / decrypt failure doesn't leave a
     // ghost "granted" row in the audit log (the failure surfaces a
     // typed error; the audit table reflects only completed unmasks).
-    write_audit_unmask_row(app_id, &args, &mask_meta.classification, "granted").await?;
+    write_audit_unmask_row(&backend, app_id, &args, &mask_meta.classification, "granted").await?;
     meter_audit_write(app_id);
 
     Ok(UnmaskFieldResult { plaintext })
@@ -558,14 +558,16 @@ fn meter_audit_write(app_id: &str) {
 /// surfaces the f64's `to_string()` form.
 #[allow(unused_variables)]
 async fn fetch_and_decrypt(
+    backend: &BackendHandle,
     app_id: &str,
     args: &UnmaskFieldArgs,
     enc_meta: &ColumnEncryptionMeta,
 ) -> Result<String, DbError> {
-    // The funnel, not a direct context read: every unmask path reaches here
-    // through `ensure_unmask_backend`, so this is idempotent, and calling it
-    // states the prerequisite instead of leaving it to call order.
-    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+    // The prepared backend arrives as an argument. This re-resolved it through
+    // the funnel until 2026-09-03, which was idempotent but pointless: every
+    // reaching path runs `ensure_unmask_backend` first, so the second lookup
+    // could only ever return what the caller already held. Taking it as a
+    // parameter makes that ordering a data dependency rather than a comment.
 
     let aad = crate::encryption::aad::canonical_aad(
         &args.collection,
@@ -661,11 +663,13 @@ async fn fetch_and_decrypt(
 /// when the column carries `.mask({...})` WITHOUT `.encrypted(...)` —
 /// the parent slot holds the plaintext on disk; the sibling
 /// `<col>_masked` carries the safe display form.
-async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<String, DbError> {
-    // The funnel, not a direct context read: every unmask path reaches here
-    // through `ensure_unmask_backend`, so this is idempotent, and calling it
-    // states the prerequisite instead of leaving it to call order.
-    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+async fn fetch_plaintext_parent(
+    backend: &BackendHandle,
+    app_id: &str,
+    args: &UnmaskFieldArgs,
+) -> Result<String, DbError> {
+    // The prepared backend arrives as an argument, for the reason spelled out
+    // on `fetch_and_decrypt`.
 
     // The real value lives in the RAW column - the field's own column holds
     // the mask. This read and its encrypted sibling are the only readers of
@@ -789,6 +793,7 @@ fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbError
 /// There is no create-on-demand fallback, because a fallback is a second
 /// schema authority.
 async fn write_audit_unmask_row(
+    backend: &BackendHandle,
     app_id: &str,
     args: &UnmaskFieldArgs,
     classification: &str,
@@ -810,11 +815,6 @@ async fn write_audit_unmask_row(
             (id, role)
         })
         .unwrap_or((None, None));
-
-    // The funnel, not a direct context read: every unmask path reaches here
-    // through `ensure_unmask_backend`, so this is idempotent, and calling it
-    // states the prerequisite instead of leaving it to call order.
-    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
 
     // The refused claim, serialised whole. Whole rather than picked apart into
     // id/kind because it is UNTRUSTED INPUT: an operator reading it is reading
@@ -1006,6 +1006,7 @@ pub async fn dispatch_bulk_unmask(
     // emit one audit row covering the whole call + refuse.
     if !unauthorized.is_empty() {
         write_audit_bulk_row(
+            &backend,
             app_id,
             &normalized_audit_args,
             &classifications,
@@ -1051,8 +1052,8 @@ pub async fn dispatch_bulk_unmask(
             // which would re-audit per pair). This is the
             // "wrap-over-many" pattern the proposal describes.
             let plaintext = match lookup_encryption_meta(&schema, canonical_col)? {
-                Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
-                None => fetch_plaintext_parent(app_id, &single_args).await?,
+                Some(enc_meta) => fetch_and_decrypt(&backend, app_id, &single_args, &enc_meta).await?,
+                None => fetch_plaintext_parent(&backend, app_id, &single_args).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1064,6 +1065,7 @@ pub async fn dispatch_bulk_unmask(
 
     // ---- Step 4 — single audit row for the whole call on success.
     write_audit_bulk_row(
+        &backend,
         app_id,
         &normalized_audit_args,
         &classifications,
@@ -1088,6 +1090,7 @@ pub async fn dispatch_bulk_unmask(
 /// `denied`; included in the reason text so audit-log readers see
 /// exactly which pairs caused the refusal.
 async fn write_audit_bulk_row(
+    backend: &BackendHandle,
     app_id: &str,
     args: &BulkUnmaskArgs,
     classifications: &std::collections::HashMap<String, String>,
@@ -1140,7 +1143,7 @@ async fn write_audit_bulk_row(
         reason: Some(reason_text),
         rejected_claim: args.rejected_claim.clone(),
     };
-    write_audit_unmask_row(app_id, &synthetic, &classification_joined, outcome).await
+    write_audit_unmask_row(backend, app_id, &synthetic, &classification_joined, outcome).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1208,6 +1211,7 @@ pub async fn authorize_query_hint(
 
     if !unauthorized.is_empty() {
         write_audit_query_hint_row(
+            &backend,
             app_id,
             collection,
             unmask_columns,
@@ -1260,7 +1264,7 @@ pub async fn audit_query_hint_granted(
     // Re-resolve classifications for the audit row. Cheap — the descriptor
     // lookup is a HashMap read.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    ensure_unmask_backend(app_id).await?;
+    let backend = ensure_unmask_backend(app_id).await?;
     let mut classifications: Vec<String> = Vec::with_capacity(unmask_columns.len());
     for col in unmask_columns {
         let cls = lookup_mask_meta(&schema, col)
@@ -1269,6 +1273,7 @@ pub async fn audit_query_hint_granted(
         classifications.push(cls);
     }
     write_audit_query_hint_row(
+        &backend,
         app_id,
         collection,
         unmask_columns,
@@ -1308,7 +1313,7 @@ pub async fn dispatch_unmask_for_query(
     }
     let app_id = binding.app_id();
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    ensure_unmask_backend(app_id).await?;
+    let backend = ensure_unmask_backend(app_id).await?;
     for row in rows.iter_mut() {
         let Some(row_pk) = row.get("id").map(|v| match v {
             Value::String(s) => s.clone(),
@@ -1353,8 +1358,8 @@ pub async fn dispatch_unmask_for_query(
                 rejected_claim: None,
             };
             let plaintext = match lookup_encryption_meta(&schema, &canonical)? {
-                Some(enc_meta) => fetch_and_decrypt(app_id, &single_args, &enc_meta).await?,
-                None => fetch_plaintext_parent(app_id, &single_args).await?,
+                Some(enc_meta) => fetch_and_decrypt(&backend, app_id, &single_args, &enc_meta).await?,
+                None => fetch_plaintext_parent(&backend, app_id, &single_args).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1378,6 +1383,7 @@ pub async fn dispatch_unmask_for_query(
 /// bulk audit row writer).
 #[allow(clippy::too_many_arguments)]
 async fn write_audit_query_hint_row(
+    backend: &BackendHandle,
     app_id: &str,
     collection: &str,
     unmask_columns: &[String],
@@ -1414,7 +1420,7 @@ async fn write_audit_query_hint_row(
         reason: Some(reason_text),
         rejected_claim: rejected_claim.cloned(),
     };
-    write_audit_unmask_row(app_id, &synthetic, &class_joined, outcome).await
+    write_audit_unmask_row(backend, app_id, &synthetic, &class_joined, outcome).await
 }
 
 // ---------------------------------------------------------------------------
