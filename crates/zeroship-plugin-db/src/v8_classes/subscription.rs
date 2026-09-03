@@ -37,6 +37,26 @@ use zeroship_runtime_macros::{v8_async_method, v8_constructor, v8_method};
 use crate::broker::{self, Subscription as BrokerSubscription, SubscriptionMessage};
 
 // ---------------------------------------------------------------------------
+// CDC readiness - the adapter half
+// ---------------------------------------------------------------------------
+
+/// Resolve the adapter state a CDC start needs, then run the handshake.
+///
+/// `cdc_lifecycle` owns the process-wide state machine and nothing else; the
+/// backend it starts a consumer on and the worker identity that names the slot
+/// are both this tier's, so they are resolved here and handed down. Before
+/// 2026-09-03 the lifecycle read them out of `crate::context` itself, which was
+/// the last CDC-to-ADAPTER reference in the crate.
+///
+/// [`crate::tx_scope::ensure_backend`] is the same funnel every other V8 entry
+/// point opens its backend through, so a cold isolate is warmed here exactly as
+/// `dispatch.rs` and `masked_value.rs` warm one.
+async fn ensure_cdc_ready(app_id: &str) -> Result<(), zeroship_data_core::error::DbError> {
+    let backend = crate::tx_scope::ensure_backend().await?;
+    crate::cdc_lifecycle::ensure_ready(app_id, backend, crate::tx_scope::cdc_worker_id()).await
+}
+
+// ---------------------------------------------------------------------------
 // Subscription state
 // ---------------------------------------------------------------------------
 
@@ -102,7 +122,7 @@ impl Subscription {
                 None::<String>,
             ));
         }
-        crate::cdc_lifecycle::ensure_ready(&self.app_id)
+        ensure_cdc_ready(&self.app_id)
             .await
             .map_err(crate::op_error::ToOpError::to_op_error)
     }
@@ -130,7 +150,7 @@ impl Subscription {
 
         // Direct native callers receive the same fail-loud contract as the
         // TypeScript wrapper even if they skip the explicit ready() call.
-        crate::cdc_lifecycle::ensure_ready(&self.app_id)
+        ensure_cdc_ready(&self.app_id)
             .await
             .map_err(crate::op_error::ToOpError::to_op_error)?;
 

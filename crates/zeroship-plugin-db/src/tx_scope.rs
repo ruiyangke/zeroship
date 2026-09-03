@@ -159,6 +159,24 @@ pub(crate) fn configured_dialect() -> crate::query::SqlDialect {
     crate::context::with(|c| c.sql_dialect())
 }
 
+/// The worker-process identity CDC slot names are built from, if this process
+/// was composed with one.
+///
+/// Beside [`configured_dialect`] for the same reason: it is a question only the
+/// per-isolate context can answer, asked by a tier that may not read it.
+/// `cdc_lifecycle.rs` used to ask `crate::context` directly, which was the last
+/// CDC-to-ADAPTER edge on `tests/lib/tier_direction_census.sh`.
+///
+/// It answers `Option`, and the refusal is deliberately NOT here. A missing
+/// identity is only an error on the one path that mints a slot name, and the
+/// message and hint for it belong beside that path - see
+/// `cdc_lifecycle::start_on_current_isolate`. Raising it here would fail
+/// `Subscription.next()` on an already-running consumer, which needs no
+/// identity at all.
+pub(crate) fn cdc_worker_id() -> Option<String> {
+    crate::context::with(|c| c.cdc_worker_id())
+}
+
 /// Read the transaction frame out of V8 and freeze a [`TxRoute`] from it.
 ///
 /// This is the whole of the V8 half of routing, and it lives here because this

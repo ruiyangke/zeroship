@@ -650,7 +650,7 @@ old responses hold the egress permits, the worker closes the minimum old
 responses needed and marks their apps reconnecting - the one explicit
 break-before-make fallback.
 
-`ensure_ready` (`crates/zeroship-plugin-db/src/cdc_lifecycle.rs:217`) currently
+`ensure_ready` (`crates/zeroship-plugin-db/src/cdc_lifecycle.rs:236`) currently
 waits only for a locally spawned consumer. It now completes for one app only
 after that app's priming, `Registered` outcome and any required `Resync` have
 been processed by the broker. A slow sibling shard is not part of its readiness.
