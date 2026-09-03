@@ -221,6 +221,20 @@ pub(crate) struct StepConfig {
     /// SQLite arm then ignored in favour of a hardcoded `BEGIN`. Each lane
     /// spells the intent now.
     pub(crate) begin: BeginIntent,
+
+    /// The backend [`Action::IssueBegin`] opens its session on.
+    ///
+    /// **Optional because the type is shared with seven step paths that
+    /// provably never open one**, not because opening is optional. `IssueBegin`
+    /// is constructed in exactly one place in the reducer, and the only route
+    /// to it is [`begin_top_level`], which always supplies `Some`. The
+    /// `StepConfig::default()` callers - open_frame, close_frame, settle_root,
+    /// run_operation, deadline_fired, cancel - drive events that cannot emit it.
+    ///
+    /// A route cannot ride here instead: `TxRoute` is deliberately neither
+    /// `Clone` nor `Default` (`crate::tx_route`), which this struct is both,
+    /// and `deadline_fired` runs on a timer with no V8 scope to capture from.
+    pub(crate) backend: Option<crate::backend::BackendHandle>,
 }
 
 /// Admit a top-level transaction, then drive it to `Idle`.
@@ -237,10 +251,14 @@ pub(crate) struct StepConfig {
 pub(crate) async fn begin_top_level(
     app_id: &str,
     isolation_level: Option<IsolationLevel>,
+    backend: crate::backend::BackendHandle,
 ) -> Result<Driven, DbError> {
     let begin = isolation_level.map_or(BeginIntent::Default, BeginIntent::Isolation);
     let admit = admit_in_preparing(app_id);
-    let config = StepConfig { begin };
+    let config = StepConfig {
+        begin,
+        backend: Some(backend),
+    };
     // The admission actions are only ever `ScheduleTimer`; run them through the
     // same interpreter so no action has a second, quieter implementation.
     let mut driven = run(app_id, admit, &config).await;
@@ -487,7 +505,19 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
 
             Action::IssueBegin { token } => {
                 let generation = next_backend_generation();
-                let outcome = match open_session(app_id, config.begin).await {
+                // `begin_top_level` is the only route to this action and it
+                // always supplies the backend; see `StepConfig::backend`. The
+                // absent arm is an internal error rather than a fallback,
+                // because a fallback here would resolve one of its own and put
+                // the read back in the engine.
+                let Some(backend) = config.backend.as_ref() else {
+                    driven.error = Some(DbError::internal(
+                        "db.transaction: begin was issued without a backend",
+                    ));
+                    queue.push_back(Action::Reply(Err(TxProtocolError::TransactionNotReady)));
+                    continue;
+                };
+                let outcome = match open_session(app_id, config.begin, backend).await {
                     Ok(()) => BeginOutcome::Opened(BackendGeneration(generation)),
                     Err(OpenSessionError::Failed(error)) => {
                         driven.error = Some(error);
@@ -698,8 +728,11 @@ fn current_frame(app_id: &str) -> Option<FrameId> {
 /// checkout - data SQL, `SAVEPOINT`, `RELEASE`, `ROLLBACK TO`, terminal SQL and
 /// the forced-cleanup `ROLLBACK` - so this driver has no ambient-privilege path
 /// to lose if the worker role stops inheriting app roles.
-async fn open_session(app_id: &str, begin: BeginIntent) -> Result<(), OpenSessionError> {
-    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+async fn open_session(
+    app_id: &str,
+    begin: BeginIntent,
+    backend: &crate::backend::BackendHandle,
+) -> Result<(), OpenSessionError> {
     install(app_id, backend.open_tx_session(app_id, begin).await?);
     // Drop any broker residue from an interrupted prior run so it cannot leak
     // into this transaction's drain.
