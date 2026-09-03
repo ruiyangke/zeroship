@@ -27,6 +27,8 @@ use std::sync::Arc;
 
 use serde_json::Value;
 
+use crate::error::DbError;
+
 use crate::binding::DbBinding;
 
 /// One isolate's descriptor entries, keyed by `(app, deploy, collection)`.
@@ -93,6 +95,38 @@ impl SchemaCache {
                     .map(|coll| (coll.to_string(), v.clone()))
             })
             .collect()
+    }
+
+    /// The descriptor entry for one collection, or a typed error.
+    ///
+    /// **There is no `Option` here on purpose, and that is a security rule.**
+    /// The read path used to treat an absent schema as "carry on", which is how
+    /// L24 happened: the projection allowlist stopped applying and the
+    /// read-identifier check silently passed, so a read served before the
+    /// schema arrived returned every physical column and accepted any field
+    /// name. A collection the descriptor does not declare is not a collection
+    /// this isolate can serve.
+    ///
+    /// This lives HERE rather than in the adapter's `descriptor.rs`, where it
+    /// sat until 2026-09-02, because the rule is about the store's contract -
+    /// what a miss MEANS - not about how a caller reached the store. The
+    /// adapter kept only the thread-local lookup.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::config`] with code `collection_not_declared` when the
+    /// descriptor this isolate was built from does not declare `collection`.
+    pub fn require(&self, binding: &DbBinding, collection: &str) -> Result<Arc<Value>, DbError> {
+        self.get(binding, collection).ok_or_else(|| {
+            DbError::config(
+                "collection_not_declared",
+                format!(
+                    "db: collection '{collection}' is not declared by this deploy's runtime schema \
+                     descriptor; the descriptor is the sole schema authority and nothing else may \
+                     be read"
+                ),
+            )
+        })
     }
 
     /// Install ONE collection's entry. Test fixtures use this narrow helper;
@@ -198,6 +232,33 @@ mod tests {
             vec!["posts".to_string(), "users".to_string()],
             "callers mint a Collection per NAME, so the key prefix must not leak"
         );
+    }
+
+    /// **L24 regression guard.** An undeclared collection must be an ERROR, not
+    /// `None` that a caller can shrug off - treating a miss as "carry on" is
+    /// what let a read served before the schema arrived return every physical
+    /// column and accept any field name.
+    ///
+    /// The guard lives beside the rule now. It was in the adapter's
+    /// `descriptor.rs` tests, one indirection away from the code it protects.
+    #[test]
+    fn an_undeclared_collection_is_an_error_and_never_a_silent_miss() {
+        let mut cache = SchemaCache::new();
+        let a = binding("app_a", "d1");
+        cache.replace_for_binding(&a, vec![("users".into(), serde_json::json!({"v": 1}))]);
+
+        let err = cache
+            .require(&a, "posts")
+            .expect_err("an undeclared collection must not resolve");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("collection_not_declared"),
+            "the miss must carry the typed code callers branch on, got: {rendered}"
+        );
+
+        // And the declared one still resolves, so the guard is not just
+        // asserting that everything fails.
+        assert!(cache.require(&a, "users").is_ok());
     }
 
     #[test]

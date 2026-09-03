@@ -64,16 +64,7 @@ pub(crate) fn collection_schema(
     binding: &DbBinding,
     collection: &str,
 ) -> Result<Arc<Value>, DbError> {
-    crate::context::with(|c| c.schema_for(binding, collection)).ok_or_else(|| {
-        DbError::config(
-            "collection_not_declared",
-            format!(
-                "db: collection '{collection}' is not declared by this deploy's runtime schema \
-                 descriptor; the descriptor is the sole schema authority and nothing else may be \
-                 read"
-            ),
-        )
-    })
+    crate::context::with(|c| c.require_schema(binding, collection))
 }
 
 /// Every collection this isolate's descriptor declares, with its field map.
