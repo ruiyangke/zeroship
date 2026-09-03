@@ -1216,7 +1216,7 @@ mod tests {
                 .await
                 .expect("create table");
 
-            let frame = AtomicWriteFrame::begin(TxRoute::pool_for_tests("app_sqlite"))
+            let frame = AtomicWriteFrame::begin(crate::exec::ambient_route_for_tests("app_sqlite"))
                 .await
                 .expect("begin atomic write frame");
             run_on_tx_conn(

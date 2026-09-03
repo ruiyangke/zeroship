@@ -382,12 +382,31 @@ pub(crate) async fn exec_mutation_with_emit(
     // `crud.rs` does the final `Value::Array(rows).to_string()` once
     // at the V8 boundary.
     let rows = exec_mutation(route, bq).await?;
-    emit_for_rows(&rows, route, collection, op);
+    emit_for_rows(
+        &rows,
+        route.app_id(),
+        route.in_tx(),
+        backend_publishes_committed_changes(route.backend()),
+        collection,
+        op,
+    );
     Ok(rows)
 }
 
-fn backend_publishes_committed_changes() -> bool {
-    context::with(|c| matches!(c.backend(), Some(BackendHandle::Sqlite(_))))
+/// Does the backend publish committed changes on its own?
+///
+/// SQLite does, through the writer actor's commit hook. PostgreSQL does not on
+/// this path - the WAL consumer is a separate process concern - so the local
+/// emit below is what feeds subscribers there.
+///
+/// **A function of the backend, taken as an argument.** This read
+/// `context::with(|c| ...)` until 2026-09-03, which is how an ENGINE file came
+/// to depend on the ADAPTER's thread state, and the census could not see it:
+/// the unqualified `context::` call does not match the extractor's
+/// `crate::`-prefixed pattern, so only the `use` at the top of this file kept
+/// the edge visible at all.
+fn backend_publishes_committed_changes(backend: &BackendHandle) -> bool {
+    matches!(backend, BackendHandle::Sqlite(_))
 }
 
 /// Build and queue/emit broker events for a mutation's RETURNING rows.
@@ -427,18 +446,19 @@ fn backend_publishes_committed_changes() -> bool {
 /// consumer's same conservative-true contract.
 fn emit_for_rows(
     rows: &[Value],
-    route: &TxRoute,
+    app_id: &str,
+    in_tx: bool,
+    backend_publishes: bool,
     collection: &str,
     op: zeroship_core::change_event::ChangeOp,
 ) {
-    let app_id = route.app_id();
     if rows.is_empty() {
         // No rows affected — no broker event. UPDATE with a non-
         // matching filter falls here; subscribers should not see a
         // spurious change.
         return;
     }
-    if backend_publishes_committed_changes() {
+    if backend_publishes {
         // SQLite has a commit-time CDC publisher wired through the writer
         // actor's preupdate/commit hooks. The old SDK-local emit was kept
         // for the Postgres/no-WAL-consumer path; on SQLite it races the CDC
@@ -492,7 +512,7 @@ fn emit_for_rows(
         };
         #[cfg(test)]
         tests::record_tuple_built();
-        queue_or_emit(route, collection, op, pk, columns, tuple);
+        queue_or_emit(app_id, in_tx, collection, op, pk, columns, tuple);
     }
 }
 
@@ -501,14 +521,14 @@ fn emit_for_rows(
 /// path to drain on COMMIT. Otherwise (autocommit), fire it
 /// immediately. Subscribers no longer observe pre-commit state.
 fn queue_or_emit(
-    route: &TxRoute,
+    app_id: &str,
+    in_tx: bool,
     collection: &str,
     op: zeroship_core::change_event::ChangeOp,
     pk: Option<String>,
     changed_columns: Vec<String>,
     new_tuple: std::collections::HashMap<String, String>,
 ) {
-    let app_id = route.app_id();
     // Queue only when THIS write actually ran on THIS app's transaction —
     // the same route that decided which connection the SQL used, so the
     // event's fate cannot disagree with the row's. A write that merely
@@ -516,7 +536,7 @@ fn queue_or_emit(
     // immediately; queueing it would park the event on a settle path that
     // belongs to a different unit of work (previously it was both routed
     // onto and queued behind a stranger's transaction).
-    if !route.in_tx() {
+    if !in_tx {
         crate::broker::emit_local(app_id, collection, op, pk, changed_columns, new_tuple);
         return;
     }
@@ -608,12 +628,24 @@ pub async fn exec_mutation_with_emit_for_tests(
 /// no-isolate test helpers only. See the note on
 /// [`exec_mutation_with_emit_for_tests`].
 #[cfg(any(test, feature = "test-helpers"))]
-fn ambient_route_for_tests(app_id: &str) -> TxRoute {
-    if crate::tx_lanes::with(|l| l.has_tx_for(app_id)) {
-        TxRoute::tx_for_tests(app_id)
+pub(crate) fn ambient_route_for_tests(app_id: &str) -> TxRoute {
+    let captured = if crate::tx_lanes::with(|l| l.has_tx_for(app_id)) {
+        crate::tx_route::CapturedRoute::tx_for_tests(app_id)
     } else {
-        TxRoute::pool_for_tests(app_id)
-    }
+        crate::tx_route::CapturedRoute::pool_for_tests(app_id)
+    };
+    // Sync, and it can be: only the COLD path needs to await, and a harness
+    // driving exec directly has already installed a backend. Production binds
+    // through `tx_scope::bind_route`, which owns the cold arm.
+    //
+    // This read is the one test-gated ENGINE-to-ADAPTER edge left in this file.
+    // The census excludes it because the item is gated, but cargo will not once
+    // the engine is its own crate, so it has to move to the adapter with the
+    // rest of the `*_for_tests` helpers.
+    captured.bind(
+        context::with(|c| c.backend())
+            .expect("test harness must install a backend before driving exec directly"),
+    )
 }
 
 /// **Test-only**: exec a read query through the same shared
@@ -787,7 +819,9 @@ mod tests {
         let rows = vec![synthetic_row()];
         emit_for_rows(
             &rows,
-            &ambient_route_for_tests("app_suppressed"),
+            "app_suppressed",
+            /* in_tx */ false,
+            /* backend_publishes */ false,
             "messages",
             ChangeOp::Insert,
         );
@@ -812,7 +846,9 @@ mod tests {
         let rows = vec![synthetic_row()];
         emit_for_rows(
             &rows,
-            &ambient_route_for_tests("app_no_subs"),
+            "app_no_subs",
+            /* in_tx */ false,
+            /* backend_publishes */ false,
             "ghosts",
             ChangeOp::Insert,
         );
@@ -876,7 +912,8 @@ mod tests {
         let mut tuple = HashMap::new();
         tuple.insert("id".to_string(), "9".to_string());
         queue_or_emit(
-            &ambient_route_for_tests("app_active_queue_or_emit_no_tx_emits_immediately"),
+            "app_active_queue_or_emit_no_tx_emits_immediately",
+            false,
             "messages",
             ChangeOp::Insert,
             Some("9".to_string()),
@@ -999,9 +1036,9 @@ mod tests {
         let rows = vec![synthetic_row()];
         emit_for_rows(
             &rows,
-            &ambient_route_for_tests(
-                "app_active_exec_mutation_with_emit_builds_when_active_subscriber",
-            ),
+            "app_active_exec_mutation_with_emit_builds_when_active_subscriber",
+            /* in_tx */ false,
+            /* backend_publishes */ false,
             "messages",
             ChangeOp::Insert,
         );
@@ -1060,9 +1097,11 @@ mod tests {
             let rows = vec![synthetic_row()];
             emit_for_rows(
                 &rows,
-                &ambient_route_for_tests(
-                    "app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes",
-                ),
+                "app_active_exec_mutation_with_emit_skips_local_emit_when_sqlite_cdc_publishes",
+                /* in_tx */ false,
+                // The SQLite arm: its commit hook publishes, so the local emit
+                // must short-circuit. This is the one site that passes `true`.
+                /* backend_publishes */ true,
                 "messages",
                 ChangeOp::Insert,
             );
@@ -1093,9 +1132,9 @@ mod tests {
         let rows = vec![synthetic_typed_id_row()];
         emit_for_rows(
             &rows,
-            &ambient_route_for_tests(
-                "app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk",
-            ),
+            "app_active_exec_mutation_with_emit_uses_logical_typed_id_for_pk",
+            /* in_tx */ false,
+            /* backend_publishes */ false,
             "messages",
             ChangeOp::Insert,
         );

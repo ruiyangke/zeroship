@@ -1148,7 +1148,7 @@ mod tests {
                     // No isolate in a unit test: this path is exercised
                     // outside any transaction, which is what the pool
                     // route means.
-                    route: &TxRoute::pool_for_tests(app_id),
+                    route: &crate::exec::ambient_route_for_tests(app_id),
                 },
             )
             .await
