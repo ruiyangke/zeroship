@@ -535,6 +535,23 @@ fn read_private_key_file(key_path: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
     read_private_key_file_with_metadata(key_path, std::fs::File::metadata)
 }
 
+/// Whether a private key's mode is safe to load, given the key's owner.
+///
+/// libpq permits a root-owned system key to be group-readable, but a key with
+/// any other owner must have no group or world access at all.
+///
+/// The rule is stated apart from the file it describes because neither arm can
+/// be reached otherwise: a test fixture is owned by whoever runs the suite, so
+/// the root arm needs a root-owned file, and the non-root arm cannot show what
+/// the root arm would have permitted. Both were unbound while this was inline.
+/// Dropping the root exception, and extending it to every owner, each left the
+/// lib and suite suites entirely green.
+#[cfg(unix)]
+const fn key_permissions_are_safe(uid: u32, mode: u32) -> bool {
+    let forbidden = if uid == 0 { 0o037 } else { 0o077 };
+    mode & forbidden == 0
+}
+
 fn read_private_key_file_with_metadata(
     key_path: &str,
     inspect: impl FnOnce(&std::fs::File) -> io::Result<std::fs::Metadata>,
@@ -557,12 +574,9 @@ fn read_private_key_file_with_metadata(
     {
         use std::os::unix::fs::MetadataExt as _;
 
-        // libpq permits root-owned system keys to be group-readable, but a
-        // key with any other owner must have no group or world access. The
-        // file handle and its metadata stay together so a path replacement
+        // The file handle and its metadata stay together so a path replacement
         // cannot make us parse a different, unchecked key.
-        let forbidden = if metadata.uid() == 0 { 0o037 } else { 0o077 };
-        if metadata.mode() & forbidden != 0 {
+        if !key_permissions_are_safe(metadata.uid(), metadata.mode()) {
             return Err(Error::tls(
                 format!(
                     "sslkey={key_path}: private key has group or world access; use permissions \
@@ -1989,6 +2003,43 @@ mod tests {
         std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(mode))
             .expect("set private key fixture permissions");
         key
+    }
+
+    /// The owner-dependent halves of the `sslkey` permission rule. The fixture
+    /// tests below can only ever own their key as whoever runs the suite, so
+    /// the root exception had no witness and neither did its absence for every
+    /// other owner: 0640 is the mode the two arms disagree about, and no test
+    /// used it.
+    #[cfg(unix)]
+    #[test]
+    fn the_sslkey_permission_rule_turns_on_the_owner() {
+        // A root-owned system key may be group-readable, as libpq allows.
+        assert!(key_permissions_are_safe(0, 0o600), "root 0600 is private");
+        assert!(
+            key_permissions_are_safe(0, 0o640),
+            "libpq permits a group-readable root-owned system key"
+        );
+        // The exception stops at reading: group write and any world access
+        // still expose the key.
+        assert!(
+            !key_permissions_are_safe(0, 0o660),
+            "a group-writable key is not protected by the root exception"
+        );
+        assert!(
+            !key_permissions_are_safe(0, 0o644),
+            "a world-readable key is never safe, whoever owns it"
+        );
+
+        // Any other owner gets no exception: 0640 hands the key to a group.
+        assert!(
+            key_permissions_are_safe(1000, 0o600),
+            "0600 is the mode the message asks for"
+        );
+        assert!(
+            !key_permissions_are_safe(1000, 0o640),
+            "only a root-owned key may be group-readable"
+        );
+        assert!(!key_permissions_are_safe(1000, 0o644), "world-readable");
     }
 
     #[cfg(unix)]
