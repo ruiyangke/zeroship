@@ -605,7 +605,7 @@ mod tests {
         let plan = std::rc::Rc::new(
             crate::system_shape_charter::AssignmentPlan::from_charter(&charter),
         );
-        crate::context::with_mut(|c| c.set_assignment_plan(plan));
+        crate::system_shape_charter::stamp(plan);
     }
 
     /// The deliverable, stated as a test: an eighth platform column is a

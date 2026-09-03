@@ -2,8 +2,8 @@
 //! dispatcher + in-process cache.
 //!
 //! The unmask authorization path (`crate::crud::unmask::check_unmask_authorization`)
-//! reads a per-app [`MaskPolicy`] cached on the per-isolate context
-//! (`ThreadDbContext::mask_policies`).
+//! reads a per-app [`MaskPolicy`] from this module's own per-thread cache
+//! ([`cache_get`]); the slot left `ThreadDbContext` on 2026-09-02.
 //!
 //! ## Where the policy comes from
 //!
@@ -57,6 +57,7 @@
 //! a misbehaving SDK can't poison the storage, and an arbitrary RPC
 //! call can't bypass the SDK-side check.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use serde_json::Value;
@@ -70,7 +71,7 @@ pub(crate) const VALID_CLASSIFICATIONS: &[&str] = &["public", "pii", "spi", "phi
 /// Per-app mask policy. Maps actor-role string → set
 /// of classifications the role is permitted to unmask.
 ///
-/// Stored on `ThreadDbContext::mask_policies` for the
+/// Held in this module's [`MASK_POLICIES`] thread-local for the
 /// life of the isolate; refreshed write-through when `setMaskPolicy`
 /// fires. A `None` cache slot means "no policy declared for this app
 /// on this isolate" — [`crate::crud::unmask::check_unmask_authorization`]
@@ -218,9 +219,8 @@ impl MaskPolicy {
 ///
 /// 1. Validate the policy JSON via [`MaskPolicy::from_json`] (both shape
 ///    + classification taxonomy).
-/// 2. Install it in the per-isolate cache on
-///    `ThreadDbContext::mask_policies`, so the next unmask on this
-///    isolate sees it.
+/// 2. Install it in this module's per-thread cache via [`cache_put`], so
+///    the next unmask on this isolate sees it.
 /// 3. On SQLite only, additionally write the sidecar JSON file. PG
 ///    persists nothing - see the module header for why the durable PG
 ///    store was deleted rather than rehomed.
@@ -249,8 +249,63 @@ pub async fn dispatch_set_mask_policy(app_id: &str, policy_v: Value) -> Result<(
     // here, which put both backend names and SQLite's sidecar strategy into the
     // engine.
     backend.persist_mask_policy(app_id, &policy.to_json()).await?;
-    crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy)));
+    cache_put(app_id, Some(policy));
     Ok(())
+}
+
+// ----- THE PER-THREAD POLICY CACHE ----------------------------------------
+
+thread_local! {
+    /// This worker thread's per-app mask-policy cache.
+    ///
+    /// It lives HERE rather than as a field on the adapter's `ThreadDbContext`
+    /// because `docs/proposals/2026-09-02-thread-context-ownership.md` assigns
+    /// `mask_policies` to data-engine, and `MaskPolicy` is this module's own
+    /// type. Parking an engine type's cache on the adapter made every read of
+    /// it - all of them in `crud/` - an engine-reaching-up edge.
+    ///
+    /// Seeded on first unmask attempt from durable storage, refreshed
+    /// write-through by `setMaskPolicy`. A missing entry is NOT "no policy": it
+    /// means this thread has not loaded one yet, and the caller must consult
+    /// durable storage before falling through to the default-deny rule. That
+    /// distinction is why [`cache_has`] exists separately from [`cache_get`].
+    ///
+    /// Entries are never proactively evicted, so one lives for the thread's
+    /// lifetime unless replaced.
+    static MASK_POLICIES: RefCell<HashMap<String, MaskPolicy>> =
+        RefCell::new(HashMap::new());
+}
+
+/// The cached policy for `app_id`, if this thread has loaded one.
+pub(crate) fn cache_get(app_id: &str) -> Option<MaskPolicy> {
+    MASK_POLICIES.with_borrow(|m| m.get(app_id).cloned())
+}
+
+/// Write-through install. `Some` upserts; `None` clears the entry.
+pub(crate) fn cache_put(app_id: &str, policy: Option<MaskPolicy>) {
+    MASK_POLICIES.with_borrow_mut(|m| match policy {
+        Some(p) => {
+            m.insert(app_id.to_string(), p);
+        }
+        None => {
+            m.remove(app_id);
+        }
+    });
+}
+
+/// Whether an entry is cached for `app_id`.
+///
+/// Cheaper than [`cache_get`] when the caller only needs to gate the durable
+/// load, and distinct from `cache_get(..).is_some()` in intent: see the
+/// thread-local's own note on why absent does not mean "no policy".
+pub(crate) fn cache_has(app_id: &str) -> bool {
+    MASK_POLICIES.with_borrow(|m| m.contains_key(app_id))
+}
+
+/// Empty this thread's cache.
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) fn reset_for_tests() {
+    MASK_POLICIES.with_borrow_mut(HashMap::clear);
 }
 
 // ---------------------------------------------------------------------------
@@ -494,8 +549,7 @@ mod tests {
     //
     // The proposal asserts that a `defineMaskPolicy()` write under
     // app A's isolate-context entry must NOT be visible from app B's
-    // entry. The cache is keyed by app_id on
-    // `ThreadDbContext.mask_policies`; this test pins that
+    // entry. The cache is keyed by app_id in [`MASK_POLICIES`]; this test pins that
     // invariant directly through the public surface so a future
     // refactor that accidentally widens the key (e.g. to a shared
     // singleton) trips the gate.
@@ -503,8 +557,6 @@ mod tests {
 
     #[test]
     fn mask_policy_per_app_isolated() {
-        use crate::context::ThreadDbContext;
-
         // Build two distinct policies — one permissive for `admin`,
         // one restrictive for `support` — and seed them under
         // different app ids.
@@ -522,16 +574,18 @@ mod tests {
         roles_b.insert("support".to_string(), support_set);
         let policy_b = MaskPolicy { roles: roles_b };
 
-        // Construct a fresh context (mirrors the pattern in the
-        // `context` module's tests — avoids touching the thread-local
-        // THREAD_DB_CTX so test ordering is irrelevant).
-        let mut ctx = ThreadDbContext::new();
-        ctx.set_mask_policy_for_app("app_a", Some(policy_a.clone()));
-        ctx.set_mask_policy_for_app("app_b", Some(policy_b.clone()));
+        // Drives the thread-local cache directly. It used to build a private
+        // `ThreadDbContext` instead, to "avoid touching the thread-local so
+        // test ordering is irrelevant" - but ordering was never the hazard it
+        // implied: libtest gives every `#[test]` its own OS thread even under
+        // `--test-threads=1` (measured 2026-09-01), so no other test can
+        // observe or disturb these entries.
+        cache_put("app_a", Some(policy_a.clone()));
+        cache_put("app_b", Some(policy_b.clone()));
 
         // App A sees policy A only — admin grants are visible; the
         // app-B `support` role is not in the cache for app A.
-        let a = ctx.mask_policy_for("app_a").expect("app_a cached");
+        let a = cache_get("app_a").expect("app_a cached");
         assert!(a.allows("admin", "pii"));
         assert!(a.allows("admin", "spi"));
         assert!(
@@ -541,7 +595,7 @@ mod tests {
 
         // App B sees policy B only — support grants are visible; the
         // app-A `admin` role is not in the cache for app B.
-        let b = ctx.mask_policy_for("app_b").expect("app_b cached");
+        let b = cache_get("app_b").expect("app_b cached");
         assert!(b.allows("support", "public"));
         assert!(
             !b.allows("admin", "pii"),
@@ -553,13 +607,13 @@ mod tests {
         );
 
         // App C — never seeded — sees nothing.
-        assert!(ctx.mask_policy_for("app_c").is_none());
+        assert!(cache_get("app_c").is_none());
 
         // Clearing app A leaves app B intact (fence against a clear-
         // implementation that walks the whole map).
-        ctx.set_mask_policy_for_app("app_a", None);
-        assert!(ctx.mask_policy_for("app_a").is_none());
-        assert!(ctx.mask_policy_for("app_b").is_some());
+        cache_put("app_a", None);
+        assert!(cache_get("app_a").is_none());
+        assert!(cache_get("app_b").is_some());
     }
 
 
@@ -582,7 +636,7 @@ mod tests {
                 .is_some_and(|backend| backend.as_sqlite().is_some()),
             "policy install must leave the configured SQLite backend ready"
         );
-        let policy = crate::context::with(|context| context.mask_policy_for("app_cold_policy"))
+        let policy = cache_get("app_cold_policy")
             .expect("policy must be cached after cold initialization");
         assert!(policy.allows("support", "spi"));
         crate::reset_context_for_tests();
