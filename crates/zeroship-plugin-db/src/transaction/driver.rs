@@ -92,6 +92,39 @@ use super::reducer::{
     TxReply,
 };
 
+thread_local! {
+    /// The generation stamped on the next transaction session this thread opens,
+    /// for SC-1's guard order step 4.
+    ///
+    /// **Thread-level, NOT per-lane**, which is why it is a module thread-local
+    /// here rather than a `TxLane` field: a counter that restarted per lane
+    /// would let a stale completion authenticate against a later session by
+    /// arithmetic coincidence. A completion naming a generation the current
+    /// session does not carry is stale, and that check is only as good as the
+    /// counter never going backwards.
+    ///
+    /// **It has no `reset_for_tests`, deliberately.** It lived on
+    /// `ThreadDbContext` until 2026-09-02, where `reset_context_for_tests`
+    /// rebuilt the whole struct and so silently returned it to 0 - contradicting
+    /// the "never reset" its own doc claimed. Nothing depended on the reset
+    /// (the one test built a private context), and not offering one makes the
+    /// documented property true rather than nearly true.
+    ///
+    /// Its only consumer is [`Action::IssueBegin`] below. It sat in the adapter
+    /// purely because that is where the context was; no adapter code ever read
+    /// or wrote it.
+    static BACKEND_GENERATION: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Mint the generation for the next session opened on this thread.
+fn next_backend_generation() -> u64 {
+    BACKEND_GENERATION.with(|g| {
+        let next = g.get() + 1;
+        g.set(next);
+        next
+    })
+}
+
 /// The authority axis a transaction is admitted under, today.
 ///
 /// **Deliberately opaque, and named for the axis rather than baked into it.**
@@ -453,7 +486,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
             Action::ScheduleTimer(scheduled) => schedule_timer(app_id, scheduled),
 
             Action::IssueBegin { token } => {
-                let generation = crate::context::with_mut(|c| c.next_backend_generation());
+                let generation = next_backend_generation();
                 let outcome = match open_session(app_id, config.begin).await {
                     Ok(()) => BeginOutcome::Opened(BackendGeneration(generation)),
                     Err(OpenSessionError::Failed(error)) => {
@@ -1202,6 +1235,50 @@ pub(crate) fn outcome_error(
             "settle_result_mismatch",
             format!("a rollback was answered with a commit{detail_text}"),
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_backend_generation;
+
+    /// The generation sequence must never restart.
+    ///
+    /// A counter that restarted would let a stale completion authenticate
+    /// against a later session by arithmetic coincidence, which is exactly what
+    /// SC-1's guard order step 4 exists to refuse.
+    ///
+    /// It reads the REAL thread-local rather than a private counter, which the
+    /// version on `ThreadDbContext` could not: that one built its own struct, so
+    /// it proved the arithmetic and never touched the store the driver uses.
+    /// Safe because libtest gives every `#[test]` its own OS thread even under
+    /// `--test-threads=1`, so no other test shares this sequence.
+    #[test]
+    fn backend_generations_are_monotonic() {
+        let first = next_backend_generation();
+        let second = next_backend_generation();
+        assert!(second > first, "generations must strictly increase");
+        assert!(
+            next_backend_generation() > second,
+            "the generation sequence must keep increasing"
+        );
+    }
+
+    /// `reset_context_for_tests` must NOT restart the sequence.
+    ///
+    /// The counter used to live on `ThreadDbContext`, where that helper rebuilt
+    /// the whole struct and silently returned it to 0 - contradicting the
+    /// "never reset" the field's own doc claimed. This pins the corrected
+    /// behaviour, and would fail against the pre-2026-09-02 placement.
+    #[test]
+    fn a_context_reset_does_not_restart_the_generation_sequence() {
+        let before = next_backend_generation();
+        crate::reset_context_for_tests();
+        assert!(
+            next_backend_generation() > before,
+            "a context reset must not rewind the backend generation: a stale \
+             completion could then authenticate against a later session"
+        );
     }
 }
 

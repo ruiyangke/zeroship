@@ -134,7 +134,6 @@ BASELINE_FILES="
 zeroship-plugin-db/exec.rs
 zeroship-plugin-db/backend/cancel.rs
 zeroship-plugin-db/auth/bootstrap.rs
-zeroship-plugin-db/context.rs
 zeroship-plugin-db/tx_lanes.rs
 zeroship-plugin-db/lib.rs
 zeroship-plugin-db/service.rs
@@ -154,7 +153,12 @@ zeroship-plugin-db/service.rs
 #                         the vendor tier by #122. See the note below on why a
 #                         move does not clear an entry, only relocates it.
 # auth/bootstrap.rs       session setup reaching the driver. Follows #110's cut.
-# context.rs              holds a live Pool in a field. #100 - placement unsettled.
+# context.rs              ENTRY DELETED 2026-09-02. It held `pool: Option<Rc<Pool>>`
+#                         plus `set_pool(Rc<Pool>)`. The field was redundant with
+#                         `backend` - the same Rc, stored twice - and the setter
+#                         became `set_postgres_backend`, with the connect moved
+#                         into `PostgresBackend::connect`. #166. The file now
+#                         names no vendor at all, which is what retired it.
 # drop_namespace.rs       ENTRY DELETED 2026-09-02, and NOT because the code
 # backend/lock_guard.rs   changed. Each module is gated at its single
 #                         declaration - lib.rs:259 and backend/mod.rs:82 - so

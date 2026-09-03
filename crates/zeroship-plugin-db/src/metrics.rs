@@ -21,22 +21,28 @@
 //! control plane's pricing catalog, so they are policy rather than mechanism -
 //! the same reasoning that put the DB-1 timeouts in [`crate::budgets`].
 //!
-//! # This module claims no tier, deliberately
+//! # This module is ENGINE, and used to claim no tier at all
 //!
-//! The NAMES are core-shaped: three `&'static str`s several tiers ask about.
-//! [`emit_db_metric`] is not, because it pulls the meter handle from
-//! [`crate::context`], whose own destination crate is unsettled. So the tier
-//! census reports this file as unjudged, which is the honest answer rather than
-//! a CORE arm that would assert a placement nobody has decided.
+//! It abstained until 2026-09-02 on the grounds that [`emit_db_metric`] pulled
+//! the meter handle from [`crate::context`], "whose own destination crate is
+//! unsettled". Both halves of that expired: the 2026-09-02 ownership decision
+//! settled the context as the adapter, and the meter no longer comes from it -
+//! it is stamped onto this module's own thread-local by `DbPlugin::register`.
+//! So the file is tiered, and the abstention would now HIDE an edge rather than
+//! report one honestly.
 //!
-//! That bound is why every call site today is at the ENGINE-tier OPERATION
-//! boundary (`crud/`) rather than inside the vendor entry points that actually
-//! run the statements. Emitting from `backend/pg_autocommit.rs` would catch
-//! every statement structurally and forever - but it would be the PG tier
-//! reaching up for the meter handle, re-forming the very cycle that module was
-//! created to break. When `context` settles low enough, move the emit down and
-//! delete the hand-placed call sites; until then they are the contract, and a
-//! new operation that runs SQL without one is silently unbilled.
+//! The METRIC NAMES are still core-shaped - three `&'static str`s several tiers
+//! ask about - and could be re-homed lower if a second tier ever needs them.
+//! Nothing does today.
+//!
+//! Every call site is at the ENGINE-tier OPERATION boundary (`crud/`) rather
+//! than inside the vendor entry points that actually run the statements.
+//! Emitting from `backend/pg_autocommit.rs` would catch every statement
+//! structurally and forever - but it would be the PG tier reaching UP for the
+//! meter, which is the cycle that module was created to break, and moving the
+//! meter here did not change that. The hand-placed call sites are still the
+//! contract, and a new operation that runs SQL without one is silently
+//! unbilled.
 //!
 //! # Adding a metric
 //!
@@ -45,7 +51,8 @@
 //! strings. A new name is a billing-contract change and needs the catalog to
 //! learn it in the same patch, or the usage is recorded and never priced.
 
-use crate::context;
+use std::cell::RefCell;
+use std::sync::Arc;
 
 /// One read operation: a query, a count, a search, a single-cell unmask fetch.
 /// Counts OPERATIONS, not rows.
@@ -71,7 +78,46 @@ pub(crate) fn emit_db_metric(app_id: &str, metric: &str, n: u64) {
     if n == 0 {
         return;
     }
-    if let Some(h) = context::with(|c| c.meter_handle(app_id)) {
+    if let Some(h) = handle_for(app_id) {
         h.record(metric, n);
     }
+}
+
+thread_local! {
+    /// The process-wide meter, as this thread sees it.
+    ///
+    /// It lives HERE rather than as a field on the adapter's `ThreadDbContext`
+    /// because this module is its only reader, and reading it through the
+    /// adapter was the sole reason an engine-tier file reached up. The adapter
+    /// still OWNS the decision - `DbPlugin::register` calls [`stamp`] - which is
+    /// a downward call and therefore fine.
+    ///
+    /// `None` is the meter-less test harness, and the emit is then a no-op.
+    static METER: RefCell<Option<Arc<zeroship_metering::Meter>>> = const { RefCell::new(None) };
+}
+
+/// Stamp the process-wide meter (called from `DbPlugin::register`).
+///
+/// Idempotent overwrite: registration may fire more than once per worker
+/// thread, and every plugin on a thread shares one meter.
+pub(crate) fn stamp(meter: Option<Arc<zeroship_metering::Meter>>) {
+    METER.with_borrow_mut(|slot| *slot = meter);
+}
+
+/// A per-`app_id` handle over the stamped meter.
+///
+/// The handle binds the SERVER-INJECTED `app_id`, which is what stops a db op
+/// metering another app; that binding is the reason this returns a handle
+/// rather than the meter itself.
+fn handle_for(app_id: &str) -> Option<zeroship_metering::MeterHandle> {
+    METER.with_borrow(|m| {
+        m.as_ref()
+            .map(|m| zeroship_metering::MeterHandle::new(Arc::clone(m), app_id))
+    })
+}
+
+/// Drop this thread's meter.
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) fn reset_for_tests() {
+    stamp(None);
 }

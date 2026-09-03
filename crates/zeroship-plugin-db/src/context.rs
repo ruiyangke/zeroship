@@ -31,9 +31,6 @@
 
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::Arc;
-
-use compio_postgres::Pool;
 
 use crate::backend::{BackendHandle, PostgresBackend};
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
@@ -70,17 +67,6 @@ pub struct ThreadDbContext {
     /// isolates must stamp the same value while different containers stamp
     /// different values.
     cdc_worker_id: Option<String>,
-
-    /// The backend generation stamped on the next installed transaction
-    /// session, for SC-1's guard order step 4.
-    ///
-    /// Thread-level, NOT per-lane, and that is why it did not move into
-    /// [`TxLane`]: monotonic for the life of the thread and never reset. A
-    /// completion naming a generation the current session does not carry is
-    /// stale, and a counter that restarted per lane would let a stale
-    /// completion authenticate against a later session by arithmetic
-    /// coincidence.
-    backend_generation: u64,
 
     /// The identity of the database this thread's resources belong to.
     ///
@@ -127,14 +113,6 @@ pub struct ThreadDbContext {
     /// during PRAGMA bootstrap with `database is locked`.
     backend_init_in_progress: bool,
 
-    /// Process-wide usage meter (metering-as-infrastructure). `Some` on the
-    /// worker / dev-serve vectors, stamped on `DbPlugin::register`. The exec
-    /// boundary (`exec.rs`) emits a raw usage metric (`db_reads` /
-    /// `db_writes` / `db_rows_written`) into it — keyed by the op's
-    /// server-injected `app_id` — in the SUCCESS arm only. Platform-measured,
-    /// unforgeable by app code. `None` in meter-less test harnesses.
-    meter: Option<Arc<zeroship_metering::Meter>>,
-
     /// Column root keys handed to this worker thread directly, in place of
     /// `ZEROSHIP_COLUMN_KEY_<KEYID>`.
     ///
@@ -163,12 +141,10 @@ impl ThreadDbContext {
         Self {
             db_url: None,
             cdc_worker_id: None,
-            backend_generation: 0,
             resource_key: DbResourceKey::UNBOUND,
             backend_selection: None,
             backend: None,
             backend_init_in_progress: false,
-            meter: None,
             supplied_root_keys: None,
         }
     }
@@ -201,24 +177,6 @@ impl ThreadDbContext {
         }
     }
 
-    // ----- metering --------------------------------------------------
-
-    /// Stamp the process-wide usage meter (called from `DbPlugin::register`).
-    /// Idempotent overwrite — registration may fire multiple times per
-    /// worker thread.
-    pub(crate) fn set_meter(&mut self, meter: Option<Arc<zeroship_metering::Meter>>) {
-        self.meter = meter;
-    }
-
-    /// Build a per-`app_id` [`zeroship_metering::MeterHandle`] from the
-    /// stamped meter. `None` when no meter is configured (test harness) —
-    /// the exec layer then skips the emit. The handle binds the
-    /// server-injected `app_id` so a db op cannot meter another app.
-    pub(crate) fn meter_handle(&self, app_id: &str) -> Option<zeroship_metering::MeterHandle> {
-        self.meter
-            .as_ref()
-            .map(|m| zeroship_metering::MeterHandle::new(Arc::clone(m), app_id))
-    }
 
     // ----- DB_POOL ----------------------------------------------------
 
@@ -393,11 +351,6 @@ impl ThreadDbContext {
         self.cdc_worker_id = Some(worker_id.to_string());
     }
 
-    /// Mint the backend generation for the next installed session.
-    pub(crate) const fn next_backend_generation(&mut self) -> u64 {
-        self.backend_generation += 1;
-        self.backend_generation
-    }
 }
 
 impl Default for ThreadDbContext {
@@ -722,32 +675,6 @@ mod tests {
             lanes.pop_frame_emit_mark("app_t"),
             None,
             "a retired transaction leaves no watermark behind"
-        );
-    }
-
-    /// The backend generation is monotonic and never restarts.
-    ///
-    /// A counter that restarted would let a stale completion authenticate
-    /// against a later session by arithmetic coincidence, which is exactly what
-    /// SC-1's guard order step 4 exists to refuse.
-    #[test]
-    fn backend_generations_are_monotonic() {
-        let mut ctx = ThreadDbContext::new();
-        let first = ctx.next_backend_generation();
-        let second = ctx.next_backend_generation();
-        assert!(second > first, "generations must strictly increase");
-        // This used to call `ctx.retire_transaction("app_t")` between the
-        // reads, asserting that retiring a transaction cannot restart the
-        // generation sequence. That is now TRUE BY CONSTRUCTION rather than by
-        // assertion: the generation counter is an adapter owner and the lanes
-        // are an engine one, in different objects behind different
-        // thread-locals, so no lane operation can reach the counter at all.
-        // The remaining assertion still pins that the counter itself is
-        // strictly increasing, which is what a stale-completion check depends
-        // on.
-        assert!(
-            ctx.next_backend_generation() > second,
-            "the generation sequence must keep increasing"
         );
     }
 
