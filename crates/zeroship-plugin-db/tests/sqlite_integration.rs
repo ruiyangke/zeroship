@@ -62,9 +62,16 @@ fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
 /// That read is the ADAPTER's and `crud::unmask` is ENGINE, so the resolution
 /// moved to the V8 dispatcher and the value is passed down. These tests drive
 /// the engine directly, so they make the same call the dispatcher makes on
-/// their behalf. Its LAZY OPEN is load-bearing here, not incidental: the
-/// `configure_cold_sqlite_unmask_fixture` cases deliberately leave the context
-/// with a URL and no backend, and this is what opens it for them.
+/// their behalf.
+///
+/// **THIS HELPER IS THE HARNESS PERFORMING THE OPEN, not a witness that
+/// something else performed it.** It is literally `tx_scope::ensure_backend`,
+/// so every `configure_cold_sqlite_unmask_fixture` case that reaches an engine
+/// entry point through it has had its isolate warmed by this line rather than
+/// by the code under test. What that leaves bound is the ATTACH half
+/// (`prepare_unmask_backend` -> `backend.prepare_for_app`); the OPEN half is
+/// bound separately and by name, by the three
+/// `cold_*_open_comes_from_ensure_backend_not_the_fixture` tests below.
 async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
     zeroship_plugin_db::tx_scope::ensure_backend()
         .await
@@ -5941,6 +5948,56 @@ fn configure_cold_sqlite_unmask_fixture(
     zeroship_plugin_db::cache_schema_for_tests(app_id, collection, schema);
 }
 
+/// The cold-open gate: prove the isolate left by
+/// [`configure_cold_sqlite_unmask_fixture`] has NO backend, and that
+/// `tx_scope::ensure_backend` is what opens and installs one.
+///
+/// # The guard this binds
+///
+/// Backend resolution for the unmask family lives in five production V8 lines
+/// (`v8_classes::dispatch::{dispatch_unmask_field, dispatch_bulk_unmask_field,
+/// dispatch_set_mask_policy_field}` and the two `v8_classes::masked_value`
+/// sites). Each one calls `tx_scope::ensure_backend`, whose `init_pool_async`
+/// arm is the lazy open; degrading it to a plain
+/// `context::with(|c| c.backend())` read would break every fresh isolate -
+/// `installSchema`'s `setMaskPolicy` loudest, which is the case
+/// `tx_scope::ensure_backend`'s own rustdoc calls load-bearing.
+///
+/// No test can drive those five lines (they take `&mut v8::PinScope` and return
+/// a `v8::Local<Promise>`), so what is bound here is the function all five call.
+///
+/// # Why identity, and not a context read
+///
+/// `crate::context` is `pub(crate)` in every build, so an integration target
+/// cannot ask "is the backend slot empty" directly. It can ask something
+/// stronger: the handle that comes back must not be the one the fixture
+/// installed, and a SECOND resolution must return that same fresh handle rather
+/// than open a third. The caller keeps its fixture `Rc` alive across this call
+/// for exactly that reason - a dropped `SqliteBackend` could be reallocated at
+/// the same address and make the first assertion pass on a coincidence.
+async fn assert_cold_open_installs_a_fresh_backend(fixture: &SqliteBackend) {
+    let opened = zeroship_plugin_db::tx_scope::ensure_backend()
+        .await
+        .expect(
+            "a cold isolate must be OPENED by ensure_backend: a plain context read answers \
+             not_configured here, which is what every fresh isolate would get",
+        );
+    let opened = opened.as_sqlite().expect("the SQLite arm");
+    assert!(
+        !std::ptr::eq(opened, fixture),
+        "the cold fixture's backend is still installed, so nothing was opened"
+    );
+
+    let again = zeroship_plugin_db::tx_scope::ensure_backend()
+        .await
+        .expect("the second resolution must see the backend the first one opened");
+    assert!(
+        std::ptr::eq(again.as_sqlite().expect("the SQLite arm"), opened),
+        "the open must INSTALL into the isolate, not hand back a private handle: \
+         a second resolution opened a different backend"
+    );
+}
+
 /// Read every row from `__zeroship_audit_unmask` for a given app.
 /// Returns `Vec<(outcome, actor_role, classification)>`.
 async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, String, String)> {
@@ -5967,11 +6024,43 @@ async fn read_audit_rows(backend: &SqliteBackend, app_id: &str) -> Vec<(String, 
         .collect()
 }
 
+/// **cold-open gate, single unmask**: the fixture leaves the isolate with a URL
+/// and no backend, and `tx_scope::ensure_backend` - the call
+/// `v8_classes::dispatch::dispatch_unmask_field` makes before handing the engine
+/// a handle - is what opens one.
+///
+/// The sibling gate below drives the same cold fixture through
+/// `dispatch_unmask` and rules on the ATTACH; this one rules on the OPEN, which
+/// nothing else does. See [`assert_cold_open_installs_a_fresh_backend`].
+#[test]
+fn cold_unmask_open_comes_from_ensure_backend_not_the_fixture() {
+    let schema = serde_json::json!({
+        "id":  { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" },
+        },
+    });
+    let app_id = "app_unmask_cold_open";
+    let collection = "users";
+
+    run(async {
+        // `fixture` stays bound for the whole block: the assertion is an
+        // address comparison against it.
+        let (fixture, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
+        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+        assert_cold_open_installs_a_fresh_backend(fixture.as_ref()).await;
+    });
+}
+
 /// **Gate #1**: an `auto` actor unmasking an encrypted +
 /// masked column recovers plaintext, and a `granted` audit row is
 /// emitted with the right classification.
+///
+/// The ATTACH is what this rules on. The OPEN is the harness's - see
+/// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
-fn cold_unmask_with_auto_actor_initializes_and_attaches_before_read() {
+fn cold_unmask_with_auto_actor_attaches_before_read() {
     let _keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
     let schema = serde_json::json!({
         "id": { "type": "string" },
@@ -6067,8 +6156,11 @@ fn cold_unmask_with_auto_actor_initializes_and_attaches_before_read() {
             .await
             .expect("INSERT");
 
-        // Remove the fixture-installed backend. The dispatch must lazily open a
-        // fresh one and ATTACH the existing app file before its direct SELECT.
+        // Remove the fixture-installed backend. The `unmask_backend()` below is
+        // the harness making the open the V8 dispatch makes in production (the
+        // cold-open gate above is where that open is ruled on); what THIS test
+        // rules on is the next step - `dispatch_unmask` ATTACHing the existing
+        // app file to that freshly opened connection before its direct SELECT.
         configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema.clone());
         let _cold_keys = with_root_key("p55_pr4_auto", &"a".repeat(64));
 
@@ -7265,8 +7357,13 @@ use zeroship_plugin_db::crud::mask_drift;
 /// fresh INSERTs. To simulate drift we UPDATE the sibling out-of-band
 /// after the insert so the stored value differs from
 /// `apply_mask_kind(plaintext)`. The drift sweep MUST flag it.
+///
+/// The name said `initializes_and_attaches` until 2026-09-03, which the body's
+/// own comment already contradicted: the sweep takes a backend rather than
+/// resolving one, so the harness performs the open. What it rules on is the
+/// ATTACH and the sampling.
 #[test]
-fn cold_drift_check_initializes_and_attaches_before_sampling() {
+fn cold_drift_check_attaches_before_sampling() {
     let schema = serde_json::json!({
         "id": { "type": "string" },
         "email": {
@@ -7631,11 +7728,51 @@ fn drift_check_handles_encrypted_column() {
 
 use zeroship_plugin_db::crud::unmask::{BulkUnmaskArgs, BulkUnmaskItem, dispatch_bulk_unmask};
 
+/// **cold-open gate, bulk unmask**: the same guard as the single-unmask
+/// cold-open gate, over the fixture shape THIS family uses - a mask policy
+/// written to the sidecar BEFORE the isolate goes cold, so the open has to find
+/// the sidecar database again from the URL alone.
+///
+/// The production line is `v8_classes::dispatch::dispatch_bulk_unmask_field`
+/// (and `v8_classes::masked_value`'s bulk site), which resolves through
+/// `tx_scope::ensure_backend` exactly as the single-unmask dispatch does.
+#[test]
+fn cold_bulk_unmask_open_comes_from_ensure_backend_not_the_fixture() {
+    let schema = serde_json::json!({
+        "id":    { "type": "string" },
+        "email": {
+            "type": "string",
+            "mask": { "kind": "email", "classification": "pii" },
+        },
+    });
+    let app_id = "app_bulk_unmask_cold_open";
+    let collection = "users";
+
+    run(async {
+        // `fixture` stays bound for the whole block: the assertion is an
+        // address comparison against it.
+        let (fixture, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
+        zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+        mask_policy::dispatch_set_mask_policy(
+            &unmask_backend().await,
+            app_id,
+            serde_json::json!({ "user": ["pii"] }),
+        )
+        .await
+        .expect("set_mask_policy");
+        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+        assert_cold_open_installs_a_fresh_backend(fixture.as_ref()).await;
+    });
+}
+
 /// **bulk gate #1**: authorised actor unmasks many columns
 /// across many rows in one call; the result map carries plaintext
 /// for every pair, and exactly ONE audit row lands.
+///
+/// The ATTACH is what this rules on. The OPEN is the harness's - see
+/// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
-fn cold_bulk_unmask_initializes_and_attaches_before_read() {
+fn cold_bulk_unmask_attaches_before_read() {
     let schema = serde_json::json!({
         "id":    { "type": "string" },
         "email": {
@@ -7693,7 +7830,9 @@ fn cold_bulk_unmask_initializes_and_attaches_before_read() {
             .expect("set_mask_policy");
 
         // The policy sidecar and app database now exist, but no backend remains
-        // in the isolate. Bulk dispatch must initialize, reload, and attach.
+        // in the isolate. The `unmask_backend()` below opens one, as the V8
+        // dispatch would (ruled on by the cold-open gate above); bulk dispatch
+        // must then RELOAD the policy and ATTACH the app file on it.
         configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
 
         let args = BulkUnmaskArgs {
@@ -7874,11 +8013,50 @@ use zeroship_plugin_db::crud::unmask::{
     audit_query_hint_granted, authorize_query_hint, dispatch_unmask_for_query,
 };
 
+/// **cold-open gate, query hint**: the same guard again, over this family's
+/// fixture. The query hint's first cold operation is the authorization fence,
+/// so the open has to happen before any policy load or denied audit write - and
+/// this is what rules on the open.
+///
+/// The production line is `crud::mod`'s query hint, sanitised in `plan_find` and
+/// resolved by the `find` dispatch through `tx_scope::ensure_backend`.
+#[test]
+fn cold_query_unmask_hint_open_comes_from_ensure_backend_not_the_fixture() {
+    let schema = serde_json::json!({
+        "id":  { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" },
+        },
+    });
+    let app_id = "app_qhint_cold_open";
+    let collection = "users";
+
+    run(async {
+        // `fixture` stays bound for the whole block: the assertion is an
+        // address comparison against it.
+        let (fixture, dir) = unmask_setup_with_schema(app_id, collection, schema.clone()).await;
+        zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
+        mask_policy::dispatch_set_mask_policy(
+            &unmask_backend().await,
+            app_id,
+            serde_json::json!({ "user": ["spi"] }),
+        )
+        .await
+        .expect("set_mask_policy");
+        configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
+        assert_cold_open_installs_a_fresh_backend(fixture.as_ref()).await;
+    });
+}
+
 /// **per-query gate #1**: an authorised actor with a query
 /// hint sees plaintext in the listed columns; non-listed masked
 /// columns keep their `__zsmask__` wrapping.
+///
+/// The ATTACH is what this rules on. The OPEN is the harness's - see
+/// `unmask_backend` - and is bound by the cold-open gate directly above.
 #[test]
-fn cold_query_unmask_hint_initializes_and_attaches_before_read() {
+fn cold_query_unmask_hint_attaches_before_read() {
     let schema = serde_json::json!({
         "id":    { "type": "string" },
         "email": {
@@ -7935,8 +8113,11 @@ fn cold_query_unmask_hint_initializes_and_attaches_before_read() {
             .await
             .expect("set_mask_policy");
 
-        // Authorization is the first operation after a cold boot. It must open
-        // and attach before loading policy or writing a denied audit row.
+        // Authorization is the first operation after a cold boot. The
+        // `unmask_backend()` calls below make the open the V8 dispatch makes
+        // (ruled on by the cold-open gate above); what this test rules on is
+        // that authorization then ATTACHes before loading policy or writing a
+        // denied audit row.
         configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
 
         // Simulate the row shape `dispatch_find` would produce

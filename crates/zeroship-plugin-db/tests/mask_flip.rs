@@ -74,8 +74,15 @@ fn test_url() -> String {
 /// That read is the ADAPTER's, and `crud::unmask` is ENGINE, so the resolution
 /// moved to the V8 dispatcher and the value is passed down. These tests drive
 /// the engine directly, with no V8 frame above them, so they make the same call
-/// the dispatcher makes on their behalf in production - including its lazy
-/// open, which is what the cold-start fixtures below depend on.
+/// the dispatcher makes on their behalf in production.
+///
+/// **Its lazy open never fires here, and this comment claimed otherwise until
+/// 2026-09-03.** Every fixture in this file calls `set_postgres_pool_for_tests`
+/// before any dispatch, so the isolate already holds a backend and this is a
+/// plain read. (`DbBinding::cold_start` below is a BINDING constructor - a
+/// different sense of cold, and not a context state.) The lazy open is bound in
+/// `tests/sqlite_integration.rs`, by the three
+/// `cold_*_open_comes_from_ensure_backend_not_the_fixture` gates.
 async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
     zeroship_plugin_db::tx_scope::ensure_backend()
         .await
