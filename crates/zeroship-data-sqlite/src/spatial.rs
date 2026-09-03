@@ -38,7 +38,7 @@
 //! is the canonical layout. A big-endian target would silently swap
 //! the byte order on read — this module does not handle that case.
 
-use crate::backend::GeoPoint;
+use zeroship_schema::descriptors::GeoPoint;
 use zeroship_data_core::error::DbError;
 
 /// Earth's mean radius in metres (IUGG / WGS84 standard). The

@@ -91,9 +91,9 @@ use std::sync::{Arc, Mutex, Once, Weak};
 
 use rusqlite::Connection;
 
-use crate::backend::sqlite::cdc::CommitPacket;
-use crate::backend::sqlite::error::from_sqlite;
-use crate::backend::sqlite::reservation::{
+use crate::cdc::CommitPacket;
+use crate::error::from_sqlite;
+use crate::reservation::{
     self, CancelCleanup, CancelIntent, Lane, Reservation, ReservationKind, TerminalOutcome,
     TxLaneId,
 };
@@ -184,7 +184,7 @@ pub enum TypedCell {
 }
 
 /// A typed row + column names, returned by the `QueryTyped` command
-/// variant. Consumers: [`crate::backend::VectorIndex::vector_search`]
+/// variant. Consumers: [`zeroship_data_core::storage::VectorIndex::vector_search`]
 /// (vec0 JOIN result) and `spatial_near`.
 ///
 /// **`pub`, and it must stay so even though NOTHING NAMES IT outside this
@@ -692,7 +692,7 @@ impl SqliteSession {
 
     /// **Test-only**: hand an autocommit reservation to the caller so it can be
     /// submitted twice. See
-    /// [`crate::backend::sqlite::SqliteBackend::spent_autocommit_reservation_for_tests`].
+    /// [`crate::SqliteBackend::spent_autocommit_reservation_for_tests`].
     #[cfg(feature = "test-helpers")]
     pub(crate) fn autocommit_reservation_for_tests(&self) -> Arc<Reservation> {
         self.autocommit_reservation()
@@ -711,7 +711,7 @@ impl SqliteSession {
     /// Two questions the design did not settle. Both are answered by the code
     /// below, so they are stated here rather than discovered - the Postgres
     /// half writes its equivalents into
-    /// [`crate::backend::postgres::PostgresBackend`]'s
+    /// `zeroship_data_postgres::PostgresBackend`'s
     /// `acquire_dedicated_client`, and these are this half's.
     ///
     /// 1. **Exhaustion: refuse immediately, do not queue.** A second
@@ -826,7 +826,7 @@ impl SqliteSession {
     }
 
     /// Send an `Exec` command on an autocommit reservation and await the reply.
-    pub(crate) async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
+    pub async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
         self.exec_on(&self.autocommit_reservation(), sql, params)
             .await
     }
@@ -900,7 +900,7 @@ impl SqliteSession {
 
     /// Run a transaction reservation's terminal statement and return the
     /// classified outcome.
-    pub(crate) async fn settle(
+    pub async fn settle(
         &self,
         reservation: &Arc<Reservation>,
         intent: TerminalIntent,
@@ -975,7 +975,7 @@ impl SqliteSession {
         })
     }
 
-    pub(crate) fn try_exec_detached(
+    pub fn try_exec_detached(
         &self,
         reservation: &Arc<Reservation>,
         sql: &str,
@@ -1267,17 +1267,17 @@ impl SqliteSessionHandle {
     }
 
     /// Convenience: forward an `exec` through the underlying session.
-    pub(crate) async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
+    pub async fn exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {
         self.session.exec_on(&self.reservation(), sql, params).await
     }
 
-    pub(crate) fn try_exec_detached(&self, sql: &str, params: &[&str]) -> Result<(), DbError> {
+    pub fn try_exec_detached(&self, sql: &str, params: &[&str]) -> Result<(), DbError> {
         self.session
             .try_exec_detached(&self.reservation(), sql, params)
     }
 
     /// Run this handle's transaction terminal statement.
-    pub(crate) async fn settle(
+    pub async fn settle(
         &self,
         intent: TerminalIntent,
     ) -> Result<TerminalOutcome, DbError> {
@@ -1317,7 +1317,7 @@ impl SqliteSessionHandle {
     /// Separate symbol from the `cfg(test-helpers)` `query` above so the
     /// production `crate::crud::unmask::dispatch_unmask` path can reach the
     /// session without forcing the feature on default builds.
-    pub(crate) async fn query_internal(
+    pub async fn query_internal(
         &self,
         sql: &str,
         params: &[&str],
@@ -1327,7 +1327,7 @@ impl SqliteSessionHandle {
 
     /// Crate-private `query_typed` counterpart for the unmask RPC dispatch
     /// (the encrypted-column read path needs raw `TypedCell::Blob` bytes).
-    pub(crate) async fn query_typed_internal(
+    pub async fn query_typed_internal(
         &self,
         sql: &str,
         params: &[&str],
@@ -1361,20 +1361,20 @@ type NextCommandGateSlot = Arc<Mutex<Option<NextCommandGateWorker>>>;
 /// Test helper: stall the next worker command before execution until the
 /// returned gate is released.
 #[cfg(any(test, feature = "test-helpers"))]
-pub(crate) struct NextCommandGate {
+pub struct NextCommandGate {
     entered_rx: flume::Receiver<()>,
     release_tx: flume::Sender<()>,
 }
 
 #[cfg(any(test, feature = "test-helpers"))]
 impl NextCommandGate {
-    pub(crate) async fn wait_until_blocked(&self) -> Result<(), DbError> {
+    pub async fn wait_until_blocked(&self) -> Result<(), DbError> {
         self.entered_rx.recv_async().await.map_err(|_| {
             DbError::internal("SqliteSession test gate: worker dropped entered signal")
         })
     }
 
-    pub(crate) fn release(self) {
+    pub fn release(self) {
         let _ = self.release_tx.send(());
     }
 }
@@ -1384,7 +1384,7 @@ impl SqliteSession {
     /// Install a one-shot gate for the next command **this session's** actor
     /// runs. Sessions do not share the slot, so a gate armed here can only ever
     /// be tripped by a command this session was asked to run.
-    pub(crate) fn arm_next_command_gate_for_tests(&self) -> NextCommandGate {
+    pub fn arm_next_command_gate_for_tests(&self) -> NextCommandGate {
         let (entered_tx, entered_rx) = flume::bounded(1);
         let (release_tx, release_rx) = flume::bounded(1);
         let mut slot = self
@@ -1417,7 +1417,7 @@ struct LaneConn {
     /// to the next caller.
     quarantined: bool,
     /// Kept alive so the CDC hooks' captured `Arc`s outlive the connection.
-    _dispatcher: Option<crate::backend::sqlite::cdc::SqliteCdcDispatcher>,
+    _dispatcher: Option<crate::cdc::SqliteCdcDispatcher>,
 }
 
 /// One app's transaction connection, plus the bookkeeping that decides who may
@@ -1472,12 +1472,12 @@ fn open_lane_connection(
     db_path: &Path,
     app_id: Option<&str>,
     packet_tx: Option<&flume::Sender<CommitPacket>>,
-) -> Result<(Connection, Option<crate::backend::sqlite::cdc::SqliteCdcDispatcher>), DbError> {
+) -> Result<(Connection, Option<crate::cdc::SqliteCdcDispatcher>), DbError> {
     register_sqlite_vec_once();
     let conn = Connection::open(db_path).map_err(from_sqlite)?;
     conn.execute_batch(BOOT_PRAGMAS).map_err(from_sqlite)?;
     let dispatcher = match packet_tx {
-        Some(tx) => Some(crate::backend::sqlite::cdc::install(
+        Some(tx) => Some(crate::cdc::install(
             &conn,
             app_id.map(str::to_string),
             tx.clone(),
@@ -2426,7 +2426,7 @@ fn run_attach(conn: &Connection, app_id: &str, db_path: &str) -> Result<(), DbEr
 
 fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, RunError> {
     // The param vector carries an optional encrypted-column side-channel: a
-    // value tagged with [`crate::query::SQLITE_BINARY_BIND_PREFIX`] is
+    // value tagged with [`zeroship_schema::query::SQLITE_BINARY_BIND_PREFIX`] is
     // base64-decoded to raw bytes and bound as BLOB instead of TEXT. The PG arm
     // never produces this prefix; non-encrypted params travel as plain `String`
     // on both arms.
@@ -2440,7 +2440,7 @@ fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, RunE
 
 /// Typed bind value. Either a borrowed `&str` (the TEXT default) or an owned
 /// `Vec<u8>` produced by base64-decoding a
-/// [`crate::query::SQLITE_BINARY_BIND_PREFIX`]-tagged param.
+/// [`zeroship_schema::query::SQLITE_BINARY_BIND_PREFIX`]-tagged param.
 enum BindParam<'a> {
     /// Plain TEXT bind - borrows from the caller's `Vec<String>`.
     Text(&'a str),
@@ -2461,7 +2461,7 @@ impl BindParam<'_> {
 /// a typed bind list.
 fn decode_blob_params(params: &[String]) -> Result<Vec<BindParam<'_>>, DbError> {
     use base64::Engine as _;
-    let prefix = crate::query::SQLITE_BINARY_BIND_PREFIX;
+    let prefix = zeroship_schema::query::SQLITE_BINARY_BIND_PREFIX;
     let mut out = Vec::with_capacity(params.len());
     for p in params {
         match p.strip_prefix(prefix) {

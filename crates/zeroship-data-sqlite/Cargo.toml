@@ -1,0 +1,51 @@
+[package]
+name = "zeroship-data-sqlite"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The SQLite vendor tier of the data plane: the single-writer session actor, its CDC dispatcher, reservation lane, dialect lowering and error mapping. This is the ONLY crate besides zeroship-data-postgres permitted to name rusqlite."
+
+[dependencies]
+# The driver. Naming it here is the point of the crate: everything above speaks
+# the contracts in `zeroship-data-core` instead, which is what lets a second
+# backend be a sibling crate rather than a set of `match` arms.
+#
+# `bundled` compiles the SQLite amalgamation in; `preupdate_hook` is the seam the
+# CDC dispatcher reads before-images from.
+rusqlite = { workspace = true, features = ["bundled", "preupdate_hook"] }
+
+# The session actor is a dedicated OS thread fed over a `flume` channel, and the
+# async side awaits its replies on compio. Both are structural to the
+# single-writer design rather than incidental.
+compio = { workspace = true }
+flume = { workspace = true }
+
+# NORMAL, not dev: `SqliteBackend::open` backs a `:memory:` database with a real
+# temp directory, so this is on the production path.
+tempfile = { workspace = true }
+
+# Statically compiles the `vec0` C extension the session actor registers.
+sqlite-vec = { workspace = true }
+
+# The snapshot path hashes dump artifacts. OPTIONAL and tied to `test-helpers`
+# rather than a dev-dependency: the code calling it sits behind
+# `cfg(feature = "test-helpers")` in the LIB, and a dev-dependency links only
+# into test and bench targets - so a dev-dep compiles for `cargo test` and fails
+# for `cargo check --features test-helpers`.
+sha2 = { workspace = true, optional = true }
+
+zeroship-data-core = { workspace = true }
+zeroship-schema = { workspace = true }
+zeroship-core = { workspace = true }
+
+serde_json = { workspace = true }
+tracing = { workspace = true }
+base64 = { workspace = true }
+uuid = { workspace = true }
+
+[features]
+# Mirrors the adapter's flag, and must be FORWARDED rather than merely declared:
+# the capability traits this crate impls are themselves feature-gated in
+# data-core, and a `cfg(test)` here names THIS crate's test build, never
+# data-core's feature. Impl and trait must agree on the feature alone.
+test-helpers = ["zeroship-data-core/test-helpers", "dep:sha2"]

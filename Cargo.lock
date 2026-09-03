@@ -7479,6 +7479,25 @@ name = "zeroship-data-query-builder"
 version = "0.1.0"
 
 [[package]]
+name = "zeroship-data-sqlite"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "compio",
+ "flume 0.11.1",
+ "rusqlite",
+ "serde_json",
+ "sha2 0.10.9",
+ "sqlite-vec",
+ "tempfile",
+ "tracing",
+ "uuid",
+ "zeroship-core",
+ "zeroship-data-core",
+ "zeroship-schema",
+]
+
+[[package]]
 name = "zeroship-gateway"
 version = "0.1.0"
 dependencies = [
@@ -7798,6 +7817,7 @@ dependencies = [
  "zeroship-data-core",
  "zeroship-data-postgres",
  "zeroship-data-query-builder",
+ "zeroship-data-sqlite",
  "zeroship-metering",
  "zeroship-migrate-policy",
  "zeroship-migrate-server",

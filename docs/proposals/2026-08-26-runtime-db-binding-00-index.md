@@ -152,13 +152,13 @@ Of the six lazy-DDL sites invariant 7 tried to enumerate: **two deleted, two
    audit wrappers.
 3. Delete `audit.rs` and the `AuditWriter` methods `ensure_audit_table`,
    `write_audit_row`, `next_schema_version`, plus the SQLite implementation
-   (`backend/sqlite/mod.rs:1293-1295`). Steps 1 and 2 left both of those
+   (`zeroship-data-sqlite/src/lib.rs:1293-1295`). Steps 1 and 2 left both of those
    `#[cfg(any(test, feature = "test-helpers"))]` with no production writer, so
    the deletion is a consequence, not an edit.
 4. `__zeroship_migrations` then disappears from creator schemas, which frees the
    name for the engine journal moving in
    (`2026-08-28-migration-record-consolidation.md`) with no rename on either
-   side. `backend/sqlite/cdc.rs:465-472` filters the table out of the change
+   side. `zeroship-data-sqlite/src/cdc.rs:465-472` filters the table out of the change
    stream and goes with it.
 
 **The order is load-bearing.** Deleting the audit table before the DDL writer
@@ -375,7 +375,7 @@ including the two the design records as owed for steps 3 and 5a.
 
 | contract | state |
 | --- | --- |
-| **SC-2** | **~80% implemented** (`a21640bf4`, `32f9bb189`, `4ec1c701f`, plus four fixes). Two connections, the interrupt generation guard, the terminal CAS, all four cancellation interleavings and all eight classifier rows are in the tree with tests. **Missing:** the per-app-file actor, a production cancellation consumer (the surface is `#[allow(dead_code)]` awaiting SC-1's deadline rule), The `SQLITE_BUSY_SNAPSHOT` arm IS handled - `crates/zeroship-plugin-db/src/backend/sqlite/error.rs:37` (the 517 constant), classified at `:97`, pinned at `:214` (checked 2026-08-29) |
+| **SC-2** | **~80% implemented** (`a21640bf4`, `32f9bb189`, `4ec1c701f`, plus four fixes). Two connections, the interrupt generation guard, the terminal CAS, all four cancellation interleavings and all eight classifier rows are in the tree with tests. **Missing:** the per-app-file actor, a production cancellation consumer (the surface is `#[allow(dead_code)]` awaiting SC-1's deadline rule), The `SQLITE_BUSY_SNAPSHOT` arm IS handled - `crates/zeroship-data-sqlite/src/error.rs:37` (the 517 constant), classified at `:97`, pinned at `:214` (checked 2026-08-29) |
 | **SC-5** | **step 5a fully implemented** (`40c3df95f` plus three fixes), with unusually strong instrumentation. **SC-5 as a contract is at zero**: Fork C (`AppIncarnationId` occurs 0 times in the tree), the ceiling as a service field, service-owned key custody |
 | **SC-3** | shared core plus the read family built (`5c83046fc`), zero dependencies, and the SEARCH **and WRITE** families ported onto the IR - `search.rs` 562 lines, `write.rs` 1057, so neither is a stub (counted 2026-08-29). `crates/zeroship-data-query-builder/src/` also carries `plan.rs`, `predicate.rs`, `projection.rs`, `path.rs`, `literal.rs`, `ident.rs` and a `render/` module. **Still absent:** the remaining families and the ledger. Unmask was deliberately left off the IR to avoid colliding with the SC-6 flip |
 | **SC-4** | **decision 4 is implemented** (`8c6caa465`, dev-ness as a typed input) and SC-4 does not record it. Decision 1 unblocked and small; decision 2 underspecified by SC-4's own admission |

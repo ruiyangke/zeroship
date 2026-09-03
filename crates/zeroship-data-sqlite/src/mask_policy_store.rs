@@ -71,7 +71,7 @@ fn policy_file_lock(path: &Path) -> Result<std::sync::MutexGuard<'static, ()>, D
 /// # Errors
 ///
 /// Any I/O or serialisation failure along the five steps above.
-pub(crate) async fn persist(
+pub async fn persist(
     sq: &SqliteBackend,
     app_id: &str,
     policy_json: &Value,
@@ -145,7 +145,7 @@ fn persist_blocking(path: PathBuf, app_id: String, policy_json: Value) -> Result
 /// # Errors
 ///
 /// A read that is not `NotFound`, or a file that is not parseable JSON.
-pub(crate) async fn load(sq: &SqliteBackend, app_id: &str) -> Result<Option<Value>, DbError> {
+pub async fn load(sq: &SqliteBackend, app_id: &str) -> Result<Option<Value>, DbError> {
     let path = policy_path(sq);
     let app_id = app_id.to_string();
     compio::runtime::spawn_blocking(move || load_blocking(path, app_id))
@@ -192,7 +192,11 @@ mod tests {
             .block_on(async {
                 let dir = tempfile::tempdir().expect("create tempdir");
                 let backend =
-                    crate::backend_selection::new_sqlite_backend(dir.path().to_path_buf())
+                    crate::SqliteBackend::new(
+                        dir.path().to_path_buf(),
+                        crate::NullChangeSink,
+                        zeroship_data_core::encryption::LocalKeySource::env_var(),
+                    )
                         .expect("open sqlite backend");
                 let stored = json!({ "admin": ["public", "pii"], "support": ["public"] });
 

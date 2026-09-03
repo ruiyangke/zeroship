@@ -290,7 +290,7 @@ site", which is what the flip-write-path review could achieve for
 **A second, independent defence, covering a different vector.** The database
 guarantee covers the PostgreSQL arm only. The SQLite dev tier has its own CDC
 producer with the same shape and the same gap:
-`crates/zeroship-plugin-db/src/backend/sqlite/cdc.rs:604-639` builds `new_tuple`
+`crates/zeroship-data-sqlite/src/cdc.rs:604-639` builds `new_tuple`
 from PRAGMA-resolved column names and sets
 `changed_columns: new_tuple.keys().cloned().collect()` (`:622-623`). There is no
 publication there to enforce anything.
@@ -1325,7 +1325,7 @@ is TRUE on SQLite - and `emit_for_rows` **returns early** on it (`:494-500`, wit
 the comment "SQLite has a commit-time CDC publisher wired through the writer
 actor's preupdate/commit hooks ... on SQLite it races the CDC publisher and
 produces duplicate identical live snapshots"). SQLite builds its `ChangeEvent` in
-`backend/sqlite/cdc.rs` and publishes it straight to the broker
+`zeroship-data-sqlite/src/cdc.rs` and publishes it straight to the broker
 (`cdc.rs:632-641`), never reaching `emit_for_rows`.
 
 So the delete is:
@@ -4228,7 +4228,7 @@ letting either read as a portable fact.
   transaction.** Measured `boot_val` is 64MB per slot (7.2), but a spilling
   transaction was not driven through the ring.
 - **Anything about MySQL or the SQLite actor beyond the CDC publisher's shape**
-  at `backend/sqlite/cdc.rs:604-639`.
+  at `zeroship-data-sqlite/src/cdc.rs:604-639`.
 - **Replay-order stability is now measured, within a stated bound.** On
   PostgreSQL 17.11, one transaction containing a three-row multi-`VALUES`
   `INSERT`, an `UPDATE` and a `DELETE` was re-decoded three times through

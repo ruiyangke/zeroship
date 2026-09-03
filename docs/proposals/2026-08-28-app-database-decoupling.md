@@ -1510,7 +1510,7 @@ anyway.
 ## 12. SQLite dev tier
 
 One file per database, `zs-db-<dbsid>.sqlite`, ATTACHed under alias `db_<dbsid>`. The existing
-`attach_app_file` (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:760`) already *is* a
+`attach_app_file` (`crates/zeroship-data-sqlite/src/lib.rs:779`) already *is* a
 per-database handle under a different name - `zs-<app_id>.sqlite` attached under the app id, with an
 `app_id_cache` dedup set because SQLite errors on a duplicate alias (`:115-118`). The dedup key becomes
 the database id.

@@ -226,6 +226,7 @@ zeroship-schema = { path = "crates/zeroship-schema" }
 # `zeroship-schema`'s runtime query builders onto it is a later step.
 zeroship-data-core = { path = "crates/zeroship-data-core" }
 zeroship-data-postgres = { path = "crates/zeroship-data-postgres" }
+zeroship-data-sqlite = { path = "crates/zeroship-data-sqlite" }
 zeroship-data-query-builder = { path = "crates/zeroship-data-query-builder" }
 # The `zeroship-migrate` engine, a full member of this workspace. It was a git submodule
 # pinned to a commit recorded here; its history was grafted in so the engine and its

@@ -87,12 +87,16 @@ pub(crate) mod cancel;
 // `backend::PostgresBackend` (re-exported below); the SQLite arm has
 // session-actor internals worth pinning at the integration level, so
 // the full sub-module is visible under the same gate.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod sqlite;
-#[cfg(feature = "test-helpers")]
-pub mod sqlite;
+// The SQLite vendor tier moved to `zeroship-data-sqlite` on 2026-09-02. The
+// re-export keeps `backend::sqlite::...` resolving for the integration target,
+// which names session-actor internals directly.
+pub use zeroship_data_sqlite as sqlite;
+pub use zeroship_data_sqlite::SqliteBackend;
 
-pub use sqlite::SqliteBackend;
+// Same orphan-rule case as the PostgreSQL arm: `Backend` is this crate's own
+// `pub(crate)` marker, so its impl on a foreign type can only be written here.
+#[cfg(any(test, feature = "test-helpers"))]
+impl Backend for SqliteBackend {}
 
 // The PostgreSQL vendor tier moved to `zeroship-data-postgres` on 2026-09-02.
 // Re-exported at the addresses the crate already spells, so this is a move

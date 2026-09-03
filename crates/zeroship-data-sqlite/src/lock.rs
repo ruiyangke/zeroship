@@ -2,16 +2,16 @@
 //!
 //! This module wires the body of the [`InProcessLockRegistry`] —
 //! the single-process HashMap [`super::SqliteBackend`]'s
-//! [`crate::backend::LockManager`] impl routes through. Per design §8.5,
+//! [`zeroship_data_core::storage::LockManager`] impl routes through. Per design §8.5,
 //! SQLite is in-process by definition; both
-//! [`crate::backend::LockScope::GlobalApp`] and
-//! [`crate::backend::LockScope::LocalApp`] route through this registry —
+//! [`zeroship_data_core::capability::LockScope::GlobalApp`] and
+//! [`zeroship_data_core::capability::LockScope::LocalApp`] route through this registry —
 //! cross-process serialisation (BEGIN IMMEDIATE / sentinel table) is
 //! deferred future work.
 //!
 //! **Storage shape** (design §8.5):
 //! `RefCell<HashMap<(String, String), Rc<Cell<bool>>>>` — the
-//! `(key1, key2)` pair is the [`crate::backend::LockScope::to_keys`]
+//! `(key1, key2)` pair is the [`zeroship_data_core::capability::LockScope::to_keys`]
 //! derivation; the inner `Cell<bool>` tracks "currently held". The
 //! outer `Rc<Cell<…>>` is deliberate: a later `SqliteLockGuard` sibling
 //! can clone the `Rc` at acquisition time and release on drop without
@@ -21,7 +21,7 @@
 //! **Cell-borrow discipline**: every `try_acquire` / `release` call
 //! must complete the `RefCell::borrow_mut()` scope synchronously —
 //! NEVER hold the borrow across an `.await`. The [`super::SqliteBackend`]
-//! [`crate::backend::LockManager`] impl calls these primitives inside
+//! [`zeroship_data_core::storage::LockManager`] impl calls these primitives inside
 //! a single statement so the borrow lifetime is the statement scope,
 //! and any sleep / backoff happens *outside* the borrow.
 
@@ -30,7 +30,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 
 /// `(key1, key2) -> Rc<Cell<bool>>` slot map — keyed on the
-/// [`crate::backend::LockScope::to_keys`] derivation; the bool
+/// [`zeroship_data_core::capability::LockScope::to_keys`] derivation; the bool
 /// records "currently held". `Rc<Cell<…>>` so a future
 /// `SqliteLockGuard` can clone the slot at acquire time and release
 /// on drop without re-walking the map.
