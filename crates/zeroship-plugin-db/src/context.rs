@@ -790,6 +790,17 @@ impl ThreadDbContext {
         self.schemas.get(binding, collection)
     }
 
+    /// The descriptor entry for one collection, or the typed
+    /// `collection_not_declared` error. The L24 rule lives on [`SchemaCache`];
+    /// this only reaches the store.
+    pub(crate) fn require_schema(
+        &self,
+        binding: &DbBinding,
+        collection: &str,
+    ) -> Result<Arc<serde_json::Value>, DbError> {
+        self.schemas.require(binding, collection)
+    }
+
     /// Enumerate every `(collection, schema)` pair the descriptor store holds
     /// for one BINDING. `mint_tx_view` uses it to mint one `Collection` per
     /// declared name onto the `tx` view; the drift-check sweep uses it to walk
