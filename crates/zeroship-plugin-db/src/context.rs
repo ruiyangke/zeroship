@@ -81,15 +81,6 @@ pub struct ThreadDbContext {
     /// different values.
     cdc_worker_id: Option<String>,
 
-    /// Every app's open transaction, plus the withdrawal tombstones that must
-    /// outlive a lane. Both moved into [`TxLanes`] on 2026-09-02: they were one
-    /// owner - 25 methods touch these two fields and NOTHING else on this
-    /// struct, so they are separable as a unit.
-    ///
-    /// The accessors below forward, so the ~55 call sites across the crate are
-    /// unchanged. What moved is the state.
-    lanes: TxLanes,
-
     ///
 
 
@@ -235,7 +226,6 @@ impl ThreadDbContext {
             pool: None,
             db_url: None,
             cdc_worker_id: None,
-            lanes: TxLanes::default(),
             backend_generation: 0,
             schemas: SchemaCache::new(),
             resource_key: DbResourceKey::UNBOUND,
@@ -586,146 +576,6 @@ impl ThreadDbContext {
         self.mask_policies.contains_key(app_id)
     }
 
-    // ----- TX LANES (delegating) ---------------------------------------
-    //
-    // The lane owner moved to [`TxLanes`] on 2026-09-02. These forward so that
-    // every call site in the crate is unchanged; the state, the SEC-1 per-app
-    // keying and the tombstone discipline live on that type now.
-    //
-    // Why forward rather than expose the field: `ThreadDbContext` is the
-    // composition root, and a `pub(crate) lanes` would let any module reach past
-    // it into the map. The forwarding list IS the lane surface, and it is
-    // exactly 25 methods wide.
-
-    pub(crate) fn has_tx_for(&self, app_id: &str) -> bool {
-        self.lanes.has_tx_for(app_id)
-    }
-
-    pub(crate) fn try_claim_tx(&mut self, app_id: &str) -> bool {
-        self.lanes.try_claim_tx(app_id)
-    }
-
-    pub(crate) fn tx_claimed_by(&self, app_id: &str) -> bool {
-        self.lanes.tx_claimed_by(app_id)
-    }
-
-    pub(crate) fn release_tx_claim(&mut self, app_id: &str) {
-        self.lanes.release_tx_claim(app_id);
-    }
-
-    pub(crate) fn push_tx_waiter(&mut self, app_id: &str, waker: std::task::Waker) {
-        self.lanes.push_tx_waiter(app_id, waker);
-    }
-
-    pub(crate) fn install_tx_client(
-        &mut self,
-        app_id: &str,
-        client: TxConnection,
-    ) -> Option<TxConnection> {
-        self.lanes.install_tx_client(app_id, client)
-    }
-
-    pub(crate) fn take_tx_client_for(&mut self, app_id: &str) -> Option<TxConnection> {
-        self.lanes.take_tx_client_for(app_id)
-    }
-
-    pub(crate) fn put_tx_client_for(&mut self, app_id: &str, client: TxConnection) {
-        self.lanes.put_tx_client_for(app_id, client);
-    }
-
-    pub(crate) fn push_tx_slot_waiter(&mut self, app_id: &str, waker: &std::task::Waker) {
-        self.lanes.push_tx_slot_waiter(app_id, waker);
-    }
-
-    pub(crate) fn install_tx_canceller(
-        &mut self,
-        app_id: &str,
-        canceller: crate::backend::cancel::TxCanceller,
-    ) {
-        self.lanes.install_tx_canceller(app_id, canceller);
-    }
-
-    pub(crate) fn tx_canceller_for(
-        &self,
-        app_id: &str,
-    ) -> Option<crate::backend::cancel::TxCanceller> {
-        self.lanes.tx_canceller_for(app_id)
-    }
-
-    pub(crate) fn remove_tx_canceller(&mut self, app_id: &str) {
-        self.lanes.remove_tx_canceller(app_id);
-    }
-
-    pub(crate) fn admit_transaction(
-        &mut self,
-        app_id: &str,
-        expected: crate::transaction::reducer::identity::ExpectedAuthority,
-        budgets: crate::transaction::reducer::TxBudgets,
-        now: std::time::Instant,
-        max_depth: u32,
-    ) -> Vec<crate::transaction::reducer::Action> {
-        self.lanes
-            .admit_transaction(app_id, expected, budgets, now, max_depth)
-    }
-
-    pub(crate) fn apply_transaction_event(
-        &mut self,
-        app_id: &str,
-        event: crate::transaction::reducer::TxEvent,
-        now: std::time::Instant,
-    ) -> Option<Vec<crate::transaction::reducer::Action>> {
-        self.lanes.apply_transaction_event(app_id, event, now)
-    }
-
-    pub(crate) fn transaction_reducer(
-        &self,
-        app_id: &str,
-    ) -> Option<&crate::transaction::reducer::TxReducer> {
-        self.lanes.transaction_reducer(app_id)
-    }
-
-    pub(crate) fn transaction_expected_authority(
-        &self,
-        app_id: &str,
-    ) -> Option<&crate::transaction::reducer::identity::ExpectedAuthority> {
-        self.lanes.transaction_expected_authority(app_id)
-    }
-
-    pub(crate) fn retire_transaction(&mut self, app_id: &str) {
-        self.lanes.retire_transaction(app_id);
-    }
-
-    pub(crate) fn withdraw_tx_session(&mut self, app_id: &str) -> Option<TxConnection> {
-        self.lanes.withdraw_tx_session(app_id)
-    }
-
-    pub(crate) fn tx_session_withdrawn(&self, app_id: &str) -> bool {
-        self.lanes.tx_session_withdrawn(app_id)
-    }
-
-    pub(crate) fn push_frame_emit_mark(&mut self, app_id: &str) {
-        self.lanes.push_frame_emit_mark(app_id);
-    }
-
-    pub(crate) fn pop_frame_emit_mark(&mut self, app_id: &str) -> Option<usize> {
-        self.lanes.pop_frame_emit_mark(app_id)
-    }
-
-    pub(crate) fn discard_frame_effects(&mut self, app_id: &str) {
-        self.lanes.discard_frame_effects(app_id);
-    }
-
-    pub(crate) fn push_pending_emit(&mut self, ev: ChangeEvent) {
-        self.lanes.push_pending_emit(ev);
-    }
-
-    pub(crate) fn drain_pending_emits_for(&mut self, app_id: &str) -> Vec<ChangeEvent> {
-        self.lanes.drain_pending_emits_for(app_id)
-    }
-
-    pub(crate) fn clear_pending_emits_for(&mut self, app_id: &str) {
-        self.lanes.clear_pending_emits_for(app_id);
-    }
 
     /// Mint the backend generation for the next installed session.
     pub(crate) const fn next_backend_generation(&mut self) -> u64 {
@@ -834,18 +684,28 @@ mod tests {
     // ----- ThreadDbContext::new / Default -------------------------------
 
     #[test]
-    fn new_yields_fully_cleared_slots() {
+    fn new_yields_fully_cleared_adapter_slots() {
         let ctx = ThreadDbContext::new();
         assert!(ctx.pool().is_none());
         assert!(!ctx.pool_initialised());
         assert!(ctx.backend().is_none());
         assert!(ctx.db_url().is_none());
-        assert!(!ctx.has_tx_for("a"));
-        assert!(ctx.transaction_reducer("a").is_none());
-        assert!(!ctx.tx_session_withdrawn("a"));
-        // pending_emits starts empty (each app's queue is allocated
-        // lazily on first push).
-        assert!(ctx.lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
+    }
+
+    /// The lane half of what `new_yields_fully_cleared_slots` used to assert.
+    /// It split when the lanes became their own owner with their own
+    /// thread-local: "a fresh thread has nothing open" is now two statements
+    /// about two objects, and asserting them together would hide either one
+    /// regressing alone.
+    #[test]
+    fn new_yields_fully_cleared_lane_slots() {
+        let lanes = TxLanes::new();
+        assert!(!lanes.has_tx_for("a"));
+        assert!(lanes.transaction_reducer("a").is_none());
+        assert!(!lanes.tx_session_withdrawn("a"));
+        // pending_emits starts empty (each app's queue is allocated lazily on
+        // first push).
+        assert!(lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
     }
 
     #[test]
@@ -854,12 +714,10 @@ mod tests {
         let b = ThreadDbContext::new();
         // Compare observable state (no PartialEq on the struct).
         assert_eq!(a.pool_initialised(), b.pool_initialised());
-        assert_eq!(
-            a.transaction_reducer("a").is_none(),
-            b.transaction_reducer("a").is_none()
-        );
-        assert_eq!(a.has_tx_for("a"), b.has_tx_for("a"));
         assert_eq!(a.db_url(), b.db_url());
+        // The two lane assertions that used to sit here moved out with the
+        // lanes: `TxLanes` has its own `Default` and its own test.
+
     }
 
     // ----- installed DB resources ----------------------------------------
@@ -992,10 +850,10 @@ mod tests {
 
     #[test]
     fn frame_emit_marks_never_discard_an_enclosing_frames_events() {
-        let mut ctx = ThreadDbContext::new();
+        let mut lanes = TxLanes::new();
         // No frame is open, so there is no watermark to pop.
         assert_eq!(
-            ctx.pop_frame_emit_mark("app_t"),
+            lanes.pop_frame_emit_mark("app_t"),
             None,
             "no open frame yields no watermark"
         );
@@ -1004,10 +862,10 @@ mod tests {
         // rather than truncating to zero, which would drop the enclosing
         // frame's events. Over-publishing is a bug; silently dropping a
         // committed row's event is a worse one.
-        ctx.push_pending_emit(dummy_event("c1"));
-        ctx.discard_frame_effects("app_t");
+        lanes.push_pending_emit(dummy_event("c1"));
+        lanes.discard_frame_effects("app_t");
         assert_eq!(
-            ctx.lanes.by_app().get("app_t").map(|lane| lane.pending_emits().len()),
+            lanes.by_app().get("app_t").map(|lane| lane.pending_emits().len()),
             Some(1),
             "a missing watermark must not discard the enclosing frame's events"
         );
@@ -1015,10 +873,10 @@ mod tests {
         // A real watermark discards exactly the frame's own events: the mark is
         // taken when the frame opens, so everything queued after it is the
         // frame's and everything before it is the parent's.
-        ctx.push_frame_emit_mark("app_t");
-        ctx.push_pending_emit(dummy_event("c2"));
-        ctx.discard_frame_effects("app_t");
-        let kept = ctx.lanes.by_app().get("app_t").expect("lane").pending_emits();
+        lanes.push_frame_emit_mark("app_t");
+        lanes.push_pending_emit(dummy_event("c2"));
+        lanes.discard_frame_effects("app_t");
+        let kept = lanes.by_app().get("app_t").expect("lane").pending_emits();
         assert_eq!(kept.len(), 1, "truncate to the frame's watermark");
         assert_eq!(
             kept[0].collection, "c1",
@@ -1027,8 +885,8 @@ mod tests {
 
         // `discard_frame_effects` does NOT pop: a rolled-back frame is not
         // closed until its RELEASE lands, and that is the call that pops.
-        assert_eq!(ctx.pop_frame_emit_mark("app_t"), Some(1));
-        assert_eq!(ctx.pop_frame_emit_mark("app_t"), None);
+        assert_eq!(lanes.pop_frame_emit_mark("app_t"), Some(1));
+        assert_eq!(lanes.pop_frame_emit_mark("app_t"), None);
     }
 
     /// `retire_transaction` drops the watermarks that died with the frames.
@@ -1038,12 +896,12 @@ mod tests {
     /// length.
     #[test]
     fn retiring_a_transaction_drops_its_frame_watermarks() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.push_pending_emit(dummy_event("c1"));
-        ctx.push_frame_emit_mark("app_t");
-        ctx.retire_transaction("app_t");
+        let mut lanes = TxLanes::new();
+        lanes.push_pending_emit(dummy_event("c1"));
+        lanes.push_frame_emit_mark("app_t");
+        lanes.retire_transaction("app_t");
         assert_eq!(
-            ctx.pop_frame_emit_mark("app_t"),
+            lanes.pop_frame_emit_mark("app_t"),
             None,
             "a retired transaction leaves no watermark behind"
         );
@@ -1060,10 +918,18 @@ mod tests {
         let first = ctx.next_backend_generation();
         let second = ctx.next_backend_generation();
         assert!(second > first, "generations must strictly increase");
-        ctx.retire_transaction("app_t");
+        // This used to call `ctx.retire_transaction("app_t")` between the
+        // reads, asserting that retiring a transaction cannot restart the
+        // generation sequence. That is now TRUE BY CONSTRUCTION rather than by
+        // assertion: the generation counter is an adapter owner and the lanes
+        // are an engine one, in different objects behind different
+        // thread-locals, so no lane operation can reach the counter at all.
+        // The remaining assertion still pins that the counter itself is
+        // strictly increasing, which is what a stale-completion check depends
+        // on.
         assert!(
             ctx.next_backend_generation() > second,
-            "retiring a transaction must not restart the sequence"
+            "the generation sequence must keep increasing"
         );
     }
 
@@ -1071,27 +937,27 @@ mod tests {
 
     #[test]
     fn pending_emits_start_empty() {
-        let ctx = ThreadDbContext::new();
-        assert!(ctx.lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
+        let lanes = TxLanes::new();
+        assert!(lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
     }
 
     #[test]
     fn push_pending_emit_allocates_slot_lazily() {
         // dummy_event tags app_id "app_t"; the queue keys on that.
-        let mut ctx = ThreadDbContext::new();
-        assert!(ctx.lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
-        ctx.push_pending_emit(dummy_event("c1"));
-        assert!(ctx.lanes.by_app().contains_key("app_t"));
-        assert_eq!(ctx.lanes.by_app().get("app_t").unwrap().pending_emits().len(), 1);
+        let mut lanes = TxLanes::new();
+        assert!(lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
+        lanes.push_pending_emit(dummy_event("c1"));
+        assert!(lanes.by_app().contains_key("app_t"));
+        assert_eq!(lanes.by_app().get("app_t").unwrap().pending_emits().len(), 1);
     }
 
     #[test]
     fn push_pending_emit_accumulates() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.push_pending_emit(dummy_event("c1"));
-        ctx.push_pending_emit(dummy_event("c2"));
-        ctx.push_pending_emit(dummy_event("c3"));
-        let evs = ctx.lanes.by_app().get("app_t").unwrap().pending_emits();
+        let mut lanes = TxLanes::new();
+        lanes.push_pending_emit(dummy_event("c1"));
+        lanes.push_pending_emit(dummy_event("c2"));
+        lanes.push_pending_emit(dummy_event("c3"));
+        let evs = lanes.by_app().get("app_t").unwrap().pending_emits();
         assert_eq!(evs.len(), 3);
         assert_eq!(evs[0].collection, "c1");
         assert_eq!(evs[1].collection, "c2");
@@ -1100,52 +966,52 @@ mod tests {
 
     #[test]
     fn drain_pending_emits_returns_and_clears() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.push_pending_emit(dummy_event("c1"));
-        ctx.push_pending_emit(dummy_event("c2"));
-        let drained = ctx.drain_pending_emits_for("app_t");
+        let mut lanes = TxLanes::new();
+        lanes.push_pending_emit(dummy_event("c1"));
+        lanes.push_pending_emit(dummy_event("c2"));
+        let drained = lanes.drain_pending_emits_for("app_t");
         assert_eq!(drained.len(), 2);
         // After drain the app's queue is cleared — subsequent pushes
         // re-allocate.
-        assert!(ctx.lanes.by_app().get("app_t").is_none_or(|lane| lane.pending_emits().is_empty()));
+        assert!(lanes.by_app().get("app_t").is_none_or(|lane| lane.pending_emits().is_empty()));
     }
 
     #[test]
     fn drain_pending_emits_on_empty_returns_empty_vec() {
-        let mut ctx = ThreadDbContext::new();
-        let drained = ctx.drain_pending_emits_for("app_t");
+        let mut lanes = TxLanes::new();
+        let drained = lanes.drain_pending_emits_for("app_t");
         assert!(drained.is_empty());
-        assert!(ctx.lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
+        assert!(lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
     }
 
     #[test]
     fn drain_then_push_starts_fresh() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.push_pending_emit(dummy_event("c1"));
-        let _ = ctx.drain_pending_emits_for("app_t");
-        ctx.push_pending_emit(dummy_event("c2"));
-        let evs = ctx.lanes.by_app().get("app_t").unwrap().pending_emits();
+        let mut lanes = TxLanes::new();
+        lanes.push_pending_emit(dummy_event("c1"));
+        let _ = lanes.drain_pending_emits_for("app_t");
+        lanes.push_pending_emit(dummy_event("c2"));
+        let evs = lanes.by_app().get("app_t").unwrap().pending_emits();
         assert_eq!(evs.len(), 1);
         assert_eq!(evs[0].collection, "c2");
     }
 
     #[test]
     fn clear_pending_emits_drops_without_returning() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.push_pending_emit(dummy_event("c1"));
-        ctx.push_pending_emit(dummy_event("c2"));
-        ctx.clear_pending_emits_for("app_t");
-        assert!(ctx.lanes.by_app().get("app_t").is_none_or(|lane| lane.pending_emits().is_empty()));
+        let mut lanes = TxLanes::new();
+        lanes.push_pending_emit(dummy_event("c1"));
+        lanes.push_pending_emit(dummy_event("c2"));
+        lanes.clear_pending_emits_for("app_t");
+        assert!(lanes.by_app().get("app_t").is_none_or(|lane| lane.pending_emits().is_empty()));
         // A subsequent drain returns empty (queue is gone).
-        assert!(ctx.drain_pending_emits_for("app_t").is_empty());
+        assert!(lanes.drain_pending_emits_for("app_t").is_empty());
     }
 
     #[test]
     fn clear_pending_emits_on_empty_is_idempotent() {
-        let mut ctx = ThreadDbContext::new();
-        ctx.clear_pending_emits_for("app_t");
-        ctx.clear_pending_emits_for("app_t");
-        assert!(ctx.lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
+        let mut lanes = TxLanes::new();
+        lanes.clear_pending_emits_for("app_t");
+        lanes.clear_pending_emits_for("app_t");
+        assert!(lanes.by_app().values().all(|lane| lane.pending_emits().is_empty()));
     }
 
     // ----- SEC-1: per-app scoping of the tx / savepoint / emit slots
@@ -1184,30 +1050,30 @@ mod tests {
     fn sec1_tx_parked_by_app_a_is_invisible_and_untakable_for_app_b() {
         run_async(async {
             let dir = tempfile::tempdir().expect("tempdir");
-            let mut ctx = ThreadDbContext::new();
-            let prev = ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
+            let mut lanes = TxLanes::new();
+            let prev = lanes.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
             assert!(prev.is_none(), "tx slot must start empty");
 
             assert!(
-                ctx.has_tx_for("app_a"),
+                lanes.has_tx_for("app_a"),
                 "the owning app must see its own parked tx",
             );
             assert!(
-                !ctx.has_tx_for("app_b"),
+                !lanes.has_tx_for("app_b"),
                 "SEC-1: app_b must NOT observe app_a's parked tx \
                  (a hit here routes app_b's SQL onto app_a's tx connection)",
             );
             assert!(
-                ctx.take_tx_client_for("app_b").is_none(),
+                lanes.take_tx_client_for("app_b").is_none(),
                 "SEC-1: app_b must NOT be able to drain app_a's tx client",
             );
             assert!(
-                ctx.has_tx_for("app_a"),
+                lanes.has_tx_for("app_a"),
                 "app_a's parked tx must survive app_b's probe unmodified",
             );
             // The owner can still take its own client back out.
             assert!(
-                ctx.take_tx_client_for("app_a").is_some(),
+                lanes.take_tx_client_for("app_a").is_some(),
                 "the owner must still be able to take its own tx client",
             );
         });
@@ -1217,13 +1083,13 @@ mod tests {
     fn sec1_frame_watermarks_are_scoped_per_app() {
         run_async(async {
             let dir = tempfile::tempdir().expect("tempdir");
-            let mut ctx = ThreadDbContext::new();
-            ctx.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
+            let mut lanes = TxLanes::new();
+            lanes.install_tx_client("app_a", sqlite_tx_conn(&dir).await);
 
-            ctx.push_frame_emit_mark("app_a");
-            ctx.push_frame_emit_mark("app_a");
+            lanes.push_frame_emit_mark("app_a");
+            lanes.push_frame_emit_mark("app_a");
             assert_eq!(
-                ctx.pop_frame_emit_mark("app_b"),
+                lanes.pop_frame_emit_mark("app_b"),
                 None,
                 "SEC-1: app_b must not inherit app_a's frame watermarks \
                  (a shared stack lets one app truncate the other's queue)",
@@ -1231,28 +1097,28 @@ mod tests {
 
             // app_b settling its own (nonexistent) transaction must not clobber
             // app_a's live frame bookkeeping.
-            ctx.retire_transaction("app_b");
+            lanes.retire_transaction("app_b");
             assert_eq!(
-                ctx.pop_frame_emit_mark("app_a"),
+                lanes.pop_frame_emit_mark("app_a"),
                 Some(0),
                 "SEC-1: app_b's settle must not drop app_a's frame watermarks",
             );
-            assert_eq!(ctx.pop_frame_emit_mark("app_a"), Some(0));
-            assert_eq!(ctx.pop_frame_emit_mark("app_a"), None);
+            assert_eq!(lanes.pop_frame_emit_mark("app_a"), Some(0));
+            assert_eq!(lanes.pop_frame_emit_mark("app_a"), None);
         });
     }
 
     #[test]
     fn sec1_pending_emits_drain_is_scoped_per_app() {
-        let mut ctx = ThreadDbContext::new();
+        let mut lanes = TxLanes::new();
         let mut ev_a = dummy_event("orders");
         ev_a.app_id = "app_a".to_string();
         let mut ev_b = dummy_event("messages");
         ev_b.app_id = "app_b".to_string();
-        ctx.push_pending_emit(ev_a);
-        ctx.push_pending_emit(ev_b);
+        lanes.push_pending_emit(ev_a);
+        lanes.push_pending_emit(ev_b);
 
-        let drained_b = ctx.drain_pending_emits_for("app_b");
+        let drained_b = lanes.drain_pending_emits_for("app_b");
         assert_eq!(
             drained_b.len(),
             1,
@@ -1260,7 +1126,7 @@ mod tests {
         );
         assert_eq!(drained_b[0].app_id, "app_b");
 
-        let drained_a = ctx.drain_pending_emits_for("app_a");
+        let drained_a = lanes.drain_pending_emits_for("app_a");
         assert_eq!(
             drained_a.len(),
             1,

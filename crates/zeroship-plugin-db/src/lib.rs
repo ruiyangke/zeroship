@@ -751,6 +751,12 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
 pub fn reset_context_for_tests() {
     service::close_operator_pools();
     ctx_mut(|c| *c = context::ThreadDbContext::new());
+    // BOTH thread-locals, since the lanes became their own owner on 2026-09-02.
+    // Resetting only the context would leave the previous test's lanes - and so
+    // its transaction claims and parked sessions - visible to the next test on
+    // the same thread, which is precisely the isolation this helper exists to
+    // provide.
+    tx_lanes::reset_for_tests();
 }
 
 /// Test helper: hand this isolate the column root keys its backends
@@ -902,8 +908,8 @@ pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
     // `ThreadDbContext::has_tx_for`), but matches the production state
     // machine more honestly.
     let _ = client.execute("BEGIN", &[]).await;
-    ctx_mut(|c| {
-        let _previous = c.install_tx_client(app_id, crate::tx_lanes::TxConnection::Postgres(client));
+    crate::tx_lanes::with_mut(|l| {
+        let _previous = l.install_tx_client(app_id, crate::tx_lanes::TxConnection::Postgres(client));
         debug_assert!(
             _previous.is_none(),
             "install_tx_marker_for_tests: slot already occupied"
@@ -930,7 +936,7 @@ pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub async fn uninstall_tx_marker_for_tests(app_id: &str) {
-    if let Some(client) = ctx_mut(|c| c.take_tx_client_for(app_id)) {
+    if let Some(client) = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id)) {
         match client {
             crate::tx_lanes::TxConnection::Postgres(client) => {
                 // Best-effort: a connection already torn down (panic recovery)
@@ -953,7 +959,7 @@ pub async fn uninstall_tx_marker_for_tests(app_id: &str) {
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn push_pending_emit_for_tests(ev: zeroship_core::change_event::ChangeEvent) {
-    ctx_mut(|c| c.push_pending_emit(ev));
+    crate::tx_lanes::with_mut(|l| l.push_pending_emit(ev));
 }
 
 /// **Test-only**: drain the pending-emits queue (fire all events

@@ -193,12 +193,12 @@ impl std::future::Future for AwaitTxClaim {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<()> {
-        if crate::context::with_mut(|c| c.try_claim_tx(&self.app_id)) {
+        if crate::tx_lanes::with_mut(|l| l.try_claim_tx(&self.app_id)) {
             return std::task::Poll::Ready(());
         }
         // Lost. Park and re-check on the next release; `release_tx_claim`
         // wakes every waiter, so a spurious wake just re-runs this poll.
-        crate::context::with_mut(|c| c.push_tx_waiter(&self.app_id, cx.waker().clone()));
+        crate::tx_lanes::with_mut(|l| l.push_tx_waiter(&self.app_id, cx.waker().clone()));
         std::task::Poll::Pending
     }
 }
@@ -253,10 +253,10 @@ impl Drop for TxAdmission {
         // out on loan behind a `TxClientSlotGuard` whose future was cancelled by
         // the same drop that got us here, and the tombstone is what destroys it
         // when that guard restores it.
-        let client = crate::context::with_mut(|c| {
-            c.retire_transaction(&self.app_id);
-            let client = c.withdraw_tx_session(&self.app_id);
-            c.release_tx_claim(&self.app_id);
+        let client = crate::tx_lanes::with_mut(|l| {
+            l.retire_transaction(&self.app_id);
+            let client = l.withdraw_tx_session(&self.app_id);
+            l.release_tx_claim(&self.app_id);
             client
         });
         if let Some(client) = client {
@@ -299,7 +299,7 @@ impl AtomicWriteFrame {
     pub(crate) async fn begin(route: TxRoute) -> Result<Self, DbError> {
         let nested = route.in_tx();
         let app_id = route.app_id().to_string();
-        if nested && !crate::context::with(|context| context.has_tx_for(&app_id)) {
+        if nested && !crate::tx_lanes::with(|l| l.has_tx_for(&app_id)) {
             return Err(DbError::validation_hinted(
                 "transaction_scope_expired",
                 "updateMany: the enclosing transaction has already settled".to_string(),
@@ -670,13 +670,17 @@ mod tests {
 
     impl Drop for ContextReset {
         fn drop(&mut self) {
-            crate::context::with_mut(|c| {
-                let _ = c.take_tx_client_for("app_sqlite");
-                c.retire_transaction("app_sqlite");
-                c.release_tx_claim("app_sqlite");
-                c.clear_pending_emits_for("app_sqlite");
-                c.clear_pool();
+            crate::tx_lanes::with_mut(|l| {
+                let _ = l.take_tx_client_for("app_sqlite");
+                l.retire_transaction("app_sqlite");
+                l.release_tx_claim("app_sqlite");
+                l.clear_pending_emits_for("app_sqlite");
             });
+            // The pool is the ADAPTER's owner, behind its own thread-local
+            // since 2026-09-02, so this fixture takes two borrows where it
+            // used to take one. Nothing runs between them: both closures are
+            // sync and this is one test thread.
+            crate::context::with_mut(|c| c.clear_pool());
         }
     }
 
@@ -687,13 +691,15 @@ mod tests {
                 .expect("open sqlite backend"),
         );
         let reset = ContextReset;
-        crate::context::with_mut(|c| {
-            let _ = c.take_tx_client_for("app_sqlite");
-            c.retire_transaction("app_sqlite");
-            c.release_tx_claim("app_sqlite");
-            c.clear_pending_emits_for("app_sqlite");
-            c.set_sqlite_backend(Rc::clone(&backend));
+        crate::tx_lanes::with_mut(|l| {
+            let _ = l.take_tx_client_for("app_sqlite");
+            l.retire_transaction("app_sqlite");
+            l.release_tx_claim("app_sqlite");
+            l.clear_pending_emits_for("app_sqlite");
         });
+        // Installing the backend is an adapter concern; see the note above on
+        // why this is a second borrow.
+        crate::context::with_mut(|c| c.set_sqlite_backend(Rc::clone(&backend)));
         (backend, dir, reset)
     }
 
@@ -745,8 +751,8 @@ mod tests {
                 "a frame id is minted from a monotonic sequence and never reused"
             );
 
-            let names = crate::context::with(|c| {
-                c.transaction_reducer("app_sqlite")
+            let names = crate::tx_lanes::with(|l| {
+                l.transaction_reducer("app_sqlite")
                     .expect("the transaction is still open")
                     .frames()
                     .minted_names()
@@ -929,7 +935,7 @@ mod tests {
                 .await
                 .expect("count notes after commit");
             assert_eq!(rows[0][0].as_deref(), Some("1"));
-            assert!(!crate::context::with(|c| c.has_tx_for("app_sqlite")));
+            assert!(!crate::tx_lanes::with(|l| l.has_tx_for("app_sqlite")));
         });
     }
 
@@ -980,7 +986,7 @@ mod tests {
             // session still open and still perfectly usable.
             crate::context::with_mut(|c| c.clear_pool());
             assert!(crate::context::with(|c| c.backend()).is_none());
-            assert!(crate::context::with(|c| c.has_tx_for("app_sqlite")));
+            assert!(crate::tx_lanes::with(|l| l.has_tx_for("app_sqlite")));
 
             run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('after')")
                 .await
@@ -996,7 +1002,7 @@ mod tests {
                 .await
                 .expect("count notes after commit");
             assert_eq!(rows[0][0].as_deref(), Some("2"));
-            assert!(!crate::context::with(|c| c.has_tx_for("app_sqlite")));
+            assert!(!crate::tx_lanes::with(|l| l.has_tx_for("app_sqlite")));
         });
     }
 
@@ -1034,7 +1040,7 @@ mod tests {
                 .await
                 .expect("count notes after rollback");
             assert_eq!(rows[0][0].as_deref(), Some("0"));
-            assert!(!crate::context::with(|c| c.has_tx_for("app_sqlite")));
+            assert!(!crate::tx_lanes::with(|l| l.has_tx_for("app_sqlite")));
         });
     }
 
@@ -1107,7 +1113,7 @@ mod tests {
                  Indeterminate here is what used to abandon a live session"
             );
             assert!(
-                !crate::context::with(|c| c.tx_session_withdrawn("app_sqlite")),
+                !crate::tx_lanes::with(|l| l.tx_session_withdrawn("app_sqlite")),
                 "a proved cleanup withdraws nothing"
             );
 
@@ -1228,8 +1234,8 @@ mod tests {
                 Some("0"),
                 "dropping an unsettled frame must roll back its writes"
             );
-            assert!(!crate::context::with(|context| {
-                context.has_tx_for("app_sqlite") || context.tx_claimed_by("app_sqlite")
+            assert!(!crate::tx_lanes::with(|l| {
+                l.has_tx_for("app_sqlite") || l.tx_claimed_by("app_sqlite")
             }));
         });
     }

@@ -21,7 +21,7 @@
 //! ## Why the entry points take `&TxRoute` and not `app_id: &str`
 //!
 //! Until 2026-08-10 the three routing sites here read ambient state —
-//! `context::with(|c| c.has_tx_for(app_id))`, "does this app have a
+//! `crate::tx_lanes::with(|l| l.has_tx_for(app_id))`, "does this app have a
 //! transaction open RIGHT NOW". That is a temporal test standing in for a
 //! structural one. An ORDINARY write with no transaction anywhere in its
 //! call chain, merely overlapping a stranger's transaction on the same
@@ -152,7 +152,7 @@ fn tx_connection_busy() -> DbError {
 
 /// Which of the two empty-slot causes applies for `app_id`.
 fn tx_slot_unavailable(app_id: &str) -> DbError {
-    if context::with(|c| c.tx_claimed_by(app_id)) {
+    if crate::tx_lanes::with(|l| l.tx_claimed_by(app_id)) {
         tx_connection_busy()
     } else {
         tx_scope_expired()
@@ -175,17 +175,17 @@ pub(crate) async fn run_sql(
     // app reads `false` and takes its own autocommit path.
     if route.in_tx() {
         // Use this app's transaction connection
-        let client = context::with_mut(|c| c.take_tx_client_for(app_id))
+        let client = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id))
             .ok_or_else(|| tx_slot_unavailable(app_id))?;
         let result = match &client {
             TxConnection::Postgres(client) => client.query_text_params(sql, params).await,
             TxConnection::Sqlite(_) => {
-                context::with_mut(|c| c.put_tx_client_for(app_id, client));
+                crate::tx_lanes::with_mut(|l| l.put_tx_client_for(app_id, client));
                 return Err(sqlite_shared_crud_unavailable());
             }
         };
         // Put it back
-        context::with_mut(|c| c.put_tx_client_for(app_id, client));
+        crate::tx_lanes::with_mut(|l| l.put_tx_client_for(app_id, client));
         return result
             .map(|rows| rows_to_json_value(&rows))
             .map_err(|e| pg_error::classify(&e));
@@ -529,7 +529,7 @@ fn queue_or_emit(
         new_tuple,
         old_tuple: None,
     };
-    context::with_mut(|c| c.push_pending_emit(ev));
+    crate::tx_lanes::with_mut(|l| l.push_pending_emit(ev));
 }
 
 fn value_to_logical_id(value: &Value) -> Option<String> {
@@ -546,7 +546,7 @@ fn value_to_logical_id(value: &Value) -> Option<String> {
 /// fire a co-resident app's pre-commit events.
 pub(crate) fn drain_pending_emits_on_commit(app_id: &str) {
     let queued: Vec<zeroship_core::change_event::ChangeEvent> =
-        context::with_mut(|c| c.drain_pending_emits_for(app_id));
+        crate::tx_lanes::with_mut(|l| l.drain_pending_emits_for(app_id));
     for ev in queued {
         crate::broker::emit_local(
             &ev.app_id,
@@ -565,7 +565,7 @@ pub(crate) fn drain_pending_emits_on_commit(app_id: &str) {
 /// run). SEC-1: scoped to the app so a ROLLBACK never drops a
 /// co-resident app's queued events.
 pub(crate) fn clear_pending_emits(app_id: &str) {
-    context::with_mut(|c| c.clear_pending_emits_for(app_id));
+    crate::tx_lanes::with_mut(|l| l.clear_pending_emits_for(app_id));
 }
 
 /// Read this app's replication-slot health.
@@ -621,7 +621,7 @@ pub async fn exec_mutation_with_emit_for_tests(
 /// [`exec_mutation_with_emit_for_tests`].
 #[cfg(any(test, feature = "test-helpers"))]
 fn ambient_route_for_tests(app_id: &str) -> TxRoute {
-    if context::with(|c| c.has_tx_for(app_id)) {
+    if crate::tx_lanes::with(|l| l.has_tx_for(app_id)) {
         TxRoute::tx_for_tests(app_id)
     } else {
         TxRoute::pool_for_tests(app_id)
@@ -873,9 +873,9 @@ mod tests {
         reset_world("app_active_queue_or_emit_no_tx_emits_immediately");
         // Defensive: make sure no tx is parked for this app from an
         // earlier test on the same OS thread.
-        context::with(|c| {
+        crate::tx_lanes::with(|l| {
             assert!(
-                !c.has_tx_for("app_active_queue_or_emit_no_tx_emits_immediately"),
+                !l.has_tx_for("app_active_queue_or_emit_no_tx_emits_immediately"),
                 "precondition: no tx"
             )
         });
@@ -932,10 +932,10 @@ mod tests {
             },
             old_tuple: None,
         };
-        context::with_mut(|c| {
-            c.push_pending_emit(mk_event(1));
-            c.push_pending_emit(mk_event(2));
-            c.push_pending_emit(mk_event(3));
+        crate::tx_lanes::with_mut(|l| {
+            l.push_pending_emit(mk_event(1));
+            l.push_pending_emit(mk_event(2));
+            l.push_pending_emit(mk_event(3));
         });
         // Sanity: nothing has been delivered before drain.
         assert!(sub.pop().is_none(), "drain must not have happened yet");
@@ -986,7 +986,7 @@ mod tests {
             new_tuple: HashMap::new(),
             old_tuple: None,
         };
-        context::with_mut(|c| c.push_pending_emit(ev));
+        crate::tx_lanes::with_mut(|l| l.push_pending_emit(ev));
 
         clear_pending_emits("app_active_clear_pending_emits_drops_without_firing");
 
@@ -1162,8 +1162,8 @@ mod tests {
                 .client_exec(&client, "BEGIN", &[])
                 .await
                 .expect("BEGIN");
-            context::with_mut(|c| {
-                let prev = c.install_tx_client("app_exec", TxConnection::Sqlite(client));
+            crate::tx_lanes::with_mut(|l| {
+                let prev = l.install_tx_client("app_exec", TxConnection::Sqlite(client));
                 assert!(prev.is_none(), "tx slot should start empty");
             });
 
@@ -1224,7 +1224,7 @@ mod tests {
             assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("tx-row"));
 
             if let Some(TxConnection::Sqlite(client)) =
-                context::with_mut(|c| c.take_tx_client_for("app_exec"))
+                crate::tx_lanes::with_mut(|l| l.take_tx_client_for("app_exec"))
             {
                 let _ = client.exec("ROLLBACK", &[]).await;
             } else {
@@ -1402,8 +1402,8 @@ mod tests {
                 .client_exec(&client, "BEGIN", &[])
                 .await
                 .expect("BEGIN");
-            context::with_mut(|c| {
-                let prev = c.install_tx_client("app_a", TxConnection::Sqlite(client));
+            crate::tx_lanes::with_mut(|l| {
+                let prev = l.install_tx_client("app_a", TxConnection::Sqlite(client));
                 assert!(prev.is_none(), "tx slot must start empty");
             });
 
@@ -1430,13 +1430,13 @@ mod tests {
             // app_a's parked transaction must still be present and
             // untouched after app_b's access.
             assert!(
-                context::with(|c| c.has_tx_for("app_a")),
+                crate::tx_lanes::with(|l| l.has_tx_for("app_a")),
                 "app_a's parked tx must survive app_b's access",
             );
 
             // Cleanup: roll app_a's tx back and drop the client.
             if let Some(TxConnection::Sqlite(client)) =
-                context::with_mut(|c| c.take_tx_client_for("app_a"))
+                crate::tx_lanes::with_mut(|l| l.take_tx_client_for("app_a"))
             {
                 let _ = client.exec("ROLLBACK", &[]).await;
             } else {
@@ -1495,8 +1495,8 @@ mod tests {
                 .client_exec(&client, "BEGIN", &[])
                 .await
                 .expect("BEGIN");
-            context::with_mut(|c| {
-                let prev = c.install_tx_client("app_exec_cancel", TxConnection::Sqlite(client));
+            crate::tx_lanes::with_mut(|l| {
+                let prev = l.install_tx_client("app_exec_cancel", TxConnection::Sqlite(client));
                 assert!(prev.is_none(), "tx slot should start empty");
             });
 
@@ -1520,7 +1520,7 @@ mod tests {
             compio::time::sleep(Duration::from_millis(20)).await;
 
             assert!(
-                context::with(|c| c.has_tx_for("app_exec_cancel")),
+                crate::tx_lanes::with(|l| l.has_tx_for("app_exec_cancel")),
                 "dropping the in-flight future must restore the tx slot"
             );
 
@@ -1539,7 +1539,7 @@ mod tests {
             );
 
             if let Some(TxConnection::Sqlite(client)) =
-                context::with_mut(|c| c.take_tx_client_for("app_exec_cancel"))
+                crate::tx_lanes::with_mut(|l| l.take_tx_client_for("app_exec_cancel"))
             {
                 let _ = client.exec("ROLLBACK", &[]).await;
             } else {

@@ -206,7 +206,7 @@ pub fn transaction_dispatch<'s>(
     // continuation that outlived its tx — e.g. a callback that was never
     // awaited) has nothing to open a SAVEPOINT on. Refuse loudly rather
     // than emitting SQL against a drained slot.
-    if nested && !crate::context::with(|c| c.has_tx_for(&app_id)) {
+    if nested && !crate::tx_lanes::with(|l| l.has_tx_for(&app_id)) {
         let err = DbError::validation_hinted(
             "transaction_scope_expired",
             "db.transaction: the enclosing transaction has already settled".to_string(),
