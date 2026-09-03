@@ -1499,6 +1499,53 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
+    /// Re-entering the session from the thread that already holds its lease
+    /// must be REFUSED, not waited on.
+    ///
+    /// This is the only guard here whose absence is a deadlock rather than a
+    /// wrong answer: without it the second lease reaches `available.wait`, and
+    /// the thread blocks on a session only it can return. Rustls invokes
+    /// caller-supplied callbacks - certificate verifiers, key log, client-cert
+    /// resolvers - while we hold the lease, so a callback that reaches back
+    /// into its own `SharedSession` arrives exactly here, which is what the
+    /// `WriteFlight` comment means about a callback on another thread.
+    ///
+    /// Nothing held it: disabling the guard left the lib (770) and suite (797)
+    /// suites green, because no test re-enters.
+    ///
+    /// NOTE FOR WHOEVER SEES THIS HANG: a regression in that guard does not
+    /// fail this test, it deadlocks it, because the re-entrant call waits
+    /// forever. A run wedged on this test name means `lease`'s owner check.
+    #[test]
+    fn a_reentrant_lease_is_refused_instead_of_deadlocking() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+
+        let held = session.lease().expect("the first lease must be granted");
+        // Matched rather than `expect_err`: that would need `SessionLease` to
+        // be `Debug`, and a production type should not grow a derive to let a
+        // test print a value it must never receive.
+        let Err(error) = session.lease() else {
+            panic!("re-entering the session from its own owner must be refused")
+        };
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::WouldBlock,
+            "a re-entrant lease must report WouldBlock: {error}"
+        );
+        assert!(
+            error.to_string().contains("re-entered"),
+            "the refusal must say the session was re-entered: {error}"
+        );
+
+        // Control: once the owner gives the session back, leasing works again,
+        // so the refusal is about re-entrancy and not a session left broken.
+        drop(held);
+        session
+            .lease()
+            .expect("a returned session must be leasable again");
+    }
+
     /// The non-blocking twin of the refusal above, and it must be an ERROR
     /// rather than `Ok(None)`.
     ///
