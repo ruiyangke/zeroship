@@ -3,12 +3,12 @@
 **Status.** PARTIAL. The storage half is SHIPPED - the masked field's own column
 holds the mask, `__zs_raw__<field>` holds the authoritative value
 (`crates/zeroship-schema/src/query.rs`,
-`crates/zeroship-plugin-db/src/crud/mask_pass.rs`,
+`crates/zeroship-data-engine/src/crud/mask_pass.rs`,
 `crates/zeroship-migrate-core/src/schema/diff.rs`, `docs/reference/db.md`). The
 operator-ceiling half is NOT: `check_unmask_authorization`
-(`crates/zeroship-plugin-db/src/crud/unmask.rs:359`) still reads the per-isolate
+(`crates/zeroship-data-engine/src/crud/unmask.rs:359`) still reads the per-isolate
 policy cache with no ceiling parameter, and the `MaskCeiling` fold in the
-transaction reducer (`crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:130`)
+transaction reducer (`crates/zeroship-data-engine/src/transaction/reducer/identity.rs:130`)
 has no production producer.
 
 There is no ceiling *read*, despite the filename. The operator ceiling is worker
@@ -44,11 +44,11 @@ and no staleness.
 fetched through a map entry the actor names. See "The ceiling, not the actor" below.
 
 Not built. Today the function reads `crud::mask_policy::cache_get(app_id)`
-(`crates/zeroship-plugin-db/src/crud/mask_policy.rs:280`), a per-isolate
+(`crates/zeroship-data-engine/src/crud/mask_policy.rs:280`), a per-isolate
 thread-local holding only the creator-declared half. `MaskCeiling::meet` and
 `TxReducer::effective_ceiling` (`reducer/mod.rs:768`) exist and are tested, but
 the single production observation site mints `MaskCeiling::default()`
-(`crates/zeroship-plugin-db/src/transaction/driver.rs:156-166`) and the accessor
+(`crates/zeroship-data-engine/src/transaction/driver.rs:156-166`) and the accessor
 has test-only consumers.
 
 #### The accepted costs of configuration delivery
@@ -90,7 +90,7 @@ match self.roles.get(role) {
 }
 ```
 
-(`crates/zeroship-plugin-db/src/crud/mask_policy.rs:114-122`.)
+(`crates/zeroship-data-engine/src/crud/mask_policy.rs:114-122`.)
 
 A naive intersection - keep only keys present in both sides - drops any key the
 manifest does not mention. Combine that with a ceiling written specifically to
@@ -212,7 +212,7 @@ field's own column.
 correctness is an enforced invariant owned by the deploy pipeline; the layout's
 unique property is that it stays safe when that enforcement has a bug. The mask
 pass runs only `if schema_has_masked_columns(&schema)`
-(`crates/zeroship-plugin-db/src/crud/read_pipeline.rs:121`, `crud/mod.rs:2190`),
+(`crates/zeroship-data-engine/src/crud/read_pipeline.rs:121`, `crud/mod.rs:2190`),
 which reads the descriptor, and the data plane performs no live introspection. So
 a descriptor that fails to declare a field masked runs no mask pass and passes
 the column's contents through untouched. With the mask in that column that
@@ -427,7 +427,7 @@ satisfy a deny-only arm **vacuously**, with every non-`auto` unmask bricked.
    BUILDABLE, 16h.
 7. **The descriptor's `storage` block has no reader.** The descriptor carries a
    `storage` block through to the runtime
-   (`crates/zeroship-plugin-db/src/descriptor.rs:1-46`), but the data plane still
+   (`crates/zeroship-data-engine/src/descriptor.rs:1-46`), but the data plane still
    derives the raw column by formatting the fixed prefix
    (`crate::query::raw_column_name`). One emitter and several derivers is one
    emitter too few. BUILDABLE, 6h.

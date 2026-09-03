@@ -708,4 +708,71 @@ mod tests {
             "tx-view for a schema-less app must be empty"
         );
     }
+
+    // ---------------------------------------------------------------------
+    // The settle-lowering arms, MOVED here from the engine's
+    // `transaction/mod.rs` with the data-engine cut on 2026-09-03.
+    //
+    // They rule on `build_settle_resolve_value`, which is defined in THIS file
+    // and lowers an engine `SettleOutcome` into a runtime `ResolveValue`. They
+    // could not travel with the module whose outcomes they check:
+    // `zeroship-data-engine` declares neither `v8` nor `zeroship-runtime`, by
+    // design, so `ResolveValue` is not nameable there.
+    // ---------------------------------------------------------------------
+
+    /// The settle's own code reaches the creator, UNWRAPPED.
+    ///
+    /// It used to be re-wrapped in `commit_failed_indeterminate`, which
+    /// labelled every failing settle "indeterminate" - including a COMMIT the
+    /// server answered `ROLLBACK`, whose outcome is not unknown at all. The
+    /// codes now come from `driver::outcome_error`, one per outcome.
+    #[test]
+    fn a_settles_own_code_reaches_the_creator_unwrapped() {
+        use crate::transaction::SettleOutcome;
+        use zeroship_data_core::error::DbError;
+        use zeroship_runtime::state::ResolveValue;
+
+        for outcome in [
+            SettleOutcome::CommitIndeterminate(DbError::Coded {
+                code: "commit_failed_indeterminate".to_string(),
+                message: "network drop".to_string(),
+                hint: None,
+            }),
+            SettleOutcome::SettleErr(DbError::Coded {
+                code: "commit_rolled_back".to_string(),
+                message: "the server discarded it".to_string(),
+                hint: None,
+            }),
+        ] {
+            let expected = match &outcome {
+                SettleOutcome::CommitIndeterminate(_) => "commit_failed_indeterminate",
+                SettleOutcome::SettleErr(_) => "commit_rolled_back",
+                SettleOutcome::Ok => unreachable!(),
+            };
+            match super::build_settle_resolve_value(outcome, true, None) {
+                ResolveValue::RejectError(op_err) => match op_err.kind {
+                    zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => {
+                        assert_eq!(
+                            code, expected,
+                            "the settle's code must survive; re-wrapping it makes \
+                             every failure read as indeterminate"
+                        );
+                    }
+                    other => panic!("expected CodedError, got {other:?}"),
+                },
+                _ => panic!("expected RejectError for {expected}"),
+            }
+        }
+    }
+
+    #[test]
+    fn build_settle_resolve_value_ok_resolve_undefined_when_no_body() {
+        use crate::transaction::SettleOutcome;
+        use zeroship_runtime::state::ResolveValue;
+
+        let rv = super::build_settle_resolve_value(SettleOutcome::Ok, true, None);
+        matches!(rv, ResolveValue::Undefined)
+            .then_some(())
+            .expect("expected Undefined for ok+no-body");
+    }
 }

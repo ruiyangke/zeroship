@@ -272,3 +272,179 @@ pub(crate) async fn bind_route(
 ) -> Result<crate::tx_route::TxRoute, DbError> {
     Ok(captured.bind(ensure_backend().await?))
 }
+
+#[cfg(test)]
+mod tests {
+    //! ## The capture arms
+    //!
+    //! ESTABLISHED: `capture_route`'s answer tracks the async-scope marker, and
+    //! it is NOT the ambient `has_tx_for` answer - `capture` says "in the
+    //! transaction" at a moment when `has_tx_for` says "no transaction parked",
+    //! so the two discriminators are provably different functions. Reverting
+    //! `CapturedRoute::capture` to the pre-fix
+    //! `tx_lanes::with(|l| l.has_tx_for(app_id))` fails three of the four.
+    //!
+    //! NOT ESTABLISHED, stated rather than implied:
+    //!   - that every `dispatch_*` actually calls `capture`. Nothing at runtime
+    //!     can check that; it is enforced by the TYPE (the exec entry points
+    //!     take `&TxRoute`, and `TxRoute` has no other production constructor)
+    //!     and end to end by `tests/e2e_dev_vs_deployed_db.sh` (`cxPlain`).
+    //!   - the OTHER direction of the #254 defect - an app with a transaction
+    //!     genuinely PARKED in the per-isolate slot while an unrelated dispatch
+    //!     runs. Reaching that state needs a real `TxConnection` (a live
+    //!     Postgres `Client` or SQLite session handle), which these tests
+    //!     deliberately do not open. It is covered by `cxPlain` on both tiers.
+    //!   - anything about which CONNECTION the exec path then picks.
+    //!
+    //! **These five arms lived in the engine's `tx_route.rs`** and moved here
+    //! with the data-engine cut: every name they drive except `tx_lanes` is this
+    //! crate's, and the engine may not see `v8`, `zeroship_runtime` or the
+    //! per-isolate context at all.
+
+    use serde_json::json;
+    use zeroship_runtime::init_v8;
+
+    macro_rules! in_scope {
+        (let $scope:ident) => {
+            init_v8();
+            let mut isolate = v8::Isolate::new(v8::CreateParams::default());
+            v8::scope!(let handle_scope, &mut isolate);
+            let context = v8::Context::new(handle_scope, Default::default());
+            let $scope = &mut v8::ContextScope::new(handle_scope, context);
+        };
+    }
+
+    fn run<F: std::future::Future>(f: F) -> F::Output {
+        compio::runtime::Runtime::new()
+            .expect("compio runtime build")
+            .block_on(f)
+    }
+
+    /// The dialect is knowable COLD, and the capture is where that is proven.
+    ///
+    /// This lived in `crud/mod.rs` as
+    /// `configured_sqlite_dialect_does_not_require_an_open_backend`, pinned on
+    /// the engine's own `current_sql_dialect()` - the function that read the
+    /// context from an ENGINE file. It is here rather than deleted because the
+    /// property it pins is what permits the stamp at all: nine `plan_*`
+    /// functions build SQL in the synchronous prelude, so if the dialect needed
+    /// an open backend the whole design would be unavailable.
+    #[test]
+    fn a_configured_sqlite_dialect_is_captured_without_an_open_backend() {
+        in_scope!(let scope);
+        crate::reset_context_for_tests();
+        crate::set_db_url_for_tests("sqlite::memory:");
+        assert!(
+            crate::context::with(|context| context.backend()).is_none(),
+            "precondition: nothing has opened a backend on this thread"
+        );
+        assert_eq!(
+            super::capture_route(scope, "app_a").dialect(),
+            crate::query::SqlDialect::Sqlite
+        );
+        crate::reset_context_for_tests();
+    }
+
+    #[test]
+    fn top_level_dispatch_routes_to_the_pool() {
+        in_scope!(let scope);
+        let route = super::capture_route(scope, "app_a");
+        assert!(!route.in_tx(), "no transaction scope entered");
+        assert_eq!(route.app_id(), "app_a");
+    }
+
+    #[test]
+    fn dispatch_inside_the_callback_routes_to_the_transaction() {
+        in_scope!(let scope);
+        let prev = super::enter(scope, "app_a");
+        assert!(super::capture_route(scope, "app_a").in_tx());
+        super::leave(scope, prev);
+        assert!(
+            !super::capture_route(scope, "app_a").in_tx(),
+            "leaving the scope must stop routing to the tx"
+        );
+    }
+
+    #[test]
+    fn a_co_resident_apps_transaction_scope_does_not_capture_this_app() {
+        in_scope!(let scope);
+        let prev = super::enter(scope, "app_other");
+        assert!(
+            !super::capture_route(scope, "app_a").in_tx(),
+            "SEC-1: app_a must not join app_other's transaction"
+        );
+        assert!(super::capture_route(scope, "app_other").in_tx());
+        super::leave(scope, prev);
+    }
+
+    /// The one-variable control that separates the two discriminators.
+    ///
+    /// Inside the scope, `capture` answers "transaction" while the per-isolate
+    /// slot this app-id would be looked up in is EMPTY, so `has_tx_for` answers
+    /// "no transaction". A `capture` implemented on the pre-fix ambient test
+    /// cannot produce this pair.
+    #[test]
+    fn capture_is_not_the_ambient_has_tx_for_answer() {
+        in_scope!(let scope);
+        let prev = super::enter(scope, "app_a");
+        let ambient = crate::tx_lanes::with(|l| l.has_tx_for("app_a"));
+        let captured = super::capture_route(scope, "app_a").in_tx();
+        super::leave(scope, prev);
+        assert!(!ambient, "precondition: no transaction is parked for app_a");
+        assert!(
+            captured,
+            "capture must read the async scope, not the parked-tx slot"
+        );
+    }
+
+    /// The cold-isolate path, driven in the order production drives it.
+    ///
+    /// **This arm lived in the engine's `crud/mask_policy.rs` and moved here
+    /// with the data-engine cut**, because three of the four things it names
+    /// belong to this crate: `set_db_url_for_tests`, `context::with` and
+    /// [`ensure_backend`]. Only its last line is the engine's. That split is the
+    /// point - it witnesses the boot sequence at the seam between the two tiers.
+    ///
+    /// The assertion that matters is unchanged in substance: if the resolve step
+    /// ever loses its `init_pool_async` arm, `ensure_backend` returns
+    /// `not_configured` here and the install never happens - the failure
+    /// `installSchema` would hit on every boot of the SQLite dev tier.
+    #[test]
+    fn set_mask_policy_installs_through_an_adapter_opened_cold_backend() {
+        crate::reset_context_for_tests();
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let url = format!("sqlite:{}", dir.path().join("cold.sqlite").display());
+        crate::set_db_url_for_tests(&url);
+        assert!(crate::context::with(|context| context.backend()).is_none());
+
+        run(async {
+            // The adapter half of the dispatcher: resolve, warming the cold
+            // isolate on the way.
+            let backend = super::ensure_backend()
+                .await
+                .expect("the adapter funnel must open a cold backend");
+            assert!(
+                backend.as_sqlite().is_some(),
+                "the configured url is sqlite:, so the opened backend must be too"
+            );
+            assert!(
+                crate::context::with(|context| context.backend()).is_some(),
+                "resolving must leave the backend installed on this isolate"
+            );
+
+            // The engine half: it receives the handle rather than fetching one.
+            crate::crud::mask_policy::dispatch_set_mask_policy(
+                &backend,
+                "app_cold_policy",
+                json!({ "support": ["spi"] }),
+            )
+            .await
+            .expect("policy install must succeed on the handed-down backend");
+        });
+
+        let policy = crate::crud::mask_policy::cache_get("app_cold_policy")
+            .expect("policy must be cached after the cold install");
+        assert!(policy.allows("support", "spi"));
+        crate::reset_context_for_tests();
+    }
+}

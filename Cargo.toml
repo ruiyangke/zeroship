@@ -227,6 +227,12 @@ zeroship-schema = { path = "crates/zeroship-schema" }
 zeroship-data-core = { path = "crates/zeroship-data-core" }
 zeroship-data-postgres = { path = "crates/zeroship-data-postgres" }
 zeroship-data-sqlite = { path = "crates/zeroship-data-sqlite" }
+# The ENGINE tier, extracted from `zeroship-plugin-db` on 2026-09-03: the CRUD
+# passes, the SC-1 transaction protocol, the routed executor, the per-isolate
+# transaction lanes and the `BackendHandle` dispatch enum. It sits ABOVE both
+# vendor crates and BELOW the adapter, and its manifest header records why it is
+# the one non-vendor crate allowed to name a driver.
+zeroship-data-engine = { path = "crates/zeroship-data-engine" }
 zeroship-data-query-builder = { path = "crates/zeroship-data-query-builder" }
 # The `zeroship-migrate` engine, a full member of this workspace. It was a git submodule
 # pinned to a commit recorded here; its history was grafted in so the engine and its

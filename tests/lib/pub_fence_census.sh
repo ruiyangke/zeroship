@@ -98,19 +98,50 @@
 set -uo pipefail
 cd "$(dirname "$0")/../.."
 
-SRC=crates/zeroship-plugin-db/src
-LIB=$SRC/lib.rs
+# ---------------------------------------------------------------------------
+# TWO CRATES SINCE 2026-09-03, AND THEY ANSWER THE SAME QUESTION AT TWO STAGES.
+# ---------------------------------------------------------------------------
+# `SRC` was `crates/zeroship-plugin-db/src` alone. The ENGINE tier left for
+# `crates/zeroship-data-engine/src` that day, taking ~22k lines and most of the
+# `pub(crate) mod` fences with it - so a census pinned to the first root would
+# have reported a small, healthy number about the modules that stayed and said
+# nothing at all about the ones whose fence had just BECOME a crate boundary.
+# That is exactly the "reports on nothing while printing what a clean tree
+# prints" failure this file's own header is a catalogue of.
+#
+# The two roots are reported SEPARATELY, not merged, because the question means
+# something different on each side:
+#
+#   ADAPTER (`zeroship-plugin-db`)  - items still fenced by a `pub(crate) mod`.
+#     This is surface the split has NOT yet published: it becomes public API the
+#     day the module becomes a crate root.
+#
+#   ENGINE (`zeroship-data-engine`) - items behind a `pub mod` at a crate root.
+#     This is surface the split HAS published. The fence is the crate boundary
+#     now, and the 325 `pub(crate)` markers inside those modules were widened to
+#     `pub` in the same commit that moved them, because a `pub(crate)` item in
+#     the engine is unreachable from the adapter that calls it.
+#
+# The combined figure is what the split publishes in total, and it is the number
+# `tests/private_interface_gate.sh` rules on the health of.
+ADAPTER_SRC=crates/zeroship-plugin-db/src
+ENGINE_SRC=crates/zeroship-data-engine/src
 
-if [ ! -f "$LIB" ]; then
-  echo "pub_fence_census: $LIB not found - has the crate moved?" >&2
-  exit 1
-fi
+for _d in "$ADAPTER_SRC" "$ENGINE_SRC"; do
+  [ -f "$_d/lib.rs" ] || {
+    echo "pub_fence_census: $_d/lib.rs not found - has a crate moved?" >&2
+    exit 1
+  }
+done
+
+SRC=$ADAPTER_SRC
+LIB=$SRC/lib.rs
 
 capped=$(grep -oE "^pub\(crate\) mod [a-z_]+;" "$LIB" | awk '{print $3}' | tr -d ';' | sort -u)
 twinned=$(grep -oE "^pub mod [a-z_]+;" "$LIB" | awk '{print $3}' | tr -d ';' | sort -u)
 
 if [ -z "$capped" ]; then
-  echo "pub_fence_census: no 'pub(crate) mod' declarations in lib.rs." >&2
+  echo "pub_fence_census: no 'pub(crate) mod' declarations in $LIB." >&2
   echo "  Either the split has landed, or the declaration style changed and" >&2
   echo "  this census is now reporting on nothing. It does NOT mean zero." >&2
   exit 1
@@ -189,6 +220,7 @@ count_shipped_pub() {
     END { print n + 0 }' "$1"
 }
 
+echo "== ADAPTER ($ADAPTER_SRC): fenced by a pub(crate) module, NOT yet published =="
 printf '%-22s %10s %10s  %s\n' MODULE SHIPPED TEST_GATED 'ALSO PUB UNDER test-helpers'
 total=0; gated_total=0; modules=0
 for m in $capped; do
@@ -213,6 +245,53 @@ printf 'pub items fenced ONLY by a pub(crate) module: %d\n' "$total"
 printf '  (+ %d more in test-gated submodules, which no shipped binary compiles)\n' "$gated_total"
 
 # ---------------------------------------------------------------------------
+# The ENGINE half. Same counter, opposite question: these modules are `pub mod`
+# at a crate root, so their `pub` items ARE the published surface - the fence
+# is cargo's now, not lib.rs's.
+# ---------------------------------------------------------------------------
+SRC=$ENGINE_SRC
+LIB=$SRC/lib.rs
+published=$(grep -oE "^pub mod [a-z_]+;" "$LIB" | awk '{print $3}' | tr -d ';' | sort -u)
+
+if [ -z "$published" ]; then
+  echo "pub_fence_census: no 'pub mod' declarations in $LIB." >&2
+  echo "  The engine crate publishes nothing, which cannot be true while the" >&2
+  echo "  adapter compiles against it. This census is reporting on nothing." >&2
+  exit 1
+fi
+
+echo
+echo "== ENGINE ($ENGINE_SRC): published by the crate boundary, ALREADY public =="
+printf '%-22s %10s %10s\n' MODULE SHIPPED TEST_GATED
+eng_total=0; eng_gated_total=0; eng_modules=0
+for m in $published; do
+  files=$(find "$SRC/$m.rs" "$SRC/$m" -name '*.rs' 2>/dev/null | LC_ALL=C sort)
+  [ -n "$files" ] || continue
+  eng_modules=$((eng_modules + 1))
+  n=0; g=0
+  for f in $files; do
+    k=$(count_shipped_pub "$f")
+    if module_is_test_gated "$f"; then g=$((g + k)); else n=$((n + k)); fi
+  done
+  printf '%-22s %10d %10d\n' "$m" "$n" "$g"
+  eng_total=$((eng_total + n))
+  eng_gated_total=$((eng_gated_total + g))
+done
+
+echo
+printf 'MODULES RULED ON: %d\n' "$eng_modules"
+printf 'pub items published by the engine crate boundary: %d\n' "$eng_total"
+printf '  (+ %d more in test-gated submodules, which no shipped binary compiles)\n' "$eng_gated_total"
+
+echo
+printf 'COMBINED, both crates: %d modules, %d shipped pub items (+ %d test-gated)\n' \
+  "$((modules + eng_modules))" "$((total + eng_total))" "$((gated_total + eng_gated_total))"
+echo "  The two halves are NOT interchangeable: the adapter's number is surface"
+echo "  the split has yet to publish, the engine's is surface it already has."
+
+SRC=$ADAPTER_SRC
+
+# ---------------------------------------------------------------------------
 # The four controls the proposal names by hand. Reported individually because
 # a count cannot say whether the RIGHT things are fenced, and because these are
 # the ones whose failure is a security bug rather than an API-surface question.
@@ -233,17 +312,24 @@ report() { # name, file, pattern
   printf '  %-24s %s:%s\n' "$name" "$file" "${hit%%:*}"
   printf '           %s\n' "$(printf '%s' "$hit" | cut -d: -f2- | sed 's/^[[:space:]]*//')"
 }
-report sanitize_app_actor "$SRC/crud/unmask.rs"  '^[[:space:]]*pub(\(crate\))? fn sanitize_app_actor'
-report "TxRoute::capture"  "$SRC/tx_route.rs"     '^[[:space:]]*pub(\(crate\))? fn capture'
-report "context::with_mut" "$SRC/context.rs"      '^[[:space:]]*pub(\(crate\))? fn with_mut'
+report sanitize_app_actor "$ENGINE_SRC/crud/unmask.rs" '^[[:space:]]*pub(\(crate\))? fn sanitize_app_actor'
+report "TxRoute::capture"  "$ENGINE_SRC/tx_route.rs"   '^[[:space:]]*pub(\(crate\))? fn capture'
+report "context::with_mut" "$ADAPTER_SRC/context.rs"   '^[[:space:]]*pub(\(crate\))? fn with_mut'
 report "DbBinding::cold_start" crates/zeroship-data-core/src/binding.rs \
        '^[[:space:]]*pub(\(crate\))? fn cold_start'
 
 echo
-echo "Measured 2026-09-02: all four hold TODAY, but three of them hold for"
-echo "DIFFERENT reasons, and only one of those survives becoming a crate:"
-echo "  sanitize_app_actor  pub(crate) on the ITEM   - survives the split"
-echo "  TxRoute::capture    pub(crate) on the ITEM   - survives the split"
+echo "Measured 2026-09-02, and TWO OF THE FOUR PREDICTIONS WERE FALSIFIED BY THE"
+echo "ENGINE CUT ON 2026-09-03. Corrected here rather than quietly rewritten:"
+echo "  sanitize_app_actor  said 'pub(crate) on the ITEM - survives the split'."
+echo "    It is plain 'pub' now, at zeroship-data-engine's crate root. It could"
+echo "    not have survived as pub(crate): three of its five call sites are in"
+echo "    the engine and two are the ADAPTER's masked_value.rs. The DB-3 fence"
+echo "    was never this visibility - it is that all five call sites invoke it -"
+echo "    so the guarantee holds and the PREDICTION did not."
+echo "  TxRoute::capture    the same, for the same reason: 'pub' in the engine,"
+echo "    called from the adapter's tx_scope::capture_route. Its real fence is"
+echo "    its argument, a '&mut v8::PinScope' the engine crate cannot even name."
 echo "  context::with_mut   pub fn, capped by 'pub(crate) mod context'"
 echo "                                               - DOES NOT survive"
 echo "  DbBinding::cold_start  #[cfg(feature=\"test-helpers\")], and the feature"

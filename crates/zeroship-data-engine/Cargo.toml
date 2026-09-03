@@ -1,0 +1,116 @@
+[package]
+name = "zeroship-data-engine"
+version = "0.1.0"
+edition = "2021"
+description = "The data plane's ENGINE tier: CRUD passes, the SC-1 transaction protocol, the routed executor, the per-isolate transaction lanes and the backend dispatch enum. Names both vendor crates by design - BackendHandle is a closed sum over them - but names no V8 type and no adapter module."
+
+# ---------------------------------------------------------------------------
+# WHY THIS CRATE NAMES BOTH VENDORS, DELIBERATELY.
+# ---------------------------------------------------------------------------
+#
+# `tests/data_crate_closure_gate.sh` guards zeroship-data-core and
+# zeroship-data-query-builder against ever acquiring `compio-postgres`,
+# `rusqlite`, `zeroship-runtime` or `v8` in their normal closure. This crate is
+# NOT on that list and must not be added to it:
+# `docs/proposals/2026-08-31-data-crate-shape.md:47-49` has data-engine depend on
+# both vendors by design. `backend_handle.rs`'s `BackendHandle` is a closed sum
+# over `PostgresBackend` and `SqliteBackend`, and `cancel.rs`'s `TxCanceller`
+# names both, so only a tier ABOVE both may hold them. A SQLite-only build still
+# links the PostgreSQL driver; that is the accepted consequence of enum dispatch,
+# not an oversight.
+#
+# WHAT IT MUST NEVER NAME is the ADAPTER above it - `zeroship-plugin-db`, which
+# owns the V8 classes, the per-isolate composition root (`context.rs`) and the
+# CDC modules. That direction is absent below, so naming it is E0433 at compile
+# time. It is absent from `[dev-dependencies]` for a stronger reason than taste:
+# cargo permits a dev-dependency cycle, but it would link TWO copies of this
+# crate into the test binary - the `--test` one and the plain rlib the adapter
+# depends on - giving every `thread_local!` here two independent instances.
+[dependencies]
+# `DbError`, `DbBinding`, `encryption`, `broker`, `read_set`, `budgets`,
+# `lock_policy`, `schema_cache` and the capability/storage trait surface every
+# pass here is written against.
+zeroship-data-core = { workspace = true }
+# `crate::query` (the DDL/DML builders + `SqlDialect`) and `crate::diff` (the
+# neutral schema metadata the mask and encryption passes read), both re-exported
+# from lib.rs so every in-file `crate::query::…` / `crate::diff::…` resolves.
+zeroship-schema = { workspace = true }
+# `BackendHandle::Postgres`, the routed autocommit funnel, `pg_error`,
+# `pg_row_json` and the PG session SQL the transaction driver issues.
+zeroship-data-postgres = { workspace = true }
+# `BackendHandle::Sqlite`, the change-sink port `backend_selection` adapts onto
+# the process broker, and the SQLite transaction lane.
+zeroship-data-sqlite = { workspace = true }
+# `ChangeEvent` / `ChangeOp` (the change-data contract the write path emits) and
+# `database_role::per_app_role_name` for the per-app role bootstrap.
+zeroship-core = { workspace = true }
+# `metrics.rs` owns the raw usage metrics and the single emit point; the metric
+# NAMES are a billing contract shared with the control plane's pricing catalog.
+zeroship-metering = { workspace = true }
+# The system-field and shape policy `crud/system_fields_pass.rs` and
+# `system_shape_charter.rs` read.
+zeroship-migrate-policy = { workspace = true }
+# `CancelToken` + `Pool` in `cancel.rs`, `OwnedPooledClient` in `tx_lanes.rs`.
+# See the header: this is the vendor edge this tier is allowed to carry.
+compio-postgres = { workspace = true, features = ["with-uuid-1"] }
+# `time::timeout` / `time::sleep` / `runtime::spawn` in the transaction driver.
+compio = { workspace = true }
+serde_json = { workspace = true }
+# Byte-column round-tripping (`crud/bytes_pass.rs`) and the ciphertext envelope.
+base64 = { workspace = true }
+tracing = { workspace = true }
+# Key material zeroised on drop in the encryption and mask passes.
+zeroize = { version = "1", features = ["alloc", "derive"] }
+# `mask_sentinel_signature` in `crud/mask_pass.rs`.
+aes-gcm = { workspace = true }
+
+[dev-dependencies]
+# The two constructors gated on `test-helpers` in the vendor and domain tiers -
+# `DbBinding::cold_start` chief among them. Declared with the feature ON here
+# and NOT in `[dependencies]`, which is the trap `zeroship-data-core`'s own
+# manifest records: across a crate boundary `cfg(test)` is the DEFINING crate's
+# test build, so the feature is what has to carry.
+zeroship-data-core = { workspace = true, features = ["test-helpers"] }
+zeroship-data-postgres = { workspace = true, features = ["test-helpers"] }
+zeroship-data-sqlite = { workspace = true, features = ["test-helpers"] }
+compio = { workspace = true }
+compio-postgres = { workspace = true }
+serde_json = { workspace = true }
+# On-disk SQLite fixtures for the exec, transaction and mask-policy suites.
+tempfile = { workspace = true }
+# `src/test_support/` - the capture layer the warn/error-shape contract tests in
+# `crud/{mask_drift,read_pipeline,unmask}.rs` assert against. DEV-only on
+# purpose, which is why `test_support` is gated `cfg(test)` and not on
+# `test-helpers`: a consumer compiling this lib with the feature is doing
+# non-test compilation and would not have this crate.
+tracing-subscriber = { workspace = true }
+# App ids in `auth/bootstrap.rs`'s live role tests and `exec.rs`'s metering arms.
+uuid = { workspace = true }
+# `auth/bootstrap.rs`'s live tests call `provision_audit_unmask_table`, the
+# PRODUCTION provisioning statement, rather than a hardcoded copy of the shape.
+# DEV-only, and `zeroship-migrate-server` does not depend on this crate, so no
+# cycle.
+zeroship-migrate-server = { workspace = true }
+
+[features]
+# The engine's cross-crate test seam. Every `pub` item behind it is reachable
+# from `zeroship-plugin-db`'s integration targets, which compile the adapter
+# with `--features test-helpers` and therefore compile THIS crate with it too.
+#
+# It is a feature and not `cfg(test)` for the reason data-core's manifest
+# records: `cfg(test)` across a crate boundary is the defining crate's test
+# build and never fires for a consumer, so a consumer would silently fall to the
+# other arm. Where an item is reached by BOTH this crate's unit tests and a
+# consumer, the gate is `cfg(any(test, feature = "test-helpers"))`.
+test-helpers = [
+    "zeroship-data-core/test-helpers",
+    "zeroship-data-postgres/test-helpers",
+    "zeroship-data-sqlite/test-helpers",
+]
+# Arms that need a live PostgreSQL listener. Mirrors the adapter's feature of
+# the same name so a `-p zeroship-plugin-db --features live-db-tests` build
+# turns on the engine's live arms too.
+live-db-tests = ["test-helpers"]
+
+[lints]
+workspace = true

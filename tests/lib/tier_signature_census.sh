@@ -101,7 +101,16 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SRC="$ROOT/crates/zeroship-plugin-db/src"
+# TWO SOURCE ROOTS SINCE 2026-09-03, for the reason spelled out at the head of
+# tier_direction_census.sh: the ENGINE tier left `zeroship-plugin-db/src` for
+# `zeroship-data-engine/src`, and a census pinned to the first would rule on
+# what stayed while printing a clean verdict about what went. A tier is not a
+# crate; both trees are scanned as one region under one `tier()` map, so the
+# arms below rule on the same files they ruled on before.
+SRC_ROOTS=(
+  "$ROOT/crates/zeroship-plugin-db/src"
+  "$ROOT/crates/zeroship-data-engine/src"
+)
 SHOW_ALL=0
 TEST_REGION=0
 case "${1:-}" in
@@ -111,8 +120,24 @@ case "${1:-}" in
   *)       echo "tier_signature_census: unknown option '$1'" >&2; exit 2 ;;
 esac
 
-[ -d "$SRC" ] || { echo "tier_signature_census: no such tree: $SRC" >&2; exit 1; }
-cd "$SRC" || exit 1
+for _root in "${SRC_ROOTS[@]}"; do
+  [ -d "$_root" ] || { echo "tier_signature_census: no such tree: $_root" >&2; exit 1; }
+done
+
+# Every `.rs` under every source root, as `<root>\t<./-relative path>`. The
+# relative half is what `tier()` and `module_is_test_gated()` are keyed on; the
+# root half is what the loop `cd`s into so a file's parent `mod` declaration
+# resolves in its own crate.
+all_sources() {
+  local p
+  for p in "${SRC_ROOTS[@]}"; do
+    ( cd "$p" && find . -name '*.rs' | LC_ALL=C sort | sed "s|^|$p\t|" )
+  done
+}
+
+# `plugin-db/context.rs` rather than `./context.rs`: with two crates in one
+# region a bare relative path no longer says which tree a row came from.
+label() { printf '%s/%s\n' "$(basename "$(dirname "$1")" | sed 's/^zeroship-//')" "$2"; }
 
 # Emit the PRODUCTION lines of a file, comments dropped, test-module regions
 # excised by brace depth.
@@ -335,11 +360,13 @@ tier() {
     # matching nothing, a map claiming coverage it does not have. Kept in step
     # with tier_direction_census.sh, where the two censuses judging one file
     # differently is defect 1.
-    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs|./drop_namespace.rs|./lock_policy.rs) echo "ENGINE" ;;
+    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs|./drop_namespace.rs) echo "ENGINE" ;;
     ./auth/bootstrap.rs)                                 echo "ENGINE" ;;
-    ./backend/postgres.rs|./backend/pg_session_sql.rs|./backend/pg_error.rs|./backend/pg_introspect.rs) echo "PG" ;;
-    ./backend/sqlite/*)                                  echo "SQLITE" ;;
-    ./encryption/*)                                      echo "ENCRYPT" ;;
+    # NO ARMS for ./backend/postgres.rs, ./backend/pg_*.rs, ./backend/sqlite/*,
+    # ./encryption/* or ./lock_policy.rs. Every one of those was extracted into
+    # a dependency crate before 2026-09-03 and the arms were patterns matching
+    # nothing - a map claiming coverage it does not have. Deleted rather than
+    # kept, exactly as the `broker`/`read_set` note above describes.
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo "CDC" ;;
     # CORE is now HALF EXTRACTED. `error.rs` and `binding.rs` left for
     # `zeroship-data-core`; this census scans only `zeroship-plugin-db/src`, so
@@ -354,7 +381,19 @@ tier() {
     ./context.rs|./service.rs|./op_error.rs)              echo "ADAPTER" ;;
     ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo "ENGINE" ;;
     ./cdc_lifecycle.rs|./change_stream_pg.rs)            echo "CDC" ;;
-    ./descriptor.rs|./budgets.rs)                        echo "CORE" ;;
+    # `descriptor.rs` was CORE here and data-engine in the proposal; SETTLED as
+    # ENGINE on 2026-09-03 by the cut, and changed in the same commit as
+    # tier_direction_census.sh - the two censuses judging one file differently
+    # is defect 1 in that file. `budgets.rs` has no arm: it left for
+    # `zeroship-data-core` and an arm for a file this region does not hold is a
+    # pattern matching nothing.
+    ./descriptor.rs)                                     echo "ENGINE" ;;
+    # `backend/mod.rs` was CONTESTED here too. It is ENGINE now: the one CDC
+    # name in it - a `#[cfg(test)]` `PgChangeStream` conformance assertion -
+    # moved to `change_stream_pg.rs` with the engine cut, and what is left is a
+    # prelude over data-core, both vendors and zeroship-schema plus this tier's
+    # own `BackendHandle`. Issue #170.
+    ./backend/mod.rs)                                    echo "ENGINE" ;;
     *)                                                   echo "CONTESTED" ;;
   esac
 }
@@ -401,10 +440,12 @@ marker_re() {
 }
 
 COL=$([ "$TEST_REGION" -eq 1 ] && echo TESTREFS || echo SIGS)
-printf '%-10s %-36s %-17s %5s   %s\n' TIER FILE MARKER "$COL" VERDICT
+printf '%-10s %-46s %-17s %5s   %s\n' TIER FILE MARKER "$COL" VERDICT
 echo "----------------------------------------------------------------------------------------"
 viol=0; rows=0
-while read -r f; do
+while IFS=$'\t' read -r croot f; do
+  cd "$croot" || continue
+  disp="$(label "$croot" "${f#./}")"
   t=$(tier "$f")
   if [ "$TEST_REGION" -eq 1 ]; then
     has_tests "$f" || continue        # no test region: nothing to say in this mode
@@ -450,9 +491,9 @@ while read -r f; do
       v="** VIOLATION **"; viol=$((viol+n))
     fi
     rows=$((rows+1))
-    printf '%-10s %-36s %-17s %5s   %s\n' "$t" "$f" "$m" "$n" "$v"
+    printf '%-10s %-46s %-17s %5s   %s\n' "$t" "$disp" "$m" "$n" "$v"
   done
-done < <(find . -name '*.rs' | LC_ALL=C sort)
+done < <(all_sources)
 echo "----------------------------------------------------------------------------------------"
 echo "rows reported: $rows"
 if [ "$TEST_REGION" -eq 1 ]; then

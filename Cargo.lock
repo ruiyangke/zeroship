@@ -7458,6 +7458,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-data-engine"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "base64",
+ "compio",
+ "compio-postgres",
+ "serde_json",
+ "tempfile",
+ "tracing",
+ "tracing-subscriber",
+ "uuid",
+ "zeroize",
+ "zeroship-core",
+ "zeroship-data-core",
+ "zeroship-data-postgres",
+ "zeroship-data-sqlite",
+ "zeroship-metering",
+ "zeroship-migrate-policy",
+ "zeroship-migrate-server",
+ "zeroship-schema",
+]
+
+[[package]]
 name = "zeroship-data-postgres"
 version = "0.1.0"
 dependencies = [
@@ -7815,6 +7839,7 @@ dependencies = [
  "zeroize",
  "zeroship-core",
  "zeroship-data-core",
+ "zeroship-data-engine",
  "zeroship-data-postgres",
  "zeroship-data-query-builder",
  "zeroship-data-sqlite",

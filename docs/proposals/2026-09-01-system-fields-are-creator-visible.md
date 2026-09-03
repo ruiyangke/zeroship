@@ -72,7 +72,7 @@ argument.** Measured 2026-09-01 across the whole tree.
 `Display`-round-tripped at `:190`, and folded into the policy seal at
 `crates/zeroship-migrate-policy/src/seal.rs:517`. That is the complete set of
 readers. The write pass matches it as `Increment(_)` and DISCARDS the amount
-(`crates/zeroship-plugin-db/src/crud/system_fields_pass.rs:383`); the actual
+(`crates/zeroship-data-engine/src/crud/system_fields_pass.rs:383`); the actual
 step is a literal `+ 1` emitted from three places in `zeroship-schema`
 (`query.rs:4279` update, `:4780` soft delete, `:4825` restore) plus the PG
 upsert's `COALESCE(..., 0) + 1` at `:6476`.

@@ -57,7 +57,7 @@ transitively bundled package, so any check it performs is a check on an input th
 attacker also controls the timing of. Rationale in the design document, section 11.
 
 **Evidence:** `sdks/db/src/policy.ts:87,93-94`;
-`crates/zeroship-plugin-db/src/crud/mask_policy.rs`
+`crates/zeroship-data-engine/src/crud/mask_policy.rs`
 
 ### L2 (DECIDED) - mask policy suppressible via `_flushPendingMaskPolicy`
 

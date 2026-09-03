@@ -32,6 +32,15 @@ zeroship-schema = { workspace = true }
 zeroship-data-core = { workspace = true }
 zeroship-data-postgres = { workspace = true }
 zeroship-data-sqlite = { workspace = true }
+# The ENGINE tier, extracted from this crate on 2026-09-03: `crud`,
+# `transaction`, `exec`, `backend`, `backend_handle`, `backend_selection`,
+# `tx_route`, `tx_lanes`, `metrics`, `system_shape_charter`, `descriptor` and
+# `auth`. `src/lib.rs` re-exports every one of them under the same visibility
+# ladder they had as modules, so both this crate's own files and its 12
+# integration targets resolve `crate::crud::…` / `zeroship_plugin_db::exec::…`
+# unchanged. The edge runs one way only, and this manifest is where that is
+# enforced: `zeroship-data-engine` does not name this crate in either table.
+zeroship-data-engine = { workspace = true }
 # The operator charter is the worker's assignment authority, and it must not
 # arrive from the creator-authored descriptor. `zeroship-migrate-policy` is a
 # leaf (serde/toml/sha2/hmac/hex/thiserror/schemars and nothing of ours), so
@@ -118,6 +127,12 @@ tempfile = { workspace = true }
 zeroship-data-core = { workspace = true, features = ["test-helpers"] }
 zeroship-data-postgres = { workspace = true, features = ["test-helpers"] }
 zeroship-data-sqlite = { workspace = true, features = ["test-helpers"] }
+# Same reason, one tier up: this crate's own `#[cfg(test)]` unit tests call
+# `zeroship_data_engine::reset_engine_for_tests`, `exec::ambient_route_for_tests`
+# and `backend_selection::new_sqlite_backend`, all gated
+# `cfg(any(test, feature = "test-helpers"))` in the engine - where `test` is the
+# ENGINE's test build, never this crate's. The feature is what carries.
+zeroship-data-engine = { workspace = true, features = ["test-helpers"] }
 zeroship-test-support = { workspace = true }
 # The DbPlan IR. A DEV dependency on purpose: nothing in this crate's `src/`
 # uses it yet, and declaring it a normal dependency would say otherwise. The
@@ -215,10 +230,11 @@ test-helpers = [
     "zeroship-data-core/test-helpers",
     "zeroship-data-postgres/test-helpers",
     "zeroship-data-sqlite/test-helpers",
+    "zeroship-data-engine/test-helpers",
 ]
 # Live logical-decoding coverage is separate from the broader helper-gated
 # integration suite because it requires the compose Postgres on port 5440.
-live-db-tests = ["test-helpers"]
+live-db-tests = ["test-helpers", "zeroship-data-engine/live-db-tests"]
 
 [[test]]
 name = "integration"

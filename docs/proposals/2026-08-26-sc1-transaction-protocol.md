@@ -1,7 +1,7 @@
 # SC-1: the explicit transaction protocol
 
 **Status.** PARTIAL. The state machine ships and drives every production
-`db.transaction()`: `crates/zeroship-plugin-db/src/transaction/` holds the pure
+`db.transaction()`: `crates/zeroship-data-engine/src/transaction/` holds the pure
 reducer (`reducer/`, with `identity.rs`, `deadline.rs`, `frames.rs`), the driver
 that turns an `Action` into I/O (`driver.rs`), the orchestrator
 (`mod.rs`) and the test seam (`probe.rs`). Two inputs the design assumes are
@@ -21,7 +21,7 @@ pending-effect buffer. It is unique per transaction, so it never contends, and
 it needs no incarnation or domain: it never outlives the app instance that
 created it, so it cannot alias across incarnations the way a durable key can.
 In the tree the entry is a `TxLane` in a per-thread `HashMap<app_id, TxLane>`
-(`crates/zeroship-plugin-db/src/tx_lanes.rs`), holding the reducer, the session,
+(`crates/zeroship-data-engine/src/tx_lanes.rs`), holding the reducer, the session,
 the canceller, the emit marks and the claim waiters; there is no separate
 `TxKey` type.
 
@@ -540,8 +540,8 @@ nobody's routine command". The transaction target runs as:
       --features test-helpers -- --test-threads=1
 
 The pure arms live in
-`crates/zeroship-plugin-db/src/transaction/reducer/tests.rs` and
-`crates/zeroship-plugin-db/src/transaction/reducer/frames.rs`, and run under
+`crates/zeroship-data-engine/src/transaction/reducer/tests.rs` and
+`crates/zeroship-data-engine/src/transaction/reducer/frames.rs`, and run under
 `cargo test -p zeroship-plugin-db --lib`. The live arms live in
 `crates/zeroship-plugin-db/tests/native_transaction.rs` and need PostgreSQL.
 

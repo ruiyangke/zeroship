@@ -725,6 +725,21 @@ jobs:
           set -o pipefail
           cargo test -p zeroship-plugin-db --features test-helpers --test sqlite_integration 2>&1 \
             | tee -a "$RUNNER_TEMP/rust-tests.log"
+      # The ENGINE tier's own suite. `cargo test --workspace` above does reach
+      # it - it is an ordinary member - but that step is the one #146 records as
+      # currently unbuildable, and a crate whose 290 tests run only through a
+      # step that cannot start is a crate whose tests do not run. Named
+      # explicitly for the same reason the sqlite suite above is: a package
+      # named here fails loudly, a package reached only by a wildcard fails
+      # silently.
+      #
+      # No feature flag: `zeroship-data-engine`'s default build compiles its
+      # whole `#[cfg(test)]` surface. Its `live-db-tests` arms need a server and
+      # belong with the other live gates, not here.
+      - run: |
+          set -o pipefail
+          cargo test -p zeroship-data-engine 2>&1 \
+            | tee -a "$RUNNER_TEMP/rust-tests.log"
       # The migration service's suite: the service's own targets, the two live-PG
       # session proofs (`smoke_apply_pg`, `author_and_apply_pg`) and the
       # `CompioPgSession` unit test. Without a database the PG proofs skip

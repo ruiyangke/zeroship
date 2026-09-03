@@ -52,7 +52,7 @@ use zeroship_plugin_db::query::{IndexKind, IndexSpec, raw_column_name};
 /// connection on drop, which writes the final WAL checkpoint).
 fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
-    let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open SqliteBackend");
+    let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open SqliteBackend");
     (backend, dir)
 }
 
@@ -136,7 +136,7 @@ fn bytes_column_stores_a_raw_blob_on_sqlite() {
         // separate file (`<dir>/zs-default.sqlite`) reached through an ATTACH
         // alias, so re-attach it before the schema-qualified name resolves.
         let backend =
-            new_sqlite_backend(PathBuf::from(dir.path())).expect("open the parity backend");
+            new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open the parity backend");
         backend
             .attach_app_file("default")
             .await
@@ -3048,7 +3048,7 @@ const _procedures = { upsertInsert };
             "freshly inserted upsert row should start at version 1: {row}"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3176,7 +3176,7 @@ const _procedures = { upsertConflict };
             "conflict update must auto-bump version"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3318,7 +3318,7 @@ const _procedures = { upsertConflict };
             "deterministic conflict probe must rewrite to the existing row id"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3446,7 +3446,7 @@ const _procedures = { seed, updateByEmail };
             "update by non-id filter should still target the seeded row"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3596,7 +3596,7 @@ const _procedures = { seed, updateManyByName };
             );
         }
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3734,7 +3734,7 @@ const _procedures = { overflow };
             "the overflow probe must fetch at most one row beyond the write cap: {counters:?}"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3904,7 +3904,7 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             "after rejection, the caller must observe that no prefix committed"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -4230,7 +4230,7 @@ const _procedures = { seed, nestedCasUpdate };
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -4318,7 +4318,7 @@ const _procedures = { seed, nestedCasUpdateMany };
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend");
+        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -5897,7 +5897,7 @@ async fn unmask_setup_with_schema(
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let backend = Rc::new(
-        new_sqlite_backend(std::path::PathBuf::from(dir.path())).expect("SqliteBackend::new"),
+        new_sqlite_backend(std::path::PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("SqliteBackend::new"),
     );
     backend
         .attach_app_file(app_id)
@@ -9969,7 +9969,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             ),
         );
 
-        let backend = Rc::new(new_sqlite_backend(PathBuf::from(dir.path())).expect("open backend"));
+        let backend = Rc::new(new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend"));
         zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
 
         // Both statements go through `exec::exec_*_for_tests`, which is the
@@ -9977,7 +9977,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
         // path a CRUD op takes. Calling `backend.pool_exec` directly would test
         // a layer BELOW the one that knows the app_id, and so could not observe
         // whether the data plane binds the file for itself.
-        zeroship_plugin_db::exec::exec_mutation_with_emit_for_tests(
+        zeroship_plugin_db::exec_mutation_with_emit_for_tests(
             zeroship_plugin_db::query::BuiltQuery {
                 sql: format!(
                     r#"INSERT INTO "{app}"."{collection}" (id, body)
@@ -9992,7 +9992,7 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
         .await
         .expect("the data plane must write after attaching the app file");
 
-        let rows = zeroship_plugin_db::exec::exec_query_for_tests(
+        let rows = zeroship_plugin_db::exec_query_for_tests(
             app,
             zeroship_plugin_db::query::BuiltQuery {
                 sql: format!(r#"SELECT body FROM "{app}"."{collection}" WHERE id = 'note_1'"#),

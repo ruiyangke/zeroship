@@ -112,10 +112,10 @@ handle") and defines by pointing here.
 **The consuming side is built; the producing side is not.** The reducer's
 `AuthorityIdentity`, `AuthorityDomain`, `SchemaEpoch`, `LifecycleState`,
 `MaskCeiling`, `classify` and all three `Verdict` arms exist and are tested
-(`crates/zeroship-plugin-db/src/transaction/reducer/identity.rs`). The single
+(`crates/zeroship-data-engine/src/transaction/reducer/identity.rs`). The single
 production construction site mints incarnation 0, domain `(0, 0)`, epoch 0,
 `Stable` and an empty ceiling, and `observation_for` echoes the expectation back
-(`crates/zeroship-plugin-db/src/transaction/driver.rs:141-165`, which says so in
+(`crates/zeroship-data-engine/src/transaction/driver.rs:141-165`, which says so in
 its own doc comment), so `classify` can only return `Current` in production and
 the three typed denial codes are unreachable outside tests. Fork C is the input
 that machine is waiting for; `driver.rs`'s two functions are the ones that change.

@@ -265,17 +265,17 @@ impl ChangeStream for PgChangeStream {
 
 }
 
-// Compile-time trait-shape assertions for `impl ChangeStream for
-// PgChangeStream` live in `crate::backend::tests` alongside the rest of
-// the `assert_postgres_backend_impls_*` family. Folding them into the
-// existing `compile_time_assertions_link` test keeps the lib-test
-// count stable.
+// The compile-time trait-shape assertion for `impl ChangeStream for
+// PgChangeStream` lived in `crate::backend::tests` alongside the rest of the
+// `assert_postgres_backend_impls_*` family until 2026-09-03. It is HERE now,
+// below, because `backend/mod.rs` left for `zeroship-data-engine` and that
+// assertion was the one CDC name in it - the reason the file was contested.
 
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
-    use super::{SharedExit, WalConsumerHandle};
+    use super::{PgChangeStream, SharedExit, WalConsumerHandle};
 
     #[test]
     fn consumer_handle_is_send_static_and_clone() {
@@ -298,5 +298,22 @@ mod tests {
             assert!(first.is_ok());
             assert!(second.is_ok());
         });
+    }
+
+    /// Compile-time: this PG-arm [`ChangeStream`] adapter satisfies the
+    /// [`ChangeStream`] trait with the agreed
+    /// `ConsumerHandle = WalConsumerHandle` shape. A regression that detaches
+    /// the impl block from [`PgChangeStream`] - or that renames the associated
+    /// type away from the agreed shape - trips compilation here rather than at
+    /// a consumer.
+    ///
+    /// **It lived in `backend/mod.rs` until 2026-09-03**, and moved here with
+    /// the data-engine cut. It was the one CDC name in that file, which is what
+    /// made the file contested; the fact it pins is about `PgChangeStream`, so
+    /// it belongs beside `PgChangeStream`.
+    #[test]
+    fn pg_change_stream_impls_change_stream() {
+        fn assert_impl<T: crate::backend::ChangeStream<ConsumerHandle = WalConsumerHandle>>() {}
+        assert_impl::<PgChangeStream>();
     }
 }

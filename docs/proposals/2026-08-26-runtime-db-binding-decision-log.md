@@ -398,7 +398,7 @@ unsourced sentence is the one that cost a reviewer's strongest finding.
 
 **"Only the producer is missing" was too narrow, and it was in AGENTS.md.** I wrote that the schema
 epoch's consumer ships and only its producer is absent. Verified against
-`crates/zeroship-plugin-db/src/transaction/reducer/mod.rs:966-972`:
+`crates/zeroship-data-engine/src/transaction/reducer/mod.rs:966-972`:
 
 ```rust
 if !opened {
@@ -510,7 +510,7 @@ one changes a shape:
 
 | What breaks | Where | Task |
 | --- | --- | --- |
-| unmask returns 42501 under column grants | `crates/zeroship-plugin-db/src/crud/unmask.rs:497` | #45 |
+| unmask returns 42501 under column grants | `crates/zeroship-data-engine/src/crud/unmask.rs:497` | #45 |
 | the id leaks by three channels, incl. persisted `currentUser()` rows | `crates/zeroship-migrate-postgres/src/backend/session.rs:935` | #52 |
 | an app editor can read a sibling app's classified rows | `deploy/policies/creator/app_editor.cedar` | #53 |
 | cost accrues to one app, throttling hits it, the causer is unthrottled | `crates/zeroship-metering/src/meter.rs:1` | #57 |
@@ -636,7 +636,7 @@ measurements under it were wrong, and each was wrong in a different way.
    answers.)*
 2. **"`strip_encryption_markers` retains it (`encryption_pass.rs:502-505`)."**
    The function is `#[cfg(any(test, feature = "test-helpers"))]`
-   (`crates/zeroship-plugin-db/src/crud/encryption_pass.rs:501`), so it is not
+   (`crates/zeroship-data-engine/src/crud/encryption_pass.rs:501`), so it is not
    on the production path at all, and it strips `__zsbin__` markers from a
    **write** document before binding rather than from a returned row. It is
    neither outbound nor live.
@@ -659,7 +659,7 @@ measurements under it were wrong, and each was wrong in a different way.
    (`crates/zeroship-data-sqlite/src/lib.rs:2232`) and its only
    caller, the `SchemaIntrospect for SqliteBackend` impl (`:804`, call at
    `:917`), are both `#[cfg(any(test, feature = "test-helpers"))]`. The dev tier
-   does not run it, and `crates/zeroship-plugin-db/src/descriptor.rs:30-32`
+   does not run it, and `crates/zeroship-data-engine/src/descriptor.rs:30-32`
    states so in the tree's own words: "On SQLite it was never live at all".
 
    **The same defect IS production on PostgreSQL, and the note did not mention
@@ -880,7 +880,7 @@ same shape.)*
 **The schema never existed in production, which is what made the deletion free.**
 `ensure_admin_schema` and every installer are
 `#[cfg(any(test, feature = "test-helpers"))]`
-(`crates/zeroship-plugin-db/src/auth/bootstrap.rs:95-96`), no migration or SQL
+(`crates/zeroship-data-engine/src/auth/bootstrap.rs:95-96`), no migration or SQL
 file created it, and `crates/zeroship-data-core/src/encryption/keys.rs:495`
 instructs operators to run a bootstrap migration **that does not exist**. The
 epoch design would therefore have landed the *first* production provisioner for
@@ -926,7 +926,7 @@ without checking.** In production the mutation-side producer is *suppressed*:
 runs for an app "it owns the publish path for events this isolate writes", so
 "in production with the consumer active, EVERY mutation previously paid the
 build cost only to discard the result"
-(`crates/zeroship-plugin-db/src/exec.rs:455-466` for the reasoning; the call at
+(`crates/zeroship-data-engine/src/exec.rs:455-466` for the reasoning; the call at
 `:501`). The real producer is `wal_consumer::emit_for_tuple`
 (`crates/zeroship-plugin-db/src/wal_consumer.rs:589`) - which holds no lease, has
 no operation context, and in which the string `epoch` does not appear once in
@@ -1021,7 +1021,7 @@ was built anyway.**
 **And the counter-example, which is the stronger half.** DB-3: app JS reached a
 privileged unmask call and could pass `actor: { kind: "auto" }` to read its own
 PII/PHI/PCI at will, patched by `sanitize_app_actor` stripping reserved system
-kinds (`crates/zeroship-plugin-db/src/crud/unmask.rs:282-303`). That is not a
+kinds (`crates/zeroship-data-engine/src/crud/unmask.rs:282-303`). That is not a
 bug the shape happened to have; it is what the shape produces. A privileged call
 the worker can make is a privileged call creator code can reach, and the only
 defence available is a hand-maintained list of arguments to strip.
@@ -1199,7 +1199,7 @@ having no effect:
 
 **Both were written as settled. Both were contradicted by live code the whole
 time** - `dispatch_set_mask_policy`
-(`crates/zeroship-plugin-db/src/crud/mask_policy.rs:224`), reached from the
+(`crates/zeroship-data-engine/src/crud/mask_policy.rs:224`), reached from the
 `setMaskPolicy` V8 method (`v8_classes/db_platform.rs:145-155`), plus a store
 that persists the result durably - **and neither statement caused the
 contradiction to be found.** It was found by asking where the policy comes from,
@@ -1446,7 +1446,7 @@ across clusters.
 `runtime_schema_for` missed the deploy-keyed cache, called
 `read_live_schema(pool, app_id)`, narrowed the result to the one collection, and
 cached **only that slice**
-(`crates/zeroship-plugin-db/src/crud/introspect_schema.rs:96-110`, DELETED in
+(`crates/zeroship-data-engine/src/crud/introspect_schema.rs:96-110`, DELETED in
 `632c1d1fa` when the descriptor became the sole schema authority; read it there).
 `read_live_schema` selected every column of every table in the app's schema -
 `WHERE n.nspname = $1`, no table predicate - over `pg_attribute` joined to
@@ -1745,7 +1745,7 @@ and citations of behaviour need checking exactly like citations of lines.)*
    schema is created anyway**, because the real site interpolates the
    identifier:
    `format!(r#"CREATE SCHEMA "{ADMIN_SCHEMA}" AUTHORIZATION "{PLATFORM_ROLE}""#)`
-   (`crates/zeroship-plugin-db/src/auth/bootstrap.rs:145-150`). So the arm as
+   (`crates/zeroship-data-engine/src/auth/bootstrap.rs:145-150`). So the arm as
    written passes on today's tree, passes after the deletion it is meant to
    enforce, and passes if a second provisioner is added tomorrow using the same
    idiom - **it cannot observe its own subject.** It must match the interpolated

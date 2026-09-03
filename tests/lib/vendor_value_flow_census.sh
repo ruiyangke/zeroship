@@ -74,8 +74,42 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SRC="$ROOT/crates/zeroship-plugin-db/src"
-cd "$SRC" || { echo "no such tree: $SRC" >&2; exit 1; }
+# TWO SOURCE ROOTS SINCE 2026-09-03. The ENGINE tier - which is where nearly
+# every vendor-value holder this census reports lives - left
+# `zeroship-plugin-db/src` for `zeroship-data-engine/src`. Pinned to the first
+# root the census would have scanned the adapter and CDC files that stayed and
+# printed a small clean number about the ~22k lines that went.
+#
+# Scanned as one region under one `tier_of_file` map, for the reason at the head
+# of tier_direction_census.sh: what this asks - does a NON-VENDOR tier hold a
+# vendor value - is a question about tiers, not about cargo packages.
+SRC_ROOTS=(
+  "$ROOT/crates/zeroship-plugin-db/src"
+  "$ROOT/crates/zeroship-data-engine/src"
+)
+for _root in "${SRC_ROOTS[@]}"; do
+  [ -d "$_root" ] || { echo "no such tree: $_root" >&2; exit 1; }
+done
+
+# Every `.rs` under every root, as `<root>\t<./-relative path>`. The relative
+# half keys `tier_of_file` and the gating set; the root half makes the path
+# absolute for the readers.
+all_sources() {
+  local p
+  for p in "${SRC_ROOTS[@]}"; do
+    ( cd "$p" && find . -name '*.rs' | LC_ALL=C sort | sed "s|^|$p\t|" )
+  done
+}
+
+# The `mod.rs` / `lib.rs` files that carry the cfg-gated `mod` declarations.
+all_mod_decls() {
+  local p
+  for p in "${SRC_ROOTS[@]}"; do
+    ( cd "$p" && find . \( -name 'mod.rs' -o -name 'lib.rs' \) | LC_ALL=C sort | sed "s|^|$p\t|" )
+  done
+}
+
+label() { printf '%s/%s\n' "$(basename "$(dirname "$1")" | sed 's/^zeroship-//')" "$2"; }
 
 # Production region of one file: no comments, no cfg-gated items. Same rule as
 # tier_direction_census.sh, and it must be applied to the CALLER scan as well as
@@ -113,13 +147,21 @@ prod() {
 tier_of_file() {
   case "$1" in
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
-    ./crud/*|./transaction/*|./exec.rs|./broker.rs|./backend_selection.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs) echo ENGINE ;;
+    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs|./drop_namespace.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
-    ./backend/postgres.rs|./backend/pg_row_json.rs|./backend/pg_error.rs|./backend/pg_introspect.rs) echo PG ;;
-    ./backend/sqlite/*)                                  echo SQLITE ;;
-    ./encryption/*)                                      echo ENCRYPT ;;
+    # NO ARMS for ./broker.rs, ./read_set.rs, ./backend/postgres.rs,
+    # ./backend/pg_*.rs, ./backend/sqlite/*, ./encryption/*, ./error.rs or
+    # ./binding.rs. Every one was extracted into a dependency crate, and an arm
+    # for a file this region does not hold is a pattern matching nothing - kept
+    # in step with tier_direction_census.sh, where the two censuses judging one
+    # file differently is defect 1.
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
-    ./error.rs|./descriptor.rs|./binding.rs)             echo CORE ;;
+    # `descriptor.rs` and `backend/mod.rs`: ENGINE, settled by the 2026-09-03
+    # cut. See the same two arms in tier_direction_census.sh.
+    ./descriptor.rs|./backend/mod.rs)                    echo ENGINE ;;
+    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo ENGINE ;;
+    ./context.rs|./service.rs|./op_error.rs)             echo ADAPTER ;;
+    ./cdc_lifecycle.rs|./change_stream_pg.rs)            echo CDC ;;
     *)                                                   echo CONTESTED ;;
   esac
 }
@@ -144,8 +186,12 @@ trap 'rm -f "$SRCS" "$HITS" "$GATED"' EXIT
 TESTMODS="$(mktemp)"; PRODMODS="$(mktemp)"
 trap 'rm -f "$SRCS" "$HITS" "$GATED" "$TESTMODS" "$PRODMODS"' EXIT
 
-while read -r m; do
-  dir="$(dirname "$m")"
+while IFS=$'\t' read -r croot m; do
+  # Keyed by ROOT and directory, not by directory alone: two crates each hold a
+  # `./crud/mod.rs`-shaped tree, and a module gated in one must not gate a
+  # same-named file in the other.
+  dir="$croot/$(dirname "${m#./}")"
+  dir="${dir%/.}"
   awk -v D="$dir" '
     function emit(tag,   name) {
       name=$0; sub(/.*mod /, "", name); sub(/;.*/, "", name)
@@ -160,24 +206,26 @@ while read -r m; do
       pend=0; next
     }
     { pend=0 }
-  ' "$m"
-done < <(find . -name 'mod.rs' -o -name 'lib.rs') > "$GATED".raw
+  ' "$croot/${m#./}"
+done < <(all_mod_decls) > "$GATED".raw
 
 grep -P '^TEST\t' "$GATED".raw | cut -f2 | sort -u > "$TESTMODS"
 grep -P '^PROD\t' "$GATED".raw | cut -f2 | sort -u > "$PRODMODS"
 # test-only = declared under a test cfg and never under a production one
-comm -23 "$TESTMODS" "$PRODMODS" | sed 's|^\./||' | while read -r base; do
+comm -23 "$TESTMODS" "$PRODMODS" | while read -r base; do
   echo "${base}.rs"; echo "${base}/"
 done > "$GATED"
 rm -f "$GATED".raw
 
+# `$1` is an ABSOLUTE path, and so is every entry in $GATED - the two roots make
+# a bare relative key ambiguous.
 is_gated_file() {
-  local rel="${1#./}"
+  local abs="$1"
   while read -r g; do
     [ -z "$g" ] && continue
     case "$g" in
-      */) case "$rel" in "$g"*) return 0 ;; esac ;;
-      *)  [ "$rel" = "$g" ] && return 0 ;;
+      */) case "$abs" in "$g"*) return 0 ;; esac ;;
+      *)  [ "$abs" = "$g" ] && return 0 ;;
     esac
   done < "$GATED"
   return 1
@@ -185,7 +233,8 @@ is_gated_file() {
 
 # Collect every fn whose RETURN TYPE names a vendor. Joins the signature across
 # lines up to the opening `{` or the `;` of a trait method.
-while read -r f; do
+while IFS=$'\t' read -r croot rel; do
+  f="$croot/${rel#./}"
   awk -v F="$f" '
     /^[[:space:]]*(\/\/\/|\/\/!|\/\/)/ { next }
     /(^|[^A-Za-z_])fn [a-z_]+/ && !collecting { collecting=1; sig=""; name=$0
@@ -199,24 +248,25 @@ while read -r f; do
       collecting=0
     }
   ' "$f"
-done < <(find . -name '*.rs') | sort -u > "$SRCS"
+done < <(all_sources) | sort -u > "$SRCS"
 
 echo "Vendor-returning functions (the sources a value can flow FROM): $(wc -l < "$SRCS")"
 sed 's/^/  /' "$SRCS"
 echo
-printf '%-9s %-34s %s\n' TIER FILE 'HOLDS A VENDOR VALUE FROM'
-echo "--------------------------------------------------------------------------------"
+printf '%-9s %-46s %s\n' TIER FILE 'HOLDS A VENDOR VALUE FROM'
+echo "--------------------------------------------------------------------------------------------"
 
 while read -r fn; do
   [ -z "$fn" ] && continue
-  while read -r f; do
-    t=$(tier_of_file "$f")
+  while IFS=$'\t' read -r croot relpath; do
+    f="$croot/${relpath#./}"
+    t=$(tier_of_file "$relpath")
     # A vendor tier holding its own vendor's values is the point of that tier.
     case "$t" in PG|SQLITE|CONTESTED) continue ;; esac
     # A file whose `mod` declaration is gated is not production, however
     # ordinary its own contents look.
     is_gated_file "$f" && continue
-    rel="${f#./}"
+    rel="$(label "$croot" "${relpath#./}")"
     # Skip the file that DEFINES it - a definition is a signature, which the
     # signature census already rules on.
     grep -qE "(^|[^A-Za-z_])fn ${fn}\b" "$f" && continue
@@ -232,13 +282,13 @@ while read -r fn; do
     # SIGPIPE. See defect 2 in the header.
     n=$(prod "$f" | grep -cE "(^|[^A-Za-z_])${fn}\(")
     if [ "${n:-0}" -gt 0 ]; then
-      printf '%-9s %-34s %s\n' "$t" "$rel" "$fn"
+      printf '%-9s %-46s %s\n' "$t" "$rel" "$fn"
       echo "$t" >> "$HITS"
     fi
-  done < <(find . -name '*.rs')
+  done < <(all_sources)
 done < "$SRCS"
 
-echo "--------------------------------------------------------------------------------"
+echo "--------------------------------------------------------------------------------------------"
 echo "Non-vendor modules holding vendor values: $(wc -l < "$HITS")"
 echo
 echo "Read as a FLOOR - see KNOWN LIMITS in this header. A hit is not a defect by"

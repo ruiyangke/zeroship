@@ -3,7 +3,7 @@
 **Status.** PARTIAL. Four of the six target crates exist and are load-bearing:
 `crates/zeroship-data-query-builder`, `crates/zeroship-data-core`,
 `crates/zeroship-data-postgres`, `crates/zeroship-data-sqlite`. Both vendor cuts are done -
-`crates/zeroship-plugin-db/src/backend/mod.rs` is now a re-export ladder plus the `Backend`
+`crates/zeroship-data-engine/src/backend/mod.rs` is now a re-export ladder plus the `Backend`
 conformance marker and `backend/cancel.rs`. `zeroship-data-engine` and `zeroship-data-cdc-server` do
 not exist; their modules still sit in `crates/zeroship-plugin-db`.
 
@@ -182,7 +182,7 @@ a new vendor means writing a statement or reading a SQLSTATE inside `data-engine
 landed. (The wording is not yet ratified - see Open 4.)
 
 The remaining surface is three logical operations, each written twice because each carries its own
-dialect, all in `crates/zeroship-plugin-db/src/backend_handle.rs`: read an encrypted raw column, read
+dialect, all in `crates/zeroship-data-engine/src/backend_handle.rs`: read an encrypted raw column, read
 a plaintext raw column, append an unmask audit row. Everything else has gone: `crud/unmask.rs` holds
 no SQL text, `transaction/mod.rs`'s `BEGIN ISOLATION LEVEL` is gone, and the `DROP SCHEMA` in
 `drop_namespace.rs` and the whole of `crud/mask_drift.rs` are `#[cfg]`-gated out of every shipped
@@ -207,7 +207,7 @@ plane. The associated types cannot be erased without losing the concrete client 
 `LockManager::acquire_advisory_lock` takes by `&Self::Client`. The backend set is closed, and an enum
 is the canonical shape for a closed sum. Monomorphised dispatch is preserved, not replaced.
 
-`BackendHandle` (`crates/zeroship-plugin-db/src/backend_handle.rs`) names both vendors in its
+`BackendHandle` (`crates/zeroship-data-engine/src/backend_handle.rs`) names both vendors in its
 definition, so it belongs to the tier ABOVE both, which is `data-engine`. Neither vendor crate names
 it - so the graph is a diamond, not a cycle.
 
@@ -379,7 +379,7 @@ follows are the mistakes that would otherwise be remade.
   records a behaviour reason, not a preference: it needs the startup-only suppression guard, whose
   `Drop` merely re-enables delivery, while the general pause guard emits a Resync on `Drop` and would
   add a synthetic first message to every SQLite subscription. The guards themselves live in
-  `crates/zeroship-plugin-db/src/broker.rs`; deleting `broker::engage_schema_pending` /
+  `crates/zeroship-data-core/src/broker.rs`; deleting `broker::engage_schema_pending` /
   `disengage_schema_pending` breaks them, because those are their implementation.
 
 - **Do not put an executor call in a `data-core` trait's default body.** `LockManager` carried a

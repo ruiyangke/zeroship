@@ -19,6 +19,24 @@
 # 17 unit tests and was never added to this list. Only its deletion made the two
 # sides agree.
 #
+# THIS LIST IS INCOMPLETE TODAY, and the gap is older and wider than the one row
+# added below. Measured 2026-09-03 against `crates/*/Cargo.toml` +
+# `libs/*/Cargo.toml`: 42 workspace members, 30 rows here. FOURTEEN members are
+# absent - `zeroship-cli`, `zeroship-data-core`, `zeroship-data-postgres`,
+# `zeroship-data-sqlite`, `zeroship-data-query-builder` and every
+# `zeroship-migrate*` - and three rows (`zeroship`, `zeroship-migrate-adapter`,
+# `zeroship-migrated`) name things that are not packages. Each of the absent ones
+# contains `#[cfg(test)]` modules, so each builds a lib test binary and each is
+# an `EXTRA` the gate refuses.
+#
+# It is NOT fixed here, deliberately: reconciling it needs a
+# `cargo test --workspace --no-run` this workspace cannot currently produce
+# (feature unification breaks registry `postgres-types`), and regenerating a
+# census from a build that does not run is how a gate stops being one - see the
+# warning three lines down. Only `zeroship-data-engine` is added, because that
+# crate was created in the same commit as this note and leaving it out would be
+# a NEW blind spot rather than an inherited one.
+#
 # To regenerate after a deliberate change:
 #   cargo test --workspace --no-run --message-format=json > /tmp/t.json
 #   tests/test_target_census_gate.sh /tmp/t.json --print-census
@@ -36,6 +54,7 @@ zeroship-config-contract
 zeroship-config-macros
 zeroship-control
 zeroship-core
+zeroship-data-engine
 zeroship-gateway
 zeroship-mailer
 zeroship-metering

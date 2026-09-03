@@ -31,7 +31,7 @@ cited line:
 
 | Fragment | Origin | Layer |
 | --- | --- | --- |
-| `db: autocommit session setup (per-app <U+00A7>17.5 + DB-1 guards): ` | `crates/zeroship-plugin-db/src/exec.rs:326` (literal), applied at `exec.rs:322-329` | plugin-db call site |
+| `db: autocommit session setup (per-app <U+00A7>17.5 + DB-1 guards): ` | `crates/zeroship-data-engine/src/exec.rs:326` (literal), applied at `exec.rs:322-329` | plugin-db call site |
 | inner `db: ` | `crates/zeroship-plugin-db/src/error.rs:721` -- `format!("db: {e}")` in `walk_pg_chain` | plugin-db classifier |
 | `db error` | `libs/compio-postgres/src/error/mod.rs:395` -- `Kind::Db => fmt.write_str("db error")` | driver Display |
 | ` <U+2014> caused by: ` | `crates/zeroship-plugin-db/src/error.rs:724` -- `msg.push_str(&format!(" <U+2014> caused by: {src}"))` | plugin-db source-chain walk |
@@ -185,17 +185,17 @@ multi-layer database error the platform produces.
 This is the finding most improved by classification. **The majority of guard
 tokens are legitimate.** `SEC-1` and `SEC-4` appear in `assert!` messages
 (`crates/zeroship-plugin-db/src/context.rs:1206-1275`,
-`crates/zeroship-plugin-db/src/crud/mask_pass.rs:1055-1065`) -- a DEVELOPER audience,
+`crates/zeroship-data-engine/src/crud/mask_pass.rs:1055-1065`) -- a DEVELOPER audience,
 where naming the guard being tested is exactly right. A blanket ban on guard
 tokens in strings would delete these correctly-written test assertions.
 
 The runtime offenders are a small, tightly-scoped set:
 
-- `crates/zeroship-plugin-db/src/exec.rs:316` -- `db: autocommit BEGIN (per-app U+00A7 17.5 + DB-1 guards): `
-- `crates/zeroship-plugin-db/src/exec.rs:326` -- `db: autocommit session setup (...)` (the anchor)
-- `crates/zeroship-plugin-db/src/exec.rs:344` -- `db: autocommit COMMIT (...)`
-- `crates/zeroship-plugin-db/src/transaction/mod.rs:171` -- `db: tx session setup (...)`
-- `crates/zeroship-plugin-db/src/auth/bootstrap.rs:1786` -- `per-app role MUST be NOREPLICATION (U+00A7 17.5 slot-ownership-stays-platform)`
+- `crates/zeroship-data-engine/src/exec.rs:316` -- `db: autocommit BEGIN (per-app U+00A7 17.5 + DB-1 guards): `
+- `crates/zeroship-data-engine/src/exec.rs:326` -- `db: autocommit session setup (...)` (the anchor)
+- `crates/zeroship-data-engine/src/exec.rs:344` -- `db: autocommit COMMIT (...)`
+- `crates/zeroship-data-engine/src/transaction/mod.rs:171` -- `db: tx session setup (...)`
+- `crates/zeroship-data-engine/src/auth/bootstrap.rs:1786` -- `per-app role MUST be NOREPLICATION (U+00A7 17.5 slot-ownership-stays-platform)`
 - `crates/zeroship-core/src/logout_token.rs:195,204` -- `(forbidden by OIDC BCL U+00A7 2.4)` (arguably legitimate: a public RFC citation, not an internal doc)
 - `crates/zeroship-runtime/src/web/streams/readable_default_controller.rs:1230` -- `see streams-native.md U+00A7 VII`
 - `crates/zeroship-schema/src/query.rs:8728` -- `(was INTEGER pre-PR 3 -- see proposal U+00A7 9 PR 3)`
@@ -248,7 +248,7 @@ sharing one variant. The mechanism exists; the variants are too coarse.
 The `leak` regex tag returned 833 hits, 52 in err/log positions in non-test
 files. **This tag is heavily false-positive and its raw count should not be
 quoted.** Inspection showed the bulk are SQL DDL strings matching on `_role` or
-`information_schema` -- e.g. `crates/zeroship-plugin-db/src/auth/bootstrap.rs:147,160,728`
+`information_schema` -- e.g. `crates/zeroship-data-engine/src/auth/bootstrap.rs:147,160,728`
 (`CREATE SCHEMA`, `GRANT EXECUTE`), `crates/zeroship-migrate-server/src/provisioning.rs:123`.
 These are SQL being *built*, not messages being *shown*.
 
@@ -589,8 +589,8 @@ where typographic dashes are arguably correct. Recommend scoping to
 `sdks/ui`.
 
 **Option 1b. Delete doc markers and guard IDs from the four runtime sites.**
-`crates/zeroship-plugin-db/src/exec.rs:316,326,344` and
-`crates/zeroship-plugin-db/src/transaction/mod.rs:171`. Replace
+`crates/zeroship-data-engine/src/exec.rs:316,326,344` and
+`crates/zeroship-data-engine/src/transaction/mod.rs:171`. Replace
 `db: autocommit session setup (per-app U+00A7 17.5 + DB-1 guards): ` with
 `db: autocommit session setup: `. The guard rationale belongs in the comment
 directly above, where it already is (`exec.rs:301`).
