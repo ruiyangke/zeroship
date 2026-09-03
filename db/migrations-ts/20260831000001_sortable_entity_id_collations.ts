@@ -1,4 +1,4 @@
-import { raw } from "zero-migrate";
+import { raw } from "@zeroship/migrate";
 
 // These are the platform columns whose entire semantic domain is a canonical
 // case-sensitive typed id or a storage copy of one. PostgreSQL's locale

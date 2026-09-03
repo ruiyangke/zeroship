@@ -54,7 +54,7 @@ const OWNER_APP = "app_partial";
 
 // The base pair creates `dupes`, then seeds two rows sharing a `tag`. The
 // duplicate is invisible to the offline fold and fatal to a unique index.
-const FILE_A_SCHEMA = `import { table, t } from "zero-migrate";
+const FILE_A_SCHEMA = `import { table, t } from "@zeroship/migrate";
 export const name = "create_dupes";
 export default {
   schema() {
@@ -66,7 +66,7 @@ export default {
 };
 `;
 
-const FILE_A_DATA = `import { table } from "zero-migrate";
+const FILE_A_DATA = `import { table } from "@zeroship/migrate";
 export const name = "seed_dupes";
 export default {
   data() {
@@ -80,7 +80,7 @@ export default {
 
 // File B is ONE file with TWO changes. Op 0 creates a fresh table and commits.
 // Op 1 builds a unique index over the duplicated column and fails at the server.
-const FILE_B = `import { table, t } from "zero-migrate";
+const FILE_B = `import { table, t } from "@zeroship/migrate";
 export const name = "survivor_then_unique";
 export default {
   schema() {

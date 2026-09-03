@@ -20,7 +20,7 @@
 #
 # Prerequisites:
 #   - cargo build --release
-#   - pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
+#   - pnpm install && pnpm build
 #   - pnpm install (jose, used by the harness OP to sign the admin bearer)
 #   - docker (an EPHEMERAL Postgres is started and removed by this script)
 #

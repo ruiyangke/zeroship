@@ -13,7 +13,7 @@
 #
 # Prereqs (see docs/runbooks/local-dev.md):
 #   - service/CLI binaries: cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship-cli --bins
-#   - the zero-migrate CLI: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
+#   - the zero-migrate CLI: pnpm install && pnpm build
 #   - a Postgres reachable at $GOLDEN_PATH_DSN (default: the compose instance on :5440)
 #   - examples/starter deps installed (pnpm install) so `pnpm build` works
 # ---------------------------------------------------------------------------
@@ -373,7 +373,7 @@ fi
   echo "      $ROOT/packages/zero-migrate-cli/dist/cli-bin.js" >&2
   echo "      The platform schema is never applied, so nothing below measures" >&2
   echo "      the platform. Build it with:" >&2
-  echo "        pnpm install && pnpm build && pnpm --filter zero-migrate-cli build" >&2
+  echo "        pnpm install && pnpm build" >&2
   exit 2
 }
 

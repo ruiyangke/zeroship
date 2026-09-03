@@ -58,9 +58,9 @@ import { dirname, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { table, t, view } from "zero-migrate";
-import { buildEnvelope } from "zero-migrate/internal/recorder";
-import type { MigrationModule } from "zero-migrate/internal/recorder";
+import { table, t, view } from "@zeroship/migrate";
+import { buildEnvelope } from "@zeroship/migrate/internal/recorder";
+import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 import { currentIrVersion, previewSql } from "zero-migrate-cli";
 
 const HERE = dirname(fileURLToPath(import.meta.url));

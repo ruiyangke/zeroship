@@ -140,7 +140,7 @@ assert(widgets.options.softDelete === false && widgets.options.strictness === 's
 assert(Array.isArray(widgets.indexes), 'indexes is an array');
 
 // (3) env.db.ts is a passive schema map using the current authoring API.
-assert(gen.envDbTs.includes('from "zero-migrate";'), 'imports zero-migrate');
+assert(gen.envDbTs.includes('from "@zeroship/migrate";'), 'imports @zeroship/migrate');
 assert(gen.envDbTs.includes('const schema = {'), 'has the schema const');
 assert(gen.envDbTs.includes('label: t.text(),'), 'renders label builder chain');
 assert(gen.envDbTs.includes('count: t.int().notNull(),'), 'renders count builder chain');

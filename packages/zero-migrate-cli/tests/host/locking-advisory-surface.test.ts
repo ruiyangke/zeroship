@@ -49,7 +49,7 @@ scope = "all"
   writeFileSync(join(work, "registry.json"), JSON.stringify({ lk_t: OWNER_APP }));
   writeFileSync(
     join(work, "migrations", "20260101000000_create.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "create_lk_t";
 export default {
   schema() {
@@ -67,7 +67,7 @@ export default {
 function addColumnMigration(work: string, unique: boolean): void {
   writeFileSync(
     join(work, "migrations", "20260101000001_add_e.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "add_e";
 export default {
   schema() {

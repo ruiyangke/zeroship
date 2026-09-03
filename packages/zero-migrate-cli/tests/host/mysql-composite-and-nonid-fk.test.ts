@@ -50,7 +50,7 @@ const OWNER_APP = "app_fkm";
 // `parent` carries a composite candidate key (a,b) and a single non-`id` one
 // (code). Both are declared via `uniques`, which is what makes them referenceable
 // - the engine requires a reference to name an exact ordered candidate key.
-const MIGRATION = `import { table, t } from "zero-migrate";
+const MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "fk_shapes";
 export default {
   schema() {

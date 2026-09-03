@@ -1,4 +1,4 @@
-import { grant } from "zero-migrate";
+import { grant } from "@zeroship/migrate";
 
 // Bounce and complaint suppression never recorded anything.
 //

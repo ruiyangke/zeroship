@@ -74,7 +74,7 @@ function uniqueNamespace(prefix: string): string {
 }
 
 function body(extraColumn: string, tableName = "things"): string {
-  return `import { table, t } from "zero-migrate";
+  return `import { table, t } from "@zeroship/migrate";
 export const name = "create_things";
 export default {
   schema() {

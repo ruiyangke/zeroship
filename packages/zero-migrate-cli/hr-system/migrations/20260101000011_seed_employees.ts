@@ -1,4 +1,4 @@
-import { table, decimal, int64 } from "zero-migrate";
+import { table, decimal, int64 } from "@zeroship/migrate";
 
 // Operational seed 1: the workforce and its current position assignments.
 // Foreign keys (department, grade, manager, position) are all satisfied by the

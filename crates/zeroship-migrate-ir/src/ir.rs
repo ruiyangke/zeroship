@@ -2162,7 +2162,7 @@ pub enum ExistenceGuard {
     IfExists,
 }
 
-/// **VENDOR (`zero-migrate/pg`)** - the CLOSED privilege lexicon for
+/// **VENDOR (`@zeroship/migrate`)** - the CLOSED privilege lexicon for
 /// `Op::Grant`/`Op::Revoke`. A CLOSED enum, so serde REJECTS an
 /// out-of-set token at DESERIALIZE - a hand-crafted IR envelope cannot smuggle an
 /// injection-shaped privilege string into the GRANT render seam (the
@@ -3658,7 +3658,7 @@ pub enum Op {
     },
 
     // ----------------------------------------------------------------------
-    // VENDOR (`zero-migrate/pg`) - Postgres-ONLY privileged primitives.
+    // VENDOR (`@zeroship/migrate`) - Postgres-ONLY privileged primitives.
     // Each is REFUSED fail-closed under a Confined capability
     // set at validate AND at lower (gate 1 = capability gate; gate 2 = the
     // rendered SQL hits the Confined deny-list). Exactly one registered backend

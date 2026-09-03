@@ -1,5 +1,9 @@
 # The JS host boundary for a napi-embeddable `@zeroship/migrate` engine
 
+> **Historical design snapshot.** Package paths and package boundaries below
+> describe the 2026-07-11 tree. The live DSL is the single
+> `@zeroship/migrate` package at `packages/zero-migrate/`.
+
 **Status:** design-only (phase: map the JS HOST boundary)
 **Branch:** `design/migrate-napi-shell`
 **Date:** 2026-07-11

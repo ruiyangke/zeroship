@@ -49,7 +49,7 @@ const ADDON_PATH = resolve(
 
 const OWNER_APP = "app_preflight";
 
-const SEED_SCHEMA = `import { table, t } from "zero-migrate";
+const SEED_SCHEMA = `import { table, t } from "@zeroship/migrate";
 export const name = "create_seeded";
 export default {
   schema() {
@@ -58,7 +58,7 @@ export default {
 };
 `;
 
-const SEED_DATA = `import { table } from "zero-migrate";
+const SEED_DATA = `import { table } from "@zeroship/migrate";
 export const name = "seed";
 export default {
   data() {
@@ -71,7 +71,7 @@ export default {
 `;
 
 /** Approval-free step FIRST, approval-gated step SECOND. The order is the point. */
-const FRESH_SCHEMA = `import { table, t } from "zero-migrate";
+const FRESH_SCHEMA = `import { table, t } from "@zeroship/migrate";
 export const name = "create_fresh";
 export default {
   schema() {
@@ -80,7 +80,7 @@ export default {
 };
 `;
 
-const DELETE_SEEDED = `import { table } from "zero-migrate";
+const DELETE_SEEDED = `import { table } from "@zeroship/migrate";
 export const name = "delete_seeded";
 export default {
   data() {

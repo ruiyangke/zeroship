@@ -89,7 +89,7 @@ scope = "all"
     const stamp = `2026010${index + 1}000000`;
     writeFileSync(
       join(work, "migrations", `${stamp}_${table}.ts`),
-      `import { table, t } from "zero-migrate";
+      `import { table, t } from "@zeroship/migrate";
 export const name = "${table}";
 export default {
   schema() {

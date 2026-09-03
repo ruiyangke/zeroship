@@ -17,13 +17,13 @@ packages:
   # The platform schema corpus. A member for TWO load-bearing reasons, neither of
   # them publishing (it is `private: true` and has no build, test or check script):
   #
-  #   1. RESOLUTION. The 35 `.ts` files `import ... from "zero-migrate"`, and the
+  #   1. RESOLUTION. The migration files import from `@zeroship/migrate`, and the
   #      `zero-migrate` CLI loads them with a plain `import()` under tsx - no
   #      bundler, no alias, no NODE_PATH - so the specifier resolves by Node's
   #      upward walk from `db/migrations-ts/`. Membership is what puts a
-  #      `zero-migrate` link in `db/migrations-ts/node_modules`, one step up.
+  #      scoped package link in `db/migrations-ts/node_modules`, one step up.
   #      Without it the walk reaches the repo root, whose `node_modules` holds no
-  #      `zero-migrate` (the root manifest declares no dependencies), and the
+  #      `@zeroship/migrate` package (the root manifest declares no dependencies), and the
   #      apply dies on file #1 with `Cannot find package`.
   #   2. MODULE KIND. `package.json` `"type": "module"` is also what makes tsx
   #      read those files as ESM. With no `package.json` above them they are

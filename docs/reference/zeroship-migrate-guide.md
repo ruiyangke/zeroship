@@ -23,6 +23,14 @@ tree as it stands today, and names the file that carries the claim now.
 engine was vendored. Those have been repointed at the in-sourced crates; a
 `third_party/` path resolves against nothing.)
 
+**Current authoring contract (2026-09-01).** There is one npm authoring package,
+`@zeroship/migrate`, in `packages/zero-migrate/`. A current module exports either
+`schema()` for DDL, `data()` plus recorded `inverse()` for reversible DML, or
+`data()` plus a non-empty `irreversible` reason. Schema and data cannot share a
+module. The generic forward/reverse phase names discussed in historical engine
+sections below are not aliases and are rejected by the current recorder. For
+current examples, use [the op DSL reference](./migrate-op-dsl.md).
+
 ---
 
 ## Table of contents
@@ -114,7 +122,7 @@ author -> plan (lint) -> gate (approval) -> executor::apply (guard + role)
 
 The engine's portability and integrity both rest on a **single canonical intermediate representation** — a frozen, dialect-neutral wire shape (full treatment in [§6](#6-the-ir--its-wire-contract)):
 
-- **One IR, one recorder.** The TypeScript authoring surface lives in `sdks/migrate/src/`. Its engine-side twin, a hand-kept `migrate_ops.js` the Rust runtime evaluated in V8, was collapsed into the same build output as `ops.ts`, so there is no second copy to drift: `sdks/migrate/src/embedded-recorder.ts` is the bundle entry the engine maps as `@zeroship/migrate`. The canonical IR shape is the frozen contract (`migrate-op-dsl.md:29-34`).
+- **One IR, one recorder.** The TypeScript authoring surface and recorder live in `packages/zero-migrate/src/`, published as `@zeroship/migrate`. The engine CLI and Vite plugin consume that package's internal recorder export, so authoring and draining share one ambient singleton. The canonical IR shape is the frozen contract.
 - **The IR is a closed discriminated union.** `MigrationIr` + the closed `Op` enum derive `schemars` JSON Schema, emitting `op-ir.schema.json` — the discriminated union the JS builder targets.
 - **Canonicalization defends the checksum.** Because `checksum = hash(up + down)` (or `Checksum::of_ir` over the neutral op-list) is the tamper-evidence anchor, the IR serializes *canonically* — `IrScalar::Bytes` stored decoded and re-encoded canonical base64; declared column ORDER preserved through the fold.
 - **Dialect-neutral, engine-owned rendering.** One script lowers per-dialect to Postgres, SQLite, and MySQL; the author describes DDL/DML once and the engine owns 100% of per-dialect rendering. A construct with no native realization on a target **fails closed** at validate (`DIALECT_UNSUPPORTED`), never silently degrading.
@@ -131,7 +139,10 @@ The engine is a **generic, standalone-capable engine** with a **thin managed pro
 
 Both an authoring mandate and a security property. The platform's own schema has **no** hand-authored SQL/Liquibase — the JS DSL corpus (`db/migrations-ts/`) is the whole source (`AGENTS.md:42`). On the creator surface there is **no raw SQL** — no `Raw` type, no ``sql`` escape, no string fragments; every transform/predicate is a closed `Expr` AST and the engine owns rendering (`migrate-op-dsl.md:22-27`, "property A"). The gated `raw({ sql, reason })` escape is reserved for trusted platform use, carries its `reason` inside the checksummed IR, and is counted against a committed baseline.
 
-A migration module is a single default-exported `{ name?, up, down? }`. `up()` is required; `down()` is optional and **not auto-derived for DML or lossy DDL** — a `backfill`/`update`/`del` or a `dropColumn` yields no auto-inverse, so such a migration is `down: null` (irreversible) unless the author hand-writes a structured `down()` (itself op calls, never a raw string). This encodes "default to roll-forward; reserve true rollback for recent/failed deploys."
+A migration module separates structural and data intent. `schema()` records DDL
+and receives an engine-synthesized structural inverse. `data()` records DML and
+must carry either a separately recorded `inverse()` or a non-empty
+`irreversible` reason. This makes rollback posture explicit and checksummable.
 
 ### 1.9 Summary — the "why" in one table
 
@@ -299,11 +310,17 @@ The crate root's compressed form is `author -> plan (lint) -> gate (approval) ->
 
 ## §3 Authoring: schema-structure DSL
 
-This section documents the TypeScript authoring surface a creator imports to describe schema changes: the migration-module shape, the fluent `table()`/`view()` handles, the `t.*` column lexicon, facets/defaults, constraints, indexes, enums/domains/sequences/schemas/extensions/roles, views, triggers, and partitions. Verified against `sdks/migrate/src/types.ts` (manual authoring types) and `sdks/migrate/src/ops.ts` (recorder implementation), cross-checked against `docs/reference/migrate-dsl-examples.md`. The **expression sublanguage** (`(col) => Expr`) is owned by [§4](#4-authoring-the-expression-sublanguage); this section shows only which builder tier each slot receives and cross-refs §4 for node-level detail.
+This section documents the TypeScript authoring surface a creator imports to describe schema changes: the migration-module shape, the fluent `table()`/`view()` handles, the `t.*` column lexicon, facets/defaults, constraints, indexes, enums/domains/sequences/schemas/extensions/roles, views, triggers, and partitions. Verified against `packages/zero-migrate/src/types.ts` (manual authoring types) and `packages/zero-migrate/src/ops.ts` (recorder implementation), cross-checked against `docs/reference/migrate-dsl-examples.md`. The **expression sublanguage** (`(col) => Expr`) is owned by [§4](#4-authoring-the-expression-sublanguage); this section shows only which builder tier each slot receives and cross-refs §4 for node-level detail.
 
 ### 3.1 Architecture in one paragraph
 
-`ops.ts` *is* the engine-embedded recorder: `sdks/migrate/src/embedded-recorder.ts` bundles it into the single artifact the engine maps as `@zeroship/migrate` (the former hand-kept `migrate_ops.js` twin, which Rust `include_str!`d into V8, was deleted when the two collapsed into one build output). It emits the dialect-neutral op objects that the closed Rust `Op` enum / `op-ir.schema.json` deserialize; the `.ir.json` wire shape is frozen and the golden corpus plus `Checksum::of_ir` round-trip are the contract (`ops.ts:15-29`). Every terminal on a handle **records eagerly and synchronously** onto an ambient per-migration recorder and returns the handle, so handles are reusable and chainable.
+`packages/zero-migrate/src/ops.ts` is the one operation producer, and
+`src/internal/recorder.ts` is the host seam exported as
+`@zeroship/migrate/internal/recorder`. Code imported by a migration and code
+drained by the host therefore share one module instance. It emits the
+dialect-neutral op objects that the closed Rust `Op` enum and IR schema
+deserialize. Every terminal records eagerly and synchronously and returns its
+handle, so handles are reusable and chainable.
 
 ### 3.2 One import root
 
@@ -315,40 +332,45 @@ The former `/pg` root is retired. `table()` is the one table handle, and public 
 
 ### 3.3 Migration module shape
 
-A migration is a `.ts` module. The typed contract is `Migration` (`types.ts:1323-1328`):
+A migration is a `.ts` module. The typed contract is `Migration`:
 
 ```ts
-export interface Migration { name?: string; up(): void; down?(): void; }
+type Migration =
+  | { name?: string; schema(): void }
+  | { name?: string; data(): void; inverse(): void }
+  | { name?: string; data(): void; irreversible: string };
 ```
 
-`up`/`down` are parameterless and author against the ambient recorder. The examples doc authors it as module-level named exports (`export const name`, `export function up()`, `export function down()`) which is equivalent:
+Each phase is parameterless and authors against the ambient recorder. A schema
+module contains DDL only; a data module contains DML only:
 
 ```ts
-import { table, t, now, uuidV4 } from "@zeroship/migrate";
+import { now, table, t, uuidV4 } from "@zeroship/migrate";
 
-export const name = "create_users";
-
-export function up() {
-  table("users").create({
-    columns: {
-      id: t.uuid().notNull().default(uuidV4()),
-      email: t.text().notNull(),
-      created_at: t.timestamp().notNull().default(now()),
-    },
-    primaryKey: ["id"],
-  });
-}
-
-export function down() { table("users").drop({ ifExists: true }); }
+export default {
+  name: "create_users",
+  schema() {
+    table("users").create({
+      columns: {
+        id: t.uuid().notNull().default(uuidV4()),
+        email: t.text().notNull(),
+        created_at: t.timestamp().notNull().default(now()),
+      },
+      primaryKey: ["id"],
+    });
+  },
+};
 ```
 
 Names are plain strings, **never live-schema-bound** (`types.ts:8`, the all-strings typing stance).
 
 ### 3.4 The recorder lifecycle & structured errors
 
-The build evaluator drives the recorder: `__begin(phase)` opens a fresh buffer (the `up` phase seeds from `deferredUpOps`), `__drain()` returns the op list and clears it (`ops.ts:291-325`). Two properties matter:
+The build evaluator drives the recorder: `__begin(phase)` opens a fresh buffer
+and `__drain()` returns the op list and clears it. Schema, data, and inverse are
+recorded in independent passes. Two properties matter:
 
-1. **Recording outside a recorder throws `OP_OUTSIDE_RECORDER`** — a `table()` handle may only be used synchronously inside `up()`/`down()` (`ops.ts:327-337`).
+1. **Recording outside a recorder throws `OP_OUTSIDE_RECORDER`** — a `table()` handle may only be used synchronously inside the active phase.
 2. A selector handed out but never terminated is a hard `SELECTOR_NOT_TERMINATED` at drain (not eagerly, so a var-held selector terminated on a later line is fine) (`ops.ts:305-324`); terminating twice throws `SELECTOR_ALREADY_TERMINATED` (`ops.ts:476-490`).
 
 Author-facing structured error codes emitted by this surface: `OP_INVALID` (any arg/shape failure), `OP_OUTSIDE_RECORDER`, `SELECTOR_NOT_TERMINATED`, `SELECTOR_ALREADY_TERMINATED`, `EXPR_NOT_PORTABLE` (`.splitPart()` grammar), `NONDETERMINISTIC_OP_ARG` (a lint finding, not a throw). Engine-side codes (`VENDOR_OP_DENIED`, off-target `EXPR_NOT_PORTABLE`/`DIALECT_UNSUPPORTED`) fire in the Rust validator ([§7](#7-the-validate-gate--error-taxonomy)).
@@ -357,12 +379,17 @@ The **op-producer registry** (`defineOp(kind, producer, { deferrable })`, `ops.t
 
 ### 3.5 The `t.*` ColType lexicon (full enumeration)
 
-`t` is a `TypeLexicon` (`types.ts:229-274`) of immutable factories each returning a chainable `ColumnDef` (`ops.ts:1275-1359`). "Canonical names only — the `string`/`int` aliases and the `{notNull,default}` options-bag overload are REMOVED" (`types.ts:226-228`). Every factory returns a fresh `ColumnDefImpl`; the emitted wire `ColType` is what the engine renders per-dialect.
+`t` is the physical `TypeLexicon` of immutable factories, each returning a
+chainable `ColumnDef`. `ids` is the separate validated-text-format lexicon for
+TypeID and ULID columns. The universal-ID shortcut, untyped-reference factory,
+loose `integer` alias, and `{notNull,default}` options-bag overload are removed.
+Every factory returns a fresh `ColumnDefImpl`; the emitted wire `ColType` plus
+its optional facets are what the engine renders per dialect.
 
 | `t.*` factory | Options | Wire `ColType` | Per-dialect intent |
 | --- | --- | --- | --- |
-| `t.id(opts?)` | `{ prefix }` | `uuid` + `.primaryKey()` + `.default(uuidV4())`; `idPrefix` facet | UUID PK; `prefix` records the typed-id brand (`usr_<base62>`) — create-only |
 | `t.text(opts?)` | `{ caseSensitive }` | `text`; facet if `caseSensitive:false` | PG `text`; `false` → citext / `COLLATE NOCASE` / `_ci` |
+| `t.string(opts?)` | `{ length?, caseSensitive? }` | bounded string | `VARCHAR(N)` on PG/MySQL; SQLite `TEXT`; length defaults to 255 |
 | `t.textArray()` | — | `textArray` | PG `text[]` / SQLite `TEXT` / MySQL `JSON` |
 | `t.numeric(opts?)` | `{ precision, scale }` default **(38, 9)** | `{ decimal: { precision, scale } }` | `NUMERIC(p,s)` |
 | `t.char(opts)` | `{ length }` **required** | `{ char: { length } }` | `CHAR(n)` |
@@ -372,7 +399,6 @@ The **op-producer registry** (`defineOp(kind, producer, { deferrable })`, `ops.t
 | `t.bytes()` | — | `bytes` | `bytea` / blob |
 | `t.boolean()` | — | `boolean` | boolean |
 | `t.json()` | — | `json` | `jsonb` |
-| `t.ref(targetTable)` | `string` | `{ ref: { references: target } }` | inline FK column TYPE naming the target table only; for the target column use an explicit type plus `.references(table, column)` ([§3.6](#36-columndef--facets--defaults)) |
 | `t.vector(opts)` | `{ dimensions, metric? }` **dims required** | `{ vector: { vector: n } }`; `vectorMetric` facet | pgvector / sqlite-vec; metric ∈ closed set |
 | `t.geoPoint()` | — | `geoPoint` | spatial point |
 | `t.smallInt()` | — | `smallInt` | int2 |
@@ -384,6 +410,14 @@ The **op-producer registry** (`defineOp(kind, producer, { deferrable })`, `ops.t
 | `t.enum(name)` | `string \| EnumHandle` | `{ enum: { name } }` | references an enum type |
 | `t.domain(name)` | `string \| DomainHandle` | `{ domain: { name } }` | references a Postgres domain |
 | `t.encrypted(arg)` | `{ of } \| ColumnDef \| ColType` | `{ encrypted: { of: innerType } }` | app-level encrypted column |
+
+Validated ID formats are ordinary text columns until the normal column facets
+opt into constraints; neither helper supplies a key or database default:
+
+| ID factory | Wire facet | Effect |
+| --- | --- | --- |
+| `ids.typeId({ prefix })` | `valueFormat: { typeId: { prefix } }` | TypeID 0.3 text validation; prefix may be empty and is at most 63 bytes |
+| `ids.ulid()` | `valueFormat: "ulid"` | canonical ULID text validation |
 
 Closed token sets validated client-side (friendly `OP_INVALID` before serde): `VECTOR_METRICS = ["cosine","l2","innerProduct"]` (`ops.ts:631`); `SEQUENCE_AS_TYPES = ["int","bigInt"]` (`ops.ts:634`); `MASK_KINDS = ["full","last4","first4","email","name","date-year","date-decade","none"]` (`ops.ts:642-651`); `MASK_CLASSIFICATIONS = ["public","pii","spi","phi","pci","internal"]` (`ops.ts:652-659`).
 
@@ -405,7 +439,10 @@ Closed token sets validated client-side (friendly `OP_INVALID` before serde): `V
 | `.identity(opts?)` | `{ always? }` | `GENERATED ALWAYS` if `always:true`, else `BY DEFAULT` |
 | `.autoIncrement()` | `(): ColumnDef` | portable sugar for `.identity({ always: false })` |
 
-Two lowering rules: a column that is both `.unique()` and `.primaryKey()` emits no separate UNIQUE (`ops.ts:826-828`); a typed-id `prefix` is **create-only** — `t.id({ prefix })` on an *added* column is `OP_INVALID` (`ops.ts:841-854`).
+Two lowering rules matter here: a column that is both `.unique()` and
+`.primaryKey()` emits no separate UNIQUE; a `.references(...)` facet is
+create-table-only, while `ids.typeId(...)` and `ids.ulid()` retain their
+`valueFormat` facet on both create-table and add-column operations.
 
 **Default forms** (resolved by `toIrDefault`, `ops.ts:1189-1214`):
 
@@ -643,7 +680,7 @@ Every predicate/value position uses a closed expression builder, but the *tier* 
 
 ## §4 Authoring: the expression sublanguage
 
-The migration DSL never accepts raw SQL in an expression position ("property A"). Every `where`, `check`, generated-column, index-predicate, trigger `when`, RLS `using`, default, and `update.set` value is authored as a **closed expression AST** — either a `(col) => Expr` callback that receives an injected builder handle, or a pre-built chain value / top-level value constructor. Citations in this section are relative to `sdks/migrate/src/`. The Rust mirror of every node is [§6.3](#6-the-ir--its-wire-contract); the validate-time gate that walks it is [§7](#7-the-validate-gate--error-taxonomy).
+The migration DSL never accepts raw SQL in an expression position ("property A"). Every `where`, `check`, generated-column, index-predicate, trigger `when`, RLS `using`, default, and `update.set` value is authored as a **closed expression AST** — either a `(col) => Expr` callback that receives an injected builder handle, or a pre-built chain value / top-level value constructor. Citations in this section are relative to `packages/zero-migrate/src/`. The Rust mirror of every node is [§6.3](#6-the-ir--its-wire-contract); the validate-time gate that walks it is [§7](#7-the-validate-gate--error-taxonomy).
 
 ### 4.1 The two authoring shapes
 
@@ -954,7 +991,7 @@ sc.delete({ where: (col) => col("code").isNull(), limit: 100 });   // method del
   "where": { "node":"unaryOp", "op":"isNull", "operand":{"node":"colRef","name":"code"} }, "limit": 100 }
 ```
 
-**TypeScript types for advanced callers.** `sdks/migrate/scripts/gen-ir-types.mjs` generates the closed string-enum tokens into `sdks/migrate/src/generated/enums.ts` from `op-ir.schema.json`. The **recursive structural types** (`MigrationIr`, `Op`, `Expr`, `ColType`, `IrConstraint`) are **hand-authored** in `sdks/migrate/src/generated/ir.ts` (codegen overflows the stack on the self-recursive `oneOf`); a drift test pins every enum token/`Op` tag/`Expr` tag against the schema. Both files stress: these are *ergonomics*; the golden `.ir.json` corpus + the `Checksum::of_ir` round-trip are the **contract source of truth**.
+**TypeScript types for advanced callers.** `packages/zero-migrate/scripts/gen-ir-types.mjs` generates the closed string-enum tokens into `packages/zero-migrate/src/generated/enums.ts` from `op-ir.schema.json`. The **recursive structural types** (`MigrationIr`, `Op`, `Expr`, `ColType`, `IrConstraint`) are **hand-authored** in `packages/zero-migrate/src/generated/ir.ts` (codegen overflows the stack on the self-recursive `oneOf`); a drift test pins every enum token/`Op` tag/`Expr` tag against the schema. Both files stress: these are *ergonomics*; the golden `.ir.json` corpus + the `Checksum::of_ir` round-trip are the **contract source of truth**.
 
 ### 6.9 The pre-launch "update every producer/consumer together" stance
 
@@ -1013,7 +1050,8 @@ Every `CODE_*` constant (`validate.rs:55-141`):
 | `CROSS_SCHEMA` | An op naming a `schema` the active `SchemaScope` does not permit (Confined pins the project schema). `:73` |
 | `INVALID_SCHEMA_IDENT` | A `schema` qualifier that is not a safe bare identifier — injection defense. `:79` |
 | `GUARD_DIRECTION` | An existence guard with illegal direction (`ifExists` on create/add, `ifNotExists` on drop/rename/alter). `:83` |
-| `INVALID_ID_PREFIX` | A `t.id({prefix})` invalid charset/length or in the reserved deny-list (`MAX_ID_PREFIX_LEN = 4`). `:89` |
+| `INVALID_ID_PREFIX` | A malformed legacy internal platform `idPrefix`; this is not the public TypeID-format helper. `:101` |
+| `INVALID_TYPE_ID_PREFIX` | An `ids.typeId({ prefix })` value outside the TypeID 0.3 grammar or 63-byte bound. `:104` |
 | `VECTOR_METRIC_MISPLACED` | A `vector_metric` on a non-`Vector` column. `:95` |
 | `COLUMN_FACET_CONFLICT` | Mutually-exclusive facets (`default`+`generated`, `identity`+`generated`). `:98` |
 | `COLUMN_DEFAULT_TYPE` | A default invalid for the declared type (e.g. `{}` on `text[]`). `:101` |
@@ -1144,7 +1182,7 @@ pub enum Disposition {
 
 > **Counts — read carefully.** A coarse `grep -cE 'DispositionRow \{' src/model/dialect_table.rs` returned **91** when this guide was written, because it matches the `pub struct DispositionRow {` declaration and the `impl DispositionRow {` block in addition to the table rows. The generated `DIALECT_TABLE` itself had **89 row literals**, and `grep -cE 'kind: "'` returned **89**, so it covered **89 `(kind, variant)` dispositions**. (Both totals have moved since; re-measure against the current table rather than quoting these.) These 89 dispositions are **not** the same as the **54 `Op` kinds** ([§6.2](#6-the-ir--its-wire-contract)): one op kind (e.g. `addConstraint`, `createTrigger`, `createTable`) has multiple variant rows (`fkSimple`/`unique`/`check`/`exclusion`; `bodySimple`/`executeFunction`/…; `base`/`partitioned`/`partitionedCollapse`). So "89 disposition rows" and "54 op kinds" are different axes and must not be conflated.
 
-**Generation & freshness gate.** The table is emitted from a hand-authored sidecar `dialect-support.toml` by `sdks/migrate/scripts/gen-dialect-table.mjs`, which writes **two** artifacts (the Rust const + the TS mirror `sdks/migrate/src/generated/dialect-table.ts`). Regenerate with `pnpm --filter @zeroship/migrate gen:dialect-table`. A regenerate-and-byte-diff CI gate pins both artifacts against the sidecar.
+**Generation & freshness gate.** The table is emitted from a hand-authored sidecar `dialect-support.toml` by `packages/zero-migrate/scripts/gen-dialect-table.mjs`, which writes **two** artifacts (the Rust const + the TS mirror `packages/zero-migrate/src/generated/dialect-table.ts`). Regenerate with `pnpm --filter @zeroship/migrate gen:dialect-table`. A regenerate-and-byte-diff CI gate pins both artifacts against the sidecar.
 
 `Op::support()` **reads** `DIALECT_TABLE` at runtime keyed on `Op::op_kind_and_variant()` (`ir.rs:3412-3425`); `support_cell` maps `Unsupported → unsupported(CODE_UNSUPPORTED, reason)` and `Portable|Vendor|TransparentDegradable → supported(render_mode)`. Only the dialect gate is table-sourced; the *render strategy* (`RenderMode::Offline` vs `LiveResolved`) and diagnostic wording stay in Rust because they are not dialect truth.
 
@@ -1392,7 +1430,11 @@ Every variable-length field is length-prefixed (no delimiter-injection/concatena
 
 `baseline` (`baseline.rs:133`) records a baseline migration as a `completed`, `kind='baseline'` event **without running its `up`** — for a DB that already physically carries its schema. Guarantees: **guard-checked** even though it never runs (defense-in-depth, `BaselineError::Guard`); **first-entry-only** (refuses if any net-applied migration exists — `AlreadyManaged`; a different baseline — `ConflictingBaseline`; re-baselining the *same* version is an idempotent no-op returning `already_present: true`); **privileged + serialized** (admin under the project advisory lock); **append-only** (an immutable `completed` row via `record_baseline`, bracketing row + supersession edges in one `BEGIN … COMMIT`). The SQLite arm mirrors this plus a `record_loaded_versions` batch for `db:load`/dump-restore.
 
-### 9.17 Rollback (`down()`)
+### 9.17 Historical rollback model
+
+This subsection records the former engine model. Current TypeScript migrations
+do not author a generic reverse phase: schema inverses are synthesized and data
+reverses are recorded as `inverse()`.
 
 `rollback` (`executor.rs:3012`) applies the `down` SQL of net-applied-and-not-rolled-back migrations after a `RollbackTarget`, in **reverse topological order of `depends_on`**. `RollbackTarget` ∈ `{ ToVersion(id) (exclusive), Steps(n), All }`, wrapped in a `RollbackRequest` with `RollbackOptions { force, backup_acknowledged }`. Durability/safety:
 
@@ -1542,15 +1584,16 @@ Every layer is explicit about its own limits and names the next layer that cover
 
 ## §11 Platform self-hosting & build integration
 
-The zeroship platform is its own biggest `zero-migrate` customer. The entire platform database — control-plane, auth/OIDC, billing/metering, and the extracted sandbox's tables — is authored as a committed JS-DSL corpus in `db/migrations-ts/` and applied by the same engine creators use, but under the widened **Platform** trust profile instead of **Confined**.
+The zeroship platform is its own biggest `@zeroship/migrate` customer. The entire platform database — control-plane, auth/OIDC, billing/metering, and the extracted sandbox's tables — is authored as a committed JS-DSL corpus in `db/migrations-ts/` and applied by the same engine creators use, but under the widened **Platform** trust profile instead of **Confined**.
 
 ### 11.1 The platform migration corpus (`db/migrations-ts/`)
 
-The platform's Postgres schema is a **single `zeroship` schema**, applied by
-`zeroship-platform-migrate` under its Platform profile. The source of truth is
-the committed `.ts` corpus (no SQL/Flyway/Liquibase, no committed `.ir.json`):
+The platform's Postgres schema is a **single `zeroship` schema**, applied by the
+`zero-migrate` Node CLI through `deploy/ops/db-migrate.sh` under its Platform
+profile. The source of truth is the committed `.ts` corpus (no
+SQL/Flyway/Liquibase, no committed `.ir.json`):
 
-| File | `export const name` | Contents |
+| File | default-exported `name` | Contents |
 | --- | --- | --- |
 | `20260702000100_schema_roles_extensions.ts` | `schema_roles_extensions` | `zeroship` schema, `citext` ext, 10 roles, 13 domains, 1 sequence |
 | `20260702000200_control_tables.ts` | `control_tables` | 19 control-plane tables (`apps`, `app_members`, `app_secrets`, `app_schema_applies`, …) |
@@ -1601,17 +1644,16 @@ The profiles compose via a monotonic **meet** (`PolicyProfile::meet_ceiling_draf
 Services **never migrate themselves** — `control`/`auth` connect to an already-migrated DB. Two apply vectors, both driving the same engine:
 
 **(a) Compose one-shot `migrate` service** (`deploy/compose/docker-compose.yml`,
-the `migrate` service) invokes `zeroship-platform-migrate` with the database URL,
-migrations directory, project schema `zeroship`, and project id `zeroship`. It
-records each `.ts` to transient IR, applies under Platform, and exits 0.
+the `migrate` service) invokes the built `zero-migrate` Node CLI. It records each
+`.ts` to transient IR, applies under Platform, and exits 0.
 `control`/`auth` depend on it with `service_completed_successfully`.
 
-**(b) By-hand wrapper `deploy/ops/db-migrate.sh`** invokes the apply-only runner
-via `cargo run` or `ZEROSHIP_MIGRATE_BIN`, targeting compose Postgres on
-`localhost:5440`. It accepts no migration subcommand. The runner records the
-committed platform corpus in-process.
+**(b) By-hand wrapper `deploy/ops/db-migrate.sh`** invokes
+`packages/zero-migrate-cli/dist/cli-bin.js`, targeting compose Postgres on
+`localhost:5440` by default. `ZEROSHIP_MIGRATE_VERB` selects another CLI verb;
+the wrapper records the committed platform corpus in-process.
 
-The engine tracks applied work in an append-only journal, so `migrate` runs only pending work and is idempotent. Apply is `BEGIN; <up>; INSERT journal; COMMIT` per step — no whole-bundle transaction.
+The engine tracks applied work in an append-only journal, so `migrate` runs only pending work and is idempotent. Apply is `BEGIN; <forward ops>; INSERT journal; COMMIT` per step — no whole-bundle transaction.
 
 **Where the journal lives depends on who owns the schema.** The PLATFORM corpus keeps its own meta schema, `zeroship_migrations`, because it has no tenant: nothing owns `zeroship` the way a migrator role owns an app schema. A CREATOR app's journal lives in the app's own schema (`"<app_uuid>".__zeroship_schema_migrations` and five siblings), because a tenant does own theirs. On both, the table names carry the `__zeroship_` prefix: the engine bootstraps with `CREATE TABLE IF NOT EXISTS` and its table names are literals, so an unfenced `schema_migrations` in a schema a creator can declare tables in would be silently adopted as the journal.
 
@@ -1649,7 +1691,9 @@ This ingress is where the §11.3 seal machinery meets the effective-policy meet:
 
 - The corpus uses `raw({ sql, reason })` where the structured DSL cannot express a construct, such as `trigger().create` for `UPDATE OF <column>`.
 - The engine journal (`zeroship_migrations.__zeroship_schema_migrations` for the platform corpus) and `zeroship.app_schema_applies` are different things (§11.4 vs §11.6): the first records what the engine ran, the second what the platform accepted. No `.ts` authors the journal itself — consistent with it being engine-internal (bootstrapped by the apply path).
-- `down()` bodies in the platform corpus are **empty** across all nine files — the platform relies on forward-only, additive-with-reviewed-destructive migrations under `--yes`, not programmatic rollback (the generic `rollback` verb "does not yet load platform `.ts`"). MEMORY notes elsewhere flag "platform-.ts rollback broken."
+- **Historical snapshot:** reverse bodies in the then-nine-file platform corpus
+  were empty. The current corpus uses the same `schema()` / `data()` contract as
+  every other `@zeroship/migrate` caller.
 
 ---
 
@@ -1686,7 +1730,7 @@ the removed appbase package cannot be selected with `cargo -p`.
 
 ### 12.3 The full-surface behavioral suite (`full_surface.rs`)
 
-`full_surface.rs` (63 KB) pinned individual DSL semantics that would silently regress (where `op_round_trip.rs` proved whole-fixture bytes/checksums). It recorded inline sources via `record_migration_to_ir_unsandboxed` and asserted on the wire `ops` JSON — e.g. `t.text()` OMITS `nullable` (absence is the dialect default) while `.notNull()` records `nullable: false`; `concatWs(...)` records a `fnSynth(concatWs)` node. That suite moved to the recorder's own language when the engine dropped V8: its successor is `sdks/migrate/tests/ops.test.ts`, which drives the recorder's `__begin`/`__drain` seam directly and is the file to read to learn what the fluent surface does op-by-op.
+`full_surface.rs` (63 KB) pinned individual DSL semantics that would silently regress (where `op_round_trip.rs` proved whole-fixture bytes/checksums). It recorded inline sources via `record_migration_to_ir_unsandboxed` and asserted on the wire `ops` JSON — e.g. `t.text()` OMITS `nullable` (absence is the dialect default) while `.notNull()` records `nullable: false`; `concatWs(...)` records a `fnSynth(concatWs)` node. That suite moved to the recorder's own language when the engine dropped V8: its successor is `packages/zero-migrate/tests/ops.test.ts`, which drives the recorder's `__begin`/`__drain` seam directly and is the file to read to learn what the fluent surface does op-by-op.
 
 ### 12.4 The embedded-`.ts`/`.js`-in-Rust-string gotcha
 
@@ -1742,9 +1786,8 @@ load, rollback, or schema-refresh commands.
 ### 12.10 Current appbase quick reference
 
 ```bash
-# Build the platform-schema runner. A plain workspace --bins build omits it.
-cargo build --release -p zeroship-migrate-adapter \
-  --features platform-cli --bin zeroship-platform-migrate
+# Build the authoring package, Node CLI, and native addon.
+pnpm build
 
 # Apply db/migrations-ts to compose Postgres through the repository wrapper.
 ./deploy/ops/db-migrate.sh

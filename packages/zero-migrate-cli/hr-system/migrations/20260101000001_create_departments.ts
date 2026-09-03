@@ -1,4 +1,4 @@
-import { table, t, ids, now } from "zero-migrate";
+import { table, t, ids, now } from "@zeroship/migrate";
 
 // Departments are the organizational anchor. Public identity is a TypeID
 // (prefix "dept"), so every reference downstream is format-checked. Uniqueness

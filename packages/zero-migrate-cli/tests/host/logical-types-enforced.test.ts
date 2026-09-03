@@ -52,7 +52,7 @@ function uniqueNamespace(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-const ENUM_MIGRATION = `import { enumType, table, t } from "zero-migrate";
+const ENUM_MIGRATION = `import { enumType, table, t } from "@zeroship/migrate";
 export const name = "base";
 export default {
   schema() {
@@ -65,7 +65,7 @@ export default {
 };
 `;
 
-const DOMAIN_MIGRATION = `import { domain, table, t } from "zero-migrate";
+const DOMAIN_MIGRATION = `import { domain, table, t } from "@zeroship/migrate";
 export const name = "base";
 export default {
   schema() {

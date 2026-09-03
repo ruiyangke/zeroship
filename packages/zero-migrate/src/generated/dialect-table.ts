@@ -2,7 +2,7 @@
 // GENERATED FILE — do not edit by hand.
 // Source: crates/zeroship-migrate/dialect-support.toml (the single-source
 // dialect-support sidecar). Regenerate with:
-//   pnpm --filter zero-migrate gen:dialect-table
+//   pnpm --filter @zeroship/migrate gen:dialect-table
 //
 // One row per (op-kind, variant) recording the token's disposition on each
 // dialect, KEYED BY DIALECT ID — the TS mirror of

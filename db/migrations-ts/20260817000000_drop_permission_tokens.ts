@@ -1,4 +1,4 @@
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 // Personal access tokens are gone. The table was the storage half of a SECOND
 // issuance authority: control minted a 365-day credential with its own signing

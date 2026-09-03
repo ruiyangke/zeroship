@@ -1,4 +1,4 @@
-import { table, t, ids, now } from "zero-migrate";
+import { table, t, ids, now } from "@zeroship/migrate";
 
 // Employees carry a TypeID public key (prefix "emp"). The department reference
 // is a format-matched TypeID FK; the grade reference is an int64 FK; manager_id

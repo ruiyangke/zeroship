@@ -134,7 +134,7 @@ stack_preflight() {
   for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
     [ -x "$E2E_BIN/$b" ] || { _stk_bad "missing $E2E_BIN/$b - run cargo build --release"; return 2; }
   done
-  [ -f "$E2E_ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { _stk_bad "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; return 2; }
+  [ -f "$E2E_ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { _stk_bad "missing the zero-migrate CLI - run: pnpm install && pnpm build"; return 2; }
   [ -f "$E2E_JOSE_JS" ] || { _stk_bad "missing jose at $E2E_JOSE_JS"; return 2; }
   command -v docker  >/dev/null || { _stk_bad "docker required"; return 2; }
   command -v openssl >/dev/null || { _stk_bad "openssl required"; return 2; }

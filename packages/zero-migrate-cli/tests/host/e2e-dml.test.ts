@@ -8,7 +8,7 @@ import {
   type DriverConfig,
   type MigrationModule,
 } from "zero-migrate-cli";
-import { buildEnvelope } from "zero-migrate/internal/recorder";
+import { buildEnvelope } from "@zeroship/migrate/internal/recorder";
 import { noInjectPolicy } from "./policy.js";
 import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 

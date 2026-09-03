@@ -16,26 +16,16 @@
 # `baseline`, `rollback` - which the one-shot never exposed. What you need that
 # you did not before is NODE and a built CLI:
 #
-#   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
+#   pnpm install && pnpm build
 #
 # The apply is idempotent: a re-run re-derives byte-identical journal versions
 # (each is a hash of owner_app + migration name) and skips every applied file.
 #
-# MEASURED 2026-08-28 against a PostgreSQL 17.11 cluster created for the run:
-# 35 of 35 files applied and exit 0, producing 659 journal versions, 104 tables
-# (98 `zeroship`, 5 `zeroship_migrations`, 1 `service_authn`), 63 functions (48
-# `public`, 15 `zeroship`) and 11 non-`pg_*` roles; an immediate second run
-# reported all 35 files with `"applied":[]` and exited 0.
-#
-# AN EARLIER VERSION OF THIS COMMENT CLAIMED THE SAME NUMBERS AND COULD NOT HAVE.
-# It was written when this script had just been repointed at the Node CLI, and on
-# that day the script could not apply the corpus at all: every file imported
-# `@zeroship/migrate`, a specifier no Node applier resolves, so the run died on
-# file #1 with `Cannot find package`. The claim survived four months because a
-# sentence asserting a measurement reads exactly like a measurement. The numbers
-# above are now produced by `tests/platform_migration_corpus_gate.sh`, which
-# applies the committed corpus to a real database and reconciles the count
-# against the files on disk - do not hand-edit them, re-run it.
+# `tests/platform_migration_corpus_gate.sh` is the executable proof for this
+# path. It reconciles every file against a committed recorder-operation ledger,
+# applies the corpus to a real database, verifies the durable journal and status
+# step IDs, then proves a second run is an exact no-op. Do not replace that proof
+# with hand-maintained totals in this comment.
 #
 # Examples:
 #   deploy/ops/db-migrate.sh
@@ -66,7 +56,7 @@ CLI="${ZEROSHIP_MIGRATE_CLI:-$ROOT/packages/zero-migrate-cli/dist/cli-bin.js}"
 
 if [ ! -f "$CLI" ]; then
   echo "db-migrate.sh: $CLI is missing." >&2
-  echo "  run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build" >&2
+  echo "  run: pnpm install && pnpm build" >&2
   exit 2
 fi
 

@@ -11,7 +11,7 @@
 // `CREATE INDEX IF NOT EXISTS`. The name is skipped by the server and the migration
 // journals complete.
 //
-// Every arm drives the REAL path: authored through the public `zero-migrate` API,
+// Every arm drives the REAL path: authored through the public `@zeroship/migrate` API,
 // lowered by the native addon, applied over the real pg driver seam, then read back
 // from `pg_index` and from the journal table rather than from an engine return
 // value.
@@ -34,7 +34,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { apply, type DriverConfig, type MigrationModule } from "zero-migrate-cli";
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 import { noInjectPolicy } from "./policy.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.

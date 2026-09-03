@@ -55,7 +55,7 @@ const APP_A = "app_a";
 const APP_B = "app_b";
 
 function migration(name: string, body: string): string {
-  return `import { table, t } from "zero-migrate";
+  return `import { table, t } from "@zeroship/migrate";
 export const name = "${name}";
 export default { schema() { ${body} } };
 `;

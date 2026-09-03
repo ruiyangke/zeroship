@@ -28,9 +28,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
-import type { MigrationModule } from "zero-migrate/internal/recorder";
+import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 // The host suite's addon is resolved and freshness-checked in one place.
 import "./addon.js";

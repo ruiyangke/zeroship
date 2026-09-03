@@ -1,4 +1,4 @@
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 // Denormalize a display name by backfilling the newly added employees.full_name
 // from first + last name with a resumable cursor over the primary key.

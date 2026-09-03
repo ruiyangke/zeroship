@@ -1,6 +1,6 @@
 // Import-intent regression fixture. Before SynchronizeIdentity this public
 // surface and canonical wire operation did not exist.
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 export const name = "synchronize_identity";
 

@@ -76,14 +76,14 @@ scope = { include = [${JSON.stringify(namespace)}] }
   writeFileSync(join(work, "registry.json"), JSON.stringify({ anchor: OWNER_APP, oob: OWNER_APP }));
   writeFileSync(
     join(work, "m", "20260101000000_a.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "anchor";
 export default { schema() { table("anchor").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); } };
 `,
   );
   writeFileSync(
     join(work, "m", "20260102000000_b.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "guarded_oob";
 export default { schema() { table("oob").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"], ifNotExists: true }); } };
 `,

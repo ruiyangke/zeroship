@@ -3,7 +3,7 @@
 // round-trip LOSSLESSLY: type matrix, ref (Id brand), vector + metric, and encrypted.
 // CHECK-borne enum/min/max facets are handled once the Expr->SQL
 // renderer lands.
-import { dbType as internalDbType } from "zero-migrate";
+import { dbType as internalDbType } from "@zeroship/migrate";
 
 const users = {
   // Internal platform id. Its wire value is the engine's base62 UUIDv7 format,

@@ -59,7 +59,7 @@ function writeStep(dir: string, filename: string, name: string, tableName: strin
   const path = join(dir, filename);
   writeFileSync(
     path,
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = ${JSON.stringify(name)};
 export function schema() {
   table(${JSON.stringify(tableName)}).create({ columns: { id: t.int() } });

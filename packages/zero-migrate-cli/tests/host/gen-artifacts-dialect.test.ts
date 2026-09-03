@@ -20,8 +20,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
-import { dialect, table, t } from "zero-migrate";
-import { buildEnvelope } from "zero-migrate/internal/recorder";
+import { dialect, table, t } from "@zeroship/migrate";
+import { buildEnvelope } from "@zeroship/migrate/internal/recorder";
 import { apply, currentIrVersion } from "zero-migrate-cli";
 import { noInjectPolicy } from "./policy.js";
 import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";

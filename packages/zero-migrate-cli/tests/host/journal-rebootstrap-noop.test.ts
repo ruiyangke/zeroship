@@ -49,7 +49,7 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const MIGRATION = `import { table, t } from "zero-migrate";
+const MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "create_one";
 export default {
   schema() {

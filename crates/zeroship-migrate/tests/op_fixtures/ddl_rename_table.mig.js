@@ -6,7 +6,7 @@
 // expand-contract); `ifExists` guards the SOURCE table and `schema` qualifies it, so
 // this fixture also asserts the JS recorder and the Rust loader fold BOTH fields
 // on a rename identically (a bare rename and a schema+guard rename are both carried).
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 export const name = "ddl_rename_table";
 

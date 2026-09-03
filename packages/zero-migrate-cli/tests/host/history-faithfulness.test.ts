@@ -52,7 +52,7 @@ const OWNER_APP = "app_history_faithfulness";
 const MYSQL_URL = process.env.ZERO_MIGRATE_MYSQL_URL;
 
 const migrationSource = (name: string, table: string): string =>
-  `import { table, t } from "zero-migrate";
+  `import { table, t } from "@zeroship/migrate";
 export const name = ${JSON.stringify(name)};
 export default {
   schema() {

@@ -93,7 +93,7 @@ scope = "all"
   writeFileSync(join(work, "registry.json"), JSON.stringify({ [table]: OWNER_APP }));
   writeFileSync(
     join(work, "migrations", "20260101000000_base.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "base";
 export default {
   schema() {

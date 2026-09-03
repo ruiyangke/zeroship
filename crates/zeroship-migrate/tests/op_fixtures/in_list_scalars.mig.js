@@ -1,4 +1,4 @@
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 
 export function schema() {
   table("scalar_membership").create({

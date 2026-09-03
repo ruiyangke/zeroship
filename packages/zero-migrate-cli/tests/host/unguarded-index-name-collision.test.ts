@@ -7,7 +7,7 @@
 // path already fails closed on this; the unguarded one is the same silent skip with
 // no decision behind it.
 //
-// Every arm drives the REAL path: authored through the public `zero-migrate` API,
+// Every arm drives the REAL path: authored through the public `@zeroship/migrate` API,
 // lowered by the native addon, applied over the real pg/mysql2 driver seam, then
 // read back from the live catalog (`pg_index` / `information_schema.STATISTICS`)
 // and from the journal table rather than from an engine return value.
@@ -40,7 +40,7 @@ import { test } from "node:test";
 import { join } from "node:path";
 
 import { apply, type DriverConfig, type MigrationModule } from "zero-migrate-cli";
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 import { noInjectPolicy } from "./policy.js";
 
 

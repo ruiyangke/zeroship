@@ -200,7 +200,7 @@ if [ "$provision_status" -ne 0 ]; then
   echo "FATAL: could not provision ${TEST_DB} at ${WHERE}." >&2
   echo "       NO TEST RAN. This is not a failure; it is the absence of a verdict." >&2
   echo "       Stand up the server:  tests/provision_test_backends.sh" >&2
-  echo "       Build the applier:    pnpm install && pnpm build && pnpm --filter zero-migrate-cli build" >&2
+  echo "       Build the applier:    pnpm install && pnpm build" >&2
   tail -20 "$MIGRATE_LOG" >&2
   exit 2
 fi

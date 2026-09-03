@@ -157,7 +157,7 @@ echo "============================================"
 for b in zeroship zeroship-control zeroship-gate zeroship-worker; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }
 done
-[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build"; exit 2; }
 AUTH_ZSHIP="$ROOT/examples/auth-notes/dist/app.zship"
 [ -f "$AUTH_ZSHIP" ] || { echo "missing $AUTH_ZSHIP — (cd examples/auth-notes && pnpm install && pnpm build)"; exit 2; }
 [ -f "$JOSE_JS" ] || { echo "missing jose at $JOSE_JS"; exit 2; }

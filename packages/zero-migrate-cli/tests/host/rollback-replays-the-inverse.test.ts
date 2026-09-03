@@ -23,9 +23,9 @@ import { dirname, join, resolve } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 import { apply, rollback, status, type DriverConfig } from "zero-migrate-cli";
-import type { MigrationModule } from "zero-migrate/internal/recorder";
+import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 import { noInjectPolicy } from "./policy.js";
@@ -376,7 +376,7 @@ test("SQLite: a recorded inverse is what a rollback runs", async () => {
   writeFileSync(join(dir, "registry.json"), JSON.stringify({ acct: OWNER_APP }));
   writeFileSync(
     join(migrations, "20260101000000_create_acct.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "create_acct";
 export default {
   schema() {
@@ -387,7 +387,7 @@ export default {
   );
   writeFileSync(
     join(migrations, "20260101000001_seed_acct.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "seed_acct";
 export default {
   data() { table("acct").insert({ rows: { id: 1 } }); },

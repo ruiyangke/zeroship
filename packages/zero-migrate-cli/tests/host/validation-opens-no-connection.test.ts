@@ -50,7 +50,7 @@ const ADDON_PATH = resolve(
 const DEAD_DSN = "postgres://nobody:nobody@127.0.0.1:59999/nope";
 
 /** Keys a MySQL index on an unbounded `t.text()`, which MySQL cannot do. */
-const INVALID_ON_MYSQL = `import { table, t } from "zero-migrate";
+const INVALID_ON_MYSQL = `import { table, t } from "@zeroship/migrate";
 export const name = "keys_a_text_column";
 export default {
   schema() {
@@ -63,7 +63,7 @@ export default {
 };
 `;
 
-const VALID_EVERYWHERE = `import { table, t } from "zero-migrate";
+const VALID_EVERYWHERE = `import { table, t } from "@zeroship/migrate";
 export const name = "plain_table";
 export default {
   schema() {

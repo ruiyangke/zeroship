@@ -1,4 +1,4 @@
-import { table, t, ids } from "zero-migrate";
+import { table, t, ids } from "@zeroship/migrate";
 
 // Position history is a temporal join: composite primary key on
 // (employee_id, effective_from), with format-matched TypeID and ULID FKs.

@@ -16,7 +16,7 @@
 // + the `Checksum::of_ir` round-trip (in `crates/zeroship-migrate/tests`)
 // remain the contract source of truth. Regenerate with:
 //
-//   pnpm --filter zero-migrate gen:ir-types
+//   pnpm --filter @zeroship/migrate gen:ir-types
 //
 // then commit the regenerated `src/generated/enums.ts`.
 
@@ -85,7 +85,7 @@ const ENUM_DEFS = [
 const banner = `/* eslint-disable */
 // GENERATED FILE — do not edit by hand.
 // Source: crates/zeroship-migrate/ir-envelope.schema.json (the engine's single-source-of-
-// truth IR schema). Regenerate with: pnpm --filter zero-migrate gen:ir-types
+// truth IR schema). Regenerate with: pnpm --filter @zeroship/migrate gen:ir-types
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live
 // (hand-authored) in ./ir.ts. These are ERGONOMICS; the golden IR-envelope corpus is
@@ -95,9 +95,9 @@ const banner = `/* eslint-disable */
 const raw = await readFile(schemaPath, "utf8");
 const schema = JSON.parse(raw);
 
-// The engine schema's doc descriptions carry the `zero-migrate` brand directly
-// (the Rust `#[doc]` comments name the standalone package + its `zero-migrate/pg`
-// vendor namespace), so the emitted TS doc strings need no specifier rewrite —
+// The engine schema's doc descriptions carry the `@zeroship/migrate` brand directly
+// (the Rust `#[doc]` comments name the standalone `@zeroship/migrate` package),
+// so the emitted TS doc strings need no specifier rewrite —
 // this is an identity pass-through kept as a seam for any future doc-only remap.
 function sanitizeDoc(node) {
   return node;

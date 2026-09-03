@@ -1,4 +1,4 @@
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 
 // Add the nullable destination before the following data migration fills it.
 export const name = "add_full_name";

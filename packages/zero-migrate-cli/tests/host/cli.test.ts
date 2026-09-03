@@ -205,7 +205,7 @@ function writeSimpleMigration(
   const path = join(dir, filename);
   writeFileSync(
     path,
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = ${JSON.stringify(migrationName)};
 export function schema() {
   table(${JSON.stringify(tableName)}).create({ columns: { id: t.int() } });
@@ -986,7 +986,7 @@ test("lint reports preview failures as per-migration dialect verdicts", () => {
   try {
     writeFileSync(
       join(dir, "20260715000000_rename_label.mjs"),
-      `import { table, t } from "zero-migrate";
+      `import { table, t } from "@zeroship/migrate";
 export const name = "rename_label";
 export function schema() {
   table("widgets").column("old_label").rename({
@@ -1050,7 +1050,7 @@ test("lint accepts a trusted ownership registry", () => {
     });
     writeFileSync(
       join(dir, "20260715000001_add_timezone.mjs"),
-      `import { table, t } from "zero-migrate";
+      `import { table, t } from "@zeroship/migrate";
 export const name = "add_timezone";
 export function schema() {
   table("users").column("timezone").add({ type: t.text() });
@@ -1165,7 +1165,7 @@ test("lint reports schema-confinement failures as a migration verdict", () => {
   try {
     writeFileSync(
       join(dir, "20260715000000_foreign_schema.mjs"),
-      `import { table, t } from "zero-migrate";
+      `import { table, t } from "@zeroship/migrate";
 export const name = "foreign_schema";
 export function schema() {
   table("widgets", { schema: "outside_project" }).create({

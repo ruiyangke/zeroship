@@ -52,7 +52,7 @@ const ADDON_PATH = resolve(
 
 const OWNER_APP = "app_journal";
 
-const MIGRATION = `import { table, t } from "zero-migrate";
+const MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "creates_one_table";
 export default {
   schema() {

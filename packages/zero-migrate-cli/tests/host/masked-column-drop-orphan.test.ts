@@ -30,7 +30,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { apply, type DriverConfig, type MigrationModule } from "zero-migrate-cli";
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 import { noInjectPolicy } from "./policy.js";
 
 // The host suite's addon is resolved and freshness-checked in one place.
