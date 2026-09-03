@@ -56,8 +56,20 @@ fn replication_watchdog_dispatch<'s>(
         // The query filters `pg_replication_slots` by this app's slot prefix,
         // so a tenant cannot enumerate a co-tenant's slots.
         async move {
-            let backend = crate::exec::ensure_postgres_backend_for_shared_sql().await?;
-            crate::replication::watchdog_query(backend.pool(), &app_id).await
+            // ADAPTER to ADAPTER. This takes no route on purpose: it is a
+            // diagnostic read of `pg_replication_slots`, never inside a
+            // transaction, so an `in_tx` bit would be captured and discarded.
+            match crate::tx_scope::ensure_backend().await? {
+                crate::backend::BackendHandle::Postgres(pg) => {
+                    crate::replication::watchdog_query(pg.pool(), &app_id).await
+                }
+                crate::backend::BackendHandle::Sqlite(_) => {
+                    Err(zeroship_data_core::error::DbError::config(
+                        "backend_unsupported",
+                        "db: the replication watchdog requires the Postgres backend".to_string(),
+                    ))
+                }
+            }
         },
         |rows| ResolveValue::String(crate::replication::watchdog_to_json(&rows)),
     )));
