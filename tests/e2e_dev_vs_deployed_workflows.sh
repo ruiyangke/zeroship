@@ -53,7 +53,7 @@
 # Prereqs (docs/runbooks/local-dev.md):
 #   pnpm build
 #   cargo build --release -p zeroship-control -p zeroship-worker -p zeroship-gateway -p zeroship-cli --bins
-#   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
+#   pnpm install && pnpm build
 #   docker (Postgres on :5440 as compose-postgres-1, plus an ephemeral Redis)
 #   pnpm install --filter workflow-probe...
 # ---------------------------------------------------------------------------

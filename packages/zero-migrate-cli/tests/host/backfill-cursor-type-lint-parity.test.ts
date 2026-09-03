@@ -87,7 +87,7 @@ scope = "all"
   if (withCreate) {
     writeFileSync(
       join(work, "migrations", "20260101000000_create.ts"),
-      `import { table, t } from "zero-migrate";
+      `import { table, t } from "@zeroship/migrate";
 export const name = "create";
 export default {
   schema() {
@@ -102,7 +102,7 @@ export default {
   }
   writeFileSync(
     join(work, "migrations", "20260101000001_fill.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "fill";
 export default {
   data() {

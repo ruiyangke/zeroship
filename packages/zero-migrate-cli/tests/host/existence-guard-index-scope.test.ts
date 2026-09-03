@@ -6,7 +6,7 @@
 // "the declared index already exists" skips the CREATE and journals the migration
 // complete while the declared index was never created.
 //
-// Every arm drives the REAL path: authored through the public `zero-migrate` API,
+// Every arm drives the REAL path: authored through the public `@zeroship/migrate` API,
 // lowered by the native addon, applied over the real pg/mysql2 driver seam, then
 // read back from the live catalog (`pg_index` / `information_schema.STATISTICS`)
 // rather than from an engine return value.
@@ -28,7 +28,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { apply, type DriverConfig, type MigrationModule } from "zero-migrate-cli";
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 import { noInjectPolicy } from "./policy.js";
 
 

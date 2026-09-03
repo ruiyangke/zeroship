@@ -25,8 +25,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
 
-import { table, t } from "zero-migrate";
-import { buildEnvelope } from "zero-migrate/internal/recorder";
+import { table, t } from "@zeroship/migrate";
+import { buildEnvelope } from "@zeroship/migrate/internal/recorder";
 import { currentIrVersion } from "zero-migrate-cli";
 import { noInjectPolicy } from "./policy.js";
 

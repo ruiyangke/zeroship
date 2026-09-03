@@ -2,7 +2,7 @@
 //
 // Proves the V8-FREE authoring path end-to-end, entirely in the Node process:
 //   1. the pure-JS host recorder (`host-recorder.ts`) evals the migration DSL
-//      (`table()`/`t.*` from `zero-migrate`) into a `{ ir_version, name, ops }`
+//      (`table()`/`t.*` from `@zeroship/migrate`) into a `{ ir_version, name, ops }`
 //      op-IR envelope — NO embedded V8, NO in-Rust recorder;
 //   2. the `zeroship-migrate-node` napi addon LOWERs the envelope in Rust (stamps
 //      `owner_app`, folds the authoritative `Checksum::of_ir` + the confined system
@@ -24,8 +24,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { table, t } from "zero-migrate";
-import { buildEnvelope } from "zero-migrate/internal/recorder";
+import { table, t } from "@zeroship/migrate";
+import { buildEnvelope } from "@zeroship/migrate/internal/recorder";
 import {
   currentIrVersion,
   apply,
@@ -95,7 +95,7 @@ test("programmatic executor verbs require explicit policy bytes", async () => {
 
 const PG_URL = pgUrl();
 
-/** Import the sample migration (`.ts`) — resolves `zero-migrate` to this
+/** Import the sample migration (`.ts`) — resolves `@zeroship/migrate` to this
  *  package's dist (one shared recorder singleton). Runs under `node --import tsx`. */
 async function loadMigration() {
   return import("./mig/20260711000001_create_widgets.ts");

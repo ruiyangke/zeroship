@@ -292,7 +292,7 @@ const UNMIGRATED_REMEDY: &str = "\
     \x20     ZEROSHIP_MIGRATE_DSN='<dsn>' deploy/ops/db-migrate.sh\n\
     \n\
     \x20   That wrapper needs the CLI built once:\n\
-    \x20     pnpm install && pnpm build && pnpm --filter zero-migrate-cli build\n\
+    \x20     pnpm install && pnpm build\n\
     \n\
     \x20   or point the run at a database that is already migrated:\n\
     \x20     PG_TEST_URL=<dsn> cargo test ...\n\

@@ -52,7 +52,7 @@ function uniqueNamespace(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-const CREATE = `import { table, t } from "zero-migrate";
+const CREATE = `import { table, t } from "@zeroship/migrate";
 export const name = "create_users";
 export default {
   schema() {
@@ -64,7 +64,7 @@ export default {
 };
 `;
 
-const RENAME = `import { table, t } from "zero-migrate";
+const RENAME = `import { table, t } from "@zeroship/migrate";
 export const name = "rename_display_name";
 export default {
   schema() {

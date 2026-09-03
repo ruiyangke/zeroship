@@ -65,7 +65,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # is built before the SDKs. Same ordering as the `sdk` job.
-      - run: pnpm --filter zero-migrate build
+      - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
       # This is the no-hoist condition the gate must survive. Prove the root
       # import fails for the expected reason, then prove the declaring package
@@ -992,7 +992,7 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter zero-migrate build
+      - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -1077,8 +1077,8 @@ jobs:
       # zeroship-platform-migrate binary, which pulled in zeroship-runtime, which
       # `include_str!`s three gitignored SDK dist files. It now runs the
       # `zero-migrate` CLI instead - so the Rust edge is gone, but the pnpm
-      # requirement is NOT: the CLI is a Node program and needs the very same
-      # `pnpm build` (plus `pnpm --filter zero-migrate-cli build`) to exist at all.
+      # requirement is NOT: the CLI is a Node program and needs `pnpm build` to
+      # exist at all.
       # The block below is therefore still load-bearing, for a different reason.
       # The original failure, reproduced
       # 2026-08-20 in a worktree that had never run pnpm:
@@ -1094,7 +1094,7 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter zero-migrate build
+      - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
       - name: Install psql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
@@ -1143,7 +1143,7 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter zero-migrate build
+      - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
       # pgvector because two tests build vector columns, and the extension has
       # to be CREATED in the target database, not merely available: a fresh
@@ -1242,7 +1242,7 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter zero-migrate build
+      - run: pnpm --filter @zeroship/migrate build
       - run: pnpm build
       # The suite reads its server's coordinates from the generated overlay and
       # from nowhere else; without this file it refuses rather than guessing.
@@ -1271,7 +1271,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # The vendored engine ships no dist/ (it is gitignored there and built
       # from source), so it has to be built before anything that imports it.
-      - run: pnpm --filter zero-migrate build
+      - run: pnpm --filter @zeroship/migrate build
       # The migrate type layer reads @zeroship/db's built types; build SDKs first.
       - run: pnpm build
       # Ticket #267 - @zeroship/db's base `typecheck` (`tsc --noEmit`) reads
@@ -1342,23 +1342,12 @@ jobs:
       #
       # Written as exclusions, not an allow-list, so a new package is gated the
       # day it appears rather than the day someone remembers to add it. The
-      # two below are excluded by name because they fail today for one shared
-      # reason, and each exclusion is a debt with an owner:
+      # two below are excluded by name because they have known failures, and
+      # each exclusion is a debt with an owner:
       #
-      #   zero-migrate           vendored third-party code at a pinned commit.
-      #                          Its suite is not ours to gate; it became
-      #                          visible only because the pin joined the
-      #                          workspace.
-      #   (@zeroship/migrate is NO LONGER EXCLUDED. It was, for failures that
-      #    are now fixed: 183 tests, 183 pass, 0 fail as of e5b87b7ad, and the
-      #    filter came out in eaca2500b. Measured on removal: 17 packages/873
-      #    passed with it excluded, 18/1056 without, same 5 failures either way
-      #    - so it added +183 tests and no failures. Floors raised to 18/950.
-      #    The last failure was OURS, not the engine's: a hand-written mirror
-      #    of the confined system columns typed three of them `text` where the
-      #    engine deliberately bounds them `string(255)` for MySQL keying.
-      #    Settled by escalating upstream rather than re-blessing the shared
-      #    fixture; see task #251.)
+      #   @zeroship/migrate      engine tests with pre-existing generated-file,
+      #                          documentation, and repository-scan failures.
+      #                          Migration contract paths are gated separately.
       #   @zeroship/vite-plugin  7 failures, and they are TWO causes, not one.
       #                          2 are drift (env.db.ts committed vs fresh).
       #                          The other 5 are not drift at all: gen-types
@@ -1394,8 +1383,8 @@ jobs:
       #
       # Runs through a script rather than inline so the result can be COUNTED.
       # `pnpm -r` skips a package whose `test` script is renamed or removed, in
-      # silence - measured, and invisible here because the filter selects 41
-      # projects of which only 16 run a suite at all. The script carries the
+      # silence - measured, and invisible here because the filter selects 56
+      # projects of which only 21 run a suite at all. The script carries the
       # filters and the floors; see its header for what it does and does not
       # catch.
       - name: JavaScript suites
@@ -1536,7 +1525,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # has to be built before the SDKs. Same ordering as the `sdk` job.
-      - run: pnpm --filter zero-migrate build
+      - run: pnpm --filter @zeroship/migrate build
       # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
       # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
       - run: pnpm build
@@ -1566,11 +1555,6 @@ jobs:
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
             -p zeroship-gateway -p zeroship-cli --bins
-          # The platform schema is applied by the `zero-migrate` CLI now, which is
-          # a Node program. `pnpm build` earlier in this job builds the napi addon
-          # and the DSL; this builds the CLI itself, which the root build script
-          # deliberately does not (package.json's `build` filters to ./sdks/*).
-          pnpm --filter zero-migrate-cli build
       # ZS_FRESHNESS_STRICT=1 because the harness's own freshness note says so:
       # step 1 runs `pnpm build` inside the example and consumes whatever
       # sdks/vite-plugin/dist is already on disk, so a run over a stale dist is
@@ -1817,7 +1801,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # has to be built before the SDKs. Same ordering as the `sdk` job.
-      - run: pnpm --filter zero-migrate build
+      - run: pnpm --filter @zeroship/migrate build
       # `pnpm build` FIRST and cargo second is load-bearing, not stylistic: the
       # runtime crate `include_str!`s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
       - run: pnpm build
@@ -1828,11 +1812,6 @@ jobs:
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
             -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins
-          # The platform schema is applied by the `zero-migrate` CLI now, which is
-          # a Node program. `pnpm build` earlier in this job builds the napi addon
-          # and the DSL; this builds the CLI itself, which the root build script
-          # deliberately does not (package.json's `build` filters to ./sdks/*).
-          pnpm --filter zero-migrate-cli build
       # Account-status and spend-state both deploy the migration-first metering
       # probe. Build its ignored .zship and refresh its tracked IR together.
       - name: Build the metering probe
@@ -2298,7 +2277,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       # The vendored engine ships no dist/ and the vite-plugin imports it, so it
       # builds before the SDKs. Same ordering as the `sdk` and golden-path jobs.
-      - run: pnpm --filter zero-migrate build
+      - run: pnpm --filter @zeroship/migrate build
       # `pnpm build` before cargo is load-bearing: the runtime crate
       # include_str!s sdks/bootstrap/dist/{runtime-entry,dispatcher}.js.
       - run: pnpm build
@@ -2309,11 +2288,6 @@ jobs:
         run: |
           cargo build --release -p zeroship-control -p zeroship-worker \
             -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins
-          # The platform schema is applied by the `zero-migrate` CLI now, which is
-          # a Node program. `pnpm build` earlier in this job builds the napi addon
-          # and the DSL; this builds the CLI itself, which the root build script
-          # deliberately does not (package.json's `build` filters to ./sdks/*).
-          pnpm --filter zero-migrate-cli build
       # The harness refuses to start without a built probe and says so; building
       # it here rather than letting that refusal read as a CI misconfiguration.
       - name: Build the metering probe

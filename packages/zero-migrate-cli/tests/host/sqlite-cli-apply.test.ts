@@ -62,7 +62,7 @@ value = true
 scope = { include = ["main"] }
 `;
 
-const SCHEMA_MIGRATION = `import { table, t } from "zero-migrate";
+const SCHEMA_MIGRATION = `import { table, t } from "@zeroship/migrate";
 
 export const name = "create_notes";
 
@@ -79,7 +79,7 @@ export default {
 };
 `;
 
-const DATA_MIGRATION = `import { table } from "zero-migrate";
+const DATA_MIGRATION = `import { table } from "@zeroship/migrate";
 
 export const name = "seed_notes";
 
@@ -100,7 +100,7 @@ function writeMigrations(migrations: string): void {
 
 test("the CLI applies to a SQLite file and the rows are really there", () => {
   // Inside the test directory, not the system temp dir: the migration imports
-  // "zero-migrate", which only resolves from within the workspace. That is a
+  // "@zeroship/migrate", which only resolves from within the workspace. That is a
   // property of the unpublished source checkout, not a defect.
   const work = mkdtempSync(join(HERE, "sqlite-cli-"));
   const dbPath = join(work, "app.db");

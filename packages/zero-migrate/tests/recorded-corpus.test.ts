@@ -91,7 +91,7 @@ async function readRecorded(): Promise<Record<string, RecordedEnvelope>> {
  * Import one fixture and drain its migration phase through the production recorder
  * seam.
  *
- * A `.mig.js` under `crates/` imports the BARE specifier `zero-migrate`. Node
+ * A `.mig.js` under `crates/` imports the BARE specifier `@zeroship/migrate`. Node
  * resolves a bare specifier by walking up from the IMPORTING file, and nothing
  * under `crates/` can see this package, so importing the file where it lives fails
  * with ERR_MODULE_NOT_FOUND (a working directory does not affect ESM resolution).
@@ -110,11 +110,11 @@ async function readRecorded(): Promise<Record<string, RecordedEnvelope>> {
 async function recordFixture(stem: string): Promise<RecordedEnvelope> {
   const source = await readFile(resolve(fixturesDir, `${stem}${MIG_SUFFIX}`), "utf8");
   const indexUrl = pathToFileURL(resolve(here, "../src/index.js")).href;
-  const parts = source.split(`from "zero-migrate"`);
+  const parts = source.split(`from "@zeroship/migrate"`);
   assert.equal(
     parts.length,
     2,
-    `${stem}${MIG_SUFFIX} must carry exactly one bare "zero-migrate" import to rewrite`,
+    `${stem}${MIG_SUFFIX} must carry exactly one bare "@zeroship/migrate" import to rewrite`,
   );
   const rewritten = parts.join(`from "${indexUrl}"`);
   const dataUrl = `data:text/javascript;base64,${Buffer.from(rewritten).toString("base64")}`;

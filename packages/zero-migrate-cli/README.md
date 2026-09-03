@@ -1,7 +1,7 @@
 # zero-migrate-cli
 
-The runtime and command-line tool for zero-migrate. Install this to run
-migrations authored with the [`zero-migrate`](https://www.npmjs.com/package/zero-migrate)
+The runtime and command-line tool for zeroship migrations. Install this to run
+migrations authored with [`@zeroship/migrate`](https://www.npmjs.com/package/@zeroship/migrate)
 DSL against PostgreSQL or MySQL 8. It provides the `zero-migrate` command and a
 programmatic API (`apply`, `plan`, `validate`, `status`, `history`,
 `resolvePending`).
@@ -9,8 +9,8 @@ programmatic API (`apply`, `plan`, `validate`, `status`, `history`,
 ## Install
 
 ```
-npm install zero-migrate-cli zero-migrate pg      # PostgreSQL
-npm install zero-migrate-cli zero-migrate mysql2   # MySQL 8
+npm install zero-migrate-cli @zeroship/migrate pg      # PostgreSQL
+npm install zero-migrate-cli @zeroship/migrate mysql2   # MySQL 8
 ```
 
 `pg`, `mysql2`, and `tsx` are optional dependencies: install the driver for your
@@ -83,7 +83,7 @@ not sandboxed; run trusted modules only.
 
 ## Docs
 
-See the [zero-migrate documentation](https://github.com/ruiyangke/zero-migrate/tree/main/docs).
+See the [migration DSL reference](../../docs/reference/migrate-op-dsl.md).
 
 ## License
 

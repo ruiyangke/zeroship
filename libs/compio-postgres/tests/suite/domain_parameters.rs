@@ -13,7 +13,7 @@
 //! worked - but for `d[]` it reports the domain ARRAY, so reading failed in
 //! exactly the way binding did. Both are covered below.
 //!
-//! This is not a theoretical shape. `sdks/migrate` can create domains, and
+//! This is not a theoretical shape. `@zeroship/migrate` can create domains, and
 //! `crates/zeroship-migrate-server/src/session.rs` already carries a `resolve_domain()`
 //! helper for `information_schema`'s `cardinal_number`, `sql_identifier` and
 //! `yes_or_no` -- all domains -- because it hit the decode half of the same

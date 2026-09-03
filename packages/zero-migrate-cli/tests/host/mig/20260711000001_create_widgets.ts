@@ -1,4 +1,4 @@
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 
 export const name = "create_widgets";
 export default {

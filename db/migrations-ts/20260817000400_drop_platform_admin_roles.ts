@@ -1,4 +1,4 @@
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 // The platform staff role model is gone. `admin` was a literal universal allow
 // - permit(principal is User, action, resource) - so one missed guard call was

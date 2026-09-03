@@ -75,7 +75,7 @@ mk_tree() { # mk_tree <dir> <file>...
   local dir="$1"; shift
   mkdir -p "$dir/db/migrations-ts"
   local f
-  for f in "$@"; do printf 'export const up = "%s";\n' "$f" > "$dir/db/migrations-ts/$f"; done
+  for f in "$@"; do printf 'export default { schema() { /* %s */ } };\n' "$f" > "$dir/db/migrations-ts/$f"; done
 }
 
 echo "=== the fingerprint is a function of the migration set, and only of it ==="
@@ -99,7 +99,7 @@ echo "=== ...and it MOVES when the schema does. Three ways it can move. ==="
 # 1. A file ADDED. This is the acceptance case: a branch that writes a migration
 #    gets its own database without being told to.
 mk_tree "$TMP/added" 20260101_one.ts 20260202_two.ts
-printf 'export const up = "three";\n' > "$TMP/added/db/migrations-ts/20260303_three.ts"
+printf 'export default { schema() { /* three */ } };\n' > "$TMP/added/db/migrations-ts/20260303_three.ts"
 f_added="$(zs_schema_fingerprint "$TMP/added")"
 if [ "$f_added" != "$fa" ]; then ok "an added migration changes the fingerprint"; else bad "an added migration did not change it"; fi
 
@@ -108,7 +108,7 @@ if [ "$f_added" != "$fa" ]; then ok "an added migration changes the fingerprint"
 #    database fails every later run with ChecksumMismatch; it has to land in a
 #    fresh one.
 mk_tree "$TMP/edited" 20260101_one.ts 20260202_two.ts
-printf 'export const up = "one, but different";\n' > "$TMP/edited/db/migrations-ts/20260101_one.ts"
+printf 'export default { schema() { /* one, but different */ } };\n' > "$TMP/edited/db/migrations-ts/20260101_one.ts"
 f_edited="$(zs_schema_fingerprint "$TMP/edited")"
 if [ "$f_edited" != "$fa" ]; then ok "an edited migration changes the fingerprint"; else bad "an edited migration did not change it"; fi
 
@@ -116,7 +116,7 @@ if [ "$f_edited" != "$fa" ]; then ok "an edited migration changes the fingerprin
 #    journals under it, so this is a different schema even though every byte is
 #    accounted for. A digest over contents alone would miss it.
 mk_tree "$TMP/renamed" 20260101_one.ts
-printf 'export const up = "20260202_two.ts";\n' > "$TMP/renamed/db/migrations-ts/20269999_two.ts"
+printf 'export default { schema() { /* 20260202_two.ts */ } };\n' > "$TMP/renamed/db/migrations-ts/20269999_two.ts"
 f_renamed="$(zs_schema_fingerprint "$TMP/renamed")"
 if [ "$f_renamed" != "$fa" ]; then ok "a renamed migration changes the fingerprint"; else bad "a rename with identical bytes did not change it"; fi
 

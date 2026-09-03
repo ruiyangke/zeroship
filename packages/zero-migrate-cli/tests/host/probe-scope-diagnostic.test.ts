@@ -75,7 +75,7 @@ scope = "all"
   // both ops are present to keep the contrast inside ONE migration.
   writeFileSync(
     join(work, "migrations", "20260101000000_make.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "make_rows";
 export default {
   schema() {

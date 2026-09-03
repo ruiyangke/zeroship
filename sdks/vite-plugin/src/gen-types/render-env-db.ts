@@ -2,7 +2,7 @@
  * The generated-source `env.db.ts` renderer.
  *
  * The schema engine's own `envDbTs` is a round-trip of the folded IR back into
- * the *migration authoring* DSL (`import ... from "zero-migrate"`,
+ * the *migration authoring* DSL (`import ... from "@zeroship/migrate"`,
  * `t.text().primaryKey()`). That is the engine's artifact, not ours: a deployed
  * app depends on `@zeroship/db`, never on the migration engine, and the whole
  * point of this file is to type `env.db`. So gen-types renders its own module

@@ -25,6 +25,7 @@ import Module from "node:module";
 import {
   genTypesFromMigrations,
   ENV_DB_FILE,
+  MIGRATIONS_IR_FILE,
   RUNTIME_DESCRIPTOR_FILE,
 } from "../../src/gen-types/index.js";
 
@@ -89,7 +90,7 @@ import { table, t } from "@zeroship/migrate";
 
 export default {
   name: "create_hits",
-  up() {
+  schema() {
     table("hits").create({
       columns: {
         path: t.text().notNull(),
@@ -124,7 +125,11 @@ describe("generated schema source (record -> genArtifacts)", () => {
     try {
       const res = await genTypesFromMigrations(join(fx.root, "migrations"), outDir, {});
       assert.equal(res.status, "written");
-      assert.deepEqual([...res.files], [ENV_DB_FILE, RUNTIME_DESCRIPTOR_FILE]);
+      assert.deepEqual([...res.files], [
+        ENV_DB_FILE,
+        RUNTIME_DESCRIPTOR_FILE,
+        MIGRATIONS_IR_FILE,
+      ]);
 
       const json = JSON.parse(await fs.readFile(join(outDir, RUNTIME_DESCRIPTOR_FILE), "utf8"));
       assertRuntimeDescriptorV2(json);

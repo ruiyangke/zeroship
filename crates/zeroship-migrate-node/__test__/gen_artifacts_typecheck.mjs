@@ -194,7 +194,7 @@ assert(
 assert(!/\btable\s*\(/.test(source), 'generated artifact does not execute a table lifecycle operation');
 
 // Root the harness inside the real package tree, matching the package doc gates,
-// so `import ... from "zero-migrate"` resolves its built public declarations.
+// so `import ... from "@zeroship/migrate"` resolves its built public declarations.
 const dir = mkdtempSync(join(AUTHORING_ROOT, 'node_modules', '.codegen-gate-'));
 try {
   writeFileSync(join(dir, 'env.db.ts'), source, 'utf8');
@@ -228,4 +228,4 @@ try {
   rmSync(dir, { recursive: true, force: true });
 }
 
-console.log('PASS: generated env.db.ts typechecks against the real zero-migrate authoring package');
+console.log('PASS: generated env.db.ts typechecks against the real @zeroship/migrate authoring package');

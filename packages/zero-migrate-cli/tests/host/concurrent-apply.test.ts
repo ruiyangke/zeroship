@@ -68,7 +68,7 @@ const ADDON_PATH = resolve(
 );
 
 /** Twelve tables, so the window a racer can land in is wide. */
-const MIGRATION = `import { table, t } from "zero-migrate";
+const MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "create_many";
 export default {
   schema() {

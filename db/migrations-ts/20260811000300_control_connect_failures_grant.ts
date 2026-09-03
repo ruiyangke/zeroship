@@ -1,4 +1,4 @@
-import { grant } from "zero-migrate";
+import { grant } from "@zeroship/migrate";
 
 // `zeroship_control` held NO privilege of any kind on
 // zeroship.connect_checkout_failures, and two production paths use it.

@@ -17,15 +17,15 @@ export default defineConfig([
     // the pg/mysql2 driver adapters. `pg`/`mysql2` are optionalDependencies
     // resolved at runtime — external so the bundle never inlines them; the addon
     // is loaded via `createRequire` at runtime (a `.node`), never bundled. The
-    // authoring DSL + pure-JS recorder live in the separate `zero-migrate` package
+    // authoring DSL + pure-JS recorder live in the separate `@zeroship/migrate` package
     // (imported here, also external).
     entry: {
       index: "src/index.ts",
       // The CLI: the arg-parser (`cli.ts`) + the executable entry
       // (`cli-bin.ts`, mapped to the `zero-migrate` bin). `cli-bin.ts` carries a
       // leading `#!/usr/bin/env node` shebang which esbuild preserves on the entry
-      // chunk, so the emitted `dist/cli-bin.js` is directly executable. `zero-migrate`
-      // (the DSL) is external so a migration's `import { table } from "zero-migrate"`
+      // chunk, so the emitted `dist/cli-bin.js` is directly executable. `@zeroship/migrate`
+      // (the DSL) is external so a migration's `import { table } from "@zeroship/migrate"`
       // resolves to the ONE recorder instance this package shares (not a duplicate).
       cli: "src/cli.ts",
       "cli-bin": "src/cli-bin.ts",
@@ -36,7 +36,7 @@ export default defineConfig([
       "pg",
       "mysql2",
       "mysql2/promise",
-      "zero-migrate",
+      "@zeroship/migrate",
       "zeroship-migrate-node",
       "tsx",
       "tsx/esm/api",

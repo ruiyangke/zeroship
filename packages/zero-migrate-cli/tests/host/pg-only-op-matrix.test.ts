@@ -36,9 +36,9 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { table, t, sequence, view } from "zero-migrate";
+import { table, t, sequence, view } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
-import type { MigrationModule } from "zero-migrate/internal/recorder";
+import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 

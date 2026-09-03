@@ -1,4 +1,4 @@
-import { table, t, ids } from "zero-migrate";
+import { table, t, ids } from "@zeroship/migrate";
 
 // Payroll: runs (ULID key) and per-employee items with a composite primary key
 // and a STORED generated net_pay column (gross - tax). Period uniqueness is a

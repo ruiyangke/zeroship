@@ -5,7 +5,7 @@
  * validation, capability frame, stream framing, output
  * validation) lives in `__zsDispatch`
  * (`sdks/bootstrap/src/dispatcher.ts`, whose compiled twin the runtime
- * splices in via `crates/runtime/src/core/init.rs`). The plugin only
+ * splices in via `crates/zeroship-runtime/src/core/init.rs`). The plugin only
  * shapes the user module into `default = { fetch, rpc }` where `rpc`
  * is a PLAIN OBJECT (dict-shape).
  *

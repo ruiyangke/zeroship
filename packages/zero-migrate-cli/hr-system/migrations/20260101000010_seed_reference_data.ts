@@ -1,4 +1,4 @@
-import { table, decimal, int64 } from "zero-migrate";
+import { table, decimal, int64 } from "@zeroship/migrate";
 
 // Reference data: departments (idempotent upsert by code), job grades, and
 // positions. Public keys are supplied explicitly, as production seeds must be.

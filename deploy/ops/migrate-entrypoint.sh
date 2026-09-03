@@ -26,10 +26,10 @@ set -euo pipefail
 
 DSN_FILE=""
 # UNDER /app, NOT /db, AND THAT IS LOAD-BEARING. The CLI `import()`s each
-# migration under tsx, so its `import ... from "zero-migrate"` resolves by Node's
+# migration under tsx, so its `import ... from "@zeroship/migrate"` resolves by Node's
 # upward walk from this directory. At `/db/migrations-ts` that walk finds nothing
 # (the store is at `/app/node_modules`) and the apply dies on file #1; under /app
-# it reaches the member's own `node_modules/zero-migrate` link immediately. See
+# it reaches the member's own `node_modules/@zeroship/migrate` link immediately. See
 # the `migrate` stage in deploy/Dockerfile.
 MIGRATIONS_DIR="/app/db/migrations-ts"
 VERB="apply"

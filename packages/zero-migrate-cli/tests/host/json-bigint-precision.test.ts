@@ -74,7 +74,7 @@ scope = { include = [${JSON.stringify(schema)}] }
 function writeMigration(work: string, index: number, table: string): void {
   writeFileSync(
     join(work, "migrations", `2026010${index}000000_m${index}.ts`),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "m${index}";
 export default {
   schema() {

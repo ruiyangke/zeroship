@@ -85,8 +85,8 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     "schema",
     "sequence",
   ];
-  assert.equal(coreExports.has("table"), true, "table must be exported from zero-migrate root declarations");
-  assert.equal(coreExports.has("ids"), true, "ids must be exported from zero-migrate root declarations");
+  assert.equal(coreExports.has("table"), true, "table must be exported from @zeroship/migrate root declarations");
+  assert.equal(coreExports.has("ids"), true, "ids must be exported from @zeroship/migrate root declarations");
   assert.equal(coreExports.has("IdOptions"), false, "the removed migration id options must not be exported");
   assert.equal(migrationTypeMembers.has("id"), false, "the migration t declaration must not expose id");
   assert.equal(migrationTypeMembers.has("ref"), false, "the migration t declaration must not expose ref");
@@ -101,7 +101,7 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     "TypeIdOptions",
     "ValueFormat",
   ]) {
-    assert.equal(coreExports.has(name), true, `${name} must be exported from zero-migrate root declarations`);
+    assert.equal(coreExports.has(name), true, `${name} must be exported from @zeroship/migrate root declarations`);
   }
   assert.equal(tableHandleMembers.has("primaryKey"), true, "TableHandle must expose primaryKey()");
   assert.equal(tableHandleMembers.has("changeIdType"), false, "TableHandle must not expose changeIdType()");
@@ -111,7 +111,7 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     "PrimaryKeyOperations must expose only explicit lifecycle actions",
   );
   for (const name of rootedVendorExports) {
-    assert.equal(coreExports.has(name), true, `${name} must be exported from zero-migrate root declarations`);
+    assert.equal(coreExports.has(name), true, `${name} must be exported from @zeroship/migrate root declarations`);
   }
 
   const forbiddenInternalExports = [
@@ -128,14 +128,14 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     "pg" + "Table",
   ];
   for (const name of forbiddenInternalExports) {
-    assert.equal(coreExports.has(name), false, `${name} must stay out of zero-migrate root declarations`);
+    assert.equal(coreExports.has(name), false, `${name} must stay out of @zeroship/migrate root declarations`);
   }
 
   const indexDts = readFileSync(new URL("../dist/index.d.ts", import.meta.url), "utf8");
   assert.doesNotMatch(indexDts, /\bCreateRawViewArgs\b/);
   assert.doesNotMatch(indexDts, /\bcreateRaw\b/);
 
-  const runtimeRoot = await import("zero-migrate");
+  const runtimeRoot = await import("@zeroship/migrate");
   assert.equal(
     (runtimeRoot.t as unknown as Record<string, unknown>).id,
     undefined,
@@ -166,6 +166,6 @@ test("public root .d.ts exposes vendor DDL and omits recorder internals", async 
     assert.equal(typeof (runtimeRoot as Record<string, unknown>)[name], "function", `${name} must be a root runtime export`);
   }
   for (const name of forbiddenInternalExports) {
-    assert.equal((runtimeRoot as Record<string, unknown>)[name], undefined, `${name} must stay out of zero-migrate root runtime exports`);
+    assert.equal((runtimeRoot as Record<string, unknown>)[name], undefined, `${name} must stay out of @zeroship/migrate root runtime exports`);
   }
 });

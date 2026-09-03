@@ -8,10 +8,8 @@
 //
 // WHY THIS EXISTS, 2026-08-12. The deployed HTML is byte-identical whether or
 // not the CDC path works, so `curl https://.../ -> 200` says nothing about the
-// subscription. The Playwright suite does assert it, but needs a browser, a
-// pnpm install and an initialised submodule; on a fresh worktree that install
-// fails outright (`zero-migrate@workspace:*` is a submodule that git worktree
-// does not populate). This probe needs only node's built-in fetch.
+// subscription. The Playwright suite does assert it, but needs a browser and a
+// pnpm install. This probe needs only node's built-in fetch.
 //
 // It is deliberately the same contract the browser test drives:
 // POST /__zeroship/v1/<id>, `accept: text/event-stream` for the subscription.

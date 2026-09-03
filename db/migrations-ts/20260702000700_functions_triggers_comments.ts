@@ -1,4 +1,4 @@
-import { table, createFunction, raw } from "zero-migrate";
+import { table, createFunction, raw } from "@zeroship/migrate";
 
 export default {
   name: "functions_triggers_comments",

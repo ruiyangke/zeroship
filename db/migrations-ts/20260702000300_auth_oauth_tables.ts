@@ -6,7 +6,7 @@ import {
   uuidV4,
   interval,
   sequence,
-} from "zero-migrate";
+} from "@zeroship/migrate";
 
 export default {
   name: "auth_oauth_tables",

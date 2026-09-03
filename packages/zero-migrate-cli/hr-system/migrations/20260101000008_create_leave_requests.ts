@@ -1,4 +1,4 @@
-import { table, t, ids, uuidV4, now } from "zero-migrate";
+import { table, t, ids, uuidV4, now } from "@zeroship/migrate";
 
 // Leave requests use a database-generated UUIDv4 key (portable across all three
 // dialects; UUIDv7 DB-generation is PostgreSQL-18-only), a format-matched

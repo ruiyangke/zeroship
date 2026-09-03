@@ -102,7 +102,7 @@ function writeStep(
     : `{ columns: { id: t.int() } }`;
   writeFileSync(
     join(dir, filename),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = ${JSON.stringify(name)};
 export function schema() {
   table(${JSON.stringify(tableName)}).create(${create});
@@ -701,7 +701,7 @@ test("baseline refuses a database whose columns are behind the migration set", a
     // would prove only that the corpus is unguarded.
     writeFileSync(
       join(cwd, "20260801000001_m1_users.ts"),
-      `import { table, t } from "zero-migrate";
+      `import { table, t } from "@zeroship/migrate";
 export const name = "m1_users";
 export function schema() {
   table("users").create({ columns: { id: t.int() }, ifNotExists: true });
@@ -712,7 +712,7 @@ export function schema() {
     // therefore invisible to a presence-only check.
     writeFileSync(
       join(cwd, "20260801000002_m2_mfa.ts"),
-      `import { table, t } from "zero-migrate";
+      `import { table, t } from "@zeroship/migrate";
 export const name = "m2_mfa";
 export function schema() {
   table("users").column("mfa_secret").add({ type: t.text() });
@@ -958,7 +958,7 @@ test("baseline adopts a database this corpus itself applied", async () => {
     writeFileSync(join(cwd, "registry.json"), JSON.stringify({ gadgets: "app_cli" }));
     writeFileSync(
       join(cwd, "20260801000001_m1_gadgets.ts"),
-      `import { table, t } from "zero-migrate";
+      `import { table, t } from "@zeroship/migrate";
 export const name = "m1_gadgets";
 export function schema() {
   table("gadgets").create({
@@ -972,7 +972,7 @@ export function schema() {
     );
     writeFileSync(
       join(cwd, "20260801000002_m2_price.ts"),
-      `import { table, t } from "zero-migrate";
+      `import { table, t } from "@zeroship/migrate";
 export const name = "m2_price";
 export function schema() {
   table("gadgets").column("price").add({ type: t.int() });

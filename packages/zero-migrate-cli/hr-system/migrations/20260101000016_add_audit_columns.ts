@@ -1,4 +1,4 @@
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 
 // Add nullable audit timestamps to the two mutable core tables. Final schema
 // evolution step; a clean additive change.

@@ -1,4 +1,4 @@
-import { raw } from "zero-migrate";
+import { raw } from "@zeroship/migrate";
 
 export default {
   name: "billing_provider_corrections",

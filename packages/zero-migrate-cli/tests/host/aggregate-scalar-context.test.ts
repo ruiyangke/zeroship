@@ -56,37 +56,37 @@ const FORBIDDEN: ReadonlyArray<
 > = [
   [
     "default",
-    `import { table, t, countStar } from "zero-migrate";`,
+    `import { table, t, countStar } from "@zeroship/migrate";`,
     `table("agg_x").create({ columns: { id: t.int().notNull(), n: t.int().default(countStar()) }, primaryKey: ["id"] });`,
     "schema",
   ],
   [
     "check",
-    `import { table, countStar } from "zero-migrate";`,
+    `import { table, countStar } from "@zeroship/migrate";`,
     `table("agg_t").check("agg_ck").add({ expr: () => countStar().gt(0) });`,
     "schema",
   ],
   [
     "generated column",
-    `import { table, t, countStar } from "zero-migrate";`,
+    `import { table, t, countStar } from "@zeroship/migrate";`,
     `table("agg_y").create({ columns: { id: t.int().notNull(), g: t.int().generated(() => countStar()) }, primaryKey: ["id"] });`,
     "schema",
   ],
   [
     "index expression",
-    `import { table, countStar } from "zero-migrate";`,
+    `import { table, countStar } from "@zeroship/migrate";`,
     `table("agg_t").index("agg_ix").add({ on: [{ expr: () => countStar() }] });`,
     "schema",
   ],
   [
     "assignment",
-    `import { table, countStar } from "zero-migrate";`,
+    `import { table, countStar } from "@zeroship/migrate";`,
     `table("agg_t").update({ set: { n: () => countStar() }, where: (col) => col("id").gt(0) });`,
     "data",
   ],
   [
     "where predicate",
-    `import { table, countStar } from "zero-migrate";`,
+    `import { table, countStar } from "@zeroship/migrate";`,
     `table("agg_t").update({ set: { n: () => 1 }, where: () => countStar().gt(0) });`,
     "data",
   ],
@@ -121,7 +121,7 @@ scope = "all"
   );
   writeFileSync(
     join(work, "migrations", "20260101000000_a.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "a";
 export default {
   schema() {
@@ -189,7 +189,7 @@ test("an aggregate is refused in all six documented scalar positions", () => {
 test("CONTROL: the same generated-column shape without an aggregate lints clean", () => {
   // Proves the refusal above is about the aggregate and not about the syntax.
   const work = project(
-    `import { table, t } from "zero-migrate";`,
+    `import { table, t } from "@zeroship/migrate";`,
     `table("agg_y").create({ columns: { id: t.int().notNull(), a: t.int().notNull(), g: t.int().generated((col) => col("a").add(1)) }, primaryKey: ["id"] });`,
   );
   try {
@@ -209,7 +209,7 @@ test("CONTROL: the same aggregate is accepted in a view projection", () => {
   // Proves the rule is POSITIONAL. A blanket ban on countStar would satisfy every
   // refusal above while breaking the one place aggregates belong.
   const work = project(
-    `import { view, countStar } from "zero-migrate";`,
+    `import { view, countStar } from "@zeroship/migrate";`,
     `view("agg_v").create({ as: (q) => q.from("agg_t").select([{ kind: "expr", alias: "total", expr: () => countStar() }]) });`,
   );
   try {

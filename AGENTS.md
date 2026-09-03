@@ -42,8 +42,8 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 | **Auth** (OIDC IdP + login UI + RPs) | `docs/reference/auth.md` · `crates/zeroship-auth/` · `crates/zeroship-gateway/src/oidc_rp.rs` · gates: `tests/run_auth_suite.sh` (live PG) + `tests/e2e_auth_ui.sh` (real Chromium against the real auth binary) |
 | **How data is stored, reached and isolated** (databases, datastores, grants, schema authority) | `docs/architecture/data-system.md` - read this before changing anything in the data plane |
 | **The DB SDK** (`@zeroship/db`) | `docs/reference/db.md` · `crates/zeroship-plugin-db/` |
-| **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `sdks/migrate/` · `crates/zeroship-schema/` · `crates/zeroship-migrate-server/` · `crates/zeroship-migrate*/` (the engine crates, in-sourced) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
-| **The PLATFORM's own schema** (`db/migrations-ts/`) | `deploy/ops/db-migrate.sh` (the sanctioned applier) · `tests/platform_migration_corpus_gate.sh` (proves it still applies) · `policies/platform.policy.toml`. It is authored in **`zero-migrate`**, the engine DSL — NOT `@zeroship/migrate`, and that is not an inconsistency. The corpus is applied by the engine's own Node CLI, which drains `zero-migrate`'s recorder; a file importing any other package records into a different ambient singleton and drains empty. It spelled `@zeroship/migrate` until 2026-08-28, which worked only because a since-deleted Rust binary aliased that name onto the engine bundle inside V8 — and left the platform unable to migrate its own database for as long as the alias was gone. Creator migrations still import `@zeroship/migrate`; the vite-plugin aliases it onto `zero-migrate` before recording (`sdks/vite-plugin/src/gen-types/recorder.ts:114-117`). |
+| **The migration DSL** (`@zeroship/migrate`, portable op DSL) | `docs/reference/migrate-op-dsl.md` · `packages/zero-migrate/` (the one authoring package and recorder) · `crates/zeroship-schema/` · `crates/zeroship-migrate-server/` · `crates/zeroship-migrate*/` (the engine crates, in-sourced) · `db/migrations-ts/` (JS DSL; sole platform migration source — no SQL/Flyway) |
+| **The PLATFORM's own schema** (`db/migrations-ts/`) | `deploy/ops/db-migrate.sh` (the sanctioned applier) · `tests/platform_migration_corpus_gate.sh` (proves it records and applies the corpus) · `policies/platform.policy.toml`. Platform and creator migrations both import the single **`@zeroship/migrate`** package in `packages/zero-migrate/`; the engine CLI and Vite plugin drain that package's one ambient recorder. This identity is load-bearing: importing a second implementation would record into another singleton and let the host drain empty. The 2026-08-28 outage was exactly that split; `docs/reviews/2026-08-28-migrate-dsl-fork-divergence.md` preserves the history. There is no alias and no second SDK package. |
 | **The KV SDK** (`@zeroship/kv`) | `docs/reference/kv.md` · `sdks/kv/` · `crates/zeroship-plugin-kv/` |
 | **The RPC SDK / server functions** (`@zeroship/rpc`) | `docs/reference/rpc.md` · `sdks/rpc/` · `sdks/vite-plugin/src/{transform,rpc-registry,manifest}.ts` · `sdks/bootstrap/src/dispatcher.ts` |
 | **Durable workflows** (`@zeroship/workflows`, `env.workflows`) | `docs/reference/workflows.md` · `sdks/workflows/` · `crates/zeroship-plugin-workflow/` · `crates/zeroship-control/src/{workflow_instance_api.rs,cron/workflow_engine.rs}` · `crates/zeroship-worker/src/handler.rs` |
@@ -408,7 +408,7 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 # cargo then sees the freshly emitted dist files.
 #
 # `sdks/vite-plugin` imports `zeroship-migrate-node`, a Rust N-API addon in
-# the vendored engine whose outputs are untracked and which `pnpm install`
+# `crates/zeroship-migrate-node` whose outputs are untracked and which `pnpm install`
 # does not build. Root `pnpm build` DOES build it -- it is the first
 # filter in the chain (package.json, `pnpm --filter zeroship-migrate-node
 # build && ...`), so one `pnpm build` on a clean checkout is enough and
@@ -424,7 +424,7 @@ range yourself with `tests/commit_msg_gate.sh --range origin/main..HEAD`.
 #
 # The original measurement still describes the FAILURE it protects
 # against, and is worth keeping: remove only index.js / index.d.ts /
-# *.node from third_party/zero-migrate/crates/zeroship-migrate-node and
+# *.node from `crates/zeroship-migrate-node` and
 # `pnpm --filter @zeroship/vite-plugin build` fails with
 #   src/gen-types/addon.ts(66,8): error TS2307:
 #       Cannot find module 'zeroship-migrate-node'

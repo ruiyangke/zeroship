@@ -1,4 +1,4 @@
-import { table, t, now, grant } from "zero-migrate";
+import { table, t, now, grant } from "@zeroship/migrate";
 
 const schema = "zeroship";
 const journalTables = [

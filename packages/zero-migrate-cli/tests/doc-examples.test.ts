@@ -3,7 +3,7 @@
 // against the REAL engine package types, so an API change that rots a documented
 // snippet FAILS CI.
 //
-// The DSL (`zero-migrate`) examples in those docs are gated by the DSL package's
+// The DSL (`@zeroship/migrate`) examples in those docs are gated by the DSL package's
 // `tests/doc-examples.test.ts`; this gate covers ONLY blocks importing
 // `zero-migrate-cli` (the host/facade surface). This package can resolve
 // `zero-migrate-cli`'s own source, so those snippets are compiled here.
@@ -75,7 +75,7 @@ function rewriteForGate(block: string, srcIndex: string): string {
 }
 
 /** Run `tsc --noEmit` over a synthesized harness rooted in the engine package,
- *  so it resolves the REAL engine + `zero-migrate` types. Returns null on
+ *  so it resolves the REAL engine + `@zeroship/migrate` types. Returns null on
  *  success, or the compiler diagnostics on failure. */
 function typecheck(harnessSource: string): string | null {
   const dir = mkdtempSync(join(PKG_ROOT, "node_modules", ".doc-gate-"));

@@ -67,7 +67,7 @@ function scaffold(schema: string): string {
   const dir = mkdtempSync(join(HERE, "rollback-live-"));
   writeFileSync(
     join(dir, "20260101000000_create_rollback_notes.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "create_rollback_notes";
 export default {
   schema() {
@@ -183,7 +183,7 @@ function scaffoldSequenceDrop(schema: string): string {
   const dir = mkdtempSync(join(HERE, "rollback-live-seq-"));
   writeFileSync(
     join(dir, "20260101000000_create_counter.ts"),
-    `import { sequence } from "zero-migrate";
+    `import { sequence } from "@zeroship/migrate";
 export const name = "create_counter";
 export default {
   schema() {
@@ -194,7 +194,7 @@ export default {
   );
   writeFileSync(
     join(dir, "20260101000001_drop_counter.ts"),
-    `import { sequence } from "zero-migrate";
+    `import { sequence } from "@zeroship/migrate";
 export const name = "drop_counter";
 export default {
   schema() {
@@ -265,7 +265,7 @@ function scaffoldSchemaDrop(projectSchema: string, authored: string): string {
   const dir = mkdtempSync(join(HERE, "rollback-live-schema-"));
   writeFileSync(
     join(dir, "20260101000000_create_reporting.ts"),
-    `import { schema } from "zero-migrate";
+    `import { schema } from "@zeroship/migrate";
 export const name = "create_reporting";
 export default {
   schema() {
@@ -276,7 +276,7 @@ export default {
   );
   writeFileSync(
     join(dir, "20260101000001_drop_reporting.ts"),
-    `import { schema } from "zero-migrate";
+    `import { schema } from "@zeroship/migrate";
 export const name = "drop_reporting";
 export default {
   schema() {
@@ -356,7 +356,7 @@ function scaffoldExtensionDrop(projectSchema: string, extensionName: string): st
   const dir = mkdtempSync(join(HERE, "rollback-live-ext-"));
   writeFileSync(
     join(dir, "20260101000000_create_ext.ts"),
-    `import { extension } from "zero-migrate";
+    `import { extension } from "@zeroship/migrate";
 export const name = "create_ext";
 export default {
   schema() {
@@ -367,7 +367,7 @@ export default {
   );
   writeFileSync(
     join(dir, "20260101000001_drop_ext.ts"),
-    `import { extension } from "zero-migrate";
+    `import { extension } from "@zeroship/migrate";
 export const name = "drop_ext";
 export default {
   schema() {
@@ -456,7 +456,7 @@ function scaffoldGuardedSchemaDrop(projectSchema: string, authored: string): str
   const dir = mkdtempSync(join(HERE, "rollback-live-guarded-"));
   writeFileSync(
     join(dir, "20260101000000_create_guarded.ts"),
-    `import { schema } from "zero-migrate";
+    `import { schema } from "@zeroship/migrate";
 export const name = "create_guarded";
 export default {
   schema() {
@@ -467,7 +467,7 @@ export default {
   );
   writeFileSync(
     join(dir, "20260101000001_drop_guarded.ts"),
-    `import { schema } from "zero-migrate";
+    `import { schema } from "@zeroship/migrate";
 export const name = "drop_guarded";
 export default {
   schema() {

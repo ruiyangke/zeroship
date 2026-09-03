@@ -62,7 +62,7 @@
     "mime": "^3.0.0",
     "tar": "^7.5.13",
     "unenv": "2.0.0-rc.24",
-    "zero-migrate": "workspace:*",
+    "@zeroship/migrate": "workspace:*",
     "zeroship-migrate-node": "workspace:*"
   },
   "bin": {

@@ -3,7 +3,7 @@
 A practical, example-driven tour of **every** construct in the `@zeroship/migrate` authoring
 surface. For the normative contract, see `docs/reference/migrate-op-dsl.md`; this guide is the
 cookbook. Examples reflect the shipped API and its arg shapes as verified against
-`sdks/migrate/src/{ops,types}.ts` and the engine. Where the surface is currently awkward or
+`packages/zero-migrate/src/{ops,types}.ts` and the engine. Where the surface is currently awkward or
 limited (redundant spellings, expressiveness cliffs), this guide flags it inline
 rather than papering over it.
 
@@ -21,28 +21,27 @@ engine's per-op `VendorCapability` gate is (see [§20](#20-the-raw-escape-hatch)
 
 ## 1. Migration module shape
 
-A migration is a `.ts` module exporting a `name` plus `up()` (and optionally `down()`). The
-functions are parameterless and author against the ambient per-migration recorder.
+A migration is a `.ts` module with exactly one forward phase. Use `schema()` for
+DDL. Use `data()` for DML and pair it with either a recorded `inverse()` or a
+non-empty `irreversible` reason. Phase functions are parameterless, synchronous,
+and author against the ambient per-migration recorder.
 
 ```ts
-import { table, t, now, uuidV4, currentSetting, currentUser, interval, concatWs } from "@zeroship/migrate";
+import { now, table, t, uuidV4 } from "@zeroship/migrate";
 
-export const name = "create_users";
-
-export function up() {
-  table("users").create({
-    columns: {
-      id: t.uuid().notNull().default(uuidV4()),
-      email: t.text().notNull(),
-      created_at: t.timestamp().notNull().default(now()),
-    },
-    primaryKey: ["id"],
-  });
-}
-
-export function down() {
-  table("users").drop({ ifExists: true });
-}
+export default {
+  name: "create_users",
+  schema() {
+    table("users").create({
+      columns: {
+        id: t.uuid().notNull().default(uuidV4()),
+        email: t.text().notNull(),
+        created_at: t.timestamp().notNull().default(now()),
+      },
+      primaryKey: ["id"],
+    });
+  },
+};
 ```
 
 Names are plain strings (never live-schema-bound). Every schema is placed with an explicit
@@ -69,11 +68,10 @@ table("orders").comment(null);                       // clear the comment
 ### Table runtime options
 
 ```ts
-table("posts").softDelete();                 // enable soft-delete (adds deleted_at semantics)
-table("posts").softDelete({ enabled: false }); // disable
-table("posts").withVersioning();             // optimistic-concurrency version column
-table("posts").strictness("strict");         // TableStrictness: strict | lenient | off
-table("posts").setOptions({ /* SetTableOptionsArgs */ });
+table("posts").setOptions({ softDelete: true });
+table("posts").setOptions({ softDelete: false });
+table("posts").setOptions({ versioning: true });
+table("posts").setOptions({ strictness: "strict" }); // strict | lenient | off
 ```
 
 ---
@@ -84,14 +82,18 @@ Every column starts from an immutable `t.*` factory. Portable core types render 
 dialects; PG-flavoured types map per-dialect.
 
 ```ts
-// Identity / keys
-t.id()                       // conventional primary-key column
+import { ids, t } from "@zeroship/migrate";
+
+// Identity / keys. ID formats remain nullable and constraint-neutral until
+// ordinary modifiers opt in.
+ids.typeId({ prefix: "usr" }).primaryKey()
+ids.ulid().notNull().unique()
 t.uuid()
 
 // Text
 t.text()
 t.text({ caseSensitive: false })   // case-insensitive: PG citext, SQLite NOCASE, MySQL _ci
-t.char(3)                    // fixed-length CHAR(n)
+t.char({ length: 3 })        // fixed-length CHAR(n)
 t.textArray()                // text[] (PG native; SQLite TEXT; MySQL JSON)
 
 // Numbers
@@ -100,7 +102,7 @@ t.int()                      // int4
 t.bigInt()                   // int8
 t.real()                     // float4
 t.double()                   // float8 / double precision — NOT an alias of t.real()
-t.numeric(12, 2)             // NUMERIC(precision, scale)
+t.numeric({ precision: 12, scale: 2 }) // NUMERIC(precision, scale)
 
 // Temporal
 t.timestamp()
@@ -117,7 +119,7 @@ t.enum("order_status")       // references an enum type (see §9)
 t.domain("billing_period")   // references a domain (see §10)
 
 // Search / spatial (vendor-mapped intent nodes)
-t.vector(1536, { metric: "cosine" })   // pgvector / sqlite-vec
+t.vector({ dimensions: 1536, metric: "cosine" }) // pgvector / sqlite-vec
 t.geoPoint()
 
 // Encryption wrapper
@@ -142,10 +144,9 @@ Facets chain onto any `t.*` value. Order is free; each returns a `ColumnDef`.
 t.text().notNull()
 t.uuid().notNull().primaryKey()
 t.text().unique()
-t.ref("users")                               // FK column TYPE naming the target table only
 t.uuid().references("users", "id")           // uuid column + typed FK facet (target table AND column)
 t.bigInt().notNull().default(0)              // scalar default
-t.char(3).notNull().default("usd")           // string literal default
+t.char({ length: 3 }).notNull().default("usd") // string literal default
 ```
 
 ### Default values — every form

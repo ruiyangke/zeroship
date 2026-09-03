@@ -1,4 +1,4 @@
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 
 // Job grades use an explicit signed-64-bit key (imported from a legacy HRIS).
 // `grade_code` uniqueness is a portable unique index (added later).

@@ -61,7 +61,7 @@
     "test:host:leak": "node --import tsx tests/host-leak-gate.ts"
   },
   "dependencies": {
-    "zero-migrate": "workspace:*",
+    "@zeroship/migrate": "workspace:*",
     "zeroship-migrate-node": "workspace:*"
   },
   "optionalDependencies": {

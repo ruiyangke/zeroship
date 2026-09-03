@@ -55,7 +55,7 @@ const ADDON_PATH = resolve(
 const OWNER_APP = "app_resolve_lifecycle";
 
 /** A seeded row, so the rename can be checked to carry its VALUES across. */
-const CREATE = `import { table, t } from "zero-migrate";
+const CREATE = `import { table, t } from "@zeroship/migrate";
 export const name = "create_users";
 export default {
   schema() {
@@ -67,7 +67,7 @@ export default {
 };
 `;
 
-const SEED = `import { table } from "zero-migrate";
+const SEED = `import { table } from "@zeroship/migrate";
 export const name = "seed_users";
 export default {
   data() {
@@ -79,7 +79,7 @@ export default {
 };
 `;
 
-const RENAME = `import { table, t } from "zero-migrate";
+const RENAME = `import { table, t } from "@zeroship/migrate";
 export const name = "rename_display_name";
 export default {
   schema() {

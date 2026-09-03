@@ -1,4 +1,4 @@
-// `zero-migrate` — the SHARED column-type lexicon bridge from the db type-builder
+// `@zeroship/migrate` — the SHARED column-type lexicon bridge from the db type-builder
 // surface (`./db-types.js`).
 //
 // The migration DSL and the runtime schema share the same primitive type

@@ -81,7 +81,7 @@ const require = createRequire(import.meta.url);
  * The reply gen-types consumes (or a soft error).
  *
  * The addon also returns an `envDbTs`, deliberately NOT declared here: it
- * re-authors the folded IR in the *migration* DSL (`from "zero-migrate"`,
+ * re-authors the folded IR in the *migration* DSL (`from "@zeroship/migrate"`,
  * `t.text().primaryKey()`), which is the engine's own artifact and neither
  * resolvable nor type-bearing in a creator app. gen-types renders the typed
  * `env.db` surface itself from `runtimeJson` (see `render-env-db.ts`).

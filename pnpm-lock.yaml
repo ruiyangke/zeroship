@@ -85,7 +85,7 @@ importers:
 
   db/migrations-ts:
     dependencies:
-      zero-migrate:
+      '@zeroship/migrate':
         specifier: workspace:*
         version: link:../../packages/zero-migrate
 
@@ -214,7 +214,7 @@ importers:
     devDependencies:
       '@zeroship/migrate':
         specifier: workspace:*
-        version: link:../../sdks/migrate
+        version: link:../../packages/zero-migrate
       '@zeroship/types':
         specifier: workspace:*
         version: link:../../sdks/types
@@ -434,7 +434,7 @@ importers:
     devDependencies:
       '@zeroship/migrate':
         specifier: workspace:*
-        version: link:../../sdks/migrate
+        version: link:../../packages/zero-migrate
       '@zeroship/types':
         specifier: workspace:*
         version: link:../../sdks/types
@@ -775,7 +775,7 @@ importers:
     devDependencies:
       '@zeroship/migrate':
         specifier: workspace:*
-        version: link:../../sdks/migrate
+        version: link:../../packages/zero-migrate
       '@zeroship/types':
         specifier: workspace:*
         version: link:../../sdks/types
@@ -855,7 +855,7 @@ importers:
         version: 19.2.3(@types/react@19.2.14)
       '@zeroship/migrate':
         specifier: workspace:*
-        version: link:../../sdks/migrate
+        version: link:../../packages/zero-migrate
       '@zeroship/types':
         specifier: workspace:*
         version: link:../../sdks/types
@@ -1139,7 +1139,7 @@ importers:
 
   packages/zero-migrate-cli:
     dependencies:
-      zero-migrate:
+      '@zeroship/migrate':
         specifier: workspace:*
         version: link:../zero-migrate
       zeroship-migrate-node:
@@ -1171,21 +1171,51 @@ importers:
 
   packages/zero-migrate-mysql:
     dependencies:
-      zero-migrate:
+      '@zeroship/migrate':
         specifier: workspace:*
         version: link:../zero-migrate
+    devDependencies:
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(supports-color@8.1.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
 
   packages/zero-migrate-postgres:
     dependencies:
-      zero-migrate:
+      '@zeroship/migrate':
         specifier: workspace:*
         version: link:../zero-migrate
+    devDependencies:
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(supports-color@8.1.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
 
   packages/zero-migrate-sqlite:
     dependencies:
-      zero-migrate:
+      '@zeroship/migrate':
         specifier: workspace:*
         version: link:../zero-migrate
+    devDependencies:
+      tsup:
+        specifier: ^8.5.1
+        version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(supports-color@8.1.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
+      tsx:
+        specifier: 'catalog:'
+        version: 4.21.0
+      typescript:
+        specifier: 'catalog:'
+        version: 5.9.3
 
   sdks/auth:
     devDependencies:
@@ -1387,38 +1417,6 @@ importers:
       typescript:
         specifier: 'catalog:'
         version: 5.9.3
-
-  sdks/migrate:
-    dependencies:
-      '@zeroship/db':
-        specifier: workspace:*
-        version: link:../db
-    devDependencies:
-      '@types/node':
-        specifier: ^22.0.0
-        version: 22.19.17
-      '@types/pg':
-        specifier: ^8.11.0
-        version: 8.20.0
-      json-schema-to-typescript:
-        specifier: ^15.0.4
-        version: 15.0.4
-      tsup:
-        specifier: ^8.5.1
-        version: 8.5.1(@swc/core@1.15.40)(jiti@2.6.1)(postcss@8.5.13)(supports-color@8.1.1)(tsx@4.21.0)(typescript@5.9.3)(yaml@2.8.4)
-      tsx:
-        specifier: 'catalog:'
-        version: 4.21.0
-      typescript:
-        specifier: 'catalog:'
-        version: 5.9.3
-    optionalDependencies:
-      mysql2:
-        specifier: ^3.11.0
-        version: 3.22.5(@types/node@22.19.17)
-      pg:
-        specifier: ^8.13.0
-        version: 8.22.0
 
   sdks/payments:
     dependencies:
@@ -1668,6 +1666,9 @@ importers:
       '@zeroship/db':
         specifier: workspace:*
         version: link:../db
+      '@zeroship/migrate':
+        specifier: workspace:*
+        version: link:../../packages/zero-migrate
       esbuild:
         specifier: ^0.28.0
         version: 0.28.0
@@ -1686,9 +1687,6 @@ importers:
       unenv:
         specifier: 2.0.0-rc.24
         version: 2.0.0-rc.24
-      zero-migrate:
-        specifier: workspace:*
-        version: link:../../packages/zero-migrate
       zeroship-migrate-node:
         specifier: workspace:*
         version: link:../../crates/zeroship-migrate-node
@@ -6984,12 +6982,6 @@ packages:
     resolution: {integrity: sha512-dkEJPVvun4FryqBmZ5KhDo0K9iDXAwn08tMLDinNdRBNPcYEDiWYysLcc6k3mjTMlbP9KyylvRpd4wFtwrT9rw==}
     engines: {node: ^20.17.0 || >=22.9.0}
 
-  mysql2@3.22.5:
-    resolution: {integrity: sha512-95uZ2TrPWAZdwpB3vvvDbmEMcNG8yIeNCyu6GUcr/QnWEE/wXm7+mhOCsdQfWQDTV7qYT/PDUZ4U4UPP4AsXqQ==}
-    engines: {node: '>= 8.0'}
-    peerDependencies:
-      '@types/node': '>= 8'
-
   mysql2@3.23.2:
     resolution: {integrity: sha512-fxh3HpQ8vJtu/Mmnd4Xsur19jGjHGzRLMxptiDtOkbX7EVBgnafGSGDx1WGGVmJLClVh2LeeBMMo24IFv8wCyQ==}
     engines: {node: '>= 8.0'}
@@ -7863,10 +7855,6 @@ packages:
 
   sqids@0.3.0:
     resolution: {integrity: sha512-lOQK1ucVg+W6n3FhRwwSeUijxe93b51Bfz5PMRMihVf1iVkl82ePQG7V5vwrhzB11v0NtsR25PSZRGiSomJaJw==}
-
-  sql-escaper@1.4.0:
-    resolution: {integrity: sha512-Ti/Zx9J3aITMYUMFhCKbkplQjyi7Kk2SyYXp+rzrkyKZetIy19XbQtVZ+0ZR5aVm/178tIJ6+aVvBqXkH+Xs7w==}
-    engines: {bun: '>=1.0.0', deno: '>=2.0.0', node: '>=12.0.0'}
 
   sql-escaper@1.5.1:
     resolution: {integrity: sha512-4toX5E1fQbBrpfXidaHnF0669nkAdETeIPTs2SUjxxD7RRIs9ICG4gtpmfc68JCEKehsdwLFqBu9VlQqZ1P1gg==}
@@ -13919,19 +13907,6 @@ snapshots:
 
   mute-stream@3.0.0: {}
 
-  mysql2@3.22.5(@types/node@22.19.17):
-    dependencies:
-      '@types/node': 22.19.17
-      aws-ssl-profiles: 1.1.2
-      denque: 2.1.0
-      generate-function: 2.3.1
-      iconv-lite: 0.7.2
-      long: 5.3.2
-      lru.min: 1.1.4
-      named-placeholders: 1.1.6
-      sql-escaper: 1.4.0
-    optional: true
-
   mysql2@3.23.2(@types/node@22.19.17):
     dependencies:
       '@types/node': 22.19.17
@@ -14928,9 +14903,6 @@ snapshots:
   sprintf-js@1.0.3: {}
 
   sqids@0.3.0: {}
-
-  sql-escaper@1.4.0:
-    optional: true
 
   sql-escaper@1.5.1:
     optional: true

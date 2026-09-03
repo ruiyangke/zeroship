@@ -1,4 +1,4 @@
-import { view } from "zero-migrate";
+import { view } from "@zeroship/migrate";
 
 export default {
   schema() {

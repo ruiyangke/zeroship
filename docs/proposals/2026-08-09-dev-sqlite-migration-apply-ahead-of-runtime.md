@@ -208,7 +208,7 @@ example migration):**
 
   export default {
     name: "create_todos",
-    up() {
+    schema() {
       table("users").create({
         columns: {
           email:  t.text().notNull().unique(),

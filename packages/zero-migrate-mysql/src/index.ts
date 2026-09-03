@@ -1,6 +1,6 @@
 // Vendor attributes for the `mysql` backend.
 //
-// This package exists so the neutral `zero-migrate` package can stay neutral. The
+// This package exists so the neutral `@zeroship/migrate` package can stay neutral. The
 // authoring DSL knows there is an extension point; it does not know that `mysql` fills
 // one. Installing this package is what supplies that knowledge, via TypeScript
 // declaration merging into `VendorAttributeNamespaces`.

@@ -22,7 +22,7 @@ import { table, t } from "@zeroship/migrate";
 //      column and the descriptor is refused.
 //
 //   2. `t.ref()` is DECLARED in @zeroship/migrate's public types
-//      (sdks/migrate/src/types.ts) but is not accepted by the vendored
+//      (packages/zero-migrate/src/types.ts) but is not accepted by the
 //      engine; a native foreign key is spelled
 //      `t.text().references(table, column)`. examples/db-todos carries the
 //      same note, written after the same failure.
@@ -54,7 +54,7 @@ export default {
         // keyId: "db_e2e"` and `ssn` as `mode: "randomised", keyId: "db_e2e"`.
         // NEITHER the mode NOR the key id is representable in a migration:
         // `t.encrypted()` takes only `of`, and `keyId` appears ZERO times in
-        // the whole of sdks/migrate/src. The vendored engine says so itself, by
+        // the whole of packages/zero-migrate/src. The engine says so itself, by
         // design and fail-closed rather than silently wrong -- see the comment
         // and test in third_party/zero-migrate/.../render/fold.rs, anchored on
         // the text "op.* can author ONLY a DEFAULT-mode encrypted column ...

@@ -1,4 +1,4 @@
-import { table, t, now, uuidV4 } from "zero-migrate";
+import { table, t, now, uuidV4 } from "@zeroship/migrate";
 
 export default {
   name: "control_tables",

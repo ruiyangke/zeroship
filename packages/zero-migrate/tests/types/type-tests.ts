@@ -15,11 +15,11 @@
 //     existence is an apply-time check, the anti-rot guarantee).
 
 // @ts-expect-error — free boolean combinators are no longer exported from the public package.
-import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "zero-migrate";
+import { and as removedPkgAnd, or as removedPkgOr, not as removedPkgNot } from "@zeroship/migrate";
 // @ts-expect-error — free policy helpers were deleted; use table(...).policy(name).create/drop().
-import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "zero-migrate";
+import { createPolicy as removedPkgCreatePolicy, dropPolicy as removedPkgDropPolicy } from "@zeroship/migrate";
 // @ts-expect-error — flat named-object lifecycle helpers were deleted; use schema/extension/role handles.
-import { dropSchema as removedPkgDropSchema, dropExtension as removedPkgDropExtension, alterRole as removedPkgAlterRole, dropRole as removedPkgDropRole } from "zero-migrate";
+import { dropSchema as removedPkgDropSchema, dropExtension as removedPkgDropExtension, alterRole as removedPkgAlterRole, dropRole as removedPkgDropRole } from "@zeroship/migrate";
 
 import * as migrate from "../../src/index.js";
 import {

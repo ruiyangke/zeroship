@@ -6,7 +6,7 @@
 # emits BOTH:
 #   - crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs (Rust test artifact)
 #   - packages/zero-migrate/src/generated/dialect-table.ts      (the TS mirror)
-# Regenerate with: `pnpm --filter zero-migrate gen:dialect-table`, then
+# Regenerate with: `pnpm --filter @zeroship/migrate gen:dialect-table`, then
 # commit both generated artifacts.
 #
 # DISPOSITION vocabulary (per (row, dialect)):
