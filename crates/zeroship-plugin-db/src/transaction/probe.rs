@@ -59,7 +59,7 @@ pub async fn begin(
 /// If a transaction is already admitted for this app.
 pub fn admit_only(app_id: &str) {
     assert!(
-        crate::context::with_mut(|c| c.try_claim_tx(app_id)),
+        crate::tx_lanes::with_mut(|l| l.try_claim_tx(app_id)),
         "admit_only: a transaction is already claimed for {app_id}"
     );
     let actions = driver::admit_in_preparing(app_id);
@@ -82,8 +82,8 @@ pub fn admit_only(app_id: &str) {
 /// If no execution deadline is armed.
 pub async fn fire_execution_deadline(app_id: &str) -> ProbeOutcome {
     use super::reducer::deadline::{DeadlineKind, DeadlineState};
-    let armed = crate::context::with(|c| {
-        c.transaction_reducer(app_id)
+    let armed = crate::tx_lanes::with(|l| {
+        l.transaction_reducer(app_id)
             .map(|reducer| reducer.deadline().state())
     });
     let (kind, generation) = match armed {
@@ -193,8 +193,8 @@ fn session_after(app_id: &str, before: Option<SessionOwnership>) -> Option<Sessi
 /// The reducer's state, or `None` once it has been retired.
 #[must_use]
 pub fn state(app_id: &str) -> Option<TxState> {
-    crate::context::with(|c| {
-        c.transaction_reducer(app_id)
+    crate::tx_lanes::with(|l| {
+        l.transaction_reducer(app_id)
             .map(super::reducer::TxReducer::state)
     })
 }
@@ -202,8 +202,8 @@ pub fn state(app_id: &str) -> Option<TxState> {
 /// The reducer's session ownership, or `None` once it has been retired.
 #[must_use]
 pub fn session(app_id: &str) -> Option<SessionOwnership> {
-    crate::context::with(|c| {
-        c.transaction_reducer(app_id)
+    crate::tx_lanes::with(|l| {
+        l.transaction_reducer(app_id)
             .map(super::reducer::TxReducer::session)
     })
 }
@@ -211,8 +211,8 @@ pub fn session(app_id: &str) -> Option<SessionOwnership> {
 /// Every savepoint name this transaction has minted, in order.
 #[must_use]
 pub fn minted_savepoint_names(app_id: &str) -> Vec<String> {
-    crate::context::with(|c| {
-        c.transaction_reducer(app_id).map_or_else(Vec::new, |r| {
+    crate::tx_lanes::with(|l| {
+        l.transaction_reducer(app_id).map_or_else(Vec::new, |r| {
             r.frames()
                 .minted_names()
                 .iter()
@@ -225,7 +225,7 @@ pub fn minted_savepoint_names(app_id: &str) -> Vec<String> {
 /// Has this app's transaction session been withdrawn?
 #[must_use]
 pub fn withdrawn(app_id: &str) -> bool {
-    crate::context::with(|c| c.tx_session_withdrawn(app_id))
+    crate::tx_lanes::with(|l| l.tx_session_withdrawn(app_id))
 }
 
 /// The PostgreSQL backend PID of the session currently in this app's slot.
@@ -240,13 +240,13 @@ pub fn withdrawn(app_id: &str) -> bool {
 /// [`begin`] comes before every use of this in the arms that withdraw.
 #[must_use]
 pub fn session_backend_pid(app_id: &str) -> Option<i32> {
-    crate::context::with_mut(|c| {
-        let client = c.take_tx_client_for(app_id)?;
+    crate::tx_lanes::with_mut(|l| {
+        let client = l.take_tx_client_for(app_id)?;
         let pid = match &client {
             crate::tx_lanes::TxConnection::Postgres(pg) => Some(pg.process_id()),
             crate::tx_lanes::TxConnection::Sqlite(_) => None,
         };
-        c.put_tx_client_for(app_id, client);
+        l.put_tx_client_for(app_id, client);
         pid
     })
 }
@@ -327,16 +327,16 @@ impl HeldSession {
 /// onto a successor lane models what actually happens and costs the arm nothing,
 /// since what it rules on is a filled slot plus a dead identity.
 pub fn abandon_reducer(app_id: &str) {
-    crate::context::with_mut(|c| {
-        let session = c.take_tx_client_for(app_id);
-        c.retire_transaction(app_id);
-        c.release_tx_claim(app_id);
+    crate::tx_lanes::with_mut(|l| {
+        let session = l.take_tx_client_for(app_id);
+        l.retire_transaction(app_id);
+        l.release_tx_claim(app_id);
         if let Some(session) = session {
             assert!(
-                c.try_claim_tx(app_id),
+                l.try_claim_tx(app_id),
                 "the successor must win the claim the release just freed"
             );
-            c.install_tx_client(app_id, session);
+            l.install_tx_client(app_id, session);
         }
     });
 }
@@ -357,11 +357,11 @@ pub const fn cancel_reclaim_grace() -> std::time::Duration {
 
 /// Clear every trace of `app_id`'s transaction, for a test tearing down.
 pub fn reset(app_id: &str) {
-    let client = crate::context::with_mut(|c| {
-        c.retire_transaction(app_id);
-        c.release_tx_claim(app_id);
-        c.clear_pending_emits_for(app_id);
-        c.take_tx_client_for(app_id)
+    let client = crate::tx_lanes::with_mut(|l| {
+        l.retire_transaction(app_id);
+        l.release_tx_claim(app_id);
+        l.clear_pending_emits_for(app_id);
+        l.take_tx_client_for(app_id)
     });
     if let Some(client) = client {
         crate::tx_lanes::destroy_tx_connection(client);

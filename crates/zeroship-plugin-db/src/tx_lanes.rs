@@ -26,6 +26,7 @@
 //! across the `await`. Every entry point is keyed by `app_id`, which is what
 //! makes app A's lane invisible and untakable for co-resident app B.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use compio_postgres::OwnedPooledClient;
@@ -290,7 +291,7 @@ impl TxClientSlotGuard {
     /// a cancellation mid-await can never re-park one app's client under
     /// another's key.
     pub(crate) fn take(app_id: &str) -> Result<Self, DbError> {
-        let client = crate::context::with_mut(|c| c.take_tx_client_for(app_id))
+        let client = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id))
             .ok_or_else(|| DbError::internal("db: transaction connection lost"))?;
         Ok(Self {
             app_id: app_id.to_string(),
@@ -310,7 +311,7 @@ impl Drop for TxClientSlotGuard {
     fn drop(&mut self) {
         if let Some(client) = self.client.take() {
             let app_id = std::mem::take(&mut self.app_id);
-            crate::context::with_mut(|c| c.put_tx_client_for(&app_id, client));
+            crate::tx_lanes::with_mut(|l| l.put_tx_client_for(&app_id, client));
         }
     }
 }
@@ -372,6 +373,11 @@ pub(crate) struct TxLanes {
 }
 
 impl TxLanes {
+    /// An empty lane set. A fresh worker thread has no open transaction.
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
     /// The lane map, for the SEC-1 scoping tests in `context.rs`.
     ///
     /// Named `by_app` rather than exposing the field so the call reads
@@ -793,4 +799,57 @@ impl TxLanes {
             lane.pending_emits.clear();
         }
     }
+}
+
+thread_local! {
+    /// This worker thread's transaction lanes.
+    ///
+    /// # Why this is a SECOND thread-local, when `context.rs` exists to have one
+    ///
+    /// `context.rs`'s module doc says its purpose was folding several scattered
+    /// `thread_local!`s into a single [`crate::context::ThreadDbContext`] with
+    /// typed accessors. This is not a return to that scattered state and the
+    /// reason is different in kind: the lanes and the backend slot are separate
+    /// OWNERS bound for separate CRATES. `data-engine` cannot reach
+    /// `plugin-db`'s thread-local without a Cargo cycle, because plugin-db
+    /// already depends on data-engine.
+    ///
+    /// What made the old arrangement bad was untyped slots with per-site
+    /// borrow rituals. Each owner here keeps its typed accessors; there are
+    /// simply two owners.
+    ///
+    /// # Two RefCells are safer than one, not riskier
+    ///
+    /// A nested borrow of the SAME `RefCell` panics, and `context.rs:296`
+    /// records one place that hazard already shapes the code: `set_pool`
+    /// constructs a backend while holding `&mut self`, so backends take their
+    /// key source as an argument rather than reaching for the thread-local.
+    /// Splitting owners removes the possibility of a lane operation and a
+    /// backend operation nesting into one another at all.
+    ///
+    /// Measured before splitting (#165): of 55 `crate::context::with*` closures
+    /// in the engine, ZERO touch both an engine owner and an adapter owner. No
+    /// closure's atomicity changes here, because none spanned the boundary.
+    static TX_LANES: RefCell<TxLanes> = RefCell::new(TxLanes::new());
+}
+
+/// Read this thread's lanes.
+pub(crate) fn with<R>(f: impl FnOnce(&TxLanes) -> R) -> R {
+    TX_LANES.with(|l| f(&l.borrow()))
+}
+
+/// Mutate this thread's lanes.
+pub(crate) fn with_mut<R>(f: impl FnOnce(&mut TxLanes) -> R) -> R {
+    TX_LANES.with(|l| f(&mut l.borrow_mut()))
+}
+
+/// Drop every lane on this thread.
+///
+/// Paired with `crate::reset_context_for_tests`, which resets the ADAPTER's
+/// thread-local. Both must run: a test that reset only the context would leave
+/// the previous test's lanes - and therefore its transaction claims - visible
+/// to the next one on the same thread.
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) fn reset_for_tests() {
+    with_mut(|l| *l = TxLanes::new());
 }

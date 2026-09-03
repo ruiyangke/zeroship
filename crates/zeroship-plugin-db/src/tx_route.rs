@@ -7,7 +7,7 @@
 //! time, from ambient state:
 //!
 //! ```text
-//! context::with(|c| c.has_tx_for(app_id))   // "does this app have a tx open RIGHT NOW"
+//! crate::tx_lanes::with(|l| l.has_tx_for(app_id))   // "does this app have a tx open RIGHT NOW"
 //! ```
 //!
 //! That is a *temporal* test standing in for a *structural* one, and the
@@ -193,7 +193,7 @@ mod tests {
     //! transaction" at a moment when `has_tx_for` says "no transaction
     //! parked", so the two discriminators are provably different
     //! functions. Reverting `capture` to the pre-fix
-    //! `context::with(|c| c.has_tx_for(app_id))` fails three of the four
+    //! `crate::tx_lanes::with(|l| l.has_tx_for(app_id))` fails three of the four
     //! tests below.
     //!
     //! NOT ESTABLISHED, stated rather than implied:
@@ -265,7 +265,7 @@ mod tests {
     fn capture_is_not_the_ambient_has_tx_for_answer() {
         in_scope!(let scope);
         let prev = crate::tx_scope::enter(scope, "app_a");
-        let ambient = crate::context::with(|c| c.has_tx_for("app_a"));
+        let ambient = crate::tx_lanes::with(|l| l.has_tx_for("app_a"));
         let captured = crate::tx_scope::capture_route(scope, "app_a").in_tx();
         crate::tx_scope::leave(scope, prev);
         assert!(!ambient, "precondition: no transaction is parked for app_a");

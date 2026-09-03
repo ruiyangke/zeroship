@@ -216,8 +216,8 @@ pub(crate) async fn begin_top_level(
             "db.transaction: admission did not install a reducer",
         ));
     };
-    let observed = observation_for(&crate::context::with(|c| {
-        c.transaction_expected_authority(app_id)
+    let observed = observation_for(&crate::tx_lanes::with(|l| {
+        l.transaction_expected_authority(app_id)
             .cloned()
             .expect("just admitted")
     }));
@@ -241,8 +241,8 @@ pub(crate) async fn begin_top_level(
 /// fixes the `NoTransaction` cleanup goal, and an arm that must reach it cannot
 /// go through a function that leaves `Preparing` in the same call.
 pub(crate) fn admit_in_preparing(app_id: &str) -> Vec<Action> {
-    crate::context::with_mut(|c| {
-        c.admit_transaction(
+    crate::tx_lanes::with_mut(|l| {
+        l.admit_transaction(
             app_id,
             expected_authority(app_id),
             budgets(),
@@ -423,12 +423,12 @@ async fn step(app_id: &str, event: TxEvent, config: &StepConfig) -> Driven {
 
 fn apply(app_id: &str, event: TxEvent) -> Option<Vec<Action>> {
     let now = Instant::now();
-    crate::context::with_mut(|c| c.apply_transaction_event(app_id, event, now))
+    crate::tx_lanes::with_mut(|l| l.apply_transaction_event(app_id, event, now))
 }
 
 fn authority_of(app_id: &str) -> Option<EventAuthority> {
-    crate::context::with(|c| {
-        c.transaction_expected_authority(app_id)
+    crate::tx_lanes::with(|l| {
+        l.transaction_expected_authority(app_id)
             .map(|expected| EventAuthority {
                 identity: expected.identity.clone(),
                 domain: expected.domain.clone(),
@@ -491,7 +491,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                     exec_on_session(app_id, &format!("SAVEPOINT {name}"), &[]).await,
                 );
                 if ok {
-                    crate::context::with_mut(|c| c.push_frame_emit_mark(app_id));
+                    crate::tx_lanes::with_mut(|l| l.push_frame_emit_mark(app_id));
                 }
                 let Some(frame) = frame else {
                     driven.error = Some(missing_frame());
@@ -516,7 +516,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                     // known to be gone. Discarding first makes the failure row's
                     // documented fate - retain the evidence, poison the
                     // transaction - unachievable.
-                    crate::context::with_mut(|c| c.discard_frame_effects(app_id));
+                    crate::tx_lanes::with_mut(|l| l.discard_frame_effects(app_id));
                 }
                 let Some(frame) = frame else {
                     driven.error = Some(missing_frame());
@@ -544,7 +544,7 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                     // A released frame's events belong to the enclosing frame
                     // now, exactly as its rows do: pop the watermark without
                     // truncating.
-                    crate::context::with_mut(|c| c.pop_frame_emit_mark(app_id));
+                    crate::tx_lanes::with_mut(|l| l.pop_frame_emit_mark(app_id));
                 }
                 let Some(frame) = frame else {
                     driven.error = Some(missing_frame());
@@ -590,9 +590,9 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
             Action::ReleaseSession => release_session(app_id),
 
             Action::ReleaseAdmission => {
-                crate::context::with_mut(|c| {
-                    c.retire_transaction(app_id);
-                    c.release_tx_claim(app_id);
+                crate::tx_lanes::with_mut(|l| {
+                    l.retire_transaction(app_id);
+                    l.release_tx_claim(app_id);
                 });
             }
         }
@@ -639,8 +639,8 @@ fn missing_frame() -> DbError {
 }
 
 fn current_frame(app_id: &str) -> Option<FrameId> {
-    crate::context::with(|c| {
-        c.transaction_reducer(app_id).and_then(|reducer| {
+    crate::tx_lanes::with(|l| {
+        l.transaction_reducer(app_id).and_then(|reducer| {
             reducer
                 .frames()
                 .top()
@@ -682,14 +682,14 @@ async fn open_session(app_id: &str, begin: BeginIntent) -> Result<(), OpenSessio
 /// moment we still own the client.
 fn install(app_id: &str, client: TxConnection) {
     let canceller = client.canceller();
-    crate::context::with_mut(|c| {
-        let previous = c.install_tx_client(app_id, client);
+    crate::tx_lanes::with_mut(|l| {
+        let previous = l.install_tx_client(app_id, client);
         debug_assert!(
             previous.is_none(),
             "open_session: the tx slot was already occupied for this app"
         );
         if let Some(canceller) = canceller {
-            c.install_tx_canceller(app_id, canceller);
+            l.install_tx_canceller(app_id, canceller);
         }
     });
 }
@@ -715,7 +715,7 @@ async fn exec_on_session(app_id: &str, sql: &str, params: &[&str]) -> Result<(),
 /// so this function is the protocol's half alone: take the session, ask it to
 /// settle, put it back for the disposition action the reducer emits next.
 async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option<DbError>) {
-    let Some(client) = crate::context::with_mut(|c| c.take_tx_client_for(app_id)) else {
+    let Some(client) = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id)) else {
         // The session is gone before terminal SQL was sent. This does NOT prove
         // the transaction ended - that inference is DBR-03 - so it is
         // indeterminate and the reducer withdraws.
@@ -733,7 +733,7 @@ async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option
     // which the reducer emits next, so put it back for that action to act on.
     // Returning it here rather than dropping it is what lets the withdrawal
     // arm reach the physical connection at all.
-    crate::context::with_mut(|c| c.put_tx_client_for(app_id, client));
+    crate::tx_lanes::with_mut(|l| l.put_tx_client_for(app_id, client));
     outcome
 }
 
@@ -783,20 +783,24 @@ impl CleanupIdentity {
     /// Read the identity of the cleanup `token` belongs to, or `None` if it is
     /// not the cleanup this app's reducer is currently running.
     fn capture(app_id: &str, token: CommandToken) -> Option<Self> {
-        crate::context::with(|c| Self::read(c, app_id, token))
+        crate::tx_lanes::with(|l| Self::read(l, app_id, token))
     }
 
     /// Is this still the cleanup the app's reducer is running?
-    fn is_current(self, ctx: &crate::context::ThreadDbContext, app_id: &str) -> bool {
-        Self::read(ctx, app_id, self.token) == Some(self)
+    /// Takes the LANES, not the whole context: everything it reads is lane
+    /// state (`transaction_reducer`). It took `&ThreadDbContext` until
+    /// 2026-09-02, which forced its caller to hold an adapter borrow to answer
+    /// an engine question.
+    fn is_current(self, lanes: &crate::tx_lanes::TxLanes, app_id: &str) -> bool {
+        Self::read(lanes, app_id, self.token) == Some(self)
     }
 
     fn read(
-        ctx: &crate::context::ThreadDbContext,
+        lanes: &crate::tx_lanes::TxLanes,
         app_id: &str,
         token: CommandToken,
     ) -> Option<Self> {
-        let reducer = ctx.transaction_reducer(app_id)?;
+        let reducer = lanes.transaction_reducer(app_id)?;
         if reducer.state() != super::reducer::TxState::Cancelling
             || reducer.cancellation_token() != Some(token)
         {
@@ -826,11 +830,11 @@ impl std::future::Future for SessionReturned<'_> {
         self: std::pin::Pin<&mut Self>,
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<()> {
-        let ready = crate::context::with_mut(|c| {
-            if c.has_tx_for(self.app_id) || !self.identity.is_current(c, self.app_id) {
+        let ready = crate::tx_lanes::with_mut(|l| {
+            if l.has_tx_for(self.app_id) || !self.identity.is_current(l, self.app_id) {
                 return true;
             }
-            c.push_tx_slot_waiter(self.app_id, cx.waker());
+            l.push_tx_slot_waiter(self.app_id, cx.waker());
             false
         });
         if ready {
@@ -854,7 +858,7 @@ async fn cleanup(app_id: &str, token: CommandToken, goal: CleanupGoal) -> Cleanu
     // taken from the PROTOCOL's view of session ownership rather than from the
     // slot being empty. Reading emptiness as proof of anything is the DBR-03
     // shape.
-    let session = crate::context::with(|c| c.transaction_reducer(app_id).map(TxReducer::session));
+    let session = crate::tx_lanes::with(|l| l.transaction_reducer(app_id).map(TxReducer::session));
     match session {
         // No session was ever acquired. From `Preparing` - goal `NoTransaction` -
         // that is proved by construction with no I/O: the reducer mints the
@@ -914,12 +918,12 @@ async fn cleanup(app_id: &str, token: CommandToken, goal: CleanupGoal) -> Cleanu
 /// `None` means the slot was empty - which is a question about ownership, not an
 /// answer, and the caller resolves it.
 async fn rollback_session_in_slot(app_id: &str) -> Option<CleanupAck> {
-    let client = crate::context::with_mut(|c| c.take_tx_client_for(app_id))?;
+    let client = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id))?;
 
     let ack = client.cleanup().await;
 
     // Put it back so the reducer's session disposition can act on it.
-    crate::context::with_mut(|c| c.put_tx_client_for(app_id, client));
+    crate::tx_lanes::with_mut(|l| l.put_tx_client_for(app_id, client));
     Some(ack)
 }
 
@@ -963,7 +967,7 @@ async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
     let Some(identity) = CleanupIdentity::capture(app_id, token) else {
         return CleanupAck::Indeterminate;
     };
-    let Some(canceller) = crate::context::with(|c| c.tx_canceller_for(app_id)) else {
+    let Some(canceller) = crate::tx_lanes::with(|l| l.tx_canceller_for(app_id)) else {
         // No canceller was captured for this session. A SQLite handle with no
         // transaction reservation is the only way to get here, and there is
         // nothing stable to interrupt.
@@ -1010,7 +1014,7 @@ async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
     // be the current one, so the identity has to be re-read rather than assumed.
     // Skipping this check is what would let a cleanup whose transaction was
     // retired underneath it roll back the NEXT transaction's session.
-    if !crate::context::with(|c| identity.is_current(c, app_id)) {
+    if !crate::tx_lanes::with(|l| identity.is_current(l, app_id)) {
         return CleanupAck::Indeterminate;
     }
     rollback_session_in_slot(app_id)
@@ -1027,7 +1031,7 @@ async fn cancel_and_reclaim(app_id: &str, token: CommandToken) -> CleanupAck {
 /// On PostgreSQL that is a plain drop, whose `Drop` returns the lease to the
 /// pool. This is the ONLY disposition that may do that.
 fn release_session(app_id: &str) {
-    let client = crate::context::with_mut(|c| {
+    let client = crate::tx_lanes::with_mut(|l| {
         // BEFORE the drop, and load-bearing. `OwnedPooledClient::drop` returns
         // the lease, and `Pool::return_client` RETIRES any session whose cancel
         // lease has escaped (`Arc::strong_count(lease) > 1`). A canceller still
@@ -1035,8 +1039,8 @@ fn release_session(app_id: &str) {
         // destroy the connection on the ordinary success path - the opposite of
         // what capturing it is for. See
         // `ThreadDbContext::remove_tx_canceller`.
-        c.remove_tx_canceller(app_id);
-        c.take_tx_client_for(app_id)
+        l.remove_tx_canceller(app_id);
+        l.take_tx_client_for(app_id)
     });
     drop(client);
 }
@@ -1054,14 +1058,14 @@ fn release_session(app_id: &str) {
 /// per-app tombstone, so a session another future is holding out of the slot is
 /// destroyed when that future returns it rather than quietly parked.
 fn destroy_session(app_id: &str) {
-    let client = crate::context::with_mut(|c| {
+    let client = crate::tx_lanes::with_mut(|l| {
         // Symmetric with `release_session`, for a different reason: this
         // connection is being destroyed either way, so the escaped-lease rule
         // cannot bite - but a canceller for a session that no longer exists is
         // a handle to nothing, and leaving it would make the map's contents a
         // weaker statement than "these sessions are live and cancellable".
-        c.remove_tx_canceller(app_id);
-        c.withdraw_tx_session(app_id)
+        l.remove_tx_canceller(app_id);
+        l.withdraw_tx_session(app_id)
     });
     if let Some(client) = client {
         crate::tx_lanes::destroy_tx_connection(client);
