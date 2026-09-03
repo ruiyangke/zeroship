@@ -752,10 +752,18 @@ pub fn reset_context_for_tests() {
     service::close_operator_pools();
     ctx_mut(|c| *c = context::ThreadDbContext::new());
     // BOTH thread-locals, since the lanes became their own owner on 2026-09-02.
-    // Resetting only the context would leave the previous test's lanes - and so
-    // its transaction claims and parked sessions - visible to the next test on
-    // the same thread, which is precisely the isolation this helper exists to
-    // provide.
+    //
+    // **The reason is WITHIN one test, not between two.** This comment first
+    // said resetting only the context would leak lanes "to the next test on the
+    // same thread". That is false: libtest gives every `#[test]` its own OS
+    // thread even under `--test-threads=1` (measured 2026-09-01), so a
+    // `thread_local!` cannot leak across tests at all.
+    //
+    // What is real: this helper is called MID-TEST - by scenario setup that
+    // resets between phases, and by the `ContextReset` drop guard in
+    // `transaction/mod.rs`. A reset that cleared the context and left the lanes
+    // would hand the next phase a stale transaction claim and a parked session,
+    // inside one test.
     tx_lanes::reset_for_tests();
 }
 
@@ -1459,5 +1467,68 @@ mod journal_schema_derivations_agree {
                  write its journal where nothing looks for it"
             );
         }
+    }
+}
+
+/// `reset_context_for_tests` must clear the LANES as well as the context.
+///
+/// Since 2026-09-02 those are two thread-locals with two owners, so "reset"
+/// became two calls, and one of them could be dropped without any existing
+/// test noticing. This binds the second one.
+///
+/// **Both halves live in ONE test on purpose.** The obvious shape - claim in
+/// test A, assert clean in test B - proves nothing here: libtest gives every
+/// `#[test]` its own OS thread even under `--test-threads=1` (measured
+/// 2026-09-01), so B would read a fresh thread-local and pass whatever the
+/// helper does. Such a guard is green by construction. The real hazard is a
+/// MID-TEST reset - scenario setup between phases, and the `ContextReset` drop
+/// guard in `transaction/mod.rs` - and that is what this reproduces.
+#[cfg(test)]
+mod reset_clears_both_thread_locals {
+    /// Deleting `tx_lanes::reset_for_tests()` from `reset_context_for_tests`
+    /// must fail this.
+    ///
+    /// `TxLanes` has TWO stores and both are asserted, because they have
+    /// different lifetimes and a partial reset could plausibly clear one: the
+    /// lane map is emptied by ordinary retirement, whereas the withdrawal
+    /// tombstone is documented to outlive its lane and to be cleared only by
+    /// the next `admit_transaction`. The tombstone is therefore the residue
+    /// most likely to survive a reset that looks correct.
+    #[test]
+    fn a_mid_test_reset_drops_a_claim_and_a_withdrawal_tombstone() {
+        let app = "app_reset_guard";
+
+        assert!(
+            crate::tx_lanes::with_mut(|l| l.try_claim_tx(app)),
+            "an unclaimed app claims on a fresh thread"
+        );
+        // `tx_claimed_by`, not `has_tx_for`: claiming opens the lane, and
+        // `has_tx_for` additionally requires the BEGIN to have landed a
+        // session. The claim without a session is exactly the window this
+        // helper has to clean up, so it is the one to assert on.
+        assert!(crate::tx_lanes::with(|l| l.tx_claimed_by(app)));
+
+        crate::tx_lanes::with_mut(|l| l.withdraw_tx_session(app));
+        assert!(crate::tx_lanes::with(|l| l.tx_session_withdrawn(app)));
+
+        crate::reset_context_for_tests();
+
+        assert!(
+            !crate::tx_lanes::with(|l| l.tx_claimed_by(app)),
+            "reset_context_for_tests left a transaction claim behind: the lane \
+             thread-local was not reset"
+        );
+        assert!(
+            !crate::tx_lanes::with(|l| l.tx_session_withdrawn(app)),
+            "reset_context_for_tests left a withdrawal tombstone behind: the \
+             next phase's session would be destroyed on return instead of parked"
+        );
+        // Re-claiming is the stronger statement, and it is the one a later
+        // phase of a multi-phase test actually makes: `tx_claimed_by` could
+        // read false off a half-cleared lane that still refuses a new claim.
+        assert!(
+            crate::tx_lanes::with_mut(|l| l.try_claim_tx(app)),
+            "the app is claimable again after a reset"
+        );
     }
 }
