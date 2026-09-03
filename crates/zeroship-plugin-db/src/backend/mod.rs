@@ -1467,6 +1467,48 @@ pub(crate) trait Backend:
     SqlExecutor + LockManager + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema> + 'static
 {
 }
+/// The result of selecting a single cell: `SELECT <col> FROM <t> WHERE id = ?`.
+///
+/// Two independent things can go missing, and callers give each its own error,
+/// so collapsing them into one `Option` would throw away the distinction. The
+/// unmask readers report [`Self::NoRow`] as `unmask_not_found` and
+/// [`Self::Null`] as `unmask_value_null`; those codes are engine-tier policy
+/// and are minted by the caller, not here.
+///
+/// Lived in `backend::pg_autocommit` until 2026-09-02. Both vendors produce it
+/// now, so it sits in the tier that dispatches between them.
+pub(crate) enum ScalarRead<T> {
+    /// The query matched no row.
+    NoRow,
+    /// The row exists and the selected column is SQL NULL.
+    Null,
+    /// The row exists and the column holds a value.
+    Value(T),
+}
+
+/// The nine columns of one `__zeroship_audit_unmask` row.
+///
+/// A struct rather than nine positional parameters: the six trailing ones are
+/// all `&str`, so a transposed pair would compile and land the wrong value in
+/// an append-only audit table.
+pub(crate) struct UnmaskAuditRow<'a> {
+    /// Trusted actor identity, or empty when the call carried none.
+    pub actor_id: &'a str,
+    /// Trusted actor role, or empty. Never populated from a claim the DB-3
+    /// sanitiser rejected - that goes in `claimed_actor`.
+    pub actor_role: &'a str,
+    /// The REFUSED claim, serialised whole and untrusted. Kept apart from the
+    /// trusted columns so an operator reading the row cannot confuse what a
+    /// handler sent with what the runtime established.
+    pub claimed_actor: &'a str,
+    pub collection: &'a str,
+    pub row_pk: &'a str,
+    pub column: &'a str,
+    pub classification: &'a str,
+    pub reason: &'a str,
+    pub outcome: &'a str,
+}
+
 
 /// Per-isolate backend handle — the typed enum stashed on
 /// [`crate::context::ThreadDbContext`].
@@ -1581,6 +1623,166 @@ impl SpatialIndex for BackendHandle {
 }
 
 impl BackendHandle {
+    /// Read the RAW sibling of a masked column as BYTES.
+    ///
+    /// The encrypted-storage half of unmask: the field's own column holds the
+    /// mask, the ciphertext lives in the raw sibling. Bytes, not text - the
+    /// sibling of an encrypted column is BYTEA on PostgreSQL and a BLOB on
+    /// SQLite, and rendering either through a text path is what made every
+    /// PostgreSQL unmask of an encrypted column fail (see the regression
+    /// `unmask_encrypted_column_on_pg_reads_bytea_raw_sibling`).
+    ///
+    /// **Why the SQL is here and not in `crud::unmask`.** It was written twice
+    /// in the engine, once per vendor, behind an `as_postgres()` /
+    /// `as_sqlite()` downcast - the shape #119 exists to remove. Only the
+    /// lowering differs (`$1` and a roled scalar read against `?1`, quoted
+    /// identifiers and a typed cell); key resolution, AEAD and the wrap step
+    /// above this are vendor-neutral and stayed put.
+    pub(crate) async fn read_raw_column_bytes(
+        &self,
+        app_id: &str,
+        collection: &str,
+        raw_column: &str,
+        row_pk: &str,
+    ) -> Result<ScalarRead<Vec<u8>>, DbError> {
+        match self {
+            Self::Postgres(pg) => {
+                let sql = format!(
+                    "SELECT \"{raw_column}\" FROM \"{app_id}\".\"{collection}\" WHERE id = $1"
+                );
+                pg.read_roled_scalar_bytes(app_id, &sql, &[&row_pk]).await
+            }
+            Self::Sqlite(sq) => {
+                let q_app = sq.quote_ident(app_id);
+                let q_coll = sq.quote_ident(collection);
+                let q_col = sq.quote_ident(raw_column);
+                let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
+                let typed = sq
+                    .autocommit_client()
+                    .query_typed_internal(&sql, &[row_pk])
+                    .await?;
+                if typed.rows.is_empty() {
+                    return Ok(ScalarRead::NoRow);
+                }
+                match &typed.rows[0][0] {
+                    sqlite::session::TypedCell::Blob(b) => Ok(ScalarRead::Value(b.clone())),
+                    sqlite::session::TypedCell::Null => Ok(ScalarRead::Null),
+                    other => Err(DbError::internal(format!(
+                        "unmask: expected BLOB for encrypted column, got {other:?}"
+                    ))),
+                }
+            }
+        }
+    }
+
+    /// Read the RAW sibling of a masked column as TEXT.
+    ///
+    /// The plaintext-storage half: the column carries `.mask({...})` WITHOUT
+    /// `.encrypted(...)`, so the sibling holds the value in its own declared
+    /// type. Distinct from [`Self::read_raw_column_bytes`] because the
+    /// encrypted path must not go near a text rendering.
+    pub(crate) async fn read_raw_column_text(
+        &self,
+        app_id: &str,
+        collection: &str,
+        raw_column: &str,
+        row_pk: &str,
+    ) -> Result<ScalarRead<String>, DbError> {
+        match self {
+            Self::Postgres(pg) => {
+                let sql = format!(
+                    "SELECT \"{raw_column}\" FROM \"{app_id}\".\"{collection}\" WHERE id = $1"
+                );
+                pg.read_roled_scalar_text(app_id, &sql, &[&row_pk]).await
+            }
+            Self::Sqlite(sq) => {
+                let q_app = sq.quote_ident(app_id);
+                let q_coll = sq.quote_ident(collection);
+                let q_col = sq.quote_ident(raw_column);
+                let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
+                let rows = sq.autocommit_client().query_internal(&sql, &[row_pk]).await?;
+                if rows.is_empty() {
+                    return Ok(ScalarRead::NoRow);
+                }
+                match rows[0].first().and_then(|c| c.clone()) {
+                    Some(value) => Ok(ScalarRead::Value(value)),
+                    None => Ok(ScalarRead::Null),
+                }
+            }
+        }
+    }
+
+    /// Append one row to the app's `__zeroship_audit_unmask` table.
+    ///
+    /// **Through the role fence on both vendors.** The PostgreSQL arm goes via
+    /// `execute_roled`, not a bare pool checkout: `runtime_dependents_sql`
+    /// grants the runtime role `WITH INHERIT FALSE`, so an unroled INSERT is
+    /// refused outright - and since an unmask whose audit row cannot be written
+    /// must not return plaintext, that would fail every unmask rather than leak
+    /// one. The funnel also carries the DB-1 statement and lock timeouts.
+    ///
+    /// Empty strings stand in for absent values rather than SQL NULL. The table
+    /// is operator-read-only, so `WHERE actor_id = ''` is the filter, and the
+    /// simplicity is worth more here than NULL fidelity.
+    pub(crate) async fn append_unmask_audit(
+        &self,
+        app_id: &str,
+        row: &UnmaskAuditRow<'_>,
+    ) -> Result<(), DbError> {
+        match self {
+            Self::Postgres(pg) => {
+                let sql = format!(
+                    r#"INSERT INTO "{app_id}"."__zeroship_audit_unmask"
+                       (actor_id, actor_role, claimed_actor, collection, row_pk, "column",
+                        classification, reason, outcome)
+                       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#
+                );
+                pg.execute_roled(
+                    app_id,
+                    &sql,
+                    &[
+                        &row.actor_id,
+                        &row.actor_role,
+                        &row.claimed_actor,
+                        &row.collection,
+                        &row.row_pk,
+                        &row.column,
+                        &row.classification,
+                        &row.reason,
+                        &row.outcome,
+                    ],
+                )
+                .await?;
+                Ok(())
+            }
+            Self::Sqlite(sq) => {
+                let q_app = sq.quote_ident(app_id);
+                let sql = format!(
+                    r#"INSERT INTO {q_app}."__zeroship_audit_unmask"
+                       (actor_id, actor_role, claimed_actor, collection, row_pk, "column",
+                        classification, reason, outcome)
+                       VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#
+                );
+                sq.pool_exec(
+                    &sql,
+                    &[
+                        row.actor_id,
+                        row.actor_role,
+                        row.claimed_actor,
+                        row.collection,
+                        row.row_pk,
+                        row.column,
+                        row.classification,
+                        row.reason,
+                        row.outcome,
+                    ],
+                )
+                .await?;
+                Ok(())
+            }
+        }
+    }
+
     /// Open a dedicated transaction session and return it as a lane.
     ///
     /// **What SC-1 asks for, in each backend's terms.** The protocol needs a
