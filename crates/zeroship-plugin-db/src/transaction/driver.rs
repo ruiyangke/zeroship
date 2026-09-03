@@ -65,7 +65,7 @@
 //!
 //! The same closure has to survive a *race*: a withdrawal can land while some
 //! other future holds the session out of the slot behind a
-//! [`crate::context::TxClientSlotGuard`], whose `Drop` puts it back. So
+//! [`crate::tx_lanes::TxClientSlotGuard`], whose `Drop` puts it back. So
 //! withdrawal also sets a per-app tombstone
 //! ([`crate::context::ThreadDbContext::withdraw_tx_session`]) and
 //! `put_tx_client_for` destroys anything that returns under it. Without that,
@@ -74,7 +74,7 @@
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
 
-use crate::context::TxConnection;
+use crate::tx_lanes::TxConnection;
 use zeroship_data_core::error::{
     BeginIntent, DbError, IsolationLevel, OpenSessionError, SessionSetupDisposition,
 };
@@ -298,7 +298,7 @@ pub(crate) async fn settle_root(app_id: &str, intent: SettleIntent) -> Driven {
 /// **No production caller yet, and that is a stated gap rather than an
 /// oversight.** Creator CRUD issued inside a transaction goes through
 /// `exec::run_sql` / `exec::exec_sqlite_json`, which take the session with a
-/// bare [`crate::context::TxClientSlotGuard`] and report nothing to the state
+/// bare [`crate::tx_lanes::TxClientSlotGuard`] and report nothing to the state
 /// machine. Routing them here is the same work the module header already names
 /// as open - "capturing the async scope at each CRUD dispatch site" - and it is
 /// not folded into this change because every one of those call sites has tests
@@ -696,7 +696,7 @@ fn install(app_id: &str, client: TxConnection) {
 
 /// Run one statement on the app's pinned transaction session.
 async fn exec_on_session(app_id: &str, sql: &str, params: &[&str]) -> Result<(), DbError> {
-    let client = crate::context::TxClientSlotGuard::take(app_id)?;
+    let client = crate::tx_lanes::TxClientSlotGuard::take(app_id)?;
     client.client().exec(sql, params).await.map(|_| ())
 }
 
@@ -711,7 +711,7 @@ async fn exec_on_session(app_id: &str, sql: &str, params: &[&str]) -> Result<(),
 /// nested commit.
 ///
 /// **The driver calls a method on the session; it never matches its variants.**
-/// [`crate::context::TxConnection::settle`] owns the dialect and the projection,
+/// [`crate::tx_lanes::TxConnection::settle`] owns the dialect and the projection,
 /// so this function is the protocol's half alone: take the session, ask it to
 /// settle, put it back for the disposition action the reducer emits next.
 async fn terminal(app_id: &str, intent: SettleIntent) -> (TerminalResult, Option<DbError>) {
@@ -935,7 +935,7 @@ async fn rollback_session_in_slot(app_id: &str) -> Option<CleanupAck> {
 ///    `ROLLBACK` below, or a later borrower's query.
 /// 2. **Wait for the holder to give the session back.** The cancelled statement
 ///    fails with `57014`, its `await` returns, and its
-///    [`crate::context::TxClientSlotGuard`] parks the session. That put is what
+///    [`crate::tx_lanes::TxClientSlotGuard`] parks the session. That put is what
 ///    wakes this wait.
 /// 3. **Roll back and sample the oracle**, in that order, exactly as
 ///    [`cleanup_postgres`] does for a session that was in the slot all along.
@@ -1064,7 +1064,7 @@ fn destroy_session(app_id: &str) {
         c.withdraw_tx_session(app_id)
     });
     if let Some(client) = client {
-        crate::context::destroy_tx_connection(client);
+        crate::tx_lanes::destroy_tx_connection(client);
     }
 }
 

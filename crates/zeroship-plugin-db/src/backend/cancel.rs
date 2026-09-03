@@ -8,7 +8,7 @@
 //! running on it. A forced cleanup usually arrives at exactly the moment that is
 //! false: the execution deadline fires **because a statement is slow**, and a
 //! slow statement is one whose future is holding the session out of the slot
-//! behind a [`crate::context::TxClientSlotGuard`]. Without a canceller, the only
+//! behind a [`crate::tx_lanes::TxClientSlotGuard`]. Without a canceller, the only
 //! honest answer there is `Indeterminate`, and `Indeterminate` withdraws - so
 //! the mechanism whose whole purpose is to bound a slow statement responded by
 //! destroying the connection, every time.
@@ -48,7 +48,7 @@ use compio_postgres::{CancelToken, Pool};
 
 use crate::backend::sqlite::reservation::TerminalOutcome as SqliteTerminalOutcome;
 use crate::backend::sqlite::session::SqliteCancelHandle;
-use crate::context::TxConnection;
+use crate::tx_lanes::TxConnection;
 use zeroship_data_core::error::DbError;
 
 /// What one delivered cancellation accomplished.

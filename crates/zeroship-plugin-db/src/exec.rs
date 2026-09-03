@@ -58,7 +58,7 @@ use crate::backend::BackendHandle;
 use crate::backend::pg_error;
 use crate::backend::pg_row_json::rows_to_json_value;
 use crate::context;
-use crate::context::TxConnection;
+use crate::tx_lanes::TxConnection;
 use zeroship_data_core::error::DbError;
 use crate::query::BuiltQuery;
 use crate::tx_route::TxRoute;
@@ -332,7 +332,7 @@ async fn exec_sqlite_json(
     // route that says "in transaction" means either the transaction has
     // settled or another op holds its connection. Re-typed so the creator
     // sees the same coded errors the Postgres arm produces.
-    let client = context::TxClientSlotGuard::take(route.app_id())
+    let client = crate::tx_lanes::TxClientSlotGuard::take(route.app_id())
         .map_err(|_| tx_slot_unavailable(route.app_id()))?;
     let result = match client.client() {
         TxConnection::Sqlite(client) => {

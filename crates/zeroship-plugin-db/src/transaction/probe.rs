@@ -243,8 +243,8 @@ pub fn session_backend_pid(app_id: &str) -> Option<i32> {
     crate::context::with_mut(|c| {
         let client = c.take_tx_client_for(app_id)?;
         let pid = match &client {
-            crate::context::TxConnection::Postgres(pg) => Some(pg.process_id()),
-            crate::context::TxConnection::Sqlite(_) => None,
+            crate::tx_lanes::TxConnection::Postgres(pg) => Some(pg.process_id()),
+            crate::tx_lanes::TxConnection::Sqlite(_) => None,
         };
         c.put_tx_client_for(app_id, client);
         pid
@@ -269,7 +269,7 @@ pub fn pool_counts() -> Option<(usize, usize, usize)> {
 /// the withdrawal tombstone has to bite.
 #[must_use = "the session is restored when this guard drops"]
 pub struct HeldSession {
-    guard: Option<crate::context::TxClientSlotGuard>,
+    guard: Option<crate::tx_lanes::TxClientSlotGuard>,
 }
 
 impl std::fmt::Debug for HeldSession {
@@ -288,7 +288,7 @@ impl HeldSession {
     /// When no session is parked for that app.
     pub fn take(app_id: &str) -> Result<Self, DbError> {
         Ok(Self {
-            guard: Some(crate::context::TxClientSlotGuard::take(app_id)?),
+            guard: Some(crate::tx_lanes::TxClientSlotGuard::take(app_id)?),
         })
     }
 
@@ -296,8 +296,8 @@ impl HeldSession {
     #[must_use]
     pub fn backend_pid(&self) -> Option<i32> {
         match self.guard.as_ref()?.client() {
-            crate::context::TxConnection::Postgres(pg) => Some(pg.process_id()),
-            crate::context::TxConnection::Sqlite(_) => None,
+            crate::tx_lanes::TxConnection::Postgres(pg) => Some(pg.process_id()),
+            crate::tx_lanes::TxConnection::Sqlite(_) => None,
         }
     }
 
@@ -364,6 +364,6 @@ pub fn reset(app_id: &str) {
         c.take_tx_client_for(app_id)
     });
     if let Some(client) = client {
-        crate::context::destroy_tx_connection(client);
+        crate::tx_lanes::destroy_tx_connection(client);
     }
 }
