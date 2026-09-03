@@ -585,6 +585,36 @@ reason. **The verification standard for every remaining move is therefore three
 commands, not one**: the crate alone with helpers and all targets, the crate
 alone WITHOUT them, and at least one dependent.
 
+### `encryption/` moves BEFORE the vendors, and it can
+
+Measured 2026-09-02. The vendor tiers name `crate::encryption::{KeyStore,
+LocalKeySource}` eleven times, so `encryption/` has to be out of
+`zeroship-plugin-db` before either backend can be its own crate - otherwise
+`data-postgres` would declare a dependency on the adapter that depends on it.
+The target block above already assigns it: `data-core` carries "the
+backend-neutral layer both already share: encryption, MaskKind,
+TypedCell/TypedRows".
+
+**The one thing that could have blocked it does not.** A first scan showed
+`encryption/` naming `compio` five times, which would put a runtime in the crate
+whose manifest declares none. All five are `compio::runtime::Runtime::new()` at
+`keys.rs:602-776`, and `keys.rs`'s `#[cfg(test)] mod tests` opens at `:432` - so
+every one is inside the test module. Production code names no runtime.
+
+Its production dependency set, measured over the four non-test files plus
+`keys.rs:1-431`:
+
+| needs | why it is fine for `data-core` |
+| --- | --- |
+| `aes_gcm`, `hmac`, `hkdf`, `sha2`, `zeroize`, `rand` | pure compute; no driver, no runtime, no V8 |
+| `zeroship-core`, `zeroship-schema` | already `data-core` dependencies |
+| `compio` | **dev-dependency only**, for the five test runtimes |
+
+1,670 lines across five files. Its only upward reference is
+`crate::backend::EncryptionMode`, which is `pub use
+zeroship_schema::descriptors::EncryptionMode` - a re-export, so it repoints
+rather than moves.
+
 ### The vendor cut's public surface is 21 items, 12 of which need promoting
 
 Measured 2026-09-02, after the three blockers below were cleared. A crate
