@@ -30,22 +30,16 @@
 //! storage alone does not provide isolate identity.
 
 use std::cell::RefCell;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
-use compio_postgres::{OwnedPooledClient, Pool};
+use compio_postgres::Pool;
 
-use crate::backend::sqlite::session::SqliteSessionHandle;
 use crate::backend::{BackendHandle, PostgresBackend};
-use zeroship_data_core::binding::DbBinding;
-use zeroship_data_core::schema_cache::SchemaCache;
 use crate::encryption::{LocalKeySource, SuppliedRootKeys};
-use zeroship_data_core::error::{CleanupAck, DbError, SettleIntent, TerminalResult};
 use crate::service::DbResourceKey;
-use zeroship_core::change_event::ChangeEvent;
 
-use crate::tx_lanes::{TxConnection, TxLanes};
 
 /// Result of trying to claim the per-thread backend initialisation slot.
 pub(crate) enum BackendInitState {
@@ -97,25 +91,6 @@ pub struct ThreadDbContext {
 
     /// This thread's slice of THE schema authority: the runtime descriptor.
     ///
-    /// One entry per `(app_id, deploy_token, collection)`. The value is the
-    /// descriptor's own field map for that collection - `{ <column>: FieldDef }`
-    /// including the v2 `storage` block - carried verbatim from the validated
-    /// `manifest.runtime_descriptor` by `DbPlugin::bind_runtime_descriptor`.
-    ///
-    /// **There is no second source.** The live-catalog introspection cache that
-    /// used to sit beside this map is deleted: it re-derived a strict SUBSET of
-    /// what the descriptor already carries (`{type, encrypted?, mask?}`, with
-    /// `vector`/`geoPoint`/`idPrefix`/`vectorDims` unrecoverable), from sentinels
-    /// the migration engine had written out of the same DSL this descriptor is
-    /// folded from. It was a round trip, not an independent authority.
-    ///
-    /// **Keyed by the DEPLOY, not just the app.** A worker thread can hold a
-    /// deploy-pinned and a current isolate of one app at the same time, and they
-    /// have different schemas. The declared cache was keyed `"{app}:{coll}"` and
-    /// would have aliased them; only the deleted introspection cache was
-    /// deploy-keyed. Consolidating onto one map keeps the stronger key.
-    schemas: SchemaCache,
-
     /// The identity of the database this thread's resources belong to.
     ///
     /// Minted once from validated configuration by `DbService` and stamped here
@@ -227,7 +202,6 @@ impl ThreadDbContext {
             db_url: None,
             cdc_worker_id: None,
             backend_generation: 0,
-            schemas: SchemaCache::new(),
             resource_key: DbResourceKey::UNBOUND,
             backend_selection: None,
             mask_policies: HashMap::new(),
@@ -318,6 +292,12 @@ impl ThreadDbContext {
     }
 
     /// True iff the pool has been initialised.
+    ///
+    /// TEST-ONLY, and gated rather than left `pub(crate)`: production asks
+    /// `pool()` and matches on the `Option` because it wants the handle, so this
+    /// predicate had no shipped caller and the resulting `dead_code` warning sat
+    /// in the build output where it could mask a real one.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn pool_initialised(&self) -> bool {
         self.pool.is_some()
     }
@@ -398,6 +378,11 @@ impl ThreadDbContext {
     }
 
     /// The identity of the database this thread's resources belong to.
+    ///
+    /// TEST-ONLY for the same reason as [`Self::pool_initialised`]: the key is
+    /// SET on every URL install and read back only by the tests that assert two
+    /// URLs land on different keys. Production reads it off `service`, not here.
+    #[cfg(any(test, feature = "test-helpers"))]
     pub(crate) fn resource_key(&self) -> DbResourceKey {
         self.resource_key
     }
@@ -468,74 +453,6 @@ impl ThreadDbContext {
     /// Stamp the worker-process identity during plug-in registration.
     pub(crate) fn set_cdc_worker_id(&mut self, worker_id: &str) {
         self.cdc_worker_id = Some(worker_id.to_string());
-    }
-
-    /// Install one collection's descriptor entry for this binding.
-    /// Test fixtures use this narrow helper; production boot replaces the
-    /// binding's complete descriptor through [`Self::replace_schemas`].
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) fn cache_schema(
-        &mut self,
-        binding: &DbBinding,
-        collection: &str,
-        schema: serde_json::Value,
-    ) {
-        self.schemas.insert_one(binding, collection, schema);
-    }
-
-    /// Replace the complete descriptor for one app-at-deploy binding.
-    ///
-    /// Callers fully validate and collect every entry before borrowing the
-    /// context mutably. The retain-and-insert sequence is therefore one
-    /// synchronous publication point: no callback can observe a partial
-    /// descriptor, removed collections do not survive a dev isolate restart,
-    /// and an empty input leaves a schema-less binding empty.
-    pub(crate) fn replace_schemas(
-        &mut self,
-        binding: &DbBinding,
-        schemas: Vec<(String, serde_json::Value)>,
-    ) {
-        self.schemas.replace_for_binding(binding, schemas);
-    }
-
-    /// The descriptor entry for one collection under one binding.
-    ///
-    /// `None` means the descriptor this isolate was built from does not declare
-    /// the collection. Callers must NOT treat that as "carry on without a
-    /// schema" - see [`crate::descriptor::collection_schema`], which is the only
-    /// thing that should call this and which turns the miss into a typed error.
-    pub(crate) fn schema_for(
-        &self,
-        binding: &DbBinding,
-        collection: &str,
-    ) -> Option<Arc<serde_json::Value>> {
-        self.schemas.get(binding, collection)
-    }
-
-    /// The descriptor entry for one collection, or the typed
-    /// `collection_not_declared` error. The L24 rule lives on [`SchemaCache`];
-    /// this only reaches the store.
-    pub(crate) fn require_schema(
-        &self,
-        binding: &DbBinding,
-        collection: &str,
-    ) -> Result<Arc<serde_json::Value>, DbError> {
-        self.schemas.require(binding, collection)
-    }
-
-    /// Enumerate every `(collection, schema)` pair the descriptor store holds
-    /// for one BINDING. `mint_tx_view` uses it to mint one `Collection` per
-    /// declared name onto the `tx` view; the drift-check sweep uses it to walk
-    /// every declared collection. Empty when the isolate has installed no
-    /// schema.
-    ///
-    /// Key shape is `SchemaCache`'s concern now; the collection name is what
-    /// comes back.
-    pub(crate) fn cached_schemas_for_binding(
-        &self,
-        binding: &DbBinding,
-    ) -> Vec<(String, Arc<serde_json::Value>)> {
-        self.schemas.entries_for_binding(binding)
     }
 
     // ----- MASK_POLICIES ---------------------------------------------
@@ -666,6 +583,12 @@ mod tests {
     use super::*;
 
     use crate::BackendUrl;
+    // The lane types are imported HERE, not at file scope. The lanes left this
+    // module on 2026-09-02 and only its tests still name them, so a file-scope
+    // import would be unused in the lib build and warn - while `--all-targets`
+    // reports that warning even though the test target needs the import, which
+    // is how deleting it "to fix a warning" turned into nine compile errors.
+    use crate::tx_lanes::{TxConnection, TxLanes};
     use std::collections::HashMap;
     use zeroship_core::change_event::{ChangeEvent, ChangeOp};
 

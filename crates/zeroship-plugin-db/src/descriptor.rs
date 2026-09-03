@@ -64,12 +64,12 @@ pub(crate) fn collection_schema(
     binding: &DbBinding,
     collection: &str,
 ) -> Result<Arc<Value>, DbError> {
-    crate::context::with(|c| c.require_schema(binding, collection))
+    zeroship_data_core::schema_cache::with(|c| c.require(binding, collection))
 }
 
 /// Every collection this isolate's descriptor declares, with its field map.
 pub(crate) fn declared_collections(binding: &DbBinding) -> Vec<(String, Arc<Value>)> {
-    crate::context::with(|c| c.cached_schemas_for_binding(binding))
+    zeroship_data_core::schema_cache::with(|c| c.entries_for_binding(binding))
 }
 
 #[cfg(test)]
@@ -103,8 +103,8 @@ mod tests {
         crate::reset_context_for_tests();
         let pinned = DbBinding::new("app_two_deploys", "deploy_pinned");
         let current = DbBinding::new("app_two_deploys", "deploy_current");
-        crate::context::with_mut(|c| {
-            c.cache_schema(
+        zeroship_data_core::schema_cache::with_mut(|c| {
+            c.insert_one(
                 &pinned,
                 "secrets",
                 json!({ "marker": { "type": "string" } }),
@@ -114,8 +114,8 @@ mod tests {
             collection_schema(&current, "secrets").is_err(),
             "the current deploy must not read the pinned deploy's descriptor entry",
         );
-        crate::context::with_mut(|c| {
-            c.cache_schema(
+        zeroship_data_core::schema_cache::with_mut(|c| {
+            c.insert_one(
                 &current,
                 "secrets",
                 json!({ "other": { "type": "string" } }),

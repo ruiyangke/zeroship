@@ -22,6 +22,7 @@
 //! prefix and re-inserts, which is one synchronous publication point - no caller
 //! can observe a half-replaced descriptor.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -143,6 +144,47 @@ impl SchemaCache {
         self.entries
             .insert(Self::key(binding, collection), Arc::new(schema));
     }
+}
+
+// ----- THE ISOLATE'S CACHE ---------------------------------------------
+
+thread_local! {
+    /// This isolate's descriptor store.
+    ///
+    /// It lives HERE rather than as a field on the adapter's `ThreadDbContext`
+    /// because `docs/proposals/2026-09-02-thread-context-ownership.md` assigns
+    /// `schemas` to `zeroship-data-core`, and a field on a struct in the adapter
+    /// cannot be read from a crate the adapter depends on. `descriptor.rs` is
+    /// core-destined and is the store's only production reader, so leaving the
+    /// cache on the context would have made the core tier reach UP into the
+    /// adapter - the one edge direction the split forbids outright.
+    ///
+    /// PER-THREAD, like every other piece of isolate state: a worker thread runs
+    /// one isolate, and two threads must not see each other's descriptors.
+    static SCHEMAS: RefCell<SchemaCache> = RefCell::new(SchemaCache::new());
+}
+
+/// Read this isolate's descriptor store.
+pub fn with<R>(f: impl FnOnce(&SchemaCache) -> R) -> R {
+    SCHEMAS.with_borrow(f)
+}
+
+/// Mutate this isolate's descriptor store.
+///
+/// Callers must not re-enter [`with`] from inside `f`: the borrow is held for
+/// the closure's whole body and a nested read panics rather than deadlocks.
+pub fn with_mut<R>(f: impl FnOnce(&mut SchemaCache) -> R) -> R {
+    SCHEMAS.with_borrow_mut(f)
+}
+
+/// Empty this isolate's descriptor store.
+///
+/// The peer of the lane and context resets, called from the same helper. See
+/// `zeroship_plugin_db::reset_context_for_tests` for why a reset is needed
+/// WITHIN one test even though libtest gives each test its own thread.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn reset_for_tests() {
+    with_mut(|c| *c = SchemaCache::new());
 }
 
 #[cfg(test)]

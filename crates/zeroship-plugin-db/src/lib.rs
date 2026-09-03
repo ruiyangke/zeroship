@@ -501,7 +501,7 @@ impl NativePlugin for DbPlugin {
         // partial schema on error.
         let schemas = descriptor_schemas(descriptor)?;
         let binding = v8_classes::db::binding_for_isolate(scope, app_id);
-        ctx_mut(|context| context.replace_schemas(&binding, schemas));
+        zeroship_data_core::schema_cache::with_mut(|c| c.replace_for_binding(&binding, schemas));
         Ok(())
     }
 
@@ -765,6 +765,7 @@ pub fn reset_context_for_tests() {
     // would hand the next phase a stale transaction claim and a parked session,
     // inside one test.
     tx_lanes::reset_for_tests();
+    zeroship_data_core::schema_cache::reset_for_tests();
 }
 
 /// Test helper: hand this isolate the column root keys its backends
@@ -871,7 +872,7 @@ pub fn cache_schema_for_deploy_for_tests(
     collection: &str,
     schema: serde_json::Value,
 ) {
-    ctx_mut(|c| c.cache_schema(binding, collection, schema));
+    zeroship_data_core::schema_cache::with_mut(|c| c.insert_one(binding, collection, schema));
 }
 
 /// Test helper: clear the per-isolate mask-policy cache
@@ -1470,11 +1471,14 @@ mod journal_schema_derivations_agree {
     }
 }
 
-/// `reset_context_for_tests` must clear the LANES as well as the context.
+/// `reset_context_for_tests` must clear ALL THREE thread-locals.
 ///
-/// Since 2026-09-02 those are two thread-locals with two owners, so "reset"
-/// became two calls, and one of them could be dropped without any existing
-/// test noticing. This binds the second one.
+/// The context was one struct until 2026-09-02. It is now three owners with
+/// three thread-locals - the adapter context, the engine.s lanes, and
+/// data-core.s descriptor store - so "reset" became three calls, any one of
+/// which could be dropped without an existing test noticing. One test per
+/// store, because a single test asserting all three would pass while two of
+/// them regressed.
 ///
 /// **Both halves live in ONE test on purpose.** The obvious shape - claim in
 /// test A, assert clean in test B - proves nothing here: libtest gives every
@@ -1484,7 +1488,7 @@ mod journal_schema_derivations_agree {
 /// MID-TEST reset - scenario setup between phases, and the `ContextReset` drop
 /// guard in `transaction/mod.rs` - and that is what this reproduces.
 #[cfg(test)]
-mod reset_clears_both_thread_locals {
+mod reset_clears_every_thread_local {
     /// Deleting `tx_lanes::reset_for_tests()` from `reset_context_for_tests`
     /// must fail this.
     ///
@@ -1529,6 +1533,33 @@ mod reset_clears_both_thread_locals {
         assert!(
             crate::tx_lanes::with_mut(|l| l.try_claim_tx(app)),
             "the app is claimable again after a reset"
+        );
+    }
+
+    /// The descriptor store is the THIRD thread-local the reset must clear, and
+    /// the one furthest from the helper: it moved to `zeroship-data-core` on
+    /// 2026-09-02, so a reset that forgot it would leave a stale schema visible
+    /// to the next phase of a test - the exact L24 shape, where serving a read
+    /// against the wrong descriptor is what drops the projection allowlist.
+    #[test]
+    fn a_mid_test_reset_drops_an_installed_descriptor() {
+        let binding = zeroship_data_core::binding::DbBinding::cold_start("app_reset_schema");
+
+        zeroship_data_core::schema_cache::with_mut(|c| {
+            c.insert_one(
+                &binding,
+                "users",
+                serde_json::json!({ "email": { "type": "string" } }),
+            );
+        });
+        assert!(zeroship_data_core::schema_cache::with(|c| c.get(&binding, "users")).is_some());
+
+        crate::reset_context_for_tests();
+
+        assert!(
+            zeroship_data_core::schema_cache::with(|c| c.get(&binding, "users")).is_none(),
+            "reset_context_for_tests left a descriptor entry behind: the schema \
+             thread-local in data-core was not reset"
         );
     }
 }
