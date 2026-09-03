@@ -525,7 +525,12 @@ impl NativePlugin for DbPlugin {
             c.set_cdc_worker_id(&self.worker_id);
             // Stamp the process-wide meter so the exec boundary can emit a
             // per-app usage metric on each successful op.
-            c.set_meter(self.meter.clone());
+        });
+        // The meter is stamped on the metrics module, not parked in the context:
+        // that module is its only reader. Outside the `ctx_mut` borrow above for
+        // the same reason the charter stamp is.
+        metrics::stamp(self.meter.clone());
+        ctx_mut(|c| {
         });
         // Stamp the operator charter's assignment projection, so the write pass
         // reads the authority this process was composed with rather than
@@ -776,6 +781,7 @@ pub fn reset_context_for_tests() {
     // inside one test.
     tx_lanes::reset_for_tests();
     crud::mask_policy::reset_for_tests();
+    metrics::reset_for_tests();
     system_shape_charter::reset_for_tests();
     zeroship_data_core::schema_cache::reset_for_tests();
 }

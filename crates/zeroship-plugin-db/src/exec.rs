@@ -1278,7 +1278,7 @@ mod tests {
             context::with_mut(|c| {
                 c.clear_pool();
                 c.set_sqlite_backend(Rc::clone(&backend));
-                c.set_meter(Some(Arc::clone(&meter)));
+                crate::metrics::stamp(Some(Arc::clone(&meter)));
             });
 
             // 1 mutation returning 1 row → db_writes +1, db_rows_written +1.
@@ -1346,7 +1346,7 @@ mod tests {
             );
 
             context::with_mut(|c| {
-                c.set_meter(None);
+                crate::metrics::stamp(None);
                 c.clear_pool();
             });
         });
