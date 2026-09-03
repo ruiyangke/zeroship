@@ -13,6 +13,8 @@
 
 use zeroship_data_core::error::DbError;
 
+use crate::backend::BackendHandle;
+
 use super::driver;
 use super::reducer::frames::{FrameClose, FrameId};
 use super::reducer::{SessionOwnership, SettleIntent, TerminalOutcome, TxState};
@@ -254,10 +256,7 @@ pub fn session_backend_pid(app_id: &str) -> Option<i32> {
 /// `(idle, active, total)` for this thread's data pool.
 #[must_use]
 pub fn pool_counts() -> Option<(usize, usize, usize)> {
-    crate::context::with(|c| {
-        c.pool()
-            .map(|pool| (pool.idle_count(), pool.active_count(), pool.total_count()))
-    })
+    crate::context::with(|c| c.backend().as_ref().and_then(BackendHandle::pool_counts))
 }
 
 /// Hold this app's transaction session out of the slot, exactly as an in-flight

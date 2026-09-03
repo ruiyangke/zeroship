@@ -61,9 +61,6 @@ pub(crate) enum BackendInitState {
 /// crate is rejected at compile time.
 #[allow(missing_debug_implementations)]
 pub struct ThreadDbContext {
-    /// Connection pool — created lazily on first DB operation.
-    pool: Option<Rc<Pool>>,
-
     /// Database URL — poisoned during `register()`, consumed on first
     /// pool creation.
     db_url: Option<String>,
@@ -164,7 +161,6 @@ impl ThreadDbContext {
     #[must_use]
     pub(crate) fn new() -> Self {
         Self {
-            pool: None,
             db_url: None,
             cdc_worker_id: None,
             backend_generation: 0,
@@ -226,46 +222,47 @@ impl ThreadDbContext {
 
     // ----- DB_POOL ----------------------------------------------------
 
-    /// Snapshot the pool handle (cloned `Rc`).
-    pub(crate) fn pool(&self) -> Option<Rc<Pool>> {
-        self.pool.as_ref().map(Rc::clone)
-    }
-
-    /// True iff the pool has been initialised.
+    /// True iff a Postgres pool has been installed.
     ///
-    /// TEST-ONLY, and gated rather than left `pub(crate)`: production asks
-    /// `pool()` and matches on the `Option` because it wants the handle, so this
-    /// predicate had no shipped caller and the resulting `dead_code` warning sat
-    /// in the build output where it could mask a real one.
-    // `cfg(test)` alone, NOT `any(test, test-helpers)`: no integration target
-    // uses either method (checked across tests/ and benches/), so the wider gate
-    // compiled them into the `test-helpers` lib with no caller and re-raised the
-    // very dead_code warning it was added to remove.
+    /// Derived from the backend slot rather than from a second field, since
+    /// there is no longer a second field to ask - see [`Self::set_pool`].
+    ///
+    /// `cfg(test)` alone, NOT `any(test, test-helpers)`: no integration target
+    /// uses it (checked across `tests/` and `benches/`), so the wider gate
+    /// compiled it into the `test-helpers` lib with no caller and raised the
+    /// very dead_code warning it was added to remove.
     #[cfg(test)]
     pub(crate) fn pool_initialised(&self) -> bool {
-        self.pool.is_some()
+        matches!(self.backend, Some(BackendHandle::Postgres(_)))
     }
 
     /// Install the pool — called by `init_pool_async` once Postgres
-    /// `connect` succeeds. Constructs the [`PostgresBackend`] facade
-    /// in lockstep so the two never drift, and wraps it in the
-    /// [`BackendHandle::Postgres`] arm.
+    /// `connect` succeeds. Constructs the [`PostgresBackend`] facade and wraps
+    /// it in the [`BackendHandle::Postgres`] arm.
+    ///
+    /// **The pool is NOT also kept in a field of its own.** It was, until
+    /// 2026-09-02: `self.pool = Some(pool)` stored the very `Rc` that had just
+    /// been cloned into `PostgresBackend`, so two slots held one pool and every
+    /// write site had to remember to move both. The backend is the single
+    /// owner; `pool.is_some()` was always exactly
+    /// `matches!(backend, Some(Postgres(_)))`, which is what the predicate above
+    /// now says outright.
+    ///
+    /// That redundant field was also the ONLY reason this adapter module named
+    /// `compio_postgres::Pool` in a return position - the conflict recorded as
+    /// #166 between "the adapter holds the pool" and "no non-vendor crate
+    /// embeds a vendor type". Deleting it settles half of that by construction;
+    /// the parameter below is the half that remains.
     pub(crate) fn set_pool(&mut self, pool: Rc<Pool>) {
         let url = self.db_url.clone().unwrap_or_default();
-        let backend = Rc::new(PostgresBackend::new(
-            Rc::clone(&pool),
-            url,
-            self.local_key_source(),
-        ));
+        let backend = Rc::new(PostgresBackend::new(pool, url, self.local_key_source()));
         self.backend = Some(BackendHandle::Postgres(backend));
-        self.pool = Some(pool);
     }
 
     /// Drop the cached pool (e.g. when the URL changes on
     /// `register`). The next CRUD call will re-`init_pool_async`
     /// against the new URL.
     pub(crate) fn clear_pool(&mut self) {
-        self.pool = None;
         self.backend = None;
         self.backend_init_in_progress = false;
     }
@@ -282,7 +279,8 @@ impl ThreadDbContext {
         &mut self,
         backend: Rc<crate::backend::sqlite::SqliteBackend>,
     ) {
-        self.pool = None;
+        // Replacing the backend IS dropping the Postgres pool: the pool has
+        // no slot of its own, so switching arms cannot leave one behind.
         self.backend = Some(BackendHandle::Sqlite(backend));
     }
 
@@ -514,7 +512,6 @@ mod tests {
     #[test]
     fn new_yields_fully_cleared_adapter_slots() {
         let ctx = ThreadDbContext::new();
-        assert!(ctx.pool().is_none());
         assert!(!ctx.pool_initialised());
         assert!(ctx.backend().is_none());
         assert!(ctx.db_url().is_none());
@@ -610,13 +607,11 @@ mod tests {
         // `install_db_resources` is *just* the configuration slots; the caller
         // (lib.rs) invokes `clear_pool` when the resource changed. We can't
         // install a real pool here (Pool::connect needs PG), but we can pin
-        // that the installer itself leaves the pool/backend slots alone.
+        // that the installer itself leaves the backend slot alone.
         let mut ctx = ThreadDbContext::new();
         install(&mut ctx, "postgres://a");
-        assert!(ctx.pool().is_none());
         assert!(ctx.backend().is_none());
         let _ = install(&mut ctx, "postgres://a"); // no-op
-        assert!(ctx.pool().is_none());
         assert!(ctx.backend().is_none());
     }
 
@@ -626,7 +621,6 @@ mod tests {
     fn clear_pool_when_unset_is_noop() {
         let mut ctx = ThreadDbContext::new();
         ctx.clear_pool();
-        assert!(ctx.pool().is_none());
         assert!(ctx.backend().is_none());
     }
 

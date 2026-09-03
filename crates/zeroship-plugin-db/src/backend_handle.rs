@@ -466,6 +466,27 @@ impl BackendHandle {
         }
     }
 
+    /// `(idle, active, total)` connections, on a backend that pools.
+    ///
+    /// `None` on SQLite, which has no pool to count - the same shape the old
+    /// `ThreadDbContext::pool()` produced there, since that slot was only ever
+    /// filled on the Postgres arm.
+    ///
+    /// It is a method HERE rather than a `as_postgres()?.pool()` chain at the
+    /// call site because the caller is `transaction::probe`, an engine module:
+    /// reaching through to `compio_postgres::Pool` to read three counters would
+    /// put a vendor type in the engine to answer a question the handle can
+    /// answer itself.
+    pub(crate) fn pool_counts(&self) -> Option<(usize, usize, usize)> {
+        match self {
+            Self::Postgres(b) => {
+                let pool = b.pool();
+                Some((pool.idle_count(), pool.active_count(), pool.total_count()))
+            }
+            Self::Sqlite(_) => None,
+        }
+    }
+
 
     /// Borrow the inner [`SqliteBackend`] as a `&SqliteBackend`
     /// reference — async-friendly companion to `BackendHandle::with_sqlite`.
