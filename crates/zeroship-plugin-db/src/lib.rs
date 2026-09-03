@@ -349,6 +349,10 @@ pub mod tx_scope;
 // `exec` entry points are, and its production constructor needs a
 // `&mut v8::PinScope`, so exposing the type opens nothing. See the
 // module docs for why a missed dispatch site cannot compile.
+// The transaction lane owner. Engine-bound: it moves to `zeroship-data-engine`
+// as a file rather than as an extraction, which is the point of separating it
+// from `context.rs` (the adapter's composition root).
+pub(crate) mod tx_lanes;
 pub mod tx_route;
 
 #[cfg(not(feature = "test-helpers"))]
@@ -896,7 +900,7 @@ pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
     // machine more honestly.
     let _ = client.execute("BEGIN", &[]).await;
     ctx_mut(|c| {
-        let _previous = c.install_tx_client(app_id, crate::context::TxConnection::Postgres(client));
+        let _previous = c.install_tx_client(app_id, crate::tx_lanes::TxConnection::Postgres(client));
         debug_assert!(
             _previous.is_none(),
             "install_tx_marker_for_tests: slot already occupied"
@@ -925,13 +929,13 @@ pub async fn install_tx_marker_for_tests(app_id: &str, url: &str) {
 pub async fn uninstall_tx_marker_for_tests(app_id: &str) {
     if let Some(client) = ctx_mut(|c| c.take_tx_client_for(app_id)) {
         match client {
-            crate::context::TxConnection::Postgres(client) => {
+            crate::tx_lanes::TxConnection::Postgres(client) => {
                 // Best-effort: a connection already torn down (panic recovery)
                 // is fine — drop closes the fd.
                 let _ = client.batch_execute("ROLLBACK").await;
                 drop(client);
             }
-            crate::context::TxConnection::Sqlite(client) => {
+            crate::tx_lanes::TxConnection::Sqlite(client) => {
                 let _ = client.exec("ROLLBACK", &[]).await;
                 drop(client);
             }

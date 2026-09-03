@@ -260,7 +260,7 @@ impl Drop for TxAdmission {
             client
         });
         if let Some(client) = client {
-            crate::context::destroy_tx_connection(client);
+            crate::tx_lanes::destroy_tx_connection(client);
         }
         clear_pending_emits(&self.app_id);
     }
@@ -945,7 +945,7 @@ mod tests {
     /// its writes and had its session withdrawn.
     ///
     /// The session is the authority on how to talk to itself.
-    /// [`crate::context::TxConnection`]'s two variants ARE the two
+    /// [`crate::tx_lanes::TxConnection`]'s two variants ARE the two
     /// `SqlExecutor::Client` associated types, so the variant already names the
     /// vendor and no second handle is consulted.
     ///
@@ -1055,7 +1055,7 @@ mod tests {
     /// is the caller that made it false.
     ///
     /// The session is taken out of the slot with a bare
-    /// [`crate::context::TxClientSlotGuard`], which is what ordinary CRUD does
+    /// [`crate::tx_lanes::TxClientSlotGuard`], which is what ordinary CRUD does
     /// (the module header's "known gap"), so the reducer still reports
     /// `SessionOwnership::Registry`. That is the production shape today, not a
     /// contrived one.
@@ -1094,7 +1094,7 @@ mod tests {
             // of the slot, so the only route left is the canceller captured when
             // the session was installed.
             let held =
-                crate::context::TxClientSlotGuard::take("app_sqlite").expect("hold the session");
+                crate::tx_lanes::TxClientSlotGuard::take("app_sqlite").expect("hold the session");
 
             let driven = driver::cancel("app_sqlite").await;
             assert_eq!(

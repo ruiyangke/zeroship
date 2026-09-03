@@ -135,6 +135,7 @@ zeroship-plugin-db/exec.rs
 zeroship-plugin-db/backend/cancel.rs
 zeroship-plugin-db/auth/bootstrap.rs
 zeroship-plugin-db/context.rs
+zeroship-plugin-db/tx_lanes.rs
 zeroship-plugin-db/lib.rs
 zeroship-plugin-db/service.rs
 "

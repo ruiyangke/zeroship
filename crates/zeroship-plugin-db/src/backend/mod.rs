@@ -663,14 +663,14 @@ impl BackendHandle {
         &self,
         app_id: &str,
         begin: BeginIntent,
-    ) -> Result<crate::context::TxConnection, OpenSessionError> {
+    ) -> Result<crate::tx_lanes::TxConnection, OpenSessionError> {
         match self {
             Self::Postgres(pg) => {
                 let client = pg.acquire_dedicated_client(app_id).await?;
                 let begin_sql = postgres::render_begin(begin);
                 pg.client_exec(&client, &begin_sql, &[]).await?;
                 postgres::apply_per_app_role(&client, app_id).await?;
-                Ok(crate::context::TxConnection::Postgres(client))
+                Ok(crate::tx_lanes::TxConnection::Postgres(client))
             }
             Self::Sqlite(sq) => {
                 sq.attach_app_file(app_id).await?;
@@ -682,7 +682,7 @@ impl BackendHandle {
                 // and no stronger one to grant. See
                 // `docs/reference/sqlite-divergences.md`.
                 sq.client_exec(&client, "BEGIN", &[]).await?;
-                Ok(crate::context::TxConnection::Sqlite(client))
+                Ok(crate::tx_lanes::TxConnection::Sqlite(client))
             }
         }
     }
