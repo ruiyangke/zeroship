@@ -207,12 +207,50 @@ pub(crate) fn capture_route(
 /// `not_configured` on every fresh isolate, which on the SQLite dev tier is
 /// every boot.
 ///
-/// `pub`, not `pub(crate)`, and capped by the module: `tx_scope` is
-/// `pub(crate) mod` in a release build and `pub mod` only under
-/// `test-helpers`, so the shipped surface is unchanged. The integration
-/// targets need it because they drive the engine's unmask entry points
-/// directly, and those take the backend as a parameter now - this is the
-/// same call the V8 dispatcher makes on their behalf in production.
+/// **`pub`, not `pub(crate)`, and the shipped surface is unchanged ONLY
+/// BECAUSE OF A CONDITION THIS DOC USED TO LEAVE UNSTATED.** The condition is
+/// `lib.rs:353-356`, which declares this module as a two-arm pair:
+///
+/// ```text
+/// #[cfg(not(feature = "test-helpers"))] pub(crate) mod tx_scope;
+/// #[cfg(feature = "test-helpers")]      pub       mod tx_scope;
+/// ```
+///
+/// A `pub fn` inside a `pub(crate) mod` has crate-only EFFECTIVE visibility,
+/// so in a release build this symbol is unreachable from outside. Delete the
+/// `not(...)` arm, or re-declare the module `pub` unconditionally in whatever
+/// crate ends up holding it, and `ensure_backend` silently becomes public API
+/// with no compile error anywhere. The old wording asserted the conclusion; the
+/// point of this paragraph is that the conclusion has a premise, and the
+/// premise is one line in another file.
+///
+/// **The crate split does not remove that cap, and a reviewer's worry that it
+/// would is refuted by the proposal.** `docs/proposals/2026-08-31-data-crate-shape.md:50`
+/// keeps `zeroship-plugin-db` as "THIN. The worker/runtime plugin ADAPTER
+/// ONLY", and `tests/lib/tier_direction_census.sh` tiers `tx_scope.rs` ADAPTER.
+/// The engine is cut OUT to `data-engine`; this file does not move, so the
+/// two-arm declaration above moves with neither.
+///
+/// **Why there is no `ensure_backend_for_tests` wrapper**, the idiom
+/// `tx_route.rs` uses for `pool_for_tests` / `tx_for_tests`: that idiom fits a
+/// test-only CONSTRUCTOR, which has no production twin, so gating it genuinely
+/// removes a capability from the shipped build. `ensure_backend` is the
+/// opposite: eleven production call sites, counted 2026-09-03 - nine in
+/// `v8_classes/` (`dispatch.rs` 5, `masked_value.rs` 2, `replication.rs` 1,
+/// `transaction.rs` 1) and two in `lib.rs` - plus [`bind_route`] below. Every
+/// one of those files is ADAPTER, so they stay in this crate when `data-engine`
+/// is cut out, and the symbol has to remain reachable from all of them.
+/// (`transaction/probe.rs` also calls it and is NOT in that count: its module
+/// is declared `#[cfg(any(test, feature = "test-helpers"))]` at
+/// `transaction/mod.rs:145`, so it is in no production build.) A gated wrapper
+/// would therefore hide nothing that is not already hidden; it would only
+/// rename five calls in
+/// `tests/{integration,sqlite_integration,mask_flip}.rs`. Naming the condition
+/// is the fix that does work; a wrapper would be ceremony that reads as one.
+///
+/// The integration targets need the `pub` arm because they drive the engine's
+/// unmask entry points directly, and those take the backend as a parameter now.
+/// It is the same call the V8 dispatcher makes on their behalf in production.
 pub async fn ensure_backend() -> Result<crate::backend::BackendHandle, DbError> {
     if crate::context::with(|c| c.backend().is_none()) {
         crate::init_pool_async()

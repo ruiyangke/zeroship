@@ -85,8 +85,17 @@ pub(crate) struct ApplyResult {
 /// to resolve its own through the engine funnel, which read ADAPTER state from
 /// an ENGINE file; the funnel now lives at `crate::tx_scope::ensure_backend`
 /// and the value travels down instead.
+///
+/// **The parameter is spelled `crate::backend_handle::BackendHandle`, not the
+/// `crate::backend` re-export, and that is not cosmetic.** `backend/mod.rs` is
+/// deliberately CONTESTED in `tests/lib/tier_direction_census.sh` - it has no
+/// settled tier - so a reference wearing that path is neither judged nor
+/// trusted: it lands in the census's DROPPED bucket, an ENGINE-to-ENGINE edge
+/// the instrument cannot rule on. `backend_handle.rs` is tiered ENGINE, so the
+/// definition path makes this file's one backend reference judgeable. Do not
+/// "simplify" it back to the re-export.
 pub(crate) async fn apply(
-    backend: &crate::backend::BackendHandle,
+    backend: &crate::backend_handle::BackendHandle,
     binding: &DbBinding,
     collection: &str,
     mut rows: Vec<Value>,
@@ -626,7 +635,14 @@ mod tests {
         // `unmask_columns`, no encrypted column in scope), so any real handle
         // does. Opened INSIDE the runtime, which its CDC publisher's `spawn`
         // requires - see `crate::test_support::unit_backend`.
-        let (backend, _dir) = rt.block_on(async { crate::test_support::unit_backend() });
+        //
+        // ORACLE NOTE: installing a real handle COST this test its second,
+        // free oracle. With no backend installed, a regression in the
+        // `SchemaFieldScope::Only(&[])` narrowing reached the decrypt stage and
+        // failed loudly on `not_configured`. It now reaches a working backend
+        // instead, so the `assert_eq!` on `result.rows` below is the ONLY thing
+        // that rules on the narrowing. Do not weaken it.
+        let (backend, dir) = rt.block_on(async { crate::test_support::unit_backend() });
         let result = rt
             .block_on(apply(
                 &backend,
@@ -663,6 +679,14 @@ mod tests {
             ))
             .expect("apply");
         assert_eq!(defaulted.rows, vec![serde_json::json!({})]);
+
+        // Drop backend-then-directory explicitly. `unit_backend` returns
+        // `(BackendHandle, TempDir)`, and scope exit drops a tuple pattern's
+        // bindings in reverse declaration order - `dir` first, which would
+        // delete the directory out from under a still-open backend. See the
+        // ordering note on `crate::test_support::unit_backend`.
+        drop(backend);
+        drop(dir);
     }
 
     #[test]
@@ -685,7 +709,13 @@ mod tests {
         let binding = DbBinding::cold_start("app_distinct_masked");
         let rt = compio::runtime::Runtime::new().expect("compio runtime build");
         // Inside the runtime: see the sibling test above.
-        let (backend, _dir) = rt.block_on(async { crate::test_support::unit_backend() });
+        //
+        // ORACLE NOTE: same trade as the sibling. A real handle removed the
+        // free `not_configured` oracle that a regression in the
+        // `wrap_masked: false` narrowing used to trip, so the `assert_eq!` on
+        // `result.rows` and the `has_masked` assertion below are the ONLY
+        // things ruling on it.
+        let (backend, dir) = rt.block_on(async { crate::test_support::unit_backend() });
         let result = rt
             .block_on(apply(
                 &backend,
@@ -704,5 +734,9 @@ mod tests {
             vec![serde_json::json!({ "email": "a***@example.com" })]
         );
         assert!(!result.has_masked);
+
+        // Backend before directory: see the sibling test above.
+        drop(backend);
+        drop(dir);
     }
 }

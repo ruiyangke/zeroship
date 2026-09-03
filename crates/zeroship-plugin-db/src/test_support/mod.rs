@@ -252,8 +252,34 @@ where
 /// which trades a compile error for a runtime one at every production call
 /// site to spare a handful of tests a temp dir.
 ///
-/// The `TempDir` is RETURNED, not dropped: it has to outlive the backend, or
-/// the SQLite session's worker thread closes over a deleted directory.
+/// The `TempDir` is RETURNED rather than dropped inside this function, so the
+/// directory survives the call. **What it does NOT survive is the caller's
+/// scope exit, and this doc asserted the opposite until 2026-09-03.**
+///
+/// The tuple is `(BackendHandle, TempDir)`, so every call site spells
+/// `let (backend, _dir) = unit_backend();` - and a `let` with a tuple pattern
+/// declares its bindings left to right and drops locals in REVERSE declaration
+/// order, so `_dir` drops FIRST and `backend` second. Scope exit therefore
+/// deletes the directory while the backend is still open, which is the exact
+/// inverse of "it has to outlive the backend". Measured with a compiled probe
+/// rather than inferred: `let (a, b) = ...` prints `drop b` then `drop a`.
+///
+/// Two things keep that from being a live failure today, and NEITHER is this
+/// helper's ordering:
+///
+/// - Every caller refuses or returns in a prologue that runs before the first
+///   statement, so nothing ever reads the database file.
+/// - `SqliteSession::drop` (`zeroship-data-sqlite/src/session.rs:1012`) only
+///   best-effort enqueues `Shutdown` and DETACHES the worker thread without
+///   joining it. The worker can therefore outlive both bindings no matter what
+///   order they drop in, so no arrangement of this tuple can deliver the
+///   guarantee the old wording claimed.
+///
+/// The change that removes the hazard is to return `(TempDir, BackendHandle)`,
+/// which makes the compiler impose `let (_dir, backend) = ...` and drop the
+/// backend first. It re-binds every call site, so it is not done here: the two
+/// sites in `crud/read_pipeline.rs` drop explicitly instead, and the sites in
+/// `crud/unmask.rs` and `crud/mask_drift.rs` still rely on scope exit.
 ///
 /// # Panics
 ///
