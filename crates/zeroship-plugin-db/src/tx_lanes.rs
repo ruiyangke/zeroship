@@ -707,9 +707,9 @@ impl TxLanes {
     /// SC-1 `Action::WithdrawSession`: mark `app_id`'s session withdrawn and
     /// hand the caller whatever is in the slot to destroy.
     ///
-    /// The tombstone outlives this call deliberately, and **outlives the lane**
-    /// - see [`Self::put_tx_client_for`]. It is recorded beside the lanes
-    /// rather than inside one because its whole purpose is to describe a
+    /// The tombstone outlives this call deliberately, and **outlives the
+    /// lane** (see [`Self::put_tx_client_for`]). It is recorded beside the
+    /// lanes rather than inside one because its whole purpose is to describe a
     /// session whose lane is gone: set here, cleared by the next
     /// [`Self::admit_transaction`], never by retirement.
     pub(crate) fn withdraw_tx_session(&mut self, app_id: &str) -> Option<TxConnection> {
