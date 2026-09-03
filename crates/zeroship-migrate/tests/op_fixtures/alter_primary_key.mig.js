@@ -1,6 +1,6 @@
 // Explicit primary-key lifecycle regression fixture. Before AlterPrimaryKey this
 // public surface and wire op did not exist.
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 export const name = "alter_primary_key";
 

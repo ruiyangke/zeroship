@@ -1,7 +1,7 @@
 // Minimal, self-contained db type-builder surface (re-authored INSIDE
-// `zero-migrate`).
+// `@zeroship/migrate`).
 //
-// SCOPE: this is the exact subset `zero-migrate`'s `db-lexicon` bridge
+// SCOPE: this is the exact subset `@zeroship/migrate`'s `db-lexicon` bridge
 // (`colTypeFromDbField` / `fromDb`) depends on — the `FieldDef` schema-field shape
 // and the fluent `TypeBuilder` (`t.*` factories return one; `.toFieldDef()` reduces
 // it to a `FieldDef`). It was previously a separate workspace db package; it is

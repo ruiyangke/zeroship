@@ -70,21 +70,21 @@ type Case = CaseBase &
 const CASES: readonly Case[] = [
   {
     what: "interval",
-    imports: `import { table, interval } from "zero-migrate";`,
+    imports: `import { table, interval } from "@zeroship/migrate";`,
     body: `table("${TABLE}").update({ set: { ts: (col) => col("ts").add(interval({ minutes: 1 })) }, where: (col) => col("id").gt(0) });`,
     inverseBody: `table("${TABLE}").update({ set: { ts: (col) => col("ts").sub(interval({ minutes: 1 })) }, where: (col) => col("id").gt(0) });`,
     appliesOnPg: true,
   },
   {
     what: "currentUser",
-    imports: `import { table, currentUser } from "zero-migrate";`,
+    imports: `import { table, currentUser } from "@zeroship/migrate";`,
     body: `table("${TABLE}").update({ set: { note: () => currentUser() }, where: (col) => col("id").gt(0) });`,
     irreversible: `overwrites note with the applying database user for existing ${TABLE} rows; prior note values are not recorded`,
     appliesOnPg: true,
   },
   {
     what: "currentSetting",
-    imports: `import { table, currentSetting } from "zero-migrate";`,
+    imports: `import { table, currentSetting } from "@zeroship/migrate";`,
     body: `table("${TABLE}").update({ set: { note: () => currentSetting("app.tenant") }, where: (col) => col("id").gt(0) });`,
     irreversible: `overwrites note with app.tenant for existing ${TABLE} rows; prior note values are not recorded`,
     appliesOnPg: false,
@@ -121,7 +121,7 @@ scope = "all"
   writeFileSync(join(work, "registry.json"), JSON.stringify({ [TABLE]: OWNER_APP }));
   writeFileSync(
     join(work, "migrations", "20260101000000_a.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "a";
 export default {
   schema() {
@@ -135,7 +135,7 @@ export default {
   );
   writeFileSync(
     join(work, "migrations", "20260101000001_seed.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "seed";
 export default {
   data() {

@@ -72,7 +72,7 @@ scope = "all"
 }
 
 /** The schema half of the doc's step-2 migration. */
-const CREATE_USERS = `import { ids, now, table, t } from "zero-migrate";
+const CREATE_USERS = `import { ids, now, table, t } from "@zeroship/migrate";
 
 export const name = "create_users";
 
@@ -94,7 +94,7 @@ export default {
 `;
 
 /** The reversible data half of the doc's step-2 migration. */
-const SEED_USERS = `import { table } from "zero-migrate";
+const SEED_USERS = `import { table } from "@zeroship/migrate";
 
 export const name = "seed_users";
 
@@ -115,7 +115,7 @@ export default {
 `;
 
 /** The doc's rename migration, including its type-identity requirement. */
-const RENAME = `import { table, t } from "zero-migrate";
+const RENAME = `import { table, t } from "@zeroship/migrate";
 
 export const name = "rename_user_display_name";
 

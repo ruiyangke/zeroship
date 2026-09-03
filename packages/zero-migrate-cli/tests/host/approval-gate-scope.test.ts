@@ -125,14 +125,14 @@ scope = "all"
   // DDL or DML, never both.
   writeFileSync(
     join(work, "migrations", "20260101000000_create.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "create";
 export default { schema() { ${SEED_DDL} } };
 `,
   );
   writeFileSync(
     join(work, "migrations", "20260101000001_seed.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "seed";
 export default {
   data() { ${SEED_DML} },
@@ -185,7 +185,7 @@ test("the approval gate covers exactly the operations the documentation names", 
 
         writeFileSync(
           join(work, "migrations", "20260102000000_op.ts"),
-          `import { table, t } from "zero-migrate";
+          `import { table, t } from "@zeroship/migrate";
 export const name = "op";
 export default { ${phase}() { ${body} }${reverse === undefined ? "" : `, ${reverse}`} };
 `,

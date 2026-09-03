@@ -1,5 +1,9 @@
 # Schema Source Flexibility — decouple schema *sourcing* from schema *applying*
 
+> **Historical design snapshot.** Package paths and package boundaries below
+> describe the 2026-07-14 tree. The live DSL is the single
+> `@zeroship/migrate` package at `packages/zero-migrate/`.
+
 - **Status:** proposal (pre-implementation)
 - **Date:** 2026-07-14
 - **Depends on:** Phase F (monorepo consumes the published `zero-migrate` engine — the in-tree engine was deleted in Phase F stage 5, commit `79a1f45e`).

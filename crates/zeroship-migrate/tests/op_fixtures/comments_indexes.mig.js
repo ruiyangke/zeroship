@@ -13,7 +13,7 @@ import {
   t,
   view,
   sequence,
-} from "zero-migrate";
+} from "@zeroship/migrate";
 
 export const name = "comments_indexes";
 

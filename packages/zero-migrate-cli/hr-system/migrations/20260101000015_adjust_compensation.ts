@@ -1,4 +1,4 @@
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 // A routine HR maintenance migration: mark a departing employee terminated, and
 // purge rejected leave requests. Exercises predicated UPDATE and DELETE DML.

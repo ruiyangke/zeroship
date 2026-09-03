@@ -1,19 +1,27 @@
 # `@zeroship/migrate` — the op DSL
 
-`@zeroship/migrate` is the no-raw-SQL, fully-structured authoring surface for
-zeroship database migrations. A migration is a `.ts` module that imports the
-helpers it needs from `@zeroship/migrate` and exports a single
-`default { name?, up, down? }` object. You
-describe schema changes (DDL) and data migrations (DML) once through the fluent
-`table()` handle; the engine lowers them per-dialect and applies
-them faithfully. PostgreSQL is the first-class target; constructs with no native
-realization on another target fail closed unless the author supplies an explicit
-dialect leg.
+`@zeroship/migrate` is the single structured authoring package and recorder for
+zeroship database migrations. It lives in `packages/zero-migrate/`; the former
+second implementation in `sdks/migrate/` is gone. Platform and creator
+migrations therefore import the same module instance and record into the same
+ambient singleton the host drains.
+
+A migration is a `.ts` module with exactly one forward phase:
+
+- `schema()` records DDL. The engine synthesizes its structural inverse.
+- `data()` records DML and must declare either a recorded `inverse()` or a
+  non-empty `irreversible` reason.
+
+Schema and data changes cannot share one module. All phase functions are
+parameterless, synchronous, and return `void`; they describe operations rather
+than executing SQL. PostgreSQL is the first-class target, and constructs with no
+native realization on another target fail closed unless the author supplies an
+explicit dialect leg.
 
 There is one import root: `@zeroship/migrate`. Core value exports include
 `table`, `view`, `enumType`, `domain`, `schema`, `extension`, `role`,
 `sequence`, `grant`, `revoke`, `createFunction`, `dropFunction`, `dropOwnedBy`,
-`raw`, `comment`, `t`, `fromDb`, and `lintDeterminism`. `index`/`foreignKey`/
+`raw`, `comment`, `t`, `ids`, `fromDb`, and `lintDeterminism`. `index`/`foreignKey`/
 `check`/`unique` stay fluent methods on the table handle; they are not
 top-level exports. Postgres-vendor ops are first-class root exports, and the
 security gate remains the engine's per-op `VendorCapability` validation:
@@ -25,107 +33,73 @@ terminals) on the handle `table()` returns. `enumType(name)` is also an inert
 handle: it records nothing until `.create({ values, schema? })`, `.drop(...)`, or
 `.comment(...)` is called.
 
-There is **no raw SQL** anywhere on this surface — no `Raw` type, no `sql\`\``
-escape, no string fragments. Every transform and predicate is a fluent
-`(col) => Expr` callback over a closed expression AST, and the engine owns 100%
-of per-dialect rendering. This is a deliberate boundary (property A): a
-transform the closed surface cannot express is a hard, structured error, not a
-back door to hand-written SQL.
+There is no raw **expression** escape: no `Raw` expression type, no `sql\`\``
+tag, and no string fragments in predicates or transforms. Every expression is a
+fluent `(col) => Expr` callback over a closed AST, and the engine owns rendering.
+The one deliberate whole-statement escape is `raw({ sql, reason })`, a
+reason-required, trust-gated DDL operation for operator migrations. Confined
+creator migrations cannot use it and receive `VENDOR_OP_DENIED`.
 
-The TypeScript authoring surface lives in `sdks/migrate/src/` (the npm
-`@zeroship/migrate` package). The current app build records it in-process through
-`sdks/vite-plugin/src/gen-types/recorder.ts`, backed by the standalone
-`zero-migrate` package. Both emit the identical dialect-neutral op objects; the
-canonical IR shape is the frozen contract.
+The TypeScript source and internal recorder live together in
+`packages/zero-migrate/src/`. The engine CLI and Vite plugin both consume its
+`@zeroship/migrate/internal/recorder` export. There is no package alias or second
+recorder. The dialect-neutral IR emitted by this one package is the frozen
+contract.
 
 ```ts
-// migrations/0007_split_name.ts
-import { table, t, now, uuidV4, concatWs } from "@zeroship/migrate";
+// migrations/0007_create_orders.ts
+import { ids, now, table, t } from "@zeroship/migrate";
 
 export default {
-  name: "split_name_column", // optional; defaults to the filename label
-
-  up() {
-    const users = table("users");
-    users.column("first_name").add({ type: t.text() }); // nullable by default
-    users.column("last_name").add({ type: t.text() });
-    users.backfill({
-      set: {
-        first_name: (col) => col("name").splitPart(" ", 1),
-        last_name: (col) => col("name").splitPart(" ", 2),
+  name: "create_orders", // optional; defaults to the filename label
+  schema() {
+    table("orders").create({
+      columns: {
+        id: ids.typeId({ prefix: "ord" }).primaryKey(),
+        status: t.text().notNull().default("pending"),
+        created_at: t.timestamp().notNull().default(now()),
       },
-      where: (col) => col("first_name").isNull(),
-      cursorColumns: ["id"],
-      cursorStability: { mode: "guardUpdates" },
     });
-    users.column("name").drop();
-  },
-
-  down() {
-    const users = table("users");
-    users.column("name").add({ type: t.text() });
-    users.backfill({
-      // concatWs is NULL-skipping — the safe join; copy this, not `.concat`
-      set: { name: (col) => concatWs(" ", col("first_name"), col("last_name")) },
-      cursorColumns: ["id"],
-      cursorStability: { mode: "guardUpdates" },
-    });
-    users.column("first_name").drop();
-    users.column("last_name").drop();
   },
 };
 ```
 
 ## Module shape
 
-A migration module is a single default-exported object:
+A migration module is one of these three default-exported shapes:
 
 ```ts
-export interface Migration {
-  name?: string; // optional; defaults to the filename label (e.g. "split_name")
-  up(): void; // required
-  down?(): void; // optional; only present when the migration is rollbackable
-}
+type Migration =
+  | { name?: string; schema(): void }
+  | { name?: string; data(): void; inverse(): void }
+  | { name?: string; data(): void; irreversible: string };
 ```
 
-- `up()` is **required**; `down()` is optional.
-- `up()`/`down()` are **parameterless and return `void`**. They do not execute
-  SQL — the `table()` handle's terminals *record* a plain-data op onto an ambient
-  per-migration recorder, synchronously (no `await`). This is the
-  vitest/jest/Playwright pattern: `import {
-  table }` then call it. The
-  build/dev evaluator installs a fresh recorder before calling `up()` (and
-  again before `down()`),
-  drains the recorded op list,
-  and canonicalizes it as
-  transient IR.
-- Authoring **outside an active recorder** — at module top level,
-  or after
-  `up()` returns (e.g. from a stray `setTimeout`) — throws a structured
+- `schema()` accepts DDL only. Any recorded DML is refused, and its reverse is
+  synthesized from the structural operations.
+- `data()` accepts DML only. `inverse()` is recorded independently through the
+  same DSL, making the reverse checksummed and lintable. If no safe reverse
+  exists, replace it with a non-empty `irreversible` explanation.
+- Every phase is parameterless and synchronous. A terminal records a plain-data
+  operation onto the ambient recorder; it never connects to a database.
+- Authoring **outside an active recorder** — at module top level or after the
+  active phase returns (e.g. from a stray `setTimeout`) — throws a structured
   `OP_OUTSIDE_RECORDER` error. The op cannot be silently lost.
 - A **selector that is never terminated** (`table("u").column("email")` with no
   terminal such as `.add()`/`.drop()`/`.rename()`/`.setNotNull()`) is a hard `SELECTOR_NOT_TERMINATED`
   build error at drain — never a silent no-op (see
   [Selectors must be terminated](#selectors-must-be-terminated)).
 
-The default export is one typed migration object,
-  never a loose top-level
-`export function up()` plus a stray `export const name`.
+The former generic phase names are deliberately rejected rather than retained as
+aliases. Authors must choose schema or data semantics explicitly.
 
-### `down()` is not auto-derived for DML or lossy DDL
+### Data reversal is recorded or explicitly impossible
 
-The engine auto-derives a reverse for *reversible* DDL (an `addColumn`'s inverse
-is a `dropColumn`,
-  etc.). A migration is auto-reversible only if **every** op is
-auto-reversible. A `backfill`/`update`/`del` (DML — no general inverse) or a
-`dropColumn` (data-destroying) yields no auto-inverse,
-  so a migration containing
-one is `down: None` (irreversible) unless you hand-write `down()`. The hero
-example above hand-writes `down()` for exactly this reason: it contains a
-`backfill` and a `dropColumn`. The DSL never silently fabricates an inverse for
-DML or lossy DDL — an author-supplied `down()` is itself a structured migration
-(its own op calls),
-  never a raw-SQL string.
+The engine never fabricates a reverse for data. A reversible data migration
+records `inverse()` as its own DML stream. An irreversible data migration carries
+the reason in `irreversible`; the reason appears in lint and status output so an
+operator sees it before attempting rollback. Destructive DDL still belongs in a
+`schema()` migration, where policy and approval gates decide whether it may run.
 
 ## Core Entry Points
 
@@ -136,7 +110,8 @@ The portable authoring surface is reached through direct named exports from
 import { table, view, enumType, comment, t, now, uuidV4 } from "@zeroship/migrate";
 ```
 
-The complete exported vocabulary (`sdks/migrate/src/index.ts`):
+The principal exports used throughout this guide
+(`packages/zero-migrate/src/index.ts`) are:
 
 | Export | Purpose |
 | --- | --- |
@@ -145,6 +120,7 @@ The complete exported vocabulary (`sdks/migrate/src/index.ts`):
 | `enumType` | portable enum entry — returns an inert `EnumHandle`; `.create({ values })` records |
 | `comment` | standalone structured object comments |
 | `t` | the immutable column-type lexicon |
+| `ids` | validated TypeID and ULID text-column formats |
 | `dialect` | per-dialect value or whole-op escape hatch |
 | `fromDb` | the `@zeroship/db` field → migration `ColumnDef` bridge |
 | `lintDeterminism` | the best-effort determinism source scan |
@@ -217,9 +193,9 @@ the live `@zeroship/db` schema. `table`, `column`, `from`, `to`, `name`,
 `cursorColumns`, every `set` key, every `where`-referenced column, and every
 `col("…")` argument are strings whose existence is validated at **apply time
 against the real DB**, never at `tsc` time (the typing-stance prose lives in the
-module header, `sdks/migrate/src/types.ts:1-11`, "§3.3 — names are plain
+module header, `packages/zero-migrate/src/types.ts`, "names are plain
 `string`, NOT live-schema-bound", and on the `Row`/`ScalarValue` types,
-`sdks/migrate/src/types.ts:91-93`).
+strings").
 
 This is deliberate, and it is the single most important typing rule of the DSL.
 
@@ -276,12 +252,15 @@ The `t.*` chain is **immutable**: every modifier returns a **fresh** `ColumnDef`
 rather than mutating the receiver, so a hoisted type var is safe to reuse across
 columns without aliasing (see [Var-assign + reuse](#var-assign--reuse)).
 
-The shipped factories (`sdks/migrate/src/ops.ts`):
+The shipped factories (`packages/zero-migrate/src/ops.ts`):
 
 | Factory | Column type |
 | --- | --- |
-| `t.id(opts?)` | a non-null `uuid` PK defaulting to `gen_random_uuid()`; `t.id({ prefix })` brands it as a typed id (`prefix_<base62>`) — see [Sensitive-data facets](#sensitive-data-facets) |
-| `t.text()` | text |
+| `ids.typeId({ prefix })` / `ids.ulid()` | validated text storage formats; nullable and constraint-neutral until modifiers opt in |
+| `t.text({ caseSensitive? })` | unbounded text |
+| `t.string({ length?, caseSensitive? })` | bounded string; length defaults to 255 |
+| `t.textArray()` | text array (JSON text on non-PG targets) |
+| `t.char({ length })` | fixed-length character string |
 | `t.int()` | 32-bit integer |
 | `t.bigInt()` | 64-bit integer |
 | `t.real()` | single-precision float (float4) |
@@ -289,19 +268,20 @@ The shipped factories (`sdks/migrate/src/ops.ts`):
 | `t.numeric({ precision?, scale? })` | fixed-precision decimal (default `(38, 9)`) |
 | `t.boolean()` | boolean |
 | `t.timestamp()` | timestamp |
+| `t.date()` | SQL date |
 | `t.uuid()` | uuid |
 | `t.bytes()` | byte array |
 | `t.json()` | json |
 | `t.vector({ dimensions, metric? })` | a pgvector column; `metric` pins the distance metric — see [Sensitive-data facets](#sensitive-data-facets) |
 | `t.geoPoint()` | a geo point |
-| `t.ref(targetTable)` | a foreign-key reference (plain-string target) |
+| `t.enum(name)` / `t.domain(name)` | a reference to a declared enum or domain type |
 | `t.encrypted({ of })` | an application-level encrypted column wrapping an inner type |
 
 > The `string`/`integer`/`float` aliases and the `t.X({ notNull, default })`
 > options-bag overload are **removed**. Use the canonical `t.text()`/`t.int()`
 > and the chain (`t.text().notNull().default("pending")`).
 
-Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnDef`:
+Chainable modifiers (`packages/zero-migrate/src/ops.ts`), each returning a fresh `ColumnDef`:
 
 | Modifier | Effect |
 | --- | --- |
@@ -313,16 +293,18 @@ Chainable modifiers (`sdks/migrate/src/ops.ts`), each returning a fresh `ColumnD
 | `.mask({ kind, classification? })` | declare a standalone column mask (the field reads back as `MaskedValue<T>`) — see [Sensitive-data facets](#sensitive-data-facets) |
 
 ```ts
-import { table, t, now, uuidV4 } from "@zeroship/migrate";
+import { ids, table, t } from "@zeroship/migrate";
 
 export default {
-  up() {
+  schema() {
     table("orders").create({
       columns: {
-        id: t.id(),
+        id: ids.typeId({ prefix: "ord" }).primaryKey(),
         total: t.numeric({ precision: 12, scale: 2 }).notNull().default(0),
         status: t.text().notNull().default("pending"),
-        customer_id: t.ref("customers").notNull(),
+        customer_id: ids.typeId({ prefix: "cus" })
+          .notNull()
+          .references("customers", "id"),
         owner_id: t.uuid().notNull().references("users", "id", { onDelete: "cascade" }),
       },
     });
@@ -330,13 +312,9 @@ export default {
 };
 ```
 
-`t.ref(target)` carries the target table as a plain string — it is never bound
-to the live schema (existence is validated at apply time).
-
-**`t.ref(target)` and `.references(table, column)` are two different
-constructs.** `t.ref` is a column **type** that names the target table only.
-`.references` is a column **facet**: the column keeps the storage type you chose
-(`t.uuid()` above) and the facet records the full target identity
+There is no untyped `t.ref()` shortcut. `.references(table, column)` is a column
+**facet**: the column keeps the explicit storage type or validated ID format you
+chose (`t.uuid()` or `ids.typeId(...)` above) and the facet records the full target identity
 (`references: { table, column }`) plus the optional referential actions and an
 explicit constraint name (absent ⇒ `<table>_<column>_fkey`). Both halves of the
 target are required — a missing target column is an `OP_INVALID` at authoring
@@ -350,19 +328,18 @@ only shape for a **composite** key.
 
 ### Sensitive-data facets
 
-Three **declared-only** column facets carry intent the live catalog cannot
-recover. Each lands on the wire `IrColumn` in camelCase (`idPrefix` /
+Three column facets carry intent the live catalog cannot fully recover. Each
+lands on the wire `IrColumn` (`valueFormat` /
 `vectorMetric` / `mask`), is **closed** (the engine rejects an out-of-set token
 at deserialize, and the SDK gives a friendly `OP_INVALID` at authoring time), and
 is **checksum-neutral when absent** (a facet-less column is byte-identical to the
 pre-facet image).
 
-**`t.id({ prefix })` — typed-id brand.** Brands the primary key as a typed id
-(`prefix_<base62>`), e.g. `t.id({ prefix: "usr" })` → `usr_3kZ…`. Declared-only:
-the minted id is opaque text in the catalog, so the prefix is a mint-time input
-introspection cannot recover. It is valid **only in `create()`** — an added
-column is never the system PK, so `t.id({ prefix })` on `.column().add()` is a
-hard `OP_INVALID` (the prefix would otherwise be silently dropped).
+**`ids.typeId({ prefix })` and `ids.ulid()` — validated text formats.** These
+builders select storage and validation only. They do not imply `NOT NULL`, a
+primary key, a default, or a generator; opt into those ordinary column facets
+explicitly. A TypeID prefix is validated at author time and carried as
+`valueFormat` because the catalog cannot recover it.
 
 **`t.vector({ dimensions, metric })` — pgvector distance metric.** Pins the ivfflat/hnsw
 operator class. Closed set: `cosine | l2 | innerProduct`. Declared-only (pgvector
@@ -381,13 +358,13 @@ on an encrypted column **overrides** the auto-mask). `kind` is **required**;
 | vector `metric` | `cosine \| l2 \| innerProduct` | engine default |
 
 ```ts
-import { table, t, now, uuidV4 } from "@zeroship/migrate";
+import { ids, table, t } from "@zeroship/migrate";
 
 export default {
-  up() {
+  schema() {
     table("documents").create({
       columns: {
-        id: t.id({ prefix: "doc" }),
+        id: ids.typeId({ prefix: "doc" }).primaryKey(),
         embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
         ssn: t.text().mask({ kind: "last4", classification: "pci" }),
         email: t.text().mask({ kind: "email" }), // classification defaults to "pii"
@@ -397,9 +374,8 @@ export default {
 };
 ```
 
-> `vectorMetric` and `mask` also ride on `.column().add({ type })` (a vector / masked
-> ADD COLUMN renders the metric opclass / `__zsmask` sentinel). `idPrefix` does not
-> (an added column is never the system PK — fail-closed, above).
+> `valueFormat`, `vectorMetric`, and `mask` also ride on
+> `.column().add({ type })`; none silently disappears from an added column.
 
 These facets are also what the migration set carries into the generated types:
 the typed-id `prefix`, the vector `metric`, and the `mask` brand survive the op
@@ -410,14 +386,14 @@ fold into `env.db.ts` (see [Generating types from the migration set](#generating
 The migration DSL and the runtime `@zeroship/db` schema share **one** type
 lexicon. `fromDb(field)` lifts a live-schema `@zeroship/db` `t.*` field into a
 migration `ColumnDef` through the identical `ColType` path
-(`sdks/migrate/src/ops.ts` `fromDb`), so a `t.ref("users")` declared in your app
-schema lowers to the byte-identical neutral type a hand-written migration column
-produces. It carries the field's nullability (`.required()` → `.notNull()`) and
-uniqueness, and returns a chainable `ColumnDef` so you can still layer migration
-modifiers on top. Names are never bound — a bridged `ref` keeps its target as a
-plain string. A non-storage `@zeroship/db` field (a json `array`, a nested
+(`packages/zero-migrate/src/ops.ts` `fromDb`). It carries the field's physical
+type and nullability (`.required()` → `.notNull()`) and returns a chainable
+`ColumnDef` so you can still layer migration modifiers on top. The bridge does
+not turn a runtime-schema ref into a migration foreign-key constraint: migration
+references use an explicit physical type plus `.references(table, column)`. A
+non-storage `@zeroship/db` field (a json `array`, a nested
 `object`, a `union`) has no portable column type and throws
-`UnsupportedColTypeError` (`sdks/migrate/src/db-lexicon.ts:51-61`) — a hard
+`UnsupportedColTypeError` (`packages/zero-migrate/src/db-lexicon.ts`) — a hard
 boundary, never a silent fallback.
 
 ## The `table()` surface
@@ -433,12 +409,12 @@ the handle** so calls chain.
 ```ts
 table("audit_log").create({
   columns: {
-    id: t.id(),
-    org_id: t.ref("orgs").notNull(),
+    id: ids.typeId({ prefix: "evt" }).primaryKey(),
+    org_id: ids.typeId({ prefix: "org" }).notNull(),
     email: t.text().notNull(),
     role: t.text().notNull().default("member"),
   },
-  primaryKey: ["org_id", "email"], // composite PK (else a single PK via t.id()/.primaryKey())
+  primaryKey: ["org_id", "email"], // composite PK; use `.primaryKey()` for a single column
   uniques: [{ name: "members_org_email_uq", columns: ["org_id", "email"] }],
   checks: [{ name: "members_role_nonempty", expr: (col) => col("role").ne("") }],
   foreignKeys: [
@@ -471,7 +447,7 @@ method set is `btree | gin | gist | ivfflat | hnsw`).
 online column expand-contract (a whole table has no per-column dual-write that
 lets it coexist under two names). Because the change is a pure metadata rename,
 it is **auto-reversible**: the engine emits the inverse `RENAME TO` as the
-down-migration, so a renaming-only migration needs no hand-written `down()`.
+structural inverse, so a renaming-only migration needs no authored reverse.
 
 The fold re-targets every **incoming** FK / `ref` reference to the new name (the
 offline mirror of what live PG does on `RENAME TO`), so a later migration may
@@ -671,7 +647,7 @@ value (`"; DROP …`, an embedded quote) is rejected on every profile.
 ```ts
 // Trusted CLI: render into a non-default schema — set once on the handle.
 const reporting = table("audit_log", { schema: "reporting" });
-reporting.create({ columns: { id: t.id() } });
+reporting.create({ columns: { id: t.uuid().primaryKey() } });
 table("widgets", { schema: "reporting" }).insert({ rows: { id: 1 } });
 // Confined creator deploy: a cross-schema op is refused fail-closed.
 table("other_app_table", { schema: "some_other_app" }).drop(); // → CROSS_SCHEMA
@@ -772,7 +748,7 @@ A selector (`.column(x)` / `.foreignKey(x)` / `.unique(x)` / `.check(x)` /
 `.constraint(x)` / `.index(x)`) returns a sub-builder that records **only** when
 its terminal (`.add` / `.drop` / `.rename` / `.alter`) is called. A forgotten
 terminal would otherwise silently record nothing — so the recorder makes it a
-**hard, structured error**: at `up()`/`down()` drain, any selector handed out but
+**hard, structured error**: when the active phase drains, any selector handed out but
 never terminated throws `{ code: "SELECTOR_NOT_TERMINATED", selector, name }`.
 Terminating the same selector twice throws `SELECTOR_ALREADY_TERMINATED`.
 
@@ -780,13 +756,12 @@ The check runs **at drain, not eagerly**, so a selector held in a variable and
 terminated on a later line is fine:
 
 ```ts
-import { table, t, now, uuidV4 } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 
 export default {
-  up() {
+  schema() {
     // FINE — terminated on a later line (the guard checks at drain).
     const email = table("users").column("email");
-    table("users").insert({ rows: [{ id: "u1" }] });
     email.add({ type: t.text().notNull() });
     // ERROR — `table("users").column("nickname")` with no terminal is a hard
     // SELECTOR_NOT_TERMINATED build error.
@@ -802,10 +777,10 @@ Both authoring styles are first-class — pick per readability. Every terminal
 across statements with `{ schema }` set a single time:
 
 ```ts
-import { table, t, now, uuidV4 } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 
 export default {
-  up() {
+  schema() {
     // chained
     table("users")
       .column("a").add({ type: t.text() })
@@ -815,7 +790,6 @@ export default {
     const users = table("users", { schema: "app" });
     users.column("email").add({ type: t.text().notNull() });
     users.unique("uq_email").add({ columns: ["email"] });
-    users.insert({ rows: [{ id: "u1", email: "a@b.co" }] });
   },
 };
 ```
@@ -830,10 +804,10 @@ Because the `t.*` chain is **immutable** (every modifier returns a fresh
 `ColumnDef`), a hoisted type var is safe to reuse across columns:
 
 ```ts
-import { table, t, now, uuidV4 } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 
 export default {
-  up() {
+  schema() {
     const reqText = t.text().notNull(); // hoisted, reusable
     table("users")
       .column("email").add({ type: reqText.unique() }) // email is UNIQUE
@@ -850,10 +824,10 @@ setDefault | noAction`, and they are **actually rendered** (`ON DELETE CASCADE`,
 …). An action-free FK records byte-identically to before:
 
 ```ts
-import { table, now, uuidV4 } from "@zeroship/migrate";
+import { table } from "@zeroship/migrate";
 
 export default {
-  up() {
+  schema() {
     table("orders").foreignKey("orders_customer_fk").add({
       columns: ["customer_id"],
       references: { table: "customers", columns: ["id"] },
@@ -870,10 +844,10 @@ has no inline `UNIQUE`, so a `t.*.unique()` / `t.*.primaryKey()` on an added col
 records the column **plus** a follow-on constraint (it is not silently dropped):
 
 ```ts
-import { table, t, now, uuidV4 } from "@zeroship/migrate";
+import { table, t } from "@zeroship/migrate";
 
 export default {
-  up() {
+  schema() {
     // records an addColumn AND a follow-on UNIQUE constraint on "email".
     table("users").column("email").add({ type: t.text().notNull().unique() });
   },
@@ -886,7 +860,7 @@ Every expression position — a DML `set` value, a `where`, a `check(name).add` 
 partial-index `where:` — is a callback `(col) => Expr` with a **single injected
 builder handle** `c`. It is never a raw string; it constructs a node of a closed
 AST via an all-strings fluent builder
-(`sdks/migrate/src/ops.ts:281-366`, `sdks/migrate/src/types.ts:95-156`).
+(`packages/zero-migrate/src/ops.ts`, `packages/zero-migrate/src/types.ts`).
 
 **`c` is both a column accessor and the function namespace.** `col("first")`
 returns an unqualified `ColRef` chain; `col("table", "col")` returns a qualified
@@ -993,12 +967,12 @@ admitting it on **both** backends — is:
 This envelope is enforced across **two layers**, not one:
 
 - The record-time JS grammar lint (`splitPartGrammarLint`,
-  `sdks/migrate/src/ops.ts:4486-4500`) rejects only the
+  `packages/zero-migrate/src/ops.ts`) rejects only the
   *dialect-neutral, clearly-malformed* shapes — a non-string or empty `delim`,
   and a non-integer or non-positive `n`. It does **not** check single-ASCII,
   multi-character, or the `1 ≤ n ≤ 8` bound. There is exactly one recorder to
   keep in step: the engine-embedded recorder and the SDK recorder are the same
-  build output (`sdks/migrate/src/embedded-recorder.ts` bundles `ops.ts`), so
+  single package's recorder build output, so
   the lint has no twin that can drift away from it.
 - The single-ASCII delimiter and the SQLite-leg `1 ≤ n ≤ 8` bound are enforced
   by the **Rust validator**: a multi-character / non-ASCII delimiter or `n > 8`
@@ -1257,31 +1231,41 @@ runtime-resolved` summary make the offline-renderable subset and the labeled
 remainder explicit. Both `.sql` (Flyway/dbmate) and explicit `.ir.json` IR files
 in the directory are previewed.
 
-## Appendix: the hero example as IR
+## Appendix: a data migration as IR
 
 A migration records into dialect-neutral IR (the frozen wire contract the engine
-loads). For reference — and because the bi-dialect-apply CI gate (below) applies
-exactly this IR on **both** Postgres and SQLite — here is a representative
-split-name migration as IR:
-structurally equivalent to the hero `up()` ([Module shape](#module-shape)) — the
-same two `addColumn`s, a `.splitPart` backfill, and a `dropColumn`, applying
-byte-identically on PG and SQLite from this one artifact.
+loads). The following artifact represents a `data()` migration that backfills
+two already-created columns and declares why it has no safe inverse. The
+preceding schema migration that adds those columns is a separate module; the
+recorder refuses a module that mixes DDL and DML.
 
-> This appendix is **illustrative, not the literal recording of the TS hero**.
-> The hero `up()` operates on `users` and relies on the engine's defaults
-> (`batchSize` 1000, an auto-derived backfill `name`); this artifact is the
-> standalone form the Rust apply gate seeds and applies, so it names `people`,
-> pins `batchSize: 50`, and `name: "split_name_bf"`
-> explicitly. Copy the TS hero, not this JSON — the build evaluator records the
-> JSON for you (with the hero's own table and defaults).
+```ts
+import { table } from "@zeroship/migrate";
+
+export default {
+  name: "split_name",
+  data() {
+    table("people").backfill({
+      name: "split_name_bf",
+      set: {
+        first_name: (col) => col("name").splitPart(" ", 1),
+        last_name: (col) => col("name").splitPart(" ", 2),
+      },
+      cursorColumns: ["id"],
+      cursorStability: { mode: "guardUpdates" },
+      batchSize: 50,
+    });
+  },
+  irreversible: "the original name cannot be reconstructed from split fields",
+};
+```
 
 ```json
 {
   "ir_version": 1,
   "name": "split_name",
+  "irreversible": "the original name cannot be reconstructed from split fields",
   "ops": [
-    { "op": "addColumn", "table": "people", "column": "first_name", "type": "text" },
-    { "op": "addColumn", "table": "people", "column": "last_name", "type": "text" },
     {
       "op": "backfill",
       "table": "people",
@@ -1301,8 +1285,7 @@ byte-identically on PG and SQLite from this one artifact.
           { "node": "literal", "value": 2 }
         ]}
       }
-    },
-    { "op": "dropColumn", "table": "people", "column": "name" }
+    }
   ]
 }
 ```
@@ -1311,18 +1294,14 @@ This is the one place authors see the IR — you never hand-write it; the build
 evaluator records it from your `.ts`. It is shown here so the "one script, both
 backends" claim is concrete.
 
-**What the doc-example gate does and does not prove.** The gate that keeps this
-doc honest is the TS leg (`sdks/migrate/tests/doc-examples.test.ts`): it compiles
-every runnable typed snippet against the real `@zeroship/migrate` types (the
-signature-listing blocks, which use bare param names, are excepted), so a
-renamed op or a changed signature fails CI — but it only proves
-**type-correctness**; the
-snippets compile inside never-executed function bodies, so it does **not**
-exercise record-time runtime checks (the `splitPartGrammarLint` throw, `del`'s
-mandatory-`where` reject). Those runtime invariants are covered separately by
-`sdks/migrate/tests/ops.test.ts`. No gate applies the appendix IR against a live
-database, so do not read a green TS gate as proof a snippet would also survive
-record-time or apply.
+**What the doc-example gate does and does not prove.** The existing TypeScript
+doc gate (`packages/zero-migrate/tests/doc-examples.test.ts`) compiles snippets
+from `docs/writing-migrations.md` and `docs/getting-started.md`; it does **not**
+extract this reference file. The recorder's runtime invariants are covered by
+`packages/zero-migrate/tests/ops.test.ts`, but that suite does not keep the
+examples above type-correct. No gate currently compiles this file's snippets or
+applies the appendix IR against a live database, so do not read either suite as
+that proof.
 
 ## Further reading
 

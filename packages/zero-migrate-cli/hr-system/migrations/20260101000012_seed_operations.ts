@@ -1,4 +1,4 @@
-import { table, decimal } from "zero-migrate";
+import { table, decimal } from "@zeroship/migrate";
 
 // Operational seed 2: a payroll run with per-employee items (net_pay is the
 // STORED generated column, never supplied), plus leave requests in every state.

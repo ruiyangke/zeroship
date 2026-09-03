@@ -60,7 +60,7 @@ const ADDON_PATH = resolve(
 
 const OWNER_APP = "app_orphan";
 
-const CREATE = `import { table, t } from "zero-migrate";
+const CREATE = `import { table, t } from "@zeroship/migrate";
 export const name = "create_people";
 export default {
   schema() {
@@ -72,7 +72,7 @@ export default {
 };
 `;
 
-const RENAME_MIG = `import { table, t } from "zero-migrate";
+const RENAME_MIG = `import { table, t } from "@zeroship/migrate";
 export const name = "rename_email";
 export default {
   schema() {

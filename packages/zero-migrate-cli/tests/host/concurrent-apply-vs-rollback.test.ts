@@ -73,14 +73,14 @@ const ADDON_PATH = resolve(
 
 const OWNER_APP = "app_race";
 
-const FIRST = `import { table, t } from "zero-migrate";
+const FIRST = `import { table, t } from "@zeroship/migrate";
 export const name = "create_alpha";
 export default {
   schema() { table("alpha").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); },
 };
 `;
 
-const SECOND = `import { table, t } from "zero-migrate";
+const SECOND = `import { table, t } from "@zeroship/migrate";
 export const name = "create_beta";
 export default {
   schema() { table("beta").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); },

@@ -51,7 +51,7 @@ const ADDON_PATH = resolve(
 
 const OWNER_APP = "app_unwind";
 
-const MIGRATION = `import { table, t } from "zero-migrate";
+const MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "create_parent";
 export default {
   schema() {

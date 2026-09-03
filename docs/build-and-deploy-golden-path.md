@@ -179,7 +179,8 @@ harness's platform OP and passes it on `--token=`.
 
 > **This section describes a run that no longer happens.** It was accurate when
 > written on 2026-06-29. On 2026-07-14 (`4e0f49a16`) `@zeroship/vite-plugin`
-> took a dependency on `zero-migrate` + `zeroship-migrate-node`, which are published
+> took a dependency on the then-unscoped `zero-migrate` package plus
+> `zeroship-migrate-node`, which were published
 > to no registry, so `npm install` in a scaffolded app now dies with `E404`
 > before the build step this section claims to have proven. Measured 2026-08-10;
 > see task #265 and `tests/golden_path.sh:2786`. Nothing in CI runs this
@@ -224,10 +225,12 @@ For the **real agent flow** against a deployed platform, the path is
   reds, so the current classifier in `tests/golden_path.sh`, not this historical
   total, is authoritative.
 - ❌ External build: registry-installed SDKs, scaffolded app builds outside the
-  monorepo — **FAILS at `npm install`** (`tests/external_chain.sh`). Published
-  `@zeroship/vite-plugin` requires `zero-migrate@0.1.0` +
-  `zeroship-migrate-node@0.1.0`; neither is on npmjs at any version. This was PASS
-  when recorded on 2026-06-29 and regressed on 2026-07-14. Task #265.
+  monorepo — **FAILS at `npm install`** (`tests/external_chain.sh`). The historical
+  published `@zeroship/vite-plugin` requires the former `zero-migrate@0.1.0` name
+  plus `zeroship-migrate-node@0.1.0`; neither dependency exists in that registry.
+  The source tree now has one authoring package, `@zeroship/migrate`, but that does
+  not repair an already-published manifest. This was PASS when recorded on
+  2026-06-29 and regressed on 2026-07-14. Task #265.
 - ✅ Local/CI deploy auth unblocked (`dev-provision`); real flow = `zeroship login`.
 - ☐ Host a real SDK registry (npmjs / hosted Verdaccio) for production gap #1.
 - ✅ Smooth one-step deploy UX. `zeroship deploy` with no arguments deploys the

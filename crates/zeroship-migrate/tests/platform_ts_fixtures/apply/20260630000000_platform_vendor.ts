@@ -6,11 +6,11 @@ import {
   grant,
   role,
   schema,
-} from "zero-migrate";
+} from "@zeroship/migrate";
 
 export const name = "platform_ts_vendor";
 
-export function up() {
+export function schema() {
   extension("citext").create({ ifNotExists: true });
   schema("zero_migrate").create({ ifNotExists: true });
   role("zero_migrate_ts_test_app").create({

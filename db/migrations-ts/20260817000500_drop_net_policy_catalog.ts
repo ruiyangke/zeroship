@@ -1,4 +1,4 @@
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 // The frontable-wildcard-suffix catalog moves to the config overlay
 // (`[control] frontable_wildcard_suffixes`), read at boot by the two paths that

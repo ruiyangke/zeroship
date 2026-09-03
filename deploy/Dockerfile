@@ -131,8 +131,8 @@ COPY libs/ libs/
 # The platform schema corpus is a workspace member too (pnpm-workspace.yaml says
 # why), so --frozen-lockfile needs it present or the install fails on a missing
 # importer. Copying it HERE rather than only in the `migrate` stage is also what
-# produces `db/migrations-ts/node_modules/zero-migrate` - the link the corpus's
-# own `import ... from "zero-migrate"` resolves through.
+# produces `db/migrations-ts/node_modules/@zeroship/migrate` - the link the
+# corpus's own `import ... from "@zeroship/migrate"` resolves through.
 COPY db/migrations-ts/ db/migrations-ts/
 RUN pnpm install --frozen-lockfile
 # The root build compiles the native addon before the JavaScript packages.
@@ -273,7 +273,7 @@ COPY --from=builder /build/target/release/zeroship-migrate-server /usr/local/bin
 # THIS COPY IS NOT THE PLATFORM APPLY PATH, and nothing in this image can apply
 # it. The runtime stage has no Node, so the `zero-migrate` CLI cannot run here at
 # all; and these files sit at `/db` with no `node_modules` above them, so their
-# `import ... from "zero-migrate"` would not resolve even if it could. The
+# `import ... from "@zeroship/migrate"` would not resolve even if it could. The
 # platform one-shot is the separate `migrate` stage below, which places the same
 # corpus at `/app/db/migrations-ts` for exactly that reason. As of 2026-08-28 no
 # compose service reads this path (`grep -n '/db/migrations-ts'` over
@@ -307,15 +307,15 @@ COPY db/migrations-ts /db/migrations-ts
 # WHY THE CORPUS LIVES UNDER /app AND NOT AT /db. It used to be copied to
 # `/db/migrations-ts` while `node_modules` sat at `/app/node_modules`, and that
 # layout cannot work: the CLI loads each migration with a plain `import()` under
-# tsx, so `import ... from "zero-migrate"` resolves by Node's UPWARD WALK from the
+# tsx, so `import ... from "@zeroship/migrate"` resolves by Node's UPWARD WALK from the
 # migration's own directory - `/db/migrations-ts/node_modules`, `/db/node_modules`,
 # `/node_modules` - none of which exist. There was also no `package.json` at `/db`
 # or `/`, so tsx read the `.ts` files as CJS and failed with `Cannot require() ES
 # Module ... in a cycle` before resolution was even reached.
 #
 # Copying it to `/app/db/migrations-ts` fixes both at once and needs no env var:
-# the member's own `node_modules/zero-migrate` comes across as the RELATIVE
-# symlink pnpm wrote (`../../../packages/zero-migrate`), which resolves here to
+# the member's own `node_modules/@zeroship/migrate` comes across as the RELATIVE
+# symlink pnpm wrote (`../../../../packages/zero-migrate`), which resolves here to
 # `/app/packages/zero-migrate` because the repo-relative layout is preserved; and
 # `db/migrations-ts/package.json` supplies `"type": "module"`.
 #
@@ -341,8 +341,8 @@ COPY --from=sdks /build/packages /app/packages
 COPY --from=sdks /build/crates/zeroship-migrate-node /app/crates/zeroship-migrate-node
 COPY --from=sdks /build/package.json /build/pnpm-workspace.yaml /app/
 # The corpus, from the `sdks` stage rather than the build context, so its
-# `node_modules/zero-migrate` link comes with it. Copying it from the context
-# would bring the 35 `.ts` files and NOTHING to resolve their import against.
+# `node_modules/@zeroship/migrate` link comes with it. Copying it from the context
+# would bring the `.ts` files and NOTHING to resolve their import against.
 COPY --from=sdks /build/db/migrations-ts /app/db/migrations-ts
 # The two files that decide what a platform migration may do: the Platform charter
 # (the guard and executor posture) and the table-to-owner registry, without which

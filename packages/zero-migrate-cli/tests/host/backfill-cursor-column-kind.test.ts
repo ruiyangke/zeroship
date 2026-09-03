@@ -28,9 +28,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
-import type { MigrationModule } from "zero-migrate/internal/recorder";
+import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 import { MYSQL_URL_ENV, connectLivePg, pgUrl, requireLiveDb } from "./live-db.js";
 

@@ -8,7 +8,7 @@
 //   await apply({ migration, ownerApp, projectSchema, policy, driver: { kind:"postgres", url } });
 //
 // The flow for `apply`:
-//   1. the pure-JS RECORDER (`zero-migrate/internal/recorder`, from the DSL package)
+//   1. the pure-JS RECORDER (`@zeroship/migrate/internal/recorder`, from the DSL package)
 //      drains the migration's explicit `schema()` or `data()` phase into a
 //      `{ ir_version, name, ops }` ENVELOPE —
 //      `ir_version` sourced from the addon's `irVersion()` (single source of truth);
@@ -42,11 +42,11 @@ import {
   buildEnvelope,
   type IrEnvelope,
   type MigrationModule,
-} from "zero-migrate/internal/recorder";
+} from "@zeroship/migrate/internal/recorder";
 
 export { currentIrVersion } from "./addon.js";
 export type { PreviewSqlSource } from "./addon.js";
-export type { IrEnvelope, MigrationModule } from "zero-migrate/internal/recorder";
+export type { IrEnvelope, MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 /** A driver target the facade opens a pinned host session against.
  *

@@ -56,7 +56,7 @@ function scaffold(schema: string, name: string, body: string): string {
   );
   writeFileSync(
     join(migrations, `20260101000000_${name}.ts`),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = ${JSON.stringify(name)};
 export default { schema() { ${body} } };
 `,

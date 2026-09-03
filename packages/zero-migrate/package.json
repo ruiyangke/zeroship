@@ -1,7 +1,7 @@
 {
-  "name": "zero-migrate",
+  "name": "@zeroship/migrate",
   "version": "0.1.0",
-  "description": "The zero-migrate authoring DSL: fluent table() / view() builders, the t.* column-type lexicon, the closed Expr AST, and the pure-JS recorder. Zero native code, zero runtime deps.",
+  "description": "The zeroship migration authoring DSL: fluent table() / view() builders, the t.* column-type lexicon, the closed Expr AST, and the pure-JS recorder. Zero native code, zero runtime deps.",
   "keywords": [
     "database",
     "migration",

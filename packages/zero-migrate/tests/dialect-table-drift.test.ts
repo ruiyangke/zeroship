@@ -222,11 +222,11 @@ test("committed generated dialect tables (TS + Rust) are up to date (regenerate 
   assert.equal(
     readFileSync(tsTmp, "utf8"),
     readFileSync(committedTs, "utf8"),
-    "src/generated/dialect-table.ts is stale — run `pnpm --filter zero-migrate gen:dialect-table`",
+    "src/generated/dialect-table.ts is stale — run `pnpm --filter @zeroship/migrate gen:dialect-table`",
   );
   assert.equal(
     readFileSync(rustTmp, "utf8"),
     readFileSync(committedRust, "utf8"),
-    "crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs is stale — run `pnpm --filter zero-migrate gen:dialect-table`",
+    "crates/zeroship-migrate/tests/dialect_matrix/dialect_table.rs is stale — run `pnpm --filter @zeroship/migrate gen:dialect-table`",
   );
 });

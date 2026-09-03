@@ -52,7 +52,7 @@ const ADDON_PATH = resolve(
 const OWNER_APP = "app_rename_dual_write";
 const RENAME_MIGRATION = "rename_display_name";
 
-const CREATE = `import { table, t } from "zero-migrate";
+const CREATE = `import { table, t } from "@zeroship/migrate";
 export const name = "create_users";
 export default {
   schema() {
@@ -64,7 +64,7 @@ export default {
 };
 `;
 
-const SEED = `import { table } from "zero-migrate";
+const SEED = `import { table } from "@zeroship/migrate";
 export const name = "seed_users";
 export default {
   data() {
@@ -76,7 +76,7 @@ export default {
 };
 `;
 
-const RENAME = `import { table, t } from "zero-migrate";
+const RENAME = `import { table, t } from "@zeroship/migrate";
 export const name = "${RENAME_MIGRATION}";
 export default {
   schema() {

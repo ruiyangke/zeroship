@@ -1,7 +1,7 @@
 {
   "name": "zeroship-migrate-node",
   "version": "0.1.0",
-  "description": "Native N-API addon for zero-migrate: the V8-free Rust core that applies portable migrations over the host-driven (pg/mysql2) SqlSession seam. Resolves the right prebuilt binary for your platform. You usually depend on `zero-migrate-cli`, not this package directly.",
+  "description": "Native N-API addon for the @zeroship/migrate toolchain: the V8-free Rust core that applies portable migrations over the host-driven (pg/mysql2) SqlSession seam. Resolves the right prebuilt binary for your platform. You usually depend on `zero-migrate-cli`, not this package directly.",
   "keywords": [
     "database",
     "migration",

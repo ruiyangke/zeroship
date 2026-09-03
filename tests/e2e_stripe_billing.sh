@@ -137,7 +137,7 @@ command -v node    >/dev/null 2>&1 || { echo "  ⚠ SKIP: node required."; exit 
 command -v openssl >/dev/null 2>&1 || { echo "  ⚠ SKIP: openssl required."; exit 0; }
 command -v curl    >/dev/null 2>&1 || { echo "  ⚠ SKIP: curl required."; exit 0; }
 [ -x "$BIN/zeroship-control" ] || { echo "  ⚠ SKIP: missing $BIN/zeroship-control — run: cargo build --release -p zeroship-control"; exit 0; }
-[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "  ⚠ SKIP: missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 0; }
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "  ⚠ SKIP: missing the zero-migrate CLI - run: pnpm install && pnpm build"; exit 0; }
 
 export PGPASSWORD="$PGPW"
 psql_db() { "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB" "$@"; }

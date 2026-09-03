@@ -1,4 +1,4 @@
-import { countStar, view } from "zero-migrate";
+import { countStar, view } from "@zeroship/migrate";
 
 export default {
   schema() {

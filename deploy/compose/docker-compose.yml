@@ -205,8 +205,8 @@ services:
         condition: service_healthy
     volumes:
       # THE CORPUS IS NOT MOUNTED, and that is deliberate. It used to be, at
-      # `/db/migrations-ts`. A mount of the host directory carries the 35 `.ts`
-      # files and nothing they can resolve `import ... from "zero-migrate"`
+      # `/db/migrations-ts`. A mount of the host directory carries the `.ts`
+      # files and nothing they can resolve `import ... from "@zeroship/migrate"`
       # against, because the link that satisfies it lives in the member's own
       # `node_modules` - which is gitignored, host-local, and absent on any
       # machine that has not run `pnpm install`. So the mount turned a baked,

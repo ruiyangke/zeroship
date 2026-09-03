@@ -57,7 +57,7 @@
 // actually decides ownership. The branch witness and both unguarded controls do not move
 // under any of the five, which is what makes them controls.
 //
-// Every arm drives the REAL path: authored through the public `zero-migrate` API,
+// Every arm drives the REAL path: authored through the public `@zeroship/migrate` API,
 // lowered by the native addon, applied through `zero-migrate-cli`'s `apply()` over the
 // real `pg`/`mysql2`/`sqlite` driver seams against a live database, and with the
 // pre-existing table created OUT OF BAND. Seeding it through the engine would put it
@@ -101,7 +101,7 @@ import {
   type DriverConfig,
   type MigrationModule,
 } from "zero-migrate-cli";
-import { table, t, type ColumnDef } from "zero-migrate";
+import { table, t, type ColumnDef } from "@zeroship/migrate";
 import { noInjectPolicy } from "./policy.js";
 
 

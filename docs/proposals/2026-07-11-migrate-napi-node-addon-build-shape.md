@@ -1,5 +1,9 @@
 # zeroship-migrate as a Node/Bun N-API addon — build / crate / platform shape
 
+> **Historical design snapshot.** Package paths and package boundaries below
+> describe the 2026-07-11 tree. The live DSL is the single
+> `@zeroship/migrate` package at `packages/zero-migrate/`.
+
 Date: 2026-07-11
 Status: Design-only (no code). Branch `design/migrate-napi-shell`.
 Scope: **Phase — build/crate/platform.** Answers the four questions the phase

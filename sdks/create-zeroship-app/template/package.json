@@ -22,7 +22,7 @@
     "react-dom": "^19.2.5"
   },
   "devDependencies": {
-    "@zeroship/migrate": "^0.0.0",
+    "@zeroship/migrate": "^0.1.0",
     "@zeroship/types": "^0.1.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",

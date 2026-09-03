@@ -1,5 +1,9 @@
 # Dual-Dialect, Structured-Max SQL-Features DSL — comprehensive design
 
+> **Historical design snapshot.** Package paths and package boundaries below
+> describe the 2026-06-26 tree. The live DSL is the single
+> `@zeroship/migrate` package at `packages/zero-migrate/`.
+
 > Status: design proposal (UNTRACKED — do not commit). Worktree
 > `appbase-migrate`, branch `feat/db-migration-engine`. Synthesizes seven
 > per-group designs for the `zeroship-migrate` engine onto two axes:

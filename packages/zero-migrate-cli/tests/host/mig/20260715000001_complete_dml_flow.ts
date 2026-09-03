@@ -1,4 +1,4 @@
-import { byteValue, table } from "zero-migrate";
+import { byteValue, table } from "@zeroship/migrate";
 
 export const name = "complete_dml_flow";
 

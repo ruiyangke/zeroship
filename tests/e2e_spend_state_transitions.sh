@@ -50,7 +50,7 @@ if ! command -v docker >/dev/null 2>&1 || ! docker info >/dev/null 2>&1; then
   exit 1
 fi
 for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-migrate-server; do [ -x "$BIN/$b" ] || { echo "missing $BIN/$b"; exit 2; }; done
-[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build"; exit 2; }
 command -v node >/dev/null && command -v openssl >/dev/null && command -v curl >/dev/null || { echo "need node/openssl/curl"; exit 2; }
 PROBE="$ROOT/examples/metering-probe/dist/app.zship"; [ -f "$PROBE" ] || { echo "missing $PROBE"; exit 2; }
 PROBE_IR="$ROOT/examples/metering-probe/generated/zeroship/migrations.ir.json"; [ -s "$PROBE_IR" ] || { echo "missing $PROBE_IR"; exit 2; }

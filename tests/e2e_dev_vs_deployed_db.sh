@@ -80,7 +80,7 @@
 #   pnpm build
 #   cargo build --release -p zeroship-control -p zeroship-worker \
 #       -p zeroship-gateway -p zeroship-cli -p zeroship-migrate-server --bins
-#   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build
+#   pnpm install && pnpm build
 #   docker (this script starts and destroys its own ephemeral Postgres)
 #   pnpm install in examples/db-todos
 # ---------------------------------------------------------------------------

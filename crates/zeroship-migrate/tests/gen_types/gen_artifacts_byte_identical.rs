@@ -506,8 +506,8 @@ fn emitted_env_db_ts_is_a_passive_current_authoring_schema() {
     // A real `.ts` module: imports the current authoring package and constrains
     // the passive schema map with the package's real CreateTableArgs type.
     assert!(
-        ts.contains("type CreateTableArgs") && ts.contains("from \"zero-migrate\";"),
-        "env.db.ts imports the current zero-migrate surface:\n{ts}"
+        ts.contains("type CreateTableArgs") && ts.contains("from \"@zeroship/migrate\";"),
+        "env.db.ts imports the current @zeroship/migrate surface:\n{ts}"
     );
     assert!(
         ts.contains("const schema = {"),

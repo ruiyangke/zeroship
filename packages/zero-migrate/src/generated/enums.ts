@@ -1,7 +1,7 @@
 /* eslint-disable */
 // GENERATED FILE — do not edit by hand.
 // Source: crates/zeroship-migrate/ir-envelope.schema.json (the engine's single-source-of-
-// truth IR schema). Regenerate with: pnpm --filter zero-migrate gen:ir-types
+// truth IR schema). Regenerate with: pnpm --filter @zeroship/migrate gen:ir-types
 //
 // Covers the CLOSED STRING-ENUM IR defs only; the recursive structural types live
 // (hand-authored) in ./ir.ts. These are ERGONOMICS; the golden IR-envelope corpus is
@@ -235,7 +235,7 @@ export type JoinKind = "inner" | "left";
 export type OrderDir = "asc" | "desc";
 
 /**
- * **VENDOR (`zero-migrate/pg`)** - the CLOSED privilege lexicon for
+ * **VENDOR (`@zeroship/migrate`)** - the CLOSED privilege lexicon for
  * `Op::Grant`/`Op::Revoke`. A CLOSED enum, so serde REJECTS an
  * out-of-set token at DESERIALIZE - a hand-crafted IR envelope cannot smuggle an
  * injection-shaped privilege string into the GRANT render seam (the

@@ -1,5 +1,9 @@
 # The standalone Node/Bun napi shell for `zeroship-migrate` — design
 
+> **Historical design snapshot.** Package paths and package boundaries below
+> describe the 2026-07-11 tree. The live DSL is the single
+> `@zeroship/migrate` package at `packages/zero-migrate/`.
+
 **Status:** proposed 2026-07-11. New end product: `@zeroship/migrate` as an npm package = a napi (`.node`) addon over the V8-free `zeroship-migrate` core + the existing TS authoring DSL + host-provided DB drivers. Branch `design/migrate-napi-shell`. Design-only; commit-only; no code shipped by this doc.
 
 **Goal.** Ship `zeroship-migrate` as a **standalone, Node-embeddable migration engine (Bun best-effort, gated — §E.2)** — one npm package a creator installs and calls, with no Rust toolchain, no V8-in-Rust, and no io_uring dependency. Node is the primary, fully-supported target; Bun ships only if its Phase-D full-`apply` journal-identity gate passes, and drops to unsupported (Node-only) if it reds. The Rust core stays V8-free and runs its own async runtime on worker threads via napi (N-API); the JS **host** supplies the JS half — `schema.js` authoring (the TS DSL already in `sdks/migrate/`) and the DB drivers (`pg` / `mysql2` / `bun:sqlite`|`better-sqlite3`) as host-callback `PgSession` impls over napi threadsafe-functions. **No second V8 is embedded in Rust.** The blueprint is Temporal's TS SDK worker: a V8-free Rust core + state machines, N-API as the channel boundary only, the JS event loop as a peer.

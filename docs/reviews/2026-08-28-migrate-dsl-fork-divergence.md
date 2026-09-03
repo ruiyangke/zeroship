@@ -1,17 +1,23 @@
-# The authoring DSL is two forks with two recorders
+# Historical review: the authoring DSL was two forks with two recorders
 
 2026-08-28. Found while moving the platform schema off `zeroship-platform-migrate`
 and onto the `zero-migrate` CLI. **Out of scope for that change and not acted on**;
 recorded here so the next person does not rediscover it from the symptom.
 
-> **STATUS, updated later the same day.** Option (1) below has landed: all 35
+> **STATUS, resolved 2026-09-01.** The final collapse has landed. The engine DSL
+> in `packages/zero-migrate` is now the single `@zeroship/migrate` package;
+> `sdks/migrate` was deleted, every caller uses the scoped name, and the Vite
+> plugin's package alias was removed. This review preserves the evidence that
+> motivated the collapse; paths, package names, counts, and API examples below
+> describe the 2026-08-28 tree and are intentionally historical.
+>
+> **Earlier status, updated later on 2026-08-28.** Option (1) below had landed: all 35
 > corpus files import `zero-migrate`, `db/migrations-ts` is a workspace member
 > that declares it, and the hand-made symlink this note ends on is gone - a clean
 > checkout migrates the platform schema after `pnpm install`, and
 > `tests/platform_migration_corpus_gate.sh` applies the committed corpus to a live
-> PostgreSQL on every run. **Option (2), the collapse, remains the end state and
-> remains undone.** Nothing prevents the two forks drifting further; what changed
-> is that the platform no longer depends on their agreeing.
+> PostgreSQL on every run. At that point option (2), the collapse, remained
+> undone; nothing prevented the two forks drifting further.
 
 ## The finding
 

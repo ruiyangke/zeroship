@@ -91,7 +91,7 @@ scope = "all"
   const ids = IDS.map((id) => JSON.stringify(id)).join(", ");
   writeFileSync(
     join(work, "migrations", "20260101000000_a.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "a";
 export default {
   schema() {
@@ -105,7 +105,7 @@ export default {
   );
   writeFileSync(
     join(work, "migrations", "20260101000001_seed.ts"),
-    `import { table, int64 } from "zero-migrate";
+    `import { table, int64 } from "@zeroship/migrate";
 export const name = "seed";
 export default {
   data() {
@@ -119,7 +119,7 @@ export default {
   );
   writeFileSync(
     join(work, "migrations", "20260102000000_b.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "b";
 export default {
   data() {

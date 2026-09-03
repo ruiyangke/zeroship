@@ -1,4 +1,4 @@
-import { table, t, ids } from "zero-migrate";
+import { table, t, ids } from "@zeroship/migrate";
 
 // Positions/titles use a public ULID key. Title uniqueness is a unique index
 // added later (portable across all dialects).

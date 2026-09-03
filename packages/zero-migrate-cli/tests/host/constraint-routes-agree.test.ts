@@ -75,7 +75,7 @@ function uniqueNamespace(prefix: string): string {
 // table-scoped, so reusing one name across two tables collides in the catalog.
 // (Foreign keys and checks create no relation, which is why F646 could reuse a
 // name across three tables.)
-const SOURCE = `import { table, t } from "zero-migrate";
+const SOURCE = `import { table, t } from "@zeroship/migrate";
 export const name = "a";
 const FK = {
   columns: ["pid"],

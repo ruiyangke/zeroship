@@ -84,7 +84,7 @@ scope = "all"
   writeFileSync(join(work, "registry.json"), JSON.stringify({ [TABLE]: OWNER_APP }));
   writeFileSync(
     join(work, "migrations", "20260101000000_base.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "base";
 export default {
   schema() {
@@ -101,14 +101,14 @@ export default {
   return work;
 }
 
-const ADD_UNIQUE = `import { table } from "zero-migrate";
+const ADD_UNIQUE = `import { table } from "@zeroship/migrate";
 export const name = "add_uq";
 export default { schema() { table("${TABLE}").unique("${TABLE}_added_uq").add({ columns: ["id", "val"] }); } };
 `;
 
 /** Drops the constraint the BASE migration created inline, so this arm stands on
  *  its own instead of depending on the add arm succeeding first. */
-const DROP_CONSTRAINT = `import { table } from "zero-migrate";
+const DROP_CONSTRAINT = `import { table } from "@zeroship/migrate";
 export const name = "drop_ct";
 export default { schema() { table("${TABLE}").constraint("${TABLE}_inline_uq").drop(); } };
 `;

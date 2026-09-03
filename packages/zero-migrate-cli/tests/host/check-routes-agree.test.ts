@@ -83,7 +83,7 @@ function uniqueNamespace(prefix: string): string {
 }
 
 /** All three routes in one migration, so they are rendered by the same run. */
-const ALL_ROUTES = `import { table, t, check } from "zero-migrate";
+const ALL_ROUTES = `import { table, t, check } from "@zeroship/migrate";
 export const name = "a";
 const cols = {
   id: t.int().notNull(),
@@ -122,7 +122,7 @@ export default {
 `;
 
 /** Route 1 alone -- the "Table-level `checks`" row of the dialect table. */
-const CREATE_TIME_ONLY = `import { table, t, check } from "zero-migrate";
+const CREATE_TIME_ONLY = `import { table, t, check } from "@zeroship/migrate";
 export const name = "a";
 export default {
   schema() {
@@ -136,7 +136,7 @@ export default {
 `;
 
 /** Route 3 alone -- the "Add standalone check" row, which is gated separately. */
-const ADD_OP_ONLY = `import { table, t } from "zero-migrate";
+const ADD_OP_ONLY = `import { table, t } from "@zeroship/migrate";
 export const name = "a";
 export default {
   schema() {

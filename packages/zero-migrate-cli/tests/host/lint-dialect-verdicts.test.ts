@@ -83,7 +83,7 @@ scope = "all"
   );
   writeFileSync(
     join(work, "migrations", "20260101000000_m.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "indexed";
 export default {
   schema() {
@@ -256,7 +256,7 @@ scope = "all"
       );
       writeFileSync(
         join(work, "migrations", "20260101000000_m.ts"),
-        `import { table, t } from "zero-migrate";
+        `import { table, t } from "@zeroship/migrate";
 export const name = "typed";
 export default {
   schema() {

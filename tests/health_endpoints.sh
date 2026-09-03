@@ -53,7 +53,7 @@
 # Requires: docker, openssl, curl, lsof; a release build of zeroship-control,
 #   zeroship-gate, zeroship-worker, zeroship-auth and zeroship-migrate-server; and
 #   the zero-migrate CLI, built by
-#   pnpm install && pnpm build && pnpm --filter zero-migrate-cli build.
+#   pnpm install && pnpm build.
 # ============================================================================
 set -uo pipefail
 
@@ -123,7 +123,7 @@ echo "=== Build check ==="
 for b in zeroship-control zeroship-gate zeroship-worker zeroship-auth zeroship-migrate-server; do
   [ -x "$BIN/$b" ] || { fail "missing $BIN/$b - run: cargo build --release"; exit 2; }
 done
-[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { fail "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { fail "missing the zero-migrate CLI - run: pnpm install && pnpm build"; exit 2; }
 pass "all five service binaries present"
 
 echo ""

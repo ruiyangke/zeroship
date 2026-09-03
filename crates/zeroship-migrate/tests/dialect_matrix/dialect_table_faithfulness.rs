@@ -275,7 +275,7 @@ fn op_variant_matches_the_corpus_and_the_generated_table_matches_the_sidecar() {
     assert_eq!(
         generated, sidecar,
         "generated dialect_table.rs drifted from dialect-support.toml — regenerate with \
-         `pnpm --filter zero-migrate gen:dialect-table`"
+         `pnpm --filter @zeroship/migrate gen:dialect-table`"
     );
 
     // 4b. CENSUS FLOOR for the dialect axis.

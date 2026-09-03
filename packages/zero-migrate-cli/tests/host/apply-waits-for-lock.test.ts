@@ -59,7 +59,7 @@ const ADDON_PATH = resolve(
 /** How long to let a blocked apply sit before concluding it really is waiting. */
 const WAIT_SAMPLE_MS = 2500;
 
-const MIGRATION = `import { table, t } from "zero-migrate";
+const MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "create_one";
 export default {
   schema() {

@@ -8,7 +8,7 @@
 // `Checksum::of_ir` corpus parity (proves both impls FOLD them identically): a JS
 // impl that mis-folded a PRESENT schema/guard into of_ir is caught here, not only
 // by the in-crate fold test.
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 export const name = "ddl_drop";
 

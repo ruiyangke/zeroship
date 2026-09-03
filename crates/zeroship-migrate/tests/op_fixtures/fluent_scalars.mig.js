@@ -7,7 +7,7 @@
 //     spelling is HARD-REJECTED by the Rust `IrScalar` deserializer).
 // The companion `fluent_scalars_dml` fixture covers the same carriers through a
 // fluent insert without mixing schema and data operations in one migration.
-import { table, t, decimal } from "zero-migrate";
+import { table, t, decimal } from "@zeroship/migrate";
 
 export const name = "fluent_scalars";
 

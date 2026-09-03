@@ -1,7 +1,7 @@
 // `insert { onConflict }` fixture authored through the fluent table() surface.
 // It pins the closed `Op::Insert.onConflict` wire shape shared by PostgreSQL,
 // SQLite, and MySQL.
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 export const name = "dml_upsert";
 export const irreversible =

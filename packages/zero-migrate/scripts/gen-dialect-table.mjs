@@ -22,7 +22,7 @@
 // This mirrors the `gen-ir-types.mjs` flow: committed generated files + a
 // regenerate-and-diff CI gate. Regenerate with:
 //
-//   pnpm --filter zero-migrate gen:dialect-table
+//   pnpm --filter @zeroship/migrate gen:dialect-table
 //
 // then commit the regenerated dialect_table.rs + dialect-table.ts.
 //
@@ -196,7 +196,7 @@ function emitRust(rows) {
   const banner = `//! GENERATED FILE — do not edit by hand.
 //! Source: crates/zeroship-migrate/dialect-support.toml (the single-source
 //! dialect-support sidecar). Regenerate with:
-//!   pnpm --filter zero-migrate gen:dialect-table
+//!   pnpm --filter @zeroship/migrate gen:dialect-table
 //!
 //! One [\`DispositionRow\`] per (op-kind, variant) recording the token's
 //! disposition on each dialect, KEYED BY [\`DialectId\`] rather than by one struct
@@ -359,7 +359,7 @@ function emitTs(rows) {
 // GENERATED FILE — do not edit by hand.
 // Source: crates/zeroship-migrate/dialect-support.toml (the single-source
 // dialect-support sidecar). Regenerate with:
-//   pnpm --filter zero-migrate gen:dialect-table
+//   pnpm --filter @zeroship/migrate gen:dialect-table
 //
 // One row per (op-kind, variant) recording the token's disposition on each
 // dialect, KEYED BY DIALECT ID — the TS mirror of

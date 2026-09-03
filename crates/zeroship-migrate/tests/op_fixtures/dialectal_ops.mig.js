@@ -4,7 +4,7 @@
 // Like the other confined-platform fixtures, this one omits `id`: policy injects the
 // internal platform key and pins the primary key, and an author column of that name
 // is a collision the resolver refuses.
-import { dialect, table, t } from "zero-migrate";
+import { dialect, table, t } from "@zeroship/migrate";
 
 export default {
   name: "dialectal_ops",

@@ -6,7 +6,7 @@
 // ANCHOR are both assertable end to end: the three steps must be journaled in
 // declaration order, re-applying the identical artifact must fold the SAME anchor,
 // and any edit to the op list must fold a different one.
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 
 export const name = "create_gadgets";
 export default {

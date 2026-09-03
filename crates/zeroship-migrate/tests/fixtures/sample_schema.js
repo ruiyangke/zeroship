@@ -2,7 +2,7 @@
 // `zero-migrate` db-type DSL (resolved to the embedded dist by the eval graph),
 // exercising the full-capability facets: encrypted (auto-masked), vector, an
 // explicit mask, and a ref.
-import { dbType } from "zero-migrate";
+import { dbType } from "@zeroship/migrate";
 
 const users = {
   email: dbType.string().required().unique(),

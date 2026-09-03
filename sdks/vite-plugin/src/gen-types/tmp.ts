@@ -3,7 +3,7 @@
  *
  * The gen-types front-ends esbuild-bundle author `.ts` (migrations / `schema.ts`)
  * to a temp `.mjs` they then dynamically `import()`. When a bundle leaves a
- * package EXTERNAL (the recorder keeps `zero-migrate` external so it shares the
+ * package EXTERNAL (the recorder keeps `@zeroship/migrate` external so it shares the
  * one op-recorder singleton), Node resolves that external at import time by
  * walking up from the temp file's directory. A `/tmp` output has no
  * `node_modules` chain, so the external would fail to resolve. Emitting under
@@ -27,7 +27,7 @@ function packageRoot(): string {
  * A writable temp dir under this package's `node_modules/.cache`, created on
  * first use. Emitting here guarantees the bundled temp file's parent chain
  * includes the monorepo's installed packages (needed for the recorder's
- * EXTERNAL `zero-migrate` to resolve at import time).
+ * EXTERNAL `@zeroship/migrate` to resolve at import time).
  */
 export async function bundleTmpDir(): Promise<string> {
   if (cached) return cached;
@@ -40,7 +40,7 @@ export async function bundleTmpDir(): Promise<string> {
 /**
  * The `node_modules` dirs esbuild should add to its resolution search path, so a
  * `schema.ts` / migration `.ts` OUTSIDE the monorepo tree (a test fixture, an
- * app in an arbitrary location) still resolves `@zeroship/db` / `zero-migrate`
+ * app in an arbitrary location) still resolves `@zeroship/db` / `@zeroship/migrate`
  * against the installed packages. Both the package-local and the monorepo-root
  * `node_modules` are included.
  */

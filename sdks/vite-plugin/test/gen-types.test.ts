@@ -36,7 +36,7 @@ import { table, t } from "@zeroship/migrate";
 
 export default {
   name: "create_notes",
-  up() {
+  schema() {
     table("notes").create({
       columns: {
         title: t.text().notNull(),

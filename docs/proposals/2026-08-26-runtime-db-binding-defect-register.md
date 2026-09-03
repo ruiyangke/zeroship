@@ -262,7 +262,7 @@ its encryption and mask passes turned off**, because "no metadata" and "no
 protection needed" are the same value.
 
 This is not an operator-only shape: `PARTITION BY` is emitted from the public
-migration DSL (`sdks/migrate/src/ops.ts`, lowered in
+migration DSL (`packages/zero-migrate/src/ops.ts`, lowered in
 `crates/zeroship-migrate-postgres/src/ddl.rs`).
 
 **The repository already knows the right predicate and uses it elsewhere.**

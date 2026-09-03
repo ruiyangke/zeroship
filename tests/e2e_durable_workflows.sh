@@ -156,7 +156,7 @@ pnpm --filter zero-migrate-cli build
 for b in zeroship-control zeroship-gate zeroship-worker dev-provision; do
   [ -x "$BIN/$b" ] || { fail "missing $BIN/$b"; exit 2; }
 done
-[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { fail "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { fail "missing the zero-migrate CLI - run: pnpm install && pnpm build"; exit 2; }
 pass "release binaries built"
 
 echo "=== DW-07 test warmup ==="

@@ -1,4 +1,4 @@
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 
 // Clarify compensation semantics: base_salary -> annual_base_salary. On
 // PostgreSQL this is an online expand/contract (leaves a pending contract to

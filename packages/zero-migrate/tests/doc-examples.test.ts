@@ -1,17 +1,17 @@
-// CI DOC-EXAMPLE GATE — the typed `zero-migrate` examples in
+// CI DOC-EXAMPLE GATE — the typed `@zeroship/migrate` examples in
 // `docs/writing-migrations.md` must TYPECHECK against the REAL package
 // types, so a future API change that rots a documented snippet FAILS CI.
 //
 // HOW IT WORKS. The test extracts every fenced ```ts block from the reference
 // doc, assembles them into ONE synthesized TypeScript module that imports the
-// real `zero-migrate` surface, and runs `tsc --noEmit` over it. A snippet
+// real `@zeroship/migrate` surface, and runs `tsc --noEmit` over it. A snippet
 // that no longer compiles (a renamed op, a dropped `t.*` factory, a changed
 // signature, a removed scalar-namespace member) is a hard test failure — the doc cannot
 // silently rot.
 //
 //   - A block that is itself a module (`export default …` / `export interface …`)
 //     is emitted verbatim at module scope (the hero migration carries its own
-//     `import { … } from "zero-migrate"`).
+//     `import { … } from "@zeroship/migrate"`).
 //   - A bare op-call fragment (e.g. a standalone `createTable(…)` / `update(…)`)
 //     is wrapped in a `function _frag_N() { … }` body, under a module preamble
 //     that imports the FULL documented vocabulary, so it typechecks exactly as if
@@ -49,7 +49,7 @@ const VOCAB_PREAMBLE = `import {
   now, uuidV4, uuidV7, genRandomUuid, int64, currentSetting, currentUser, interval, concatWs,
   dialect,
   dbType as dbT,
-} from "zero-migrate";
+} from "@zeroship/migrate";
 `;
 
 /** Pull every fenced ```ts block out of the markdown doc, in order.
@@ -71,7 +71,7 @@ function extractTsBlocks(md: string): string[] {
     if (/\/\/\s*(ops|types)\.ts:/.test(block)) continue; // skip signature listings
     // A block importing `zero-migrate-cli` (the host package) is gated in the
     // engine package's own doc-typecheck, not here — this DSL package cannot
-    // resolve the host package. Skip those blocks in the `zero-migrate` gate.
+    // resolve the host package. Skip those blocks in the `@zeroship/migrate` gate.
     if (/from\s+["']zero-migrate-cli["']/.test(block)) continue;
     blocks.push(block);
   }
@@ -93,16 +93,16 @@ function assembleHarness(blocks: string[]): string {
       // collides with the next module example. Wrap each module example in its
       // own namespace via a unique const alias is not possible (it's a default
       // export), so re-emit module examples inside a fresh block is not enough.
-      // Instead, strip the `import … from "zero-migrate"` (the harness
+      // Instead, strip the `import … from "@zeroship/migrate"` (the harness
       // already imports the vocab) and downgrade `export default {…}` to a typed
       // local so multiple modules coexist. `export interface`/`export type`
       // become plain declarations.
-      let body = b.replace(/^\s*import[^\n]*from\s+["']zero-migrate["'];?\s*$/gm, "");
+      let body = b.replace(/^\s*import[^\n]*from\s+["']@zeroship\/migrate["'];?\s*$/gm, "");
       // A migration module's `export const name = "…"` is a cosmetic label
       // re-export, orthogonal to DSL typechecking, and would collide across the
       // several module examples (each named `name`). Drop those lines.
       body = body.replace(/^\s*export\s+const\s+name\s*=[^\n]*$/gm, "");
-      body = body.replace(/^\s*export\s+default\s+/m, `const _mod_${moduleBlocks.length}: import("zero-migrate").Migration = `);
+      body = body.replace(/^\s*export\s+default\s+/m, `const _mod_${moduleBlocks.length}: import("@zeroship/migrate").Migration = `);
       body = body.replace(/^\s*export\s+(interface|type|const|function)\s+/m, "$1 ");
       moduleBlocks.push(body);
     } else {
@@ -119,11 +119,11 @@ function assembleHarness(blocks: string[]): string {
 }
 
 /** Run `tsc --noEmit` over a single synthesized harness file rooted in the
- *  package, so it resolves the REAL `zero-migrate` types.
+ *  package, so it resolves the REAL `@zeroship/migrate` types.
  *  Returns null on success, or the compiler diagnostics on failure. */
 function typecheck(harnessSource: string): string | null {
   // The harness MUST live inside the package tree so node module resolution
-  // finds the package's own `node_modules` (`zero-migrate`).
+  // finds the package's own `node_modules` (`@zeroship/migrate`).
   // A throwaway subdir UNDER `node_modules/` (already gitignored, so a crash
   // leftover is never accidentally tracked); a sibling of `@zero_migrate/*`, so the
   // parent-dir resolution from the harness still reaches the package's deps.
@@ -165,13 +165,13 @@ test("doc-gate: every typed example in writing-migrations.md typechecks against 
   assert.equal(
     diagnostics,
     null,
-    `a typed example in docs/writing-migrations.md no longer compiles against zero-migrate.\n` +
+    `a typed example in docs/writing-migrations.md no longer compiles against @zeroship/migrate.\n` +
       `Fix the doc (or the snippet) — do not weaken this gate.\n\n${diagnostics ?? ""}`,
   );
 });
 
 test("doc-gate: every DSL example in getting-started.md typechecks against the real package", () => {
-  // The step-by-step guide's `zero-migrate` (DSL) examples ride the SAME
+  // The step-by-step guide's `@zeroship/migrate` (DSL) examples ride the SAME
   // harness as writing-migrations.md. Its `zero-migrate-cli` (host) snippet is excluded
   // here — `extractTsBlocks` skips engine-import blocks — and is gated instead
   // by the engine package's own doc-typecheck.
@@ -183,7 +183,7 @@ test("doc-gate: every DSL example in getting-started.md typechecks against the r
   assert.equal(
     diagnostics,
     null,
-    `a DSL example in docs/getting-started.md no longer compiles against zero-migrate.\n` +
+    `a DSL example in docs/getting-started.md no longer compiles against @zeroship/migrate.\n` +
       `Fix the doc (or the snippet) — do not weaken this gate.\n\n${diagnostics ?? ""}`,
   );
 });
@@ -217,16 +217,16 @@ const OTHER_DSL_DOCS = ["architecture.md", "concepts.md", "upgrading.md"] as con
 for (const file of OTHER_DSL_DOCS) {
   test(`doc-gate: every DSL example in ${file} typechecks against the real package`, () => {
     const md = readFileSync(resolve(DOCS_DIR, file), "utf8");
-    const blocks = extractTsBlocks(md).filter((b) => /from\s+["']zero-migrate["']/.test(b));
+    const blocks = extractTsBlocks(md).filter((b) => /from\s+["']@zeroship\/migrate["']/.test(b));
     assert.ok(
       blocks.length >= 1,
-      `expected docs/${file} to carry at least one zero-migrate DSL example; found ${blocks.length}`,
+      `expected docs/${file} to carry at least one @zeroship/migrate DSL example; found ${blocks.length}`,
     );
     const diagnostics = typecheck(assembleHarness(blocks));
     assert.equal(
       diagnostics,
       null,
-      `a DSL example in docs/${file} no longer compiles against zero-migrate.\n` +
+      `a DSL example in docs/${file} no longer compiles against @zeroship/migrate.\n` +
         `Fix the doc (or the snippet) - do not weaken this gate.\n\n` +
         String(diagnostics),
     );

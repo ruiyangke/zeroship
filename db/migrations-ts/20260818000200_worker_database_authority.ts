@@ -1,4 +1,4 @@
-import { role, raw, revoke } from "zero-migrate";
+import { role, raw, revoke } from "@zeroship/migrate";
 
 // The worker's database authority, narrowed to exactly what its workflow
 // dispatcher reads. Originally landed by EDITING three already-applied files in

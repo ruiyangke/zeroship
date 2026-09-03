@@ -47,7 +47,7 @@ const ADDON_PATH = resolve(
 const OWNER_APP = "app_pending_remediation";
 const RENAME_MIGRATION = "rename_display_name";
 
-const CREATE = `import { table, t } from "zero-migrate";
+const CREATE = `import { table, t } from "@zeroship/migrate";
 export const name = "create_users";
 export default {
   schema() {
@@ -59,7 +59,7 @@ export default {
 };
 `;
 
-const RENAME = `import { table, t } from "zero-migrate";
+const RENAME = `import { table, t } from "@zeroship/migrate";
 export const name = "${RENAME_MIGRATION}";
 export default {
   schema() {
@@ -69,7 +69,7 @@ export default {
 `;
 
 /** A later deploy touching the same table, which the pending contract must block. */
-const TOUCH = `import { table, t } from "zero-migrate";
+const TOUCH = `import { table, t } from "@zeroship/migrate";
 export const name = "add_nickname";
 export default {
   schema() {
