@@ -130,8 +130,17 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
 /// by the caller that already holds the handle this write will run on. It is a
 /// borrow rather than an `Option`, so a caller with no key store fails to
 /// compile instead of failing mid-write.
+///
+/// `dialect` is a PARAMETER for exactly the same reason. Stage 5 needs to know
+/// which bind form the column takes and nothing more; a dialect is not a
+/// routing decision either. It used to be read here as
+/// `super::current_sql_dialect()`, the same engine-reads-adapter funnel, four
+/// separate times per write. It now rides down from the caller that resolved
+/// it - off the dispatch's captured route in production - so one write op
+/// lowers under ONE dialect rather than four independent derivations of it.
 pub(crate) async fn apply(
     keys: &crate::encryption::KeyStore,
+    dialect: query::SqlDialect,
     binding: &DbBinding,
     collection: &str,
     payload: &mut Value,
@@ -184,7 +193,7 @@ pub(crate) async fn apply(
             )?;
             let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_doc(keys, app_id, collection, &row_pk, payload)
+                .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -198,14 +207,14 @@ pub(crate) async fn apply(
             for doc in docs.iter_mut() {
                 let row_pk = row_pk_from_doc(doc);
                 stages
-                    .apply_to_doc(keys, app_id, collection, &row_pk, doc)
+                    .apply_to_doc(keys, dialect, app_id, collection, &row_pk, doc)
                     .await?;
             }
             Ok(())
         }
         ApplyMode::Update { row_pk } => {
             stages
-                .apply_to_update(keys, app_id, collection, row_pk, payload)
+                .apply_to_update(keys, dialect, app_id, collection, row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -224,6 +233,7 @@ pub(crate) async fn apply(
             )?;
             rewrite_upsert_doc_id_to_existing_row_id(
                 keys,
+                dialect,
                 payload,
                 route,
                 collection,
@@ -233,7 +243,7 @@ pub(crate) async fn apply(
             .await?;
             let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_doc(keys, app_id, collection, &row_pk, payload)
+                .apply_to_doc(keys, dialect, app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -265,12 +275,14 @@ impl<'a> WriteStages<'a> {
         self.has_encrypted || self.has_masked || self.has_sqlite_binary || self.has_plain_bytes
     }
 
-    /// `keys` rides down from [`apply`] rather than being resolved here: the
-    /// encryption stage wants a key store, not a backend, and this struct
-    /// makes no routing decision it could take one from.
+    /// `keys` and `dialect` ride down from [`apply`] rather than being resolved
+    /// here: the encryption stage wants a key store, not a backend, the binary
+    /// stages want a dialect, not a connection, and this struct makes no
+    /// routing decision it could take either from.
     async fn apply_to_doc(
         &self,
         keys: &crate::encryption::KeyStore,
+        dialect: query::SqlDialect,
         app_id: &str,
         collection: &str,
         row_pk: &str,
@@ -301,7 +313,7 @@ impl<'a> WriteStages<'a> {
         } else {
             Vec::new()
         };
-        if self.has_sqlite_binary && super::current_sql_dialect() == query::SqlDialect::Sqlite {
+        if self.has_sqlite_binary && dialect == query::SqlDialect::Sqlite {
             super::encode_sqlite_binary_doc_with_schema(schema, row)?;
         }
         // AFTER encryption: a `t.encrypted({ wraps: t.bytes() })` column is the
@@ -309,7 +321,7 @@ impl<'a> WriteStages<'a> {
         // ordering also means the ciphertext it deposits is never re-read as a
         // plain bytes value.
         if self.has_plain_bytes {
-            super::bytes_pass::encode_bytes_on_write(schema, super::current_sql_dialect(), row)?;
+            super::bytes_pass::encode_bytes_on_write(schema, dialect, row)?;
         }
         // LAST. Every stage above reads and writes a masked field under its
         // LOGICAL key and knows nothing about the flip; this one moves the
@@ -320,10 +332,12 @@ impl<'a> WriteStages<'a> {
         Ok(())
     }
 
-    /// `keys` rides down from [`apply`], for the reason on [`Self::apply_to_doc`].
+    /// `keys` and `dialect` ride down from [`apply`], for the reason on
+    /// [`Self::apply_to_doc`].
     async fn apply_to_update(
         &self,
         keys: &crate::encryption::KeyStore,
+        dialect: query::SqlDialect,
         app_id: &str,
         collection: &str,
         row_pk: &str,
@@ -353,11 +367,11 @@ impl<'a> WriteStages<'a> {
         } else {
             Vec::new()
         };
-        if self.has_sqlite_binary && super::current_sql_dialect() == query::SqlDialect::Sqlite {
+        if self.has_sqlite_binary && dialect == query::SqlDialect::Sqlite {
             super::encode_sqlite_binary_update_with_schema(schema, patch)?;
         }
         if self.has_plain_bytes {
-            super::bytes_pass::encode_bytes_on_update(schema, super::current_sql_dialect(), patch)?;
+            super::bytes_pass::encode_bytes_on_update(schema, dialect, patch)?;
         }
         // LAST, on the same sub-document the encryption pass wrote to (`$set`
         // when the patch uses one). A field the patch does not mention is
@@ -397,8 +411,15 @@ pub(crate) struct TargetRowId {
 /// `schema` is the caller's already-resolved descriptor entry. The probe still
 /// selects only `id`; the declared fields are carried solely so its filter can
 /// lower SQLite booleans and numeric timestamp binds by field type.
+///
+/// `dialect` is the caller's too, and passed in even though this function holds
+/// a [`TxRoute`] it could read one off - the same shape, and the same reason, as
+/// `keys` on [`rewrite_upsert_doc_id_to_existing_row_id`]. The probe and the
+/// UPDATE it precedes must be written in ONE dialect, and that is the one the
+/// caller resolved for the whole operation, not a second derivation here.
 pub(crate) async fn resolve_target_row_ids(
     route: &TxRoute,
+    dialect: query::SqlDialect,
     collection: &str,
     filter: &Value,
     limit: i64,
@@ -407,16 +428,10 @@ pub(crate) async fn resolve_target_row_ids(
     let app_id = route.app_id();
     note_target_row_resolution_for_tests();
     let mut sql_filter = filter.clone();
-    super::maybe_lower_sqlite_boolean_filter(schema, &mut sql_filter);
-    let built = query::build_write_target_probe(
-        app_id,
-        collection,
-        schema,
-        &sql_filter,
-        limit,
-        super::current_sql_dialect(),
-    )
-    .map_err(DbError::from)?;
+    super::maybe_lower_sqlite_boolean_filter(dialect, schema, &mut sql_filter);
+    let built =
+        query::build_write_target_probe(app_id, collection, schema, &sql_filter, limit, dialect)
+            .map_err(DbError::from)?;
     note_target_row_resolution_sql_for_tests(&built.sql);
     let rows = exec_query(route, built).await?;
     Ok(rows
@@ -526,8 +541,13 @@ fn update_target(patch: &mut Value) -> &mut Value {
 /// connection; the deterministic-encryption step below needs a key and nothing
 /// else, and taking it from [`apply`]'s parameter keeps one key store per write
 /// op rather than two independent derivations of it.
+///
+/// `dialect` is passed in for the same reason: the probe's SQL text has to be
+/// the dialect the enclosing upsert was planned in, and taking it from
+/// [`apply`]'s parameter keeps one dialect per write op rather than re-asking.
 async fn rewrite_upsert_doc_id_to_existing_row_id(
     keys: &crate::encryption::KeyStore,
+    dialect: query::SqlDialect,
     doc: &mut Value,
     route: &TxRoute,
     collection: &str,
@@ -574,15 +594,10 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
         .await?;
     }
     note_upsert_conflict_probe_for_tests();
-    super::maybe_lower_sqlite_boolean_filter(schema, &mut filter);
-    let built = query::build_conflict_probe_with_dialect(
-        app_id,
-        collection,
-        schema,
-        &filter,
-        super::current_sql_dialect(),
-    )
-    .map_err(DbError::from)?;
+    super::maybe_lower_sqlite_boolean_filter(dialect, schema, &mut filter);
+    let built =
+        query::build_conflict_probe_with_dialect(app_id, collection, schema, &filter, dialect)
+            .map_err(DbError::from)?;
     let rows = exec_query(route, built).await?;
     let Some(existing_id) = rows.first().and_then(|row| match row.get("id") {
         Some(Value::String(id)) => Some(id.clone()),
@@ -796,8 +811,13 @@ mod tests {
                 );
                 let mut doc = serde_json::json!({ "name": "Alice" });
 
+                // The dialect is unobservable in this case and stated rather
+                // than defaulted: the fixture schema declares no encrypted,
+                // masked or binary column, so `WriteStages::any()` is false and
+                // no dialect-sensitive stage runs before the refusal.
                 let result = apply(
                     &test_key_store(),
+                    SqlDialect::Postgres,
                     &binding,
                     collection,
                     &mut doc,
@@ -839,6 +859,8 @@ mod tests {
 
             apply(
                 &test_key_store(),
+                // Unobservable here for the reason given in the sibling case.
+                SqlDialect::Postgres,
                 &binding,
                 collection,
                 &mut doc,
@@ -1022,8 +1044,13 @@ mod tests {
                 "name": "Seed",
                 "ssn": "123-45-6789"
             });
+            // SQLite, stated explicitly: the fixture stands up a real
+            // `SqliteBackend`, and this is the dialect a captured route would
+            // have stamped for it. Passing it in is what lets the case run with
+            // no isolate to capture from.
             apply(
                 backend.key_store(),
+                SqlDialect::Sqlite,
                 &binding,
                 collection,
                 &mut insert_doc,
@@ -1083,6 +1110,7 @@ mod tests {
             ]);
             apply(
                 backend.key_store(),
+                SqlDialect::Sqlite,
                 &binding,
                 collection,
                 &mut bulk_docs,
@@ -1133,6 +1161,7 @@ mod tests {
             );
             apply(
                 backend.key_store(),
+                SqlDialect::Sqlite,
                 &binding,
                 collection,
                 &mut update_patch,
@@ -1182,6 +1211,12 @@ mod tests {
             });
             apply(
                 backend.key_store(),
+                // The conflict probe below is the ONE pre-pass that issues SQL
+                // of its own, so this is the arm where the dialect is load
+                // bearing: an ambient test route carries an inert dialect
+                // (see `CapturedRoute::pool_for_tests`), and the probe takes
+                // this parameter instead.
+                SqlDialect::Sqlite,
                 &binding,
                 collection,
                 &mut upsert_doc,

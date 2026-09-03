@@ -268,7 +268,7 @@ pub(crate) fn dispatch_delete_one<'s>(
     let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = current_actor_id(&state);
 
-    let built = plan_delete_one(&binding, &coll, filter, actor_id.as_deref());
+    let built = plan_delete_one(&binding, &route, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -310,7 +310,7 @@ pub(crate) fn dispatch_delete_many<'s>(
     let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = current_actor_id(&state);
 
-    let built = plan_delete_many(&binding, &coll, filter, actor_id.as_deref());
+    let built = plan_delete_many(&binding, &route, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -345,14 +345,19 @@ pub(crate) fn dispatch_purge_one<'s>(
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let built = plan_purge_one(&binding, collection, filter);
-
     let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    //
+    // The capture is ABOVE the plan, and that ordering is now enforced by the
+    // signature rather than by this comment: `plan_purge_one` takes the
+    // `CapturedRoute`, because the dialect it writes its SQL in is stamped on
+    // it. Hoisting it over `setup_js_promise` / `runtime_state` is safe - see
+    // the note on `dispatch_count`.
     let route = crate::tx_scope::capture_route(scope, app_id);
+    let built = plan_purge_one(&binding, &route, collection, filter);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -383,14 +388,14 @@ pub(crate) fn dispatch_purge_many<'s>(
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let built = plan_purge_many(&binding, collection, filter);
-
     let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    // Capture before plan; see [`dispatch_purge_one`].
     let route = crate::tx_scope::capture_route(scope, app_id);
+    let built = plan_purge_many(&binding, &route, collection, filter);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -428,7 +433,7 @@ pub(crate) fn dispatch_restore_one<'s>(
     let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = current_actor_id(&state);
 
-    let built = plan_restore_one(&binding, &coll, filter, actor_id.as_deref());
+    let built = plan_restore_one(&binding, &route, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -467,7 +472,7 @@ pub(crate) fn dispatch_restore_many<'s>(
     let route = crate::tx_scope::capture_route(scope, app_id);
     let actor_id = current_actor_id(&state);
 
-    let built = plan_restore_many(&binding, &coll, filter, actor_id.as_deref());
+    let built = plan_restore_many(&binding, &route, &coll, filter, actor_id.as_deref());
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
         request_id,
@@ -498,13 +503,14 @@ pub(crate) fn dispatch_aggregate<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     // Read-set capture, before planning: `plan_aggregate` records into it.
     crate::v8_bridge::ensure_read_set_capture();
-    let planned = plan_aggregate(&binding, collection, &pipeline, &opts);
 
     let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    // Capture before plan; see [`dispatch_purge_one`].
     let route = crate::tx_scope::capture_route(scope, app_id);
+    let planned = plan_aggregate(&binding, &route, collection, &pipeline, &opts);
     let coll = collection.to_string();
     let group_fields = aggregate_group_fields(&pipeline);
     let (built, result_columns): (_, Option<Vec<String>>) = match planned {
@@ -540,13 +546,13 @@ pub(crate) fn dispatch_distinct<'s>(
     filter: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let planned = plan_distinct(&binding, collection, field, filter, &opts);
-
     let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    // Capture before plan; see [`dispatch_purge_one`].
     let route = crate::tx_scope::capture_route(scope, app_id);
+    let planned = plan_distinct(&binding, &route, collection, field, filter, &opts);
     let coll = collection.to_string();
     // The `false` is unobservable, not a default: on the error arm `run_op`
     // rejects before it ever calls the closure that reads this flag.
@@ -598,13 +604,26 @@ pub(crate) fn dispatch_count<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     // Read-set capture, before planning: `plan_count` records into it.
     crate::v8_bridge::ensure_read_set_capture();
-    let built = plan_count(&binding, collection, filter, &opts);
 
     let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
+    //
+    // **WHY HOISTING THE CAPTURE OVER THE PROLOGUE IS SAFE**, for the five
+    // dispatches (`purge_one`, `purge_many`, `aggregate`, `distinct`, `count`)
+    // that used to plan first. `capture_route` reads V8's
+    // continuation-preserved slot; nothing it is hoisted over WRITES that slot.
+    // Enumerated rather than argued: the complete set of
+    // `set_continuation_preserved_embedder_data` writers in the tree is ten
+    // sites in three files - `plugin-db/src/tx_scope.rs` (`enter` / `leave`),
+    // `runtime/src/core/invocation.rs` (6) and
+    // `runtime/src/node/async_hooks/als.rs` (2). Neither `runtime_state` (an
+    // isolate slot read) nor `setup_js_promise` (allocates a `PromiseResolver`
+    // and reads `executing_request_id`) is among them, and the prelude is one
+    // synchronous frame, so no pump turn rotates the slot inside it either.
     let route = crate::tx_scope::capture_route(scope, app_id);
+    let built = plan_count(&binding, &route, collection, filter, &opts);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
         resolver,
@@ -655,7 +674,14 @@ pub(crate) fn dispatch_search<'s>(
     collection: &str,
     args: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let planned = plan_search(&binding, collection, &args);
+    // No route to stamp a dialect on (see the async body), so the adapter reads
+    // it directly from the same place a capture would have.
+    let planned = plan_search(
+        &binding,
+        crate::tx_scope::configured_dialect(),
+        collection,
+        &args,
+    );
 
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
@@ -682,7 +708,13 @@ pub(crate) fn dispatch_near<'s>(
     collection: &str,
     args: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let planned = plan_near(&binding, collection, &args);
+    // No route, for the same reason as `dispatch_search`; same dialect read.
+    let planned = plan_near(
+        &binding,
+        crate::tx_scope::configured_dialect(),
+        collection,
+        &args,
+    );
 
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
