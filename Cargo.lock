@@ -7451,8 +7451,26 @@ dependencies = [
  "hmac 0.12.1",
  "serde_json",
  "sha2 0.10.9",
+ "tracing",
  "zeroize",
  "zeroship-core",
+ "zeroship-schema",
+]
+
+[[package]]
+name = "zeroship-data-postgres"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "compio",
+ "compio-postgres",
+ "serde_json",
+ "sha2 0.10.9",
+ "tracing",
+ "uuid",
+ "zeroship-core",
+ "zeroship-data-core",
+ "zeroship-migrate-server",
  "zeroship-schema",
 ]
 
@@ -7778,6 +7796,7 @@ dependencies = [
  "zeroize",
  "zeroship-core",
  "zeroship-data-core",
+ "zeroship-data-postgres",
  "zeroship-data-query-builder",
  "zeroship-metering",
  "zeroship-migrate-policy",

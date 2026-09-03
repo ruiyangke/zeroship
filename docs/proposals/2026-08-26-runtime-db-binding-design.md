@@ -902,12 +902,22 @@ establish the conflict winner's stored id atomically before encryption, preserve
 internal transaction so behaviour does not change with encryption mode.
 
 **Connections always come from a pool (D10), and that is a capacity-model change
-rather than a refactor.** Today `acquire_dedicated_client` opens a brand new TCP
-connection per transaction - `compio_postgres::connect` directly, then a
-detached task per connection
-(`crates/zeroship-plugin-db/src/backend/postgres.rs:161-174`, unverified). It
-never touches the pool, so the current concurrent-transaction ceiling is
-*unbounded*, and a worker multiplexing ~200 isolates per OS thread
+rather than a refactor.**
+
+**THIS PARAGRAPH'S PREMISE WAS MARKED `unverified` AND HAS NOW BEEN VERIFIED
+FALSE.** It read: `acquire_dedicated_client` opens a brand new TCP connection per
+transaction via `compio_postgres::connect` directly, plus a detached task per
+connection, and never touches the pool - leaving the concurrent-transaction
+ceiling *unbounded*. Measured 2026-09-02 at
+`crates/zeroship-data-postgres/src/postgres.rs:328`, the whole body is
+`self.pool.get_owned().await`, whose error arm goes out of its way to
+distinguish "this worker hit its own pool ceiling" from "the server is
+unreachable". D10 therefore SHIPPED: the checkout is pooled and the ceiling is
+the pool's size, not unbounded. What remains live below is the *sizing*
+question - what that ceiling should be - not the introduction of one.
+
+The original reasoning is kept because the sizing argument still rests on it: a
+worker multiplexing ~200 isolates per OS thread
 (`crates/zeroship-plugin-db/src/exec.rs:1321`) that each open a transaction opens
 ~200 connections.
 
@@ -1111,15 +1121,25 @@ rather than the contract describing the code.
    disagree with the descriptor describing it. This is enforced by *deleting*
    the DDL-emitting paths, not by a classifier that may never traverse them.
 
-   The live index-creation surface is two statements, both in the PostgreSQL
-   backend: `CREATE INDEX CONCURRENTLY ... USING ivfflat`
-   (`crates/zeroship-plugin-db/src/backend/postgres.rs:518`, from
-   `ensure_vector_index`) and `... USING GIST` (`:668`, from
-   `ensure_spatial_index`). They move into the migration path, so a `.vector()`
-   or `.spatial()` field declares its index the way every other index is
-   declared, and then `ensure_vector_index`, `ensure_spatial_index`,
-   `create_index_with_recovery` and `create_index_with_recovery_audited` are
-   deleted.
+   **DONE - this step shipped, and the paragraph below is kept in the past
+   tense rather than rewritten.** The live index-creation surface WAS two
+   statements in the PostgreSQL backend: `CREATE INDEX CONCURRENTLY ... USING
+   ivfflat` (DELETED, was `crates/zeroship-plugin-db/src/backend/postgres.rs:518`,
+   from `ensure_vector_index`) and `... USING GIST` (DELETED, was `:668`, from
+   `ensure_spatial_index`). They moved into the migration path, so a `.vector()`
+   or `.spatial()` field now declares its index the way every other index is
+   declared, and `ensure_vector_index`, `ensure_spatial_index`,
+   `create_index_with_recovery` and `create_index_with_recovery_audited` were
+   DELETED. Re-measured 2026-09-02: zero definitions and zero call sites
+   (`grep -rn 'fn ensure_vector_index\|fn ensure_spatial_index\|fn
+   create_index_with_recovery' crates/ libs/` matches nothing). The names DO
+   still appear about ten times in `zeroship-migrate-core` and two test files,
+   every one a comment naming the deleted function to say which engine-side
+   renderer replaced it - so a bare name grep reports them as live and is the
+   wrong instrument here. The backend that carried them is now
+   `crates/zeroship-data-postgres/src/postgres.rs`, and what survives there is
+   only the two `pg_extension` capability PROBES (`:527` for pgvector, `:625`
+   for PostGIS), which read a catalog rather than emitting DDL.
 
    **`__zeroship_migrations` is not a migration record; it is the provenance log
    for exactly that DDL**, written only from `create_index_with_recovery_audited`.
@@ -1557,7 +1577,7 @@ producer, consumer, fixture and reference doc in the same patch.
    re-provision the per-app platform tables the `CASCADE` destroyed; and re-run
    publication reconciliation, without which subscriptions silently stop
    forever. The current terminal arm - release the lock with the schema empty
-   (`restore` at `crates/zeroship-plugin-db/src/backend/postgres.rs:803`,
+   (`restore` at `crates/zeroship-data-postgres/src/postgres.rs:871`,
    delegating to `backup_pg::restore_impl`) - is not
    acceptable. A restore that silently replaces the unmask audit trail with an
    older one is an **audit-erasure primitive**, and the rewind is recorded as an

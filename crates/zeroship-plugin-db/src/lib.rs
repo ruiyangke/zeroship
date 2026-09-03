@@ -97,7 +97,11 @@ pub mod op_error;
 // vocabulary bound for `zeroship-data-core`, and the policy names an executor.
 // A default method body travels with its trait, so the split had to happen
 // before the trait can move, not after.
-pub mod lock_policy;
+// Moved to `zeroship-data-core` on 2026-09-02: both vendor crates call it, so it
+// cannot live above them. Re-exported rather than repointed, so
+// `crate::lock_policy::BoundedLockAcquire` and
+// `zeroship_plugin_db::lock_policy::...` both still resolve.
+pub use zeroship_data_core::lock_policy;
 // The DDL builders + `QueryError` + `SqlDialect` +
 // the system-field / validation helpers were extracted into the leaf crate
 // `zeroship-schema`. plugin-db re-exports the module wholesale so every

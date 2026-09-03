@@ -1155,7 +1155,7 @@ designed-not-built prerequisites in the CDC proposal.
 `crates/zeroship-plugin-db/src/auth/bootstrap.rs:15-18` records that **nothing replaced it**, and
 `db/migrations-ts/` provisions no such schema. One live statement still names it and therefore fails
 on every database: the PITR placeholder at
-`crates/zeroship-plugin-db/src/backend/postgres.rs:1286`, whose own comment at `:770-776` says the
+`crates/zeroship-data-postgres/src/postgres.rs:1333`, whose own comment at `:839-844` says the
 schema "NO LONGER EXISTS" and "the INSERT below therefore fails on every database".
 
 This design creates it, and the shape is the invariant's one permitted use - state a separate service
