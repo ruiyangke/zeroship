@@ -726,8 +726,13 @@ pub fn set_postgres_pool_for_tests(pool: Rc<compio_postgres::Pool>, url: &str) {
     let backend = service::select_backend(url).expect("test URL must be a supported backend");
     ctx_mut(|c| {
         c.install_db_resources(url, key, backend);
-        c.set_pool(pool);
     });
+    // The key source is read AFTER the borrow above is released, not inside it:
+    // `isolate_key_source` takes a context borrow of its own, and nesting the
+    // two panics. Production reaches the same shape through
+    // `PostgresBackend::connect`, which is handed the source by its caller.
+    let pg = crate::backend::PostgresBackend::new(pool, url.to_string(), context::isolate_key_source());
+    ctx_mut(|c| c.set_postgres_backend(Rc::new(pg)));
 }
 
 /// **Test-only**: drop everything the per-thread context holds, including
@@ -1213,21 +1218,19 @@ pub async fn init_pool_async() -> Result<(), String> {
         // when the plugin registered.
         match selection {
             BackendUrl::Postgres => {
-                let pool = Pool::connect(&url, 8).await.map_err(|e| {
-                    // Walk the error source chain so the root cause (e.g. ECONNREFUSED,
-                    // TLS handshake failure) reaches the JS console instead of the
-                    // generic "error connecting to server" wrapper.
-                    let mut msg = format!("db: failed to connect: {e}");
-                    let mut cur: &dyn std::error::Error = &e;
-                    while let Some(src) = std::error::Error::source(cur) {
-                        msg.push_str(&format!(" — caused by: {src}"));
-                        cur = src;
-                    }
-                    msg
-                })?;
-
+                // Symmetric with the SQLite arm below: the backend is composed
+                // whole by the tier that may name its driver, and this arm only
+                // installs it. The connect, the pool size and the error-chain
+                // walk all live in `PostgresBackend::connect`.
+                let backend = crate::backend::PostgresBackend::connect(
+                    &url,
+                    8,
+                    context::isolate_key_source(),
+                )
+                .await
+                .map_err(DbError::into_string)?;
                 service::note_backend_open();
-                ctx_mut(|c| c.set_pool(Rc::new(pool)));
+                ctx_mut(|c| c.set_postgres_backend(Rc::new(backend)));
             }
             BackendUrl::Sqlite { path } => {
                 let backend = crate::backend_selection::open_sqlite_backend(&path)
