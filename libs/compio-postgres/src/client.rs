@@ -3154,6 +3154,26 @@ impl Client {
             Ok(sink) => Ok(sink),
             Err(failure) => {
                 let (error, before_bind_complete) = failure.into_parts();
+                // DEFENCE IN DEPTH, measured on 2026-09-03 rather than assumed.
+                // For this condition to change any outcome, COPY needs a
+                // failure that is BOTH post-Bind and replay-eligible, and
+                // neither replay-eligible error is:
+                //
+                //   26000 `FetchPreparedStatement` is raised at Bind, so it
+                //   arrives with `before_bind_complete` already true; 0A000
+                //   `RevalidateCachedQuery` / `RevalidateCachedPlan` does not
+                //   occur for COPY at all - a cached `COPY .. FROM STDIN`
+                //   survived `ADD COLUMN`, `ALTER COLUMN .. TYPE`, `ADD COLUMN
+                //   .. NOT NULL DEFAULT` and `SET NOT NULL`, the second COPY
+                //   succeeding every time.
+                //
+                // So disabling this line leaves the whole suite green, and the
+                // cause is not a missing test: with it disabled the retry DOES
+                // run (transaction status `Idle`, reprepare supplies a
+                // replacement) and then fails identically, so no assertion on
+                // the returned error can separate the two paths. The
+                // propagation itself IS held, by
+                // `post_bind_error_keeps_copy_in_statement_cached`.
                 if !before_bind_complete {
                     return Err(error);
                 }
