@@ -137,7 +137,7 @@ impl PgChangeStream {
     /// Crate-private — the
     /// [`crate::backend::BackendHandle::as_change_stream_pg`] accessor
     /// is the public entry point.
-    pub(crate) fn new(backend: Rc<PostgresBackend>) -> Self {
+    pub fn new(backend: Rc<PostgresBackend>) -> Self {
         Self { backend }
     }
 }

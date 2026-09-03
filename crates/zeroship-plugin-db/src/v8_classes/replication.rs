@@ -45,7 +45,20 @@ fn replication_watchdog_dispatch<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        async move { crate::exec::replication_watchdog(&app_id).await },
+        // The slot-health read is composed HERE, not behind an `exec` wrapper.
+        // It was `exec::replication_watchdog`, which made the ENGINE name
+        // `crate::replication` - a CDC module - so exec.rs could not move to
+        // data-engine without dragging CDC with it. The adapter may name both
+        // tiers, and this file already calls `replication::watchdog_to_json`
+        // directly two lines below, so composing the pair here is the shape
+        // that was already half-present.
+        //
+        // The query filters `pg_replication_slots` by this app's slot prefix,
+        // so a tenant cannot enumerate a co-tenant's slots.
+        async move {
+            let backend = crate::exec::ensure_postgres_backend_for_shared_sql().await?;
+            crate::replication::watchdog_query(backend.pool(), &app_id).await
+        },
         |rows| ResolveValue::String(crate::replication::watchdog_to_json(&rows)),
     )));
 

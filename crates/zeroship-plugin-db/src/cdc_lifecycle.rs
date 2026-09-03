@@ -261,10 +261,16 @@ async fn start_on_current_isolate(app_id: &str) -> Result<RunningConsumer, DbErr
     })?;
 
     match backend {
-        BackendHandle::Postgres(_) => {
-            let change_stream = backend
-                .as_change_stream_pg()
-                .expect("Postgres backend must expose its change stream");
+        BackendHandle::Postgres(pg) => {
+            // Constructed here rather than through a `BackendHandle` accessor.
+            // `as_change_stream_pg()` made the dispatch enum - a data-engine
+            // type - name `crate::change_stream_pg`, which is CDC, so
+            // backend_handle.rs could not move to data-engine without dragging
+            // the CDC module with it. CDC composing its own change stream from
+            // the arm it already matched is the right direction, and it drops
+            // an `.expect` that could only have fired if the accessor and this
+            // match disagreed about the same value.
+            let change_stream = crate::change_stream_pg::PgChangeStream::new(pg.clone());
             // Suppress the local fast path before provisioning. The initial
             // snapshot is emitted only after readiness, so writes in this
             // startup window are represented by that snapshot. The consumer

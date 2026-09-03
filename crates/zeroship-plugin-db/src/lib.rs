@@ -267,12 +267,24 @@ pub(crate) use zeroship_data_core::encryption;
 pub use zeroship_data_core::encryption;
 
 // `change_stream_pg` is the PG-arm adapter for the `ChangeStream`
-// capability declared in `crate::backend::mod`. Crate-private — the
-// stable consumer surface is the `BackendHandle::as_change_stream_pg`
-// accessor (mirroring the `as_postgres` / `as_sqlite` shape). The
-// adapter borrows `PostgresBackend` and the underlying replication
-// helpers (`replication.rs` / `wal_consumer.rs`) are PG-only.
+// capability declared in `crate::backend::mod`. The adapter borrows
+// `PostgresBackend` and the underlying replication helpers
+// (`replication.rs` / `wal_consumer.rs`) are PG-only.
+//
+// **The consumer surface used to be `BackendHandle::as_change_stream_pg`, and
+// that accessor is deleted.** It made the dispatch enum - a data-engine type -
+// name this CDC module, so `backend_handle.rs` could not move to data-engine
+// without dragging CDC along (#163). Callers now construct
+// `PgChangeStream::new` directly from the `Rc<PostgresBackend>` they already
+// hold, which is the direction that works: CDC composing over the vendor arm.
+//
+// Test visibility follows the `encryption` idiom directly above: crate-private
+// in a shipped build, `pub` under `test-helpers` so `tests/integration.rs` can
+// build a consumer without the enum growing an accessor for its benefit.
+#[cfg(not(feature = "test-helpers"))]
 pub(crate) mod change_stream_pg;
+#[cfg(feature = "test-helpers")]
+pub mod change_stream_pg;
 
 // Process-wide owner for per-app CDC consumers. Native Subscription wrappers
 // acquire leases here so all isolates in one worker share one logical slot.

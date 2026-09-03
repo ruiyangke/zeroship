@@ -208,8 +208,10 @@ pub async fn drop_namespace(
 /// file-unlink teardown.
 async fn deprovision_change_stream(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
     use crate::backend::ChangeStream;
-    if let Some(pg) = backend.as_change_stream_pg() {
-        return pg.deprovision(app_id).await;
+    if let BackendHandle::Postgres(pg) = backend {
+        return crate::change_stream_pg::PgChangeStream::new(pg.clone())
+            .deprovision(app_id)
+            .await;
     }
     if let Some(sq) = backend.as_change_stream_sqlite() {
         return sq.deprovision(app_id).await;

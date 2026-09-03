@@ -2771,9 +2771,10 @@ async fn c1_abandoned_reaper_preserves_a_connected_idle_consumer() {
     let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
         zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source()),
     ));
-    let consumer = backend
-        .as_change_stream_pg()
-        .expect("Postgres backend must expose CDC")
+    let consumer = zeroship_plugin_db::change_stream_pg::PgChangeStream::new(match &backend {
+        zeroship_plugin_db::backend::BackendHandle::Postgres(pg) => pg.clone(),
+        zeroship_plugin_db::backend::BackendHandle::Sqlite(_) => panic!("fixture builds a Postgres handle"),
+    })
         .spawn_consumer(app, worker_id)
         .await
         .expect("idle consumer must reach START_REPLICATION");
@@ -3240,9 +3241,10 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
         zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source()),
     ));
-    let consumer = backend
-        .as_change_stream_pg()
-        .expect("Postgres backend must expose CDC")
+    let consumer = zeroship_plugin_db::change_stream_pg::PgChangeStream::new(match &backend {
+        zeroship_plugin_db::backend::BackendHandle::Postgres(pg) => pg.clone(),
+        zeroship_plugin_db::backend::BackendHandle::Sqlite(_) => panic!("fixture builds a Postgres handle"),
+    })
         .spawn_consumer(app, CDC_TEST_WORKER_ID)
         .await
         .expect("CDC must reach START_REPLICATION");
@@ -3453,9 +3455,10 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
         zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source()),
     ));
-    let consumer = backend
-        .as_change_stream_pg()
-        .expect("Postgres backend must expose CDC")
+    let consumer = zeroship_plugin_db::change_stream_pg::PgChangeStream::new(match &backend {
+        zeroship_plugin_db::backend::BackendHandle::Postgres(pg) => pg.clone(),
+        zeroship_plugin_db::backend::BackendHandle::Sqlite(_) => panic!("fixture builds a Postgres handle"),
+    })
         .spawn_consumer(app, CDC_TEST_WORKER_ID)
         .await
         .expect("CDC must reach START_REPLICATION");

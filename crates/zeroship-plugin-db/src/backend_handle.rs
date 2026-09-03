@@ -502,30 +502,6 @@ impl BackendHandle {
         }
     }
 
-    /// Borrow a [`ChangeStream`] adapter over the PG arm — returns the
-    /// thin [`crate::change_stream_pg::PgChangeStream`] wrapper that
-    /// re-routes `ensure_publication_and_slot` /
-    /// `wal_consumer::run_supervised` through the trait surface.
-    ///
-    /// Introduced alongside the [`ChangeStream`] trait.
-    /// Associated types (`type ConsumerHandle`) block dyn dispatch, so
-    /// the consumer migration path mirrors the `as_postgres` /
-    /// `as_sqlite` accessor shape rather than a `with_change_stream`
-    /// visitor returning `R` (see the trait doc-comment for the dyn
-    /// vs. concrete-accessor rationale).
-    ///
-    /// Returns `Some` on the PG arm; `None` on the SQLite arm.
-    ///
-    /// The adapter holds an `Rc<PostgresBackend>` (Rc-cloned from the
-    /// arm's inner value); see [`crate::change_stream_pg::PgChangeStream`]
-    /// for the lifetime / ownership rationale.
-    pub fn as_change_stream_pg(&self) -> Option<crate::change_stream_pg::PgChangeStream> {
-        match self {
-            Self::Postgres(b) => Some(crate::change_stream_pg::PgChangeStream::new(b.clone())),
-            Self::Sqlite(_) => None,
-        }
-    }
-
     /// Borrow a [`ChangeStream`] adapter over the SQLite arm —
     /// returns the [`crate::backend::sqlite::cdc::SqliteChangeStream`]
     /// wrapper that fills in `preupdate_hook`/`commit_hook`
