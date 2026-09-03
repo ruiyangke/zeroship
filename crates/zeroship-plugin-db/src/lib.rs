@@ -239,11 +239,12 @@ mod cdc_lifecycle;
 // provenance the log existed to give it.
 
 // The `auth` module is always compiled: `auth::bootstrap` carries the
-// per-app PG role machinery the data plane runs on every transaction,
-// and `auth::util` is the shared-helper subtree the SQLite
-// `SessionMinter` impl reuses. The `keys` / `session` submodules and
-// the `__zeroship_admin` schema they spoke to are deleted -- see
-// `auth/mod.rs` for why they are not coming back.
+// per-app PG role machinery the data plane runs on every transaction.
+// The `keys` / `session` submodules and the `__zeroship_admin` schema they
+// spoke to are deleted -- see `auth/mod.rs` for why they are not coming back.
+// `auth::util` was the shared-helper subtree the SQLite `SessionMinter` impl
+// reused; that impl was deleted on 2026-09-02, so `util` now has no consumer
+// in the crate at all.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod auth;
 #[cfg(feature = "test-helpers")]

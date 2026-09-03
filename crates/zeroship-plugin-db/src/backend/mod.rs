@@ -599,107 +599,6 @@ pub trait SchemaIntrospect: 'static {
     async fn estimate_row_count(&self, app_id: &str, collection: &str) -> Result<i64, DbError>;
 }
 
-/// HMAC-signed session-init capability.
-///
-/// **Only the SQLite arm implements this.** The PG impl lived at the
-/// bottom of `crate::auth::session` and wrapped SECURITY DEFINER
-/// routines in a platform-owned `__zeroship_admin` schema; both were
-/// deleted on 2026-08-27 because a privileged routine the worker can
-/// call is not a boundary (AGENTS.md, "privilege follows the PROCESS,
-/// not the function"). On PG, privilege is carried by the connection
-/// role instead - see `crate::auth::bootstrap`.
-///
-/// The surviving SQLite impl lives in
-/// `crate::backend::sqlite::session_minter` — dev tier, no SQL surface,
-/// HMAC-SHA256 + bounded LRU nonce cache in Rust. It has no production
-/// consumer: the whole trait is `test-helpers`-gated.
-///
-/// ## Token canonical payload
-///
-/// The canonical payload for the same `(secret, init, nonce,
-/// expires_at)` is:
-///
-/// ```text
-/// actor_kind || '|' || actor_id || '|' || pid || '|'
-///            || hex(nonce) || '|' || expires_at_iso
-/// ```
-///
-/// `sqlite_integration.rs::session_canonical_payload_byte_pin` pins
-/// the bytes. It used to be half of a cross-backend equivalence pair;
-/// the PG half is gone with the PG impl.
-///
-/// ## Dyn-compatibility
-///
-/// `async fn` in trait position means this trait is dyn-incompatible.
-/// Consumers route through the [`BackendHandle::as_postgres`] /
-/// [`BackendHandle::as_sqlite`] accessors — the same pattern already
-/// used by the `ChangeStream` family.
-///
-/// Not `Send + Sync` for the same single-threaded-per-worker reason
-/// as the rest of the capability traits (Open Q4).
-#[cfg(feature = "test-helpers")]
-pub trait SessionMinter: 'static {
-    /// Mint a fresh session token. `ttl_secs = None` defers to the
-    /// implementation's default (today: `auth::util::DEFAULT_TOKEN_TTL_SECS`).
-    /// Negative `ttl_secs` produce a deliberately-expired token for
-    /// tests; the PG impl preserves that behaviour.
-    #[allow(async_fn_in_trait)]
-    async fn mint_session_token(
-        &self,
-        init: SessionInit,
-        ttl_secs: Option<i64>,
-    ) -> Result<MintedToken, DbError>;
-
-    /// Present a previously-minted token to the backend's session
-    /// authority. The SQLite impl verifies in-process against the
-    /// configured secret(s) + nonce LRU cache; no persistent state. It
-    /// surfaces 5 typed `.code`s on refusal:
-    /// `session_signature_expired`, `session_nonce_replay`,
-    /// `session_invalid_signature`, `session_invalid_actor_kind`,
-    /// `session_nonce_too_short`.
-    #[allow(async_fn_in_trait)]
-    async fn init_session(&self, token: &MintedToken) -> Result<(), DbError>;
-}
-
-/// Inputs for [`SessionMinter::mint_session_token`].
-///
-/// `pid` is the design §12 project-id binding, used verbatim by the
-/// SQLite impl. `backend_pid` on [`MintedToken`] is a leftover of the
-/// deleted PG impl, which bound tokens to `pg_backend_pid()`.
-#[cfg(feature = "test-helpers")]
-#[derive(Debug, Clone)]
-pub struct SessionInit {
-    pub app_id: String,
-    pub actor_kind: String,
-    pub actor_id: Option<String>,
-    /// Project id per design §12 glossary. SQLite uses this verbatim
-    /// in the canonical payload; PG uses `pg_backend_pid()` when this
-    /// is `None`, or `pid` when `Some(...)`.
-    pub pid: Option<String>,
-}
-
-/// A token minted by a [`SessionMinter`] impl. Cross-backend shape:
-/// PG fills `backend_pid` from `pg_backend_pid()` for back-compat;
-/// SQLite always sets `backend_pid = 0` (there is no PG concept).
-#[cfg(feature = "test-helpers")]
-#[derive(Debug, Clone)]
-pub struct MintedToken {
-    pub app_id: String,
-    pub actor_kind: String,
-    pub actor_id: Option<String>,
-    /// Mirrors [`SessionInit::pid`]. Carried verbatim through the
-    /// canonical payload so signature verification reproduces the
-    /// exact bytes.
-    pub pid: Option<String>,
-    /// PG: `pg_backend_pid()` at mint time. SQLite: always `0` — the
-    /// SQLite signer has no backend concept and binds via `pid`
-    /// instead.
-    pub backend_pid: i32,
-    pub nonce: Vec<u8>,
-    pub expires_at_iso: String,
-    pub signature: Vec<u8>,
-}
-
 /// SQL-dialect strategy — the seam every per-engine SQL-string
 /// builder route through.
 ///
@@ -1031,7 +930,7 @@ impl Drop for BrokerPauseGuard {
 ///
 /// ## Why not on `Backend` super-bound
 ///
-/// Same rationale as [`ChangeStream`] / [`SessionMinter`] (plan §2):
+/// Same rationale as [`ChangeStream`] (plan §2):
 /// consumers route via concrete-backend accessors —
 /// [`BackendHandle::as_postgres`] / [`BackendHandle::as_sqlite`] —
 /// because `async fn` in trait position is dyn-incompatible. Adding
@@ -1039,7 +938,7 @@ impl Drop for BrokerPauseGuard {
 /// every backend to implement it (including hypothetical future
 /// arms that have no vector primitive), and the consumer migration
 /// path goes through the same `as_*()?.vector_search(...)`
-/// shape the `SessionMinter` consumers already use.
+/// shape every other capability consumer already uses.
 ///
 /// ## Method signatures
 ///

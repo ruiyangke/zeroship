@@ -41,13 +41,3 @@ pub async fn open_sqlite_backend(path: impl AsRef<Path>) -> Result<SqliteBackend
 pub fn new_sqlite_backend(db_dir: PathBuf) -> Result<SqliteBackend, DbError> {
     SqliteBackend::new(db_dir, BrokerChangeSink)
 }
-
-/// Test composition for the explicit-secret constructor.
-#[cfg(any(test, feature = "test-helpers"))]
-pub fn new_sqlite_backend_with_secrets(
-    db_dir: PathBuf,
-    secret: Vec<u8>,
-    secret_prev: Option<Vec<u8>>,
-) -> Result<SqliteBackend, DbError> {
-    SqliteBackend::new_with_secrets(db_dir, secret, secret_prev, BrokerChangeSink)
-}

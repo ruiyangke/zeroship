@@ -274,11 +274,13 @@ fn normalize_timestamp_value(value: &mut Value) -> Result<(), DbError> {
     }
 }
 
+// This used to try `session_minter::parse_iso_to_millis` first and fall back to
+// the parser below. That fast path was deleted with the session minter on
+// 2026-09-02, and nothing was lost: the parser below accepts a strict superset
+// of the same `YYYY-MM-DDTHH:MM:SS.mmm` shape and computes it identically. It
+// is also stricter where it matters - the deleted one range-checked no field,
+// so `...T99:00:00.000` short-circuited to a nonsense instant instead of `None`.
 fn parse_timestamp_millis(s: &str) -> Option<i64> {
-    if let Some(ms) = crate::backend::sqlite::session_minter::parse_iso_to_millis(s) {
-        return Some(ms);
-    }
-
     let b = s.as_bytes();
     if b.len() < 19 {
         return None;
