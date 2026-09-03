@@ -101,7 +101,7 @@ pub(crate) async fn ensure_backend_for_shared_sql() -> Result<BackendHandle, DbE
 /// `read_roled_scalar_bytes`, `read_roled_scalar_text`, `execute_roled`); the
 /// rows variant was simply missing, so this path reached past the abstraction
 /// its four neighbours went through.
-async fn ensure_postgres_backend_for_shared_sql()
+pub(crate) async fn ensure_postgres_backend_for_shared_sql()
 -> Result<Rc<crate::backend::PostgresBackend>, DbError> {
     match ensure_backend_for_shared_sql().await? {
         crate::backend::BackendHandle::Postgres(pg) => Ok(pg),
@@ -575,18 +575,6 @@ pub(crate) fn clear_pending_emits(app_id: &str) {
 /// and which by 2026-09-02 had exactly ONE caller: the `db.replication
 /// .watchdog()` dispatch, which took the pool only to hand it straight to
 /// `replication::watchdog_query`. Naming the operation instead of the handle
-/// keeps `Rc<Pool>` inside the tier that owns it.
-///
-/// The query filters `pg_replication_slots` by this app's slot prefix, so a
-/// tenant cannot enumerate a co-tenant's slots - see
-/// [`crate::v8_classes::replication`] for the scoping guarantee this preserves.
-pub(crate) async fn replication_watchdog(
-    app_id: &str,
-) -> Result<Vec<crate::replication::SlotHealth>, DbError> {
-    let backend = ensure_postgres_backend_for_shared_sql().await?;
-    crate::replication::watchdog_query(backend.pool(), app_id).await
-}
-
 /// **Test-only**: end-to-end wrapper around [`exec_mutation_with_emit`]
 /// so integration tests can drive the queue/drain machinery against a
 /// real Postgres connection without spinning up a V8 isolate.
