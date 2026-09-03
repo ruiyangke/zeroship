@@ -189,6 +189,12 @@ where
             // A truncated handshake is a TLS-level failure, not an ending:
             // rustls treats silent truncation as an attack. The message names
             // the handshake so the cause is legible in a connect error.
+            //
+            // Measured 2026-09-03: disabling this does not fail a test, it
+            // HANGS - the loop re-reads a socket that will never yield another
+            // byte, and the lib run was killed at its 1200s bound instead of
+            // reporting. So a timeout here is this guard being load-bearing,
+            // not a flaky run; the guard turns that spin into a named error.
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "the peer closed the connection during the TLS handshake",
@@ -361,6 +367,12 @@ impl TlsSession {
         while self.conn.wants_write() {
             let before = outgoing.len();
             self.conn.write_tls(&mut outgoing)?;
+            // Defence against a rustls invariant violation - `wants_write`
+            // answering true while `write_tls` emits nothing - which would
+            // otherwise spin this loop forever. Unbound on purpose rather than
+            // by omission: disabling it left the lib (768), suite (797) and
+            // `tls_live` (48) suites green, because reaching it needs a rustls
+            // that contradicts itself. Kept as a termination bound.
             if outgoing.len() == before {
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
