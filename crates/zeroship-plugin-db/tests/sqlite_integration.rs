@@ -36,7 +36,7 @@ use zeroship_plugin_db::backend::sqlite::SqliteBackend;
 use zeroship_plugin_db::backend::sqlite::reservation::{CancelCleanup, TerminalOutcome};
 use zeroship_plugin_db::backend::sqlite::session::TerminalIntent;
 use zeroship_plugin_db::backend::{
-    BackendHandle, ChangeStream, LockManager, LockScope, SchemaIntrospect, SqlExecutor,
+    BackendHandle, LockManager, LockScope, SchemaIntrospect, SqlExecutor,
 };
 use zeroship_plugin_db::backend_selection::new_sqlite_backend;
 // The bounded-retry surface is the policy extension trait, not `LockManager`.
@@ -1466,7 +1466,7 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
         // `wal_consumer::suppress_app(app_id)`; the publisher's
         // per-event check drops every packet for this app until the
         // guard drops.
-        let guard = backend.pause_broker_for_tests("app_backfill");
+        let guard = zeroship_plugin_db::broker::BrokerPauseGuard::new("app_backfill".to_string());
 
         // INSERT 100 rows under the suppression window. Each statement
         // routes through the session actor, the preupdate hook fires,
@@ -1571,7 +1571,7 @@ fn schema_pending_decoder_drops_then_resyncs() {
         // `broker::engage_schema_pending(app_id)`; both the publisher
         // suppression check AND the `Broker::try_subscribe` rejection
         // branch activate.
-        let guard = backend.engage_schema_pending_for_tests("app_pending");
+        let guard = zeroship_plugin_db::broker::SchemaPendingGuard::new("app_pending".to_string());
 
         // INSERT 50 rows under the schema-pending window. Same shape
         // as the backfill test above — packets ship, publisher drops.
@@ -1751,7 +1751,7 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
         let cs = handle
             .as_change_stream_sqlite()
             .expect("BackendHandle::Sqlite must expose ChangeStream");
-        let guard = cs.pause_broker("app_orch");
+        let guard = zeroship_plugin_db::broker::BrokerPauseGuard::new("app_orch".to_string());
 
         // Pull a Rc-clone of the inner backend so we can issue the
         // 100 INSERTs against it. (The `BackendHandle::Sqlite` arm owns

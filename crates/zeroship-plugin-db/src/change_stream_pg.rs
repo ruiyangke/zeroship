@@ -18,7 +18,7 @@ use std::sync::{Arc, Mutex};
 use futures::FutureExt;
 
 use crate::backend::postgres::PostgresBackend;
-use crate::backend::{BrokerPauseGuard, ChangeStream, SchemaPendingGuard};
+use crate::backend::ChangeStream;
 use zeroship_data_core::error::DbError;
 
 #[derive(Debug, Default)]
@@ -263,19 +263,6 @@ impl ChangeStream for PgChangeStream {
         }
     }
 
-    /// Return a [`BrokerPauseGuard`] for `app_id`. Construction
-    /// suppresses the app via `broker::suppress_app`; the
-    /// guard's `Drop` unsuppresses and emits a resync.
-    fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard {
-        BrokerPauseGuard::new(app_id.to_string())
-    }
-
-    /// Return a [`SchemaPendingGuard`] for `app_id`. Construction adds
-    /// the app to the broker's `schema_pending_apps` set; the guard's
-    /// `Drop` clears it and calls `resume_app_with_resync`.
-    fn engage_schema_pending(&self, app_id: &str) -> SchemaPendingGuard {
-        SchemaPendingGuard::new(app_id.to_string())
-    }
 }
 
 // Compile-time trait-shape assertions for `impl ChangeStream for

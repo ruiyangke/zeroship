@@ -696,120 +696,13 @@ pub trait ChangeStream: 'static {
         worker_id: &str,
     ) -> Result<Self::ConsumerHandle, DbError>;
 
-    /// Pause broker delivery for `app_id` during a backfill window.
-    /// Returns a [`BrokerPauseGuard`] whose `Drop` resumes delivery
-    /// and emits a `Resync` to every active subscriber (§16.7).
-    ///
-    /// `Drop` IS wired: it calls `broker::unsuppress_app` then
-    /// `broker::resume_app_with_resync` (see the impl on
-    /// [`BrokerPauseGuard`]). This said "starts as a no-op
-    /// (tracing::trace! only) until it is wired" until 2026-09-01, long after
-    /// the wiring landed - a stale "not done yet" reads as a to-do and invites
-    /// someone to implement it a second time.
-    fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard;
-
-    /// Engage the schema-pending decoder for `app_id`. Returns a
-    /// [`SchemaPendingGuard`] whose `Drop` disengages the decoder and
-    /// emits a `Resync` per §16.7. While engaged,
-    /// `Broker::subscribe(app_id, …)` rejects new subscriptions with
-    /// `DbError::Conflict { code: "schema_pending" }`.
-    ///
-    /// `Drop` IS wired, same as [`ChangeStream::pause_broker`]: it calls
-    /// `broker::disengage_schema_pending` then
-    /// `broker::resume_app_with_resync`. The "starts as a no-op until both
-    /// halves are wired" note this carried until 2026-09-01 was stale.
-    fn engage_schema_pending(&self, app_id: &str) -> SchemaPendingGuard;
-}
-
-/// RAII guard returned by [`ChangeStream::pause_broker`]. Resuming the
-/// broker for `app_id` (and emitting one `Resync` per active
-/// subscription) happens on `Drop`.
-///
-/// Wired body (plan §7 backfill pause):
-///
-/// 1. `::new(app_id)` — calls [`crate::broker::suppress_app`], which
-///    INCREMENTS this app's entry in `SUPPRESSED_APPS`. While the count is
-///    non-zero, the SQLite CDC publisher
-///    (`backend/sqlite/cdc.rs::publisher_loop`) drops every packet whose
-///    `app_id` matches before the broker fan-out, AND the legacy local-emit
-///    shim (`crate::broker::emit_local`) short-circuits to a no-op so the PG
-///    arm sees the same contract.
-/// 2. `::drop` — calls [`crate::broker::unsuppress_app`], which DECREMENTS
-///    that count and removes the entry only at zero, then
-///    [`crate::broker::Broker::resume_app_with_resync`] which pushes
-///    one `Resync` message onto every active subscription registered
-///    on `app_id`. Subscribers refetch and continue catching up.
-///
-/// The matching `subscribe()` rejection branch lives on the
-/// [`SchemaPendingGuard`] (the louder rail); backfill is silent on the
-/// `subscribe` path by design (a backfill window is internally driven and SDK
-/// callers have no way to observe it directly).
-///
-/// **`SUPPRESSED_APPS` is a process-wide REFCOUNT, not a thread-local flag,
-/// and the difference is the whole safety property.** It is
-/// `LazyLock<Mutex<HashMap<String, usize>>>` (`broker.rs:761`) - a count behind
-/// a process-wide mutex, because a worker process runs many single-threaded
-/// compio runtimes and a backfill on one must suppress delivery on all of them.
-///
-/// This doc called it a "thread-local flag" until 2026-09-01, and that reading
-/// makes overlapping guards look BROKEN when they are in fact the case the
-/// refcount exists for: with a boolean, an inner guard's drop would clear the
-/// outer guard's suppression and resume delivery mid-backfill. With the count,
-/// the inner drop takes it 2 -> 1 and nothing resumes until the outer one
-/// releases. Anyone "simplifying" this to a `HashSet` or a `bool` reintroduces
-/// exactly that bug, and it would surface as change events escaping during a
-/// backfill window rather than as a test failure.
-///
-/// The `#[must_use]` annotation prevents accidental inline drop at
-/// the call site — the pause/resume contract is the *duration* of the
-/// guard's binding, not its construction.
-#[must_use = "BrokerPauseGuard releases the pause on Drop — bind it to a name to keep the broker paused for the surrounding scope"]
-// Constructed via the `ChangeStream` adapters' `pause_broker(app_id)`
-// — the general "suppress CDC for a known DDL/bulk-write window, emit
-// one closing `Resync`" primitive (§16.7). The `pub(crate)`
-// constructor stays internal.
-#[derive(Debug)]
-pub struct BrokerPauseGuard {
-    app_id: String,
-}
-
-impl BrokerPauseGuard {
-    /// Construct a guard for `app_id` AND engage the suppression flag
-    /// on the current thread. The `Drop` impl unsuppresses + emits the
-    /// per-subscription `Resync`.
-    ///
-    /// Idempotent in the sense that calling `new` twice for the same
-    /// `app_id` is harmless: the second call's `suppress_app` is a
-    /// `HashSet::insert` of an existing key (no-op), and both guards'
-    /// `Drop`s call `unsuppress_app` (also a no-op-on-second). Each
-    /// guard still emits its own `resume_app_with_resync` on drop —
-    /// subscribers dedup Resync messages at the consumer level (see
-    /// `SubscriptionMessage::Resync` rustdoc in `broker.rs`).
-    ///
-    /// Internal to the [`ChangeStream`] impls (PG adapter + SQLite
-    /// arm); orchestrator code reaches the guard via
-    /// `BackendHandle::as_change_stream_*().pause_broker(app_id)`.
-    pub(crate) fn new(app_id: String) -> Self {
-        crate::broker::suppress_app(&app_id);
-        Self { app_id }
-    }
-}
-
-impl Drop for BrokerPauseGuard {
-    fn drop(&mut self) {
-        // 1. Clear the suppression flag so subsequent CDC packets
-        //    publish normally + the legacy local-emit shim re-enables.
-        crate::broker::unsuppress_app(&self.app_id);
-        // 2. Push one `Resync` per active subscription on `app_id`.
-        //    Subscribers refetch + continue catching up. The broker
-        //    primitive is idempotent on closed entries (skipped) and
-        //    fast-noop on apps with zero subscribers.
-        crate::broker::resume_app_with_resync(&self.app_id);
-        tracing::trace!(
-            app_id = %self.app_id,
-            "BrokerPauseGuard dropped: unsuppress + resume_app_with_resync emitted"
-        );
-    }
+    // `pause_broker` and `engage_schema_pending` were here until 2026-09-02.
+    // They were not vendor behaviour: all four impls - PG and SQLite - were the
+    // same two lines, ignored `self`, and touched no backend state. They now
+    // live as `broker::BrokerPauseGuard::new` / `SchemaPendingGuard::new`, in
+    // the module owning the registries they mutate. Returning them from here
+    // would also force those guards to rank 0 while their `Drop` drives the
+    // engine, which is a Cargo cycle the split cannot build.
 }
 
 /// Vector-index capability — the "build an ANN index over a `float[]`
@@ -1098,72 +991,6 @@ pub enum PitrTarget {
     /// Wall-clock time, milliseconds since UNIX epoch. PG translates
     /// to `recovery_target_time`.
     TimeMillis(u64),
-}
-
-/// RAII guard returned by [`ChangeStream::engage_schema_pending`].
-/// Disengaging the schema-pending decoder (and emitting one `Resync`
-/// per active subscription) happens on `Drop`.
-///
-/// Wired body (plan §7 + design §16.7):
-///
-/// 1. `::new(app_id)` — calls
-///    [`crate::broker::engage_schema_pending`] which inserts the app
-///    id into the thread-local `SCHEMA_PENDING_APPS` set. While
-///    engaged: (a) [`crate::broker::Broker::try_subscribe`] returns
-///    `DbError::Coded { code: "schema_pending" }`; (b) the SQLite CDC
-///    publisher (`backend/sqlite/cdc.rs::publisher_loop`) drops every
-///    packet whose `app_id` matches.
-/// 2. `::drop` — calls [`crate::broker::disengage_schema_pending`] to
-///    clear the flag, then
-///    [`crate::broker::Broker::resume_app_with_resync`] which pushes
-///    one `Resync` message onto every active subscription on the app.
-///
-/// **Joint-window precedence with [`BrokerPauseGuard`]** (plan §7):
-/// `schema_pending` takes precedence on the `subscribe()` path —
-/// `try_subscribe` returns the loud `Conflict` envelope. Backfill
-/// pause is silent on `subscribe()` by design.
-///
-/// The `#[must_use]` annotation prevents accidental inline drop at
-/// the call site — the engage/disengage contract is the *duration*
-/// of the guard's binding, not its construction.
-#[must_use = "SchemaPendingGuard disengages the decoder on Drop — bind it to a name to keep the schema-pending state engaged for the surrounding scope"]
-#[allow(
-    dead_code,
-    reason = "bundle-invalidated wiring has not landed yet; keep the guard so the resync semantics stay pinned"
-)]
-#[derive(Debug)]
-pub struct SchemaPendingGuard {
-    app_id: String,
-}
-
-impl SchemaPendingGuard {
-    /// Construct a guard for `app_id` AND engage the schema-pending
-    /// flag on the current thread. The `Drop` impl disengages + emits
-    /// the per-subscription `Resync`.
-    ///
-    /// Internal to the [`ChangeStream`] impls (PG adapter + SQLite
-    /// arm); orchestrator code reaches the guard via
-    /// `BackendHandle::as_change_stream_*().engage_schema_pending(app_id)`.
-    pub(crate) fn new(app_id: String) -> Self {
-        crate::broker::engage_schema_pending(&app_id);
-        Self { app_id }
-    }
-}
-
-impl Drop for SchemaPendingGuard {
-    fn drop(&mut self) {
-        // 1. Clear the schema-pending flag so subsequent
-        //    `Broker::try_subscribe` calls succeed + CDC packets
-        //    publish normally.
-        crate::broker::disengage_schema_pending(&self.app_id);
-        // 2. Push one `Resync` per active subscription on `app_id` —
-        //    same primitive the backfill-pause path uses.
-        crate::broker::resume_app_with_resync(&self.app_id);
-        tracing::trace!(
-            app_id = %self.app_id,
-            "SchemaPendingGuard dropped: disengage + resume_app_with_resync emitted"
-        );
-    }
 }
 
 /// The data-store boundary. One impl per storage backend; today only
