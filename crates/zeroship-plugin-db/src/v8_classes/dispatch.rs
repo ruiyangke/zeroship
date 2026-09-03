@@ -859,8 +859,8 @@ pub(crate) fn dispatch_unmask_field<'s>(
     let state = crate::v8_bridge::runtime_state(scope);
     let (resolver, request_id, promise) = crate::v8_bridge::setup_js_promise(scope, &state);
 
-    // Parse the args eagerly so a malformed shape surfaces a typed
-    // error synchronously rather than racing the spawn.
+    // Parse the args eagerly, off the V8 stack, so a malformed shape is decided
+    // before anything is spawned and cannot race the spawn.
     let parsed = parse_args(&args_v);
     let binding = binding.clone();
 
@@ -875,8 +875,15 @@ pub(crate) fn dispatch_unmask_field<'s>(
         // from an ENGINE file. There is no route to take it off: an unmask is
         // not a routed statement, so this dispatch owns the resolution.
         async move {
+            // `parsed?` is taken BEFORE the first await, so a malformed payload
+            // rejects with its own typed parse error rather than whatever
+            // `ensure_backend` happens to say on an isolate that cannot open one
+            // (`not_configured` / `lazy_init_failed`). Writing it as
+            // `dispatch_unmask(.., parsed?)` reads the same and is not: the `?`
+            // then runs behind the await, and the backend error wins.
+            let args = parsed?;
             let backend = crate::tx_scope::ensure_backend().await?;
-            dispatch_unmask(&backend, &binding, parsed?).await
+            dispatch_unmask(&backend, &binding, args).await
         },
         |result| {
             // Wire shape: `{ plaintext: <string> }`. The SDK reads
@@ -890,8 +897,8 @@ pub(crate) fn dispatch_unmask_field<'s>(
 }
 /// V8-facing dispatch helper for `zeroship.db.bulkUnmaskFields`.
 ///
-/// Mirrors [`dispatch_unmask_field`]: parses the args eagerly so a
-/// malformed shape surfaces synchronously, then spawns the bulk
+/// Mirrors [`dispatch_unmask_field`]: parses the args eagerly and takes
+/// the error before any await, then spawns the bulk
 /// dispatcher and resolves with `{ results: { <rowPk>: { <col>: <pt> } } }`
 /// on success or rejects with the typed `OpError` on failure (most
 /// commonly `bulk_unmask_partial_unauthorized`).
@@ -911,8 +918,15 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
         request_id,
         // Resolved adapter-side, as in [`dispatch_unmask_field`].
         async move {
+            // Ahead of the await, for the reason spelled out in
+            // [`dispatch_unmask_field`]: the parse error must win over a
+            // backend-open failure. Note this orders the PARSE only; the
+            // descriptor validation inside `dispatch_bulk_unmask` still runs
+            // after the backend is in hand, which is a separate deliberate
+            // trade documented in `crud/unmask.rs`.
+            let args = parsed?;
             let backend = crate::tx_scope::ensure_backend().await?;
-            dispatch_bulk_unmask(&backend, &binding, parsed?).await
+            dispatch_bulk_unmask(&backend, &binding, args).await
         },
         |result| {
             // Wire shape: `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
