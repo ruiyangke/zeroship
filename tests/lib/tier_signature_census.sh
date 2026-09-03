@@ -327,7 +327,15 @@ tier() {
     # Re-derive with `grep -c 'scope: &mut v8::PinScope' tx_scope.rs` rather
     # than trusting this number.
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo "ADAPTER" ;;
-    ./crud/*|./transaction/*|./exec.rs|./broker.rs|./backend_selection.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs|./lock_policy.rs) echo "ENGINE" ;;
+    # `./broker.rs` and `./read_set.rs` are NOT here, and left on 2026-09-03
+    # for `zeroship-data-core` - the broker because the ENGINE and CDC both
+    # publish into it, `read_set` because the broker names its `ReadSetEntry`.
+    # Same treatment the CORE note below describes: this census scans only
+    # `zeroship-plugin-db/src`, so an arm for a file that moved out is a pattern
+    # matching nothing, a map claiming coverage it does not have. Kept in step
+    # with tier_direction_census.sh, where the two censuses judging one file
+    # differently is defect 1.
+    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs|./drop_namespace.rs|./lock_policy.rs) echo "ENGINE" ;;
     ./auth/bootstrap.rs)                                 echo "ENGINE" ;;
     ./backend/postgres.rs|./backend/pg_session_sql.rs|./backend/pg_error.rs|./backend/pg_introspect.rs) echo "PG" ;;
     ./backend/sqlite/*)                                  echo "SQLITE" ;;

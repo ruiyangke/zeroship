@@ -91,6 +91,9 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use serde_json::Value;
+use zeroship_schema::diff::MaskKind;
+
+use crate::masking::apply_mask_kind;
 
 // ---------------------------------------------------------------------------
 // NormalizedFilter shape
@@ -356,7 +359,7 @@ pub fn normalise_filter(filter: &Value, schema: &Value) -> Option<Predicate> {
 
 /// The mask kind declared for `column`, or `None` when it is unmasked or opted
 /// out with `kind: "none"`.
-fn mask_kind_for_column(schema: &Value, column: &str) -> Option<crate::diff::MaskKind> {
+fn mask_kind_for_column(schema: &Value, column: &str) -> Option<MaskKind> {
     let kind = schema
         .as_object()?
         .get(column)?
@@ -366,13 +369,13 @@ fn mask_kind_for_column(schema: &Value, column: &str) -> Option<crate::diff::Mas
         .and_then(Value::as_str)
         .unwrap_or("full");
     match kind {
-        "full" => Some(crate::diff::MaskKind::Full),
-        "last4" => Some(crate::diff::MaskKind::Last4),
-        "first4" => Some(crate::diff::MaskKind::First4),
-        "email" => Some(crate::diff::MaskKind::Email),
-        "name" => Some(crate::diff::MaskKind::Name),
-        "dateYear" | "date-year" => Some(crate::diff::MaskKind::DateYear),
-        "dateDecade" | "date-decade" => Some(crate::diff::MaskKind::DateDecade),
+        "full" => Some(MaskKind::Full),
+        "last4" => Some(MaskKind::Last4),
+        "first4" => Some(MaskKind::First4),
+        "email" => Some(MaskKind::Email),
+        "name" => Some(MaskKind::Name),
+        "dateYear" | "date-year" => Some(MaskKind::DateYear),
+        "dateDecade" | "date-decade" => Some(MaskKind::DateDecade),
         // "none", and anything the parser does not know: treat as unmasked so
         // an unrecognised kind widens the fanout rather than silently
         // rewriting the operand with the wrong transform.
@@ -382,14 +385,11 @@ fn mask_kind_for_column(schema: &Value, column: &str) -> Option<crate::diff::Mas
 
 /// Mask the operand when the column is masked, so the comparison runs
 /// mask-against-mask against what the WAL tuple actually carries.
-fn lower_operand(mask_kind: Option<crate::diff::MaskKind>, value: &Value) -> Value {
+fn lower_operand(mask_kind: Option<MaskKind>, value: &Value) -> Value {
     let Some(kind) = mask_kind else {
         return value.clone();
     };
-    Value::String(crate::crud::mask_pass::apply_mask_kind(
-        kind,
-        &value_to_text(value),
-    ))
+    Value::String(apply_mask_kind(kind, &value_to_text(value)))
 }
 
 // ---------------------------------------------------------------------------
@@ -743,65 +743,25 @@ mod tests {
 
     // -------- Active guard / record_if_active --------
     //
-    // These tests intentionally do NOT set the procedure kind — they
-    // verify the guard mechanics. The kind gate is exercised by the
-    // higher-level callback tests (and indirectly by the
-    // capture_in_query_kind_only smoke test below).
+    // These tests intentionally do NOT set the procedure kind - they
+    // verify the guard mechanics.
+    //
+    // THE KIND GATE IS NOT TESTED HERE, AND CANNOT BE. `recording` is the
+    // caller's answer to "is this a query?", and the caller is the adapter:
+    // `v8_bridge::ensure_read_set_capture` reads `zeroship_runtime::rpc`'s
+    // procedure kind and passes the boolean down. Three arms used to live in
+    // this module driving `KindGuard` directly; they moved to
+    // `zeroship_plugin_db::v8_bridge`'s tests on 2026-09-03, with this module,
+    // because naming the runtime crate here is exactly what
+    // `tests/data_crate_closure_gate.sh` refuses. They got stronger in the
+    // move: they now drive `ensure_read_set_capture` itself rather than a
+    // test-local copy of the kind-to-boolean mapping.
 
     #[test]
     fn record_no_op_when_inactive() {
         // No `Active::begin` — record should be a no-op.
         record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
         assert!(!is_active());
-    }
-
-    #[test]
-    fn record_no_op_outside_query_kind() {
-        // No kind set on the thread, so the installer resolves `recording` to
-        // false and the scope is inert.
-        let guard = Active::begin(recording_for_current_kind());
-        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
-        let entries = guard.take();
-        assert!(entries.is_empty());
-    }
-
-    /// The kind gate, driven through the REAL runtime marker.
-    ///
-    /// `record_if_active` no longer reads `current_kind()` itself - the
-    /// installer does, once - so these three arms go through
-    /// [`recording_for_current_kind`], which is the decision the adapter makes
-    /// when it opens the scope. Keeping `KindGuard` here is deliberate: a test
-    /// that passed the boolean literally would still pass if the mapping from
-    /// kind to boolean were inverted.
-    fn recording_for_current_kind() -> bool {
-        matches!(
-            zeroship_runtime::rpc::current_kind(),
-            Some(zeroship_runtime::rpc::ProcedureKind::Query)
-        )
-    }
-
-    #[test]
-    fn capture_in_query_kind_only() {
-        use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
-        let _kg = KindGuard::enter(ProcedureKind::Query);
-        let guard = Active::begin(recording_for_current_kind());
-        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
-        record_if_active("messages", &json!({}), &json!({}));
-        let entries = guard.take();
-        assert_eq!(entries.len(), 2);
-        assert_eq!(entries[0].collection, "messages");
-        assert!(entries[0].predicate.is_some());
-        assert_eq!(entries[1].predicate, Some(Predicate::All(vec![])));
-    }
-
-    #[test]
-    fn capture_skipped_in_mutation_kind() {
-        use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
-        let _kg = KindGuard::enter(ProcedureKind::Mutation);
-        let guard = Active::begin(recording_for_current_kind());
-        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
-        let entries = guard.take();
-        assert!(entries.is_empty(), "mutations must not record read-set");
     }
 
     /// **A recording scope still ends at its guard.** Distinct from the kind

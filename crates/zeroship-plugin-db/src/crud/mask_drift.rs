@@ -58,7 +58,7 @@
 use serde_json::Value;
 
 use crate::backend::BackendHandle;
-use crate::crud::mask_pass::apply_mask_kind;
+use zeroship_data_core::masking::apply_mask_kind;
 use crate::diff::MaskKind;
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;

@@ -60,7 +60,7 @@ use std::task::Waker;
 use serde_json::Value;
 use zeroship_core::change_event::{ChangeEvent, ChangeOp};
 
-use zeroship_data_core::error::DbError;
+use crate::error::DbError;
 use crate::read_set::ReadSetEntry;
 
 // ---------------------------------------------------------------------------
@@ -76,7 +76,12 @@ pub const DEFAULT_QUEUE_DEPTH: usize = 1024;
 /// every matching publish, so an unbounded `for (…) db.t.subscribe(…)` loop
 /// would grow the isolate's memory and per-event fan-out cost without bound.
 /// 256 is far above any legitimate app's working set.
-pub(crate) const MAX_SUBSCRIPTIONS_PER_APP: usize = 256;
+///
+/// `pub` rather than `pub(crate)` since the 2026-09-03 move out of
+/// `zeroship-plugin-db`: the cap is enforced in the ADAPTER, at
+/// `v8_classes::subscription`'s `try_subscribe` refusal, and quoted back in its
+/// error message.
+pub const MAX_SUBSCRIPTIONS_PER_APP: usize = 256;
 
 /// One subscriber's view of the broker.
 ///
@@ -134,7 +139,13 @@ struct SubscriptionInner {
     /// Unit tests run in parallel while sharing the production-style
     /// process broker. Track ownership so test-only global cleanup and
     /// counts do not interfere with unrelated test threads.
-    #[cfg(test)]
+    ///
+    /// Gated on `test` OR `test-helpers`, not on `test` alone: since this
+    /// module moved to `zeroship-data-core` on 2026-09-03 the consumers'
+    /// test builds are NOT this crate's `cfg(test)`, and a bare `test` gate
+    /// silently dropped them onto the process-wide arms. See
+    /// [`live_subscription_count`].
+    #[cfg(any(test, feature = "test-helpers"))]
     owner_thread: std::thread::ThreadId,
 }
 
@@ -171,7 +182,7 @@ impl Subscription {
             closed: false,
             resync_pending: false,
             read_set: None,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-helpers"))]
             owner_thread: std::thread::current().id(),
         })))
     }
@@ -326,7 +337,7 @@ impl Subscription {
         self.lock_inner().closed
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn is_owned_by_current_thread(&self) -> bool {
         self.lock_inner().owner_thread == std::thread::current().id()
     }
@@ -416,7 +427,7 @@ impl Broker {
     /// MUST be refused loudly so the SDK can surface a typed error
     /// rather than open a subscription whose collection may not exist
     /// after the deploy stabilises. The mirror "soft" path is backfill
-    /// pause (see [`crate::backend::BrokerPauseGuard`]) which silently
+    /// pause (see `zeroship_plugin_db::backend::BrokerPauseGuard`) which silently
     /// drops events at the publisher and emits one `Resync` per active
     /// subscription on disengage — there is no `subscribe()` rejection
     /// there because backfill is internally driven.
@@ -562,7 +573,8 @@ impl Broker {
     /// the caller builds one extra tuple after a subscriber drop, which
     /// `publish` then discards harmlessly.
     /// Number of registered (not-yet-closed) subscriptions across all
-    /// keys. Used by tests + the maintenance cron for metrics.
+    /// keys. Used by this type's `Debug` impl and by
+    /// [`live_subscription_count`] outside a test build.
     pub fn subscription_count(&self) -> usize {
         self.by_key
             .values()
@@ -606,7 +618,7 @@ impl Broker {
             .collect()
     }
 
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-helpers")))]
     fn take_all_subscriptions(&mut self) -> Vec<Subscription> {
         std::mem::take(&mut self.by_key)
             .into_values()
@@ -614,7 +626,7 @@ impl Broker {
             .collect()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn take_current_thread_subscriptions(&mut self) -> Vec<Subscription> {
         let mut taken = Vec::new();
         self.by_key.retain(|_, by_collection| {
@@ -634,7 +646,7 @@ impl Broker {
         taken
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     fn current_thread_subscription_count(&self) -> usize {
         self.by_key
             .values()
@@ -662,9 +674,9 @@ impl Broker {
     /// Push a `Resync` to every active subscription registered for
     /// `app_id`.
     ///
-    /// Invoked from [`crate::backend::BrokerPauseGuard::drop`] (after a
+    /// Invoked from `zeroship_plugin_db::backend::BrokerPauseGuard::drop` (after a
     /// backfill window) and
-    /// [`crate::backend::SchemaPendingGuard::drop`] (after the
+    /// `zeroship_plugin_db::backend::SchemaPendingGuard::drop` (after the
     /// schema-pending decoder window ends) per design §16.7.
     ///
     /// **Idempotent on a per-call basis.** Calling
@@ -899,7 +911,7 @@ fn lock_schema_pending() -> MutexGuard<'static, HashSet<String>> {
 /// drops every packet whose `app_id` matches.
 ///
 /// Internal — called from
-/// [`crate::backend::SchemaPendingGuard::new`]; production code should
+/// `zeroship_plugin_db::backend::SchemaPendingGuard::new`; production code should
 /// reach the guard through `BackendHandle::as_change_stream_*().engage_schema_pending(app_id)`.
 pub fn engage_schema_pending(app_id: &str) {
     lock_schema_pending().insert(app_id.to_string());
@@ -907,7 +919,7 @@ pub fn engage_schema_pending(app_id: &str) {
 
 /// Inverse of [`engage_schema_pending`]. Idempotent — calling on an
 /// app that is not engaged is a no-op. Called from
-/// [`crate::backend::SchemaPendingGuard::drop`] before
+/// `zeroship_plugin_db::backend::SchemaPendingGuard::drop` before
 /// `resume_app_with_resync` pushes the per-subscription `Resync`.
 pub fn disengage_schema_pending(app_id: &str) {
     lock_schema_pending().remove(app_id);
@@ -929,7 +941,11 @@ pub fn publish(event: &ChangeEvent) {
 /// Convenience accessor - query the process-wide broker for whether
 /// any subscriber is registered on `(app_id, collection)`. See
 /// [`Broker::has_subscribers`] for the conservative-true semantics.
-pub(crate) fn has_subscribers(app_id: &str, collection: &str) -> bool {
+///
+/// `pub` rather than `pub(crate)` since the 2026-09-03 move out of
+/// `zeroship-plugin-db`: both callers are above this crate - `exec`'s
+/// local-emit gate (ENGINE) and `wal_consumer`'s per-relation filter (CDC).
+pub fn has_subscribers(app_id: &str, collection: &str) -> bool {
     lock_broker().has_subscribers(app_id, collection)
 }
 
@@ -945,16 +961,31 @@ pub fn try_subscribe(app_id: &str, collection: &str) -> Result<Subscription, DbE
     lock_broker().try_subscribe(app_id, collection)
 }
 
-/// Total live (not-yet-closed) subscriptions in this process's broker.
-/// Tests use this to verify the [`crate::v8_classes::subscription`]
-/// Weak finalizer reclaims broker slots when V8 GCs an orphaned
-/// wrapper.
+/// Total live (not-yet-closed) subscriptions in this process's broker, narrowed
+/// to the CALLING THREAD under test. Tests use this to verify the
+/// `zeroship_plugin_db::v8_classes::subscription` Weak finalizer reclaims
+/// broker slots when V8 GCs an orphaned wrapper.
+///
+/// # The gate is `any(test, feature = "test-helpers")`, and it has to be
+///
+/// This was a bare `#[cfg(test)]` fork until the 2026-09-03 move out of
+/// `zeroship-plugin-db`, and the move broke it silently: across a crate
+/// boundary `cfg(test)` is the DEFINING crate's test build, so the instant the
+/// broker became a dependency every consumer fell to the process-wide arm.
+/// `cargo test -p zeroship-plugin-db --lib` went nondeterministic - two
+/// `v8_classes::subscription` tests assert an exact count while `exec`'s tests
+/// subscribe on other threads - failing 1 or 2 of 447 depending on scheduling.
+/// The `test` arm stays because this crate's own tests need it; the feature arm
+/// is what carries the same isolation to consumers, which declare
+/// `zeroship-data-core = { features = ["test-helpers"] }` in
+/// `[dev-dependencies]` (already present for `DbBinding::cold_start`, and under
+/// resolver 3 it does not leak into a non-test build).
 pub fn live_subscription_count() -> usize {
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-helpers"))]
     {
         lock_broker().current_thread_subscription_count()
     }
-    #[cfg(not(test))]
+    #[cfg(not(any(test, feature = "test-helpers")))]
     {
         lock_broker().subscription_count()
     }
@@ -987,11 +1018,11 @@ pub fn drop_app(app_id: Option<&str>) {
         match app_id {
             Some(id) => broker.take_app_subscriptions(id),
             None => {
-                #[cfg(test)]
+                #[cfg(any(test, feature = "test-helpers"))]
                 {
                     broker.take_current_thread_subscriptions()
                 }
-                #[cfg(not(test))]
+                #[cfg(not(any(test, feature = "test-helpers")))]
                 {
                     broker.take_all_subscriptions()
                 }
@@ -2173,7 +2204,7 @@ mod tests {
         let raw_ciphertext_text = "\\x0123456789abcdef0123456789abcdef";
         let masked_text = "***-**-6789";
         let plaintext = "123-45-6789";
-        let raw_col = crate::query::raw_column_name("ssn");
+        let raw_col = zeroship_schema::query::raw_column_name("ssn");
 
         let mut tuple = HashMap::new();
         tuple.insert("id".into(), "42".into());
