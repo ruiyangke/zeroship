@@ -3855,6 +3855,7 @@ async fn vector_search_returns_k_nearest() {
         10,
         VectorMetric::Cosine,
         &serde_json::Value::Null,
+        &serde_json::Value::Null,
     )
     .await
     .unwrap_or_else(|e| panic!("vector_search failed: {e:?}"));
@@ -3942,6 +3943,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
             &[0.0f32; 8],
             10,
             VectorMetric::Cosine,
+            &serde_json::Value::Null,
             &serde_json::Value::Null,
         )
         .await
@@ -4184,6 +4186,7 @@ async fn near_returns_within_radius() {
         1000.0,
         &serde_json::Value::Null,
         None,
+        &serde_json::Value::Null,
     )
     .await
     .unwrap_or_else(|e| panic!("spatial_near failed: {e:?}"));
@@ -4254,6 +4257,7 @@ async fn postgis_extension_missing_reports_typed_error() {
             1000.0,
             &serde_json::Value::Null,
             None,
+            &serde_json::Value::Null,
         )
         .await
         .expect_err("missing PostGIS must yield a typed error on near")
@@ -6174,6 +6178,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
         1,
         VectorMetric::Cosine,
         &Value::Null,
+        &serde_json::Value::Null,
     )
     .await
     .unwrap_or_else(|e| panic!("vector_search failed: {e:?}"));
@@ -6272,6 +6277,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         1000.0,
         &Value::Null,
         Some(1),
+        &serde_json::Value::Null,
     )
     .await
     .unwrap_or_else(|e| panic!("spatial_near failed: {e:?}"));

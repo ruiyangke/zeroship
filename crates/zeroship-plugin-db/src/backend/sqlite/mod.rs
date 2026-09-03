@@ -1118,6 +1118,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
         k: usize,
         metric: crate::backend::VectorMetric,
         filter: &serde_json::Value,
+        schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
         let app_id = binding.app_id();
         // Reject inner-product before issuing any SQL — a vec0 vtable
@@ -1129,7 +1130,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
 
         // Resolve the declared shape before lowering the filter: timestamp
         // bind conversion is schema-driven, just like boolean lowering.
-        let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
+        let schema_hint = schema;
 
         // Build the filter WHERE clause via the shared lowering. The
         // builder emits `$N` placeholders + a parallel params Vec.
@@ -1241,13 +1242,14 @@ impl crate::backend::SpatialIndex for SqliteBackend {
         radius_m: f64,
         filter: &serde_json::Value,
         limit: Option<usize>,
+        schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
         let app_id = binding.app_id();
         // Build the WHERE clause via the same machinery `dispatch_find`
         // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
         // positionally on rusqlite). No ORDER BY at the SQL layer —
         // we sort in Rust by computed distance.
-        let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
+        let schema_hint = schema;
         let bq = build_spatial_near_base_query(app_id, collection, filter, &schema_hint)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&bq.sql, &param_refs).await?;

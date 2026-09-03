@@ -1794,9 +1794,13 @@ pub(crate) async fn run_search(
     // used to sit here - lives in `backend/mod.rs` where naming a vendor is
     // legitimate. This function no longer knows either backend exists.
     let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+    // The descriptor slice is resolved HERE and handed down. The vendor used to
+    // fetch it from `crate::context` itself, which is the backend tier reaching
+    // into engine state - an edge that cannot survive the crate split.
+    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     use crate::backend::VectorIndex as _;
     let rows = backend
-        .vector_search(&binding, &coll, &column, &vector, k, metric, &filter)
+        .vector_search(&binding, &coll, &column, &vector, k, metric, &filter, &schema)
         .await?;
 
     // Metering, success arm only. The search family is a read op on
@@ -1945,9 +1949,11 @@ pub(crate) async fn run_near(
     // As in `run_search`: `BackendHandle` implements `SpatialIndex`, so the
     // vendor branch and the SQLite ATTACH prelude live in the vendor tier.
     let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+    // Resolved here for the same reason as `run_search` above.
+    let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     use crate::backend::SpatialIndex as _;
     let rows = backend
-        .spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit)
+        .spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit, &schema)
         .await?;
 
     // Metering, success arm only. The search family is a read op on

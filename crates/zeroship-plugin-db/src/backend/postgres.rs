@@ -538,6 +538,7 @@ impl VectorIndex for PostgresBackend {
         k: usize,
         metric: VectorMetric,
         filter: &serde_json::Value,
+        schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
         // Probe so a missing extension surfaces with the same typed
         // error shape the capability probe produces — the SDK branches
@@ -549,7 +550,7 @@ impl VectorIndex for PostgresBackend {
         // The projection allowlist and the `column` identifier check both come
         // off the descriptor. A collection this deploy does not declare is
         // refused here rather than searched with an unbounded projection.
-        let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
+        let schema_hint = schema;
         let bq = crate::query::build_vector_search(
             app_id,
             collection,
@@ -635,11 +636,12 @@ impl SpatialIndex for PostgresBackend {
         radius_m: f64,
         filter: &serde_json::Value,
         limit: Option<usize>,
+        schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
         self.ensure_postgis_available().await?;
 
         let app_id = binding.app_id();
-        let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
+        let schema_hint = schema;
         let bq = crate::query::build_spatial_near(
             app_id,
             collection,

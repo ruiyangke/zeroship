@@ -504,6 +504,7 @@ impl VectorIndex for BackendHandle {
         k: usize,
         metric: VectorMetric,
         filter: &serde_json::Value,
+        schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
         match self {
             // The SQLite arm has to ATTACH the app's database file before it
@@ -511,11 +512,11 @@ impl VectorIndex for BackendHandle {
             // to the arm that needs it, and nothing else has to know.
             Self::Sqlite(sq) => {
                 sq.attach_app_file(binding.app_id()).await?;
-                sq.vector_search(binding, collection, column, query, k, metric, filter)
+                sq.vector_search(binding, collection, column, query, k, metric, filter, schema)
                     .await
             }
             Self::Postgres(pg) => {
-                pg.vector_search(binding, collection, column, query, k, metric, filter)
+                pg.vector_search(binding, collection, column, query, k, metric, filter, schema)
                     .await
             }
         }
@@ -535,15 +536,16 @@ impl SpatialIndex for BackendHandle {
         radius_m: f64,
         filter: &serde_json::Value,
         limit: Option<usize>,
+        schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
         match self {
             Self::Sqlite(sq) => {
                 sq.attach_app_file(binding.app_id()).await?;
-                sq.spatial_near(binding, collection, column, point, radius_m, filter, limit)
+                sq.spatial_near(binding, collection, column, point, radius_m, filter, limit, schema)
                     .await
             }
             Self::Postgres(pg) => {
-                pg.spatial_near(binding, collection, column, point, radius_m, filter, limit)
+                pg.spatial_near(binding, collection, column, point, radius_m, filter, limit, schema)
                     .await
             }
         }
