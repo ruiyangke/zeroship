@@ -57,6 +57,14 @@ use serde_json::Value;
 use crate::backend::BackendHandle;
 use crate::backend::pg_error;
 use crate::backend::pg_row_json::rows_to_json_value;
+// GATED, and the gate is the point. No production item in this file reads the
+// adapter's thread context any more, so an unconditional `use` would be an
+// unused import in a release build - and, worse, would keep the ENGINE ->
+// ADAPTER edge on `tests/lib/tier_direction_census.sh`, whose extractor reads
+// `use` lines and cannot tell an import from a call. The one surviving reader is
+// `ambient_route_for_tests`, itself gated the same way; its own comment says why
+// that read is tolerable and where it has to go when the engine becomes a crate.
+#[cfg(any(test, feature = "test-helpers"))]
 use crate::context;
 use crate::tx_lanes::TxConnection;
 use zeroship_data_core::error::DbError;
@@ -80,16 +88,19 @@ fn sqlite_shared_crud_unavailable() -> DbError {
     }
 }
 
-pub(crate) async fn ensure_backend_for_shared_sql() -> Result<BackendHandle, DbError> {
-    if context::with(|c| c.backend().is_none()) {
-        crate::init_pool_async().await.map_err(|e| {
-            DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}"))
-        })?;
-    }
-
-    context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized".to_string()))
-}
+// There is deliberately no `ensure_backend_for_shared_sql` here any more.
+//
+// It was the last ENGINE-to-ADAPTER edge in this crate: an engine file reading
+// `crate::context` and calling `crate::init_pool_async`, the one dependency
+// direction the crate split forbids. It moved VERBATIM to
+// `crate::tx_scope::ensure_backend`, which is adapter-side, where the thread
+// context and the lazy init both already live; the cold-init arm went with it
+// and is still load-bearing for `installSchema`'s boot-time `setMaskPolicy`.
+//
+// Nothing in this file resolves a backend now. The routed helpers below take it
+// off `route.backend()`, which `tx_scope::bind_route` bound for them at the
+// dispatch frame, so the handle a statement runs on is the handle its routing
+// decision was made against - one read, not two.
 
 // There is deliberately no `ensure_postgres_backend_for_shared_sql` any more.
 //

@@ -57,6 +57,7 @@
 
 use serde_json::Value;
 
+use crate::backend::BackendHandle;
 use crate::crud::mask_pass::apply_mask_kind;
 use crate::diff::MaskKind;
 use zeroship_data_core::binding::DbBinding;
@@ -132,7 +133,18 @@ impl DriftReport {
 ///
 /// `sample_pct` is in the range `(0.0, 100.0]`. Out-of-range values
 /// surface `ValidationFailed { code: "invalid_sample_pct" }`.
+///
+/// **`backend` is a PARAMETER, and every helper below takes it from here.**
+/// This function resolved one itself, through
+/// `exec::ensure_backend_for_shared_sql`, until 2026-09-03; that funnel read
+/// `crate::context` and called `crate::init_pool_async`, both ADAPTER state,
+/// from an ENGINE file - the one dependency direction the crate split forbids.
+/// The funnel now lives at `crate::tx_scope::ensure_backend`, and a sweep
+/// caller resolves there before calling in. The cold-start half is not lost,
+/// only rehomed: a drift sweep runs outside any V8 dispatch, so it is often the
+/// call that warms a cold isolate, and `ensure_backend` still owns that arm.
 pub async fn run_drift_check_for_column(
+    backend: &BackendHandle,
     app_id: &str,
     collection: &str,
     column: &str,
@@ -157,7 +169,6 @@ pub async fn run_drift_check_for_column(
     let Some(col_meta) = lookup_drift_column_meta(&schema, column)? else {
         return Ok(DriftReport::default());
     };
-    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
     if let Some(sqlite) = backend.as_sqlite() {
         sqlite.attach_app_file(app_id).await?;
     }
@@ -175,6 +186,7 @@ pub async fn run_drift_check_for_column(
     // random-modulo equivalent. Both share the same `(id, value, stored_mask)`
     // row shape so the diff loop is backend-agnostic.
     let rows = sample_rows(
+        backend,
         app_id,
         collection,
         &value_column,
@@ -221,16 +233,26 @@ pub async fn run_drift_check_for_column(
                     row_pk = %sample.row_pk,
                     "mask sibling drift detected (sibling NULL on non-NULL parent)",
                 );
-                write_drift_audit_row(app_id, &sample, sample_pct).await?;
+                write_drift_audit_row(backend, app_id, &sample, sample_pct).await?;
                 report.drifted += 1;
                 report.samples.push(sample);
                 continue;
             }
         };
 
-        let expected =
-            compute_expected_masked(app_id, collection, column, &col_meta, &row_pk, &parent)
-                .await?;
+        // The key store, not the backend: computing the expected mask decrypts
+        // and re-masks, and issues no SQL at all. See the note on
+        // `compute_expected_masked`.
+        let expected = compute_expected_masked(
+            backend.key_store(),
+            app_id,
+            collection,
+            column,
+            &col_meta,
+            &row_pk,
+            &parent,
+        )
+        .await?;
 
         if expected != stored_text {
             let sample = DriftSample {
@@ -248,7 +270,7 @@ pub async fn run_drift_check_for_column(
                 row_pk = %row_pk,
                 "mask sibling drift detected",
             );
-            write_drift_audit_row(app_id, &sample, sample_pct).await?;
+            write_drift_audit_row(backend, app_id, &sample, sample_pct).await?;
             report.drifted += 1;
             report.samples.push(sample);
         }
@@ -387,16 +409,20 @@ enum ParentValue {
     SqliteBlob(Vec<u8>),
 }
 
+/// The sampling SELECT, on whichever backend the sweep was handed.
+///
+/// `backend` travels down from [`run_drift_check_for_column`] rather than being
+/// read back out of `crate::context` here: this file is ENGINE, the context is
+/// the ADAPTER's, and a second read could in principle answer with a different
+/// handle than the one the caller already attached the app file on.
 async fn sample_rows(
+    backend: &BackendHandle,
     app_id: &str,
     collection: &str,
     column: &str,
     sibling: &str,
     sample_pct: f64,
 ) -> Result<Vec<SampledRow>, DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-
     // ---- PG arm ----
     if let Some(pg) = backend.as_postgres() {
         return sample_rows_pg(pg, app_id, collection, column, sibling, sample_pct).await;
@@ -566,7 +592,14 @@ async fn sample_rows_sqlite(
 ///   (string → UTF-8, number → f64, bytes → base64) so the result
 ///   is the same string `apply_mask_kind` would see if the original
 ///   write had used the plaintext directly.
+///
+/// `keys` is a [`crate::encryption::KeyStore`] rather than a backend, and it is
+/// a parameter rather than a lookup: this path issues no SQL, so it has no
+/// routing decision to make and must not be handed one to make it from. The
+/// only thing it wanted from a backend was `key_store()`, which the sweep
+/// already holds - the same narrowing `crud::mod`'s encryption pass took.
 async fn compute_expected_masked(
+    keys: &crate::encryption::KeyStore,
     app_id: &str,
     collection: &str,
     column: &str,
@@ -601,13 +634,18 @@ async fn compute_expected_masked(
     // Encrypted column path — decrypt + decode-per-wraps + mask.
     let enc = meta.enc.as_ref().expect("checked just above");
     let plaintext_bytes =
-        decrypt_parent_value(app_id, collection, column, enc, row_pk, parent).await?;
+        decrypt_parent_value(keys, app_id, collection, column, enc, row_pk, parent).await?;
     let plaintext_string = decode_plaintext_per_wraps(&plaintext_bytes, enc.wraps)?;
     Ok(apply_mask_kind(meta.kind, &plaintext_string))
 }
 
+/// `keys` is threaded down from the sweep for the same reason
+/// [`compute_expected_masked`] takes it: the only thing this function ever
+/// wanted from a backend was `key_store()`, and reaching one through
+/// `crate::context` made an ENGINE file read ADAPTER state to fetch a key.
 #[allow(unused_variables)]
 async fn decrypt_parent_value(
+    keys: &crate::encryption::KeyStore,
     app_id: &str,
     collection: &str,
     column: &str,
@@ -615,9 +653,6 @@ async fn decrypt_parent_value(
     row_pk: &str,
     parent: &ParentValue,
 ) -> Result<Vec<u8>, DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-
     let aad = crate::encryption::aad::canonical_aad(
         collection,
         column,
@@ -648,7 +683,7 @@ async fn decrypt_parent_value(
             ));
         }
     };
-    let key = backend.key_store().resolve(app_id, &enc.key_id).await?;
+    let key = keys.resolve(app_id, &enc.key_id).await?;
     crate::encryption::aead::decrypt(&key, &bytes, &aad)
 }
 
@@ -723,14 +758,18 @@ fn nibble(c: u8) -> Result<u8, DbError> {
 /// log in detection events. Keeping the tables separate also lets a
 /// future per-app dashboard query each cleanly without per-row
 /// outcome-discriminator filters.
+///
+/// `backend` is the sweep's, passed down rather than looked up: the audit row
+/// must land on the same connection the drift was observed through, and this
+/// ENGINE file has no business reading the ADAPTER's thread context to find
+/// one.
 async fn write_drift_audit_row(
+    backend: &BackendHandle,
     app_id: &str,
     sample: &DriftSample,
     sample_pct: f64,
 ) -> Result<(), DbError> {
-    ensure_drift_audit_table(app_id).await?;
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
+    ensure_drift_audit_table(backend, app_id).await?;
 
     // ---- PG arm ----
     if let Some(pg) = backend.as_postgres() {
@@ -806,10 +845,11 @@ async fn write_drift_audit_row(
 ///     PRIMARY KEY (detected_at, collection, column_name, row_pk)
 /// );
 /// ```
-async fn ensure_drift_audit_table(app_id: &str) -> Result<(), DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-
+///
+/// Takes the sweep's `backend` for the same reason its one caller does: the
+/// provisioning statement and the INSERT that follows it must run on one
+/// backend, and neither may read `crate::context` from here.
+async fn ensure_drift_audit_table(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
     // ---- PG arm ----
     if let Some(pg) = backend.as_postgres() {
         use crate::backend::PgSqlExecutor as _;
@@ -887,14 +927,18 @@ async fn ensure_drift_audit_table(app_id: &str) -> Result<(), DbError> {
 /// helper specifically tolerates the missing-table case so a
 /// zero-drift run can still assert `audit.is_empty()` without
 /// pre-provisioning the table.
+///
+/// `backend` is a parameter here too, and the integration targets pass the same
+/// handle they passed the sweep - obtained from `crate::tx_scope::ensure_backend`,
+/// which is where a test stands in for the caller that would resolve one in
+/// production. Reading it back out of `crate::context` was the ADAPTER read
+/// this file no longer makes anywhere.
 #[cfg(feature = "test-helpers")]
 #[doc(hidden)]
 pub async fn read_drift_audit_rows_for_tests(
+    backend: &BackendHandle,
     app_id: &str,
 ) -> Result<Vec<(String, String, String, String, String)>, DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
-
     if let Some(sq) = backend.as_sqlite() {
         use crate::backend::DialectBuilder as _;
         let q_app = sq.quote_ident(app_id);
@@ -1167,25 +1211,35 @@ mod tests {
         }
     }
 
+    /// The three tests below hand the sweep a real handle from
+    /// [`crate::test_support::unit_backend`] and never let it reach a
+    /// statement: each refuses or returns in the prologue, before the first
+    /// SELECT. That is the shape the parameter forces and it is the honest
+    /// one - the sweep no longer resolves a backend, so "no backend installed"
+    /// is not a state it can be in. What each test pins is unchanged: which
+    /// check fires, and how early.
     #[test]
     fn run_drift_check_for_column_rejects_sample_pct_out_of_range() {
         let app = "drift_unit_pct_oor_app";
         let coll = "users";
         let column = "ssn";
-        // No backend installed — error is the sample_pct check, which
-        // happens BEFORE the schema lookup.
+        // The sample_pct check happens BEFORE the schema lookup and before the
+        // backend is touched at all, so the handed-down handle is never used.
         let runtime = compio::runtime::Runtime::new().unwrap();
-        for bad in [-0.1f64, 0.0, 100.1, f64::NAN, f64::INFINITY] {
-            let err = runtime
-                .block_on(run_drift_check_for_column(app, coll, column, bad))
-                .unwrap_err();
-            match err {
-                DbError::ValidationFailed { code, .. } => {
-                    assert_eq!(code, "invalid_sample_pct", "bad pct {bad} accepted");
+        runtime.block_on(async {
+            let (backend, _dir) = crate::test_support::unit_backend();
+            for bad in [-0.1f64, 0.0, 100.1, f64::NAN, f64::INFINITY] {
+                let err = run_drift_check_for_column(&backend, app, coll, column, bad)
+                    .await
+                    .unwrap_err();
+                match err {
+                    DbError::ValidationFailed { code, .. } => {
+                        assert_eq!(code, "invalid_sample_pct", "bad pct {bad} accepted");
+                    }
+                    other => panic!("expected ValidationFailed for pct {bad}, got {other:?}"),
                 }
-                other => panic!("expected ValidationFailed for pct {bad}, got {other:?}"),
             }
-        }
+        });
     }
 
     /// An UNDECLARED collection is not a drift-free one.
@@ -1202,9 +1256,12 @@ mod tests {
         crate::reset_context_for_tests();
         let app = "drift_unit_no_schema_app";
         let runtime = compio::runtime::Runtime::new().unwrap();
-        let err = runtime
-            .block_on(run_drift_check_for_column(app, "users", "ssn", 1.0))
-            .expect_err("an undeclared collection must not report a clean sweep");
+        let err = runtime.block_on(async {
+            let (backend, _dir) = crate::test_support::unit_backend();
+            run_drift_check_for_column(&backend, app, "users", "ssn", 1.0)
+                .await
+                .expect_err("an undeclared collection must not report a clean sweep")
+        });
         assert!(
             format!("{err:?}").contains("collection_not_declared"),
             "expected the typed descriptor refusal, got {err:?}",
@@ -1218,9 +1275,12 @@ mod tests {
         let collection = "users";
         crate::cache_schema_for_tests(app, collection, json!({ "ssn": { "type": "string" } }));
         let runtime = compio::runtime::Runtime::new().unwrap();
-        let report = runtime
-            .block_on(run_drift_check_for_column(app, collection, "ssn", 1.0))
-            .unwrap();
+        let report = runtime.block_on(async {
+            let (backend, _dir) = crate::test_support::unit_backend();
+            run_drift_check_for_column(&backend, app, collection, "ssn", 1.0)
+                .await
+                .unwrap()
+        });
         assert_eq!(report.sampled, 0);
         assert_eq!(report.drifted, 0);
     }

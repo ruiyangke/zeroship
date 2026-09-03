@@ -837,7 +837,15 @@ pub(crate) fn dispatch_unmask_field<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
         resolver,
         request_id,
-        async move { dispatch_unmask(&binding, parsed?).await },
+        // The backend is resolved HERE, on the adapter side, and handed to the
+        // engine. `crud::unmask` used to open one itself through
+        // `exec::ensure_backend_for_shared_sql`, which read `crate::context`
+        // from an ENGINE file. There is no route to take it off: an unmask is
+        // not a routed statement, so this dispatch owns the resolution.
+        async move {
+            let backend = crate::tx_scope::ensure_backend().await?;
+            dispatch_unmask(&backend, &binding, parsed?).await
+        },
         |result| {
             // Wire shape: `{ plaintext: <string> }`. The SDK reads
             // `result.plaintext` directly; for `wraps = bytes` the
@@ -869,7 +877,11 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
         resolver,
         request_id,
-        async move { dispatch_bulk_unmask(&binding, parsed?).await },
+        // Resolved adapter-side, as in [`dispatch_unmask_field`].
+        async move {
+            let backend = crate::tx_scope::ensure_backend().await?;
+            dispatch_bulk_unmask(&backend, &binding, parsed?).await
+        },
         |result| {
             // Wire shape: `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
             // `BTreeMap` serialises as a JSON object with sorted
@@ -908,10 +920,21 @@ pub(crate) fn dispatch_set_mask_policy_field<'s>(
     // The engine half already existed as a separate `async fn`; what was here
     // was a hand-rolled copy of `settle`'s two arms. Its error arm and
     // `settle`'s are the same `reject_op` call.
+    //
+    // The backend is resolved HERE, not by the engine installer. This dispatch
+    // captures no route - a policy install routes no SQL of its own - so the
+    // handle comes from `tx_scope::ensure_backend()`, adapter to adapter, and is
+    // passed down. That call keeps the cold-init arm, and this is the site that
+    // needs it: `installSchema` fires `setMaskPolicy` at boot, typically before
+    // any other op has opened the backend, so a plain read of the context would
+    // return `not_configured` on every fresh isolate.
     state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
         resolver,
         request_id,
-        async move { dispatch_set_mask_policy(&app, policy_v).await },
+        async move {
+            let backend = crate::tx_scope::ensure_backend().await?;
+            dispatch_set_mask_policy(&backend, &app, policy_v).await
+        },
         |()| ResolveValue::Json("{}".to_string()),
     )));
 

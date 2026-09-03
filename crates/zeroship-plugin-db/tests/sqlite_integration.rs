@@ -56,6 +56,21 @@ fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
     (backend, dir)
 }
 
+/// The backend handle the unmask entry points now take as a parameter.
+///
+/// They resolved one themselves, from the isolate's context, until 2026-09-03.
+/// That read is the ADAPTER's and `crud::unmask` is ENGINE, so the resolution
+/// moved to the V8 dispatcher and the value is passed down. These tests drive
+/// the engine directly, so they make the same call the dispatcher makes on
+/// their behalf. Its LAZY OPEN is load-bearing here, not incidental: the
+/// `configure_cold_sqlite_unmask_fixture` cases deliberately leave the context
+/// with a URL and no backend, and this is what opens it for them.
+async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
+    zeroship_plugin_db::tx_scope::ensure_backend()
+        .await
+        .expect("the backend the V8 dispatcher would have opened")
+}
+
 /// Drive a future to completion on a fresh compio runtime. The
 /// integration target has no global runtime — each `#[test]` builds
 /// its own so tests stay isolated.
@@ -6066,7 +6081,7 @@ fn cold_unmask_with_auto_actor_initializes_and_attaches_before_read() {
             reason: Some("integration test".to_string()),
             rejected_claim: None,
         };
-        let result = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
+        let result = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
             .await
             .expect("dispatch_unmask must succeed for auto actor");
         assert_eq!(
@@ -6155,7 +6170,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
+        let err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("dispatch_unmask must refuse user actor under PR 4 stub");
         match err {
@@ -6201,7 +6216,7 @@ fn unmask_column_not_masked_returns_typed_error() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
+        let err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("unmask of non-masked column must refuse");
         match err {
@@ -6243,7 +6258,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
             reason: Some("chart review".to_string()),
             rejected_claim: None,
         };
-        let _err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
+        let _err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("user actor denied");
 
@@ -6320,7 +6335,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
         let policy_v = serde_json::json!({
             "user": ["public", "pii"],
         });
-        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy must succeed");
 
@@ -6407,7 +6422,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             reason: Some("user requested own data".to_string()),
             rejected_claim: None,
         };
-        let result = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
+        let result = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
             .await
             .expect("policy grants user → pii; unmask must succeed");
         assert_eq!(result.plaintext, plaintext);
@@ -6463,7 +6478,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
         let policy_v = serde_json::json!({
             "user": ["public"],
         });
-        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy must succeed");
 
@@ -6475,7 +6490,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
+        let err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("policy does not allow user → pii; must refuse");
         match err {
@@ -6521,7 +6536,7 @@ fn unmask_default_deny_when_no_policy() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args)
+        let err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("no policy + non-auto actor → default-deny");
         match err {
@@ -6554,7 +6569,7 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
         let bad_policy = serde_json::json!({
             "admin": ["public", "badclass"],
         });
-        let err = mask_policy::dispatch_set_mask_policy(app_id, bad_policy)
+        let err = mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, bad_policy)
             .await
             .expect_err("rust validator must refuse unknown classification");
         match err {
@@ -6610,9 +6625,13 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args1.clone())
-            .await
-            .expect_err("no policy → default deny for support");
+        let err = unmask::dispatch_unmask(
+            &unmask_backend().await,
+            &DbBinding::cold_start(app_id),
+            args1.clone(),
+        )
+        .await
+        .expect_err("no policy → default deny for support");
         match err {
             zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
@@ -6624,7 +6643,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
         let policy_v = serde_json::json!({
             "support": ["internal"],
         });
-        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
 
@@ -6632,7 +6651,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
         // We still get `unmask_not_found` because no row exists, but
         // that's the path AFTER the auth check — the absence of
         // `unmask_not_permitted` is the pin.
-        let err = unmask::dispatch_unmask(&DbBinding::cold_start(app_id), args1)
+        let err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args1)
             .await
             .expect_err("auth passes; SELECT misses");
         match err {
@@ -7298,9 +7317,17 @@ fn cold_drift_check_initializes_and_attaches_before_sampling() {
         // Run cold at 100% sample to guarantee both rows are inspected. The
         // drift checker bypasses ordinary CRUD, so it must attach for itself.
         configure_cold_sqlite_unmask_fixture(&dir, app_id, collection, schema);
-        let report = mask_drift::run_drift_check_for_column(app_id, collection, "email", 100.0)
-            .await
-            .expect("drift check");
+        // The cold OPEN is the caller's now, not the sweep's: the drift check
+        // takes a backend instead of resolving one, so this line is where the
+        // isolate warms. `unmask_backend` is `tx_scope::ensure_backend`, the
+        // same funnel the V8 dispatcher would run, and it still owns the
+        // `init_pool_async` arm - if it ever lost it, this call fails
+        // `not_configured` here rather than sampling on a cold context.
+        let cold = unmask_backend().await;
+        let report =
+            mask_drift::run_drift_check_for_column(&cold, app_id, collection, "email", 100.0)
+                .await
+                .expect("drift check");
         assert_eq!(report.sampled, 2, "both rows must be sampled: {report:?}");
         assert_eq!(report.drifted, 1, "exactly one row drifted: {report:?}");
         assert_eq!(report.samples.len(), 1);
@@ -7311,8 +7338,9 @@ fn cold_drift_check_initializes_and_attaches_before_sampling() {
         assert_eq!(s.stored, "***");
         assert_eq!(s.expected, "b***@example.com");
 
-        // Audit row landed in the per-app sidecar table.
-        let audit = mask_drift::read_drift_audit_rows_for_tests(app_id)
+        // Audit row landed in the per-app sidecar table. Read it back through
+        // the handle the sweep wrote on, not through a second resolve.
+        let audit = mask_drift::read_drift_audit_rows_for_tests(&cold, app_id)
             .await
             .expect("read drift audit rows");
         assert_eq!(audit.len(), 1, "one drift audit row expected: {audit:?}");
@@ -7362,12 +7390,17 @@ fn drift_check_returns_zero_when_aligned() {
             );
             backend.pool_exec(&sql, &[]).await.expect("INSERT");
         }
-        let report = mask_drift::run_drift_check_for_column(app_id, collection, "email", 100.0)
-            .await
-            .expect("drift check");
+        // The handle the sweep runs on, resolved once and shared with the audit
+        // read below: the drift check is handed a backend rather than fetching
+        // one, and `unmask_backend` returns the one this fixture installed.
+        let handle = unmask_backend().await;
+        let report =
+            mask_drift::run_drift_check_for_column(&handle, app_id, collection, "email", 100.0)
+                .await
+                .expect("drift check");
         assert_eq!(report.sampled, 3, "all rows sampled: {report:?}");
         assert_eq!(report.drifted, 0, "no drift expected: {report:?}");
-        let audit = mask_drift::read_drift_audit_rows_for_tests(app_id)
+        let audit = mask_drift::read_drift_audit_rows_for_tests(&handle, app_id)
             .await
             .expect("read audit");
         assert!(audit.is_empty(), "no audit rows for clean run: {audit:?}");
@@ -7411,9 +7444,15 @@ fn drift_check_handles_null_sibling_drift() {
             )
             .await
             .expect("INSERT NULL sibling");
-        let report = mask_drift::run_drift_check_for_column(app_id, collection, "email", 100.0)
-            .await
-            .expect("drift check");
+        let report = mask_drift::run_drift_check_for_column(
+            &unmask_backend().await,
+            app_id,
+            collection,
+            "email",
+            100.0,
+        )
+        .await
+        .expect("drift check");
         assert_eq!(report.drifted, 1, "null sibling must drift: {report:?}");
         assert_eq!(report.samples[0].stored, "__null__");
     });
@@ -7466,9 +7505,15 @@ fn drift_check_handles_plaintext_column() {
             )
             .await
             .expect("INSERT drifted");
-        let report = mask_drift::run_drift_check_for_column(app_id, collection, "ssn", 100.0)
-            .await
-            .expect("drift check");
+        let report = mask_drift::run_drift_check_for_column(
+            &unmask_backend().await,
+            app_id,
+            collection,
+            "ssn",
+            100.0,
+        )
+        .await
+        .expect("drift check");
         assert_eq!(report.sampled, 2);
         assert_eq!(report.drifted, 1);
         assert_eq!(report.samples[0].row_pk, "u_drift");
@@ -7559,10 +7604,18 @@ fn drift_check_handles_encrypted_column() {
             .expect("INSERT");
 
         // The correct mask for `555-00-1234` under `last4` is
-        // `***-**-1234`; stored is `***-**-9999`. Drift expected.
-        let report = mask_drift::run_drift_check_for_column(app_id, collection, "ssn", 100.0)
-            .await
-            .expect("drift check");
+        // `***-**-1234`; stored is `***-**-9999`. Drift expected. The sweep
+        // decrypts through `backend.key_store()` taken from this handle, which
+        // is the one holding the root key `with_root_key` installed.
+        let report = mask_drift::run_drift_check_for_column(
+            &unmask_backend().await,
+            app_id,
+            collection,
+            "ssn",
+            100.0,
+        )
+        .await
+        .expect("drift check");
         assert_eq!(report.sampled, 1, "one row sampled: {report:?}");
         assert_eq!(report.drifted, 1, "drift expected: {report:?}");
         let s = &report.samples[0];
@@ -7635,7 +7688,7 @@ fn cold_bulk_unmask_initializes_and_attaches_before_read() {
 
         // Policy: `user` can unmask pii AND spi.
         let policy_v = serde_json::json!({ "user": ["pii", "spi"] });
-        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
 
@@ -7659,7 +7712,7 @@ fn cold_bulk_unmask_initializes_and_attaches_before_read() {
             reason: Some("ops dashboard".into()),
             rejected_claim: None,
         };
-        let result = dispatch_bulk_unmask(&DbBinding::cold_start(app_id), args)
+        let result = dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
             .await
             .expect("bulk unmask");
         // Plaintext recovered for every pair.
@@ -7737,7 +7790,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
 
         // Policy: `user` can ONLY unmask pii; spi is forbidden.
         let policy_v = serde_json::json!({ "user": ["pii"] });
-        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
 
@@ -7753,7 +7806,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             reason: None,
             rejected_claim: None,
         };
-        let err = dispatch_bulk_unmask(&DbBinding::cold_start(app_id), args)
+        let err = dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("bulk must refuse atomically");
         match err {
@@ -7801,7 +7854,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
             reason: None,
             rejected_claim: None,
         };
-        let err = dispatch_bulk_unmask(&DbBinding::cold_start(app_id), args)
+        let err = dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("unknown column must refuse");
         match err {
@@ -7878,7 +7931,7 @@ fn cold_query_unmask_hint_initializes_and_attaches_before_read() {
 
         // Policy: `user` can unmask both pii and spi.
         let policy_v = serde_json::json!({ "user": ["pii", "spi"] });
-        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
 
@@ -7896,6 +7949,7 @@ fn cold_query_unmask_hint_initializes_and_attaches_before_read() {
 
         // Step 1 — upfront auth fence.
         authorize_query_hint(
+            &unmask_backend().await,
             &DbBinding::cold_start(app_id),
             collection,
             &["ssn".to_string()],
@@ -7923,6 +7977,7 @@ fn cold_query_unmask_hint_initializes_and_attaches_before_read() {
             },
         })];
         dispatch_unmask_for_query(
+            &unmask_backend().await,
             &DbBinding::cold_start(app_id),
             collection,
             &["ssn".to_string()],
@@ -7951,6 +8006,7 @@ fn cold_query_unmask_hint_initializes_and_attaches_before_read() {
 
         // Step 3 — granted audit row lands.
         audit_query_hint_granted(
+            &unmask_backend().await,
             &DbBinding::cold_start(app_id),
             collection,
             &["ssn".to_string()],
@@ -8005,12 +8061,13 @@ fn per_query_unmask_hint_rejects_unauthorized_actor() {
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
         // Policy: `user` can only unmask `pii`, NOT `spi`.
         let policy_v = serde_json::json!({ "user": ["pii"] });
-        mask_policy::dispatch_set_mask_policy(app_id, policy_v)
+        mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, policy_v)
             .await
             .expect("set_mask_policy");
 
         let actor = Some(serde_json::json!({ "kind": "user", "id": "actor_x" }));
         let err = authorize_query_hint(
+            &unmask_backend().await,
             &DbBinding::cold_start(app_id),
             collection,
             &["ssn".to_string()],
@@ -8053,6 +8110,7 @@ fn per_query_unmask_hint_unknown_column_returns_typed_error() {
         zeroship_plugin_db::clear_mask_policy_cache_for_tests(app_id);
         let actor = Some(serde_json::json!({ "kind": "auto" }));
         let err = authorize_query_hint(
+            &unmask_backend().await,
             &DbBinding::cold_start(app_id),
             collection,
             &["does_not_exist".to_string()],

@@ -149,6 +149,7 @@ pub(crate) async fn exec_mutation_then_read(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_mutation_with_emit(bq, &route, &coll, op).await?;
     read_pipeline::apply(
+        route.backend(),
         &binding,
         &coll,
         rows,
@@ -174,6 +175,7 @@ pub(crate) async fn exec_aggregate_read(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_query(&route, bq).await?;
     read_pipeline::apply(
+        route.backend(),
         &binding,
         &coll,
         rows,
@@ -211,6 +213,7 @@ pub(crate) async fn exec_distinct_read(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_query(&route, bq).await?;
     read_pipeline::apply(
+        route.backend(),
         &binding,
         &coll,
         rows,
@@ -699,9 +702,14 @@ pub(crate) async fn run_find(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     validate_unmask_projection(plan.select.as_ref(), &plan.unmask_columns)?;
 
-    // Upfront auth fence for the unmask hint.
+    // Upfront auth fence for the unmask hint. The fence, the SELECT and the
+    // audit row below all run on `route.backend()` - the handle the adapter
+    // bound for THIS dispatch. The unmask module used to resolve its own from
+    // the thread's context, which is ADAPTER state an ENGINE file may not read,
+    // and which could name a different handle than the one the read ran on.
     if !plan.unmask_columns.is_empty() {
         crate::crud::unmask::authorize_query_hint(
+            route.backend(),
             &binding,
             &coll,
             &plan.unmask_columns,
@@ -739,6 +747,7 @@ pub(crate) async fn run_find(
     .map_err(DbError::from)?;
     let rows = exec_query(&route, bq).await?;
     let result = read_pipeline::apply(
+        route.backend(),
         &binding,
         &coll,
         rows,
@@ -754,6 +763,7 @@ pub(crate) async fn run_find(
     // return the plaintext anyway.
     if !plan.unmask_columns.is_empty() {
         crate::crud::unmask::audit_query_hint_granted(
+            route.backend(),
             &binding,
             &coll,
             &plan.unmask_columns,
@@ -791,7 +801,12 @@ pub(crate) async fn run_insert(
     actor_id: Option<String>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let mut doc = doc;
+    // The write pipeline's encryption stage takes a key store, not a backend:
+    // it issues no SQL of its own, so it has no routing decision to make. The
+    // store comes off the route this insert will run on, which is the handle
+    // that will store the ciphertext.
     write_pipeline::apply(
+        route.backend().key_store(),
         &binding,
         &coll,
         &mut doc,
@@ -821,6 +836,7 @@ pub(crate) async fn run_insert(
     )
     .await?;
     read_pipeline::apply(
+        route.backend(),
         &binding,
         &coll,
         rows,
@@ -843,7 +859,14 @@ pub(crate) async fn run_insert_many(
     actor_id: Option<String>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let mut docs = docs;
-    prepare_insert_many_docs_for_binding(&mut docs, &binding, &coll, actor_id.as_deref()).await?;
+    prepare_insert_many_docs_for_binding(
+        route.backend().key_store(),
+        &mut docs,
+        &binding,
+        &coll,
+        actor_id.as_deref(),
+    )
+    .await?;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     maybe_lower_sqlite_boolean_docs(&schema, &mut docs);
 
@@ -863,6 +886,7 @@ pub(crate) async fn run_insert_many(
     )
     .await?;
     read_pipeline::apply(
+        route.backend(),
         &binding,
         &coll,
         rows,
@@ -942,7 +966,9 @@ pub(crate) async fn run_update_one(
 
     let mut update = update;
     let row_pk = target_row.as_ref().map_or("", |row| row.row_pk.as_str());
+    // Key store off the route, for the reason given on [`run_insert`].
     write_pipeline::apply(
+        route.backend().key_store(),
         &binding,
         &coll,
         &mut update,
@@ -990,6 +1016,7 @@ pub(crate) async fn run_update_one(
     )
     .await?;
     let result = read_pipeline::apply(
+        route.backend(),
         &binding,
         &coll,
         rows,
@@ -1104,7 +1131,11 @@ pub(crate) async fn run_update_many(
                 let row_pk = target_row.row_pk.clone();
                 let row_id = target_row.id_value.clone();
                 let mut row_update = update.clone();
+                // The route moved into the frame, so the key store comes off
+                // the frame's route - the same connection every statement in
+                // this atomic write runs on.
                 write_pipeline::apply(
+                    frame.route().backend().key_store(),
                     &binding,
                     &coll,
                     &mut row_update,
@@ -1167,7 +1198,10 @@ pub(crate) async fn run_update_many(
     }
 
     let mut update = update;
+    // The non-per-row arm never moved the route into a frame, so it is still
+    // here to supply the key store.
     write_pipeline::apply(
+        route.backend().key_store(),
         &binding,
         &coll,
         &mut update,
@@ -1643,6 +1677,7 @@ pub(crate) async fn run_upsert(
     )
     .await?;
     read_pipeline::apply(
+        route.backend(),
         &binding,
         &coll,
         rows,
@@ -1822,6 +1857,7 @@ pub(crate) async fn run_search(
     crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
 
     read_pipeline::apply(
+        backend,
         &binding,
         &coll,
         rows,
@@ -1975,6 +2011,7 @@ pub(crate) async fn run_near(
     crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
 
     read_pipeline::apply(
+        backend,
         &binding,
         &coll,
         rows,
@@ -1992,13 +2029,19 @@ pub(crate) async fn run_near(
 // ===========================================================================
 // Transparent column encryption hooks
 // ===========================================================================
+/// `keys` is a parameter for the same reason it is one on
+/// [`write_pipeline::apply`]: this prep encrypts, and encryption wants a key
+/// store, not a backend and not a route. The production caller takes it off
+/// the route the insert will run on.
 async fn prepare_insert_many_docs_for_binding(
+    keys: &crate::encryption::KeyStore,
     docs: &mut Value,
     binding: &DbBinding,
     collection: &str,
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
     write_pipeline::apply(
+        keys,
         binding,
         collection,
         docs,
@@ -2015,7 +2058,15 @@ pub async fn prepare_insert_many_docs_for_write(
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
     let binding = DbBinding::cold_start(app_id);
-    prepare_insert_many_docs_for_binding(docs, &binding, collection, actor_id).await
+    // Resolves its key store through the adapter's funnel for the same reason
+    // `finalize_rows_on_read_for_tests` below does: it stands in for the V8
+    // dispatcher, which is the frame that resolves the handle before the
+    // engine sees it. A production caller here would be an ENGINE-to-ADAPTER
+    // edge; this one is `test-helpers`-gated, and its callers are integration
+    // targets with no route to take a handle off.
+    let backend = crate::tx_scope::ensure_backend().await?;
+    prepare_insert_many_docs_for_binding(backend.key_store(), docs, &binding, collection, actor_id)
+        .await
 }
 
 /// Test helper that drives the REAL read pipeline
@@ -2024,6 +2075,12 @@ pub async fn prepare_insert_many_docs_for_write(
 /// descriptor-sourced decrypt + mask-wrap path end-to-end (not an AEAD-unit
 /// shim). Returns the finalized rows; `has_masked` is dropped (the caller
 /// asserts on the row contents).
+///
+/// It resolves the backend itself, through the adapter's funnel, because it is
+/// standing in for the V8 dispatcher - which is the frame that does exactly
+/// that before handing the handle to the engine. A production caller here would
+/// be an ENGINE-to-ADAPTER edge; this one is `test-helpers`-gated, and its
+/// callers are integration targets with no route to take the handle off.
 #[cfg(feature = "test-helpers")]
 pub async fn finalize_rows_on_read_for_tests(
     app_id: &str,
@@ -2031,7 +2088,9 @@ pub async fn finalize_rows_on_read_for_tests(
     rows: Vec<Value>,
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app_id);
+    let backend = crate::tx_scope::ensure_backend().await?;
     let result = read_pipeline::apply(
+        &backend,
         &binding,
         collection,
         rows,
@@ -2069,7 +2128,12 @@ async fn prepare_upsert_doc_for_write(
     actor_id: Option<&str>,
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
+    // The key store comes off the route this upsert already carries. That is
+    // not "thread a route to reach a key": the route is here because the
+    // conflict probe issues SQL, and taking the store from it keeps the write
+    // and its ciphertext on one handle.
     write_pipeline::apply(
+        route.backend().key_store(),
         binding,
         collection,
         doc,
@@ -2105,7 +2169,17 @@ async fn prepare_upsert_doc_for_write(
 /// schema declares an encrypted column, surface a typed Configuration
 /// error so the SDK can branch on `.code` rather than silently writing
 /// plaintext to the BYTEA/BLOB column.
+///
+/// `keys` is a PARAMETER rather than something this function resolves, and it
+/// is a [`crate::encryption::KeyStore`] rather than a backend or a route: this
+/// pass issues no SQL, so it has no routing decision to make and must not be
+/// handed one to make it from. It called `exec::ensure_backend_for_shared_sql`
+/// until 2026-09-03 purely to reach `backend.key_store()`, which put an
+/// ADAPTER read (`crate::context`, `init_pool_async`) behind an ENGINE
+/// function on every encrypted write. Every caller already holds the handle
+/// the write itself will run on, so the store travels down from there.
 async fn encryption_pass_dispatch(
+    keys: &crate::encryption::KeyStore,
     app_id: &str,
     collection: &str,
     schema: &Value,
@@ -2119,17 +2193,18 @@ async fn encryption_pass_dispatch(
     //
     // A `column_encryption_unavailable` refusal used to follow them, guarded by
     // `schema_has_encrypted_columns`. IT WAS UNREACHABLE, and collapsing the
-    // arms is what exposed that: `ensure_backend_for_shared_sql` returns a
+    // arms is what exposed that: the backend resolution returned a
     // `BackendHandle`, not an `Option`, and the handle has exactly two variants
     // - so `as_encrypted_column_pg()` and `as_encrypted_column_sqlite()` were
     // exhaustive between them and one always returned first. The refusal read
     // as the fence that stops a declared-encrypted column being written in
     // plaintext; it never ran, and deleting it removes that impression rather
-    // than a protection. The real fence is that this function cannot obtain a
-    // handle without `?`-propagating the failure.
-    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+    // than a protection. The real fence is now stronger than the `?` it
+    // replaced: `keys` is a required borrow, so a caller with no key store
+    // cannot reach this function at all - a compile error where the funnel
+    // gave a runtime one.
     crate::crud::encryption_pass::encrypt_row_on_write_with_sidechannel(
-        backend.key_store(),
+        keys,
         app_id,
         collection,
         schema,

@@ -241,6 +241,37 @@ where
     (result, events)
 }
 
+/// A real backend for units that must PASS one but never reach a statement.
+///
+/// The engine's row-facing entry points - `crud::read_pipeline::apply` and the
+/// four `crud::unmask` dispatchers - take `&BackendHandle` as a parameter
+/// rather than resolving one from the thread's context, because resolving it
+/// reads ADAPTER state and those files are ENGINE. Their unit tests refuse or
+/// return in a prologue that runs before the first statement, so any real
+/// handle does; expressing "not opened yet" instead would need an `Option`,
+/// which trades a compile error for a runtime one at every production call
+/// site to spare a handful of tests a temp dir.
+///
+/// The `TempDir` is RETURNED, not dropped: it has to outlive the backend, or
+/// the SQLite session's worker thread closes over a deleted directory.
+///
+/// # Panics
+///
+/// **Call this INSIDE a compio runtime** - from within `block_on`, not beside
+/// it. Opening the SQLite backend spawns its CDC publisher with
+/// `compio::runtime::spawn`, which panics `not in a compio runtime` off-thread
+/// of one. Building the runtime first and calling this outside its `block_on`
+/// is the shape that fails, and it fails on the OPEN, before any assertion.
+pub(crate) fn unit_backend() -> (crate::backend::BackendHandle, tempfile::TempDir) {
+    let dir = tempfile::tempdir().expect("create tempdir");
+    let backend = crate::backend_selection::new_sqlite_backend(dir.path().to_path_buf())
+        .expect("open SqliteBackend");
+    (
+        crate::backend::BackendHandle::Sqlite(std::rc::Rc::new(backend)),
+        dir,
+    )
+}
+
 #[cfg(test)]
 mod self_tests {
     //! Sanity tests for the capture layer itself. These pin the

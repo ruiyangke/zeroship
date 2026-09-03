@@ -77,7 +77,16 @@ pub(crate) struct ApplyResult {
 /// now the `collection_not_declared` error, and what used to be a warm read of
 /// an EMPTY declared field map still behaves the same way it always did: the
 /// platform system timestamps normalize, and no creator field is coerced.
+///
+/// `backend` is a PARAMETER because step 5 issues SQL of its own - one SELECT
+/// per (row, unmasked column), outside `exec` - and the handle it runs on must
+/// be the one the read itself ran on. Every caller here already holds a
+/// [`crate::tx_route::TxRoute`] and hands over `route.backend()`. Step 5 used
+/// to resolve its own through the engine funnel, which read ADAPTER state from
+/// an ENGINE file; the funnel now lives at `crate::tx_scope::ensure_backend`
+/// and the value travels down instead.
 pub(crate) async fn apply(
+    backend: &crate::backend::BackendHandle,
     binding: &DbBinding,
     collection: &str,
     mut rows: Vec<Value>,
@@ -102,7 +111,11 @@ pub(crate) async fn apply(
     normalize_rows_on_read(&schema, &mut rows)?;
 
     if opts.apply_decrypt && super::schema_has_encrypted_columns(&schema) {
-        decrypt_rows_on_read(app_id, collection, &schema, &mut rows).await?;
+        // The key store comes off the handle this read ran on, not off a
+        // second resolution of its own: `backend` is already here for step 5,
+        // and one handle per call is what keeps the decrypt keyed to the same
+        // backend that returned the ciphertext.
+        decrypt_rows_on_read(backend.key_store(), app_id, collection, &schema, &mut rows).await?;
     }
 
     let has_masked = if opts.wrap_masked && super::schema_has_masked_columns(&schema) {
@@ -114,6 +127,7 @@ pub(crate) async fn apply(
 
     if !opts.unmask_columns.is_empty() {
         super::unmask::dispatch_unmask_for_query(
+            backend,
             binding,
             collection,
             opts.unmask_columns,
@@ -387,23 +401,29 @@ fn days_from_civil(y: i32, m: u32, d: u32) -> Option<i64> {
     Some(era * 146_097 + doe as i64 - 719_468)
 }
 
+/// Decrypt every encrypted column on `rows`.
+///
+/// `keys` is a PARAMETER, and it is a [`crate::encryption::KeyStore`] rather
+/// than a backend because a key store is the whole of what this stage needs -
+/// it issues no SQL, so it has no routing decision to make and must not be
+/// handed one. It resolved its own backend through the engine funnel until
+/// 2026-09-03, which read ADAPTER state (`crate::context`, `init_pool_async`)
+/// from an ENGINE file. [`apply`] already holds the handle the read ran on, so
+/// the store travels down from there and no key can come from a backend other
+/// than the one that produced the ciphertext.
+///
+/// One arm, not two. This was a PG branch and a SQLite branch calling the SAME
+/// function with the SAME arguments, differing only in the concrete type they
+/// passed - a monomorphisation artifact of the `EncryptedColumn` trait, deleted
+/// 2026-09-02. Column encryption never depended on the vendor; only key
+/// sourcing did, and both backends source identically.
 async fn decrypt_rows_on_read(
+    keys: &crate::encryption::KeyStore,
     app_id: &str,
     collection: &str,
     schema: &Value,
     rows: &mut [Value],
 ) -> Result<(), DbError> {
-    // The funnel, not a direct context read. Every caller already reached this
-        // point through a path that installed the backend, so this is idempotent -
-        // but saying so with a call rather than relying on the ordering means a
-        // future caller that has NOT done that still works instead of failing.
-    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
-    // One arm, not two. This was a PG branch and a SQLite branch calling the
-    // SAME function with the SAME arguments, differing only in the concrete
-    // type they passed - a monomorphisation artifact of the `EncryptedColumn`
-    // trait, deleted 2026-09-02. Column encryption never depended on the
-    // vendor; only key sourcing did, and both backends source identically.
-    let keys = backend.key_store();
     for row in rows.iter_mut() {
         crate::crud::encryption_pass::decrypt_row_on_read(keys, app_id, collection, schema, row)
             .await?;
@@ -601,8 +621,15 @@ mod tests {
         let binding = DbBinding::cold_start("app_aggregate_scope");
         let alias = ["secret".to_string()];
         let rt = compio::runtime::Runtime::new().expect("compio runtime build");
+        // `apply` takes the backend rather than resolving one; none of the
+        // three cases in this module reaches a statement through it (empty
+        // `unmask_columns`, no encrypted column in scope), so any real handle
+        // does. Opened INSIDE the runtime, which its CDC publisher's `spawn`
+        // requires - see `crate::test_support::unit_backend`.
+        let (backend, _dir) = rt.block_on(async { crate::test_support::unit_backend() });
         let result = rt
             .block_on(apply(
+                &backend,
                 &binding,
                 "users",
                 rows.clone(),
@@ -624,6 +651,7 @@ mod tests {
         // what makes `Declared` a usable default for the other twelve sites.
         let defaulted = rt
             .block_on(apply(
+                &backend,
                 &binding,
                 "users",
                 rows,
@@ -655,9 +683,12 @@ mod tests {
         })];
 
         let binding = DbBinding::cold_start("app_distinct_masked");
-        let result = compio::runtime::Runtime::new()
-            .expect("compio runtime build")
+        let rt = compio::runtime::Runtime::new().expect("compio runtime build");
+        // Inside the runtime: see the sibling test above.
+        let (backend, _dir) = rt.block_on(async { crate::test_support::unit_backend() });
+        let result = rt
             .block_on(apply(
+                &backend,
                 &binding,
                 "users",
                 rows,

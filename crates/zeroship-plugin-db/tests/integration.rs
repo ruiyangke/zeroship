@@ -51,6 +51,19 @@ fn test_url() -> String {
     zeroship_core::config::test_database_url()
 }
 
+/// The backend handle the unmask entry points now take as a parameter.
+///
+/// They resolved one themselves, from the isolate's context, until 2026-09-03.
+/// That read is the ADAPTER's and `crud::unmask` is ENGINE, so the resolution
+/// moved to the V8 dispatcher and the value is passed down. These tests drive
+/// the engine directly, with no V8 frame above them, so they make the same call
+/// the dispatcher makes on their behalf in production.
+async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
+    zeroship_plugin_db::tx_scope::ensure_backend()
+        .await
+        .expect("the backend the V8 dispatcher would have opened")
+}
+
 async fn require_pg() -> String {
     let url = test_url();
     match compio_postgres::connect(&url, NoTls).await {
@@ -6366,6 +6379,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
@@ -6493,6 +6507,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
@@ -6632,6 +6647,7 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
@@ -6750,12 +6766,18 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     // The boot-time install `installSchema` performs. Before the fix
     // this issued `SELECT __zeroship_admin.set_mask_policy(...)` and
     // failed here on every database.
-    mask_policy::dispatch_set_mask_policy(app, json!({ "support": ["spi"] }))
-        .await
-        .expect("setMaskPolicy must install the declared policy on PG");
+    mask_policy::dispatch_set_mask_policy(
+        // The backend the V8 dispatcher resolves before calling the installer.
+        &unmask_backend().await,
+        app,
+        json!({ "support": ["spi"] }),
+    )
+    .await
+    .expect("setMaskPolicy must install the declared policy on PG");
 
     // A role the declared policy grants reads through.
     let granted = unmask::dispatch_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
@@ -6774,6 +6796,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     // test would pass on an implementation that authorized everything,
     // which is exactly the failure mode a cache-only policy could hide.
     let err = unmask::dispatch_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),

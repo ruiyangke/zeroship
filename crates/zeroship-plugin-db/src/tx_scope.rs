@@ -176,7 +176,14 @@ pub(crate) fn capture_route(
 /// the read would make `installSchema`'s `setMaskPolicy` fail
 /// `not_configured` on every fresh isolate, which on the SQLite dev tier is
 /// every boot.
-pub(crate) async fn ensure_backend() -> Result<crate::backend::BackendHandle, DbError> {
+///
+/// `pub`, not `pub(crate)`, and capped by the module: `tx_scope` is
+/// `pub(crate) mod` in a release build and `pub mod` only under
+/// `test-helpers`, so the shipped surface is unchanged. The integration
+/// targets need it because they drive the engine's unmask entry points
+/// directly, and those take the backend as a parameter now - this is the
+/// same call the V8 dispatcher makes on their behalf in production.
+pub async fn ensure_backend() -> Result<crate::backend::BackendHandle, DbError> {
     if crate::context::with(|c| c.backend().is_none()) {
         crate::init_pool_async()
             .await

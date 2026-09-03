@@ -420,28 +420,30 @@ async fn ensure_mask_policy_cached(
     Ok(())
 }
 
-/// Initialize the configured backend and bind the app file on SQLite before
-/// an unmask path reaches its direct SQL helpers.
+/// Bind the app file on SQLite before an unmask path reaches its direct SQL
+/// helpers.
 ///
 /// Ordinary CRUD gets the same binding from `exec`, but unmask fetches and
 /// audit writes intentionally bypass that executor. The old schema bootstrap
 /// call happened to initialize the backend and attach SQLite before either
 /// path could run; lazy initialization must preserve that prerequisite without
 /// restoring a per-collection boot RPC.
-/// **Returns the prepared backend**, so the caller does not have to go back to
-/// the context for it. `ensure_mask_policy_cached` used to do exactly that, and
-/// its miss arm - "backend not initialised, the default-deny stub handles it" -
-/// described a state that could not occur: all three of its call sites run this
-/// function immediately beforehand. Handing the value over turns that ordering
-/// from a convention into a data dependency, and removes the last
-/// engine-reaches-into-the-adapter read in this file.
-async fn ensure_unmask_backend(app_id: &str) -> Result<BackendHandle, DbError> {
-    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+///
+/// **The backend is a PARAMETER, not something this function resolves.** It
+/// resolved one itself - through `exec::ensure_backend_for_shared_sql`, which
+/// read `crate::context` and called `crate::init_pool_async` - until
+/// 2026-09-03. Both are ADAPTER state, and this file is ENGINE, so that call
+/// was the one dependency direction the crate split forbids. The funnel now
+/// lives at `crate::tx_scope::ensure_backend` and every entry point in this
+/// module receives what it resolved: a routed one takes it off its `TxRoute`,
+/// an unrouted one is handed the value the V8 dispatcher already opened. What
+/// is left here is the half that is genuinely about unmask - the per-app
+/// preparation - and it stays because these paths bypass `exec`.
+async fn prepare_unmask_backend(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
     // Asked, not downcast. What "ready for this app" means is the backend's
     // business - SQLite must attach the app file, PostgreSQL needs nothing -
     // and this path only needs it to have happened.
-    backend.prepare_for_app(app_id).await?;
-    Ok(backend)
+    backend.prepare_for_app(app_id).await
 }
 
 // ---------------------------------------------------------------------------
@@ -459,7 +461,13 @@ async fn ensure_unmask_backend(app_id: &str) -> Result<BackendHandle, DbError> {
 /// Public under `test-helpers` so the integration suite can drive
 /// the dispatch flow without standing up V8; the production V8 glue
 /// in [`dispatch_unmask_field`] is the only crate-internal caller.
+///
+/// `backend` is supplied by the caller because this function is ENGINE and the
+/// funnel that opens a backend is ADAPTER state; the V8 dispatcher resolves it
+/// with `tx_scope::ensure_backend` and hands the value down. See
+/// `prepare_unmask_backend`.
 pub async fn dispatch_unmask(
+    backend: &BackendHandle,
     binding: &DbBinding,
     mut args: UnmaskFieldArgs,
 ) -> Result<UnmaskFieldResult, DbError> {
@@ -485,19 +493,19 @@ pub async fn dispatch_unmask(
             ),
         })?;
     args.column = mask_meta.canonical_column.clone();
-    let backend = ensure_unmask_backend(app_id).await?;
+    prepare_unmask_backend(backend, app_id).await?;
 
     // Step 2 — authorization: load the per-app policy into the cache
     // (best-effort) THEN consult `check_unmask_authorization`, which
     // honours the cached policy or falls back to the default-deny
     // rule on a miss.
-    ensure_mask_policy_cached(&backend, app_id).await?;
+    ensure_mask_policy_cached(backend, app_id).await?;
     let allowed = check_unmask_authorization(app_id, &args.actor, &mask_meta.classification)?;
     if !allowed {
         // Audit-then-refuse. The audit row carries `outcome = "denied"`
         // so operators see every attempted access — including the
         // `canUnmask()` probe path the SDK uses.
-        write_audit_unmask_row(&backend, app_id, &args, &mask_meta.classification, "denied").await?;
+        write_audit_unmask_row(backend, app_id, &args, &mask_meta.classification, "denied").await?;
         // The REFUSED unmask still wrote an audit row, and that row cost a
         // statement. Metering counts work performed, not permission granted.
         meter_audit_write(app_id);
@@ -515,8 +523,8 @@ pub async fn dispatch_unmask(
 
     // Step 3 — fetch + decrypt (or fetch-plaintext).
     let plaintext = match lookup_encryption_meta(&schema, &args.column)? {
-        Some(enc_meta) => fetch_and_decrypt(&backend, app_id, &args, &enc_meta).await?,
-        None => fetch_plaintext_parent(&backend, app_id, &args).await?,
+        Some(enc_meta) => fetch_and_decrypt(backend, app_id, &args, &enc_meta).await?,
+        None => fetch_plaintext_parent(backend, app_id, &args).await?,
     };
     // Both arms ran exactly one SELECT and both `?`, so reaching here means it
     // succeeded. Neither goes through `exec::run_sql`, so neither was billed
@@ -527,7 +535,7 @@ pub async fn dispatch_unmask(
     // is in hand so a SELECT failure / decrypt failure doesn't leave a
     // ghost "granted" row in the audit log (the failure surfaces a
     // typed error; the audit table reflects only completed unmasks).
-    write_audit_unmask_row(&backend, app_id, &args, &mask_meta.classification, "granted").await?;
+    write_audit_unmask_row(backend, app_id, &args, &mask_meta.classification, "granted").await?;
     meter_audit_write(app_id);
 
     Ok(UnmaskFieldResult { plaintext })
@@ -565,7 +573,7 @@ async fn fetch_and_decrypt(
 ) -> Result<String, DbError> {
     // The prepared backend arrives as an argument. This re-resolved it through
     // the funnel until 2026-09-03, which was idempotent but pointless: every
-    // reaching path runs `ensure_unmask_backend` first, so the second lookup
+    // reaching path runs `prepare_unmask_backend` first, so the second lookup
     // could only ever return what the caller already held. Taking it as a
     // parameter makes that ordering a data dependency rather than a comment.
 
@@ -926,7 +934,12 @@ pub struct BulkUnmaskResult {
 /// Unknown columns (`unmask_column_not_masked`) or unknown
 /// collections fail the call up-front before any audit row is written
 /// — the error surface is unchanged from the single-cell path.
+///
+/// `backend` is supplied by the caller for the reason
+/// `prepare_unmask_backend` gives: opening one reads ADAPTER state, and this
+/// is ENGINE. The V8 glue resolves it before it enters here.
 pub async fn dispatch_bulk_unmask(
+    backend: &BackendHandle,
     binding: &DbBinding,
     args: BulkUnmaskArgs,
 ) -> Result<BulkUnmaskResult, DbError> {
@@ -985,11 +998,20 @@ pub async fn dispatch_bulk_unmask(
         rejected_claim: args.rejected_claim.clone(),
     };
 
-    // ---- Step 1: only after every column is validated, initialize the
+    // ---- Step 1: only after every column is validated, prepare the
     // backend, load policy, and check authorization. Invalid descriptor input
-    // keeps its typed validation error even when no database is configured.
-    let backend = ensure_unmask_backend(app_id).await?;
-    ensure_mask_policy_cached(&backend, app_id).await?;
+    // keeps its typed validation error rather than being reported as a
+    // database fault.
+    //
+    // That ordering is now local to THIS function. It used to hold for the
+    // whole op, because the backend was opened here; the caller opens it now,
+    // so on an isolate with no database at all the V8 dispatch surfaces the
+    // configuration error first. Nothing in production reaches that state -
+    // the isolate always has a URL, and the dev tier opens SQLite lazily - and
+    // the alternative is handing the engine an `Option` it would have to
+    // unwrap at a statement.
+    prepare_unmask_backend(backend, app_id).await?;
+    ensure_mask_policy_cached(backend, app_id).await?;
     let mut unauthorized: Vec<(String, String)> = Vec::new(); // (row_pk, column)
     for (row_pk, columns) in &normalized_items {
         for (_, canonical_column) in columns {
@@ -1006,7 +1028,7 @@ pub async fn dispatch_bulk_unmask(
     // emit one audit row covering the whole call + refuse.
     if !unauthorized.is_empty() {
         write_audit_bulk_row(
-            &backend,
+            backend,
             app_id,
             &normalized_audit_args,
             &classifications,
@@ -1052,8 +1074,8 @@ pub async fn dispatch_bulk_unmask(
             // which would re-audit per pair). This is the
             // "wrap-over-many" pattern the proposal describes.
             let plaintext = match lookup_encryption_meta(&schema, canonical_col)? {
-                Some(enc_meta) => fetch_and_decrypt(&backend, app_id, &single_args, &enc_meta).await?,
-                None => fetch_plaintext_parent(&backend, app_id, &single_args).await?,
+                Some(enc_meta) => fetch_and_decrypt(backend, app_id, &single_args, &enc_meta).await?,
+                None => fetch_plaintext_parent(backend, app_id, &single_args).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1065,7 +1087,7 @@ pub async fn dispatch_bulk_unmask(
 
     // ---- Step 4 — single audit row for the whole call on success.
     write_audit_bulk_row(
-        &backend,
+        backend,
         app_id,
         &normalized_audit_args,
         &classifications,
@@ -1166,7 +1188,14 @@ async fn write_audit_bulk_row(
 /// `Err(DbError::Coded { code: "unmask_not_permitted", ... })`. The
 /// denied path writes one `denied` audit row covering the whole
 /// query.
+///
+/// `backend` comes off the find's own [`crate::tx_route::TxRoute`] rather than
+/// being resolved here: `run_find` already holds the handle its SELECT will run
+/// on, and the fence, the SELECT and the audit row all have to be the same
+/// backend. Resolving a second one here would also put this ENGINE file's hands
+/// on ADAPTER state - see `prepare_unmask_backend`.
 pub async fn authorize_query_hint(
+    backend: &BackendHandle,
     binding: &DbBinding,
     collection: &str,
     unmask_columns: &[String],
@@ -1200,8 +1229,8 @@ pub async fn authorize_query_hint(
         classifications.push(mask_meta.classification);
     }
 
-    let backend = ensure_unmask_backend(app_id).await?;
-    ensure_mask_policy_cached(&backend, app_id).await?;
+    prepare_unmask_backend(backend, app_id).await?;
+    ensure_mask_policy_cached(backend, app_id).await?;
     let mut unauthorized: Vec<String> = Vec::new();
     for (column, classification) in unmask_columns.iter().zip(&classifications) {
         if !check_unmask_authorization(app_id, actor, classification)? {
@@ -1211,7 +1240,7 @@ pub async fn authorize_query_hint(
 
     if !unauthorized.is_empty() {
         write_audit_query_hint_row(
-            &backend,
+            backend,
             app_id,
             collection,
             unmask_columns,
@@ -1247,7 +1276,12 @@ pub async fn authorize_query_hint(
 /// unmask hint. Called by the find dispatcher AFTER the SELECT lands.
 /// Single row per query (NOT per row), so the audit-log volume scales
 /// with query count not row count.
+///
+/// Takes the same `backend` its `authorize_query_hint` half took, for the same
+/// reason: the granted row must land on the connection the find ran on, and
+/// `run_find` is the frame that holds it.
 pub async fn audit_query_hint_granted(
+    backend: &BackendHandle,
     binding: &DbBinding,
     collection: &str,
     unmask_columns: &[String],
@@ -1264,7 +1298,7 @@ pub async fn audit_query_hint_granted(
     // Re-resolve classifications for the audit row. Cheap — the descriptor
     // lookup is a HashMap read.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    let backend = ensure_unmask_backend(app_id).await?;
+    prepare_unmask_backend(backend, app_id).await?;
     let mut classifications: Vec<String> = Vec::with_capacity(unmask_columns.len());
     for col in unmask_columns {
         let cls = lookup_mask_meta(&schema, col)
@@ -1273,7 +1307,7 @@ pub async fn audit_query_hint_granted(
         classifications.push(cls);
     }
     write_audit_query_hint_row(
-        &backend,
+        backend,
         app_id,
         collection,
         unmask_columns,
@@ -1302,7 +1336,14 @@ pub async fn audit_query_hint_granted(
 /// `rows` is mutated in place. Each row's PK is read from `row["id"]`
 /// (the implicit primary key; aligns with `wrap_row_on_read`'s
 /// expectation).
+///
+/// `backend` arrives from `crate::crud::read_pipeline::apply`, which is the
+/// stage this promotion belongs to and which takes it off the read's own route.
+/// It resolved one through the engine funnel until 2026-09-03; the handle it
+/// found was the route's anyway, so the parameter costs nothing and stops an
+/// ENGINE file reading ADAPTER state. See `prepare_unmask_backend`.
 pub async fn dispatch_unmask_for_query(
+    backend: &BackendHandle,
     binding: &DbBinding,
     collection: &str,
     unmask_columns: &[String],
@@ -1313,7 +1354,7 @@ pub async fn dispatch_unmask_for_query(
     }
     let app_id = binding.app_id();
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    let backend = ensure_unmask_backend(app_id).await?;
+    prepare_unmask_backend(backend, app_id).await?;
     for row in rows.iter_mut() {
         let Some(row_pk) = row.get("id").map(|v| match v {
             Value::String(s) => s.clone(),
@@ -1358,8 +1399,8 @@ pub async fn dispatch_unmask_for_query(
                 rejected_claim: None,
             };
             let plaintext = match lookup_encryption_meta(&schema, &canonical)? {
-                Some(enc_meta) => fetch_and_decrypt(&backend, app_id, &single_args, &enc_meta).await?,
-                None => fetch_plaintext_parent(&backend, app_id, &single_args).await?,
+                Some(enc_meta) => fetch_and_decrypt(backend, app_id, &single_args, &enc_meta).await?,
+                None => fetch_plaintext_parent(backend, app_id, &single_args).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1619,6 +1660,13 @@ fn require_string_with_code(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    // Every dispatch unit below refuses in the descriptor / validation
+    // prologue, or returns on an empty input, BEFORE `prepare_unmask_backend`
+    // and before any SQL - but the entry points take the backend as a
+    // parameter now, so each still has to hand one over. See the helper's own
+    // doc for why that is the right trade.
+    use crate::test_support::unit_backend;
 
     #[test]
     fn sanitize_app_actor_strips_reserved_auto_db3() {
@@ -2034,7 +2082,10 @@ mod tests {
             rejected_claim: None,
         };
         let result = runtime
-            .block_on(dispatch_bulk_unmask(&binding, args))
+            .block_on(async {
+                let (backend, _dir) = unit_backend();
+                dispatch_bulk_unmask(&backend, &binding, args).await
+            })
             .unwrap();
         assert!(result.results.is_empty());
     }
@@ -2068,7 +2119,10 @@ mod tests {
             rejected_claim: None,
         };
         let err = runtime
-            .block_on(dispatch_bulk_unmask(&binding, args))
+            .block_on(async {
+                let (backend, _dir) = unit_backend();
+                dispatch_bulk_unmask(&backend, &binding, args).await
+            })
             .unwrap_err();
         match err {
             DbError::ValidationFailed { code, .. } => {
@@ -2098,7 +2152,10 @@ mod tests {
             rejected_claim: None,
         };
         let err = runtime
-            .block_on(dispatch_bulk_unmask(&binding, args))
+            .block_on(async {
+                let (backend, _dir) = unit_backend();
+                dispatch_bulk_unmask(&backend, &binding, args).await
+            })
             .unwrap_err();
         assert!(
             format!("{err:?}").contains("collection_not_declared"),
@@ -2114,14 +2171,19 @@ mod tests {
     fn query_hint_empty_columns_no_op() {
         let binding = DbBinding::cold_start("qhint_unit_empty_app");
         let runtime = compio::runtime::Runtime::new().unwrap();
-        let ok = runtime.block_on(authorize_query_hint(
-            &binding,
-            "users",
-            &[],
-            &Some(json!({ "kind": "user" })),
-            None,
-            &None,
-        ));
+        let ok = runtime.block_on(async {
+            let (backend, _dir) = unit_backend();
+            authorize_query_hint(
+                &backend,
+                &binding,
+                "users",
+                &[],
+                &Some(json!({ "kind": "user" })),
+                None,
+                &None,
+            )
+            .await
+        });
         assert!(ok.is_ok());
     }
 
@@ -2139,14 +2201,19 @@ mod tests {
         let binding = DbBinding::cold_start(app_id);
         let runtime = compio::runtime::Runtime::new().unwrap();
         let err = runtime
-            .block_on(authorize_query_hint(
-                &binding,
-                "users",
-                &["nonexistent".to_string()],
-                &Some(json!({ "kind": "auto" })),
-                None,
-                &None,
-            ))
+            .block_on(async {
+                let (backend, _dir) = unit_backend();
+                authorize_query_hint(
+                    &backend,
+                    &binding,
+                    "users",
+                    &["nonexistent".to_string()],
+                    &Some(json!({ "kind": "auto" })),
+                    None,
+                    &None,
+                )
+                .await
+            })
             .unwrap_err();
         match err {
             DbError::ValidationFailed { code, .. } => {
@@ -2163,7 +2230,10 @@ mod tests {
         let mut rows = vec![json!({ "id": "u1", "name": "alice" })];
         let original = rows.clone();
         runtime
-            .block_on(dispatch_unmask_for_query(&binding, "users", &[], &mut rows))
+            .block_on(async {
+                let (backend, _dir) = unit_backend();
+                dispatch_unmask_for_query(&backend, &binding, "users", &[], &mut rows).await
+            })
             .unwrap();
         assert_eq!(rows, original, "empty unmask columns must be a no-op");
     }

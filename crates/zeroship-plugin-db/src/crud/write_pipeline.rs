@@ -122,7 +122,16 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
 /// The SQL builders still own dialect lowering and UPDATE auto-bump
 /// emission. This module centralises the transform stages that were
 /// previously hand-wired per dispatch site.
+///
+/// `keys` is a PARAMETER because the encryption stage needs a key store and
+/// nothing more. It used to reach one by resolving a backend inside
+/// `super::encryption_pass_dispatch`, through the engine funnel that read
+/// ADAPTER state; a key is not a routing decision, so the store is passed in
+/// by the caller that already holds the handle this write will run on. It is a
+/// borrow rather than an `Option`, so a caller with no key store fails to
+/// compile instead of failing mid-write.
 pub(crate) async fn apply(
+    keys: &crate::encryption::KeyStore,
     binding: &DbBinding,
     collection: &str,
     payload: &mut Value,
@@ -175,7 +184,7 @@ pub(crate) async fn apply(
             )?;
             let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_doc(app_id, collection, &row_pk, payload)
+                .apply_to_doc(keys, app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -189,14 +198,14 @@ pub(crate) async fn apply(
             for doc in docs.iter_mut() {
                 let row_pk = row_pk_from_doc(doc);
                 stages
-                    .apply_to_doc(app_id, collection, &row_pk, doc)
+                    .apply_to_doc(keys, app_id, collection, &row_pk, doc)
                     .await?;
             }
             Ok(())
         }
         ApplyMode::Update { row_pk } => {
             stages
-                .apply_to_update(app_id, collection, row_pk, payload)
+                .apply_to_update(keys, app_id, collection, row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -214,6 +223,7 @@ pub(crate) async fn apply(
                 payload, &schema, collection, actor_id,
             )?;
             rewrite_upsert_doc_id_to_existing_row_id(
+                keys,
                 payload,
                 route,
                 collection,
@@ -223,7 +233,7 @@ pub(crate) async fn apply(
             .await?;
             let row_pk = row_pk_from_doc(payload);
             stages
-                .apply_to_doc(app_id, collection, &row_pk, payload)
+                .apply_to_doc(keys, app_id, collection, &row_pk, payload)
                 .await?;
             Ok(())
         }
@@ -255,8 +265,12 @@ impl<'a> WriteStages<'a> {
         self.has_encrypted || self.has_masked || self.has_sqlite_binary || self.has_plain_bytes
     }
 
+    /// `keys` rides down from [`apply`] rather than being resolved here: the
+    /// encryption stage wants a key store, not a backend, and this struct
+    /// makes no routing decision it could take one from.
     async fn apply_to_doc(
         &self,
+        keys: &crate::encryption::KeyStore,
         app_id: &str,
         collection: &str,
         row_pk: &str,
@@ -270,6 +284,7 @@ impl<'a> WriteStages<'a> {
         let mut sidechannel = super::mask_pass::MaskPlaintextSidechannel::new();
         if self.has_encrypted {
             super::encryption_pass_dispatch(
+                keys,
                 app_id,
                 collection,
                 schema,
@@ -305,8 +320,10 @@ impl<'a> WriteStages<'a> {
         Ok(())
     }
 
+    /// `keys` rides down from [`apply`], for the reason on [`Self::apply_to_doc`].
     async fn apply_to_update(
         &self,
+        keys: &crate::encryption::KeyStore,
         app_id: &str,
         collection: &str,
         row_pk: &str,
@@ -321,6 +338,7 @@ impl<'a> WriteStages<'a> {
         let mut sidechannel = super::mask_pass::MaskPlaintextSidechannel::new();
         if self.has_encrypted {
             super::encryption_pass_dispatch(
+                keys,
                 app_id,
                 collection,
                 schema,
@@ -503,7 +521,13 @@ fn update_target(patch: &mut Value) -> &mut Value {
     }
 }
 
+/// `keys` is passed in even though this function holds a [`TxRoute`] it could
+/// take a handle off. The route is here to run the probe SELECT on the right
+/// connection; the deterministic-encryption step below needs a key and nothing
+/// else, and taking it from [`apply`]'s parameter keeps one key store per write
+/// op rather than two independent derivations of it.
 async fn rewrite_upsert_doc_id_to_existing_row_id(
+    keys: &crate::encryption::KeyStore,
     doc: &mut Value,
     route: &TxRoute,
     collection: &str,
@@ -539,6 +563,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     if let Some(probe_schema) = deterministic_conflict_probe_schema(schema, conflict_arr)? {
         let mut sidechannel = super::mask_pass::MaskPlaintextSidechannel::new();
         super::encryption_pass_dispatch(
+            keys,
             app_id,
             collection,
             &probe_schema,
@@ -772,6 +797,7 @@ mod tests {
                 let mut doc = serde_json::json!({ "name": "Alice" });
 
                 let result = apply(
+                    &test_key_store(),
                     &binding,
                     collection,
                     &mut doc,
@@ -812,6 +838,7 @@ mod tests {
             let mut doc = serde_json::json!({ "name": "Alice" });
 
             apply(
+                &test_key_store(),
                 &binding,
                 collection,
                 &mut doc,
@@ -839,6 +866,18 @@ mod tests {
         compio::runtime::Runtime::new()
             .expect("compio runtime build")
             .block_on(f)
+    }
+
+    /// A key store for the cases that stand no backend up at all.
+    ///
+    /// `apply` takes the store as a parameter now, so a test that refuses
+    /// before the encryption stage still has to name one. It is built from the
+    /// same isolate key source a real backend constructor is handed, so it is
+    /// the real type resolving from the real source - not a stub - and a test
+    /// whose schema DOES declare an encrypted column would exercise it. The
+    /// cases below use it only on schemas that declare none.
+    fn test_key_store() -> encryption::KeyStore {
+        encryption::KeyStore::new(crate::isolate_key_source())
     }
 
     fn last4_mask(plaintext: &str) -> String {
@@ -984,6 +1023,7 @@ mod tests {
                 "ssn": "123-45-6789"
             });
             apply(
+                backend.key_store(),
                 &binding,
                 collection,
                 &mut insert_doc,
@@ -1042,6 +1082,7 @@ mod tests {
                 }
             ]);
             apply(
+                backend.key_store(),
                 &binding,
                 collection,
                 &mut bulk_docs,
@@ -1091,6 +1132,7 @@ mod tests {
                  so the builder's own actor bump is the only assignment to it",
             );
             apply(
+                backend.key_store(),
                 &binding,
                 collection,
                 &mut update_patch,
@@ -1139,6 +1181,7 @@ mod tests {
                 "ssn": "222-33-4444"
             });
             apply(
+                backend.key_store(),
                 &binding,
                 collection,
                 &mut upsert_doc,
