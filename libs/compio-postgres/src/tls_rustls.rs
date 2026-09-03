@@ -226,6 +226,46 @@ impl CrlDirectoryReload {
     }
 }
 
+/// Trust anchors from the operating system's certificate store.
+///
+/// Individual unparsable entries are ignored: one bad certificate in the OS
+/// store must not take out the whole store. A store that yields nothing usable
+/// is refused, naming the read-error count so the cause is not left to
+/// guesswork.
+///
+/// That refusal is load-bearing rather than cosmetic. `verifier_for` reads an
+/// empty `RootCertStore` as "sslrootcert is unset", so returning one here for
+/// `sslrootcert=system` would hand a weak `sslmode`
+/// `ServerVerification::None` (accept any certificate) after being asked to
+/// trust the OS store. The crate's own connect paths refuse `system` under
+/// anything but `verify-full` before reaching here
+/// (`Config::validate_connection_settings`), but `from_config` is public API
+/// and callers reach it directly, so this is the last check on that path.
+///
+/// The decision is taken here, apart from `load_native_certs`, because the OS
+/// store cannot be steered from a test without setting `SSL_CERT_FILE` in this
+/// process. Splitting the policy from the read makes it provable with neither.
+fn system_trust_anchors(
+    certs: Vec<CertificateDer<'static>>,
+    read_errors: usize,
+) -> Result<RootCertStore, Error> {
+    let mut roots = RootCertStore::empty();
+    for cert in certs {
+        let _ = roots.add(cert);
+    }
+    if roots.is_empty() {
+        return Err(Error::tls(
+            format!(
+                "sslrootcert=system: the operating system certificate store yielded no usable \
+                 certificates ({read_errors} read error(s)). Name a CA file with \
+                 sslrootcert=<path> instead."
+            )
+            .into(),
+        ));
+    }
+    Ok(roots)
+}
+
 /// Turn a policy into the rustls verifier that implements it.
 ///
 /// Every mode goes through this function, including `verify-full` - which
@@ -1084,23 +1124,7 @@ impl MakeRustlsConnect {
             SslRootCert::Unset => {}
             SslRootCert::System => {
                 let found = rustls_native_certs::load_native_certs();
-                for cert in found.certs {
-                    // Ignore individual unparsable system certificates: a
-                    // single bad entry in the OS store must not take out the
-                    // whole store. An empty result is caught below.
-                    let _ = roots.add(cert);
-                }
-                if roots.is_empty() {
-                    return Err(Error::tls(
-                        format!(
-                            "sslrootcert=system: the operating system certificate store yielded \
-                             no usable certificates ({} read error(s)). Name a CA file with \
-                             sslrootcert=<path> instead.",
-                            found.errors.len()
-                        )
-                        .into(),
-                    ));
-                }
+                roots = system_trust_anchors(found.certs, found.errors.len())?;
             }
             SslRootCert::File(path) => {
                 let certs = CertificateDer::pem_file_iter(path)
@@ -3113,6 +3137,48 @@ mod tests {
             chain.contains("no CERTIFICATE blocks"),
             "the refusal must say what the file lacked: {chain}"
         );
+    }
+
+    /// The `sslrootcert=system` arm of the same refusal the test above covers
+    /// for `sslrootcert=<path>`. It had no witness: mutated to `if false` it
+    /// left the lib (765), `tls_live` (48) and `suite` (797) suites green,
+    /// because the OS store cannot be emptied from a test without setting
+    /// `SSL_CERT_FILE` across this process.
+    ///
+    /// It is worth binding because `verifier_for` reads an empty store as
+    /// "sslrootcert is unset". Without this refusal a weak `sslmode` reaching
+    /// the public `from_config` directly - which skips the
+    /// `validate_connection_settings` rule that `system` demands
+    /// `verify-full` - would be handed `ServerVerification::None`, having
+    /// asked to trust the operating system's certificates.
+    #[test]
+    fn a_system_trust_store_with_nothing_usable_is_refused_by_name() {
+        let error = system_trust_anchors(Vec::new(), 3)
+            .expect_err("an empty system store cannot verify anything");
+        let chain = sslkey_error_chain(&error);
+        assert!(
+            chain.contains("sslrootcert=system"),
+            "the refusal must name the setting: {chain}"
+        );
+        assert!(
+            chain.contains("3 read error(s)"),
+            "the refusal must report how many entries could not be read: {chain}"
+        );
+
+        // A store whose every entry is unparsable is empty for this purpose:
+        // the per-certificate failures are ignored, the empty result is not.
+        let garbage = CertificateDer::from(b"not a certificate".to_vec());
+        assert!(
+            system_trust_anchors(vec![garbage], 0).is_err(),
+            "a store no anchor could be added from must not pass as configured"
+        );
+
+        // Control: one usable certificate is enough, and is kept, even beside
+        // read errors - those are what the store tolerates rather than fails on.
+        let ca = CertificateDer::from_pem_slice(include_bytes!("../tests/data/verifier_ca.pem"))
+            .expect("decode the fixture CA");
+        let roots = system_trust_anchors(vec![ca], 7).expect("a usable anchor is accepted");
+        assert_eq!(roots.len(), 1, "the usable anchor must be kept");
     }
 
     #[test]
