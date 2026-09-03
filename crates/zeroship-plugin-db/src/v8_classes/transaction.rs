@@ -254,7 +254,22 @@ pub fn transaction_dispatch<'s>(
         } else {
             Some(TxAdmission::acquire(app_id.clone()).await)
         };
-        match exec_begin_or_savepoint(nested, isolation_level, &app_id).await {
+        // Resolved adapter-side. A resolution failure folds into the same
+        // `Err` arm as a begin failure, so the admission claim is dropped and
+        // released on that path too.
+        //
+        // BEHAVIOUR CHANGE, stated rather than discovered: a cold
+        // `init_pool_async` now runs HERE, after `TxAdmission::acquire` but
+        // before the BEGIN, where it used to run deeper inside `open_session`.
+        // It shortens the window the claim is held across, but it is a change
+        // to admission timing, not a refactor.
+        let began = match crate::tx_scope::ensure_backend().await {
+            Ok(backend) => {
+                exec_begin_or_savepoint(nested, isolation_level, &app_id, backend).await
+            }
+            Err(e) => Err(e),
+        };
+        match began {
             Ok(frame) => {
                 // The session is installed and the reducer is in `Idle`. Every
                 // path out of there emits `ReleaseAdmission`, so the claim's

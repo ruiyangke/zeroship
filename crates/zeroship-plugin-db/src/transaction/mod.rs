@@ -315,7 +315,11 @@ impl AtomicWriteFrame {
             Some(TxAdmission::acquire(app_id.clone()).await)
         };
 
-        match exec_begin_or_savepoint(nested, None, &app_id).await {
+        // Cloned off the route while it is still alive - it is consumed by
+        // `into_internal_transaction` two lines below. Both `BackendHandle`
+        // arms are an `Rc`, so this is a refcount bump, not a second backend.
+        let backend = route.backend().clone();
+        match exec_begin_or_savepoint(nested, None, &app_id, backend).await {
             Ok(frame) => Ok(Self {
                 route: route.into_internal_transaction(),
                 frame,
@@ -404,10 +408,15 @@ impl Drop for AtomicWriteFrame {
 /// nested begin opened. The savepoint NAME never leaves the frame stack: the
 /// caller settles by frame id, and the name the settle emits is the one that
 /// frame minted.
+///
+/// `backend` is consumed only by the top-level arm - a SAVEPOINT runs on the
+/// session the enclosing BEGIN already opened - but it is taken unconditionally
+/// so the caller cannot be in the position of deciding whether one is needed.
 pub(crate) async fn exec_begin_or_savepoint(
     nested: bool,
     isolation_level: Option<zeroship_data_core::error::IsolationLevel>,
     app_id: &str,
+    backend: crate::backend::BackendHandle,
 ) -> Result<Option<reducer::frames::FrameId>, DbError> {
     if nested {
         let driven = driver::open_frame(app_id).await;
@@ -422,7 +431,7 @@ pub(crate) async fn exec_begin_or_savepoint(
         return Ok(Some(frame));
     }
 
-    let driven = driver::begin_top_level(app_id, isolation_level).await?;
+    let driven = driver::begin_top_level(app_id, isolation_level, backend).await?;
     let outcome = driven.outcome();
     match outcome {
         // Only the genuinely unclassified startup outcome gets the generic
@@ -647,6 +656,17 @@ fn savepoint_release_failed_indeterminate(error: DbError) -> DbError {
     }
 }
 
+/// The backend the tests below already installed, for the `begin` argument.
+///
+/// Sync, and it can be: only the COLD path needs to await, and every test here
+/// opens a SQLite backend before it begins a transaction. Production resolves
+/// through `tx_scope::ensure_backend`, which owns the cold arm.
+#[cfg(test)]
+fn test_backend() -> crate::backend::BackendHandle {
+    crate::context::with(|c| c.backend())
+        .expect("test must install a backend before beginning a transaction")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,11 +749,11 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, None, "app_sqlite")
+            exec_begin_or_savepoint(false, None, "app_sqlite", test_backend())
                 .await
                 .expect("begin");
 
-            let first = exec_begin_or_savepoint(true, None, "app_sqlite")
+            let first = exec_begin_or_savepoint(true, None, "app_sqlite", test_backend())
                 .await
                 .expect("first nested frame")
                 .expect("a nested begin opens a frame");
@@ -744,7 +764,7 @@ mod tests {
                 other => panic!("expected Ok for the first frame settle, got {other:?}"),
             }
 
-            let second = exec_begin_or_savepoint(true, None, "app_sqlite")
+            let second = exec_begin_or_savepoint(true, None, "app_sqlite", test_backend())
                 .await
                 .expect("second nested frame")
                 .expect("a nested begin opens a frame");
@@ -920,6 +940,7 @@ mod tests {
                 false,
                 Some(zeroship_data_core::error::IsolationLevel::Serializable),
                 "app_sqlite",
+                test_backend(),
             )
                 .await
                 .expect("begin sqlite tx");
@@ -977,7 +998,7 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, None, "app_sqlite")
+            exec_begin_or_savepoint(false, None, "app_sqlite", test_backend())
                 .await
                 .expect("begin sqlite tx");
             run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('before')")
@@ -1022,7 +1043,7 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, None, "app_sqlite")
+            exec_begin_or_savepoint(false, None, "app_sqlite", test_backend())
                 .await
                 .expect("begin sqlite tx");
             run_on_tx_conn(
@@ -1091,7 +1112,7 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, None, "app_sqlite")
+            exec_begin_or_savepoint(false, None, "app_sqlite", test_backend())
                 .await
                 .expect("begin sqlite tx");
             run_on_tx_conn("app_sqlite", "INSERT INTO notes (title) VALUES ('doomed')")
@@ -1165,7 +1186,7 @@ mod tests {
                 .await
                 .expect("create table");
 
-            exec_begin_or_savepoint(false, None, "app_sqlite")
+            exec_begin_or_savepoint(false, None, "app_sqlite", test_backend())
                 .await
                 .expect("begin sqlite tx");
 

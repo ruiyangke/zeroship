@@ -40,7 +40,8 @@ pub async fn begin(
     app_id: &str,
     isolation_level: Option<zeroship_data_core::error::IsolationLevel>,
 ) -> Result<(), DbError> {
-    let driven = driver::begin_top_level(app_id, isolation_level).await?;
+    let backend = crate::tx_scope::ensure_backend().await?;
+    let driven = driver::begin_top_level(app_id, isolation_level, backend).await?;
     if let Some(outcome) = driven.outcome() {
         return Err(driven.error.unwrap_or_else(|| {
             DbError::internal(format!("db: BEGIN settled immediately as {outcome:?}"))
