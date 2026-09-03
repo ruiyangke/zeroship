@@ -70,7 +70,7 @@
 use base64::Engine as _;
 use serde_json::Value;
 
-use crate::backend::ScalarRead;
+use crate::backend::{BackendHandle, ScalarRead};
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
 
@@ -400,14 +400,13 @@ pub(crate) fn check_unmask_authorization(
 /// [`crate::crud::mask_policy::cache_put`]. A
 /// corrupt sidecar propagates as `DbError` so operators see the real
 /// fault instead of a silent default-deny.
-async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
+async fn ensure_mask_policy_cached(
+    backend: &BackendHandle,
+    app_id: &str,
+) -> Result<(), DbError> {
     if super::mask_policy::cache_has(app_id) {
         return Ok(());
     }
-    let backend = match crate::context::with(|c| c.backend()) {
-        Some(b) => b,
-        None => return Ok(()), // backend not initialised — auth path's default-deny stub handles it
-    };
 
     // Ask the backend for whatever it durably stored. `None` covers both "this
     // backend stores nothing" (PostgreSQL, which reinstalls on boot) and "this
@@ -429,12 +428,20 @@ async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
 /// call happened to initialize the backend and attach SQLite before either
 /// path could run; lazy initialization must preserve that prerequisite without
 /// restoring a per-collection boot RPC.
-async fn ensure_unmask_backend(app_id: &str) -> Result<(), DbError> {
+/// **Returns the prepared backend**, so the caller does not have to go back to
+/// the context for it. `ensure_mask_policy_cached` used to do exactly that, and
+/// its miss arm - "backend not initialised, the default-deny stub handles it" -
+/// described a state that could not occur: all three of its call sites run this
+/// function immediately beforehand. Handing the value over turns that ordering
+/// from a convention into a data dependency, and removes the last
+/// engine-reaches-into-the-adapter read in this file.
+async fn ensure_unmask_backend(app_id: &str) -> Result<BackendHandle, DbError> {
     let backend = crate::exec::ensure_backend_for_shared_sql().await?;
     // Asked, not downcast. What "ready for this app" means is the backend's
     // business - SQLite must attach the app file, PostgreSQL needs nothing -
     // and this path only needs it to have happened.
-    backend.prepare_for_app(app_id).await
+    backend.prepare_for_app(app_id).await?;
+    Ok(backend)
 }
 
 // ---------------------------------------------------------------------------
@@ -478,13 +485,13 @@ pub async fn dispatch_unmask(
             ),
         })?;
     args.column = mask_meta.canonical_column.clone();
-    ensure_unmask_backend(app_id).await?;
+    let backend = ensure_unmask_backend(app_id).await?;
 
     // Step 2 — authorization: load the per-app policy into the cache
     // (best-effort) THEN consult `check_unmask_authorization`, which
     // honours the cached policy or falls back to the default-deny
     // rule on a miss.
-    ensure_mask_policy_cached(app_id).await?;
+    ensure_mask_policy_cached(&backend, app_id).await?;
     let allowed = check_unmask_authorization(app_id, &args.actor, &mask_meta.classification)?;
     if !allowed {
         // Audit-then-refuse. The audit row carries `outcome = "denied"`
@@ -981,8 +988,8 @@ pub async fn dispatch_bulk_unmask(
     // ---- Step 1: only after every column is validated, initialize the
     // backend, load policy, and check authorization. Invalid descriptor input
     // keeps its typed validation error even when no database is configured.
-    ensure_unmask_backend(app_id).await?;
-    ensure_mask_policy_cached(app_id).await?;
+    let backend = ensure_unmask_backend(app_id).await?;
+    ensure_mask_policy_cached(&backend, app_id).await?;
     let mut unauthorized: Vec<(String, String)> = Vec::new(); // (row_pk, column)
     for (row_pk, columns) in &normalized_items {
         for (_, canonical_column) in columns {
@@ -1190,8 +1197,8 @@ pub async fn authorize_query_hint(
         classifications.push(mask_meta.classification);
     }
 
-    ensure_unmask_backend(app_id).await?;
-    ensure_mask_policy_cached(app_id).await?;
+    let backend = ensure_unmask_backend(app_id).await?;
+    ensure_mask_policy_cached(&backend, app_id).await?;
     let mut unauthorized: Vec<String> = Vec::new();
     for (column, classification) in unmask_columns.iter().zip(&classifications) {
         if !check_unmask_authorization(app_id, actor, classification)? {
