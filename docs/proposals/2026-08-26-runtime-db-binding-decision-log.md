@@ -1813,7 +1813,7 @@ future migrator-created table, while the reserved-prefix revoke lives in
 measurement about the provisioner, not about the epoch, and it still holds.
 
 **And restore's home was named but its machinery never existed.**
-`restore` at `crates/zeroship-plugin-db/src/backend/postgres.rs:803` is the site the design
+`restore` at `crates/zeroship-data-postgres/src/postgres.rs:871` is the site the design
 moves out of the data-plane crate into the migration service - **which today has
 no restore machinery at all**, so the tooling (`pg_restore` invocation, snapshot
 handle, blob access) is named work rather than a move.

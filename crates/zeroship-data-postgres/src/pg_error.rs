@@ -159,7 +159,7 @@ pub fn classify(e: &compio_postgres::Error) -> DbError {
 
 /// Classify a PostgreSQL error and prepend a `"<context>: "` phrase to the
 /// resulting message body. The SQLSTATE-derived `.code` is preserved.
-pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
+pub fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
     let mut err = classify(&e);
     zeroship_data_core::error::prefix_message(&mut err, &format!("{context}: "));
     err
@@ -167,7 +167,7 @@ pub(crate) fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
 
 /// Translate the PG introspection module's contextual driver error into the
 /// backend-neutral error hierarchy.
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 pub(crate) fn classify_schema_error(e: super::pg_introspect::SchemaError) -> DbError {
     coded_sql(&format!("diff: {}", e.context), e.source)
 }
@@ -240,7 +240,7 @@ mod tests {
         let app_id = "role_parity";
         let role = zeroship_core::database_role::per_app_role_name(app_id)
             .expect("parity fixture role name");
-        let quoted_role = crate::query::quote_ident(&role);
+        let quoted_role = zeroship_schema::query::quote_ident(&role);
 
         let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
             app_id,
@@ -254,9 +254,9 @@ mod tests {
         );
 
         for setup_sql in [
-            crate::backend::pg_session_sql::tx_session_setup_sql(app_id)
+            crate::pg_session_sql::tx_session_setup_sql(app_id)
                 .expect("transaction setup role name"),
-            crate::backend::pg_session_sql::autocommit_local_session_setup_sql(app_id)
+            crate::pg_session_sql::autocommit_local_session_setup_sql(app_id)
                 .expect("autocommit setup role name"),
         ] {
             assert!(

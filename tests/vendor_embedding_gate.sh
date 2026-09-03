@@ -132,7 +132,6 @@ key_to_path() {
 # it, so that is all these lines say now.
 BASELINE_FILES="
 zeroship-plugin-db/exec.rs
-zeroship-plugin-db/backend/mod.rs
 zeroship-plugin-db/backend/cancel.rs
 zeroship-plugin-db/auth/bootstrap.rs
 zeroship-plugin-db/context.rs
@@ -141,8 +140,15 @@ zeroship-plugin-db/service.rs
 "
 # exec.rs                 Pool + Vec<Row> - the unsettled row vocabulary. Blocked on
 #                         the neutral-row decision; see roled_rows in pg_autocommit.
-# backend/mod.rs          BackendHandle names BOTH vendors, which is why this file
-#                         has no tier at all. #119.
+# backend/mod.rs          ENTRY RETIRED 2026-09-02, the second way described
+#                         below and exactly as predicted: `zeroship-data-postgres`
+#                         now exists, the six PostgreSQL files and the two PG
+#                         extension traits moved into it, and what is left in
+#                         backend/mod.rs names no driver at all. `BackendHandle`
+#                         still names both backends, but through the re-exported
+#                         `PostgresBackend` / `SqliteBackend` types rather than
+#                         `compio_postgres::` directly. No code was written to
+#                         clear this - the crate boundary cleared it.
 # backend/cancel.rs       CancelToken, Pool. Was transaction/cancel.rs; moved into
 #                         the vendor tier by #122. See the note below on why a
 #                         move does not clear an entry, only relocates it.
@@ -171,11 +177,12 @@ zeroship-plugin-db/service.rs
 # naming a vendor at all; cancel.rs MOVED, so its entry did not disappear, it
 # became backend/cancel.rs above.
 #
-# The rest come off the second way: by the crate split itself. backend/mod.rs,
-# backend/cancel.rs and backend/lock_guard.rs are already in the tier that is
-# ALLOWED to name a driver - they are listed only because plugin-db is still one
-# crate, and this gate's rule is about crates. They need no code move; they need
-# `backend/` to become zeroship-data-postgres. Do not chase them as defects.
+# The rest come off the second way: by the crate split itself. That prediction
+# has now been TESTED once and held: on 2026-09-02 `backend/` became
+# zeroship-data-postgres, and backend/mod.rs left this list without a line of
+# code being written to make it. backend/cancel.rs is the same case still
+# pending - it is in the tier ALLOWED to name a driver and is listed only
+# because it has not moved yet. Do not chase it as a defect.
 
 in_baseline() {
   printf '%s\n' "$BASELINE_FILES" | grep -qx -- "$1"

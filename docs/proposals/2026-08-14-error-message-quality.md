@@ -292,7 +292,7 @@ Specific leak sites worth fixing, all traced to OPERATOR-ONLY over HTTP:
   verbatim (`crates/zeroship-plugin-kv/src/error.rs:187`, `Err(_) => raw.to_string()`) --
   and a malformed URL can still contain a password. Reaches app JS; requires
   operator misconfiguration.
-- **`crates/zeroship-plugin-db/src/backend/postgres.rs:1504-1546`** -- pg_dump/pg_restore
+- **`crates/zeroship-data-postgres/src/postgres.rs:976-1035`** -- pg_dump/pg_restore
   stderr passthrough carrying internal hostname, IP, port and role name; the
   catch-all arm keeps 4096 bytes of raw stderr.
 
@@ -602,7 +602,7 @@ Cost: under an hour. Risk: very low.
 `{error}` at `crates/zeroship-control/src/cron/workflow_engine.rs:1084` to match its
 sibling at `:1080`; interpolate `redact_url(...)` rather than the raw inner error
 at `crates/zeroship-plugin-kv/src/backend/redis.rs:170`; and either bound or drop the
-4096-byte raw-stderr arm at `crates/zeroship-plugin-db/src/backend/postgres.rs:1504-1546`.
+4096-byte raw-stderr arm at `crates/zeroship-data-postgres/src/postgres.rs:976-1035`.
 Cost: an hour. Risk: very low. All three are currently contained by the 5xx rail,
 so this is defence in depth rather than an active exposure -- which is also the
 argument for doing it cheaply now rather than scheduling it.

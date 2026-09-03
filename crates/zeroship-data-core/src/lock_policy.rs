@@ -2,7 +2,7 @@
 //!
 //! # Why this is a separate module from the trait it extends
 //!
-//! [`LockManager`](crate::backend::LockManager) is a CONTRACT: an associated
+//! [`LockManager`](crate::storage::LockManager) is a CONTRACT: an associated
 //! client type, three string-key primitives every backend must supply, and two
 //! typed wrappers that do nothing but derive `(key1, key2)` from a
 //! [`LockScope`]. Nothing in it reaches for a runtime. That makes it rank-0
@@ -12,19 +12,33 @@
 //! The bounded-retry loop is not vocabulary. It is POLICY - a wall-clock
 //! schedule, `compio::time::sleep` between attempts, and `tracing` warns per
 //! retry - and it used to live in a DEFAULT METHOD BODY on that trait. A
-//! default body travels with the trait, so moving `LockManager` verbatim would
-//! have put an async executor inside a crate whose own manifest says it "names
-//! no database driver, no V8, and no runtime". `zeroship-data-core` today
-//! depends on exactly `serde_json`, `zeroship-core` and `zeroship-schema`.
+//! default body travels with the trait, so `LockManager` could not keep it:
+//! every consumer of the contract would have linked an executor just to reach
+//! the three string-key primitives. Splitting it into this extension trait is
+//! what let the contract move down clean, and THAT half of the decision stands.
 //!
-//! **`tests/data_crate_closure_gate.sh` would NOT have caught it.** That gate
-//! pins `compio-postgres`, `rusqlite`, `zeroship-runtime` and `v8`; `compio`
-//! itself is none of those, so the edge would have landed green.
+//! # This module moved, and its first address was wrong
 //!
-//! The extension-trait split is the same shape the tree already used for
-//! `ToOpError`, which was lifted out of `data-core` for the same reason: a
-//! domain type may not name a delivery mechanism, and a contract may not carry
-//! an executor.
+//! It lived in `zeroship-plugin-db` until 2026-09-02, on the argument that a
+//! crate whose manifest says it "names no database driver, no V8, and no
+//! runtime" may not host a `compio::time::sleep`. Extracting
+//! `zeroship-data-postgres` supplied the fact that argument was missing: BOTH
+//! vendors call this. `LockGuard::acquire` needs it and `LockGuard` travels
+//! with the PostgreSQL backend by the orphan rule; and
+//! `crates/zeroship-plugin-db/tests/sqlite_integration.rs` needs it on the
+//! other side. A policy both vendors need cannot live in the crate ABOVE them
+//! without making each vendor depend on the adapter that depends on it.
+//!
+//! The manifest line was the thing that had to give, and it was imprecise
+//! rather than load-bearing: `tests/data_crate_closure_gate.sh` pins
+//! `compio-postgres`, `rusqlite`, `zeroship-runtime` and `v8`, and `compio` is
+//! none of those. The fence that matters - no DRIVER, no V8 - is untouched.
+//! What this crate gives up is the claim to name no executor, which it could
+//! not honestly make while defining `async fn` in trait position anyway.
+//!
+//! Corroborating detail: `storage.rs` already spelled four intra-doc links
+//! `crate::lock_policy::BoundedLockAcquire`. Every one was broken while this
+//! module lived elsewhere; the move repairs them rather than repointing them.
 //!
 //! # Using it
 //!
@@ -32,13 +46,14 @@
 //! trait in scope:
 //!
 //! ```ignore
-//! use crate::lock_policy::BoundedLockAcquire;
+//! use zeroship_data_core::lock_policy::BoundedLockAcquire;
 //! backend.acquire(&client, &scope).await?;
 //! ```
 
-use zeroship_data_core::error::DbError;
+use crate::error::DbError;
 
-use crate::backend::{LockManager, LockScope};
+use crate::capability::LockScope;
+use crate::storage::LockManager;
 
 /// The retry schedule as `(attempt_index, pre_wait_ms)`.
 ///
@@ -141,8 +156,7 @@ impl<T: LockManager + ?Sized> BoundedLockAcquire for T {}
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::backend::SqlExecutor;
-    use crate::op_error::ToOpError;
+    use crate::storage::SqlExecutor;
     use std::cell::Cell;
 
     /// **Security [I43]**: exhaust the bounded-retry loop against a mock whose
@@ -267,15 +281,17 @@ mod tests {
             other => panic!("expected DbError::LockContention, got {other:?}"),
         }
 
-        let op_err = err.to_op_error();
-        let code = match op_err.kind {
-            zeroship_runtime::state::OpErrorKind::CodedError { code, .. } => code,
-            other => panic!("expected CodedError, got {other:?}"),
-        };
-        assert_eq!(
-            code, "lock_not_available",
-            "contention must reach JS as the canonical retryable code"
-        );
+        // The third assertion this test used to make - that the contention error
+        // lowers to the JS code `lock_not_available` - is NOT here, and its
+        // absence is the tier boundary rather than a gap. `to_op_error` is the
+        // adapter's `ToOpError`, which was lifted OUT of this crate for the
+        // same reason the policy above could not stay on the contract: a domain
+        // type may not name a delivery mechanism. Naming it here would put
+        // `zeroship_runtime` in data-core's test build.
+        //
+        // The lowering is covered where the lowering lives:
+        // `zeroship-plugin-db/src/op_error.rs` table-tests
+        // `DbError::LockContention` -> `"lock_not_available"` directly.
     }
 
     /// The schedule's cumulative budget is the security bound the [I43] comment

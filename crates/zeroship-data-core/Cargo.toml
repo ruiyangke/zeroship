@@ -2,7 +2,7 @@
 name = "zeroship-data-core"
 version = "0.1.0"
 edition = "2021"
-description = "The data plane's domain tier: the typed error hierarchy every backend translates INTO, and the immutable identity of one env.db binding. Names no database driver, no V8, and no runtime - the translators live in the vendor crates and the OpError lowering lives in the adapter."
+description = "The data plane's domain tier: the typed error hierarchy every backend translates INTO, and the immutable identity of one env.db binding. Names no database driver and no V8 - the translators live in the vendor crates and the OpError lowering lives in the adapter."
 
 # ---------------------------------------------------------------------------
 # WHAT THIS MANIFEST IS FOR.
@@ -63,6 +63,17 @@ hkdf = { workspace = true }
 hmac = { workspace = true }
 sha2 = { workspace = true }
 zeroize = { version = "1", features = ["alloc", "derive"] }
+
+# `compio` and `tracing` arrived with `lock_policy` on 2026-09-02, and they are
+# the reason this manifest no longer claims to "name no runtime". That claim was
+# imprecise from the start: this crate defines `async fn` in trait position, so
+# it has always described work an executor performs. What it must never name is a
+# DRIVER or V8, and `tests/data_crate_closure_gate.sh` pins exactly those four
+# (`compio-postgres`, `rusqlite`, `zeroship-runtime`, `v8`) - none of which is
+# `compio`. See `src/lock_policy.rs` for why the policy could not stay above the
+# vendor crates: both of them call it.
+compio = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 # `encryption::keys`'s tests build a runtime to drive the key-source futures.

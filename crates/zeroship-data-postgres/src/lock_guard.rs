@@ -1,19 +1,19 @@
-//! RAII-ish guard returned by [`crate::backend::LockManager`] for
+//! RAII-ish guard returned by [`zeroship_data_core::storage::LockManager`] for
 //! session-scoped advisory locks.
 //!
 //! Renamed from the prior orchestrator-internal guard type and
 //! moved out of the old orchestration wrapper into `backend/` (see
 //! `docs/archive/p0-implementation-plan.md` §"PR 6") — the guard is the
 //! canonical RAII return shape for the
-//! [`crate::backend::LockManager`] capability, not an
+//! [`zeroship_data_core::storage::LockManager`] capability, not an
 //! orchestrator-internal detail. Construction goes through
-//! [`LockGuard::acquire`] taking a [`crate::backend::LockScope`] (the
+//! [`LockGuard::acquire`] taking a [`zeroship_data_core::capability::LockScope`] (the
 //! typed classifier introduced alongside it).
 //!
 //! Snapshot and restore hold a session-scoped
 //! `pg_advisory_lock(hashtext('<app_id>:snapshot_restore'),
 //!  hashtext('snapshot_restore'))` on a single pooled client (key
-//! derivation via [`crate::backend::LockScope::to_keys`]). The
+//! derivation via [`zeroship_data_core::capability::LockScope::to_keys`]). The
 //! invariant is: *every* exit path from the locked region — Ok, Err,
 //! panic — must either explicitly issue `pg_advisory_unlock` before
 //! parking the `OwnedPooledClient` back into the pool, OR transfer
@@ -56,10 +56,11 @@
 
 use compio_postgres::OwnedPooledClient;
 
-use crate::backend::{LockManager, LockScope};
+use zeroship_data_core::capability::LockScope;
+use zeroship_data_core::storage::LockManager;
 // The bounded-retry `acquire` is policy, not contract: it lives on the
 // blanket-implemented extension trait so `LockManager` itself names no runtime.
-use crate::lock_policy::BoundedLockAcquire;
+use zeroship_data_core::lock_policy::BoundedLockAcquire;
 use zeroship_data_core::error::DbError;
 
 /// Session-scoped advisory-lock guard. See module docs for the lifecycle
@@ -74,7 +75,7 @@ use zeroship_data_core::error::DbError;
 /// warnings on common patterns (e.g. `let _ = acquire(...).await`).
 #[must_use = "LockGuard must be released via .release().await or .into_held(); \
               dropping it leaks the session-scoped advisory lock"]
-pub(crate) struct LockGuard {
+pub struct LockGuard {
     /// The pooled client that holds the advisory lock at session
     /// scope. `None` after `release()` or `into_held()` has moved it
     /// out; `Drop` then becomes a no-op.
@@ -127,7 +128,7 @@ impl LockGuard {
     /// are unaffected: on `Ok` the lock is held by `self.client` and
     /// will be released via [`Self::release`] / [`Self::into_held`];
     /// on `Err` no lock is held and `client` drops back to the pool.
-    pub(crate) async fn acquire<B: LockManager<Client = compio_postgres::OwnedPooledClient>>(
+    pub async fn acquire<B: LockManager<Client = compio_postgres::OwnedPooledClient>>(
         backend: &B,
         client: OwnedPooledClient,
         scope: &LockScope,
@@ -160,7 +161,7 @@ impl LockGuard {
     /// `query_text_params` are swallowed (matches the pre-existing
     /// inline sites; the session-scoped lock will auto-release when
     /// the backend session ends if the explicit unlock failed).
-    pub(crate) async fn release(mut self) -> Result<Option<OwnedPooledClient>, DbError> {
+    pub async fn release(mut self) -> Result<Option<OwnedPooledClient>, DbError> {
         if self.released {
             return Ok(self.client.take());
         }
@@ -211,7 +212,7 @@ impl LockGuard {
     /// invariant stays codified at the guard boundary rather than
     /// re-discovered as another open-coded unlock sequence.
     #[allow(dead_code)]
-    pub(crate) fn into_held(mut self) -> OwnedPooledClient {
+    pub fn into_held(mut self) -> OwnedPooledClient {
         self.released = true;
         // SAFETY-ish: by construction, a guard returned from
         // `acquire()` always has `client = Some(_)`; the only way to

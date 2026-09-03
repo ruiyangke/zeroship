@@ -367,7 +367,7 @@ definer-rights routines - because the worker could call every one of them, and a
 worker can make is not a boundary. `crates/zeroship-plugin-db/src/auth/bootstrap.rs:15-18` records
 that nothing replaced it, and `db/migrations-ts/` provisions no such schema. One live statement still
 names it and therefore fails on every database: the PITR placeholder at
-`crates/zeroship-plugin-db/src/backend/postgres.rs:1286`, whose own comment at `:770-776` says so.
+`crates/zeroship-data-postgres/src/postgres.rs:1333`, whose own comment at `:839-844` says so.
 
 **This work creates it**, and the shape is the invariant's one permitted use - state a separate
 service writes and the worker only reads:

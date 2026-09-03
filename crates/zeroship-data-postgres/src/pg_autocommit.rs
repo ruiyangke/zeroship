@@ -4,7 +4,7 @@
 //! `SET LOCAL ROLE`, an explicit `BEGIN`/`COMMIT` around a single statement,
 //! and `compio_postgres` rows. The policy these encode - which timeouts, which
 //! role - lives one tier down in [`crate::budgets`], and the SQL that renders
-//! it is [`crate::backend::pg_session_sql`].
+//! it is [`crate::pg_session_sql`].
 //!
 //! # Why this module exists
 //!
@@ -22,7 +22,7 @@
 //! type would have to lie to at least one of them:
 //!
 //! - the two search methods want JSON, and get it via
-//!   [`crate::backend::pg_row_json::rows_to_json_value`];
+//!   [`crate::pg_row_json::rows_to_json_value`];
 //! - the two unmask readers want ONE CELL, and one of them wants it as RAW
 //!   BYTES. Routing that through JSON is not an option:
 //!   `pg_row_json::column_to_json` base64-encodes BYTEA, so an encrypted
@@ -39,14 +39,15 @@ use std::rc::Rc;
 
 use serde_json::Value;
 
-use crate::backend::pg_error;
-use crate::backend::pg_session_sql::autocommit_local_session_setup_sql;
+use crate::pg_error;
+use crate::pg_session_sql::autocommit_local_session_setup_sql;
 use zeroship_data_core::error::DbError;
 
-// `ScalarRead` moved to `crate::backend` on 2026-09-02: SQLite returns it too
-// now that the unmask reads dispatch through `BackendHandle`, and a shared
-// return type living in the PostgreSQL module is the shape #119 is about.
-pub(crate) use super::ScalarRead;
+// `ScalarRead` is a shared return type - SQLite returns it too, now that the
+// unmask reads dispatch through `BackendHandle` - so it is data-core's, not the
+// PostgreSQL module's. That is the shape #119 was about. Re-exported here
+// because this module's own signatures return it.
+pub use zeroship_data_core::capability::ScalarRead;
 
 /// Run `sql` on a pooled connection narrowed to `app_id`'s role, returning the
 /// raw driver rows.
@@ -127,7 +128,7 @@ pub(crate) async fn roled_json(
     params: &[&str],
 ) -> Result<Vec<Value>, DbError> {
     let rows = roled_rows(pool, app_id, sql, params).await?;
-    Ok(crate::backend::pg_row_json::rows_to_json_value(&rows))
+    Ok(crate::pg_row_json::rows_to_json_value(&rows))
 }
 
 /// Read column 0 of the first row as raw bytes, under the per-app role.

@@ -79,28 +79,6 @@ use zeroship_data_core::error::{BeginIntent, DbError, OpenSessionError};
 /// answered.
 pub(crate) mod cancel;
 
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) mod lock_guard;
-/// PostgreSQL row -> JSON decoding. Travels with `postgres` into the Postgres
-/// crate; kept beside it rather than in the V8 adapter, which is where it lived
-/// until 2026-08-31 and which made this backend depend on the adapter.
-pub(crate) mod pg_row_json;
-// PostgreSQL pooled execution under the per-app role fence. Lived in
-// `crate::exec` (ENGINE) until 2026-09-01, where it formed the upward half of
-// the `PG <-> ENGINE` tier cycle.
-pub(crate) mod pg_autocommit;
-// PostgreSQL error classification. PG tier: SQLSTATE and driver source-chain
-// inspection translate into the neutral `zeroship_data_core::error::DbError` hierarchy.
-pub mod pg_error;
-// PostgreSQL catalog introspection into the vendor-neutral schema snapshot.
-// Gated with the SchemaIntrospect capability and both backend impls below.
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) mod pg_introspect;
-// PostgreSQL per-app session setup SQL. PG tier: `SET LOCAL ROLE` and the GUC
-// names are dialect. The budgets they render are core policy - see
-// `crate::budgets`. `pub` so `auth::bootstrap` can re-export for its callers.
-pub mod pg_session_sql;
-pub mod postgres;
 // SQLite module — crate-private by default; under `test-helpers` it
 // becomes `pub` so the integration target (`tests/sqlite_integration.rs`)
 // can name `backend::sqlite::SqliteBackend` and the session-handle
@@ -114,10 +92,29 @@ pub(crate) mod sqlite;
 #[cfg(feature = "test-helpers")]
 pub mod sqlite;
 
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) use lock_guard::LockGuard;
-pub use postgres::PostgresBackend;
 pub use sqlite::SqliteBackend;
+
+// The PostgreSQL vendor tier moved to `zeroship-data-postgres` on 2026-09-02.
+// Re-exported at the addresses the crate already spells, so this is a move
+// rather than a rename sweep across every consumer.
+//
+// The split is NOT `pub use zeroship_data_postgres::*`: the gated half must
+// carry the same `cfg` as the impls in THIS crate. `SchemaIntrospect` proved
+// why - its trait is `cfg(feature)` in data-core while plugin-db impls it under
+// `cfg(any(test, feature))`, and the mismatch was invisible to every `cargo
+// check` configuration and appeared only in the lib-TEST target.
+pub use zeroship_data_postgres::{PostgresBackend, pg_error, pg_row_json, postgres};
+// `pg_autocommit` and `pg_session_sql` lost their last UNGATED consumer in this
+// crate when the PostgreSQL tier left: what still names them is `exec.rs`'s test
+// module, `auth/bootstrap.rs` (itself gated) and `tests/integration.rs`. The
+// gate keeps a default build warning-free without hiding them from the callers
+// that exist.
+#[cfg(any(test, feature = "test-helpers"))]
+pub use zeroship_data_postgres::{pg_autocommit, pg_session_sql};
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) use zeroship_data_postgres::{PgLockManager, PgSqlExecutor, lock_guard, pg_introspect};
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) use zeroship_data_postgres::lock_guard::LockGuard;
 
 
 // The vocabulary these capability traits speak in moved to
@@ -129,9 +126,11 @@ pub use sqlite::SqliteBackend;
 // Re-exported wholesale rather than repointed at call sites, the same mechanism
 // `budgets` used: `crate::backend::LockScope` and friends resolve unchanged, so
 // this is a move rather than a rename sweep across the crate.
-pub use zeroship_data_core::capability::{
-    LockScope, SNAPSHOT_RESTORE_LOCK_TAG, ScalarRead, UnmaskAuditRow,
-};
+pub use zeroship_data_core::capability::{ScalarRead, UnmaskAuditRow};
+// Same story as `pg_autocommit` above: `lock_guard.rs` was the ungated consumer
+// of both, and it travelled to the PostgreSQL crate with `LockGuard`.
+#[cfg(any(test, feature = "test-helpers"))]
+pub use zeroship_data_core::capability::{LockScope, SNAPSHOT_RESTORE_LOCK_TAG};
 // The backup/snapshot four carry `#[cfg(feature = "test-helpers")]`, and THAT
 // ATTRIBUTE CHANGED MEANING WHEN THEY CROSSED THE CRATE BOUNDARY: it used to
 // name this crate's feature, and now names `zeroship-data-core`'s. The two are
@@ -179,93 +178,6 @@ pub use zeroship_data_core::storage::SchemaIntrospect;
 
 
 
-
-/// Postgres-specific extension trait exposing the underlying pool
-/// handle so free-function consumers — chiefly the audit helpers in
-/// [`crate::audit`] — can reach an `&compio_postgres::Pool` without
-/// naming the concrete backend type.
-///
-/// **Open Q1 resolution**: the 16 audit-table operations
-/// that used to live as methods on `Backend` were deleted; the
-/// helpers stay as free functions in `crate::audit::*` taking
-/// `&Pool` / `&Client`, and generic consumers reach the pool through
-/// `backend.pool_handle()`. See `docs/archive/p0-implementation-plan.md`
-/// §3 Q1 and `docs/archive/db-system-design.md` §7.
-///
-/// **Feature gating: TEST-ONLY as of 2026-09-01, and that is the point.**
-///
-/// This trait hands out the raw pool, and a bare checkout carries the shared
-/// `zeroship_worker` login role with NO `SET LOCAL ROLE` - so every call is a
-/// chance to reach a tenant schema outside the per-app role fence. The tree
-/// records one occasion the option was taken: `crud/unmask.rs`'s audit INSERT
-/// used `pool_handle()` until 2026-09-01 and was the single ungated production
-/// path in this crate reaching a tenant schema unfenced.
-///
-/// It was unconditional until now, which made the escape hatch DISCOURAGED
-/// rather than IMPOSSIBLE. Its only four callers are in `crud::mask_drift`,
-/// which is itself `#[cfg(any(test, feature = "test-helpers"))]`, so gating the
-/// trait removes it from release builds and changes no behaviour. Three of
-/// those callers issue DDL the per-app role is not granted and so cannot be
-/// routed through the roled funnel - which is why the accessor is GATED here
-/// rather than deleted.
-///
-/// If a production path ever needs the pool, that is a design question, not a
-/// feature-flag question: route it through `PostgresBackend`'s roled entry
-/// points, or argue why the fence should not apply.
-///
-/// The `impl` side is PG-only; a hypothetical `SqliteBackend` would not
-/// implement this trait — it would have its own audit-helper signatures (a
-/// `SqliteExecutor` accessor returning `&sqlite::Connection`, etc.).
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) trait PgSqlExecutor: SqlExecutor<Client = compio_postgres::OwnedPooledClient> {
-    /// Borrow the underlying `compio_postgres::Pool`. Free-function
-    /// audit helpers in [`crate::audit`] take `&Pool` directly; this
-    /// accessor lets generic consumers (e.g.
-    /// `<B: PgSqlExecutor>`) reach the pool without naming
-    /// `PostgresBackend`.
-    fn pool_handle(&self) -> &Rc<compio_postgres::Pool>;
-}
-
-/// Postgres-specific extension trait carrying the
-/// `acquire_pooled_client_for_lock` primitive - a pool checkout whose lease
-/// [`crate::backend::lock_guard::LockGuard`] holds for the life of the
-/// advisory lock.
-///
-/// **Open Q5 is now moot, and this paragraph is kept as history rather than as
-/// a live trade-off.** It read: the primitive had to return a
-/// `PooledClient<'p>` whose `'p` borrow lifetime threaded through `LockGuard`,
-/// and the alternative was a GAT on [`LockManager`] of the form
-/// `type PooledLockClient<'p>: 'p where Self: 'p` — workable with
-/// async-fn-in-trait but fighting the trait solver at consumer sites, so the
-/// PG extension trait was taken and cross-backend lifetime threading deferred.
-/// `OwnedPooledClient` removes the lifetime outright: the lease owns an `Rc` of
-/// the pool and still returns on drop, so neither branch of that choice is
-/// needed. See `docs/archive/p0-implementation-plan.md` §3 Q5 and
-/// `docs/archive/db-system-design.md` §7 for the original framing.
-///
-/// The `: LockManager<Client = compio_postgres::OwnedPooledClient>` super-bound
-/// is load-bearing: the returned lease is the [`SqlExecutor::Client`] that
-/// [`LockManager::acquire_advisory_lock`] takes, so the orchestrator can hand
-/// it straight into `LockGuard::acquire` without an adapter.
-#[cfg(any(test, feature = "test-helpers"))]
-pub(crate) trait PgLockManager: LockManager<Client = compio_postgres::OwnedPooledClient> {
-    /// Acquire a pool-leased client for advisory-lock duty.
-    ///
-    /// Returns an [`compio_postgres::OwnedPooledClient`]: the lease owns an
-    /// `Rc` of the pool and still returns on drop, so
-    /// [`crate::backend::lock_guard::LockGuard`] no longer has to thread a
-    /// `'p` borrow lifetime through itself. The Q5 note above is therefore
-    /// historical - the GAT alternative it weighs was solving a lifetime
-    /// problem the owned lease removes outright.
-    ///
-    /// Postgres impl wraps `self.pool().get_owned().await` and maps the
-    /// pool error to [`DbError::Transient`] with the same operator-
-    /// facing message the bootstrap call site used to emit inline.
-    #[allow(async_fn_in_trait)]
-    async fn acquire_pooled_client_for_lock(
-        &self,
-    ) -> Result<compio_postgres::OwnedPooledClient, DbError>;
-}
 
 
 
@@ -436,6 +348,14 @@ pub(crate) trait Backend:
     SqlExecutor + LockManager + SchemaIntrospect<LiveSchema = crate::diff::LiveSchema> + 'static
 {
 }
+
+// The impl lives HERE and not beside the sub-trait impls in
+// `zeroship-data-postgres`, and that is the orphan rule rather than a
+// preference: `Backend` is this crate's own `pub(crate)` marker, so a local
+// trait on a foreign type is legal and the reverse is not. Every method it
+// composes is impl'd in the vendor crate; this line adds no behaviour.
+#[cfg(any(test, feature = "test-helpers"))]
+impl Backend for PostgresBackend {}
 
 
 /// Per-isolate backend handle — the typed enum stashed on

@@ -43,5 +43,6 @@ pub mod binding;
 pub mod budgets;
 pub mod capability;
 pub mod encryption;
+pub mod lock_policy;
 pub mod storage;
 pub mod error;

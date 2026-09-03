@@ -1,4 +1,4 @@
-//! `PostgresBackend` — the single concrete impl of [`super::Backend`].
+//! `PostgresBackend` — the single concrete impl of `zeroship_plugin_db::backend::Backend`.
 //!
 //! Wraps the `compio_postgres::Pool` and the configured URL. Every PG-
 //! flavoured call moves here so consumer files such as `transaction/*` can stay
@@ -21,18 +21,31 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 #[cfg(any(test, feature = "test-helpers"))]
-use crate::diff::LiveSchema;
+// Feeds only the `SchemaIntrospect` impl, whose trait is `cfg(feature)` in
+// data-core - so this import carries that gate, not `any(test, feature)`.
+#[cfg(feature = "test-helpers")]
+use zeroship_schema::diff::LiveSchema;
 use zeroship_data_core::error::{BeginIntent, CleanupAck, DbError, SettleIntent, TerminalResult};
 
-#[cfg(any(test, feature = "test-helpers"))]
-use super::Backend;
-#[cfg(any(test, feature = "test-helpers"))]
+// `Backend` is NOT imported here. It is `zeroship-plugin-db`'s own
+// `pub(crate)` composition marker, so by the orphan rule
+// `impl Backend for PostgresBackend` can only be written in that crate - and
+// its compile-time conformance assertion lives beside it.
+#[cfg(feature = "test-helpers")]
 use super::pg_introspect;
-use super::{
-    DialectBuilder, GeoPoint, LockManager, SpatialIndex, SqlExecutor, VectorIndex, VectorMetric,
+use zeroship_data_core::storage::{
+    DialectBuilder, LockManager, SpatialIndex, SqlExecutor, VectorIndex,
 };
+use zeroship_schema::descriptors::{GeoPoint, VectorMetric};
 #[cfg(any(test, feature = "test-helpers"))]
-use super::{PgLockManager, PgSqlExecutor, SchemaIntrospect};
+use super::{PgLockManager, PgSqlExecutor};
+// `SchemaIntrospect` is `cfg(feature = "test-helpers")` in data-core, so ACROSS
+// THE CRATE BOUNDARY the feature is the whole gate: a `cfg(test)` here names
+// THIS crate's test build and can never turn data-core's feature on. Import and
+// impl must therefore agree on the feature alone, or `cargo test` on this crate
+// compiles the impl without the trait.
+#[cfg(feature = "test-helpers")]
+use zeroship_data_core::storage::SchemaIntrospect;
 use super::{pg_autocommit, pg_error};
 
 /// Single concrete impl of `Backend` backed by `compio_postgres`.
@@ -51,10 +64,10 @@ pub struct PostgresBackend {
     /// `(app_id, key_id) → AeadKey` from this isolate's in-process root
     /// key source -- roots the host supplied, else
     /// `ZEROSHIP_COLUMN_KEY_<KEYID>` env vars. No database round-trip is
-    /// involved and none is wanted (see `crate::encryption::keys`).
+    /// involved and none is wanted (see `zeroship_data_core::encryption::keys`).
     /// Single-threaded (`RefCell` inside `KeyStore`) since every
     /// `PostgresBackend` is owned by a single compio thread.
-    key_store: crate::encryption::KeyStore,
+    key_store: zeroship_data_core::encryption::KeyStore,
     /// Cached pgvector extension presence probe.
     ///
     /// `None` before the first [`VectorIndex::vector_search`] call;
@@ -99,33 +112,33 @@ impl PostgresBackend {
     ///
     /// The lookup did not disappear; it moved up to the composer that always
     /// owned the context,
-    /// [`crate::backend_selection::open_postgres_backend`]. The old `new()`
+    /// `zeroship_plugin_db::backend_selection`. The old `new()`
     /// even documented the hazard it created - "do not call this from inside a
     /// `context::with` closure, it takes a context borrow of its own" - which
     /// is what a fetch buried in a constructor costs.
     pub fn new(
         pool: Rc<compio_postgres::Pool>,
         url: String,
-        key_source: crate::encryption::LocalKeySource,
+        key_source: zeroship_data_core::encryption::LocalKeySource,
     ) -> Self {
         Self {
             pool,
             url,
             pgvector_available: RefCell::new(None),
             postgis_available: RefCell::new(None),
-            key_store: crate::encryption::KeyStore::new(key_source),
+            key_store: zeroship_data_core::encryption::KeyStore::new(key_source),
         }
     }
 
     /// Borrow the inner pool. Provided for the few places that still
     /// need the raw `Pool` (e.g. the v8_classes layer's `ensure_pool`
     /// shim until the consumer migration completes).
-    pub(crate) fn pool(&self) -> &Rc<compio_postgres::Pool> {
+    pub fn pool(&self) -> &Rc<compio_postgres::Pool> {
         &self.pool
     }
 
     /// Borrow the configured URL.
-    pub(crate) fn url(&self) -> &str {
+    pub fn url(&self) -> &str {
         &self.url
     }
 }
@@ -143,7 +156,7 @@ impl PostgresBackend {
 ///
 /// The three shapes exist because the callers want three different things; the
 /// reasoning, including why the byte reader cannot go through JSON, is in
-/// [`crate::backend::pg_autocommit`].
+/// [`crate::pg_autocommit`].
 impl PostgresBackend {
     /// Run `sql` under this app's role and render the rows as JSON objects.
     ///
@@ -165,7 +178,7 @@ impl PostgresBackend {
     ///
     /// As [`Self::query_roled_json`], plus a decode failure if column 0 is not
     /// byte-typed.
-    pub(crate) async fn read_roled_scalar_bytes(
+    pub async fn read_roled_scalar_bytes(
         &self,
         app_id: &str,
         sql: &str,
@@ -181,7 +194,7 @@ impl PostgresBackend {
     /// As [`Self::query_roled_json`], plus a decode failure if column 0 is not
     /// text-typed. A BYTEA column is refused rather than mis-parsed; use
     /// [`Self::read_roled_scalar_bytes`].
-    pub(crate) async fn read_roled_scalar_text(
+    pub async fn read_roled_scalar_text(
         &self,
         app_id: &str,
         sql: &str,
@@ -195,7 +208,7 @@ impl PostgresBackend {
     /// # Errors
     ///
     /// As [`Self::query_roled_json`].
-    pub(crate) async fn execute_roled(
+    pub async fn execute_roled(
         &self,
         app_id: &str,
         sql: &str,
@@ -221,7 +234,7 @@ impl PostgresBackend {
     /// # Errors
     ///
     /// As [`Self::query_roled_json`].
-    pub(crate) async fn query_roled_rows_as_json(
+    pub async fn query_roled_rows_as_json(
         &self,
         app_id: &str,
         sql: &str,
@@ -339,7 +352,9 @@ impl SqlExecutor for PostgresBackend {
         Ok(rows.len() as u64)
     }
 
-    #[cfg(any(test, feature = "test-helpers"))]
+    // Gate matches `SqlExecutor::pool_exec_ddl` in data-core, which is
+    // `cfg(feature = "test-helpers")`.
+    #[cfg(feature = "test-helpers")]
     async fn pool_exec_ddl(&self, sql: &str) -> Result<(), DbError> {
         // Multi-statement DDL (CREATE TABLE + implicit system-field
         // CREATE INDEXes + `COMMENT ON COLUMN` mask sentinels) must use
@@ -432,7 +447,7 @@ impl LockManager for PostgresBackend {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 impl SchemaIntrospect for PostgresBackend {
     type LiveSchema = LiveSchema;
 
@@ -551,7 +566,7 @@ impl VectorIndex for PostgresBackend {
         // off the descriptor. A collection this deploy does not declare is
         // refused here rather than searched with an unbounded projection.
         let schema_hint = schema;
-        let bq = crate::query::build_vector_search(
+        let bq = zeroship_schema::query::build_vector_search(
             app_id,
             collection,
             column,
@@ -642,7 +657,7 @@ impl SpatialIndex for PostgresBackend {
 
         let app_id = binding.app_id();
         let schema_hint = schema;
-        let bq = crate::query::build_spatial_near(
+        let bq = zeroship_schema::query::build_spatial_near(
             app_id,
             collection,
             column,
@@ -695,13 +710,13 @@ impl PgLockManager for PostgresBackend {
 pub(crate) struct PgDialect;
 
 impl DialectBuilder for PgDialect {
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn sql_dialect(&self) -> crate::query::SqlDialect {
-        crate::query::SqlDialect::Postgres
+    #[cfg(feature = "test-helpers")]
+    fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
+        zeroship_schema::query::SqlDialect::Postgres
     }
 
     /// Double-quote with embedded-quote escape. Matches the existing
-    /// `crate::query::quote_ident` helper byte-for-byte.
+    /// `zeroship_schema::query::quote_ident` helper byte-for-byte.
     fn quote_ident(&self, name: &str) -> String {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
@@ -749,8 +764,8 @@ impl DialectBuilder for PgDialect {
 /// separate field. The bodies delegate to the `PgDialect` ZST; rustc
 /// inlines the value away because every method is `&self`.
 impl DialectBuilder for PostgresBackend {
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn sql_dialect(&self) -> crate::query::SqlDialect {
+    #[cfg(feature = "test-helpers")]
+    fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
         PgDialect.sql_dialect()
     }
 
@@ -771,10 +786,11 @@ impl DialectBuilder for PostgresBackend {
     }
 }
 
-// `Backend` is a pure composition marker -- every method
-// lives on a sub-trait impl above.
-#[cfg(any(test, feature = "test-helpers"))]
-impl Backend for PostgresBackend {}
+// `impl Backend for PostgresBackend` is NOT here. `Backend` is
+// `zeroship-plugin-db`'s own `pub(crate)` composition marker, and the orphan
+// rule puts the impl in the crate that owns the trait even though the type is
+// this crate's. It lives in `zeroship-plugin-db/src/backend/mod.rs` with the
+// compile-time assertion that pins it.
 
 // ===========================================================================
 // Key-store accessor + Backup impl on PostgresBackend
@@ -802,9 +818,9 @@ impl PostgresBackend {
     /// 2026-09-02: key SOURCING was the only part of column encryption a
     /// backend ever contributed, and PG stopped differing from SQLite on it
     /// when the admin-schema `get_column_key` getter went on 2026-08-27. The
-    /// AEAD is `crate::encryption::aead` for both, so the CRUD passes call it
+    /// AEAD is `zeroship_data_core::encryption::aead` for both, so the CRUD passes call it
     /// directly rather than through a per-vendor trait.
-    pub fn key_store(&self) -> &crate::encryption::KeyStore {
+    pub fn key_store(&self) -> &zeroship_data_core::encryption::KeyStore {
         &self.key_store
     }
 }
@@ -842,20 +858,20 @@ impl PostgresBackend {
 // pattern used elsewhere in the codebase (e.g. `sandbox-agent/src/exec.rs`).
 
 #[cfg(feature = "test-helpers")]
-impl crate::backend::Backup for PostgresBackend {
+impl zeroship_data_core::storage::Backup for PostgresBackend {
     async fn snapshot(
         &self,
         app_id: &str,
         dest_uri: &str,
-        opts: crate::backend::SnapshotOpts,
-    ) -> Result<crate::backend::SnapshotHandle, DbError> {
+        opts: zeroship_data_core::capability::SnapshotOpts,
+    ) -> Result<zeroship_data_core::capability::SnapshotHandle, DbError> {
         backup_pg::snapshot_impl(self, app_id, dest_uri, opts).await
     }
 
     async fn restore(
         &self,
         app_id: &str,
-        snapshot: &crate::backend::SnapshotHandle,
+        snapshot: &zeroship_data_core::capability::SnapshotHandle,
     ) -> Result<(), DbError> {
         backup_pg::restore_impl(self, app_id, snapshot).await
     }
@@ -863,7 +879,7 @@ impl crate::backend::Backup for PostgresBackend {
     async fn pitr_replay(
         &self,
         app_id: &str,
-        target: crate::backend::PitrTarget,
+        target: zeroship_data_core::capability::PitrTarget,
     ) -> Result<(), DbError> {
         backup_pg::pitr_replay_impl(self, app_id, target).await
     }
@@ -880,9 +896,11 @@ mod backup_pg {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::PostgresBackend;
-    use crate::backend::SNAPSHOT_RESTORE_LOCK_TAG;
-    use crate::backend::{
-        BusyPolicy, LockGuard, LockScope, PgLockManager, PitrTarget, SnapshotHandle, SnapshotOpts,
+    use zeroship_data_core::capability::SNAPSHOT_RESTORE_LOCK_TAG;
+    use crate::PgLockManager;
+    use crate::lock_guard::LockGuard;
+    use zeroship_data_core::capability::{
+        BusyPolicy, LockScope, PitrTarget, SnapshotHandle, SnapshotOpts,
     };
     use zeroship_data_core::error::DbError;
 
@@ -1234,7 +1252,7 @@ mod backup_pg {
             return Err(DbError::Internal {
                 message: format!(
                     "restore: DROP SCHEMA failed: {}",
-                    crate::backend::pg_error::classify(&e)
+                    crate::pg_error::classify(&e)
                 ),
             });
         }
@@ -1322,7 +1340,7 @@ mod backup_pg {
             .pool()
             .query_text_params(sql, &[app_id, target_str.as_str()])
             .await
-            .map_err(|e| crate::backend::pg_error::classify(&e))?;
+            .map_err(|e| crate::pg_error::classify(&e))?;
         Ok(())
     }
 }
@@ -1332,7 +1350,7 @@ mod backup_pg {
 /// The dialect lives here, not in the protocol. PostgreSQL spells the ANSI
 /// levels verbatim, so this is a `format!` today; a backend that did not would
 /// still only have to change its own renderer.
-pub(crate) fn render_begin(intent: BeginIntent) -> String {
+pub fn render_begin(intent: BeginIntent) -> String {
     match intent {
         BeginIntent::Default => "BEGIN".to_string(),
         BeginIntent::Isolation(level) => {
@@ -1359,7 +1377,7 @@ pub(crate) fn render_begin(intent: BeginIntent) -> String {
 /// statement"; `SET LOCAL ROLE` is one dialect's answer to that, and the engine
 /// asking for it by name was the last thing making `transaction/mod.rs` name
 /// `compio_postgres`.
-pub(crate) async fn apply_per_app_role(
+pub async fn apply_per_app_role(
     client: &compio_postgres::Client,
     app_id: &str,
 ) -> Result<(), zeroship_data_core::error::SessionSetupError> {
@@ -1368,11 +1386,11 @@ pub(crate) async fn apply_per_app_role(
     // The idle-in-tx guard is the load-bearing defense: a creator callback that
     // never resolves can no longer pin this dedicated connection forever and
     // exhaust the shared Postgres for other tenants.
-    let sql = crate::backend::pg_session_sql::tx_session_setup_sql(app_id)
+    let sql = crate::pg_session_sql::tx_session_setup_sql(app_id)
         .map_err(zeroship_data_core::error::SessionSetupError::failed)?;
     client.simple_query(&sql).await.map_err(|e| {
         let mut classified =
-            crate::backend::pg_error::classify_pg_per_app_session_setup(&e, app_id);
+            crate::pg_error::classify_pg_per_app_session_setup(&e, app_id);
         zeroship_data_core::error::prefix_message(
             classified.error_mut(),
             "db: tx session setup (per-app section 17.5 + DB-1 guards): ",
@@ -1491,7 +1509,7 @@ mod tests {
     //!    tightening a lifetime, swapping an associated type) fails
     //!    compilation here, not at a distant call site.
     //! 2. Associated-type identities — pin `Client = compio_postgres::OwnedPooledClient`
-    //!    and `LiveSchema = crate::diff::LiveSchema` so a refactor that
+    //!    and `LiveSchema = zeroship_schema::diff::LiveSchema` so a refactor that
     //!    accidentally swaps either is caught here.
     //! 3. The `Backend: 'static` bound on the trait — re-asserted at
     //!    the impl site.
@@ -1501,19 +1519,14 @@ mod tests {
     //! seam break.
 
     use super::*;
-    use crate::backend::{
-        Backend, DialectBuilder, LockManager, PgLockManager, PgSqlExecutor, SchemaIntrospect,
-        SqlExecutor,
-    };
+    use crate::{PgLockManager, PgSqlExecutor};
+    use zeroship_data_core::storage::{DialectBuilder, LockManager, SqlExecutor};
+    #[cfg(feature = "test-helpers")]
+    use zeroship_data_core::storage::SchemaIntrospect;
 
-    /// Compile-time: `PostgresBackend` must satisfy the `Backend` trait
-    /// (a pure composition marker over five sub-traits).
-    /// The function is never called; the bound is checked at type-check
-    /// time.
-    fn assert_postgres_backend_impls_backend() {
-        fn assert_impl<T: Backend>() {}
-        assert_impl::<PostgresBackend>();
-    }
+    // The `Backend` conformance assertion is NOT here: that trait is the
+    // adapter's own marker, so both `impl Backend for PostgresBackend` and the
+    // assertion pinning it live in `zeroship-plugin-db`.
 
     /// Compile-time: each carved capability trait is impl'd directly on
     /// `PostgresBackend` (not just visible through the
@@ -1523,11 +1536,13 @@ mod tests {
     fn assert_postgres_backend_impls_sub_traits() {
         fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::OwnedPooledClient>>() {}
         fn impls_lock_manager<T: LockManager<Client = compio_postgres::OwnedPooledClient>>() {}
-        fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
+        #[cfg(feature = "test-helpers")]
+        fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = zeroship_schema::diff::LiveSchema>>() {}
         fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
         fn impls_pg_lock_manager<T: PgLockManager>() {}
         impls_sql_executor::<PostgresBackend>();
         impls_lock_manager::<PostgresBackend>();
+        #[cfg(feature = "test-helpers")]
         impls_schema_introspect::<PostgresBackend>();
         impls_pg_sql_executor::<PostgresBackend>();
         impls_pg_lock_manager::<PostgresBackend>();
@@ -1592,12 +1607,10 @@ mod tests {
     /// by [`SchemaIntrospect`] -- the `Backend` super-bound
     /// `SchemaIntrospect<LiveSchema = LiveSchema>` re-anchors it so
     /// `Backend<LiveSchema = …>` still resolves here.
-    fn assert_postgres_backend_assoc_types() {
-        fn same_client<T: Backend<Client = compio_postgres::OwnedPooledClient>>() {}
-        fn same_live_schema<T: Backend<LiveSchema = crate::diff::LiveSchema>>() {}
-        same_client::<PostgresBackend>();
-        same_live_schema::<PostgresBackend>();
-    }
+    // `assert_postgres_backend_assoc_types` is not here: it is stated in terms
+    // of `Backend`, which this crate cannot name. `zeroship-plugin-db`'s
+    // `assert_associated_types_pinned` pins the same two associated types.
+    fn assert_postgres_backend_assoc_types() {}
 
     /// Compile-time: the `Backend: 'static` bound carries through to
     /// the impl. The per-isolate context relies on this to park
@@ -1657,7 +1670,6 @@ mod tests {
         // checks happen at type-check time on the function body
         // regardless of whether we call them, but the explicit
         // `_ = ...` documents intent and silences `dead_code`.
-        let _ = assert_postgres_backend_impls_backend as fn();
         let _ = assert_postgres_backend_impls_sub_traits as fn();
         let _ = assert_postgres_backend_assoc_types as fn();
         let _ = assert_postgres_backend_is_static as fn();
