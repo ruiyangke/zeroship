@@ -87,29 +87,23 @@ impl std::fmt::Debug for PostgresBackend {
 }
 
 impl PostgresBackend {
-    /// Build a backend handle around an already-initialised pool.
+    /// Build a backend handle around an already-initialised pool, with the
+    /// column-key source supplied by the caller.
     ///
-    /// Column keys resolve through whatever local source this isolate
-    /// carries - the roots a host installed, else
-    /// `ZEROSHIP_COLUMN_KEY_<KEYID>`. A caller that wants to pin the
-    /// source regardless of the isolate goes through
-    /// [`Self::new_with_key_source`].
+    /// **The key source is a parameter, not a lookup, and that is a tier
+    /// boundary rather than a style preference.** This constructor used to have
+    /// a sibling `new()` that called `crate::context::isolate_key_source()` -
+    /// the vendor reaching up into the ENGINE's per-isolate thread-local. Once
+    /// this file is `zeroship-data-postgres`, that call cannot compile: the
+    /// engine depends on the vendor, so the vendor may not name the engine.
     ///
-    /// Do not call this from inside a `context::with` / `with_mut`
-    /// closure - it takes a context borrow of its own.
-    /// `ThreadDbContext::set_pool` uses `new_with_key_source` for
-    /// exactly that reason.
-    pub fn new(pool: Rc<compio_postgres::Pool>, url: String) -> Self {
-        let key_source = crate::context::isolate_key_source();
-        Self::new_with_key_source(pool, url, key_source)
-    }
-
-    /// Build a backend handle with an explicit column-key source.
-    ///
-    /// The isolate context uses this to hand a backend the root keys the
-    /// host installed (`ThreadDbContext::local_key_source`) instead of
-    /// the process environment.
-    pub(crate) fn new_with_key_source(
+    /// The lookup did not disappear; it moved up to the composer that always
+    /// owned the context,
+    /// [`crate::backend_selection::open_postgres_backend`]. The old `new()`
+    /// even documented the hazard it created - "do not call this from inside a
+    /// `context::with` closure, it takes a context borrow of its own" - which
+    /// is what a fetch buried in a constructor costs.
+    pub fn new(
         pool: Rc<compio_postgres::Pool>,
         url: String,
         key_source: crate::encryption::LocalKeySource,

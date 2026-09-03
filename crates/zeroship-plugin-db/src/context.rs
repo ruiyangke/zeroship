@@ -641,7 +641,7 @@ impl ThreadDbContext {
     /// [`BackendHandle::Postgres`] arm.
     pub(crate) fn set_pool(&mut self, pool: Rc<Pool>) {
         let url = self.db_url.clone().unwrap_or_default();
-        let backend = Rc::new(PostgresBackend::new_with_key_source(
+        let backend = Rc::new(PostgresBackend::new(
             Rc::clone(&pool),
             url,
             self.local_key_source(),
