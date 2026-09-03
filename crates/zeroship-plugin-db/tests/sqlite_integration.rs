@@ -2013,6 +2013,11 @@ fn vector_search_returns_k_nearest_sqlite() {
                 10,
                 VectorMetric::Cosine,
                 &serde_json::Value::Null,
+                &zeroship_plugin_db::collection_schema(
+                        &DbBinding::cold_start("vector_topk"),
+                        "docs",
+                    )
+                    .expect("descriptor slice for the search fixture"),
             )
             .await
             .expect("vector_search");
@@ -2181,6 +2186,11 @@ fn vector_search_respects_filter_sqlite() {
                 10,
                 VectorMetric::Cosine,
                 &filter,
+                &zeroship_plugin_db::collection_schema(
+                        &DbBinding::cold_start("vector_filter"),
+                        "docs",
+                    )
+                    .expect("descriptor slice for the search fixture"),
             )
             .await
             .expect("vector_search with filter");
@@ -2280,6 +2290,11 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 2,
                 VectorMetric::Cosine,
                 &serde_json::Value::Null,
+                &zeroship_plugin_db::collection_schema(
+                        &DbBinding::cold_start("vector_math"),
+                        "docs",
+                    )
+                    .expect("descriptor slice for the search fixture"),
             )
             .await
             .expect("cosine search");
@@ -2292,6 +2307,11 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 2,
                 VectorMetric::L2,
                 &serde_json::Value::Null,
+                &zeroship_plugin_db::collection_schema(
+                        &DbBinding::cold_start("vector_math"),
+                        "docs",
+                    )
+                    .expect("descriptor slice for the search fixture"),
             )
             .await
             .expect("l2 search");
@@ -2428,6 +2448,11 @@ fn near_returns_within_radius() {
                 1000.0,
                 &serde_json::Value::Null,
                 None,
+                &zeroship_plugin_db::collection_schema(
+                        &DbBinding::cold_start("near_radius"),
+                        "places",
+                    )
+                    .expect("descriptor slice for the search fixture"),
             )
             .await
             .expect("spatial_near");

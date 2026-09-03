@@ -500,6 +500,14 @@ pub trait VectorIndex: 'static {
     /// `"_distance"` field (`f64`).
     #[allow(async_fn_in_trait)]
     #[allow(clippy::too_many_arguments)] // mirrors the SDK's flat vector-search call shape; a params struct would just move the fields
+    /// `schema` is the caller-resolved descriptor slice for `collection`.
+    ///
+    /// **A parameter, not a lookup.** Both impls used to call
+    /// `descriptor::collection_schema(binding, collection)` themselves, which
+    /// reaches the ENGINE's per-isolate context - an edge that cannot compile
+    /// once the backends are their own crates. The caller already holds the
+    /// descriptor; `binding` and `collection` stay because the SQL still names
+    /// the schema and table.
     async fn vector_search(
         &self,
         binding: &DbBinding,
@@ -509,6 +517,7 @@ pub trait VectorIndex: 'static {
         k: usize,
         metric: VectorMetric,
         filter: &serde_json::Value,
+        schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError>;
 }
 
@@ -537,6 +546,8 @@ pub trait SpatialIndex: 'static {
     /// ASC. `limit` of `None` defers to the impl's default.
     #[allow(async_fn_in_trait)]
     #[allow(clippy::too_many_arguments)] // mirrors the SDK's flat spatial-near call shape; a params struct would just move the fields
+    /// `schema` is the caller-resolved descriptor slice - see
+    /// [`VectorIndex::vector_search`] for why it is a parameter.
     async fn spatial_near(
         &self,
         binding: &DbBinding,
@@ -546,6 +557,7 @@ pub trait SpatialIndex: 'static {
         radius_m: f64,
         filter: &serde_json::Value,
         limit: Option<usize>,
+        schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError>;
 }
 

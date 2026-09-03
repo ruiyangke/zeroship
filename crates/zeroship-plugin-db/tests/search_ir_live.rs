@@ -514,6 +514,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                 5,
                 BackendMetric::InnerProduct,
                 &serde_json::Value::Null,
+                &serde_json::Value::Null,
             )
             .await
             .expect_err("vec0 has no inner-product metric");
@@ -535,6 +536,7 @@ fn postgres_serves_the_inner_product_that_sqlite_refuses() {
                 &unit_vector(3),
                 5,
                 BackendMetric::Cosine,
+                &serde_json::Value::Null,
                 &serde_json::Value::Null,
             )
             .await

@@ -141,6 +141,22 @@ pub(crate) mod context;
 pub fn isolate_key_source() -> encryption::LocalKeySource {
     context::isolate_key_source()
 }
+/// This isolate's descriptor slice for one collection, for callers that drive a
+/// search backend directly.
+///
+/// Exported for the same reason as [`isolate_key_source`] directly above: the
+/// search traits take the schema as a PARAMETER now, and a caller outside this
+/// crate has to be able to resolve the value the engine would have passed.
+/// Passing `Value::Null` instead is NOT equivalent - the read pipeline refuses
+/// it with `invalid_filter` / "read schema must be a field-map object", which
+/// is how the integration suite caught the substitution.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn collection_schema(
+    binding: &zeroship_data_core::binding::DbBinding,
+    collection: &str,
+) -> Result<std::sync::Arc<serde_json::Value>, DbError> {
+    descriptor::collection_schema(binding, collection)
+}
 // The operator charter the worker parses once at construction. `pub(crate)`
 // because nothing outside the crate has business reading the assignment
 // authority - the descriptor mirror is what consumers verify against.
