@@ -1499,6 +1499,44 @@ mod tests {
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
     }
 
+    /// The non-blocking twin of the refusal above, and it must be an ERROR
+    /// rather than `Ok(None)`.
+    ///
+    /// `try_with` has two failure shapes that read very differently: `Ok(None)`
+    /// means "another thread holds the lease, try later" and is recoverable,
+    /// while `Err` means the session is finished. A poisoned session reported
+    /// as busy would invite exactly the retry that must never happen. The test
+    /// above poisons and then proves `with` refuses, which binds `lease`'s
+    /// check; `try_lease` carries its own and nothing reached it - disabling it
+    /// left the lib (769), suite (797) and `tls_live` (48) suites green.
+    ///
+    /// It is the release path that cares: `release.rs` uses `try_with`
+    /// precisely because it must not block, so a poisoned session escaping
+    /// there is one the shutdown path would go on using.
+    #[test]
+    fn a_poisoned_session_refuses_a_try_lease_rather_than_reporting_it_busy() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = session.with(|_| -> io::Result<()> { panic!("scripted callback panic") });
+        }));
+        assert!(panic.is_err(), "the seeding callback did not panic");
+
+        let error = session
+            .try_with(|_| -> io::Result<()> { Ok(()) })
+            .expect_err("the non-blocking path handed out a poisoned session");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::BrokenPipe,
+            "a poisoned session must not look retryable: {error}"
+        );
+        assert!(
+            error.to_string().contains("poisoned"),
+            "the refusal must name poisoning: {error}"
+        );
+    }
+
     #[compio::test]
     async fn cancelling_a_tls_write_poisons_the_reused_stream() {
         let (client, _server) = handshaken_pair();
