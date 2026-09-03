@@ -725,11 +725,25 @@ pub(crate) async fn run_find(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     validate_unmask_projection(plan.select.as_ref(), &plan.unmask_columns)?;
 
-    // Upfront auth fence for the unmask hint. The fence, the SELECT and the
-    // audit row below all run on `route.backend()` - the handle the adapter
-    // bound for THIS dispatch. The unmask module used to resolve its own from
-    // the thread's context, which is ADAPTER state an ENGINE file may not read,
-    // and which could name a different handle than the one the read ran on.
+    // Upfront auth fence for the unmask hint. The fence, the SELECT, the read
+    // pipeline's unmask fetch and the audit row below all take the SAME HANDLE -
+    // `route.backend()`, the one the adapter bound for THIS dispatch. That is
+    // what the argument buys: the unmask module used to resolve its own from the
+    // thread's context, which is ADAPTER state an ENGINE file may not read, and
+    // which could name a different handle than the one the read ran on.
+    //
+    // ONE HANDLE IS NOT ONE CONNECTION, and this comment claimed it was until
+    // 2026-09-03. Only the SELECT goes through `exec_query`, which honours
+    // `route.in_tx()` and issues on the app's parked transaction client. The
+    // fence, the unmask fetch and the audit INSERT call the handle directly and
+    // therefore land on the autocommit lane, inside a transaction as much as
+    // outside it. So a `find({ unmask })` in a `db.transaction(fn)` callback
+    // reads its rows in the transaction and authorises, unmasks and audits them
+    // outside it - uncommitted rows are invisible to the unmask fetch, and the
+    // audit row survives a rollback of the read that produced it.
+    //
+    // That split is PRE-EXISTING and tracked on its own; do not read the
+    // paragraph above as a claim that it is closed.
     if !plan.unmask_columns.is_empty() {
         crate::crud::unmask::authorize_query_hint(
             route.backend(),
@@ -2080,7 +2094,14 @@ pub(crate) async fn run_near(
 /// [`write_pipeline::apply`]: this prep encrypts and lowers, and neither the
 /// key store nor the dialect is a routing decision. The production caller takes
 /// both off the route the insert will run on.
-async fn prepare_insert_many_docs_for_binding(
+///
+/// `pub(crate)` rather than private because the no-isolate test entry point
+/// `crate::prepare_insert_many_docs_for_tests` calls it. That helper lives at
+/// the crate root, on the ADAPTER side, precisely so the resolution of the two
+/// parameters stays there: an engine-side helper resolving them itself would be
+/// an ENGINE-to-ADAPTER call, which a `test-helpers` gate hides from the census
+/// but does not stop cargo refusing once the engine is its own crate.
+pub(crate) async fn prepare_insert_many_docs_for_binding(
     keys: &crate::encryption::KeyStore,
     dialect: query::SqlDialect,
     docs: &mut Value,
@@ -2099,63 +2120,18 @@ async fn prepare_insert_many_docs_for_binding(
     .await
 }
 
-#[cfg(feature = "test-helpers")]
-pub async fn prepare_insert_many_docs_for_write(
-    docs: &mut Value,
-    app_id: &str,
-    collection: &str,
-    actor_id: Option<&str>,
-) -> Result<(), DbError> {
-    let binding = DbBinding::cold_start(app_id);
-    // Resolves its key store AND its dialect through the adapter for the same
-    // reason `finalize_rows_on_read_for_tests` below resolves its backend: it
-    // stands in for the V8 dispatcher, which is the frame that resolves both
-    // before the engine sees them. A production caller here would be an
-    // ENGINE-to-ADAPTER edge; this one is `test-helpers`-gated, and its callers
-    // are integration targets with no dispatch prelude to capture from.
-    let backend = crate::tx_scope::ensure_backend().await?;
-    let dialect = crate::tx_scope::configured_dialect();
-    prepare_insert_many_docs_for_binding(
-        backend.key_store(),
-        dialect,
-        docs,
-        &binding,
-        collection,
-        actor_id,
-    )
-    .await
-}
-
-/// Test helper that drives the REAL read pipeline
-/// (`read_pipeline::apply` with default options: decrypt + mask-wrap on) over a
-/// set of freshly-fetched rows, so a faithful round-trip e2e can exercise the
-/// descriptor-sourced decrypt + mask-wrap path end-to-end (not an AEAD-unit
-/// shim). Returns the finalized rows; `has_masked` is dropped (the caller
-/// asserts on the row contents).
-///
-/// It resolves the backend itself, through the adapter's funnel, because it is
-/// standing in for the V8 dispatcher - which is the frame that does exactly
-/// that before handing the handle to the engine. A production caller here would
-/// be an ENGINE-to-ADAPTER edge; this one is `test-helpers`-gated, and its
-/// callers are integration targets with no route to take the handle off.
-#[cfg(feature = "test-helpers")]
-pub async fn finalize_rows_on_read_for_tests(
-    app_id: &str,
-    collection: &str,
-    rows: Vec<Value>,
-) -> Result<Vec<Value>, DbError> {
-    let binding = DbBinding::cold_start(app_id);
-    let backend = crate::tx_scope::ensure_backend().await?;
-    let result = read_pipeline::apply(
-        &backend,
-        &binding,
-        collection,
-        rows,
-        read_pipeline::ApplyOptions::default(),
-    )
-    .await?;
-    Ok(result.rows)
-}
+// The two no-isolate test entry points that USED to sit here -
+// `prepare_insert_many_docs_for_write` and `finalize_rows_on_read_for_tests` -
+// moved to the crate root on 2026-09-03 and are now
+// `crate::prepare_insert_many_docs_for_tests` and
+// `crate::finalize_rows_on_read_for_tests`. They each resolved a backend (and
+// one of them a dialect) through `tx_scope`, which is ADAPTER, so this ENGINE
+// module held two calls up the lattice. Being `test-helpers`-gated hid them
+// from `tests/lib/tier_direction_census.sh`, which excises gated items - it did
+// not make them legal. `test-helpers` is a normal cargo feature, so the calls
+// compile into the library, and cargo refuses that direction outright once the
+// engine is a separate crate. Both helpers stand in for the V8 dispatcher,
+// which is adapter work, so the adapter is where they belong.
 
 /// Test helper that resolves the runtime data-access schema the way the CRUD
 /// passes do — through [`crate::descriptor::collection_schema`], the data

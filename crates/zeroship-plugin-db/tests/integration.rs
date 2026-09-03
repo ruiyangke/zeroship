@@ -4764,7 +4764,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         "phone": "415-555-0142",
         "embedding": [0.1, 0.2, 0.3],
     }]);
-    zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, "people", None)
+    zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
 
@@ -4845,7 +4845,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     });
 
     let finalized =
-        zeroship_plugin_db::crud::finalize_rows_on_read_for_tests(app, "people", vec![row])
+        zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![row])
             .await
             .expect("read pipeline");
     let out = &finalized[0];
@@ -5000,7 +5000,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         "ssn": "987-65-4321",
         "phone": "650-555-0199",
     }]);
-    zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, "people", None)
+    zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
     let doc = &docs[0];
@@ -5069,7 +5069,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         "phone": raw[0].get::<_, String>("phone"),
     });
     let finalized =
-        zeroship_plugin_db::crud::finalize_rows_on_read_for_tests(app, "people", vec![row])
+        zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![row])
             .await
             .expect("read pipeline");
     let out = &finalized[0];

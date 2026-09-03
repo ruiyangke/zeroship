@@ -214,7 +214,7 @@ async fn insert_through_the_pipeline(
     doc: Value,
 ) -> Inserted {
     let mut docs = json!([doc]);
-    zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, collection, None)
+    zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, collection, None)
         .await
         .expect("write pipeline");
     let id = docs[0]["id"]
@@ -1957,7 +1957,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
 
     // BOUNDARY 2, the runtime's.
     let allowed: BTreeSet<String> = read_surface_columns(&schema);
-    let finalized = zeroship_plugin_db::crud::finalize_rows_on_read_for_tests(
+    let finalized = zeroship_plugin_db::finalize_rows_on_read_for_tests(
         app,
         "people",
         returned.clone(),
@@ -2001,7 +2001,7 @@ async fn no_write_verb_hands_back_a_column_the_descriptor_does_not_declare() {
     smuggled[raw_column_name("ssn")] = json!("123-45-6789");
     smuggled["__zs_shadow_key"] = json!("aux-42");
     smuggled["totally_undeclared"] = json!("leak-me");
-    let finalized = zeroship_plugin_db::crud::finalize_rows_on_read_for_tests(
+    let finalized = zeroship_plugin_db::finalize_rows_on_read_for_tests(
         app,
         "people",
         vec![smuggled],
@@ -2385,7 +2385,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
     // like every other, so the only thing that can be refused below is the
     // duplicate value on the raw column.
     let mut docs = json!([{ "ssn": "111-11-1234" }]);
-    zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(&mut docs, app, "people", None)
+    zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
     let bq = build_insert(app, "people", &schema, &docs[0]).unwrap();
