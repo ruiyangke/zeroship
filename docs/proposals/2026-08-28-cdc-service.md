@@ -1361,7 +1361,7 @@ publisher - which is the ONLY local-emit producer left, and was never on the
 deleted path. What it loses is every line that speaks the streaming replication
 protocol, and with it the reason its process needs `REPLICATION`.
 
-`ChangeStream` (`crates/zeroship-plugin-db/src/backend/mod.rs:840-883`) survives
+`ChangeStream` (`crates/zeroship-plugin-db/src/backend_handle.rs:518-561`) survives
 as a capability trait with a changed Postgres implementation: `spawn_consumer`
 becomes "subscribe to the relay". `deprovision` removes only this worker's local
 lease and performs 5.2's immutable make-before-break response replacement
