@@ -1752,6 +1752,53 @@ mod tests {
         );
     }
 
+    /// A release landing while a write is still in flight must DECLINE to
+    /// serialize the alert rather than emit one.
+    ///
+    /// This is a real window, not a synthetic state: `flush_outgoing` sets
+    /// `write_in_flight` for exactly the span where the queued ciphertext is
+    /// owned by the async write, and `release.rs` calls `take_close_notify`
+    /// synchronously inside it. An alert queued there would be ordered ahead of
+    /// a record the peer has not received, which is what the module docs mean
+    /// by declining rather than overtaking - and they attribute real server-log
+    /// entries to this path.
+    ///
+    /// Nothing held it. Disabling the guard left the lib (768), suite (797) and
+    /// `tls_live` (48) suites all green.
+    #[test]
+    fn a_close_notify_is_declined_while_a_write_is_in_flight() {
+        let (client, _server) = handshaken_pair();
+        let mut session = TlsSession::new(client);
+        session.write_in_flight = true;
+
+        let error = session
+            .take_close_notify()
+            .expect_err("an alert must not overtake ciphertext still being written");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::WouldBlock,
+            "the refusal reported the wrong kind: {error}"
+        );
+        assert!(
+            error.to_string().contains("still being written"),
+            "the refusal must say why it declined: {error}"
+        );
+        // Declining must not spend the one alert the session is allowed. Were
+        // this guard ever moved below the `close_notify_sent` assignment, the
+        // alert would be lost for good rather than deferred.
+        assert!(
+            !session.close_notify_sent,
+            "a declined attempt consumed the single permitted close_notify"
+        );
+
+        // Control: the refusal turns on the in-flight write and nothing else.
+        session.write_in_flight = false;
+        let alert = session
+            .take_close_notify()
+            .expect("the alert must serialize once the write has completed");
+        assert!(!alert.is_empty(), "the alert serialized no ciphertext");
+    }
+
     /// `close_notify` is the end of the record stream. A lease taken after it
     /// could encrypt another record behind the peer's terminal alert, which is
     /// a protocol violation the peer is entitled to reject outright.
