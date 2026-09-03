@@ -99,6 +99,8 @@ pub(crate) fn dispatch_find<'s>(
     filter: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    // Read-set capture, before planning: `plan_find` records into it.
+    crate::v8_bridge::ensure_read_set_capture();
     let plan = plan_find(&binding, collection, &filter, &opts);
 
     let app_id = binding.app_id();
@@ -488,6 +490,8 @@ pub(crate) fn dispatch_aggregate<'s>(
     pipeline: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    // Read-set capture, before planning: `plan_aggregate` records into it.
+    crate::v8_bridge::ensure_read_set_capture();
     let planned = plan_aggregate(&binding, collection, &pipeline, &opts);
 
     let app_id = binding.app_id();
@@ -580,6 +584,8 @@ pub(crate) fn dispatch_count<'s>(
     filter: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
+    // Read-set capture, before planning: `plan_count` records into it.
+    crate::v8_bridge::ensure_read_set_capture();
     let built = plan_count(&binding, collection, filter, &opts);
 
     let app_id = binding.app_id();

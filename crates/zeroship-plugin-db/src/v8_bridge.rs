@@ -99,6 +99,32 @@ pub(crate) fn refuse_if_query_capability<'s>(
 }
 
 // ---------------------------------------------------------------------------
+// Read-set capture
+// ---------------------------------------------------------------------------
+
+/// Open (or keep) the read-set capture for the dispatch frame this read runs
+/// in. Call from the adapter's read entry points, before the engine plans the
+/// query - `crate::crud`'s `record_read_set` runs inside `plan_find` and needs
+/// a capture already installed.
+///
+/// **This function exists so that `read_set` and `crud` need not.** Both are
+/// engine-tier and name no runtime type (#96, #117); the kind and the dispatch
+/// generation are ambient ADAPTER state, so the adapter resolves them once and
+/// passes them down. `read_set::ensure_capture` takes them as plain values.
+///
+/// Cheap enough for the read hot path: two thread-local reads plus, on the
+/// first read of a frame, one small allocation.
+pub(crate) fn ensure_read_set_capture() {
+    crate::read_set::ensure_capture(
+        zeroship_runtime::rpc::dispatch_generation(),
+        matches!(
+            zeroship_runtime::rpc::current_kind(),
+            Some(zeroship_runtime::rpc::ProcedureKind::Query)
+        ),
+    );
+}
+
+// ---------------------------------------------------------------------------
 // V8 value walker
 // ---------------------------------------------------------------------------
 
