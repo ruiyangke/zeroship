@@ -1312,6 +1312,17 @@ impl CopyMode {
         }
     }
 
+    /// The refusal that keeps a COPY exclusive. Four call sites raise it, and
+    /// they are a REDUNDANT FAMILY: measured 2026-09-03, disabling any single
+    /// one leaves the whole suite green, while disabling the three
+    /// `active_copy_mode` checks together fails both
+    /// `copy_interleaving::copy_in_refuses_queries_until_the_sink_finishes` and
+    /// its `copy_out` twin.
+    ///
+    /// So the property is held and the individual guards are not separately
+    /// bindable - a request reaching one has already been refused by whichever
+    /// fires first. Do not read a single green mutation here as a coverage gap;
+    /// that reading cost a cycle before this note existed.
     fn admission_error(self) -> Error {
         match self {
             Self::In => Error::copy_in_progress(),
