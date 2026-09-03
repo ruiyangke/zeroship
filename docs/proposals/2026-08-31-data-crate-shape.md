@@ -505,6 +505,41 @@ the handle would be `vendor -> engine` while `engine -> vendor` already exists
 (the enum wraps an `Rc` of each), and that cycle would have to be broken before
 either crate could be created. It does not exist.
 
+#### One of the nine does not fit at rank 0 as written: `LockManager`
+
+Measured 2026-09-02. Of the twenty items above, nineteen reference nothing but
+`DbError`, `DbBinding`, `serde_json`, `std`, their own siblings, and one
+`crate::query` path that is already `zeroship-schema`. The twentieth does not.
+
+`LockManager::try_acquire_with_backoff` (`backend/mod.rs:407-...`) is a DEFAULT
+METHOD BODY, not a signature: a five-attempt retry schedule
+(`0+50+200+500+1000 = 1750ms`) that calls `compio::time::sleep` between
+attempts and `tracing::warn!` on each contended try. Moving the trait verbatim
+would put the async executor into `data-core`, whose manifest description is
+"names no database driver, no V8, and **no runtime**".
+
+Note that `tests/data_crate_closure_gate.sh` would NOT catch this: it pins the
+closure against `compio-postgres`, `rusqlite`, `zeroship-runtime` and `v8`, and
+`compio` itself is none of those. The fence is on drivers, and this is the
+executor - so the gate would stay green while the crate quietly stopped being
+what its own description says it is.
+
+**`LockManager` is two things.** The CONTRACT - `type Client`,
+`try_acquire_advisory_lock`, `LockScope` and its key derivation - is rank-0
+vocabulary and moves. The POLICY - the schedule, the sleeps, the retry logging -
+is engine behaviour and belongs with `data-engine`, reachable as a free function
+or an extension trait over the contract.
+
+That is the same cut this document already makes twice: `budgets` keeps the
+NUMBERS at rank 0 and leaves the `SET LOCAL` strings that spend them with the
+vendor; the error hierarchy keeps `DbError` neutral and leaves the per-vendor
+translators with the vendors. A default body that sleeps is the third instance
+of it, and the only one where the trait has to be cut rather than merely placed.
+
+Sized, not done: the retry bound is security-relevant (its own comment cites
+"[I43] bounded loop"), so the split wants its own pass with the behaviour pinned
+by a test before it moves.
+
 **`auth/` is a leftover copy of work that already moved to the migration
 service.** Its own header says the data plane's `SET LOCAL ROLE` batch "comes
 from here on every transaction". It does not:
