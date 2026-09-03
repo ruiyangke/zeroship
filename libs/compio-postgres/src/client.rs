@@ -3016,80 +3016,31 @@ impl Client {
         .await
     }
 
-    /// The maximally flexible version of [`execute`].
+    /// Run a cached statement for its row count, retrying once only when the
+    /// failure arrived BEFORE `BindComplete`.
     ///
-    /// [`execute`]: #method.execute
-    pub async fn execute_raw<T, P, I>(&self, statement: &T, params: I) -> Result<u64, Error>
+    /// After that point the statement's effect may already be committed, so a
+    /// replay would run it twice; that is what `!before_bind_complete` refuses.
+    /// `execute_raw` reaches this from the same two entry paths as
+    /// `query_raw`, and until 2026-09-03 each carried a verbatim copy. Only the
+    /// second was held: mutating the probationary copy's two error returns left
+    /// the lib (771) and suite (797) suites green, while the same mutation in
+    /// the other failed
+    /// `statement_cache_never_replays_a_committed_effect_after_bind_complete`.
+    /// The replay-safety check now exists once, under that test.
+    async fn execute_cached_with_one_reprepare<P>(
+        &self,
+        statement: Statement,
+        cache_sql: &str,
+        replay_permitted: bool,
+        params: Vec<P>,
+    ) -> Result<u64, Error>
     where
-        T: ?Sized + ToStatement,
         P: BorrowToSql,
-        I: IntoIterator<Item = P>,
-        I::IntoIter: ExactSizeIterator,
     {
-        let execution = statement.__convert().into_statement(&self.inner).await?;
-        if execution.unnamed_sql.is_some() {
-            let params = params.into_iter().collect::<Vec<_>>();
-            let execution = execution
-                .finalize_probationary(&self.inner, params.len())
-                .await?;
-            if let Some(sql) = execution.unnamed_sql {
-                let types = execution.statement.params().to_vec();
-                return query::execute_typed(&self.inner, sql, params.into_iter().zip(types)).await;
-            }
-
-            let Some(cache_sql) = execution.cache_sql else {
-                return query::execute(self.inner(), execution.statement, params).await;
-            };
-            let replay_permitted = self.stale_cache_replay_permitted();
-            if !replay_permitted {
-                return query::execute(self.inner(), execution.statement, params).await;
-            }
-
-            let first = query::execute_cached(
-                self.inner(),
-                execution.statement,
-                params.iter().map(BorrowToSql::borrow_to_sql),
-            )
-            .await;
-            return match first {
-                Ok(rows) => Ok(rows),
-                Err(failure) => {
-                    let (error, before_bind_complete) = failure.into_parts();
-                    if !before_bind_complete {
-                        return Err(error);
-                    }
-                    let Some(replacement) = self
-                        .reprepare_cached_statement_once(
-                            Some(cache_sql),
-                            replay_permitted,
-                            params.len(),
-                            &error,
-                        )
-                        .await
-                    else {
-                        return Err(error);
-                    };
-                    query::execute(
-                        self.inner(),
-                        replacement?,
-                        params.iter().map(BorrowToSql::borrow_to_sql),
-                    )
-                    .await
-                }
-            };
-        }
-        let Some(cache_sql) = execution.cache_sql else {
-            return query::execute(self.inner(), execution.statement, params).await;
-        };
-        let replay_permitted = self.stale_cache_replay_permitted();
-        if !replay_permitted {
-            return query::execute(self.inner(), execution.statement, params).await;
-        }
-
-        let params = params.into_iter().collect::<Vec<_>>();
         let first = query::execute_cached(
             self.inner(),
-            execution.statement,
+            statement,
             params.iter().map(BorrowToSql::borrow_to_sql),
         )
         .await;
@@ -3119,6 +3070,62 @@ impl Client {
                 .await
             }
         }
+    }
+
+    /// The maximally flexible version of [`execute`].
+    ///
+    /// [`execute`]: #method.execute
+    pub async fn execute_raw<T, P, I>(&self, statement: &T, params: I) -> Result<u64, Error>
+    where
+        T: ?Sized + ToStatement,
+        P: BorrowToSql,
+        I: IntoIterator<Item = P>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let execution = statement.__convert().into_statement(&self.inner).await?;
+        if execution.unnamed_sql.is_some() {
+            let params = params.into_iter().collect::<Vec<_>>();
+            let execution = execution
+                .finalize_probationary(&self.inner, params.len())
+                .await?;
+            if let Some(sql) = execution.unnamed_sql {
+                let types = execution.statement.params().to_vec();
+                return query::execute_typed(&self.inner, sql, params.into_iter().zip(types)).await;
+            }
+
+            let Some(cache_sql) = execution.cache_sql else {
+                return query::execute(self.inner(), execution.statement, params).await;
+            };
+            let replay_permitted = self.stale_cache_replay_permitted();
+            if !replay_permitted {
+                return query::execute(self.inner(), execution.statement, params).await;
+            }
+
+            return self
+                .execute_cached_with_one_reprepare(
+                    execution.statement,
+                    cache_sql,
+                    replay_permitted,
+                    params,
+                )
+                .await;
+        }
+        let Some(cache_sql) = execution.cache_sql else {
+            return query::execute(self.inner(), execution.statement, params).await;
+        };
+        let replay_permitted = self.stale_cache_replay_permitted();
+        if !replay_permitted {
+            return query::execute(self.inner(), execution.statement, params).await;
+        }
+
+        let params = params.into_iter().collect::<Vec<_>>();
+        self.execute_cached_with_one_reprepare(
+            execution.statement,
+            cache_sql,
+            replay_permitted,
+            params,
+        )
+        .await
     }
 
     /// Executes a `COPY FROM STDIN` statement, returning a sink used to write the copy data.
