@@ -9,6 +9,7 @@ use zeroship_core::change_event::ChangeEvent;
 
 use crate::backend::sqlite::SqliteBackend;
 use crate::backend::sqlite::change_sink::{ChangeSink, DeliveryDisposition};
+use zeroship_data_core::encryption::LocalKeySource;
 use zeroship_data_core::error::DbError;
 
 /// Engine adapter from the SQLite-owned delivery port to the process broker.
@@ -32,8 +33,20 @@ impl ChangeSink for BrokerChangeSink {
 }
 
 /// Open the selected SQLite backend with the production broker sink.
-pub async fn open_sqlite_backend(path: impl AsRef<Path>) -> Result<SqliteBackend, DbError> {
-    SqliteBackend::open(path, BrokerChangeSink, crate::context::isolate_key_source()).await
+///
+/// **The key source is a parameter, not a lookup.** It was
+/// `crate::context::isolate_key_source()` until 2026-09-03, which made this
+/// ENGINE-tier composer read the ADAPTER's per-isolate context - the one edge
+/// direction the split forbids. `PostgresBackend::new` took the same correction
+/// one tier lower and for the same reason; its doc records the argument.
+///
+/// The caller that owns the context does the lookup. `init_pool_async` is the
+/// only shipped one, and it is in the adapter, so the read is adapter-local.
+pub async fn open_sqlite_backend(
+    path: impl AsRef<Path>,
+    key_source: LocalKeySource,
+) -> Result<SqliteBackend, DbError> {
+    SqliteBackend::open(path, BrokerChangeSink, key_source).await
 }
 
 // There is deliberately NO `open_postgres_backend` composer here.
