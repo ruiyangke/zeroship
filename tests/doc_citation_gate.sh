@@ -169,7 +169,11 @@ check_citations() {
   done
 }
 
-check_citations docs/proposals/2026-08-26-*.md
+check_citations docs/proposals/2026-08-26-*.md \
+                docs/proposals/2026-08-31-*.md \
+                docs/proposals/2026-07-10-migrate-*.md \
+                docs/proposals/2026-07-11-migrate-*.md \
+                docs/proposals/2026-07-12-zero-migrate-redesign-plan.md
 gate_arm proposal_citations "$cites_examined" 60 || FAILED=1
 [ "$cites_bad" -eq 0 ] || FAILED=1
 proposal_cites=$cites_examined
@@ -195,6 +199,23 @@ proposal_cites=$cites_examined
 # nothing announces it. If a third design document appears, it must be added
 # here or it is unexamined; the floor below is the only thing that will notice
 # a file dropping OUT.
+#
+# THAT WARNING CAME TRUE AND WAS NOT ACTED ON. Measured 2026-09-03: arm 2's
+# `2026-08-26-*` and this arm's `2026-08-28-*` between them left SEVEN proposals
+# unexamined by any arm - `2026-08-31-data-crate-shape.md`, the design document
+# for the crate split then under active revision, and the six `2026-07-*` migrate
+# proposals. All seven were rewritten that day and the gate printed a clean green
+# about none of them. Arm 2 now names them.
+#
+# SWEEPING IN `docs/proposals/*.md` WAS TRIED AND REJECTED, and the measurement
+# is the reason to leave it rejected: the full glob takes the examined count from
+# 303 to 1292 and surfaces 105 dead citations across 24 OTHER proposals. Those
+# are not rot this gate should fail on today - per the scope policy at the top of
+# this file, a document joins the gate when it has been deliberately CLEANED and
+# added, and `docs/decisions/` and `docs/archive/` are exempt outright because a
+# dead path in a historical record may be correct. Adding 24 uncleaned documents
+# at once would either wedge the gate red or force 105 repairs nobody scoped.
+# Clean a proposal, then add it by name on the same commit.
 # ---------------------------------------------------------------------------
 check_citations docs/architecture/data-system.md \
                 docs/proposals/2026-08-28-*.md
