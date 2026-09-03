@@ -121,8 +121,7 @@ pub(crate) fn encrypt_deterministic(
 ) -> Result<Vec<u8>, DbError> {
     // `Hmac::new_from_slice` only fails for HMAC backends with
     // fixed key-length requirements — `Hmac<Sha256>` accepts any
-    // length key, so this never errors in practice (mirrors the
-    // pattern in `backend/sqlite/session_minter.rs`). Fully qualify
+    // length key, so this never errors in practice. Fully qualify
     // the call because `aes-gcm` brings `KeyInit::new_from_slice`
     // into scope through its `aead` re-exports and `HmacSha256`
     // satisfies both — the explicit `<… as Mac>::` syntax disambiguates.

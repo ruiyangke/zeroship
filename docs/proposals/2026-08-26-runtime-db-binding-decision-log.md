@@ -1040,7 +1040,10 @@ question stayed open.**
 "`SessionMinter` and the backup/snapshot contracts are either assigned a
 destination in SC-3's ledger or deleted with the feature they serve" - resolves
 as a deletion. The SQLite side goes too
-(`crates/zeroship-plugin-db/src/backend/sqlite/session_minter.rs`), and the
+(`crates/zeroship-plugin-db/src/backend/sqlite/session_minter.rs` - DELETED
+2026-09-02, along with the trait, `SessionInit`, `MintedToken`, the
+`SqliteBackend` impl and its secrets constructor, and the nine integration
+tests; the PG half had gone on 2026-08-27), and the
 `session_*` error codes it raises - `session_nonce_replay`,
 `session_nonce_too_short`, `session_signature_expired`
 (`backend/mod.rs:736-738`, classified at `auth/session.rs:204-219`) - go with
