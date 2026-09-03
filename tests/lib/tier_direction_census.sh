@@ -188,11 +188,13 @@ cd "$SRC" || { echo "no such tree: $SRC" >&2; exit 1; }
 tier_of_file() {
   case "$1" in
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
-    ./crud/*|./transaction/*|./exec.rs|./broker.rs|./backend_selection.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs|./lock_policy.rs) echo ENGINE ;;
+    ./crud/*|./transaction/*|./exec.rs|./broker.rs|./backend_selection.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
-    ./backend/postgres.rs|./backend/pg_row_json.rs|./backend/pg_session_sql.rs|./backend/pg_autocommit.rs|./backend/pg_error.rs|./backend/pg_introspect.rs) echo PG ;;
-    ./backend/sqlite/*)                                  echo SQLITE ;;
-    ./encryption/*)                                      echo ENCRYPT ;;
+    # NO ARMS for ./backend/pg_*.rs, ./backend/postgres.rs, ./backend/sqlite/*,
+    # ./encryption/* or ./lock_policy.rs. Every one of those was extracted into a
+    # dependency crate, and an arm for a file that does not exist is not inert -
+    # see the tier_of_target note below for what it cost. Measured 2026-09-03:
+    # ./backend/ holds only cancel.rs and mod.rs, and ./encryption/ is gone.
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
     # Settled by docs/proposals/2026-09-02-thread-context-ownership.md, whose
     # ownership table places `lanes` and `mask_policies` in data-engine,
@@ -227,12 +229,39 @@ tier_of_file() {
 # file path, and may be a crate-root item.
 tier_of_target() {
   case "$1" in
-    backend::sqlite)                                     echo SQLITE ;;
-    backend::postgres|backend::pg_row_json|backend::pg_session_sql|backend::pg_autocommit|backend::pg_error|backend::pg_introspect) echo PG ;;
+    # RESOLVE these, do not assert them. Each of these names was a module of THIS
+    # crate when the arm was written and is now a re-export of a dependency crate
+    # (`backend/mod.rs`: `pub use zeroship_data_sqlite as sqlite`, `pub use
+    # zeroship_data_postgres::{PostgresBackend, pg_error, pg_row_json, postgres}`,
+    # `pub use zeroship_data_postgres::{pg_autocommit, pg_session_sql}`).
+    #
+    # THIS IS DEFECT 7 IN MIRROR IMAGE. Defect 7 was reading "the census has no arm
+    # for it" as "nobody has placed it". This was an arm existing for something no
+    # longer OURS to place, so a resolved dependency edge was reported as an
+    # unresolved placement question. The EXTERNAL fallback below cannot save it:
+    # a hardcoded arm wins first, and that fallback greps only lib.rs while these
+    # re-exports live in backend/mod.rs.
+    #
+    # MEASURED 2026-09-03 with a one-variable control (two copies of this script,
+    # ROOT pinned, differing only in these arms): 7 violations before, 4 after. The
+    # three that vanished were `change_stream_pg.rs -> backend::postgres`,
+    # `replication.rs -> backend::pg_error` and `slot_reaper.rs -> backend::pg_error`
+    # - CDC files naming a dependency crate, which cargo already governs.
+    #
+    # Resolving by file existence is self-maintaining: the day a module leaves the
+    # crate, the census follows it instead of silently mis-tiering the edge.
+    backend::sqlite)
+      if [ -d backend/sqlite ]; then echo SQLITE; else echo EXTERNAL; fi ;;
+    backend::postgres|backend::pg_row_json|backend::pg_session_sql|backend::pg_autocommit|backend::pg_error|backend::pg_introspect)
+      if [ -f "backend/${1#backend::}.rs" ]; then echo PG; else echo EXTERNAL; fi ;;
     v8_classes*|v8_bridge*|tx_scope*)                    echo ADAPTER ;;
     crud*|transaction*|exec*|broker*|backend_selection*|read_set*|tx_route*|drop_namespace*) echo ENGINE ;;
     auth::bootstrap)                                     echo ENGINE ;;
-    encryption*)                                         echo ENCRYPT ;;
+    # Same treatment: `src/encryption/` no longer exists; lib.rs re-exports
+    # `zeroship_data_core::encryption`. The ENCRYPT tier has zero files in this
+    # crate - it is already extracted.
+    encryption*)
+      if [ -d encryption ]; then echo ENCRYPT; else echo EXTERNAL; fi ;;
     wal_consumer*|replication*|slot_reaper*)             echo CDC ;;
     context*|service*|op_error*)                          echo ADAPTER ;;
     tx_lanes*|backend_handle*|backend::cancel|system_shape_charter*|metrics*) echo ENGINE ;;
