@@ -124,7 +124,7 @@ pub(crate) fn build_vector_search_sql(
 /// whose length is `4 * dims` and reads the bytes as native-endian
 /// `f32` — every workspace-targeted platform is little-endian, so
 /// the per-element `f32::to_le_bytes` produces the canonical form.
-pub(crate) fn vec_to_le_bytes(v: &[f32]) -> Vec<u8> {
+pub fn vec_to_le_bytes(v: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(v.len() * 4);
     for f in v {
         out.extend_from_slice(&f.to_le_bytes());

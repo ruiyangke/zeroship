@@ -24,7 +24,7 @@ use super::session::{TypedCell, TypedRows};
 /// BLOBs surface as base64 strings. The CRUD read-side normalizer
 /// consults the declared schema after this step; this helper's job is
 /// only to preserve bytes losslessly across the JSON boundary.
-pub(crate) fn typed_rows_to_json_value(rows: &TypedRows) -> Vec<Value> {
+pub fn typed_rows_to_json_value(rows: &TypedRows) -> Vec<Value> {
     rows.rows
         .iter()
         .map(|row| Value::Object(typed_row_to_json_object(&rows.columns, row)))

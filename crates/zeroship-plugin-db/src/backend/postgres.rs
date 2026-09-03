@@ -1400,7 +1400,7 @@ pub(crate) async fn apply_per_app_role(
 /// landed. The check is deliberately scoped to the `Commit` arm: `RELEASE`
 /// answers with the tag `RELEASE`, so "anything but COMMIT is a failure" would
 /// reject every healthy nested commit.
-pub(crate) fn terminal_from_tag(intent: SettleIntent, tag: Option<&str>) -> TerminalResult {
+pub fn terminal_from_tag(intent: SettleIntent, tag: Option<&str>) -> TerminalResult {
     match (intent, tag) {
         (SettleIntent::Commit, Some("ROLLBACK")) => TerminalResult::RolledBack,
         (SettleIntent::Commit, _) => TerminalResult::Committed,
@@ -1420,7 +1420,7 @@ pub(crate) fn terminal_from_tag(intent: SettleIntent, tag: Option<&str>) -> Term
 /// `ROLLBACK` is accepted from a poisoned block, and answering it resolves the
 /// status byte. That is why the two lines below are in this order and must stay
 /// in it.
-pub(crate) async fn cleanup(client: &compio_postgres::Client) -> CleanupAck {
+pub async fn cleanup(client: &compio_postgres::Client) -> CleanupAck {
     let rolled_back = client.batch_execute("ROLLBACK").await;
     match client.transaction_status() {
         Some(compio_postgres::TransactionStatus::Idle) => {
@@ -1450,7 +1450,7 @@ pub(crate) async fn cleanup(client: &compio_postgres::Client) -> CleanupAck {
 /// transaction, or a status that could not be read at all - is DBR-03
 /// territory: not knowing is not the same as knowing it ended, so it settles
 /// `Indeterminate` and the session is withdrawn.
-pub(crate) const fn terminal_from_status(
+pub const fn terminal_from_status(
     status: Option<compio_postgres::TransactionStatus>,
 ) -> TerminalResult {
     match status {

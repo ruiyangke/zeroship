@@ -429,7 +429,7 @@ pub enum TerminalOutcome {
 /// actor **after** the statement - the same "sample after, never before" rule,
 /// enforced by SC-2's own terminal classifier via [`terminal_result`] rather
 /// than restated here.
-pub(crate) async fn cleanup(
+pub async fn cleanup(
     handle: &super::session::SqliteSessionHandle,
 ) -> zeroship_data_core::error::CleanupAck {
     use zeroship_data_core::error::{CleanupAck, TerminalResult};
@@ -450,7 +450,7 @@ pub(crate) async fn cleanup(
 /// The vendor decides what happened; SC-1 decides what it means. Lives beside
 /// the enum it reads rather than in the driver, so the protocol never has to
 /// name a SQLite type to learn its own answer.
-pub(crate) fn terminal_result(
+pub fn terminal_result(
     outcome: &TerminalOutcome,
 ) -> (
     zeroship_data_core::error::TerminalResult,

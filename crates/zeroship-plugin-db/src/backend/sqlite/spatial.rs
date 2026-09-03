@@ -111,7 +111,7 @@ pub(crate) fn sqlite_geopoint_column_ddl(name: &str) -> String {
 /// [`blob_to_point`] together (the round-trip test pins the
 /// behaviour).
 #[allow(dead_code)]
-pub(crate) fn point_to_blob(point: GeoPoint) -> Vec<u8> {
+pub fn point_to_blob(point: GeoPoint) -> Vec<u8> {
     let mut out = Vec::with_capacity(16);
     out.extend_from_slice(&point.lat.to_le_bytes());
     out.extend_from_slice(&point.lng.to_le_bytes());

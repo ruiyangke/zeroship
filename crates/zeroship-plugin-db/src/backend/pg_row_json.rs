@@ -24,7 +24,7 @@ use serde_json::Value;
 /// (`first_row_or_null`, `row_count_as_f64`) inspect or take a single
 /// row without paying for a JSON parse + reserialise of the whole
 /// result set.
-pub(crate) fn rows_to_json_value(rows: &[compio_postgres::Row]) -> Vec<Value> {
+pub fn rows_to_json_value(rows: &[compio_postgres::Row]) -> Vec<Value> {
     rows.iter().map(row_to_json).collect()
 }
 
