@@ -2498,6 +2498,22 @@ where
                             // pool poison before the prefix can wake its
                             // borrower; the terminal error itself remains
                             // behind that prefix in the read FIFO.
+                            // NOT PEER-OBSERVABLE, and that is measured. This
+                            // shutdown is redundant with `ConnectionDropRelease
+                            // ::drop`: the deferred error retires the connection,
+                            // so the driver completes and drops the release
+                            // handle before any peer read can distinguish the two
+                            // closes. Deleting this line leaves the lib suite
+                            // (763) and the integration suite (797) green.
+                            //
+                            // A test written for it on 2026-09-02 passed with the
+                            // line deleted, which is the whole point: it was
+                            // observing Drop. Asserting the driver was still
+                            // pending when the peer saw the close - the check
+                            // `replication.rs` uses for its release arms - fails,
+                            // because by then the driver is Ready. Keep the call
+                            // for promptness; do not read a mutation report
+                            // calling it unbound as a missing test.
                             read_error_status.store(READ_RETIRED_STATUS, Ordering::Release);
                             if let Some(release) = &read_error_release {
                                 release.shutdown();
