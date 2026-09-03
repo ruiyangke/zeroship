@@ -41,4 +41,5 @@
 
 pub mod binding;
 pub mod budgets;
+pub mod capability;
 pub mod error;
