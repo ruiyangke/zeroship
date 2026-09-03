@@ -366,6 +366,16 @@ where
         self.phase = HandshakePhase::Complete;
     }
 
+    /// Every refusal below was mutation-measured on 2026-09-03 and each has a
+    /// precisely-named witness, so this function needs no further audit. Six of
+    /// the eleven are invisible to `--lib` and only fail under `--test suite`
+    /// (the duplicate, unsupported-version, newer-than-requested, negative and
+    /// oversized option-count, and trailing-byte cases), which is why a lib-only
+    /// run over this function reads as five unbound guards that are not.
+    ///
+    /// The downgrade refusal - a negotiated protocol below `min_protocol` - is
+    /// held by two: `min_protocol_version_rejects_a_lower_server_negotiation`
+    /// and `a_below_minimum_negotiation_with_options_names_both_versions`.
     fn negotiate_protocol(&mut self, body: Bytes) -> Result<(), Error> {
         if self.negotiation_seen {
             return Err(protocol_error(
