@@ -91,23 +91,14 @@ pub(crate) async fn ensure_backend_for_shared_sql() -> Result<BackendHandle, DbE
         .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized".to_string()))
 }
 
-/// The Postgres backend for a shared-SQL (non-transactional) op.
-///
-/// **Returns the backend, not its pool.** This was
-/// `ensure_postgres_pool_for_shared_sql -> Result<Rc<compio_postgres::Pool>>`
-/// until 2026-09-02, which handed the raw driver handle to an ENGINE-tiered
-/// file so it could call `pg_autocommit::roled_rows` directly. The backend
-/// already owned four methods of exactly that shape (`query_roled_json`,
-/// `read_roled_scalar_bytes`, `read_roled_scalar_text`, `execute_roled`); the
-/// rows variant was simply missing, so this path reached past the abstraction
-/// its four neighbours went through.
-pub(crate) async fn ensure_postgres_backend_for_shared_sql()
--> Result<Rc<crate::backend::PostgresBackend>, DbError> {
-    match ensure_backend_for_shared_sql().await? {
-        crate::backend::BackendHandle::Postgres(pg) => Ok(pg),
-        crate::backend::BackendHandle::Sqlite(_) => Err(sqlite_shared_crud_unavailable()),
-    }
-}
+// There is deliberately no `ensure_postgres_backend_for_shared_sql` any more.
+//
+// It resolved a backend of its own and then narrowed it, which meant it could
+// not take the route's already-bound handle - it took no arguments at all. Its
+// two callers now narrow where they stand:
+// `exec_postgres_autocommit_with_role` against `route.backend()` (ENGINE), and
+// `v8_classes/replication.rs` against `tx_scope::ensure_backend()` (ADAPTER to
+// ADAPTER, and correct there: a slot diagnostic is never in a transaction).
 
 /// The op was dispatched inside a `db.transaction(fn)` callback whose
 /// transaction has since settled — a continuation that outlived its
@@ -194,7 +185,7 @@ pub(crate) async fn run_sql(
     // No transaction — use pool. On the SQLite arm the shared CRUD
     // row-returning path is not wired yet; surface a typed error
     // instead of falling through to a misleading `pool not initialized`.
-    exec_postgres_autocommit_with_role(app_id, sql, params).await
+    exec_postgres_autocommit_with_role(route, sql, params).await
 }
 
 /// Execute a built query via pool (or TX conn) and return the
@@ -208,8 +199,8 @@ pub(crate) async fn run_sql(
 pub(crate) async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        let rows = exec_sqlite_json(route, &sq, &bq.sql, &param_refs).await?;
+    if let BackendHandle::Sqlite(sq) = route.backend() {
+        let rows = exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?;
         // Success arm only: one read op. Unforgeable (emitted by the primitive).
         emit_db_metric(app_id, DB_READS, 1);
         return Ok(rows);
@@ -227,8 +218,8 @@ pub(crate) async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Va
 pub(crate) async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError> {
     let app_id = route.app_id();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        let rows = exec_sqlite_json(route, &sq, &bq.sql, &param_refs).await?;
+    if let BackendHandle::Sqlite(sq) = route.backend() {
+        let rows = exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?;
         // Success arm only: a count is a read op.
         emit_db_metric(app_id, DB_READS, 1);
         return Ok(rows
@@ -264,8 +255,8 @@ pub(crate) async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, D
 pub(crate) async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    if let BackendHandle::Sqlite(sq) = ensure_backend_for_shared_sql().await? {
-        let rows = exec_sqlite_json(route, &sq, &bq.sql, &param_refs).await?;
+    if let BackendHandle::Sqlite(sq) = route.backend() {
+        let rows = exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?;
         // Success arm only: one write op + the affected/RETURNING row count.
         emit_db_metric(app_id, DB_WRITES, 1);
         emit_db_metric(app_id, DB_ROWS_WRITTEN, rows.len() as u64);
@@ -287,14 +278,21 @@ pub(crate) async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec
 /// the backend and called `pg_autocommit` itself, so the `Row` type came back
 /// here to be converted. Now the backend does both and returns JSON.
 async fn exec_postgres_autocommit_with_role(
-    app_id: &str,
+    route: &TxRoute,
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<Value>, DbError> {
-    ensure_postgres_backend_for_shared_sql()
-        .await?
-        .query_roled_rows_as_json(app_id, sql, params)
-        .await
+    // The Postgres narrowing happens here, against the backend the adapter
+    // already bound onto the route, rather than in a wrapper that resolved one
+    // of its own. Both arms are ENGINE types, so this whole path is
+    // engine-internal.
+    match route.backend() {
+        BackendHandle::Postgres(pg) => {
+            pg.query_roled_rows_as_json(route.app_id(), sql, params)
+                .await
+        }
+        BackendHandle::Sqlite(_) => Err(sqlite_shared_crud_unavailable()),
+    }
 }
 
 async fn exec_sqlite_json(
