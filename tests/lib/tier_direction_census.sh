@@ -194,7 +194,30 @@ tier_of_file() {
     ./backend/sqlite/*)                                  echo SQLITE ;;
     ./encryption/*)                                      echo ENCRYPT ;;
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
+    # Settled by docs/proposals/2026-09-02-thread-context-ownership.md, whose
+    # ownership table places `lanes` and `mask_policies` in data-engine,
+    # `schemas` in data-core, and the pool/backend slots in the adapter -
+    # making context.rs "the composition root: an adapter concern by
+    # definition". Until 2026-09-02 these files had NO arm and so were skipped
+    # entirely, which is how 42 references INTO them were dropped unjudged,
+    # including every engine-to-adapter call the split has left to remove.
+    ./context.rs|./service.rs|./op_error.rs)              echo ADAPTER ;;
+    # BackendHandle and TxCanceller name BOTH vendors, so only a tier above both
+    # may hold them; the crate-shape proposal puts them in data-engine.
+    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo ENGINE ;;
+    ./cdc_lifecycle.rs|./change_stream_pg.rs)            echo CDC ;;
     ./error.rs|./descriptor.rs|./binding.rs|./budgets.rs) echo CORE ;;
+    # FOUR FILES ARE DELIBERATELY LEFT CONTESTED, and each has a reason that is
+    # an open QUESTION rather than an omission:
+    #   auth/mod.rs, auth/util.rs - #156 asks whether auth/ is deleted outright
+    #     (1407 lines, zero production callers, a live twin in migrate-server).
+    #     Tiering code that may not exist would assert a placement for it.
+    #   backend/mod.rs - the dispatch traits. Both vendors implement them so
+    #     they must sit at or below the vendor tier, but the file also names
+    #     replication, wal_consumer and change_stream_pg, which are CDC. That
+    #     contradiction is a real design question, not a missing arm.
+    #   test_support/mod.rs - test-only; it ships in no build.
+    # Anything else landing here IS an omission. Add an arm above.
     *)                                                   echo CONTESTED ;;
   esac
 }
@@ -211,6 +234,9 @@ tier_of_target() {
     auth::bootstrap)                                     echo ENGINE ;;
     encryption*)                                         echo ENCRYPT ;;
     wal_consumer*|replication*|slot_reaper*)             echo CDC ;;
+    context*|service*|op_error*)                          echo ADAPTER ;;
+    tx_lanes*|backend_handle*|backend::cancel|system_shape_charter*|metrics*) echo ENGINE ;;
+    cdc_lifecycle*|change_stream_pg*)                    echo CDC ;;
     error*|descriptor*|binding*|budgets*)                echo CORE ;;
     [A-Z]*)
       # A crate-root item. Resolve it rather than assume: lib.rs is where

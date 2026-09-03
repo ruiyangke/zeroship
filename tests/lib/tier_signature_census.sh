@@ -340,6 +340,12 @@ tier() {
     # enforces its dependency direction, and its vendor-freedom is ruled on by
     # tests/vendor_embedding_gate.sh, which now lists the crate as a root.
     # What remains below is the CORE-destined code still inside the plugin.
+    # Settled by docs/proposals/2026-09-02-thread-context-ownership.md. Kept
+    # byte-identical in intent to tier_direction_census.sh: the two censuses
+    # judging one file differently is defect 1 in that file.
+    ./context.rs|./service.rs|./op_error.rs)              echo "ADAPTER" ;;
+    ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo "ENGINE" ;;
+    ./cdc_lifecycle.rs|./change_stream_pg.rs)            echo "CDC" ;;
     ./descriptor.rs|./budgets.rs)                        echo "CORE" ;;
     *)                                                   echo "CONTESTED" ;;
   esac
