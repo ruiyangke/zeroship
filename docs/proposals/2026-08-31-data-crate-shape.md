@@ -536,9 +536,34 @@ vendor; the error hierarchy keeps `DbError` neutral and leaves the per-vendor
 translators with the vendors. A default body that sleeps is the third instance
 of it, and the only one where the trait has to be cut rather than merely placed.
 
-Sized, not done: the retry bound is security-relevant (its own comment cites
-"[I43] bounded loop"), so the split wants its own pass with the behaviour pinned
-by a test before it moves.
+**DONE 2026-09-02.** The cut shipped as an extension trait, the same shape the
+tree already used for `ToOpError`:
+
+| where | what | names a runtime? |
+| --- | --- | --- |
+| `backend::LockManager` (rank 0) | 3 primitives + `try_acquire` / `release`, which only call `LockScope::to_keys` | no - measured over the trait's own 101-line span, code with comments stripped |
+| `lock_policy::BoundedLockAcquire` (engine) | `acquire`, `try_acquire_with_backoff`, the `SCHEDULE` const | yes: `compio::time::sleep`, `tracing::warn!` |
+
+Blanket-implemented (`impl<T: LockManager + ?Sized> BoundedLockAcquire for T`),
+so a call site needs only the trait in scope. Three call sites took the import:
+`backend/lock_guard.rs`, one shape-check in `backend/mod.rs`, and
+`tests/sqlite_integration.rs`.
+
+Two notes worth carrying into the remaining moves:
+
+**The pinning test already existed** - `try_acquire_with_backoff_exhaustion_
+yields_lock_contention` asserts `attempts == 5`, not merely that contention
+surfaces. It moved with the policy it pins. A second test now pins the
+schedule's arithmetic (5 entries, 1750ms, first wait 0, 1-based indices)
+independently of the loop. Mutation: dropping the 1000ms attempt reddens
+**exactly those two** of 682 lib tests.
+
+**`cargo check -p zeroship-plugin-db` did not see the break.** The only
+production caller, `backend/lock_guard.rs`, is `#[cfg(any(test,
+feature = "test-helpers"))]`, so the default check compiled a green tree with
+`acquire` deleted and its caller unbuilt. `--features test-helpers --all-targets`
+found it immediately. Verify every remaining move under that configuration, not
+the bare one.
 
 #### And two of the value types close a cycle: the broker guards
 
