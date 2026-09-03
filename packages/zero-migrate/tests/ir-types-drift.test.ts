@@ -555,6 +555,6 @@ test("committed generated/enums.ts is up to date with the schema (regenerate + d
   assert.equal(
     readFileSync(out, "utf8"),
     readFileSync(committed, "utf8"),
-    "src/generated/enums.ts is stale — run `pnpm --filter zero-migrate gen:ir-types`",
+    "src/generated/enums.ts is stale — run `pnpm --filter @zeroship/migrate gen:ir-types`",
   );
 });

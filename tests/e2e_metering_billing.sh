@@ -100,7 +100,7 @@ fi
 for b in zeroship zeroship-control zeroship-gate zeroship-worker zeroship-mock-stripe zeroship-migrate-server; do
   [ -x "$BIN/$b" ] || { echo "missing $BIN/$b - run cargo build --release"; exit 2; }
 done
-[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build && pnpm --filter zero-migrate-cli build"; exit 2; }
+[ -f "$ROOT/packages/zero-migrate-cli/dist/cli-bin.js" ] || { echo "missing the zero-migrate CLI - run: pnpm install && pnpm build"; exit 2; }
 command -v node    >/dev/null 2>&1 || { echo "node required"; exit 2; }
 command -v openssl >/dev/null 2>&1 || { echo "openssl required"; exit 2; }
 PROBE_ZSHIP="$ROOT/examples/metering-probe/dist/app.zship"

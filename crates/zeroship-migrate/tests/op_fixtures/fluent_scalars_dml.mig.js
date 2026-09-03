@@ -2,7 +2,7 @@
 // kept in a data migration so the corpus never mixes DDL and DML in one envelope.
 // The recorder normalizes decimal() and Uint8Array author values into the closed
 // IrScalar wire carriers that Rust accepts value-equal.
-import { table, decimal } from "zero-migrate";
+import { table, decimal } from "@zeroship/migrate";
 
 export const name = "fluent_scalars_dml";
 export const irreversible =

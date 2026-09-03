@@ -1,4 +1,4 @@
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 export default {
   name: "constraints_indexes_fks",

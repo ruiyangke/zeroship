@@ -1,7 +1,7 @@
 // The extension point for backend-specific table options — and the ONLY thing the
 // neutral package knows about them.
 //
-// This file names no vendor, and must not start to. `zero-migrate` is the neutral
+// This file names no vendor, and must not start to. `@zeroship/migrate` is the neutral
 // authoring DSL; a `postgres.fillfactor` typing in here would be the TypeScript mirror
 // of the Cargo rule that forbids `zeroship-migrate-core` from depending on a vendor crate.
 //
@@ -11,7 +11,7 @@
 // vendor's npm package augments it from its own generated typings:
 //
 //     // in zero-migrate-postgres
-//     declare module "zero-migrate" {
+//     declare module "@zeroship/migrate" {
 //       interface VendorAttributeNamespaces {
 //         postgres: { fillfactor?: number; tablespace?: string; ... };
 //       }

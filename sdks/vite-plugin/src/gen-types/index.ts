@@ -17,7 +17,7 @@
  *    owns `schema.ts`; `env.db.ts` just re-exports its typing.
  *
  * Neither uses the engine's own `envDbTs`: that string round-trips the folded IR
- * back into the *migration authoring* DSL (`from "zero-migrate"`), which is the
+ * back into the *migration authoring* DSL (`from "@zeroship/migrate"`), which is the
  * engine's artifact, not a creator app's type surface.
  *
  * `--check` (`{ check: true }`) regenerates in memory and diffs against the
@@ -264,7 +264,7 @@ export async function genTypesFromSchemaFile(
     // `genArtifacts` source.
     //
     // Nothing enforces it. `emitDialectal` is exposed on our own op surface
-    // (sdks/migrate/src/ops.ts:525), so the first migration to use it makes this
+    // (packages/zero-migrate/src/ops.ts), so the first migration to use it makes this
     // constant silently wrong for the SQLite dev tier - a column set that the dev
     // database does not have. If you are adding a dialectal leg, this line is the
     // thing that breaks, and it will not tell you.

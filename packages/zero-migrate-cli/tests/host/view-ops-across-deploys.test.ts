@@ -36,9 +36,9 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { test } from "node:test";
 
-import { table, t, view } from "zero-migrate";
+import { table, t, view } from "@zeroship/migrate";
 import { apply, type DriverConfig } from "zero-migrate-cli";
-import type { MigrationModule } from "zero-migrate/internal/recorder";
+import type { MigrationModule } from "@zeroship/migrate/internal/recorder";
 
 import { noInjectPolicy } from "./policy.js";
 

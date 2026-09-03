@@ -1,5 +1,9 @@
 # zero-migrate — Consolidated Redesign Plan
 
+> **Historical design snapshot.** Package paths, names, and split proposals
+> below describe the 2026-07-12 tree. The live DSL is the single
+> `@zeroship/migrate` package at `packages/zero-migrate/`.
+
 **Status:** draft (uncommitted). **Date:** 2026-07-12.
 **Basis:** two independent harsh reviews (codex 16/100, fable 18/100 — both in
 `docs/reviews/2026-07-12-zero-migrate-arch-{codex,fable}.md`), converging on the

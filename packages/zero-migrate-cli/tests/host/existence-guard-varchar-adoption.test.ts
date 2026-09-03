@@ -19,7 +19,7 @@
 //     fail closed. Without it a "fix" that stops comparing the field at all would pass
 //     the first two arms.
 //
-// Every arm drives the REAL path: authored through the public `zero-migrate` API,
+// Every arm drives the REAL path: authored through the public `@zeroship/migrate` API,
 // lowered by the native addon, applied through `zero-migrate-cli`'s `apply()` over the
 // real `pg` driver seam against a live database, with the pre-state created OUT OF BAND
 // so the adoption is genuine rather than a re-run of the engine's own DDL.
@@ -63,7 +63,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { apply, type DriverConfig, type MigrationModule } from "zero-migrate-cli";
-import { table, t, type ColumnDef } from "zero-migrate";
+import { table, t, type ColumnDef } from "@zeroship/migrate";
 import { noInjectPolicy } from "./policy.js";
 
 

@@ -8,12 +8,12 @@
 //!   sample .ts migration  (createTable notes(title, body) + addColumn tag)
 //!        │
 //!        ▼  zeroship-runtime V8 isolate
-//!   STANDALONE zero-migrate recorder (dist/embedded-recorder.js, the v1 DSL)
-//!        │      run up() under __begin/__drain, emit { ir_version:1, name, ops }
+//!   @zeroship/migrate recorder (dist/embedded-recorder.js, the v1 DSL)
+//!        │      run schema() under __begin/__drain, emit { ir_version:1, name, ops }
 //!        ▼
 //!   ir_version-1 envelope JSON  (authored in V8 — NOT hand-built)
 //!        │
-//!        ▼  published zero-migrate (Rust)
+//!        ▼  zeroship-migrate engine (Rust)
 //!   fail-closed load gate → IrAuthor::load_and_lower (Postgres)
 //!        │
 //!        ▼
@@ -24,7 +24,7 @@
 //! ```
 //!
 //! The Stage-1 `smoke_apply_pg.rs` HAND-BUILT the envelope JSON; Stage 2 replaces
-//! that literal with an envelope AUTHORED by running the standalone recorder in
+//! that literal with an envelope AUTHORED by running the package recorder in
 //! zeroship-runtime's V8. Everything downstream of the envelope is the SAME native
 //! apply path as Stage 1.
 //!
@@ -87,19 +87,19 @@ scope = "all"
 
 // ── The V8 authoring front-end ───────────────────────────────────────────────
 //    Mechanism: build a module graph that maps `@zeroship/migrate` to a recorder
-//    bundle and `__migration__.js` to the creator migration, run `up()` under a
+//    bundle and `__migration__.js` to the creator migration, run `schema()` under a
 //    fresh ambient recorder, and read the drained envelope back off a global.
-//    Here that graph wires the STANDALONE v1 recorder and emits ir_version:1.
+//    Here that graph wires the package's v1 recorder and emits ir_version:1.
 
 /// The Stage-2 authoring glue (imports the migration + the recorder seam, runs
-/// `up()`, emits the v1 envelope on `globalThis.__zsStage2IR`).
+/// `schema()`, emits the v1 envelope on `globalThis.__zsStage2IR`).
 const STAGE2_RECORDER_JS: &str = include_str!("stage2_recorder.js");
 
-/// The STANDALONE `zero-migrate` recorder bundle — the CURRENT v1 DSL + recorder
-/// (`table()`/`t.*` → `__begin`/`__drain`). This is the published engine's
-/// authoring artifact, NOT the monorepo's in-tree v6 bundle. Mapping
-/// `@zeroship/migrate` to THIS file is what makes the authored envelope v1.
-const STANDALONE_RECORDER_JS: &str = include_str!(concat!(
+/// The `@zeroship/migrate` recorder bundle — the CURRENT v1 DSL + recorder
+/// (`table()`/`t.*` → `__begin`/`__drain`). This is the engine package's
+/// authoring artifact. Mapping `@zeroship/migrate` to THIS file keeps the DSL
+/// producers and the ambient recorder on the same module instance.
+const MIGRATE_RECORDER_JS: &str = include_str!(concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../../packages/zero-migrate/dist/embedded-recorder.js"
 ));
@@ -115,7 +115,7 @@ struct AuthoredEnvelope {
 }
 
 /// Author a `.ts` migration module source into its `ir_version:1` IR envelope
-/// JSON by running the STANDALONE recorder in zeroship-runtime's V8 isolate.
+/// JSON by running the package recorder in zeroship-runtime's V8 isolate.
 ///
 /// `name` is the filename-derived fallback used when the module declares none.
 /// Returns the envelope JSON string (`{ ir_version:1, name, ops }`).
@@ -124,7 +124,7 @@ fn author_v1_envelope(migration_source: &str, name: &str) -> String {
 
     // The in-memory module graph. The GLUE is the entry (compiled eagerly); it
     // imports the migration under `./__migration__.js` and the recorder seam from
-    // `@zeroship/migrate` (mapped to the standalone v1 bundle).
+    // `@zeroship/migrate` (mapped to the package's v1 bundle).
     let modules = vec![
         ModuleEntry {
             specifier: "stage2_recorder.js".to_string(),
@@ -136,7 +136,7 @@ fn author_v1_envelope(migration_source: &str, name: &str) -> String {
         },
         ModuleEntry {
             specifier: "@zeroship/migrate".to_string(),
-            source: STANDALONE_RECORDER_JS.to_string(),
+            source: MIGRATE_RECORDER_JS.to_string(),
         },
     ];
 
@@ -191,7 +191,7 @@ import { table, t } from "@zeroship/migrate";
 
 export const name = "create_notes_and_add_tag";
 
-export function up() {
+export function schema() {
   table("notes").create({
     columns: {
       title: t.text().notNull(),
@@ -298,7 +298,7 @@ async fn column_exists(session: &CompioPgSession, schema: &str, table: &str, col
 }
 
 /// V8 authoring is DB-free — assert it unconditionally so the proof holds even in
-/// DB-less CI: running the sample `.ts` through the standalone recorder in
+/// DB-less CI: running the sample `.ts` through the package recorder in
 /// zeroship-runtime's V8 yields exactly the createTable+addColumn v1 envelope.
 #[test]
 fn sample_ts_authors_ir_version_1_envelope_in_v8() {

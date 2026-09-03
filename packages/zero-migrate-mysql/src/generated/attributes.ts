@@ -9,12 +9,14 @@
 // A drift test asserts this file matches the artifact, so an edit here is reverted by
 // the next regeneration rather than silently kept.
 //
-// This module augments the neutral `zero-migrate` package's `VendorAttributeNamespaces`
+// This module augments the neutral `@zeroship/migrate` package's `VendorAttributeNamespaces`
 // interface. Importing this package is what makes `mysql: { … }` typecheck on the
 // authoring surface; without it the key is a type error. The namespace key is the
 // backend's DIALECT ID — there is no hand-picked alias anywhere in the chain.
 
-declare module "zero-migrate" {
+import type {} from "@zeroship/migrate";
+
+declare module "@zeroship/migrate" {
   /** CreateTable-level options this backend accepts. */
   interface MysqlCreateTableAttributes {
     /**

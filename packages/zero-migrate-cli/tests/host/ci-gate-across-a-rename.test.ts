@@ -46,7 +46,7 @@ const ADDON_PATH = resolve(
 const OWNER_APP = "app_ci_rename";
 const RENAME_MIGRATION = "rename_email";
 
-const CREATE = `import { table, t } from "zero-migrate";
+const CREATE = `import { table, t } from "@zeroship/migrate";
 export const name = "create_people";
 export default {
   schema() {
@@ -58,7 +58,7 @@ export default {
 };
 `;
 
-const SEED = `import { table } from "zero-migrate";
+const SEED = `import { table } from "@zeroship/migrate";
 export const name = "seed_people";
 export default {
   data() {
@@ -70,7 +70,7 @@ export default {
 };
 `;
 
-const RENAME = `import { table, t } from "zero-migrate";
+const RENAME = `import { table, t } from "@zeroship/migrate";
 export const name = "${RENAME_MIGRATION}";
 export default {
   schema() {

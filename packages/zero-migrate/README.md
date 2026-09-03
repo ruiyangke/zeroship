@@ -1,6 +1,6 @@
-# zero-migrate
+# `@zeroship/migrate`
 
-The authoring DSL for zero-migrate. Write one typed migration and target
+The one authoring DSL and recorder for zeroship migrations. Write one typed migration and target
 PostgreSQL, MySQL 8, or SQLite. This package is pure JavaScript with no native
 code and no runtime dependencies; it is what your migration files import.
 
@@ -10,18 +10,17 @@ To run migrations (apply, plan, status, the `zero-migrate` CLI), install
 ## Install
 
 ```
-npm install zero-migrate
+npm install @zeroship/migrate
 ```
 
 ## Write a migration
 
 ```ts
-import { ids, now, table, t } from "zero-migrate";
-
-export const name = "create_orders";
+import { ids, now, table, t } from "@zeroship/migrate";
 
 export default {
-  up() {
+  name: "create_orders",
+  schema() {
     table("orders").create({
       columns: {
         id: ids.typeId({ prefix: "ord" }).primaryKey(),
@@ -36,6 +35,34 @@ export default {
 };
 ```
 
+Schema and data changes are separate migration modules. A schema migration
+exports `schema()` and receives an engine-synthesized structural inverse. A data
+migration exports `data()` and must make its rollback posture explicit with
+either a recorded `inverse()` or a non-empty `irreversible` reason:
+
+```ts
+import { table } from "@zeroship/migrate";
+
+export default {
+  name: "normalize_order_status",
+  data() {
+    table("orders").update({
+      set: { status: "pending" },
+      where: (col) => col("status").eq("new"),
+    });
+  },
+  inverse() {
+    table("orders").update({
+      set: { status: "new" },
+      where: (col) => col("status").eq("pending"),
+    });
+  },
+};
+```
+
+A module exports exactly one forward phase: `schema()` or `data()`. There is no
+`up()` compatibility alias and no authored `down()` surface.
+
 TypeID columns do not add a database default. Supply a valid value with the
 matching prefix whenever you insert a row.
 
@@ -46,7 +73,7 @@ validation error instead of guessing.
 
 ## Docs
 
-See the [zero-migrate documentation](https://github.com/ruiyangke/zero-migrate/tree/main/docs).
+See the [migration DSL reference](../../docs/reference/migrate-op-dsl.md).
 
 ## License
 

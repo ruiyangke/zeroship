@@ -77,7 +77,7 @@ Expressed faithfully:
 - Descending index elements, e.g. `{ kind: "column", name: "ordinal", order: "desc" }`.
 - Composite primary keys and composite unique indexes.
 - Foreign keys, including self-FK and `ON DELETE CASCADE` / `RESTRICT`.
-- PostgreSQL grants and revokes as structured `@zeroship/migrate/pg` `grant` / `revoke` ops.
+- PostgreSQL grants and revokes as structured `@zeroship/migrate` `grant` / `revoke` ops.
 
 ## Gaps
 

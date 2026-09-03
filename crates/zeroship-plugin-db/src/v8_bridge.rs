@@ -437,7 +437,6 @@ pub(crate) fn setup_js_promise<'s>(
     (global_resolver, request_id, promise)
 }
 
-
 // ---------------------------------------------------------------------------
 // Result lowering: engine value -> runtime ResolveValue
 // ---------------------------------------------------------------------------
@@ -501,6 +500,7 @@ pub(crate) fn maybe_rehydrate(json: String, has_masked: bool) -> ResolveValue {
         ResolveValue::Json(json)
     }
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

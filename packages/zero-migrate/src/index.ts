@@ -1,4 +1,4 @@
-// `zero-migrate` — the no-raw-SQL, fully-structured, FLUENT-only op builder
+// `@zeroship/migrate` — the no-raw-SQL, fully-structured, FLUENT-only op builder
 // for portable bi-dialect (PG + SQLite) migrations (design
 // `2026-06-25-op-dsl-fluent-redesign.md`).
 //
@@ -20,7 +20,7 @@
 // reason })` DDL op (a trust-gated, reason-required whole-statement emitter for
 // vendor DDL the structured surface cannot yet express) — exported below.
 //
-//   import { table, t } from "zero-migrate";
+//   import { table, t } from "@zeroship/migrate";
 //
 //   export default {
 //     schema() {
@@ -111,6 +111,14 @@ export type { DbSchemaField, DbFieldType } from "./db-lexicon.js";
 // (and the bridge tests) can construct db fields without a separate db package.
 export { t as dbType, TypeBuilder as DbTypeBuilder } from "./db-types.js";
 export type { FieldDef, TypeName, EncryptedOptions } from "./db-types.js";
+
+// Public declaration-merging seams used by the separately installed vendor
+// attribute packages. These must be exported from the package root: their
+// `declare module "@zeroship/migrate"` blocks augment this module identity.
+export type {
+  VendorAttributeNamespaces,
+  VendorIndexAttributeNamespaces,
+} from "./vendor-attributes.js";
 
 export type {
   // authoring types

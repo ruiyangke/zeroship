@@ -3,7 +3,7 @@
  * constant the gen-types orchestrator threads into `genArtifacts` as
  * `policyCeilingToml`.
  *
- * WHY this lives here (and is a constant, not a file read): the `zero-migrate`
+ * WHY this lives here (and is a constant, not a file read): the `@zeroship/migrate`
  * engine is deliberately PRESET-FREE — it bakes in no confined ceiling. The
  * SCHEMA-EMIT injection shape (the seven platform system columns + `["id"]` PK +
  * the three system indexes) is supplied by the CALLER. gen-types runs entirely

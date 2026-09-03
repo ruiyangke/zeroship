@@ -1,4 +1,4 @@
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 
 // The signing-key trust horizon: a key leaves `retiring` for `retired` only
 // once every token it ever issued has expired, which is what

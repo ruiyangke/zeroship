@@ -1,4 +1,4 @@
-import { grant } from "zero-migrate";
+import { grant } from "@zeroship/migrate";
 
 // The shared token-bucket limiter could not write its own bucket, so the
 // throttle failed closed and took the whole control admin API with it.

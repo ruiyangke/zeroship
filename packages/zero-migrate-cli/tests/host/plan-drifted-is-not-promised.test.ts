@@ -58,7 +58,7 @@ function firstMigration(extraColumn: boolean): string {
   const columns = extraColumn
     ? `{ id: t.int().notNull(), drifted: t.text() }`
     : `{ id: t.int().notNull() }`;
-  return `import { table, t } from "zero-migrate";
+  return `import { table, t } from "@zeroship/migrate";
 export const name = "pd_a";
 export default {
   schema() {
@@ -68,7 +68,7 @@ export default {
 `;
 }
 
-const SECOND_MIGRATION = `import { table, t } from "zero-migrate";
+const SECOND_MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "pd_b";
 export default {
   schema() {

@@ -24,12 +24,12 @@ function record(up: () => void): any[] {
   return __drain();
 }
 
-test("zero-migrate root exports vendor names and /pg subpath is retired", async () => {
+test("@zeroship/migrate root exports vendor names and /pg subpath is retired", async () => {
   const resolveImport = (import.meta as ImportMeta & { resolve(specifier: string): string }).resolve;
-  const resolved = resolveImport("zero-migrate");
+  const resolved = resolveImport("@zeroship/migrate");
   assert.match(resolved, /\/dist\/index\.js$/);
-  assert.throws(() => resolveImport("zero-migrate/pg"), /Package subpath|ERR_PACKAGE_PATH_NOT_EXPORTED/);
-  const imported = await import("zero-migrate");
+  assert.throws(() => resolveImport("@zeroship/migrate/pg"), /Package subpath|ERR_PACKAGE_PATH_NOT_EXPORTED/);
+  const imported = await import("@zeroship/migrate");
   assert.equal((imported as any).pg, undefined);
   assert.equal(typeof imported.schema, "function");
   assert.equal(typeof imported.raw, "function");

@@ -36,7 +36,7 @@
 // deliberate one - a gate that tried to recognise "machine-specific" in general would
 // either miss these anyway or reject legitimate absolute paths like `/usr/bin/env`.
 //
-// DOES NOT run in CI as its own step: it rides `pnpm --filter zero-migrate test`,
+// DOES NOT run in CI as its own step: it rides `pnpm --filter @zeroship/migrate test`,
 // which CI already runs, for the same reason the tracked-file byte gate does.
 
 import assert from "node:assert/strict";

@@ -1,4 +1,4 @@
-// `zero-migrate` — the fluent DSL records the same frozen wire ops the
+// `@zeroship/migrate` — the fluent DSL records the same frozen wire ops the
 // engine recorder + golden corpus pin. The DSL's `__begin`/`__drain` ambient
 // recorder (the build-evaluator seam) is driven directly so a test can assert the
 // recorded op objects without invoking the Rust engine host. Table authoring is via
@@ -74,7 +74,7 @@ async function importPlatformCorpusMigration(relativePath: string): Promise<{ sc
   const sourcePath = resolve(process.cwd(), "../..", relativePath);
   const indexUrl = pathToFileURL(resolve(process.cwd(), "src/index.js")).href;
   const source = (await readFile(sourcePath, "utf8")).replaceAll(
-    `from "zero-migrate"`,
+    `from "@zeroship/migrate"`,
     `from "${indexUrl}"`,
   );
   // THE SWEEP LANDED. This used to resolve `up()` and assert it existed, with a
@@ -82,7 +82,7 @@ async function importPlatformCorpusMigration(relativePath: string): Promise<{ sc
   // corpus to `schema()` and it did, silently, because the specifier rewrite above
   // also stopped matching (the corpus said `@zeroship/migrate` then) so the import
   // failed before the assertion was ever reached. Both halves are repaired here:
-  // the corpus now spells `zero-migrate`, and this resolves the member it exports.
+  // the corpus now spells `@zeroship/migrate`, and this resolves the member it exports.
   const dataUrl = `data:text/javascript;base64,${Buffer.from(source).toString("base64")}#${Date.now()}`;
   const mod = (await import(dataUrl)) as {
     schema?: () => void;
@@ -121,8 +121,8 @@ function recordEngine(up: (api: {
   return engDrain();
 }
 
-test("zero-migrate core exports enumType, pg vendor names, and omits old names", async () => {
-  const imported = await import("zero-migrate");
+test("@zeroship/migrate core exports enumType, pg vendor names, and omits old names", async () => {
+  const imported = await import("@zeroship/migrate");
   assert.equal(typeof imported.enumType, "function");
   assert.equal(typeof imported.check, "function");
   assert.equal(typeof imported.int64, "function");

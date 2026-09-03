@@ -75,7 +75,7 @@ scope = "all"
   writeFileSync(join(work, "registry.json"), JSON.stringify({ [TABLE]: OWNER_APP }));
   writeFileSync(
     join(work, "migrations", "20260101000000_base.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "base";
 export default {
   schema() {
@@ -98,7 +98,7 @@ export default {
   );
   writeFileSync(
     join(work, "migrations", "20260101000001_seed.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "seed";
 export default {
   data() {
@@ -113,7 +113,7 @@ export default {
   // Dropping an unrelated column is what forces the rebuild.
   writeFileSync(
     join(work, "migrations", "20260102000000_drop.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "drop_doomed";
 export default { schema() { table("${TABLE}").column("doomed").drop(); } };
 `,
@@ -253,7 +253,7 @@ scope = "all"
   );
   writeFileSync(
     join(work, "migrations", "20260101000000_base.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "base";
 export default {
   schema() {
@@ -272,7 +272,7 @@ export default {
   );
   writeFileSync(
     join(work, "migrations", "20260101000001_seed.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "seed";
 export default {
   data() {
@@ -289,7 +289,7 @@ export default {
   // Dropping `spare` is incidental: it exists only to force the rebuild.
   writeFileSync(
     join(work, "migrations", "20260102000000_rebuild.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "rebuild";
 export default { schema() { table("fk_${rebuild}").column("spare").drop(); } };
 `,
@@ -391,7 +391,7 @@ scope = "all"
   writeFileSync(join(work, "registry.json"), JSON.stringify({ partial_rows: OWNER_APP }));
   writeFileSync(
     join(work, "migrations", "20260101000000_base.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "base";
 export default {
   schema() {
@@ -412,7 +412,7 @@ export default {
   );
   writeFileSync(
     join(work, "migrations", "20260101000001_seed.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "seed";
 export default {
   data() {
@@ -426,7 +426,7 @@ export default {
   );
   writeFileSync(
     join(work, "migrations", "20260102000000_drop.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "drop_spare";
 export default { schema() { table("partial_rows").column("spare").drop(); } };
 `,

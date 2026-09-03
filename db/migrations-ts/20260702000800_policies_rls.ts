@@ -1,4 +1,4 @@
-import { currentSetting, table } from "zero-migrate";
+import { currentSetting, table } from "@zeroship/migrate";
 
 export default {
   name: "policies_rls",

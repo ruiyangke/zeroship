@@ -5,7 +5,7 @@
 //
 // Commands:
 //   new <name>          Scaffold a fresh `<14-digit-ts>_<name>.ts` op-DSL migration
-//                       (imports `{ table, t } from "zero-migrate"`). OFFLINE.
+//                       (imports `{ table, t } from "@zeroship/migrate"`). OFFLINE.
 //   lint   [dir]        DB-free verification for every supported dialect. OFFLINE.
 //   plan   [dir]        Reconcile live status and render pending SQL without apply.
 //   apply  [dir]        Apply every migration in `dir` over the `--database-url`
@@ -54,7 +54,7 @@ import {
   resolveMigrationName,
   type IrEnvelope,
   type MigrationModule,
-} from "zero-migrate/internal/recorder";
+} from "@zeroship/migrate/internal/recorder";
 
 /** The default migration directory (dbmate/Flyway convention). */
 const DEFAULT_DIR = "./migrations";
@@ -919,7 +919,7 @@ function assertUniqueMigrationTimestampPrefixes(files: readonly MigrationFile[])
 
 /** `new <name>` — scaffold a fresh op-DSL migration. Validates the name, refuses to
  *  clobber, and prints the created path. The scaffold imports `{ table, t }` from the
- *  `zero-migrate` DSL package (the current fluent surface). */
+ *  `@zeroship/migrate` DSL package (the current fluent surface). */
 async function runNew(args: Args): Promise<number> {
   const name = args.positional;
   if (!name) throw new CliError("`new` needs a migration name: zero-migrate new <name>");
@@ -947,9 +947,9 @@ async function runNew(args: Args): Promise<number> {
   return 0;
 }
 
-/** The op-DSL migration scaffold body — emits a `zero-migrate` DSL module. */
+/** The op-DSL migration scaffold body — emits an `@zeroship/migrate` DSL module. */
 function scaffold(name: string): string {
-  return `import { table, t } from "zero-migrate";
+  return `import { table, t } from "@zeroship/migrate";
 
 export const name = ${JSON.stringify(name)};
 

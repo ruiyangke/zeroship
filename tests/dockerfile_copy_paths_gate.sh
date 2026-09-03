@@ -163,7 +163,7 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # which is now a pnpm workspace member. One source left the count in exchange: the
 # migrate stage's corpus COPY became `COPY --from=sdks`, which is not a context
 # source, because the corpus has to arrive carrying the `node_modules` link that
-# resolves its `zero-migrate` import. 19 + 11 - 1 = 29, plus `libs/` (the root
+# resolves its `@zeroship/migrate` import. 19 + 11 - 1 = 29, plus `libs/` (the root
 # manifest's second members glob refuses to match nothing) = 30.
 EXPECT_RAN=30
 RAN=$((PASS + FAIL))

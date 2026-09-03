@@ -1,4 +1,4 @@
-import { table } from "zero-migrate";
+import { table } from "@zeroship/migrate";
 
 // Uniqueness and access-path indexes. Unique indexes carry the business keys
 // (department code, grade code, employee email, position title, payroll

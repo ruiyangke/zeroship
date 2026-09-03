@@ -1,4 +1,4 @@
-// `zero-migrate` — the authoring-surface TS types (fluent-only).
+// `@zeroship/migrate` — the authoring-surface TS types (fluent-only).
 //
 // These are MANUAL types that codegen cannot express: the fluent `table()`
 // handle + its selector sub-handles (`.column`/`.foreignKey`/…), the chainable
@@ -326,7 +326,7 @@ export interface TypeLexicon {
   inet(): ColumnDef;
   /** A named enum reference declared with `enumType(name).create({ values })`. */
   enum(name: string | EnumHandle): ColumnDef;
-  /** A named domain reference declared with `domain(name).create(...)` from `zero-migrate`. */
+  /** A named domain reference declared with `domain(name).create(...)` from `@zeroship/migrate`. */
   domain(name: string | DomainHandle): ColumnDef;
   /** An application-level encrypted column wrapping an inner type. */
   encrypted(arg: { of: ColumnDef | ColType } | ColumnDef | ColType): ColumnDef;

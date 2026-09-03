@@ -24,7 +24,7 @@ const ADDON_PATH = resolve(
 
 const OWNER_APP = "app_plan_blocked_rename";
 
-const CREATE = `import { table, t } from "zero-migrate";
+const CREATE = `import { table, t } from "@zeroship/migrate";
 export const name = "create_people";
 export default {
   schema() {
@@ -36,7 +36,7 @@ export default {
 };
 `;
 
-const SEED = `import { table } from "zero-migrate";
+const SEED = `import { table } from "@zeroship/migrate";
 export const name = "seed_people";
 export default {
   data() {
@@ -48,7 +48,7 @@ export default {
 };
 `;
 
-const RENAME = `import { table, t } from "zero-migrate";
+const RENAME = `import { table, t } from "@zeroship/migrate";
 export const name = "rename_email";
 export default {
   schema() {
@@ -57,7 +57,7 @@ export default {
 };
 `;
 
-const ADD_NOTE = `import { table, t } from "zero-migrate";
+const ADD_NOTE = `import { table, t } from "@zeroship/migrate";
 export const name = "add_note";
 export default {
   schema() {

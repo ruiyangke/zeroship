@@ -24,7 +24,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { apply } from "zero-migrate-cli";
-import { byteValue, decimal, ids, lit, table, t, uuidV4 } from "zero-migrate";
+import { byteValue, decimal, ids, lit, table, t, uuidV4 } from "@zeroship/migrate";
 import { noInjectPolicy } from "./policy.js";
 
 

@@ -1,4 +1,4 @@
-import { raw, revoke, table, t } from "zero-migrate";
+import { raw, revoke, table, t } from "@zeroship/migrate";
 
 // Archive is the app lifecycle boundary. It retains the row that owns billing
 // attribution, migration history, the routable name, and database bindings.

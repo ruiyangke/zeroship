@@ -62,7 +62,7 @@ describe("op.* runtime schema descriptor bundling", () => {
       "dist/server/index.js":
         "export default { fetch(){ return new Response('ok'); } }\n",
       "dist/index.html": "<!doctype html><html></html>\n",
-      [`migrations/${stem}.ts`]: "export function up() {}\n",
+      [`migrations/${stem}.ts`]: "export default { schema() {} };\n",
       // The committed gen-types output (default dir `generated/zeroship`).
       "generated/zeroship/schema.runtime.json": DESCRIPTOR,
     });
@@ -100,7 +100,7 @@ describe("op.* runtime schema descriptor bundling", () => {
     const fx = await makeFixture({
       "dist/server/index.js": "export default { fetch(){ return new Response('ok'); } }\n",
       "dist/index.html": "<!doctype html><html></html>\n",
-      [`migrations/${stem}.ts`]: "export function up() {}\n",
+      [`migrations/${stem}.ts`]: "export default { schema() {} };\n",
       "generated/zeroship/schema.runtime.json": RUNTIME_DESCRIPTOR,
     });
     try {
@@ -127,7 +127,7 @@ describe("op.* runtime schema descriptor bundling", () => {
       "dist/server/index.js":
         "export default { fetch(){ return new Response('ok'); } }\n",
       "dist/index.html": "<!doctype html><html></html>\n",
-      [`migrations/${stem}.ts`]: "export function up() {}\n",
+      [`migrations/${stem}.ts`]: "export default { schema() {} };\n",
       // No generated/zeroship/schema.runtime.json on disk.
     });
     try {
@@ -167,7 +167,7 @@ describe("op.* runtime schema descriptor bundling", () => {
       "dist/server/index.js":
         "export default { fetch(){ return new Response('ok'); } }\n",
       "dist/index.html": "<!doctype html><html></html>\n",
-      [`migrations/${stem}.ts`]: "export function up() {}\n",
+      [`migrations/${stem}.ts`]: "export default { schema() {} };\n",
       "generated/zeroship/schema.runtime.json": descriptor,
     });
     try {

@@ -1,5 +1,9 @@
 # #169 P5 — delete the `export default { schema }` fallback (migrations the SOLE schema source of truth)
 
+> **Historical design snapshot.** Package paths and package boundaries below
+> describe the 2026-06-28 tree. The live DSL is the single
+> `@zeroship/migrate` package at `packages/zero-migrate/`.
+
 Status: design (2026-06-28). The migration-first cutover is substantially done — when
 `globalThis.__zsRuntimeDescriptor` (the migration fold's wire map, from `manifest.runtime_descriptor`) is
 present it IS the schema source of truth (`sdks/bootstrap/src/runtime-entry.ts:77-105`);

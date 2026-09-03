@@ -68,7 +68,7 @@ const ADDON_PATH = resolve(
 
 const OWNER_APP = "app_unrelated";
 
-const CREATE = `import { table, t } from "zero-migrate";
+const CREATE = `import { table, t } from "@zeroship/migrate";
 export const name = "create_people";
 export default {
   schema() {
@@ -80,7 +80,7 @@ export default {
 };
 `;
 
-const RENAME_MIG = `import { table, t } from "zero-migrate";
+const RENAME_MIG = `import { table, t } from "@zeroship/migrate";
 export const name = "rename_email";
 export default {
   schema() {
@@ -89,7 +89,7 @@ export default {
 };
 `;
 
-const UNRELATED = `import { table, t } from "zero-migrate";
+const UNRELATED = `import { table, t } from "@zeroship/migrate";
 export const name = "create_widgets";
 export default {
   schema() { table("widgets").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] }); },

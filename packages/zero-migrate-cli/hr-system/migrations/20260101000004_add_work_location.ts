@@ -1,4 +1,4 @@
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 
 // Remote-work rollout: add a nullable work_location to employees. A plain
 // additive column change, portable across all three dialects.

@@ -28,7 +28,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import { apply, status, history, currentIrVersion } from "zero-migrate-cli";
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 import { noInjectPolicy } from "./policy.js";
 import { connectLivePg, pgUrl } from "./live-db.js";
 
@@ -45,7 +45,7 @@ function uniqueSchema(prefix: string): string {
   return `${prefix}_${Date.now().toString(36)}_${Math.floor(Math.random() * 1e6).toString(36)}`;
 }
 
-/** Import the multi-op golden migration (`.ts`) — resolves `zero-migrate` to this
+/** Import the multi-op golden migration (`.ts`) — resolves `@zeroship/migrate` to this
  *  package's dist (one shared recorder singleton). Runs under `node --import tsx`. */
 async function loadMigration() {
   return import("./mig/20260712000001_create_gadgets.ts");

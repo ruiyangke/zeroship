@@ -84,7 +84,7 @@ scope = "all"
 function writeMigration(work: string, helper: string, extraColumn = false): void {
   writeFileSync(
     join(work, "migrations", "20260101000000_a.ts"),
-    `import { table, t, ${helper} } from "zero-migrate";
+    `import { table, t, ${helper} } from "@zeroship/migrate";
 export const name = "a";
 export default {
   schema() {

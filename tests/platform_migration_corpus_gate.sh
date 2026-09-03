@@ -1,110 +1,27 @@
 #!/usr/bin/env bash
-# ============================================================================
-# THE PLATFORM CANNOT MIGRATE ITS OWN DATABASE - can it, though?
+# Prove that the sanctioned platform applier records and durably applies the
+# complete committed migration corpus through the single @zeroship/migrate DSL.
 #
-# WHAT WENT WRONG. On 2026-08-28, `deploy/ops/db-migrate.sh` could not apply
-# `db/migrations-ts/` AT ALL. It died on file #1, and it had been dead since
-# ccda4bb42 swapped the applier from the Rust `zeroship-platform-migrate` binary
-# to the Node `zero-migrate` CLI. Two independent blockers, stacked:
+# The important failure mode is a successful empty drain: an imported migration
+# can record into one ambient singleton while the CLI drains another. Counting
+# `apply ...` lines cannot distinguish that from health. This gate therefore:
 #
-#   1. RESOLUTION. All 35 corpus files spelled `from "@zeroship/migrate"`. That
-#      name was never a package Node could find from `db/migrations-ts/` - it was
-#      a V8 MODULE-MAP ALIAS the retired Rust binary installed, pointing at
-#      `packages/zero-migrate/dist/embedded-recorder.js`. The deleted code says so
-#      in its own comment: "This is the ENGINE's recorder ..., NOT the monorepo's
-#      `sdks/migrate` copy" (crates/zeroship-migrate-adapter/src/platform/author.rs
-#      at ccda4bb42^). Node has no module map, so the alias became
-#      `Cannot find package`.
-#   2. RECORDER IDENTITY. Made resolvable against `sdks/migrate`, it failed one
-#      layer deeper with `op authoring called outside an active migration
-#      recorder`: the corpus recorded into `@zeroship/migrate`'s ambient recorder
-#      while the CLI drained `zero-migrate`'s. Two recorder singletons, one op
-#      list, and it is empty.
+#   1. lints through the CLI and reconciles every report's migration name and
+#      opCount against a committed per-file ledger;
+#   2. applies to fresh PostgreSQL and requires every file to return at least one
+#      newly applied journal identity;
+#   3. rereads history and status and reconciles those durable journal identities
+#      with the first apply;
+#   4. applies again and requires exact per-file skips plus unchanged history.
 #
-# AND THE PART THAT MATTERS MORE THAN EITHER BUG. Three comments in this tree
-# asserted "Measured 2026-08-28 against a fresh PostgreSQL 17.11: 35 files
-# applied, then an immediate second run applied none" - a measurement that could
-# not have been taken, because the path it describes died on file #1. A false
-# claim about what was verified is why nobody looked for four months of commits.
-# This gate exists so that sentence is produced by a machine or not at all.
+# Usage:
+#   tests/platform_migration_corpus_gate.sh
+#   tests/platform_migration_corpus_gate.sh --dsn <url>
+#   tests/platform_migration_corpus_gate.sh --static-only
+#   tests/platform_migration_corpus_gate.sh --with-container
 #
-# WHAT THIS GATE RULES ON, in order of how much it is worth:
-#
-#   apply / idempotence   Runs the SANCTIONED applier (deploy/ops/db-migrate.sh)
-#                         over the COMMITTED corpus against a real PostgreSQL,
-#                         twice. This is the arm that would have caught it. The
-#                         other three are cheap early warnings.
-#   specifier             Every corpus file imports the DSL the applier actually
-#                         activates, and nothing else.
-#   resolution            That specifier RESOLVES, by Node's own resolver, from
-#                         each corpus file's own directory - the upward walk the
-#                         CLI's plain `import()` performs.
-#   container_paths       The container puts the corpus where its resolution can
-#                         still work: under the directory that receives the pnpm
-#                         store. This is a PROPERTY check on three declarations,
-#                         not a spelling check - see the arm.
-#
-# THE TWO RECORDERS, AND WHAT ACTUALLY STOPS THIS RECURRING. Said plainly,
-# because leaving it implied is how the last claim got believed.
-#
-# NOTHING IN THIS TREE PREVENTS `sdks/migrate` AND `packages/zero-migrate` FROM
-# DRIFTING APART. They are two independent implementations of the same DSL and
-# recorder; no test compares them, no build step derives one from the other, and
-# after this fix none does either. That is not what was fixed.
-#
-# What was fixed is the platform's DEPENDENCE on their agreeing. Before, the
-# corpus was authored against one name and executed by the other, so the two
-# staying in step was a load-bearing assumption held up by nothing. Now the
-# corpus names the package whose recorder drains it, and the two may diverge
-# freely without the platform noticing or caring. SEVERING a coupling is a
-# stronger guarantee than bridging one - a bridge propagates drift, an absent
-# edge cannot. This gate then detects, every run, whether that single binding
-# still works end to end.
-#
-# So: prevention, no. Detection on every CI run, yes. If someone re-points the
-# corpus at a package the applier does not drain, the `specifier` arm fails
-# statically and the `apply` arm fails against a live database.
-#
-# THE END STATE IS STILL A COLLAPSE, and this gate does not deliver it.
-# `@zeroship/migrate` should become a thin layer over the engine's recorder
-# rather than a parallel implementation. The evidence that this is affordable:
-# `sdks/migrate`'s ambient recorder is not, today, the recorder that records
-# anything on a shipped path - the creator build esbuild-aliases the specifier
-# onto `zero-migrate` before recording
-# (sdks/vite-plugin/src/gen-types/recorder.ts:114-117), and the retired platform
-# binary mapped it to the engine bundle too. That collapse is a redesign of a
-# published package surface (it carries the `@zeroship/db` lexicon bridge and a
-# `host/` addon facade that `zero-migrate` deliberately does not), so it is its
-# own change with its own verification - not a thing to do in the same patch as
-# restoring the platform's ability to migrate its own database.
-#
-# WHAT IT DOES NOT CATCH, stated so nobody reads it as complete:
-#   - Whether the SCHEMA the corpus produces is correct. It rules on "the applier
-#     ran it and the journal is idempotent", never on what the tables mean. A
-#     migration that applies cleanly and creates the wrong column passes here.
-#   - Drift between `@zeroship/migrate` and `zero-migrate`, per the section above.
-#     It cannot see it and does not try.
-#   - The creator path. `sdks/vite-plugin/src/gen-types/recorder.ts:114-117`
-#     records creator migrations by esbuild-aliasing `@zeroship/migrate` onto
-#     `zero-migrate`. That alias is untouched here and unexercised by this gate.
-#   - Whether the compose `migrate` service, as opposed to the image it builds,
-#     is wired correctly end to end. `container_paths` rules on the three path
-#     declarations agreeing; it does not start compose. `--with-container` builds
-#     and runs the image itself, and is NOT on by default because the `sdks`
-#     stage installs a Rust toolchain to compile the napi addon.
-#   - Postgres versions other than the one it runs against.
-#
-# USAGE
-#   tests/platform_migration_corpus_gate.sh                 # own container
-#   tests/platform_migration_corpus_gate.sh --dsn <url>     # your database
-#   tests/platform_migration_corpus_gate.sh --static-only   # no database
-#   tests/platform_migration_corpus_gate.sh --with-container  # + build the image
-#
-# IT DOES NOT SKIP. Without a usable database the apply arms cannot run, so
-# `--static-only` must be asked for BY NAME and says out loud which arms it drops.
-# A missing prerequisite is a loud failure naming what is missing, never a quiet
-# pass - a gate that skips its only real arm prints what a clean tree prints.
-# ============================================================================
+# `--static-only` runs the import, resolution, container-layout and recorder
+# proofs, but deliberately exits non-zero because it cannot prove application.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -112,17 +29,14 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 . "$ROOT/tests/lib/gate_arms.sh"
 
 CORPUS_DIR="$ROOT/db/migrations-ts"
+OP_LEDGER="$CORPUS_DIR/op-counts.json"
 CLI="$ROOT/packages/zero-migrate-cli/dist/cli-bin.js"
-# The specifier the applier's own recorder is reachable under. The CLI drains
-# `zero-migrate/internal/recorder` (packages/zero-migrate-cli/src/cli.ts:57), so
-# a corpus file must record into THAT package or its ops land in a different
-# singleton and drain empty. It is also what the CLI scaffolds new migrations
-# with (packages/zero-migrate-cli/src/cli.ts:931).
-DSL_SPECIFIER="zero-migrate"
-# The spelling that caused the outage: a name no applier binds outside a V8
-# module map. Kept as a named refusal rather than a general "anything else"
-# check so the failure message can say what happened last time.
-ALIAS_SPECIFIER="@zeroship/migrate"
+DSL_INDEX="$ROOT/packages/zero-migrate/dist/index.js"
+DSL_RECORDER="$ROOT/packages/zero-migrate/dist/internal/recorder.js"
+DSL_SPECIFIER="@zeroship/migrate"
+# An exact import of this former package name would recreate the split-recorder
+# seam. It is a refusal, not an alias.
+OLD_DSL_SPECIFIER="zero-migrate"
 
 DSN=""
 STATIC_ONLY=0
@@ -138,94 +52,100 @@ done
 
 gate_arms_init platform_migration_corpus
 
+OWN_CONTAINER=""
+WORK_DIR="$(mktemp -d -t zeroship-migration-corpus.XXXXXX)"
+cleanup() {
+  if [ -n "$OWN_CONTAINER" ]; then
+    docker rm -f "$OWN_CONTAINER" >/dev/null 2>&1 || true
+  fi
+  if [ -n "$WORK_DIR" ] && [ -d "$WORK_DIR" ]; then
+    rm -rf -- "$WORK_DIR"
+  fi
+}
+trap cleanup EXIT HUP INT TERM
+
 echo "== platform migration corpus gate =="
 echo "corpus: $CORPUS_DIR"
 
-# ---------------------------------------------------------------------------
-# Arm 1 - specifier. Every corpus file must import the DSL the applier
-# activates, and none may import the alias that broke it.
-#
-# `examined` is the number of files whose import specifier this arm read and
-# ruled on - not the number of files present. A file with no import at all is
-# counted as ruled-on-and-failing rather than skipped, because a corpus file
-# that imports nothing is a file that records nothing.
-# ---------------------------------------------------------------------------
+# Refuse an absent or stale build. Both the CLI and the DSL dist matter: a fresh
+# CLI draining an old recorder is still a verdict about code nobody is reading.
+assert_fresh_artifact() {
+  local artifact="$1" label="$2"
+  shift 2
+
+  if [ ! -f "$artifact" ]; then
+    echo "FAIL: $label is missing: $artifact" >&2
+    echo "  run: pnpm build" >&2
+    exit 2
+  fi
+
+  local source newer stale=""
+  for source in "$@"; do
+    if [ -d "$source" ]; then
+      newer="$(find "$source" -type f -newer "$artifact" -print 2>/dev/null | head -3)"
+      if [ -n "$newer" ]; then
+        stale="${stale}${stale:+$'\n'}${newer}"
+      fi
+    elif [ -f "$source" ]; then
+      if [ "$source" -nt "$artifact" ]; then
+        stale="${stale}${stale:+$'\n'}${source}"
+      fi
+    else
+      echo "FAIL: freshness input is missing for $label: $source" >&2
+      exit 2
+    fi
+  done
+
+  if [ -n "$stale" ]; then
+    echo "FAIL: $label is stale: $artifact" >&2
+    echo "  These build inputs are newer:" >&2
+    printf '%s\n' "$stale" | sed 's|^|    |' >&2
+    echo "  run: pnpm build" >&2
+    exit 2
+  fi
+}
+
+# Arm 1: every TypeScript corpus file imports the canonical DSL exactly once and
+# none imports the former exact specifier.
 spec_examined=0
 spec_bad=0
 for f in "$CORPUS_DIR"/*.ts; do
   [ -e "$f" ] || continue
   spec_examined=$((spec_examined + 1))
-  if grep -q "from \"$ALIAS_SPECIFIER\"" "$f"; then
-    echo "FAIL[specifier]: $(basename "$f") imports $ALIAS_SPECIFIER" >&2
-    echo "  No applier binds that name. It was a V8 module-map alias installed by" >&2
-    echo "  a binary deleted in ccda4bb42; Node has no module map. Use $DSL_SPECIFIER." >&2
+  canonical_count="$(grep -Ec "from[[:space:]]+['\"]${DSL_SPECIFIER}['\"]" "$f")"
+  old_count="$(grep -Ec "from[[:space:]]+['\"]${OLD_DSL_SPECIFIER}['\"]" "$f")"
+  if [ "$old_count" -ne 0 ]; then
+    echo "FAIL[specifier]: $(basename "$f") imports removed package $OLD_DSL_SPECIFIER" >&2
     spec_bad=$((spec_bad + 1))
-  elif ! grep -q "from \"$DSL_SPECIFIER\"" "$f"; then
-    echo "FAIL[specifier]: $(basename "$f") does not import $DSL_SPECIFIER" >&2
+  fi
+  if [ "$canonical_count" -ne 1 ]; then
+    echo "FAIL[specifier]: $(basename "$f") has $canonical_count canonical DSL imports; expected 1" >&2
     spec_bad=$((spec_bad + 1))
   fi
 done
 gate_arm specifier "$spec_examined" 25
 
-# ---------------------------------------------------------------------------
-# Arm 2 - resolution. The specifier must RESOLVE, and it is resolved the way the
-# applier resolves it: Node's own resolver, rooted at each migration file, which
-# is the upward node_modules walk a plain `import()` under tsx performs.
-#
-# NOT a check that `db/migrations-ts/package.json` exists or names a dependency.
-# That would answer spelling. This performs the resolution.
-#
-# IT MUST BE AN ESM `import()`, AND THAT IS NOT A DETAIL. The first version of
-# this arm used `createRequire(<file>).resolve(...)`, and it failed on all 35
-# files while the live apply beside it passed on all 35 - because CommonJS
-# resolution reads the `require` condition of the target's `exports` map, and
-# `packages/zero-migrate/package.json` publishes only `import`. The arm was
-# answering a question no applier asks. `--input-type=module` with the cwd set to
-# the corpus directory reproduces the ACTUAL walk: Node treats the eval module's
-# URL as `file://<cwd>/[eval1]`, so bare-specifier resolution starts in the corpus
-# directory exactly as it does for a migration file, under ESM conditions, and the
-# `await import` proves the module also LOADS rather than merely resolving.
-#
-# The lesson is the general one: verify against the parser that will read it.
-# ---------------------------------------------------------------------------
+# Arm 2: load the canonical package using Node's ESM resolver from the corpus
+# directory, which is where the CLI's migration import begins its upward walk.
 res_examined=0
 res_bad=0
 for f in "$CORPUS_DIR"/*.ts; do
   [ -e "$f" ] || continue
   res_examined=$((res_examined + 1))
   if ! (cd "$CORPUS_DIR" && node --input-type=module \
-        -e "await import(process.argv[1]);" "$DSL_SPECIFIER") >/dev/null 2>&1; then
-    echo "FAIL[resolution]: $DSL_SPECIFIER does not import from $(basename "$f")" >&2
-    echo "  Node walks up from $CORPUS_DIR looking for node_modules/$DSL_SPECIFIER." >&2
-    echo "  Run pnpm install; db/migrations-ts is a workspace member that declares it." >&2
+        -e 'await import(process.argv[1]);' "$DSL_SPECIFIER") >/dev/null 2>&1; then
+    echo "FAIL[resolution]: $DSL_SPECIFIER does not load from $(basename "$f")" >&2
     res_bad=$((res_bad + 1))
   fi
 done
 gate_arm resolution "$res_examined" 25
 
-# ---------------------------------------------------------------------------
-# Arm 3 - container_paths. The image must put the corpus somewhere its
-# resolution still works.
-#
-# The bug this rules on: the corpus was copied to `/db/migrations-ts` while the
-# pnpm store landed at `/app/node_modules`. Node's upward walk from `/db/...`
-# reaches `/db/node_modules` and `/node_modules`, neither of which exists, so the
-# apply could not have worked in the container even after the specifier was
-# fixed. There was also no `package.json` above `/db`, so tsx read the files as
-# CJS first.
-#
-# THIS IS A PROPERTY CHECK, NOT A GREP FOR A KNOWN-GOOD STRING. It extracts the
-# three paths the three files actually declare and rules on the RELATIONSHIP
-# between them: the corpus must be a descendant of the directory that receives
-# node_modules, and the runtime default and the compose flag must both name the
-# path the Dockerfile creates. Hardcoding "/app/db/migrations-ts" here would pass
-# any future layout that merely kept the spelling.
-# ---------------------------------------------------------------------------
+# Arm 3: extract the image declarations and prove that the corpus remains below
+# the node_modules root, with entrypoint and compose pointing at the copied path.
 DOCKERFILE="$ROOT/deploy/Dockerfile"
 ENTRYPOINT="$ROOT/deploy/ops/migrate-entrypoint.sh"
 COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
 
-# Where node_modules lands in the migrate stage, and where the corpus lands.
 nm_dest="$(grep -oP '^COPY --from=sdks /build/node_modules \K\S+' "$DOCKERFILE" | tail -1)"
 corpus_dest="$(grep -oP '^COPY --from=sdks /build/db/migrations-ts \K\S+' "$DOCKERFILE" | tail -1)"
 entry_default="$(grep -oP '^MIGRATIONS_DIR="\K[^"]+' "$ENTRYPOINT" | head -1)"
@@ -233,218 +153,367 @@ compose_dir="$(grep -A1 -- '- --migrations-dir' "$COMPOSE" | grep -oP '^\s+- \K/
 
 cp_examined=0
 cp_bad=0
-
-# (a) corpus under the node_modules root.
 cp_examined=$((cp_examined + 1))
 nm_root="${nm_dest%/node_modules}"
 if [ -z "$nm_dest" ] || [ -z "$corpus_dest" ]; then
-  echo "FAIL[container_paths]: could not read the migrate stage's COPY destinations" >&2
-  echo "  node_modules='$nm_dest' corpus='$corpus_dest' in $DOCKERFILE" >&2
-  echo "  The COPY lines were reshaped; this arm reads them and must be updated with them." >&2
+  echo "FAIL[container_paths]: could not extract COPY destinations from $DOCKERFILE" >&2
   cp_bad=$((cp_bad + 1))
 elif [ "${corpus_dest#"$nm_root"/}" = "$corpus_dest" ]; then
-  echo "FAIL[container_paths]: corpus '$corpus_dest' is not under '$nm_root'" >&2
-  echo "  Node resolves the DSL by walking UP from the corpus, so a corpus outside" >&2
-  echo "  the tree that holds node_modules cannot resolve it. This is the exact" >&2
-  echo "  layout that made the container unable to migrate before 2026-08-28." >&2
+  echo "FAIL[container_paths]: corpus '$corpus_dest' is not below '$nm_root'" >&2
   cp_bad=$((cp_bad + 1))
 fi
 
-# (b) the entrypoint default names the path the image creates.
 cp_examined=$((cp_examined + 1))
 if [ "$entry_default" != "$corpus_dest" ]; then
-  echo "FAIL[container_paths]: entrypoint default '$entry_default' != image path '$corpus_dest'" >&2
+  echo "FAIL[container_paths]: entrypoint '$entry_default' != image '$corpus_dest'" >&2
   cp_bad=$((cp_bad + 1))
 fi
 
-# (c) the compose --migrations-dir names it too.
 cp_examined=$((cp_examined + 1))
 if [ "$compose_dir" != "$corpus_dest" ]; then
-  echo "FAIL[container_paths]: compose --migrations-dir '$compose_dir' != image path '$corpus_dest'" >&2
+  echo "FAIL[container_paths]: compose '$compose_dir' != image '$corpus_dest'" >&2
   cp_bad=$((cp_bad + 1))
 fi
-
 gate_arm container_paths "$cp_examined" 3
 
-# ---------------------------------------------------------------------------
-# Arms 4 and 5 - the live apply. Everything above is an early warning; this is
-# the arm that rules on the claim in the title.
-# ---------------------------------------------------------------------------
-corpus_files="$(find "$CORPUS_DIR" -maxdepth 1 -name '*.ts' | wc -l)"
+assert_fresh_artifact "$CLI" "sanctioned migration CLI" \
+  "$ROOT/packages/zero-migrate-cli/src" \
+  "$ROOT/packages/zero-migrate-cli/package.json" \
+  "$ROOT/packages/zero-migrate-cli/tsup.config.ts"
+assert_fresh_artifact "$DSL_INDEX" "migration DSL public bundle" \
+  "$ROOT/packages/zero-migrate/src" \
+  "$ROOT/packages/zero-migrate/package.json" \
+  "$ROOT/packages/zero-migrate/tsup.config.ts"
+assert_fresh_artifact "$DSL_RECORDER" "migration DSL recorder bundle" \
+  "$ROOT/packages/zero-migrate/src" \
+  "$ROOT/packages/zero-migrate/package.json" \
+  "$ROOT/packages/zero-migrate/tsup.config.ts"
 
-if [ "$STATIC_ONLY" -eq 1 ]; then
-  echo
-  echo "--static-only: the apply and idempotence arms did NOT run." >&2
-  echo "  Those are the arms that rule on whether the platform can migrate its own" >&2
-  echo "  database. What ran was three static early warnings over $corpus_files files." >&2
-  echo "  This mode is for a machine with no Docker and no PostgreSQL; it is not a" >&2
-  echo "  pass of this gate." >&2
-  gate_arms_finish || exit 1
-  exit 1
-fi
-
-OWN_CONTAINER=""
-cleanup() {
-  if [ -n "$OWN_CONTAINER" ]; then
-    docker rm -f "$OWN_CONTAINER" >/dev/null 2>&1 || true
-  fi
-}
-trap cleanup EXIT HUP INT TERM
-
-if [ ! -f "$CLI" ]; then
-  echo "FAIL: the sanctioned applier's CLI is missing: $CLI" >&2
-  echo "  run: pnpm install && pnpm build" >&2
+if [ ! -f "$OP_LEDGER" ]; then
+  echo "FAIL[recorded_ops]: operation ledger is missing: $OP_LEDGER" >&2
   exit 2
 fi
 
-# A STALE dist is worse than an absent one, and the asymmetry is the whole
-# reason this check exists. `dist/` is GITIGNORED BUILD OUTPUT, so its contents
-# are whatever this machine compiled last:
-#
-#   ABSENT  -> the check above stops the run and names the fix. LOUD.
-#   STALE   -> the gate applies the corpus with OLD CODE and reports PASSED.
-#              SILENT, and the verdict is about a build nobody is looking at.
-#
-# MEASURED 2026-08-31, which is why this is here rather than hypothetical: a
-# duplicate-timestamp guard committed to `src/cli.ts` was absent from a
-# three-day-old `dist/cli-bin.js`. A migration with a colliding prefix was added
-# expecting refusal; this gate reported PASSED with 38 files and zero refusals.
-# After `pnpm --filter zero-migrate-cli build` the identical probe produced the
-# correct refusal. Nothing about the corpus changed - only which build ran.
-#
-# Every guard in that CLI is exercised here only to the extent the on-disk build
-# contains it: the duplicate-NAME guard, the duplicate-TIMESTAMP guard, checksum
-# refusal, orphan-journal detection. A committed-but-unbuilt change to cli.ts is
-# invisible to the gate that exists to prove the platform can migrate itself.
-#
-# mtime, not a content hash, on purpose: this must be cheap enough to run every
-# time, and it only has to catch "somebody edited the source and did not
-# rebuild". A rebuild that produces byte-identical output still refreshes the
-# mtime, so the false-positive costs one build and never a wrong verdict.
-CLI_SRC="$ROOT/packages/zero-migrate-cli/src"
-if [ -d "$CLI_SRC" ]; then
-  CLI_STALE_AGAINST="$(find "$CLI_SRC" -type f -newer "$CLI" -print 2>/dev/null | head -3)"
-  if [ -n "$CLI_STALE_AGAINST" ]; then
-    echo "FAIL: the sanctioned applier's CLI is STALE: $CLI" >&2
-    echo "  These sources are newer than the build the gate would run:" >&2
-    echo "$CLI_STALE_AGAINST" | sed 's|^|    |' >&2
-    echo "  Applying the corpus with a stale build would rule on code nobody is" >&2
-    echo "  reading. run: pnpm --filter zero-migrate-cli build" >&2
-    exit 2
-  fi
+# Arm 4: ask the same CLI that applies the corpus to record it without a DB, then
+# reconcile every sorted file, authored name and operation count with the ledger.
+# Generic lint deliberately refuses platform-only capabilities such as roles,
+# grants and raw SQL before the platform charter is composed, so its validation
+# verdict is not this arm's verdict. Its complete JSON report is the recorder
+# instrument; the live apply below is the policy-aware execution verdict.
+lint_json="$WORK_DIR/lint.json"
+lint_err="$WORK_DIR/lint.err"
+ZEROSHIP_MIGRATE_VERB=lint \
+  bash "$ROOT/deploy/ops/db-migrate.sh" --dialect postgres --json \
+  >"$lint_json" 2>"$lint_err"
+lint_status=$?
+record_status=1
+recorded_files=0
+recorded_ops=0
+recorded_refusals=0
+record_summary="$(node --input-type=module - \
+  "$lint_json" "$OP_LEDGER" "$CORPUS_DIR" "$lint_status" <<'NODE'
+import assert from "node:assert/strict";
+import { readFileSync, readdirSync } from "node:fs";
+
+const [lintPath, ledgerPath, corpusDir, lintStatusRaw] = process.argv.slice(2);
+const lintStatus = Number(lintStatusRaw);
+const reports = JSON.parse(readFileSync(lintPath, "utf8"));
+const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+
+assert.ok(Array.isArray(ledger) && ledger.length > 0, "operation ledger must be nonempty");
+assert.equal(new Set(ledger.map((entry) => entry.file)).size, ledger.length, "duplicate ledger file");
+assert.equal(new Set(ledger.map((entry) => entry.name)).size, ledger.length, "duplicate ledger name");
+
+const files = readdirSync(corpusDir)
+  .filter((name) => name.endsWith(".ts") && !name.endsWith(".d.ts"))
+  .sort();
+assert.deepEqual(files, ledger.map((entry) => entry.file), "ledger files do not equal corpus files");
+assert.ok(Array.isArray(reports), "lint --json did not return a report array");
+assert.equal(reports.length, ledger.length, "lint report count does not equal ledger count");
+
+let opTotal = 0;
+for (let i = 0; i < ledger.length; i += 1) {
+  const expected = ledger[i];
+  const report = reports[i];
+  assert.ok(Number.isInteger(expected.opCount) && expected.opCount > 0,
+    `ledger ${expected.file} has a non-positive opCount`);
+  assert.equal(report.label, expected.name, `${expected.file}: authored name drift`);
+  assert.equal(report.opCount, expected.opCount, `${expected.file}: recorded opCount drift`);
+  assert.ok(Array.isArray(report.dialects) && report.dialects.length === 1,
+    `${expected.file}: expected exactly one dialect result`);
+  assert.equal(report.dialects[0].dialect, "postgres", `${expected.file}: wrong lint dialect`);
+  if (report.dialects[0].opCount !== undefined) {
+    assert.equal(report.dialects[0].opCount, expected.opCount,
+      `${expected.file}: verifier opCount drift`);
+  }
+  opTotal += expected.opCount;
+}
+assert.ok(opTotal > 0, "corpus recorded zero operations");
+const refusalCount = reports.filter((report) => !report.ok).length;
+assert.equal(lintStatus, refusalCount === 0 ? 0 : 1,
+  "lint exit status does not agree with its complete JSON report");
+process.stdout.write(`${ledger.length}\t${opTotal}\t${refusalCount}`);
+NODE
+)"
+record_status=$?
+if [ "$record_status" -eq 0 ]; then
+  IFS=$'\t' read -r recorded_files recorded_ops recorded_refusals <<<"$record_summary"
+else
+  echo "FAIL[recorded_ops]: could not reconcile lint's JSON report (exit $lint_status)" >&2
+  tail -40 "$lint_err" >&2
+fi
+gate_arm recorded_ops "$recorded_files" 25
+
+if [ "$STATIC_ONLY" -eq 1 ]; then
+  echo >&2
+  echo "--static-only: recorder proof saw $recorded_files files and $recorded_ops ops." >&2
+  echo "  Apply, durable history/status, and idempotence did NOT run; this is not a pass." >&2
+  gate_arms_finish || true
+  exit 1
 fi
 
 if [ -z "$DSN" ]; then
   if ! command -v docker >/dev/null 2>&1; then
-    echo "FAIL: no --dsn given and docker is not on PATH." >&2
-    echo "  This gate needs a PostgreSQL it may create schemas, roles and extensions" >&2
-    echo "  in. Pass --dsn <url> for one you control, or --static-only to run the" >&2
-    echo "  three static arms and fail." >&2
+    echo "FAIL: no --dsn given and docker is not on PATH" >&2
     exit 2
   fi
-  # A port nobody else is on. This tree runs many PostgreSQL containers at once
-  # (compio-postgres fixtures, e2e stacks), so a fixed port is a collision.
   port=""
   for p in $(seq 5560 5599); do
-    if ! ss -ltn 2>/dev/null | grep -q ":$p "; then port="$p"; break; fi
+    if ! ss -ltn 2>/dev/null | grep -q ":$p "; then
+      port="$p"
+      break
+    fi
   done
   if [ -z "$port" ]; then
-    echo "FAIL: no free TCP port in 5560-5599 for the gate's own PostgreSQL." >&2
+    echo "FAIL: no free TCP port in 5560-5599 for PostgreSQL" >&2
     exit 2
   fi
   OWN_CONTAINER="zs-migcorpus-gate-$port"
   docker rm -f "$OWN_CONTAINER" >/dev/null 2>&1 || true
-  echo "starting a fresh PostgreSQL on 127.0.0.1:$port ($OWN_CONTAINER)"
+  echo "starting fresh PostgreSQL on 127.0.0.1:$port ($OWN_CONTAINER)"
   if ! docker run -d --name "$OWN_CONTAINER" \
       -p "127.0.0.1:$port:5432" \
       -e POSTGRES_PASSWORD=zeroship -e POSTGRES_USER=postgres -e POSTGRES_DB=zeroship \
       postgres:17 >/dev/null 2>&1; then
-    echo "FAIL: could not start the gate's PostgreSQL container." >&2
+    echo "FAIL: could not start PostgreSQL container" >&2
     exit 2
   fi
   if ! docker exec "$OWN_CONTAINER" sh -c \
       'for i in $(seq 1 60); do pg_isready -U postgres -q && exit 0; sleep 1; done; exit 1'; then
-    echo "FAIL: the gate's PostgreSQL never became ready." >&2
+    echo "FAIL: PostgreSQL did not become ready" >&2
     exit 2
   fi
   DSN="postgres://postgres:zeroship@localhost:$port/zeroship"
 fi
 
-run1="$(mktemp)"; run2="$(mktemp)"
-trap 'rm -f "$run1" "$run2"; cleanup' EXIT HUP INT TERM
+run1="$WORK_DIR/apply-first.out"
+run1_err="$WORK_DIR/apply-first.err"
+history1="$WORK_DIR/history-first.json"
+history1_err="$WORK_DIR/history-first.err"
+run2="$WORK_DIR/apply-second.out"
+run2_err="$WORK_DIR/apply-second.err"
+history2="$WORK_DIR/history-second.json"
+history2_err="$WORK_DIR/history-second.err"
+status_json="$WORK_DIR/status.json"
+status_err="$WORK_DIR/status.err"
 
-# The SANCTIONED applier, by the path an operator would type. Calling the CLI
-# directly here would exercise a different command line from the one that ships,
-# which is how the last measurement came to describe a path that did not run.
-echo "applying the committed corpus with deploy/ops/db-migrate.sh"
-ZEROSHIP_MIGRATE_DSN="$DSN" bash "$ROOT/deploy/ops/db-migrate.sh" >"$run1" 2>&1
+echo "applying committed corpus with deploy/ops/db-migrate.sh"
+ZEROSHIP_MIGRATE_DSN="$DSN" bash "$ROOT/deploy/ops/db-migrate.sh" \
+  >"$run1" 2>"$run1_err"
 run1_status=$?
-applied_files="$(grep -c '^apply ' "$run1")"
 
-if [ "$run1_status" -ne 0 ]; then
-  echo "FAIL[apply]: the applier exited $run1_status." >&2
-  tail -20 "$run1" >&2
-fi
+ZEROSHIP_MIGRATE_DSN="$DSN" ZEROSHIP_MIGRATE_VERB=history \
+  bash "$ROOT/deploy/ops/db-migrate.sh" --json >"$history1" 2>"$history1_err"
+history1_status=$?
 
-# THE RECONCILIATION. A silent skip looks exactly like health: the applier would
-# exit 0 having applied a subset. So the arm's count is compared to the number of
-# files on disk, and a mismatch is a failure even when the exit code is 0.
-if [ "$applied_files" -ne "$corpus_files" ]; then
-  echo "FAIL[apply]: $applied_files files reported, $corpus_files on disk." >&2
-  echo "  A file the applier never mentioned was skipped, not applied. Compare:" >&2
-  echo "    ls $CORPUS_DIR/*.ts" >&2
-  echo "    grep '^apply ' <the run log>" >&2
-  run1_status=1
-fi
-gate_arm apply "$applied_files" 25
+ZEROSHIP_MIGRATE_DSN="$DSN" ZEROSHIP_MIGRATE_VERB=status \
+  bash "$ROOT/deploy/ops/db-migrate.sh" --json --strict >"$status_json" 2>"$status_err"
+status_cmd_status=$?
 
-echo "re-running to rule on idempotence"
-ZEROSHIP_MIGRATE_DSN="$DSN" bash "$ROOT/deploy/ops/db-migrate.sh" >"$run2" 2>&1
+echo "re-running to prove exact no-op idempotence"
+ZEROSHIP_MIGRATE_DSN="$DSN" bash "$ROOT/deploy/ops/db-migrate.sh" \
+  >"$run2" 2>"$run2_err"
 run2_status=$?
-# Ruled on: files the second run reported at all. Of those, the ones that applied
-# nothing must be all of them.
-second_seen="$(grep -c '^apply ' "$run2")"
-second_empty="$(grep -c '"applied":\[\]' "$run2")"
 
-if [ "$run2_status" -ne 0 ]; then
-  echo "FAIL[idempotence]: the second run exited $run2_status." >&2
-  tail -20 "$run2" >&2
-fi
-if [ "$second_empty" -ne "$second_seen" ] || [ "$second_seen" -ne "$corpus_files" ]; then
-  echo "FAIL[idempotence]: $second_empty of $second_seen files applied nothing" \
-       "(expected $corpus_files of $corpus_files)." >&2
-  echo "  A second apply that changes the database means the journal version a" >&2
-  echo "  migration derives is not stable across runs." >&2
-  run2_status=1
-fi
-gate_arm idempotence "$second_seen" 25
+ZEROSHIP_MIGRATE_DSN="$DSN" ZEROSHIP_MIGRATE_VERB=history \
+  bash "$ROOT/deploy/ops/db-migrate.sh" --json >"$history2" 2>"$history2_err"
+history2_status=$?
 
-# ---------------------------------------------------------------------------
-# Arm 6 (opt-in) - the image. Builds the `migrate` target and applies the corpus
-# from INSIDE it, which is the only way to rule on the COPY set rather than on
-# the host's node_modules. Off by default: the `sdks` stage installs a Rust
-# toolchain to compile the napi addon.
-# ---------------------------------------------------------------------------
+for result in \
+  "first apply:$run1_status:$run1:$run1_err" \
+  "first history:$history1_status:$history1:$history1_err" \
+  "strict status:$status_cmd_status:$status_json:$status_err" \
+  "second apply:$run2_status:$run2:$run2_err" \
+  "second history:$history2_status:$history2:$history2_err"; do
+  IFS=: read -r label code stdout_path stderr_path <<<"$result"
+  if [ "$code" -ne 0 ]; then
+    echo "FAIL[live]: $label exited $code" >&2
+    tail -30 "$stderr_path" >&2
+    tail -30 "$stdout_path" >&2
+  fi
+done
+
+reconcile_status=1
+applied_files=0
+applied_versions=0
+history_events=0
+status_plans=0
+status_steps=0
+second_seen=0
+if [ "$run1_status" -eq 0 ] && [ "$history1_status" -eq 0 ] && \
+   [ "$run2_status" -eq 0 ] && [ "$history2_status" -eq 0 ] && \
+   [ "$status_cmd_status" -eq 0 ]; then
+  live_summary="$(node --input-type=module - \
+    "$OP_LEDGER" "$run1" "$history1" "$run2" "$history2" "$status_json" <<'NODE'
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const [ledgerPath, firstPath, history1Path, secondPath, history2Path, statusPath] =
+  process.argv.slice(2);
+const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+
+function parseApply(path) {
+  const records = [];
+  for (const line of readFileSync(path, "utf8").split(/\r?\n/)) {
+    if (!line.startsWith("apply ")) continue;
+    const match = /^apply ([^:]+): (\{.*\})$/.exec(line);
+    assert.ok(match, `${path}: malformed apply result: ${line}`);
+    records.push({ label: match[1], outcome: JSON.parse(match[2]) });
+  }
+  return records;
+}
+
+function requireOutcomeArrays(record, phase) {
+  for (const key of ["applied", "skipped", "recovered", "pendingContracts"]) {
+    assert.ok(Array.isArray(record.outcome[key]), `${phase} ${record.label}: ${key} is not an array`);
+  }
+}
+
+function assertUnique(values, label) {
+  assert.equal(new Set(values).size, values.length, `${label} contains duplicate identities`);
+}
+
+function assertSameSet(actual, expected, label) {
+  assert.equal(actual.length, expected.length, `${label}: cardinality differs`);
+  assert.deepEqual([...actual].sort(), [...expected].sort(), `${label}: identities differ`);
+}
+
+const expectedLabels = ledger.map((entry) => entry.file.replace(/\.[^.]+$/, ""));
+const first = parseApply(firstPath);
+assert.deepEqual(first.map((record) => record.label), expectedLabels,
+  "first apply labels do not exactly equal corpus files");
+
+const firstIds = [];
+for (const record of first) {
+  requireOutcomeArrays(record, "first apply");
+  assert.ok(record.outcome.applied.length > 0,
+    `first apply ${record.label}: recorder drained empty`);
+  assert.deepEqual(record.outcome.skipped, [], `first apply ${record.label}: not a fresh apply`);
+  assert.deepEqual(record.outcome.recovered, [], `first apply ${record.label}: recovered work`);
+  assert.deepEqual(record.outcome.pendingContracts, [],
+    `first apply ${record.label}: left pending contracts`);
+  firstIds.push(...record.outcome.applied);
+}
+assert.ok(firstIds.length > 0, "first apply produced zero journal identities");
+assertUnique(firstIds, "first apply");
+
+const h1 = JSON.parse(readFileSync(history1Path, "utf8"));
+assert.ok(Array.isArray(h1.events) && h1.events.length > 0, "history after apply is empty");
+assert.ok(h1.events.every((event) => event.kind === "applied"),
+  "fresh history contains a non-applied event");
+const historyIds = h1.events.map((event) => event.version);
+assertUnique(historyIds, "first history");
+assertSameSet(historyIds, firstIds, "history versus first apply");
+
+const second = parseApply(secondPath);
+assert.deepEqual(second.map((record) => record.label), expectedLabels,
+  "second apply labels do not exactly equal corpus files");
+for (let i = 0; i < second.length; i += 1) {
+  const record = second[i];
+  requireOutcomeArrays(record, "second apply");
+  assert.deepEqual(record.outcome.applied, [], `second apply ${record.label}: applied again`);
+  assert.deepEqual(record.outcome.recovered, [], `second apply ${record.label}: recovered work`);
+  assert.deepEqual(record.outcome.pendingContracts, [],
+    `second apply ${record.label}: left pending contracts`);
+  assertUnique(record.outcome.skipped, `second apply ${record.label} skips`);
+  assertSameSet(record.outcome.skipped, first[i].outcome.applied,
+    `second apply ${record.label}: skips versus first applied identities`);
+}
+
+const h2 = JSON.parse(readFileSync(history2Path, "utf8"));
+assert.deepEqual(h2, h1, "history changed during the second no-op apply");
+
+const status = JSON.parse(readFileSync(statusPath, "utf8"));
+assert.equal(status.busy, false, "status was busy and reconciled no state");
+assert.deepEqual(status.lockHolders, [], "clean status has lock holders");
+for (const key of [
+  "pending", "aborted", "rolledBack", "pendingContracts", "blocked",
+  "unexpectedJournal", "interruptedUnwinds",
+]) {
+  assert.deepEqual(status[key], [], `status ${key} is not empty`);
+}
+assert.ok(Array.isArray(status.plans), "status omitted plan-aware detail");
+assert.equal(status.plans.length, ledger.length, "status plan count differs from corpus");
+assert.deepEqual(status.plans.map((plan) => plan.name), ledger.map((entry) => entry.name),
+  "status plan names differ from authored ledger names");
+assert.deepEqual(status.applied, status.plans.map((plan) => plan.version),
+  "status logical applied ids differ from its plans");
+assert.equal(status.currentVersion, status.applied.at(-1), "status currentVersion is not final plan");
+
+const statusStepIds = [];
+for (const plan of status.plans) {
+  assert.equal(plan.state, "applied", `status plan ${plan.name} is ${plan.state}`);
+  assert.deepEqual(plan.missingDependencies, [], `status plan ${plan.name} misses dependencies`);
+  assert.ok(Array.isArray(plan.steps) && plan.steps.length > 0,
+    `status plan ${plan.name} has no journal-visible steps`);
+  assert.ok(plan.steps.every((step) => step.state === "applied"),
+    `status plan ${plan.name} has a non-applied step`);
+  statusStepIds.push(...plan.steps.map((step) => step.version));
+}
+assertUnique(statusStepIds, "status steps");
+assertSameSet(statusStepIds, firstIds, "status steps versus first apply");
+
+process.stdout.write([
+  first.length,
+  firstIds.length,
+  h1.events.length,
+  status.plans.length,
+  statusStepIds.length,
+  second.length,
+].join("\t"));
+NODE
+)"
+  reconcile_status=$?
+  if [ "$reconcile_status" -eq 0 ]; then
+    IFS=$'\t' read -r applied_files applied_versions history_events \
+      status_plans status_steps second_seen <<<"$live_summary"
+  fi
+fi
+
+# Each arm reports the items it actually reconciled, with floors deliberately
+# below today's corpus size so normal deletion is not a census update.
+gate_arm apply_outcomes "$applied_files" 25
+gate_arm journal_events "$history_events" 25
+gate_arm status_plans "$status_plans" 25
+gate_arm idempotence_outcomes "$second_seen" 25
+
+# Optional image proof. It uses a second empty database and subjects every image
+# result to the same exact-label/nonempty-outcome parser instead of line counts.
 container_status=0
 if [ "$WITH_CONTAINER" -eq 1 ]; then
-  echo "building the migrate image"
-  image_build_log="$(mktemp)"
+  image_build_log="$WORK_DIR/image-build.log"
+  image_stdout="$WORK_DIR/image-apply.out"
+  image_stderr="$WORK_DIR/image-apply.err"
+  img_files=0
+  img_versions=0
+
+  echo "building and exercising the migrate image"
   if ! docker build -f "$ROOT/deploy/Dockerfile" --target migrate \
-       -t zeroship-migrate:gate "$ROOT" >"$image_build_log" 2>&1; then
-    echo "FAIL[image]: the migrate target did not build." >&2
-    echo "  Last 80 lines of docker build output:" >&2
+      -t zeroship-migrate:gate "$ROOT" >"$image_build_log" 2>&1; then
+    echo "FAIL[image]: migrate image build failed" >&2
     tail -80 "$image_build_log" >&2
     container_status=1
-    img_applied=0
   else
-    # A SECOND, EMPTY DATABASE, so the in-image apply is a real first apply
-    # rather than a re-run over what the host arms already built.
-    #
-    # Created through a throwaway `postgres` image rather than `docker exec` on
-    # the gate's own container: with --dsn the gate never started one, so the
-    # exec form ran `docker exec ""`, failed, and was swallowed by the `2>&1` -
-    # leaving this arm to report `database "gate_img" does not exist` and 0 of 35.
-    # Going through the DSN works for a caller-supplied database too.
     admin_dsn="${DSN%/*}/postgres"
     docker run --rm --network host postgres:17 \
       psql "$admin_dsn" -v ON_ERROR_STOP=1 \
@@ -452,55 +521,96 @@ if [ "$WITH_CONTAINER" -eq 1 ]; then
     if ! docker run --rm --network host postgres:17 \
         psql "$admin_dsn" -v ON_ERROR_STOP=1 \
         -c "CREATE DATABASE gate_img" >/dev/null 2>&1; then
-      echo "FAIL[image]: could not create the gate_img database via $admin_dsn" >&2
+      echo "FAIL[image]: could not create gate_img via the supplied server" >&2
       container_status=1
+    else
+      secret="$WORK_DIR/image-secret"
+      mkdir "$secret"
+      chmod 700 "$secret"
+      printf '%s' "${DSN%/*}/gate_img" >"$secret/dsn"
+      chmod 600 "$secret/dsn"
+
+      docker run --rm --network host \
+        -v "$secret/dsn:/tmp/dsn:ro" \
+        zeroship-migrate:gate --database-url-file /tmp/dsn \
+        >"$image_stdout" 2>"$image_stderr"
+      img_status=$?
+      if [ "$img_status" -ne 0 ]; then
+        echo "FAIL[image]: in-image apply exited $img_status" >&2
+        tail -30 "$image_stderr" >&2
+        tail -30 "$image_stdout" >&2
+        container_status=1
+      else
+        image_summary="$(node --input-type=module - "$OP_LEDGER" "$image_stdout" <<'NODE'
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const [ledgerPath, outputPath] = process.argv.slice(2);
+const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+const records = [];
+for (const line of readFileSync(outputPath, "utf8").split(/\r?\n/)) {
+  if (!line.startsWith("apply ")) continue;
+  const match = /^apply ([^:]+): (\{.*\})$/.exec(line);
+  assert.ok(match, `malformed image apply result: ${line}`);
+  records.push({ label: match[1], outcome: JSON.parse(match[2]) });
+}
+const labels = ledger.map((entry) => entry.file.replace(/\.[^.]+$/, ""));
+assert.deepEqual(records.map((record) => record.label), labels,
+  "image apply labels do not exactly equal corpus files");
+const ids = [];
+for (const record of records) {
+  for (const key of ["applied", "skipped", "recovered", "pendingContracts"]) {
+    assert.ok(Array.isArray(record.outcome[key]), `image ${record.label}: ${key} is not an array`);
+  }
+  assert.ok(record.outcome.applied.length > 0, `image ${record.label}: recorder drained empty`);
+  assert.deepEqual(record.outcome.skipped, [], `image ${record.label}: database was not empty`);
+  assert.deepEqual(record.outcome.recovered, [], `image ${record.label}: recovered work`);
+  assert.deepEqual(record.outcome.pendingContracts, [],
+    `image ${record.label}: left pending contracts`);
+  ids.push(...record.outcome.applied);
+}
+assert.ok(ids.length > 0, "image apply produced zero journal identities");
+assert.equal(new Set(ids).size, ids.length, "image apply returned duplicate identities");
+process.stdout.write(`${records.length}\t${ids.length}`);
+NODE
+)"
+        image_parse_status=$?
+        if [ "$image_parse_status" -eq 0 ]; then
+          IFS=$'\t' read -r img_files img_versions <<<"$image_summary"
+        else
+          container_status=1
+        fi
+      fi
     fi
-    # The SAME DSN with the database swapped, so this arm reaches whatever the
-    # rest of the gate reached. 0600 because the CLI's config reader REFUSES a
-    # config carrying a literal url with any bit set in 0o077, and the entrypoint
-    # copies this DSN into one.
-    secret="$(mktemp -d)"
-    chmod 700 "$secret"
-    printf '%s' "${DSN%/*}/gate_img" > "$secret/dsn"
-    chmod 600 "$secret/dsn"
-    img_log="$(mktemp)"
-    # `--network host`, NOT `--add-host=host.docker.internal:host-gateway`. The
-    # gate's own PostgreSQL publishes on 127.0.0.1 only, and the host-gateway
-    # address is the bridge IP, which a loopback-bound listener does not answer -
-    # that spelling fails to connect rather than proving anything. Host networking
-    # also lets a caller-supplied --dsn point anywhere they can already reach.
-    docker run --rm --network host \
-      -v "$secret/dsn:/tmp/dsn:ro" \
-      zeroship-migrate:gate --database-url-file /tmp/dsn > "$img_log" 2>&1
-    img_status=$?
-    img_applied="$(grep -c '^apply ' "$img_log")"
-    if [ "$img_status" -ne 0 ] || [ "$img_applied" -ne "$corpus_files" ]; then
-      echo "FAIL[image]: in-image apply exited $img_status with $img_applied of" \
-           "$corpus_files files." >&2
-      tail -20 "$img_log" >&2
-      container_status=1
-    fi
-    rm -rf "$secret" "$img_log"
   fi
-  rm -f "$image_build_log"
-  gate_arm image "$img_applied" 25
+  gate_arm image_apply_outcomes "$img_files" 25
 fi
 
 echo
-echo "corpus files on disk:      $corpus_files"
-echo "files applied (first run): $applied_files"
-echo "files applying nothing (second run): $second_empty of $second_seen"
+echo "recorded corpus:          $recorded_files files, $recorded_ops operations"
+echo "generic lint refusals:    $recorded_refusals envelopes"
+echo "first apply:              $applied_files files, $applied_versions journal identities"
+echo "durable history:          $history_events applied events"
+echo "clean status:             $status_plans plans, $status_steps applied steps"
+echo "second exact no-op apply: $second_seen files"
+if [ "$WITH_CONTAINER" -eq 1 ]; then
+  echo "image first apply:        $img_files files, $img_versions journal identities"
+fi
 
 overall=0
 [ "$spec_bad" -eq 0 ] || overall=1
 [ "$res_bad" -eq 0 ] || overall=1
 [ "$cp_bad" -eq 0 ] || overall=1
+[ "$record_status" -eq 0 ] || overall=1
 [ "$run1_status" -eq 0 ] || overall=1
+[ "$history1_status" -eq 0 ] || overall=1
 [ "$run2_status" -eq 0 ] || overall=1
+[ "$history2_status" -eq 0 ] || overall=1
+[ "$status_cmd_status" -eq 0 ] || overall=1
+[ "$reconcile_status" -eq 0 ] || overall=1
 [ "$container_status" -eq 0 ] || overall=1
 
 gate_arms_finish || overall=1
-
 if [ "$overall" -ne 0 ]; then
   echo "PLATFORM MIGRATION CORPUS GATE: FAILED" >&2
   exit 1

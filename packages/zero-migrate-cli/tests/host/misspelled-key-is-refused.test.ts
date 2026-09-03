@@ -49,7 +49,7 @@ const OWNER_APP = "app_typo";
 
 /** `spelling` is the key the author writes for the table-level foreign key. */
 function migration(spelling: string): string {
-  return `import { table, t } from "zero-migrate";
+  return `import { table, t } from "@zeroship/migrate";
 export const name = "fk_by_${spelling}";
 export default {
   schema() {
@@ -274,7 +274,7 @@ scope = "all"
     writeFileSync(join(work, "registry.json"), JSON.stringify({ alpha: OWNER_APP }));
     writeFileSync(
       join(work, "migrations", "20260101000000_guarded.ts"),
-      `import { table, t } from "zero-migrate";
+      `import { table, t } from "@zeroship/migrate";
 export const name = "guarded_create";
 export default {
   schema() {

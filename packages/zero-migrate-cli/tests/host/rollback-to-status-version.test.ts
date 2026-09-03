@@ -83,7 +83,7 @@ scope = "all"
   );
   writeFileSync(
     join(work, "migrations", "20260101000000_one.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "one";
 export default { schema() {
   table("rbv_one").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });
@@ -92,7 +92,7 @@ export default { schema() {
   );
   writeFileSync(
     join(work, "migrations", "20260102000000_two.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "two";
 export default { schema() {
   table("rbv_two").create({ columns: { id: t.int().notNull() }, primaryKey: ["id"] });

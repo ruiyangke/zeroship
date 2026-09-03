@@ -84,7 +84,7 @@ scope = { include = [${JSON.stringify(schema)}] }
   );
   writeFileSync(
     join(work, "migrations", "20260101000000_create.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "create_t1";
 export default {
   schema() {

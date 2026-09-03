@@ -103,7 +103,7 @@ function project(namespace: string | null, posture: "allow" | null): string {
   writeFileSync(join(work, "registry.json"), JSON.stringify({ doomed: OWNER_APP }));
   writeFileSync(
     join(work, "migrations", "20260101000000_make.ts"),
-    `import { table, t } from "zero-migrate";
+    `import { table, t } from "@zeroship/migrate";
 export const name = "make_doomed";
 export default {
   schema() {
@@ -122,7 +122,7 @@ export default {
 function addUpdate(work: string): void {
   writeFileSync(
     join(work, "migrations", "20260102000000_bump.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "bump_rows";
 export default {
   data() {
@@ -145,7 +145,7 @@ export default {
 function addDrop(work: string): void {
   writeFileSync(
     join(work, "migrations", "20260102000000_drop.ts"),
-    `import { table } from "zero-migrate";
+    `import { table } from "@zeroship/migrate";
 export const name = "drop_doomed";
 export default { schema() { table("doomed").drop(); } };
 `,

@@ -16,7 +16,7 @@ import {
   revoke,
   role,
   schema as pgSchema,
-} from "zero-migrate";
+} from "@zeroship/migrate";
 
 export const name = "pg_vendor";
 

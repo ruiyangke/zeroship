@@ -16,7 +16,7 @@ import { table, t } from "@zeroship/migrate";
 
 export default {
   name: "initial_schema",
-  up() {
+  schema() {
     table("users").create({
       columns: {
         name: t.text().notNull(),
@@ -96,8 +96,10 @@ Three consequences worth knowing before you meet them:
   it would boot the app with `env.db` uninstalled over a live database.
 - **You cannot deploy an older build across a migration boundary.** The
   comparison is against the NEWEST applied migration, not "any migration ever
-  applied", so rolling code back over a schema change means rolling the schema
-  forward - there is no reverse.
+  applied". Schema migrations carry an engine-synthesized structural inverse,
+  while data migrations carry either a recorded `inverse()` or an explicit
+  `irreversible` reason; deployment still requires the descriptor for the newest
+  applied state.
 
 ### TypeScript: typed `env.db`
 
@@ -239,7 +241,7 @@ You never declare these; every collection has them. They're the
 platform "system fields" — full documentation lives in the
 [System fields](#system-fields) section below:
 
-- `id: string` — `TEXT PRIMARY KEY`, typed_id (`<prefix>_<base62(uuidv7)>`), platform-minted. The `<prefix>` is auto-derived from the collection name; override it with `id: t.id("blog")` — see [Typed-id prefixes](#typed-id-prefixes).
+- `id: string` — `TEXT PRIMARY KEY`, typed_id (`<prefix>_<base62(uuidv7)>`), platform-minted. The `<prefix>` is auto-derived from the collection name; see [Typed-id prefixes](#typed-id-prefixes).
 - `created_at: number` — Unix-ms timestamp at INSERT.
 - `updated_at: number` — Unix-ms timestamp at INSERT; bumped on every UPDATE.
 - `created_by: string | null` — session actor at INSERT (`null` for system writes).
@@ -271,33 +273,11 @@ take the first 4 ASCII alphanumerics. An empty result falls back to
 | `users`      | `user`      | `user_01HXY3Z9PQR2…`    |
 | `categories` | `cate`      | `cate_01HXY3Z9PQR2…`    |
 
-**Override — `id: t.id({ prefix })`.** Declare the prefix explicitly in the
-migration that creates the table:
-
-```ts
-import { table, t } from "@zeroship/migrate";
-
-export default {
-  name: "create_posts",
-  up() {
-    table("posts").create({
-      columns: {
-        id: t.id({ prefix: "blog" }), // rows get ids like blog_<22 base62 chars>
-        title: t.text().notNull(),
-      },
-    });
-  },
-};
-```
-
-`id: t.id({ prefix: "blog" })` is a **prefix declaration** for the system `id`
-column — it does not emit a second column, and it is the only sanctioned
-way to name `id` in a schema (you otherwise never declare `id`). The
-prefix must match `^[a-z][a-z0-9_]*$`.
-
-**`usr` is reserved.** It is the platform user-id prefix, so
-`t.id({ prefix: "usr" })` is rejected (and the auto-derivation will never
-produce it either — e.g. a collection named `usrs` derives `usrs`, not `usr`).
+**No public system-prefix override.** The canonical migration package does not
+expose the former `t.id(...)` shortcut. Do not declare the injected `id` column.
+`ids.typeId({ prefix })` and `ids.ulid()` are available for ordinary,
+author-owned columns, but they select validated text formats only; they do not
+rename the platform-minted system ID or add a generator, default, or key.
 
 **Ordering.** The UUIDv7 body is encoded as a fixed-width base62 string
 using the runtime's ordered alphabet, so lexicographic `id` order
@@ -314,14 +294,14 @@ import { table, t } from "@zeroship/migrate";
 
 export default {
   name: "create_todos",
-  up() {
+  schema() {
     table("todos").create({
       columns: {
         title: t.text().notNull(),
         done: t.boolean().default(false),
       },
-      strictness: "strict",
-      indexes: [{ name: "by_done", columns: ["done"] }],
+      options: { strictness: "strict" },
+      indexes: [{ name: "by_done", on: ["done"] }],
     });
   },
 };
@@ -341,7 +321,7 @@ export default {
   preserves the selected value in the runtime descriptor. No deploy-time
   refusal consumer is wired in this repository today, so the three values do
   not yet change deployment behavior. The authoring types live in
-  `sdks/migrate/src/types.ts`.
+  `packages/zero-migrate/src/types.ts`.
 
 ### Named indexes
 
@@ -354,16 +334,16 @@ import { table, t } from "@zeroship/migrate";
 
 export default {
   name: "create_todos_indexes",
-  up() {
+  schema() {
     table("todos").create({
       columns: {
-        userId: t.ref("users"),
+        userId: t.text().references("users", "id"),
         done: t.boolean().default(false),
         email: t.text(),
       },
       indexes: [
-        { name: "by_email", columns: ["email"] },
-        { name: "by_user_done", columns: ["userId", "done"] },
+        { name: "by_email", on: ["email"] },
+        { name: "by_user_done", on: ["userId", "done"] },
       ],
     });
   },
@@ -496,7 +476,7 @@ answer lives. Four things hold there, in order:
    applies under a `NOLOGIN`/`NOSUPERUSER` per-app role whose `search_path` and
    grants reach that schema only (`src/provisioning.rs:104-208`).
 
-The `ForeignKeyReference.schema` field in `sdks/migrate/src/types.ts` is an
+The `ForeignKeyReference.schema` field in `packages/zero-migrate/src/types.ts` is an
 authoring hint only. It is never serialised into the IR, and when the enclosing
 op carries an explicit schema a mismatch throws `OP_INVALID`; when it does not,
 the hint is accepted and discarded.
@@ -790,25 +770,25 @@ flat scan — see "Backend coverage" below for the dev-scale ceiling.
 
 ### Vector search
 
-Declare a column with `t.vector(dims, opts?)`:
+Declare a column with `t.vector({ dimensions, metric? })`:
 
 ```ts
 import { table, t } from "@zeroship/migrate";
 
 export default {
   name: "create_docs",
-  up() {
+  schema() {
     table("docs").create({
       columns: {
         title: t.text().notNull(),
-        embedding: t.vector(1536, { metric: "cosine" }), // dims in 1..=16000
+        embedding: t.vector({ dimensions: 1536, metric: "cosine" }),
       },
     });
   },
 };
 ```
 
-- `dims` is **required** and must lie in `1..=16000` (pgvector's
+- `dimensions` is **required** and must lie in `1..=16000` (pgvector's
   hard ceiling). The SDK validates the literal at schema-parse time
   and again at insert (`code: "VECTOR_DIMENSION_MISMATCH"` when
   `vector.length !== dims`).
@@ -847,7 +827,7 @@ import { table, t } from "@zeroship/migrate";
 
 export default {
   name: "create_stores",
-  up() {
+  schema() {
     table("stores").create({
       columns: {
         name: t.text().notNull(),
@@ -890,7 +870,7 @@ production-scale geo workload.
 ### Where the search index comes from
 
 **Your migration builds it, not the first query.** Declaring
-`t.vector(dims, { metric })` or `t.geoPoint()` makes the index part of
+`t.vector({ dimensions, metric })` or `t.geoPoint()` makes the index part of
 your schema, and it is created when you apply migrations — the same
 moment your table is. Nothing is built lazily at runtime, so the first
 `.search()` after a deploy is as fast as the thousandth, and a query
@@ -1200,7 +1180,7 @@ Three implicit B-tree indexes ride along (`deleted_at`, `updated_at`,
 
 | Column        | Type (PG)       | Default            | Set by             |
 |---------------|-----------------|--------------------|--------------------|
-| `id`          | `TEXT` PK       | platform-minted    | typed_id (`<prefix>_<base62(uuidv7)>`); prefix auto-derived or set via [`t.id("prefix")`](#typed-id-prefixes) |
+| `id`          | `TEXT` PK       | platform-minted    | typed_id (`<prefix>_<base62(uuidv7)>`); prefix auto-derived from the collection name |
 | `created_at`  | `TIMESTAMPTZ`   | `NOW()` at INSERT  | DB default         |
 | `updated_at`  | `TIMESTAMPTZ`   | `NOW()` at INSERT, bumped on every UPDATE | runtime UPDATE builder |
 | `created_by`  | `TEXT` NULL     | `null` if no actor | session actor at INSERT |
@@ -1228,11 +1208,6 @@ Which layer owns this rejection is being reworked: the reserved-name list is
 going away in favour of the injected-column policy as the single authority. The
 names above stay reserved either way — only the mechanism and the error you see
 will change.
-
-The one sanctioned exception is
-`id: t.id("prefix")`, which declares the typed-id prefix for the system
-`id` column rather than overriding it — see
-[Typed-id prefixes](#typed-id-prefixes).
 
 ### Reading system fields
 
@@ -1283,8 +1258,8 @@ which the SDK rethrows as `OptimisticLockError` (`code:
 `instanceof OptimisticLockError` check keeps working.
 
 The physical column and native CAS behavior exist on every collection.
-The current `withVersioning()` builder flag is only an SDK-side hint for
-typed wrapper error mapping; it is not what creates the `version` column.
+The migration option `setOptions({ versioning: true })` is only an SDK-side hint
+for typed wrapper error mapping; it is not what creates the `version` column.
 
 Omitting `version` from the filter is last-writer-wins — the UPDATE
 still bumps `version` by 1 but doesn't refuse on a concurrent edit.
@@ -1426,7 +1401,7 @@ import { table, t } from "@zeroship/migrate";
 
 export default {
   name: "create_users_sensitive_fields",
-  up() {
+  schema() {
     table("users").create({
       columns: {
         name: t.text().notNull(),

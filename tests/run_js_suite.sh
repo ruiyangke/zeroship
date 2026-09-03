@@ -13,10 +13,10 @@
 #       -> EXIT 0
 #
 # The second is the one that bites. `pnpm -r` SKIPS a package with no `test`
-# script, in silence: nothing in the output separates "16 packages tested" from
-# "15 tested and one whose script was renamed". Measured on this tree, the CI
-# filter selects 41 projects and only 16 of them run a test script at all, so a
-# package dropping out of that 16 is invisible against 25 that legitimately
+# script, in silence: nothing in the output separates "21 packages tested" from
+# "20 tested and one whose script was renamed". Measured on this tree, the CI
+# filter selects 56 projects and only 21 of them run a test script at all, so a
+# package dropping out of that 21 is invisible against 35 that legitimately
 # have nothing to run.
 #
 # That is the same failure as the one that left this repo with NO JavaScript
@@ -38,8 +38,8 @@
 #
 # FLOORS (constants below, not environment - a floor its caller can lower is
 # not a floor)
-#   JS_MIN_PACKAGES 18   packages that must actually RUN a test script
-#   JS_MIN_TESTS    950  total TAP assertions that must pass
+#   JS_MIN_PACKAGES 21   packages that must actually RUN a test script
+#   JS_MIN_TESTS    790  total TAP assertions that must pass
 # ============================================================================
 set -uo pipefail
 
@@ -54,11 +54,11 @@ trap 'rm -f "$LOG"' EXIT
 # FILTERS GO BEFORE THE SCRIPT NAME. Anything after it is forwarded TO the
 # script, so `pnpm -r test --filter=!x` passes `--filter=!x` to the test command
 # and pnpm never sees it. pnpm 9 tolerated the wrong order; pnpm 11 does not.
-# Measured: filters after the name give "Scope: 44 of 45" and all three excluded
-# packages run; before the name gives "Scope: 41 of 45", which is correct.
+# Measured: the correctly ordered exclusions give "Scope: 56 of 59". Moving a
+# filter after `test` forwards it to package scripts instead of filtering them.
 set +e
 pnpm -r --no-bail \
-  --filter='!zero-migrate' \
+  --filter='!@zeroship/migrate' \
   --filter='!@zeroship/vite-plugin' \
   test 2>&1 | tee "$LOG"
 # PIPESTATUS, not $?: piping into tee makes $? tee's status, which is 0 whenever
@@ -74,11 +74,11 @@ clean="$(sed -e 's/\x1b\[[0-9;]*m//g' "$LOG")"
 # "<pkg> test$ <command>" header per package it runs.
 packages="$(printf '%s\n' "$clean" | grep -oP '^\S+(?= test\$)' | sort -u | wc -l)"
 
-# TAP assertions. NOTE this covers 12 of the 16 running packages: the other four
-# (the vendored zeroship-migrate-node addon, examples/db-todos, examples/ssr-blog,
-# sdks/payments) do not emit a TAP summary line. The package count above is the
-# check that covers all sixteen; this one bounds mass deletion inside the
-# twelve that report.
+# TAP assertions. NOTE this covers 16 of the 21 running packages: the other five
+# (the zeroship-migrate-node addon, tests/e2e-browser, examples/db-todos,
+# examples/ssr-blog, and sdks/payments) do not emit a TAP summary line. The
+# package count above covers all 21; this one bounds mass deletion inside the
+# 16 that report.
 tests_passed="$(printf '%s\n' "$clean" | grep -oP '# pass \K[0-9]+' | awk '{s+=$1} END {print s+0}')"
 tests_failed="$(printf '%s\n' "$clean" | grep -oP '# fail \K[0-9]+' | awk '{s+=$1} END {print s+0}')"
 
@@ -89,12 +89,13 @@ if [ "$run_status" -ne 0 ]; then
   status=1
 fi
 
-# 18 measured on 2026-08-10 (was 16 on 08-08, then 17; un-excluding
-# @zeroship/migrate added the 18th). Floor at the measured number, not below: the package set is discrete and
-# changes only when someone adds or removes a suite, so there is no noise to
-# absorb - and a package silently dropping out is the exact defect this guards.
-# Adding a suite means raising this deliberately, which is the point.
-JS_MIN_PACKAGES=18
+# 21 measured on 2026-09-01 after collapsing the migration DSL packages. The
+# sole @zeroship/migrate engine remains explicitly excluded because its large
+# suite has separately tracked failures; the deleted duplicate SDK no longer
+# contributes a test script. Floor at the measured number, not below: the
+# package set is discrete, and a package silently dropping out is the exact
+# defect this guards. Adding a suite means raising this deliberately.
+JS_MIN_PACKAGES=21
 if [ "$packages" -lt "$JS_MIN_PACKAGES" ]; then
   echo "FAIL: only ${packages} packages ran a test script, fewer than the ${JS_MIN_PACKAGES} expected." >&2
   echo "A package whose 'test' script is renamed or removed is SKIPPED SILENTLY by pnpm -r." >&2
@@ -102,9 +103,10 @@ if [ "$packages" -lt "$JS_MIN_PACKAGES" ]; then
   status=1
 fi
 
-# 950 against 1056 measured 2026-08-10, ~10 percent headroom (was 800/862).
-# The +183 is @zeroship/migrate, un-excluded here.
-JS_MIN_TESTS=950
+# 790 against 877 assertions observed by the 16 TAP suites on 2026-09-01
+# (871 passed plus 6 independently reported failures), about 10 percent
+# headroom. The deleted duplicate migration SDK formerly contributed 183.
+JS_MIN_TESTS=790
 if [ "$tests_passed" -lt "$JS_MIN_TESTS" ]; then
   echo "FAIL: only ${tests_passed} JS tests passed, fewer than the ${JS_MIN_TESTS} expected." >&2
   status=1

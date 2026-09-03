@@ -1,4 +1,4 @@
-import { table, grant } from "zero-migrate";
+import { table, grant } from "@zeroship/migrate";
 
 // Credential lifecycle enforcement: the two lookups every disable / anonymize /
 // delete path performs, and the one privilege the linking path was missing.

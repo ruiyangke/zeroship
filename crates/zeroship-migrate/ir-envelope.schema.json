@@ -6452,7 +6452,7 @@
       ]
     },
     "Privilege": {
-      "description": "**VENDOR (`zero-migrate/pg`)** - the CLOSED privilege lexicon for\n`Op::Grant`/`Op::Revoke`. A CLOSED enum, so serde REJECTS an\nout-of-set token at DESERIALIZE - a hand-crafted IR envelope cannot smuggle an\ninjection-shaped privilege string into the GRANT render seam (the\n`RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest\nrender their SQL keyword. Camel/lower-cased on the wire.",
+      "description": "**VENDOR (`@zeroship/migrate`)** - the CLOSED privilege lexicon for\n`Op::Grant`/`Op::Revoke`. A CLOSED enum, so serde REJECTS an\nout-of-set token at DESERIALIZE - a hand-crafted IR envelope cannot smuggle an\ninjection-shaped privilege string into the GRANT render seam (the\n`RefAction`/`IndexMethod` precedent). `All` renders `ALL PRIVILEGES`; the rest\nrender their SQL keyword. Camel/lower-cased on the wire.",
       "oneOf": [
         {
           "description": "`ALL PRIVILEGES`.",

@@ -1,4 +1,4 @@
-import { grant } from "zero-migrate";
+import { grant } from "@zeroship/migrate";
 
 // `zeroship_gateway` could never set a token-family revocation marker, so
 // signout and backchannel logout silently failed to revoke.

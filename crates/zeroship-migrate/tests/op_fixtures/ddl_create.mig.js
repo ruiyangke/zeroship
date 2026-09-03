@@ -7,7 +7,7 @@
 // ["id"] while its constraints list stays EMPTY (it is the no-constraint
 // createTable carrier). `note` is nullable-by-default (the fluent chain OMITS the
 // nullable key for a nullable column).
-import { table, t } from "zero-migrate";
+import { table, t } from "@zeroship/migrate";
 
 export const name = "ddl_create";
 

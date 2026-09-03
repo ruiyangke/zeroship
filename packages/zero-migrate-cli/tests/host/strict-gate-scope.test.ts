@@ -41,7 +41,7 @@ const ADDON_PATH = resolve(
   `../../../../crates/zeroship-migrate-node/zeroship-migrate-node.${process.platform}-${process.arch}${ABI}.node`,
 );
 
-const MIGRATION = `import { table, t } from "zero-migrate";
+const MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "create_notes";
 export default {
   schema() {
@@ -56,7 +56,7 @@ export default {
 /** The control's pending migration creates its OWN table rather than altering
  *  `notes`. Touching an existing table needs an ownership registry the CLI takes
  *  from project config, and the control only needs "something is pending". */
-const SECOND_MIGRATION = `import { table, t } from "zero-migrate";
+const SECOND_MIGRATION = `import { table, t } from "@zeroship/migrate";
 export const name = "create_more";
 export default {
   schema() {

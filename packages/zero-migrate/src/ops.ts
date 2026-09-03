@@ -1,7 +1,7 @@
-// `zero-migrate` — the fluent-only op-builder DSL implementation.
+// `@zeroship/migrate` — the fluent-only op-builder DSL implementation.
 //
 // This is the TS authoring surface a creator imports:
-//   import { ids, table, t } from "zero-migrate";
+//   import { ids, table, t } from "@zeroship/migrate";
 //
 //   // Schema and data are SEPARATE migrations; one module may not do both.
 //   export default {
