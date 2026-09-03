@@ -540,6 +540,41 @@ Sized, not done: the retry bound is security-relevant (its own comment cites
 "[I43] bounded loop"), so the split wants its own pass with the behaviour pinned
 by a test before it moves.
 
+#### And two of the value types close a cycle: the broker guards
+
+Measured 2026-09-02, and found only by scanning `impl` blocks rather than
+declarations. The first scan asked what each type's DEFINITION references and
+all twelve came back clean; that is not the whole item, because behaviour lives
+in `impl` blocks elsewhere in the file.
+
+| type | `impl` blocks | what those bodies reach |
+| --- | --- | --- |
+| `SchemaPendingGuard` | 2 | `crate::broker`, `tracing` |
+| `BrokerPauseGuard` | 2 | `crate::broker`, `tracing` |
+| the other nine | 0 or 1 | nothing below rank 0 |
+
+`broker.rs` is assigned to `data-engine`. So these two want to be in `data-core`
+- `ChangeStream::pause_broker` and `::engage_schema_pending` RETURN them, and
+`backend/sqlite/cdc.rs:785` and `:792` implement those methods, so a vendor
+constructs them - while their `new` and `Drop` drive engine state. That is
+`data-core -> data-engine` against the `data-engine -> data-core` that already
+exists: a Cargo cycle, unbuildable, exactly the one `data-core`'s own `lib.rs`
+already refuses for `descriptor.rs`.
+
+**Same cut as `LockManager`, and as `budgets` before it.** The guard as a VALUE -
+an opaque token saying "app X holds a broker pause" - is rank-0 vocabulary. The
+EFFECT - registering the pause on construction, releasing it on drop, and the
+refcount `BrokerPauseGuard`'s own rustdoc describes - is engine behaviour. Either
+the type carries no `Drop` and the engine brackets it, or `ChangeStream` stops
+returning it and the engine wraps the vendor call.
+
+**This is the pattern to expect for the rest of the extraction, and the reason
+a declaration-level census is not enough.** Three items so far - `budgets`,
+`LockManager`, these two guards - are each a rank-0 name with rank-1 behaviour
+welded on. Nineteen of twenty passed a signature scan; two of eleven failed an
+`impl` scan. Run both before moving anything, and expect the compiler to find a
+third class neither scan sees.
+
 **`auth/` is a leftover copy of work that already moved to the migration
 service.** Its own header says the data plane's `SET LOCAL ROLE` batch "comes
 from here on every transaction". It does not:
