@@ -81,7 +81,7 @@ same block `value_column_for_field` reads on the query side
 logical field column holds the creator-visible value including the mask, and
 `storage.rawColumn` names the `__zs_raw__<field>` column holding plaintext or
 ciphertext (`crates/zeroship-migrate-core/src/render/gen_types.rs`,
-`crates/zeroship-plugin-db/src/crud/mask_pass.rs`). `rawColumn` is never in the
+`crates/zeroship-data-engine/src/crud/mask_pass.rs`). `rawColumn` is never in the
 wire set because the set is built from `valueColumn` and nothing else.
 
 `wire_exposure` is a closed renderer result, never a guess from a name:
@@ -276,7 +276,7 @@ from the build.
 ### The epoch producer and the head row
 
 No epoch producer and no system schema exist today
-(`crates/zeroship-plugin-db/src/auth/bootstrap.rs`). Datastore provisioning
+(`crates/zeroship-data-engine/src/auth/bootstrap.rs`). Datastore provisioning
 creates exactly one reserved table:
 
 ```text
@@ -393,7 +393,7 @@ allowed.**
 
 The local-emit path serves Postgres, not SQLite:
 `backend_publishes_committed_changes()` is true on SQLite and `emit_for_rows`
-returns early on it (`crates/zeroship-plugin-db/src/exec.rs:445`), because SQLite
+returns early on it (`crates/zeroship-data-engine/src/exec.rs:445`), because SQLite
 builds its `ChangeEvent` in `crates/zeroship-data-sqlite/src/cdc.rs` and
 publishes straight to the broker. So the delete is `emit_for_rows`,
 `queue_or_emit`, `drain_pending_emits_on_commit` and `clear_pending_emits`;
@@ -706,7 +706,7 @@ it: `Subscription::push` is not `async` and never awaits; on overflow it clears
 the queue and pushes ONE `Resync`, with a `resync_pending` flag collapsing
 successive overflows so a wedged subscriber cannot make the publisher do work
 proportional to how wedged it is (`DEFAULT_QUEUE_DEPTH = 1024` at
-`crates/zeroship-plugin-db/src/broker.rs:72`, `MAX_SUBSCRIPTIONS_PER_APP = 256`
+`crates/zeroship-data-core/src/broker.rs:72`, `MAX_SUBSCRIPTIONS_PER_APP = 256`
 at `:79`).
 
 The honest cost: a merely-slow worker reconnects repeatedly and gets `Resync`
@@ -1456,7 +1456,7 @@ unrepresentable.
 **The whitelist does not repair a current creator-response leak.** The shipped
 serializers are safe: `message_to_json` and `ws_frame` filter platform names
 through `creator_visible_columns` and emit no row values
-(`crates/zeroship-plugin-db/src/broker.rs:1020`, `:1093`). What the whitelist
+(`crates/zeroship-data-core/src/broker.rs:1020`, `:1093`). What the whitelist
 does is move the boundary one process earlier, so the raw name and value never
 reach pgoutput, the relay, or the broker. The accepted cost is that every schema
 migration must maintain that whitelist correctly.

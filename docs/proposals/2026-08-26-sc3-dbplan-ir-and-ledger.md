@@ -83,7 +83,7 @@ lands, one of the two copies is deleted rather than both maintained.
   it;
 - **effects**: the publication a committed mutation owes the broker. A bare rows
   result cannot express it, and committed-change publication already differs by
-  backend today (`emit_for_rows`, `crates/zeroship-plugin-db/src/exec.rs`).
+  backend today (`emit_for_rows`, `crates/zeroship-data-engine/src/exec.rs`).
 
 Per-family node spelling is each family's own to fix. The **expression
 sub-grammar** underneath them is not: filters, projections, ordering keys and
@@ -331,7 +331,7 @@ single one of them would be found by testing the others:
 3. **encrypted columns** bind it into the AEAD tag via `canonical_aad`, so
    without it the ciphertext is undecryptable;
 4. **change events** correlate on it - `emit_for_rows` reads `row["id"]` with an
-   `_id` fallback (`crates/zeroship-plugin-db/src/exec.rs`), so a projection that
+   `_id` fallback (`crates/zeroship-data-engine/src/exec.rs`), so a projection that
    dropped the PK emits an event with no key and a subscriber that cannot match
    it to anything.
 
@@ -422,7 +422,7 @@ not portable to the other.
 A relation plan cannot be handed to the live-query path as it stands, and the
 failure is silent rather than loud - the subscription simply never fires.
 
-`crates/zeroship-plugin-db/src/read_set.rs` contains the string `relation`
+`crates/zeroship-data-core/src/read_set.rs` contains the string `relation`
 **once**, in a comment, and is otherwise entirely relation-unaware. Two
 consequences:
 

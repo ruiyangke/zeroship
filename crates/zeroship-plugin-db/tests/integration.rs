@@ -3165,7 +3165,7 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
         &serde_json::json!({ "name": "alice" }),
     )
     .expect("build_insert");
-    let _ = zeroship_plugin_db::exec::exec_mutation_with_emit_for_tests(
+    let _ = zeroship_plugin_db::exec_mutation_with_emit_for_tests(
         bq,
         app,
         "users",
@@ -6086,7 +6086,7 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
         .unwrap();
     zeroship_plugin_db::set_db_url_for_tests(&url);
 
-    let rows = zeroship_plugin_db::exec::exec_query_for_tests(
+    let rows = zeroship_plugin_db::exec_query_for_tests(
         app,
         zeroship_plugin_db::query::BuiltQuery {
             sql: "SELECT current_user AS u".to_string(),

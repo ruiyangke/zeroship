@@ -329,7 +329,7 @@ from "read the secret" to "recover the secret", not to "safe".
 
 **Evidence:** `zeroship-schema/src/query.rs:5477-5484` (the read-path order
 builder), `:5487-5528` (the emitter using the raw key), `:5500`, `:5521`;
-`crates/zeroship-plugin-db/src/crud/mask_pass.rs:150-152`
+`crates/zeroship-data-engine/src/crud/mask_pass.rs:150-152`
 
 **It compounds with L24.** The only gate on the order-by key is
 `validate_read_identifier` (`:5483`), which L24 establishes **fails open when

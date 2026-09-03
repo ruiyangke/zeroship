@@ -781,9 +781,14 @@ mod tests {
     /// exercise the slot state machine only.
     async fn sqlite_tx_conn(dir: &tempfile::TempDir) -> TxConnection {
         use crate::backend::SqlExecutor as _;
-        let backend =
-            crate::backend_selection::new_sqlite_backend(std::path::PathBuf::from(dir.path()))
-                .expect("open sqlite backend");
+        // The key source is a parameter now: the engine composer cannot read
+        // this crate's per-isolate context, so the caller that owns it does the
+        // lookup. This is the one adapter-side caller.
+        let backend = crate::backend_selection::new_sqlite_backend(
+            std::path::PathBuf::from(dir.path()),
+            isolate_key_source(),
+        )
+        .expect("open sqlite backend");
         let client = backend
             .acquire_dedicated_client("slot_state_probe")
             .await

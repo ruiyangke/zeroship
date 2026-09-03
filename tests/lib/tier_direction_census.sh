@@ -183,9 +183,52 @@
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-SRC="$ROOT/crates/zeroship-plugin-db/src"
+# ---------------------------------------------------------------------------
+# THE TIERS SPAN TWO CRATES SINCE 2026-09-03, AND SO DOES THIS SCAN.
+# ---------------------------------------------------------------------------
+# `SRC` was a single path, `crates/zeroship-plugin-db/src`, and the ENGINE tier
+# left that tree for `crates/zeroship-data-engine/src` the day this changed.
+# Left alone, the census would have scanned the ~15k lines that stayed and
+# printed exactly what a clean tree prints about the ~22k that went - the defect
+# class this file's own header is a catalogue of.
+#
+# SCANNED AS A UNION, NOT SUMMED, and the reason is that a tier is not a crate:
+# what this census judges is whether a file in tier N references a module in
+# tier M, and that question is identical whether the two ended up in one cargo
+# package or two. Summing two independent runs would ALSO lose every edge whose
+# source and target now sit on opposite sides of the cut - which is precisely
+# the set the split is about. One `tier_of_file` map, one `tier_of_target` map,
+# one table, one set of counts: the arms rule on the same files they ruled on
+# before, plus the ones that moved.
+#
+# `crate::` still means "this tier's vocabulary" on both sides, because
+# `zeroship-data-engine/src/lib.rs` re-exports the same neutral modules
+# `zeroship-plugin-db/src/lib.rs` does (`query`, `diff`, `broker`, `read_set`,
+# `encryption`, `budgets`, `lock_policy`), and the adapter re-exports the engine's
+# back. A path spelled `crate::crud::…` resolves to the same item from either
+# crate, which is exactly what makes the union scan sound.
+SRC_ROOTS=(
+  "$ROOT/crates/zeroship-plugin-db/src"
+  "$ROOT/crates/zeroship-data-engine/src"
+)
+for _root in "${SRC_ROOTS[@]}"; do
+  [ -d "$_root" ] || { echo "no such tree: $_root" >&2; exit 1; }
+done
 MODE="${1:-violations}"
-cd "$SRC" || { echo "no such tree: $SRC" >&2; exit 1; }
+
+# Does a path exist under ANY source root?
+#
+# The file-existence resolutions in `tier_of_target` below used a bare `[ -f x ]`
+# against one cwd. With two roots that answers "is it in the crate I happen to
+# be scanning", which is not the question - the question is whether the module is
+# still OURS to place at all. This asks it across the whole scanned region.
+src_path_exists() {
+  local p
+  for p in "${SRC_ROOTS[@]}"; do
+    [ -e "$p/$1" ] && return 0
+  done
+  return 1
+}
 
 # Destination crate per FILE, keyed on the full relative path. This is a copy of
 # tier_signature_census.sh's tier(), deliberately - the two censuses judging the
@@ -204,6 +247,8 @@ tier_of_file() {
     # `zeroship-data-core`: the broker is published into by the ENGINE
     # (`exec::emit_local`) AND by CDC (`wal_consumer`), so it had to sit below
     # both, and `read_set` went first because the broker names `ReadSetEntry`.
+    # NO ARMS for ./error.rs, ./binding.rs or ./budgets.rs either. Same reason,
+    # earlier moves: all three are `zeroship-data-core`'s now.
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
     # Settled by docs/proposals/2026-09-02-thread-context-ownership.md, whose
     # ownership table places `lanes` and `mask_policies` in data-engine,
@@ -217,16 +262,32 @@ tier_of_file() {
     # may hold them; the crate-shape proposal puts them in data-engine.
     ./tx_lanes.rs|./backend_handle.rs|./backend/cancel.rs|./system_shape_charter.rs|./metrics.rs) echo ENGINE ;;
     ./cdc_lifecycle.rs|./change_stream_pg.rs)            echo CDC ;;
-    ./error.rs|./descriptor.rs|./binding.rs|./budgets.rs) echo CORE ;;
-    # FOUR FILES ARE DELIBERATELY LEFT CONTESTED, and each has a reason that is
+    # `descriptor.rs` was CORE here and data-engine in the crate-shape proposal,
+    # and the two disagreed for two days. SETTLED as ENGINE on 2026-09-03 by the
+    # cut itself: the file left with the engine tier, and the argument that put
+    # it at rank 0 - "named by two tiers, so below both" - does not survive
+    # measurement. It is 130 lines wrapping `zeroship_data_core::schema_cache`,
+    # 25 of its call sites are in `crud/`, and three are in the adapter, which is
+    # ADAPTER -> ENGINE and legal. The rank-0 primitive it wraps is already in
+    # data-core; this is the engine's accessor for it.
+    ./descriptor.rs)                                     echo ENGINE ;;
+    # `backend/mod.rs` was CONTESTED for one stated reason: it "also names
+    # replication, wal_consumer and change_stream_pg, which are CDC". That was
+    # true of ONE `#[cfg(test)]` assertion, which moved to `change_stream_pg.rs`
+    # on 2026-09-03 - the fact it pins is about `PgChangeStream`, so it belongs
+    # beside it. What is left is a prelude of re-exports from data-core, both
+    # vendor crates and zeroship-schema, plus this tier's own `BackendHandle`
+    # and a test-only conformance marker: all at or below ENGINE. Issue #170
+    # closes here.
+    ./backend/mod.rs)                                    echo ENGINE ;;
+    # THREE FILES ARE DELIBERATELY LEFT CONTESTED, and each has a reason that is
     # an open QUESTION rather than an omission:
     #   auth/mod.rs, auth/util.rs - #156 asks whether auth/ is deleted outright
-    #     (1407 lines, zero production callers, a live twin in migrate-server).
-    #     Tiering code that may not exist would assert a placement for it.
-    #   backend/mod.rs - the dispatch traits. Both vendors implement them so
-    #     they must sit at or below the vendor tier, but the file also names
-    #     replication, wal_consumer and change_stream_pg, which are CDC. That
-    #     contradiction is a real design question, not a missing arm.
+    #     (zero production callers, a live twin in migrate-server). Tiering code
+    #     that may not exist would assert a placement for it. They travelled to
+    #     `zeroship-data-engine` with `auth/bootstrap.rs`, which needs the
+    #     `APP_ROLE_TEMPLATE` anchor `mod.rs` holds; that is a consequence of
+    #     the move, not an answer to #156.
     #   test_support/mod.rs - test-only; it ships in no build.
     # Anything else landing here IS an omission. Add an arm above.
     *)                                                   echo CONTESTED ;;
@@ -260,9 +321,9 @@ tier_of_target() {
     # Resolving by file existence is self-maintaining: the day a module leaves the
     # crate, the census follows it instead of silently mis-tiering the edge.
     backend::sqlite)
-      if [ -d backend/sqlite ]; then echo SQLITE; else echo EXTERNAL; fi ;;
+      if src_path_exists backend/sqlite; then echo SQLITE; else echo EXTERNAL; fi ;;
     backend::postgres|backend::pg_row_json|backend::pg_session_sql|backend::pg_autocommit|backend::pg_error|backend::pg_introspect)
-      if [ -f "backend/${1#backend::}.rs" ]; then echo PG; else echo EXTERNAL; fi ;;
+      if src_path_exists "backend/${1#backend::}.rs"; then echo PG; else echo EXTERNAL; fi ;;
     v8_classes*|v8_bridge*|tx_scope*)                    echo ADAPTER ;;
     crud*|transaction*|exec*|backend_selection*|tx_route*|drop_namespace*) echo ENGINE ;;
     auth::bootstrap)                                     echo ENGINE ;;
@@ -274,19 +335,40 @@ tier_of_target() {
     # after cargo had already made it a plain dependency edge - which is the
     # whole point of the move.
     broker*)
-      if [ -f broker.rs ]; then echo ENGINE; else echo EXTERNAL; fi ;;
+      if src_path_exists broker.rs; then echo ENGINE; else echo EXTERNAL; fi ;;
     read_set*)
-      if [ -f read_set.rs ]; then echo ENGINE; else echo EXTERNAL; fi ;;
+      if src_path_exists read_set.rs; then echo ENGINE; else echo EXTERNAL; fi ;;
     # Same treatment: `src/encryption/` no longer exists; lib.rs re-exports
     # `zeroship_data_core::encryption`. The ENCRYPT tier has zero files in this
     # crate - it is already extracted.
     encryption*)
-      if [ -d encryption ]; then echo ENCRYPT; else echo EXTERNAL; fi ;;
+      if src_path_exists encryption; then echo ENCRYPT; else echo EXTERNAL; fi ;;
     wal_consumer*|replication*|slot_reaper*)             echo CDC ;;
     context*|service*|op_error*)                          echo ADAPTER ;;
-    tx_lanes*|backend_handle*|backend::cancel|system_shape_charter*|metrics*) echo ENGINE ;;
+    tx_lanes*|backend_handle*|system_shape_charter*|metrics*) echo ENGINE ;;
+    # Same file-existence resolution, and it earned it the same way: `cancel.rs`
+    # left with the ENGINE tier for `zeroship-data-engine`, and an arm asserting
+    # a tier for a file this region no longer holds is the rot documented at the
+    # top of this function.
+    backend::cancel)
+      if src_path_exists backend/cancel.rs; then echo ENGINE; else echo EXTERNAL; fi ;;
     cdc_lifecycle*|change_stream_pg*)                    echo CDC ;;
-    error*|descriptor*|binding*|budgets*)                echo CORE ;;
+    # DEFECT 7 IN MIRROR IMAGE, ONE ARM SHORT, FOUND 2026-09-02 AND FIXED HERE.
+    # This read `error*|descriptor*|binding*|budgets*) echo CORE`, and THREE of
+    # those four files did not exist. As a `tier_of_file` key that is inert -
+    # `find` never yields them - but as a TARGET key it is not: `crate::error`
+    # and `crate::budgets` resolve through `zeroship-data-core` re-exports and
+    # are EXTERNAL, so the arm asserted CORE for a resolved dependency edge.
+    # It changed no verdict (CORE and EXTERNAL both rank below every ENGINE
+    # source), which is exactly why it survived - a wrong arm that agrees with
+    # the right answer on today's inputs is invisible until the inputs move.
+    #
+    # `descriptor` is the one that still exists, and it is ENGINE now: see the
+    # `./descriptor.rs` note in `tier_of_file`.
+    descriptor*)
+      if src_path_exists descriptor.rs; then echo ENGINE; else echo EXTERNAL; fi ;;
+    error*|binding*|budgets*)
+      if src_path_exists "${1%%::*}.rs"; then echo CORE; else echo EXTERNAL; fi ;;
     [A-Z]*)
       # A crate-root item. Resolve it rather than assume: lib.rs is where
       # crate-root items live TODAY, and the script must say so out loud if that
@@ -409,15 +491,39 @@ DROPPED="$(mktemp)"
 EXTERNALS="$(mktemp)"
 trap 'rm -f "$EDGES" "$DROPPED" "$EXTERNALS"' EXIT
 
+# Every `.rs` under every source root, as `<root>\t<./-relative path>`.
+#
+# The `./`-relative half is what `tier_of_file` and `declared_test_only` are
+# keyed on and must stay exactly that; the root half is what the loop `cd`s into
+# so `prod`, `declared_test_only` and `tier_of_target`'s lib.rs lookups resolve
+# against the crate the file actually lives in.
+all_sources() {
+  local p
+  for p in "${SRC_ROOTS[@]}"; do
+    ( cd "$p" && find . -name '*.rs' | LC_ALL=C sort | sed "s|^|$p\t|" )
+  done
+}
+
+# `plugin-db/crud/mod.rs` rather than `./crud/mod.rs`: with two crates scanned as
+# one region, a bare relative path no longer says which tree a row came from.
+#
+# NEWLINE-TERMINATED, and it must be: `n_contested` pipes this into
+# `sort -u | grep -c .`, and a `printf` without the `\n` ran all three contested
+# files together on one line and reported the blind spot as 1 file instead of 3.
+# The LIST printed correctly the whole time, because `echo "$(label ...)"` adds
+# its own - so the count and the listing disagreed while both looked right.
+label() { printf '%s/%s\n' "$(basename "$(dirname "$1")" | sed 's/^zeroship-//')" "$2"; }
+
 n_test_only=0
-printf '%-9s %-34s %-10s %-26s %s\n' FROM FILE TO TARGET VERDICT
-echo "----------------------------------------------------------------------------------------------"
-while read -r f; do
-  rel="${f#./}"
+printf '%-9s %-46s %-10s %-26s %s\n' FROM FILE TO TARGET VERDICT
+echo "--------------------------------------------------------------------------------------------------------"
+while IFS=$'\t' read -r croot f; do
+  cd "$croot" || continue
+  rel="$(label "$croot" "${f#./}")"
   st=$(tier_of_file "$f")
   [ "$st" = CONTESTED ] && continue
   # Defect 5: a module gated one-arm in its PARENT is in no production build.
-  declared_test_only "$rel" && { n_test_only=$((n_test_only + 1)); continue; }
+  declared_test_only "${f#./}" && { n_test_only=$((n_test_only + 1)); continue; }
   sr=$(rank "$st")
 
   # DEFECT 6, 2026-09-01. There used to be a self-reference skip here:
@@ -463,7 +569,7 @@ while read -r f; do
       continue
     fi
     if [ "$tt" = UNRESOLVED ]; then
-      printf '%-9s %-34s %-10s %-26s %s\n' "$st" "$rel" "UNRESOLVED" "crate::$tpath" "** UNRESOLVED - tier it **"
+      printf '%-9s %-46s %-10s %-26s %s\n' "$st" "$rel" "UNRESOLVED" "crate::$tpath" "** UNRESOLVED - tier it **"
       continue
     fi
     tr=$(rank "$tt")
@@ -478,11 +584,11 @@ while read -r f; do
     else v="** VIOLATION **"
     fi
     [ "$v" = ok ] && [ "$MODE" != "--all" ] && continue
-    printf '%-9s %-34s %-10s %-26s %s\n' "$st" "$rel" "$tt" "crate::$tpath" "$v"
+    printf '%-9s %-46s %-10s %-26s %s\n' "$st" "$rel" "$tt" "crate::$tpath" "$v"
   done
-done < <(find . -name '*.rs' | LC_ALL=C sort)
+done < <(all_sources)
 
-echo "----------------------------------------------------------------------------------------------"
+echo "--------------------------------------------------------------------------------------------------------"
 
 # TIER CYCLES. A pair of tiers with edges in BOTH directions cannot become two
 # crates - cargo has no way to express it. This is strictly stronger than the
@@ -518,8 +624,8 @@ fi
 # being used to judge. An unjudged file is a HOLE IN THE MEASUREMENT and the
 # default output must say how big it is.
 n_contested=$(
-  find . -name '*.rs' | LC_ALL=C sort | while read -r f; do
-    [ "$(tier_of_file "$f")" = CONTESTED ] && echo "$f"
+  all_sources | while IFS=$'\t' read -r croot f; do
+    [ "$(tier_of_file "$f")" = CONTESTED ] && label "$croot" "${f#./}"
   done | sort -u | grep -c . || true
 )
 echo
@@ -528,8 +634,8 @@ if [ "$MODE" = "--dropped" ]; then
   sort -u "$DROPPED" | sed 's/^/  /'
 elif [ "$MODE" = "--contested" ]; then
   echo "Files with no settled tier ($n_contested; neither judged nor trusted):"
-  find . -name '*.rs' | LC_ALL=C sort | while read -r f; do
-    [ "$(tier_of_file "$f")" = CONTESTED ] && echo "  ${f#./}"
+  all_sources | while IFS=$'\t' read -r croot f; do
+    [ "$(tier_of_file "$f")" = CONTESTED ] && echo "  $(label "$croot" "${f#./}")"
   done | sort -u
 else
   echo "TEST-ONLY: $n_test_only file(s) whose module is gated one-arm in its parent"

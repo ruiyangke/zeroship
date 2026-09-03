@@ -37,7 +37,7 @@ For the **migration** authoring surface, the equivalent boundary — which DML t
 
 ## Source of truth
 
-- [crates/zeroship-plugin-db/src/backend/mod.rs](../../crates/zeroship-plugin-db/src/backend/mod.rs) - cross-backend trait contracts for vector and spatial search
+- [crates/zeroship-data-engine/src/backend/mod.rs](../../crates/zeroship-data-engine/src/backend/mod.rs) - cross-backend trait contracts for vector and spatial search
 - [crates/zeroship-data-sqlite/src/lib.rs](../../crates/zeroship-data-sqlite/src/lib.rs) — SQLite implementations
 - [crates/zeroship-data-sqlite/src/vector.rs](../../crates/zeroship-data-sqlite/src/vector.rs) — `vector_unsupported_metric`
 - [crates/zeroship-data-sqlite/src/spatial.rs](../../crates/zeroship-data-sqlite/src/spatial.rs) — haversine helper
@@ -45,7 +45,7 @@ For the **migration** authoring surface, the equivalent boundary — which DML t
 - [crates/zeroship-data-sqlite/src/error.rs](../../crates/zeroship-data-sqlite/src/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
 - [crates/zeroship-plugin-db/src/v8_classes/transaction.rs](../../crates/zeroship-plugin-db/src/v8_classes/transaction.rs) — SQLite `transaction()` begin path
 - [crates/zeroship-schema/src/query.rs](../../crates/zeroship-schema/src/query.rs) — cross-backend `ORDER BY` shaping and the `IS NULL` buckets, plus the system-column and index emission
-- [crates/zeroship-plugin-db/src/crud/mod.rs](../../crates/zeroship-plugin-db/src/crud/mod.rs) — reads the `orderBy` option and threads it to the backend
+- [crates/zeroship-data-engine/src/crud/mod.rs](../../crates/zeroship-data-engine/src/crud/mod.rs) — reads the `orderBy` option and threads it to the backend
 - [crates/zeroship-data-sqlite/src/dialect.rs](../../crates/zeroship-data-sqlite/src/dialect.rs) — `now_fn()` returns `CURRENT_TIMESTAMP`, which is where the whole-second system-timestamp resolution comes from
 
 ## Test coverage

@@ -121,27 +121,54 @@ pub use zeroship_data_core::lock_policy;
 pub use zeroship_schema::query;
 pub mod v8_classes;
 
-// `backend` is crate-private by default; under `test-helpers` it
-// becomes `pub` so the integration-test targets
-// (`tests/sqlite_integration.rs` in particular) can name
-// `backend::SqliteBackend` + the `SqlExecutor` trait directly. The PG
-// `tests/integration.rs` target reaches PG-specific behaviour through
-// the lifted-to-pub helpers in `exec` / `migrations` /
-// `drop_namespace` - those continue to gate on
-// `test-helpers`. The backend traits themselves carry no
-// production-only behaviour (their bodies are SQL + RPC plumbing), so
-// exposing them under the same gate is safe.
+// ---------------------------------------------------------------------------
+// THE ENGINE TIER LEFT FOR `zeroship-data-engine` ON 2026-09-03.
+// ---------------------------------------------------------------------------
+//
+// `crud`, `transaction`, `exec`, `backend`, `backend_handle`,
+// `backend_selection`, `tx_route`, `tx_lanes`, `metrics`,
+// `system_shape_charter`, `descriptor` and `auth` are all re-exported below
+// rather than repointed, the mechanism `budgets`, `encryption`, `lock_policy`,
+// `broker` and `read_set` used before them: every `crate::crud::…` /
+// `crate::backend::…` call site in the modules that STAYED resolves unchanged,
+// and so does every `zeroship_plugin_db::…` path in the 12 integration targets.
+//
+// The two-arm `#[cfg(not(feature = "test-helpers"))] pub(crate) use` /
+// `#[cfg(feature = "test-helpers")] pub use` ladders describe THIS crate's
+// release surface and are kept for the modules that had one. They no longer
+// govern the ENGINE's own visibility - a re-export cannot widen what it
+// re-exports, so the items behind them are `pub` in `zeroship-data-engine`,
+// gated there on ITS `test-helpers` feature, which this crate's feature turns
+// on transitively.
+//
+// `backend` is crate-private by default; under `test-helpers` it becomes `pub`
+// so the integration-test targets (`tests/sqlite_integration.rs` in particular)
+// can name `backend::SqliteBackend` + the `SqlExecutor` trait directly.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod backend;
+pub(crate) use zeroship_data_engine::backend;
 #[cfg(feature = "test-helpers")]
-pub mod backend;
+pub use zeroship_data_engine::backend;
 // The engine owns concrete backend composition because it supplies the
 // consumer-side ports implemented by the process broker. Integration targets
 // reach the same production composition under `test-helpers`.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod backend_selection;
+pub(crate) use zeroship_data_engine::backend_selection;
 #[cfg(feature = "test-helpers")]
-pub mod backend_selection;
+pub use zeroship_data_engine::backend_selection;
+// The per-isolate dispatch enum and the transaction lane owner. Crate-private
+// here: nothing outside names either, and the tx-route TYPE has to be nameable
+// wherever the `exec` entry points are, which is why only `tx_route` is `pub`.
+pub(crate) use zeroship_data_engine::{backend_handle, tx_lanes};
+pub use zeroship_data_engine::tx_route;
+// The operator charter the worker parses once at construction. `pub(crate)`
+// because nothing outside the crate has business reading the assignment
+// authority - the descriptor mirror is what consumers verify against.
+pub(crate) use zeroship_data_engine::system_shape_charter;
+// THE schema authority for the data plane: the runtime descriptor this isolate
+// was built from. One resolution function, no `Option`, no catalog read.
+pub(crate) use zeroship_data_engine::descriptor;
+// Raw usage metrics and the single emit point.
+pub(crate) use zeroship_data_engine::metrics;
 pub(crate) mod context;
 /// This isolate's column-key source, for callers that construct a backend.
 ///
@@ -172,10 +199,6 @@ pub fn collection_schema(
 ) -> Result<std::sync::Arc<serde_json::Value>, DbError> {
     descriptor::collection_schema(binding, collection)
 }
-// The operator charter the worker parses once at construction. `pub(crate)`
-// because nothing outside the crate has business reading the assignment
-// authority - the descriptor mirror is what consumers verify against.
-pub(crate) mod system_shape_charter;
 // `cross_app_fk` WAS DECLARED HERE and is deleted (2026-09-02), under the
 // split's Phase 0.5 dead-code decision: "giving dead code a crate is how the
 // existing clusters got there". 235 lines and eleven tests, exported `pub` and
@@ -199,9 +222,9 @@ pub(crate) mod system_shape_charter;
 // for the end-to-end encrypted-column CRUD round-trip test. Same shape
 // as `encryption` below.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod crud;
+pub(crate) use zeroship_data_engine::crud;
 #[cfg(feature = "test-helpers")]
-pub mod crud;
+pub use zeroship_data_engine::crud;
 // The diff classifier (`compute_diff`, `ChangeKind`, `ChangeClass`, `DiffOp`)
 // and vendor-neutral schema metadata (`MaskMeta`, `EncryptionMeta`, `MaskKind`,
 // `Classification`, `WrappedType`, `LiveSchema`, `ColumnInfo`) live in the leaf
@@ -236,9 +259,6 @@ pub(crate) use zeroship_data_core::read_set;
 pub use zeroship_data_core::read_set;
 pub(crate) mod v8_bridge;
 
-// THE schema authority for the data plane: the runtime descriptor this isolate
-// was built from. One resolution function, no `Option`, no catalog read.
-pub(crate) mod descriptor;
 // DB-1 execution budgets MOVED to `zeroship_data_core::budgets` on 2026-09-02.
 // They are named by a vendor tier (`backend/pg_session_sql.rs`, which renders
 // them into PostgreSQL GUCs) AND by the engine (`transaction/driver.rs`, whose
@@ -249,15 +269,6 @@ pub(crate) mod descriptor;
 // live suites assert against these guards by name, and `zeroship-plugin-db`
 // remains their public surface until the tiers themselves are crates.
 pub use zeroship_data_core::budgets;
-// Raw usage metrics and the single emit point. The metric NAMES are a billing
-// contract shared with `zeroship-metering` and the control plane's pricing
-// catalog, not a detail of whichever module happens to run the statement; they
-// were private items in `exec.rs` until 2026-09-01, which silently made the
-// BILLED surface equal to "whatever flows through exec", and three operation
-// families do not. NO TIER IS CLAIMED: the names are core-shaped but
-// `emit_db_metric` reads `crate::context`, whose own destination is unsettled,
-// so the census reports this file as unjudged until that is decided.
-pub(crate) mod metrics;
 // Process-wide ownership of the `env.db` primitive: validated configuration,
 // the plugin prototype, the stable thread-resource key, and the neutral
 // operator-lifecycle handle.
@@ -329,14 +340,14 @@ mod cdc_lifecycle;
 // reused; that impl was deleted on 2026-09-02, so `util` now has no consumer
 // in the crate at all.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod auth;
+pub(crate) use zeroship_data_engine::auth;
 #[cfg(feature = "test-helpers")]
-pub mod auth;
+pub use zeroship_data_engine::auth;
 
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod exec;
+pub(crate) use zeroship_data_engine::exec;
 #[cfg(feature = "test-helpers")]
-pub mod exec;
+pub use zeroship_data_engine::exec;
 
 // COMPILED ONLY INTO TEST BUILDS, and that is now structural rather than
 // documented. `drop_namespace` has no production caller anywhere in the
@@ -364,9 +375,9 @@ pub mod replication;
 pub mod slot_reaper;
 
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod transaction;
+pub(crate) use zeroship_data_engine::transaction;
 #[cfg(feature = "test-helpers")]
-pub mod transaction;
+pub use zeroship_data_engine::transaction;
 
 // Async-scoped transaction marker. Read by `transaction` to tell a
 // genuinely NESTED `transaction()` call from one that merely overlaps
@@ -377,42 +388,19 @@ pub(crate) mod tx_scope;
 #[cfg(feature = "test-helpers")]
 pub mod tx_scope;
 
-// The tx-vs-pool routing decision, frozen at the V8 dispatch frame and
-// carried into the spawned future. Always `pub` (not feature-gated like
-// its neighbours): the `TxRoute` TYPE has to be nameable wherever the
-// `exec` entry points are, and its production constructor needs a
-// `&mut v8::PinScope`, so exposing the type opens nothing. See the
-// module docs for why a missed dispatch site cannot compile.
-// The transaction lane owner. Engine-bound: it moves to `zeroship-data-engine`
-// as a file rather than as an extraction, which is the point of separating it
-// from `context.rs` (the adapter's composition root).
-// The per-isolate dispatch enum. Engine-bound, and separated from
-// backend/mod.rs so the data-engine cut moves a file.
-pub(crate) mod backend_handle;
-pub(crate) mod tx_lanes;
-pub mod tx_route;
-
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) mod wal_consumer;
 #[cfg(feature = "test-helpers")]
 pub mod wal_consumer;
 
-// Test-only: `tracing-subscriber` capture layer for warn/error-shape
-// contract tests. See `test_support/mod.rs` for the module preamble.
-//
-// Gate note: `cfg(test)` only (NOT `any(test, feature = "test-helpers")`)
-// because `tracing-subscriber` is a `[dev-dependencies]` entry — it
-// is unavailable when downstream crates compile the lib with
-// `--features test-helpers` (which is non-test compilation from the
-// integration target's perspective). Moving `tracing-subscriber` out
-// of dev-deps would pollute the release dependency graph. The
-// `test_support` surface is therefore reachable from in-crate unit
-// tests (`#[cfg(test)] mod tests { use crate::test_support; }`) but
-// not from `crates/plugin-db/tests/integration.rs`. End-to-end
-// warn-shape coverage from integration tests would need a separate
-// helper rebuilt off `tracing_subscriber` re-exposed elsewhere.
-#[cfg(test)]
-pub(crate) mod test_support;
+// `test_support` - the `tracing-subscriber` capture layer for warn/error-shape
+// contract tests - LEFT for `zeroship-data-engine` on 2026-09-03, and it left
+// because every one of its call sites did. Measured before the move: six, all
+// in `crud/{mask_drift,read_pipeline,unmask}.rs`, and zero anywhere else in this
+// crate. It is not re-exported: it is `cfg(test)` in the engine, so it is
+// invisible here by construction, and a warn-shape assertion about an adapter
+// event would need it rebuilt against `tracing_subscriber` as a dev-dependency
+// of THIS crate.
 
 // The synchronous `ensure_pool(scope)` helper that used to live here
 // has been removed — every callback dispatches through
@@ -894,38 +882,12 @@ pub fn set_sqlite_backend_for_tests(backend: Rc<crate::backend::sqlite::SqliteBa
     ctx_mut(|c| c.set_sqlite_backend(backend));
 }
 
-/// Test helper: install one collection's descriptor entry into this isolate's
-/// store, so the CRUD passes and the unmask dispatcher's `lookup_mask_meta` /
-/// `lookup_encryption_meta` resolve the column metadata. `schema` is the same
-/// descriptor-shaped `{ <column>: FieldDef }` map native boot extracts from a
-/// `RuntimeSchemaDescriptor` collection.
-///
-/// The entry lands under the COLD-START binding, which is what every test-side
-/// binding is (`crud::write_pipeline`'s fixture, the `_for_tests` seams in
-/// `crud`, `v8_classes::transaction`). A fixture that needs two deploys of one
-/// app kept apart uses [`cache_schema_for_deploy_for_tests`] instead.
+// The two descriptor-store fixtures MOVED to `zeroship-data-engine` with the
+// engine tier: they touch `zeroship_data_core::schema_cache` and nothing else,
+// and the CRUD passes that call them are the engine's. Re-exported here so the
+// integration targets and this crate's own tests keep the same path.
 #[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn cache_schema_for_tests(app_id: &str, collection: &str, schema: serde_json::Value) {
-    cache_schema_for_deploy_for_tests(
-        &zeroship_data_core::binding::DbBinding::cold_start(app_id),
-        collection,
-        schema,
-    );
-}
-
-/// Test helper: [`cache_schema_for_tests`] for an explicit binding, so a
-/// fixture can install two deploys of one app and assert they do not see each
-/// other's descriptor entries.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub fn cache_schema_for_deploy_for_tests(
-    binding: &zeroship_data_core::binding::DbBinding,
-    collection: &str,
-    schema: serde_json::Value,
-) {
-    zeroship_data_core::schema_cache::with_mut(|c| c.insert_one(binding, collection, schema));
-}
+pub use zeroship_data_engine::{cache_schema_for_deploy_for_tests, cache_schema_for_tests};
 
 /// Test helper: clear the per-isolate mask-policy cache
 /// entry for `app_id`. Used by `tests/sqlite_integration.rs` to
@@ -1001,6 +963,75 @@ pub async fn finalize_rows_on_read_for_tests(
     )
     .await?;
     Ok(result.rows)
+}
+
+/// **Test-only**: end-to-end wrapper around `exec::exec_mutation_with_emit` so
+/// integration tests can drive the queue/drain machinery against a real
+/// Postgres connection without spinning up a V8 isolate.
+///
+/// **This lived in `exec.rs` until the engine became its own crate**, and had
+/// to move for the same reason as its two neighbours above: resolving the
+/// backend is `tx_scope::ensure_backend`'s job, and that is adapter-side. The
+/// engine keeps `exec::ambient_route_for_tests`, which now TAKES the handle.
+///
+/// The route is derived from the ambient parked-tx slot rather than from a V8
+/// scope, because there is no isolate here. That is exactly the discriminator
+/// production no longer uses; it is sound ONLY because a test drives one unit
+/// of work at a time, and it is why this helper cannot stand in for the
+/// `cxPlain` coverage in `tests/e2e_dev_vs_deployed_db.sh`.
+///
+/// # Errors
+///
+/// The statement's own error, stringified.
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+pub async fn exec_mutation_with_emit_for_tests(
+    bq: query::BuiltQuery,
+    app_id: &str,
+    collection: &str,
+    op: zeroship_core::change_event::ChangeOp,
+) -> Result<Vec<serde_json::Value>, String> {
+    let backend = tx_scope::ensure_backend()
+        .await
+        .map_err(DbError::into_string)?;
+    let route = exec::ambient_route_for_tests(app_id, backend);
+    exec::exec_mutation_with_emit(bq, &route, collection, op)
+        .await
+        .map_err(DbError::into_string)
+}
+
+/// **Test-only**: exec a read query through the same shared pool-or-tx path
+/// production CRUD uses, including the Postgres autocommit per-app role fence.
+///
+/// Adapter-side for the reason on [`exec_mutation_with_emit_for_tests`].
+///
+/// # Errors
+///
+/// The statement's own error, stringified.
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+pub async fn exec_query_for_tests(
+    app_id: &str,
+    bq: query::BuiltQuery,
+) -> Result<Vec<serde_json::Value>, String> {
+    let backend = tx_scope::ensure_backend()
+        .await
+        .map_err(DbError::into_string)?;
+    let route = exec::ambient_route_for_tests(app_id, backend);
+    exec::exec_query(&route, bq)
+        .await
+        .map_err(DbError::into_string)
+}
+
+/// **Test-only**: `(idle, active, total)` for this isolate's data pool.
+///
+/// `transaction::probe::pool_counts` takes the handle now - the engine may not
+/// read the adapter's context - so this is where the lookup lives.
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+#[must_use]
+pub fn pool_counts_for_tests() -> Option<(usize, usize, usize)> {
+    transaction::probe::pool_counts(&context::with(|c| c.backend())?)
 }
 
 /// **Test-only**: install a real Postgres client into the active

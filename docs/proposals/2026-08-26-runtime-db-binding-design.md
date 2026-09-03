@@ -1,7 +1,7 @@
 # Runtime DB binding: construction-time schema binding
 
 **Status.** PARTIAL - the descriptor is the shipped sole schema authority
-(`crates/zeroship-plugin-db/src/descriptor.rs`, over
+(`crates/zeroship-data-engine/src/descriptor.rs`, over
 `zeroship_data_core::schema_cache`) and `registerModel` is gone, but the private
 module map, the artifact/init channel and the isolate-owned binding do not
 exist; the descriptor still arrives on `globalThis.__zsRuntimeDescriptor`
@@ -115,7 +115,7 @@ invalidates the runtime rather than silently re-homing its bindings. Constructio
 stays I/O-free (SQLite requires this) because adoption happens at first read.
 
 The comparison machinery ships and is tested: `SchemaEpoch`
-(`crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:97`),
+(`crates/zeroship-data-engine/src/transaction/reducer/identity.rs:97`),
 `Verdict::Deny(DenyReason::StaleAppIncarnation)` at `:254`, `Verdict::ReResolve`
 at `:260` and `:266`, with the setup-outcome adapter in `reducer/mod.rs`. **In
 production it is a tautology**: the single construction site
@@ -137,7 +137,7 @@ The repository invariant in `AGENTS.md`. Its two halves as they bear here:
 
 Consequences that are settled: there is no HMAC session anchor and no
 `SessionMinter`; `__zeroship_admin` does not exist and nothing replaced it
-(`crates/zeroship-plugin-db/src/auth/bootstrap.rs`); CDC slot and publication
+(`crates/zeroship-data-engine/src/auth/bootstrap.rs`); CDC slot and publication
 ownership belongs to the CDC relay. SQLite has no `session_ctx` at all and binds
 context through the session actor's per-call state instead - two tiers
 disagreeing about where identity is enforced is evidence that the Rust-boundary
@@ -149,7 +149,7 @@ invariant points at, not a restoration of deleted definer-rights functions.
 
 The live counter-example is DB-3: app JS reached a privileged unmask call and
 could pass `actor: { kind: "auto" }` to read its own PII/PHI/PCI. It is fenced by
-`sanitize_app_actor` (`crates/zeroship-plugin-db/src/crud/unmask.rs:321`), called
+`sanitize_app_actor` (`crates/zeroship-data-engine/src/crud/unmask.rs:321`), called
 at **five** sites - `v8_classes/masked_value.rs:300` and `:423`, `crud/mod.rs:669`,
 `unmask.rs:1514` and `:1629`. Count them with
 `grep -rn 'sanitize_app_actor(' crates/zeroship-plugin-db/src`, un-truncated.
@@ -357,7 +357,7 @@ columns are never creator-visible keys on any path.
 
 **The mutation-side producer is suppressed in production, so delivery must be
 designed against the WAL consumer.** `broker::is_app_suppressed`
-(`crates/zeroship-plugin-db/src/broker.rs:806`, called at `:858` and from
+(`crates/zeroship-data-core/src/broker.rs:806`, called at `:858` and from
 `exec.rs:466`) gates the mutation-side publish: when the WAL consumer runs for an
 app it owns the publish path for events that isolate writes. The real producer is
 `wal_consumer::emit_for_tuple`, which holds no operation context, and `publish` /

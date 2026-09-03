@@ -54,29 +54,59 @@ ROOT=$(pwd)
 . "$ROOT/tests/lib/gate_arms.sh"
 gate_arms_init private_interface
 
-PKG=zeroship-plugin-db
-SRC=crates/$PKG/src
-LIB=$SRC/lib.rs
+# ---------------------------------------------------------------------------
+# TWO PACKAGES SINCE 2026-09-03.
+# ---------------------------------------------------------------------------
+# `PKG` was `zeroship-plugin-db` alone. The ENGINE tier left that crate for
+# `zeroship-data-engine` that day, and every `pub(crate)` marker inside it was
+# widened to `pub` in the same commit - because a `pub(crate)` item in the engine
+# is unreachable from the adapter that calls it. That is EXACTLY the population
+# this lint fires in: 341 items whose fence stopped being a module and started
+# being a crate boundary. A gate pinned to the adapter would have gone from
+# ruling on the widest surface in the tree to ruling on 21 items, and printed
+# what a clean crate prints about the other 341.
+#
+# The engine is checked FIRST, because a private-in-public defect there is the
+# one that matters most: its `pub` items are now real cross-crate API, and a
+# `pub fn` returning a private type is an item the adapter cannot use at all.
+PKGS="zeroship-data-engine zeroship-plugin-db"
+ADAPTER_SRC=crates/zeroship-plugin-db/src
+ENGINE_SRC=crates/zeroship-data-engine/src
 OUT=$(mktemp)
 trap 'rm -f "$OUT"' EXIT
 
-if [ ! -f "$LIB" ]; then
-  echo "private_interface_gate: $LIB not found - has the crate moved?" >&2
-  exit 1
-fi
+for _s in "$ADAPTER_SRC" "$ENGINE_SRC"; do
+  if [ ! -f "$_s/lib.rs" ]; then
+    echo "private_interface_gate: $_s/lib.rs not found - has a crate moved?" >&2
+    exit 1
+  fi
+done
 
 # Force re-emission. See the header: a warm build's silence is not evidence.
-touch "$LIB"
-CARGO_INCREMENTAL=0 cargo check -p "$PKG" --features test-helpers --all-targets \
-  --message-format=json > "$OUT" 2>/dev/null
-check_status=$?
+# Touching the ENGINE root also re-runs rustc for the adapter, which depends on
+# it - but the adapter root is touched too, so neither crate can go quiet
+# because the other happened to be the one rebuilt.
+touch "$ENGINE_SRC/lib.rs" "$ADAPTER_SRC/lib.rs"
+units=0
+check_status=0
+for pkg in $PKGS; do
+  CARGO_INCREMENTAL=0 cargo check -p "$pkg" --features test-helpers --all-targets \
+    --message-format=json > "$OUT.$pkg" 2>/dev/null
+  rc=$?
+  [ "$rc" -ne 0 ] && check_status=$rc
+  n=$(grep '"reason":"compiler-artifact"' "$OUT.$pkg" | grep -c "$pkg")
+  echo "== compilation units re-emitted for $pkg =="
+  echo "  $n unit(s) rebuilt under --features test-helpers --all-targets"
+  units=$((units + n))
+  cat "$OUT.$pkg" >> "$OUT"
+  rm -f "$OUT.$pkg"
+done
 
-units=$(grep '"reason":"compiler-artifact"' "$OUT" | grep -c "$PKG")
-
-echo "== compilation units re-emitted for $PKG =="
-echo "  $units unit(s) rebuilt under --features test-helpers --all-targets"
 echo
-gate_arm compiled_units "$units" 6
+# The floor is 8, not 6, and the two extra are the engine's own lib + lib-test.
+# It was 6 when one package was checked; a floor left at 6 would pass on a run
+# where the engine emitted nothing at all.
+gate_arm compiled_units "$units" 8
 
 # A build that failed outright tells us nothing about visibility; say so rather
 # than reporting zero warnings from a compile that never produced any.
@@ -132,19 +162,40 @@ count_shipped_pub() {
     END { print n + 0 }' "$1"
 }
 
-capped=$(grep -oE "^pub\(crate\) mod [a-z_]+;" "$LIB" | awk '{print $3}' | tr -d ';' | sort -u)
+# The ADAPTER half: items still fenced by a `pub(crate) mod` in its lib.rs.
+capped=$(grep -oE "^pub\(crate\) mod [a-z_]+;" "$ADAPTER_SRC/lib.rs" \
+           | awk '{print $3}' | tr -d ';' | sort -u)
 fenced=0
 for m in $capped; do
-  files=$(find "$SRC/$m.rs" "$SRC/$m" -name '*.rs' 2>/dev/null)
+  files=$(find "$ADAPTER_SRC/$m.rs" "$ADAPTER_SRC/$m" -name '*.rs' 2>/dev/null)
+  for f in $files; do
+    fenced=$((fenced + $(count_shipped_pub "$f")))
+  done
+done
+
+# The ENGINE half: items behind a `pub mod` at a crate root. The fence is cargo's
+# now rather than lib.rs's, and the lint's question is unchanged - a `pub fn`
+# whose signature names a private type is exactly as broken either way, and
+# STRICTLY more consequential here, because a consumer really does exist.
+published=$(grep -oE "^pub mod [a-z_]+;" "$ENGINE_SRC/lib.rs" \
+              | awk '{print $3}' | tr -d ';' | sort -u)
+for m in $published; do
+  files=$(find "$ENGINE_SRC/$m.rs" "$ENGINE_SRC/$m" -name '*.rs' 2>/dev/null)
   for f in $files; do
     fenced=$((fenced + $(count_shipped_pub "$f")))
   done
 done
 
 echo "== items the lint can fire inside =="
-echo "  $fenced pub item(s) fenced only by a pub(crate) module"
+echo "  $fenced pub item(s) across both crates, fenced by a module or by the"
+echo "  engine crate boundary"
 echo
-gate_arm fenced_pub_items "$fenced" 100
+# The floor was 100 when the adapter's `pub(crate) mod` fences were the whole
+# population and the census counted 182. The engine cut moved most of that
+# surface across the boundary and widened it; re-derive with
+# tests/lib/pub_fence_census.sh rather than trusting this number, and note the
+# gate counts test-gated submodules the census excludes.
+gate_arm fenced_pub_items "$fenced" 300
 
 # ---------------------------------------------------------------------------
 # The verdict. Both lints, because they are the same defect in two positions:

@@ -121,7 +121,7 @@ native ops, so the plugin reads the binding in Rust when the op runs.
 
 The worker does not compare `epoch` in Rust to authorize a transaction; it composes the role
 name the setup batch sends. An app whose binding is absent is a hard refusal with the same
-shape as `collection_not_declared` (`crates/zeroship-plugin-db/src/descriptor.rs`).
+shape as `collection_not_declared` (`crates/zeroship-data-engine/src/descriptor.rs`).
 
 Per-thread resources become maps keyed by `DbResourceKey`. `ThreadDbContext`
 (`crates/zeroship-plugin-db/src/context.rs`) holds one pool, one url, one resource key and
@@ -322,7 +322,7 @@ that makes database ids exist**, not after.
 
 - **Op counts stay keyed on the app.** `db_reads` / `db_writes` / `db_rows_written` are
   emitted against the server-injected app id at the op boundary
-  (`crates/zeroship-plugin-db/src/exec.rs`), and the app that issued the op consumed the
+  (`crates/zeroship-data-engine/src/exec.rs`), and the app that issued the op consumed the
   compute.
 - **The billing principal for a database is the creator**, because no app owns one. Any metric
   measuring the *resource* attributes to the creator; any metric measuring an *op* attributes
@@ -385,7 +385,7 @@ sees exactly one. The multi-database transaction problem is closed by the entity
 than by a runtime check. `tx_conns`, `tx_claims`, `tx_waiters`, `savepoint_depths`,
 `savepoint_emit_marks` and `pending_emits` (`crates/zeroship-plugin-db/src/context.rs`) stay
 keyed on `app_id`, because `app_id` still determines the database. `TxRoute`
-(`crates/zeroship-plugin-db/src/tx_route.rs`) is unchanged, and its continuation slot stays
+(`crates/zeroship-data-engine/src/tx_route.rs`) is unchanged, and its continuation slot stays
 keyed on the app id: SEC-1 is structural there, and the planted key must never become a
 creator-facing name, or two co-resident apps both calling their database `main` would compare
 equal.
@@ -477,7 +477,7 @@ role fence is applied by two functions
 outside them is unfenced. That hole is closed TODAY, and only because
 `PgSqlExecutor::pool_handle` is `#[cfg(any(test, feature = "test-helpers"))]`
 (`crates/zeroship-data-postgres/src/postgres.rs:513-515`) - its remaining callers are in
-`crates/zeroship-plugin-db/src/crud/mask_drift.rs`, itself test-gated with zero production
+`crates/zeroship-data-engine/src/crud/mask_drift.rs`, itself test-gated with zero production
 callers. Do not ungate it. Under a private database the blast radius of one unfenced statement
 was a single app's schema; under sharing it is every database in the datastore, and
 `WITH INHERIT FALSE` only converts such a statement from succeeding to failing at runtime. The
@@ -597,7 +597,7 @@ readable.
 **Cross-creator table sharing is refused permanently.** Three independent reasons:
 
 1. **The unmask policy is authored by the READING app.**
-   `crates/zeroship-plugin-db/src/crud/mask_policy.rs` states it: the policy comes from the
+   `crates/zeroship-data-engine/src/crud/mask_policy.rs` states it: the policy comes from the
    creator's own source, at boot, and nowhere else on the PG arm; the app declares
    `defineMaskPolicy()`, `installSchema` flushes it into that isolate's cache, and there is no
    durable policy store. A co-grant-holder ships a permissive policy in its own bundle and
@@ -651,11 +651,11 @@ datastore from an app under its limit.
 
 2. **Supply the schema epoch producer.**
    BUILDABLE, 8h. The consumer ships and is tested: `SchemaEpoch`
-   (`crates/zeroship-plugin-db/src/transaction/reducer/identity.rs:97`), the comparison at
+   (`crates/zeroship-data-engine/src/transaction/reducer/identity.rs:97`), the comparison at
    `:265` returning `Verdict::ReResolve`, and the adapter from a classified session-setup
    outcome into that verdict. **The machine is a tautology in production.** The single
    production construction site
-   (`crates/zeroship-plugin-db/src/transaction/driver.rs:143-145`) mints incarnation 0, domain
+   (`crates/zeroship-data-engine/src/transaction/driver.rs:143-145`) mints incarnation 0, domain
    `(0,0)`, epoch 0, `Stable` and an empty ceiling, and echoes the expectation back as the
    observation, so `classify` can only return `Current` and the three typed denial codes are
    unreachable outside tests. The work is the record, the migration-service write and the
@@ -738,7 +738,7 @@ datastore from an app under its limit.
     statement fails, the split does not exist. One live test.
 
 13. **Re-prove the pooled-connection reset against a narrowed role.**
-    BUILDABLE, 3h. `crates/zeroship-plugin-db/src/exec.rs` already runs the role and timeout
+    BUILDABLE, 3h. `crates/zeroship-data-engine/src/exec.rs` already runs the role and timeout
     guards via `SET LOCAL` inside an explicit transaction so they auto-revert at COMMIT and at
     the implicit ROLLBACK on drop, covering a setup error, a query error, or a cancellation
     between setup and the would-be reset. That reasoning does not change when the role names a

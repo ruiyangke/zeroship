@@ -1880,6 +1880,20 @@ mod sc1_driver {
 
     use super::{block_on, pg_url};
 
+    /// The backend `probe::begin` takes as a parameter.
+    ///
+    /// It resolved its own through `tx_scope::ensure_backend` until 2026-09-03,
+    /// which made an ENGINE file call the ADAPTER - the one direction the crate
+    /// split forbids, and a hard cargo error once `transaction/` became
+    /// `zeroship-data-engine`. The lookup lives here now, in the caller that
+    /// owns the thread context, and it is the same call the V8 dispatcher makes
+    /// on this test's behalf in production.
+    async fn probe_backend() -> zeroship_plugin_db::backend::BackendHandle {
+        zeroship_plugin_db::tx_scope::ensure_backend()
+            .await
+            .expect("the adapter funnel must open a backend before BEGIN")
+    }
+
     /// Connect an out-of-band admin session, and report the server reached.
     ///
     /// **Prints `server_version_num`, not a container tag.** A cross-version
@@ -1994,7 +2008,7 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None).await.expect("BEGIN");
+            probe::begin(APP, None, probe_backend().await).await.expect("BEGIN");
             probe::operation(APP, &format!("CREATE TABLE \"{APP}\".kept (id int)"))
                 .await
                 .expect("a statement inside the transaction");
@@ -2037,13 +2051,13 @@ mod sc1_driver {
             // The connection is back in the pool and reusable: the next checkout
             // is the SAME backend. With max_size = 1 there is nothing else it
             // could be handed.
-            let (idle, active, total) = probe::pool_counts().expect("a pool is installed");
+            let (idle, active, total) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle, active, total),
                 (1, 0, 1),
                 "a released session returns to the pool as idle"
             );
-            probe::begin(APP, None)
+            probe::begin(APP, None, probe_backend().await)
                 .await
                 .expect("a second BEGIN reuses it");
             assert_eq!(
@@ -2102,8 +2116,8 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None).await.expect("BEGIN");
-            let (_, _, total_before) = probe::pool_counts().expect("a pool is installed");
+            probe::begin(APP, None, probe_backend().await).await.expect("BEGIN");
+            let (_, _, total_before) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(total_before, 1, "one connection, checked out");
 
             // Another future owns the session, and NOTHING IS RUNNING ON IT.
@@ -2137,7 +2151,7 @@ mod sc1_driver {
             // does. THIS is the moment a withdrawal has to survive.
             held.restore();
 
-            let (idle, _, total_after) = probe::pool_counts().expect("a pool is installed");
+            let (idle, _, total_after) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 idle, 0,
                 "a withdrawn session must not be published as idle - a plain \
@@ -2152,7 +2166,7 @@ mod sc1_driver {
             // And the strongest form: whatever the pool opens next is a
             // DIFFERENT backend.
             probe::reset(APP);
-            probe::begin(APP, None).await.expect("a fresh BEGIN");
+            probe::begin(APP, None, probe_backend().await).await.expect("a fresh BEGIN");
             let fresh_pid = probe::session_backend_pid(APP).expect("a pinned session");
             assert_ne!(
                 fresh_pid, withdrawn_pid,
@@ -2245,7 +2259,7 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None).await.expect("BEGIN");
+            probe::begin(APP, None, probe_backend().await).await.expect("BEGIN");
             let pid = probe::session_backend_pid(APP).expect("a pinned session");
 
             // A statement that will not end on its own inside this arm. 60s is
@@ -2294,13 +2308,13 @@ mod sc1_driver {
                  because the grace expired; {elapsed:?} is the whole grace"
             );
 
-            let (idle, active, total) = probe::pool_counts().expect("a pool is installed");
+            let (idle, active, total) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle, active, total),
                 (1, 0, 1),
                 "the session went back to the pool as idle"
             );
-            probe::begin(APP, None)
+            probe::begin(APP, None, probe_backend().await)
                 .await
                 .expect("a second BEGIN reuses it");
             assert_eq!(
@@ -2366,7 +2380,7 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None).await.expect("BEGIN");
+            probe::begin(APP, None, probe_backend().await).await.expect("BEGIN");
             let held = probe::HeldSession::take(APP).expect("hold the session");
             let pid = held.backend_pid().expect("a Postgres session");
             assert_eq!(
@@ -2431,7 +2445,7 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None).await.expect("BEGIN");
+            probe::begin(APP, None, probe_backend().await).await.expect("BEGIN");
             probe::operation(APP, &format!("CREATE TABLE \"{APP}\".rows_ (tag text)"))
                 .await
                 .expect("create table");
@@ -2541,7 +2555,7 @@ mod sc1_driver {
                 Some(SessionOwnership::None),
                 "Preparing holds no session: the client is acquired by IssueBegin"
             );
-            let (idle_before, _, _) = probe::pool_counts().expect("a pool is installed");
+            let (idle_before, _, _) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
 
             let fired = probe::fire_execution_deadline(APP).await;
 
@@ -2563,7 +2577,7 @@ mod sc1_driver {
                 "ReleaseAdmission retires the transaction on every path to Settled"
             );
 
-            let (idle_after, active_after, _) = probe::pool_counts().expect("a pool is installed");
+            let (idle_after, active_after, _) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle_after, active_after),
                 (idle_before, 0),
@@ -2572,7 +2586,7 @@ mod sc1_driver {
 
             // The claim was released, so the next transaction is admitted
             // rather than parked forever.
-            probe::begin(APP, None)
+            probe::begin(APP, None, probe_backend().await)
                 .await
                 .expect("the admission claim was released");
             let settled = probe::settle(APP, false).await;

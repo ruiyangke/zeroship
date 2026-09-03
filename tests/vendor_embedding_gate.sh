@@ -72,8 +72,19 @@ VENDORS='compio_postgres|rusqlite'
 # their own driver. Scanning all twenty would report noise and train people to
 # ignore this gate. The roots below are the crates the data-plane split requires
 # to be vendor-free, and adding one is a design decision, not housekeeping.
+#
+# `zeroship-data-engine/src` JOINED THE ROOTS ON 2026-09-03, in the commit that
+# created it. It had to: four of the six baseline entries below were files that
+# left `zeroship-plugin-db/src` that day, and a root list pinned to the old tree
+# would have left every one of them unscanned while their baseline keys went
+# dead - arm 2 refuses a key it cannot resolve, so the gate would have failed
+# loudly rather than quietly, but only after the four files had stopped being
+# ruled on at all. It is also the one non-vendor crate that names BOTH vendors by
+# design (`BackendHandle` is a closed sum over them), which is exactly why its
+# entries are baselined rather than absent.
 ROOTS="
 crates/zeroship-plugin-db/src
+crates/zeroship-data-engine/src
 crates/zeroship-schema/src
 crates/zeroship-data-core/src
 "
@@ -130,11 +141,18 @@ key_to_path() {
 # contradict it - and a stale one reads exactly like a measured one. What a
 # comment CAN say that the gate cannot is why the entry exists and what deletes
 # it, so that is all these lines say now.
+#
+# RE-KEYED 2026-09-03: FOUR OF THE SIX CHANGED CRATE, NONE CHANGED SUBSTANCE.
+# `exec.rs`, `backend/cancel.rs`, `auth/bootstrap.rs` and `tx_lanes.rs` are the
+# ENGINE tier and left for `zeroship-data-engine`. This is the third occurrence
+# of the "a move relocates an entry, it does not clear one" case the closing
+# note below describes, and the first where four moved at once. `lib.rs` and
+# `service.rs` are the adapter's and stayed.
 BASELINE_FILES="
-zeroship-plugin-db/exec.rs
-zeroship-plugin-db/backend/cancel.rs
-zeroship-plugin-db/auth/bootstrap.rs
-zeroship-plugin-db/tx_lanes.rs
+zeroship-data-engine/exec.rs
+zeroship-data-engine/backend/cancel.rs
+zeroship-data-engine/auth/bootstrap.rs
+zeroship-data-engine/tx_lanes.rs
 zeroship-plugin-db/lib.rs
 zeroship-plugin-db/service.rs
 "
