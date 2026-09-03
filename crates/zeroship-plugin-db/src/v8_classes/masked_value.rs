@@ -316,7 +316,22 @@ impl MaskedValue {
         let binding = self.binding.clone();
 
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            match dispatch_unmask(&binding, args).await {
+            // The backend is opened HERE, on the adapter side, and handed to
+            // the engine. `crud::unmask` resolved its own through
+            // `exec::ensure_backend_for_shared_sql` until 2026-09-03, which put
+            // an ENGINE file's hands on `crate::context`. A `MaskedValue`
+            // unmask carries no route - it is not a routed statement - so this
+            // dispatch is the frame that owns the resolution.
+            //
+            // A failure here folds into the SAME error arm below rather than
+            // returning early, so the `probe` branch keeps deciding what a
+            // rejection means: `not_configured` is not `unmask_not_permitted`,
+            // so `canUnmask()` still re-throws it instead of answering `false`.
+            let outcome = match crate::tx_scope::ensure_backend().await {
+                Ok(backend) => dispatch_unmask(&backend, &binding, args).await,
+                Err(e) => Err(e),
+            };
+            match outcome {
                 Ok(result) => {
                     if probe {
                         // canUnmask: success → resolve with `true`.
@@ -427,7 +442,13 @@ impl MaskedValue {
         let row_pk = self.row_pk.clone();
 
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            match dispatch_bulk_unmask(&binding, args).await {
+            // Resolved adapter-side and folded into the error arm, exactly as
+            // in [`MaskedValue::dispatch_unmask_single`] above.
+            let outcome = match crate::tx_scope::ensure_backend().await {
+                Ok(backend) => dispatch_bulk_unmask(&backend, &binding, args).await,
+                Err(e) => Err(e),
+            };
+            match outcome {
                 Ok(result) => {
                     // Project to the per-column map for THIS row — the
                     // SDK's `MaskedValue.unmask(cols)` overload expects

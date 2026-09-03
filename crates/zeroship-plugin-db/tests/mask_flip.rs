@@ -68,6 +68,20 @@ fn test_url() -> String {
     zeroship_core::config::test_database_url()
 }
 
+/// The backend handle the unmask entry points now take as a parameter.
+///
+/// They resolved one themselves, from the isolate's context, until 2026-09-03.
+/// That read is the ADAPTER's, and `crud::unmask` is ENGINE, so the resolution
+/// moved to the V8 dispatcher and the value is passed down. These tests drive
+/// the engine directly, with no V8 frame above them, so they make the same call
+/// the dispatcher makes on their behalf in production - including its lazy
+/// open, which is what the cold-start fixtures below depend on.
+async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
+    zeroship_plugin_db::tx_scope::ensure_backend()
+        .await
+        .expect("the backend the V8 dispatcher would have opened")
+}
+
 /// Connect, or fail the test.
 ///
 /// Deliberately NOT a skip, for the reason the module doc gives.
@@ -496,6 +510,7 @@ async fn the_real_value_is_still_stored_and_still_reachable_by_the_audited_path(
     support::grant_runtime_select_columns(&pool, app, "people", &["id", &raw_col]).await;
 
     let result = zeroship_plugin_db::crud::unmask::dispatch_unmask(
+        &unmask_backend().await,
         &zeroship_data_core::binding::DbBinding::cold_start(app),
         zeroship_plugin_db::crud::unmask::UnmaskFieldArgs {
             collection: "people".to_string(),
@@ -707,6 +722,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
     // `support` is not `auto`, and no policy is installed - so the no-policy
     // fallback denies it. This is the case `mask_flip` never had.
     let err = dispatch_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         unmask_args(
             &person.id,
@@ -757,10 +773,11 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
     );
 
     // ---- THE CONTROL, differing in one variable: the policy ----
-    dispatch_set_mask_policy(app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
     let result = dispatch_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         unmask_args(
             &person.id,
@@ -786,6 +803,7 @@ async fn an_actor_the_policy_does_not_permit_is_refused_and_the_refusal_is_audit
         json!({ "hr": { "type": "string", "mask": { "kind": "full", "classification": "phi" } } }),
     );
     let err = dispatch_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: "vitals".to_string(),
@@ -829,8 +847,12 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
         ("not an object", Some(json!("support"))),
         ("object with no kind", Some(json!({ "id": "usr_1" }))),
     ] {
-        let err = match dispatch_unmask(&DbBinding::cold_start(app), unmask_args(&person.id, actor))
-            .await
+        let err = match dispatch_unmask(
+            &unmask_backend().await,
+            &DbBinding::cold_start(app),
+            unmask_args(&person.id, actor),
+        )
+        .await
         {
             Ok(leaked) => panic!(
                 "an actor that is {label} must be refused; the call returned \
@@ -867,10 +889,11 @@ async fn an_unmask_with_no_usable_actor_is_refused_and_audited() {
     );
 
     // ---- THE CONTROL: the same fixture DOES hand out the plaintext ----
-    dispatch_set_mask_policy(app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
     let result = dispatch_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         unmask_args(
             &person.id,
@@ -963,7 +986,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
     let ssn = "123-45-6789";
     let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
 
-    dispatch_set_mask_policy(app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
 
@@ -977,7 +1000,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
          rejection, and a test that never got past the parser would assert \
          nothing about it",
     );
-    let err = match dispatch_unmask(&DbBinding::cold_start(app), forged).await {
+    let err = match dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app), forged).await {
         Ok(leaked) => panic!(
             "DB-3 is back: app JS claiming the reserved `auto` system actor was \
              authorized, and the plaintext came back: {leaked:?}"
@@ -1036,7 +1059,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_parser() {
         &json!({ "kind": "support", "id": "usr_support_1" }),
     ))
     .expect("the same payload shape must parse");
-    let result = dispatch_unmask(&DbBinding::cold_start(app), permitted)
+    let result = dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app), permitted)
         .await
         .expect(
             "the same payload naming a non-reserved kind the policy permits must \
@@ -1081,7 +1104,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
     let ssn = "987-65-4321";
     let person = audited_unmask_fixture(&pool, &url, app, &schema, ssn).await;
 
-    dispatch_set_mask_policy(app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
 
@@ -1092,7 +1115,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
         &json!({ "kind": "auto", "id": "usr_support_1" }),
     ))
     .expect("the payload must PARSE; DB-3 is an authorization fence");
-    let err = match dispatch_bulk_unmask(&DbBinding::cold_start(app), forged).await {
+    let err = match dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app), forged).await {
         Ok(leaked) => panic!(
             "DB-3 is back on the bulk path: app JS claiming the reserved `auto` \
              system actor was authorized, and the plaintext came back: \
@@ -1144,7 +1167,7 @@ async fn app_js_claiming_the_auto_system_actor_is_refused_by_the_bulk_parser() {
         &json!({ "kind": "support", "id": "usr_support_1" }),
     ))
     .expect("the same payload shape must parse");
-    let granted = dispatch_bulk_unmask(&DbBinding::cold_start(app), permitted)
+    let granted = dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app), permitted)
         .await
         .expect(
             "the same batch naming a non-reserved kind the policy permits must \
@@ -1195,7 +1218,7 @@ async fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
     let schema = flip_schema();
     let person = audited_unmask_fixture(&pool, &url, app, &schema, "123-45-6789").await;
 
-    dispatch_set_mask_policy(app, json!({ "support": ["pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pci"] }))
         .await
         .expect("install the app's declared mask policy");
 
@@ -1205,14 +1228,14 @@ async fn a_rejected_impersonation_is_distinguishable_from_an_absent_actor() {
         &json!({ "kind": "auto", "id": "usr_support_1" }),
     ))
     .expect("the forged payload must parse; DB-3 is a fence, not a shape check");
-    dispatch_unmask(&DbBinding::cold_start(app), forged)
+    dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app), forged)
         .await
         .expect_err("the forged claim must be refused");
 
     // ---- (2) no actor at all, same row, same column, same policy
     let anonymous = parse_args(&unmask_args_json(&person.id, &Value::Null))
         .expect("an actor-less payload must parse");
-    dispatch_unmask(&DbBinding::cold_start(app), anonymous)
+    dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app), anonymous)
         .await
         .expect_err("an absent actor must be refused");
 
@@ -1316,13 +1339,14 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 
     // The policy grants `support` exactly ONE of the two classifications:
     // `email` is pii and permitted, `ssn` is pci and is not.
-    dispatch_set_mask_policy(app, json!({ "support": ["pii"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pii"] }))
         .await
         .expect("install the app's declared mask policy");
     let actor = json!({ "kind": "support", "id": "usr_support_1" });
 
     // ---- the half-authorised batch ----
     let err = dispatch_bulk_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         bulk_args(&person.id, &["email", "ssn"], Some(actor.clone())),
     )
@@ -1391,6 +1415,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     // So the refusal above withheld a column this very call could return,
     // which is what makes the fence ATOMIC rather than merely right per column.
     let granted = dispatch_bulk_unmask(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         bulk_args(&person.id, &["email"], Some(actor.clone())),
     )
@@ -1445,7 +1470,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         reason: Some("mask_flip integration test".to_string()),
         rejected_claim: None,
     };
-    let err = dispatch_bulk_unmask(&DbBinding::cold_start(app), two_rows.clone())
+    let err = dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app), two_rows.clone())
         .await
         .expect_err("one forbidden pair on ONE row must refuse every row");
     assert_eq!(refusal_code(&err), "bulk_unmask_partial_unauthorized");
@@ -1502,7 +1527,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
         reason: Some("mask_flip integration test".to_string()),
         rejected_claim: None,
     };
-    let err = dispatch_bulk_unmask(&DbBinding::cold_start(app), both_denied)
+    let err = dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app), both_denied)
         .await
         .expect_err("two forbidden pairs must still refuse the whole batch");
     assert_eq!(refusal_code(&err), "bulk_unmask_partial_unauthorized");
@@ -1538,10 +1563,10 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     // ---- CONTROL 2, differing in one variable: the policy. The SAME two-row
     // batch now passes whole, and BOTH rows hand over their values - so the
     // refusal above withheld two real values, and the arm can pass.
-    dispatch_set_mask_policy(app, json!({ "support": ["pii", "pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pii", "pci"] }))
         .await
         .expect("widen the app's declared mask policy");
-    let granted = dispatch_bulk_unmask(&DbBinding::cold_start(app), two_rows)
+    let granted = dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app), two_rows)
         .await
         .expect("the same batch must pass once the policy grants both classes");
     assert_eq!(granted.results[&person.id]["ssn"], ssn);
@@ -1598,7 +1623,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     )
     .await;
 
-    dispatch_set_mask_policy(app, json!({ "support": ["pii"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pii"] }))
         .await
         .expect("install the app's declared mask policy");
     let actor = Some(json!({ "kind": "support", "id": "usr_support_2" }));
@@ -1606,6 +1631,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     let both = ["email".to_string(), "ssn".to_string()];
 
     let err = authorize_query_hint(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         "people",
         &both,
@@ -1681,6 +1707,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     // `audit_query_hint_granted` so a failing SELECT leaves no ghost, which is
     // why the count staying at 1 is the assertion here.
     authorize_query_hint(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         "people",
         &["email".to_string()],
@@ -1699,10 +1726,11 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     // ---- CONTROL 2, differing in one variable: the policy. The same hint now
     // passes, and the promotion the dispatcher runs after the SELECT hands back
     // both plaintexts.
-    dispatch_set_mask_policy(app, json!({ "support": ["pii", "pci"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pii", "pci"] }))
         .await
         .expect("widen the app's declared mask policy");
     authorize_query_hint(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         "people",
         &both,
@@ -1713,9 +1741,15 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     .await
     .expect("the same hint must pass once the policy grants both classes");
     let mut rows = run_find(&pool, app, &json!({}), &schema).await;
-    dispatch_unmask_for_query(&DbBinding::cold_start(app), "people", &both, &mut rows)
-        .await
-        .expect("the promotion the find dispatcher runs after the SELECT");
+    dispatch_unmask_for_query(
+        &unmask_backend().await,
+        &DbBinding::cold_start(app),
+        "people",
+        &both,
+        &mut rows,
+    )
+    .await
+    .expect("the promotion the find dispatcher runs after the SELECT");
     assert_eq!(rows[0]["id"], json!(person.id));
     assert_eq!(
         rows[0]["ssn"],
@@ -1724,6 +1758,7 @@ async fn a_query_hint_naming_one_forbidden_column_is_refused_whole() {
     );
     assert_eq!(rows[0]["email"], json!(email));
     audit_query_hint_granted(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         "people",
         &both,
@@ -1789,7 +1824,7 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
     )
     .await;
 
-    dispatch_set_mask_policy(app, json!({ "support": ["pii"] }))
+    dispatch_set_mask_policy(&unmask_backend().await, app, json!({ "support": ["pii"] }))
         .await
         .expect("install the app's declared mask policy");
     let actor = Some(json!({ "kind": "support", "id": "usr_support_3" }));
@@ -1798,6 +1833,7 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
     let hinted = ["contactEmail".to_string()];
 
     authorize_query_hint(
+        &unmask_backend().await,
         &DbBinding::cold_start(app),
         "people",
         &hinted,
@@ -1817,9 +1853,15 @@ async fn a_query_hint_reads_the_column_its_alias_resolved_to() {
         "contact_email": "a***@example.com",
         "nickname": "ada",
     })];
-    dispatch_unmask_for_query(&DbBinding::cold_start(app), "people", &hinted, &mut rows)
-        .await
-        .expect(
+    dispatch_unmask_for_query(
+        &unmask_backend().await,
+        &DbBinding::cold_start(app),
+        "people",
+        &hinted,
+        &mut rows,
+    )
+    .await
+    .expect(
             "the read must find the column the fence authorised. If this errors \
              on a missing column, the hint authorised `contact_email` and then \
              read `__zs_raw__contactEmail`: the caller's spelling survived \
