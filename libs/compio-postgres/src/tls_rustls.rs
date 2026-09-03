@@ -296,6 +296,16 @@ fn verifier_for(
         return Ok((Arc::new(AcceptAnyServerCert { algorithms }), policy));
     }
 
+    // `VerifierBuilderError` has exactly two variants, `NoRootAnchors` and
+    // `InvalidCrl` (rustls 0.23, checked 2026-09-03). Every `Err(error)` arm
+    // below therefore reduces to `NoRootAnchors` once its `InvalidCrl` sibling
+    // is matched - and that is UNREACHABLE here, because the `select` above
+    // returns `ServerVerification::None` for an empty store and we have already
+    // returned. So those arms carry a case the guards keeping `roots` non-empty
+    // exclude, and they are defence rather than dead weight only for as long as
+    // those guards hold. Both are bound: the file arm by
+    // `sslrootcert_without_a_certificate_block_is_refused_by_name`, the system
+    // arm by `a_system_trust_store_with_nothing_usable_is_refused_by_name`.
     let builder =
         || WebPkiServerVerifier::builder_with_provider(roots.clone(), Arc::new(provider.clone()));
 
