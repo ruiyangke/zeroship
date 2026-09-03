@@ -51,9 +51,9 @@
 //! Production inner-product workloads run on pgvector through the PG
 //! arm (`vector_ip_ops` opclass).
 
-use crate::backend::VectorMetric;
+use zeroship_schema::descriptors::VectorMetric;
 use zeroship_data_core::error::DbError;
-use crate::query::quote_ident;
+use zeroship_schema::query::quote_ident;
 
 /// Reject [`VectorMetric::InnerProduct`] with a typed `DbError` on
 /// SQLite. The PG arm continues to support all three metrics via
@@ -103,7 +103,7 @@ pub(crate) fn build_vector_search_sql(
     let qvtab = quote_ident(&vec_table_name(collection, column));
     let qcol = quote_ident(column);
     let select_expr =
-        crate::query::build_masked_aware_select_expr_for_table_alias(schema_hint, "t")
+        zeroship_schema::query::build_masked_aware_select_expr_for_table_alias(schema_hint, "t")
             .map_err(DbError::from)?;
     let extra_filter = if where_expr.is_empty() {
         String::new()
@@ -189,7 +189,7 @@ mod tests {
             "vector search must project the masked column: {sql}"
         );
         assert!(
-            !sql.contains(&crate::query::raw_column_name("ssn")),
+            !sql.contains(&zeroship_schema::query::raw_column_name("ssn")),
             "vector search must never name the raw column: {sql}"
         );
     }

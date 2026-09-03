@@ -54,7 +54,7 @@ const SQLITE_CONSTRAINT_UNIQUE: i32 = 2067;
 
 /// Map a `rusqlite::Error` into a typed [`DbError`].
 ///
-/// The mapping mirrors [`crate::backend::pg_error::classify`]'s SQLSTATE
+/// The mapping mirrors `zeroship_data_postgres::pg_error::classify`'s SQLSTATE
 /// switch — every variant the SDK branches on has a SQLite counter-
 /// part below. The message body always includes the rusqlite display
 /// and the extended code so operators can correlate against the SQLite
@@ -74,12 +74,12 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
         // Its position among the other arms is NOT load-bearing - 9 is in no
         // other arm's set - so do not read the ordering as a guard. What is
         // load-bearing is that the wire code equals
-        // [`crate::backend::sqlite::reservation::CANCELLED_CODE`], the code the
+        // [`crate::reservation::CANCELLED_CODE`], the code the
         // actor's terminal classifier reports: a caller cannot tell, and does
         // not need to tell, which of the two produced it.
         rusqlite::Error::SqliteFailure(ffi_err, _) if ffi_err.extended_code == SQLITE_INTERRUPT => {
             DbError::Coded {
-                code: crate::backend::sqlite::reservation::CANCELLED_CODE.to_string(),
+                code: crate::reservation::CANCELLED_CODE.to_string(),
                 message: msg,
                 hint: None,
             }
@@ -297,7 +297,7 @@ mod tests {
         match db {
             DbError::Coded { code, .. } => assert_eq!(
                 code,
-                crate::backend::sqlite::reservation::CANCELLED_CODE,
+                crate::reservation::CANCELLED_CODE,
                 "SQLITE_INTERRUPT must report the cancellation code"
             ),
             other => {

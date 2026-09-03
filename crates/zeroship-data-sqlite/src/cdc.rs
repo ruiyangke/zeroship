@@ -1,4 +1,4 @@
-//! SQLite-side [`crate::backend::ChangeStream`] adapter — the
+//! SQLite-side [`zeroship_data_core::storage::ChangeStream`] adapter — the
 //! `preupdate_hook` / `commit_hook` / `rollback_hook` integration.
 //!
 //! This file installs the three hooks on the writer-actor's
@@ -91,10 +91,10 @@ use rusqlite::hooks::{Action, PreUpdateCase};
 use rusqlite::types::ValueRef;
 use zeroship_core::change_event::{ChangeEvent, ChangeOp};
 
-use crate::backend::sqlite::SqliteBackend;
-use crate::backend::sqlite::change_sink::{ChangeSink, DeliveryDisposition};
-use crate::backend::sqlite::session::SqliteSession;
-use crate::backend::ChangeStream;
+use crate::SqliteBackend;
+use crate::change_sink::{ChangeSink, DeliveryDisposition};
+use crate::session::SqliteSession;
+use zeroship_data_core::storage::ChangeStream;
 use zeroship_data_core::error::DbError;
 
 // ---------------------------------------------------------------------------
@@ -221,7 +221,7 @@ pub(crate) fn install(
             preupdate_callback(action, db_name, table, case, &buffer_pre);
         },
     ))
-    .map_err(crate::backend::sqlite::error::from_sqlite)?;
+    .map_err(crate::error::from_sqlite)?;
 
     // commit hook: drains buffer, ships packet. Returns `false` to
     // never veto the commit.
@@ -231,14 +231,14 @@ pub(crate) fn install(
     conn.commit_hook(Some(move || -> bool {
         commit_callback(&buffer_commit, &commit_id_commit, &packet_tx_commit)
     }))
-    .map_err(crate::backend::sqlite::error::from_sqlite)?;
+    .map_err(crate::error::from_sqlite)?;
 
     // rollback hook: clears buffer; no channel send.
     let buffer_rb = buffer.clone();
     conn.rollback_hook(Some(move || {
         rollback_callback(&buffer_rb);
     }))
-    .map_err(crate::backend::sqlite::error::from_sqlite)?;
+    .map_err(crate::error::from_sqlite)?;
 
     Ok(dispatcher)
 }
@@ -727,9 +727,9 @@ pub struct SqliteConsumerHandle;
 
 /// SQLite arm of the [`ChangeStream`] capability.
 ///
-/// Constructed via [`crate::backend::BackendHandle::as_change_stream_sqlite`].
+/// Constructed via `zeroship_plugin_db::backend::BackendHandle::as_change_stream_sqlite`.
 /// Owns an `Rc<SqliteBackend>` (Rc-cloned from the
-/// [`crate::backend::BackendHandle::Sqlite`] arm) — same ownership
+/// `zeroship_plugin_db::backend::BackendHandle::Sqlite` arm) — same ownership
 /// shape as the PG-arm adapter for the same `'static` reason
 /// (`async fn`-in-trait futures don't compose with borrowed-reference
 /// self).
@@ -752,9 +752,9 @@ pub struct SqliteChangeStream {
 impl SqliteChangeStream {
     /// Construct an adapter holding an Rc-clone of `backend`.
     /// Crate-private — the
-    /// [`crate::backend::BackendHandle::as_change_stream_sqlite`] accessor
+    /// `zeroship_plugin_db::backend::BackendHandle::as_change_stream_sqlite` accessor
     /// is the public entry point.
-    pub(crate) fn new(backend: Rc<SqliteBackend>) -> Self {
+    pub fn new(backend: Rc<SqliteBackend>) -> Self {
         Self { backend }
     }
 }

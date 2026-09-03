@@ -372,7 +372,7 @@ matches again. That module's own doc calls silently dropped events
 
 **The dev tier loses all mask metadata.** The SQLite introspector requires
 `sibling_name.strip_suffix("_masked")` to match before recording the entry, with
-no `else` (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:2230`); the
+no `else` (`crates/zeroship-data-sqlite/src/lib.rs:2261`); the
 malformed-sentinel arm warns, this one does not.
 
 The write path is specified in full in

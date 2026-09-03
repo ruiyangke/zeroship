@@ -136,7 +136,7 @@ So SQLite admits **one** top-level transaction per `(thread-resource, app_id)`.
 **It does not serialize the second one - there is no `Reserve(Transaction)`
 queue.** A second `db.transaction()` for the same app is refused at once with
 `transaction_connection_busy`
-(`crates/zeroship-plugin-db/src/backend/sqlite/session.rs:688-695`, whose own
+(`crates/zeroship-data-sqlite/src/session.rs:688-695`, whose own
 heading is "Exhaustion: refuse immediately, do not queue"). Postgres queues
 instead, on the pool's `acquire_timeout`, so the two tiers differ in what a
 creator observes under contention: a refusal on SQLite, a wait on Postgres.

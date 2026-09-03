@@ -31,6 +31,7 @@ zeroship-schema = { workspace = true }
 # `ToOpError` lowering in `src/op_error.rs`.
 zeroship-data-core = { workspace = true }
 zeroship-data-postgres = { workspace = true }
+zeroship-data-sqlite = { workspace = true }
 # The operator charter is the worker's assignment authority, and it must not
 # arrive from the creator-authored descriptor. `zeroship-migrate-policy` is a
 # leaf (serde/toml/sha2/hmac/hex/thiserror/schemars and nothing of ours), so
@@ -116,6 +117,7 @@ tempfile = { workspace = true }
 # release binary would retire the check that nothing in production does so.
 zeroship-data-core = { workspace = true, features = ["test-helpers"] }
 zeroship-data-postgres = { workspace = true, features = ["test-helpers"] }
+zeroship-data-sqlite = { workspace = true, features = ["test-helpers"] }
 zeroship-test-support = { workspace = true }
 # The DbPlan IR. A DEV dependency on purpose: nothing in this crate's `src/`
 # uses it yet, and declaring it a normal dependency would say otherwise. The
@@ -209,7 +211,11 @@ harness = false
 # downstream test crates (integration tests in `tests/integration.rs`).
 # The same symbols are visible to the in-crate unit tests via
 # `#[cfg(test)]` so `cargo test --lib` does NOT need this feature.
-test-helpers = ["zeroship-data-core/test-helpers", "zeroship-data-postgres/test-helpers"]
+test-helpers = [
+    "zeroship-data-core/test-helpers",
+    "zeroship-data-postgres/test-helpers",
+    "zeroship-data-sqlite/test-helpers",
+]
 # Live logical-decoding coverage is separate from the broader helper-gated
 # integration suite because it requires the compose Postgres on port 5440.
 live-db-tests = ["test-helpers"]

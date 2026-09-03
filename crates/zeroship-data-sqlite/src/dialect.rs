@@ -1,7 +1,7 @@
 //! SQLite-flavoured `DialectBuilder` impl.
 //!
 //! Fills in the six hooks declared by
-//! [`crate::backend::DialectBuilder`] (see
+//! [`zeroship_data_core::storage::DialectBuilder`] (see
 //! `docs/archive/p1-sqlite-implementation-plan.md` §5 for the hook
 //! set rationale and §7.2 of the design doc for the engine-divergence
 //! table). The shape is a Zero-Sized Type — every hook is a pure
@@ -11,28 +11,28 @@
 //! the matching `PgDialect` impl so `query.rs`'s free-function string
 //! builders can be retargeted onto a dialect-typed entry point in a
 //! later change without re-shaping their call sites. The
-//! [`crate::backend::sqlite::SqliteBackend::attach_app_file`] impl
+//! [`crate::SqliteBackend::attach_app_file`] impl
 //! uses `quote_ident` to escape the ATTACH alias; the other
 //! hooks have no consumer yet.
 
-use crate::backend::DialectBuilder;
+use zeroship_data_core::storage::DialectBuilder;
 
 /// SQLite-flavoured dialect. Zero-sized — every method is pure.
 ///
-/// Constructed implicitly by [`crate::backend::sqlite::SqliteBackend`]
+/// Constructed implicitly by [`crate::SqliteBackend`]
 /// (which `impl`s `DialectBuilder` directly via this ZST's behaviour;
 /// see the impl block in `sqlite/mod.rs`).
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct SqliteDialect;
 
 impl DialectBuilder for SqliteDialect {
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn sql_dialect(&self) -> crate::query::SqlDialect {
-        crate::query::SqlDialect::Sqlite
+    #[cfg(feature = "test-helpers")]
+    fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
+        zeroship_schema::query::SqlDialect::Sqlite
     }
 
     /// Double-quote the identifier, escaping any embedded `"` by
-    /// doubling. Matches `crate::query::quote_ident` (the PG-side
+    /// doubling. Matches `zeroship_schema::query::quote_ident` (the PG-side
     /// helper) — SQLite's identifier-quoting rules are a superset of
     /// PG's in this regard (both support the `"…""…"` escape).
     ///
@@ -71,7 +71,7 @@ impl DialectBuilder for SqliteDialect {
             // `t.encrypted(...)`-declared columns always
             // store the ciphertext wire blob (`[version_flag | nonce |
             // ct+tag]`) as BLOB regardless of `wraps`. The DDL emitter
-            // (`crate::query::field_to_column`) inspects `def.encrypted`
+            // (`zeroship_schema::query::field_to_column`) inspects `def.encrypted`
             // BEFORE calling `map_zs_type` and shortcuts to BLOB on the
             // SQLite arm — but if a future path reaches this branch
             // with `zs_type = "encrypted"`, BLOB is the safe answer.

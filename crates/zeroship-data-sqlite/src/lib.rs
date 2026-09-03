@@ -31,50 +31,69 @@ use serde_json::Value;
 use tempfile::TempDir;
 
 #[cfg(any(test, feature = "test-helpers"))]
-use crate::backend::Backend;
-#[cfg(any(test, feature = "test-helpers"))]
-use crate::backend::SchemaIntrospect;
-use crate::backend::{DialectBuilder, LockManager, SqlExecutor};
+// `SchemaIntrospect` is `cfg(feature)` in data-core, so the feature is the whole
+// gate here - `cfg(test)` would name this crate's test build and could never
+// turn data-core's feature on, leaving the impl without its trait.
+#[cfg(feature = "test-helpers")]
+use zeroship_data_core::storage::SchemaIntrospect;
+use zeroship_data_core::storage::{DialectBuilder, LockManager, SqlExecutor};
 use zeroship_data_core::error::DbError;
 
 use self::change_sink::ChangeSink;
 
 pub mod change_sink;
+
+/// A `ChangeSink` that drops every event, for this crate's own tests.
+///
+/// The adapter injects `BrokerChangeSink`; a vendor crate cannot reach it
+/// without depending on the crate that composes it. Tests here exercise the
+/// backend, not delivery, so a no-op port is the honest double - and it keeps
+/// the composer's shape visible: `open`/`new` take the sink and the key source
+/// as parameters precisely so the policy lives above.
+#[cfg(test)]
+struct NullChangeSink;
+
+#[cfg(test)]
+impl change_sink::ChangeSink for NullChangeSink {
+    fn disposition(&self, _app_id: &str) -> change_sink::DeliveryDisposition {
+        change_sink::DeliveryDisposition::Deliver
+    }
+    fn publish(&self, _event: &zeroship_core::change_event::ChangeEvent) {}
+}
 // `cdc` is the home for the SQLite-side `ChangeStream` adapter (the
 // `preupdate_hook` install + worker->compio publisher integration).
 // Crate-private - the public consumer surface is
 // `BackendHandle::as_change_stream_sqlite()` (mirroring the
 // `as_postgres` / `as_sqlite` accessor shape).
-pub(crate) mod cdc;
-pub(crate) mod dialect;
-pub(crate) mod error;
-pub(crate) mod lock;
+pub mod cdc;
+pub mod dialect;
+pub mod error;
+pub mod lock;
 /// Sidecar storage for an app's mask policy. Moved out of `crud/mask_policy.rs`
 /// on 2026-09-02: a file path, a lock registry and an atomic rename are SQLite
 /// implementation, not engine logic.
-pub(crate) mod mask_policy_store;
+pub mod mask_policy_store;
 /// SQLite typed-row -> JSON decoding, beside the `TypedCell`/`TypedRows` it
 /// reads. Peer of `backend::pg_row_json`; see that module for why the two are
 /// deliberately not shared.
-pub(crate) mod row_json;
+pub mod row_json;
 // SC-2's reservation / cancellation / terminal-classification protocol.
 // Public because the cancellation surface (`SqliteCancelHandle`,
 // `TerminalOutcome`) is the contract a deadline or a dropped caller-side
 // future acts through; the actor in `session` is its only driver.
 pub mod reservation;
-// `pub` under `test-helpers` so the e2e encrypted-column round-trip
-// test in `tests/sqlite_integration.rs` can name `session::TypedCell`
-// for typed BLOB extraction.
-#[cfg(not(feature = "test-helpers"))]
-pub(crate) mod session;
-#[cfg(feature = "test-helpers")]
+// Unconditionally `pub` since the crate split: this module is now a crate
+// boundary rather than a private child, so `pub(crate)` would hide it from the
+// adapter that dispatches into it. The `test-helpers` arm existed to let
+// `tests/sqlite_integration.rs` name `session::TypedCell`; that need is now met
+// by the boundary itself.
 pub mod session;
 // Pure-Rust haversine + `(lat, lng)` BLOB round-trip. The
 // `impl SpatialIndex for SqliteBackend` block at the bottom of
 // this file routes the flat-scan path through this module; the math
 // (`haversine_m`) and the `point_to_blob` / `blob_to_point` helpers
 // stay unit-testable in `spatial.rs`.
-pub(crate) mod spatial;
+pub mod spatial;
 // `sqlite-vec` vec0 vtable lifecycle + MATCH query composition.
 // Supersedes the earlier pure-Rust flat scan (see
 // `docs/archive/p4-search-implementation-plan.md` §10, 2026-05-24
@@ -84,7 +103,7 @@ pub(crate) mod spatial;
 // (`build_create_vec0_sql`, `build_*_trigger_sql`, `vec_to_le_bytes`)
 // live in `vector.rs` so the documented shapes stay unit-testable
 // in isolation.
-pub(crate) mod vector;
+pub mod vector;
 // `session_minter` was the SQLite half of the HMAC session anchor. Its PG half
 // was deleted on 2026-08-27 under AGENTS.md's "privilege follows the PROCESS"
 // invariant; this half survived behind `test-helpers`, unreachable by any
@@ -114,7 +133,7 @@ use session::{SqliteSession, SqliteSessionHandle};
 // inline (`SqliteDialect`) per call; rustc inlines the value away.
 
 /// SQLite backend handle. One instance per worker thread (mirrors
-/// [`crate::backend::PostgresBackend`]'s lifecycle).
+/// `zeroship_data_postgres::PostgresBackend`'s lifecycle).
 ///
 /// **Field set** (`docs/archive/p1-sqlite-implementation-plan.md` §2.1):
 ///
@@ -158,7 +177,7 @@ pub struct SqliteBackend {
     /// admin-schema sidecar; mirrors the session-minter pattern).
     /// Single-threaded (`RefCell` inside `KeyStore`) since every
     /// `SqliteBackend` is owned by a single compio thread.
-    key_store: crate::encryption::KeyStore,
+    key_store: zeroship_data_core::encryption::KeyStore,
 }
 
 impl std::fmt::Debug for SqliteBackend {
@@ -214,13 +233,13 @@ impl SqliteBackend {
             .insert((app_id.to_string(), collection.to_string()));
     }
 
-    pub(crate) async fn query_json(
+    pub async fn query_json(
         &self,
         sql: &str,
         params: &[&str],
     ) -> Result<Vec<serde_json::Value>, DbError> {
         let typed = self.session.query_typed(sql, params).await?;
-        Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(
+        Ok(crate::row_json::typed_rows_to_json_value(
             &typed,
         ))
     }
@@ -238,10 +257,10 @@ impl SqliteBackend {
     /// control session in SQLite's in-memory mode and keeps a
     /// `tempfile::TempDir` alive for the lifetime of the backend so
     /// the per-app ATTACH files stay ephemeral too.
-    pub(crate) async fn open<S: ChangeSink>(
+    pub async fn open<S: ChangeSink>(
         path: impl AsRef<Path>,
         sink: S,
-        key_source: crate::encryption::LocalKeySource,
+        key_source: zeroship_data_core::encryption::LocalKeySource,
     ) -> Result<Self, DbError> {
         let path = path.as_ref().to_path_buf();
         let opened = compio::runtime::spawn_blocking(move || Self::open_blocking(path))
@@ -259,10 +278,10 @@ impl SqliteBackend {
     // `broker::SchemaPendingGuard::new(app_id)` directly - there was never a
     // backend to dispatch on.
     #[allow(dead_code)]
-    pub(crate) fn new<S: ChangeSink>(
+    pub fn new<S: ChangeSink>(
         db_dir: PathBuf,
         sink: S,
-        key_source: crate::encryption::LocalKeySource,
+        key_source: zeroship_data_core::encryption::LocalKeySource,
     ) -> Result<Self, DbError> {
         let session_path = db_dir.join("zs-control.sqlite");
         Self::open_with_session_path(db_dir, session_path, sink, key_source)
@@ -317,7 +336,7 @@ impl SqliteBackend {
         db_dir: PathBuf,
         session_path: PathBuf,
         sink: S,
-        key_source: crate::encryption::LocalKeySource,
+        key_source: zeroship_data_core::encryption::LocalKeySource,
     ) -> Result<Self, DbError> {
         let opened = Self::open_session(db_dir, session_path, None)?;
         Ok(Self::finish_open(opened, sink, key_source))
@@ -356,7 +375,7 @@ impl SqliteBackend {
     fn finish_open<S: ChangeSink>(
         opened: OpenedBackend,
         sink: S,
-        key_source: crate::encryption::LocalKeySource,
+        key_source: zeroship_data_core::encryption::LocalKeySource,
     ) -> Self {
         let OpenedBackend {
             session,
@@ -386,7 +405,7 @@ impl SqliteBackend {
         // LOCAL: the roots this isolate was handed, else
         // `ZEROSHIP_COLUMN_KEY_<KEYID>`. Cache lives for the lifetime of the
         // backend; clears on backend drop.
-        let key_store = crate::encryption::KeyStore::new(key_source);
+        let key_store = zeroship_data_core::encryption::KeyStore::new(key_source);
 
         Self {
             memory_db_dir,
@@ -426,7 +445,7 @@ impl SqliteBackend {
     /// open creator transaction, which is exactly the coupling SC-2 Decision 1
     /// removes.
     #[cfg(not(feature = "test-helpers"))]
-    pub(crate) fn autocommit_client(&self) -> SqliteSessionHandle {
+    pub fn autocommit_client(&self) -> SqliteSessionHandle {
         SqliteSessionHandle::new(self.session.clone())
     }
 
@@ -449,7 +468,7 @@ impl SqliteBackend {
     /// [`session::SqliteSession::arm_next_command_gate_for_tests`]; the gate is
     /// per-session, so it cannot be tripped by another backend's traffic.
     #[cfg(any(test, feature = "test-helpers"))]
-    pub(crate) fn arm_next_command_gate_for_tests(&self) -> session::NextCommandGate {
+    pub fn arm_next_command_gate_for_tests(&self) -> session::NextCommandGate {
         self.session.arm_next_command_gate_for_tests()
     }
 
@@ -463,7 +482,7 @@ impl SqliteBackend {
     #[cfg(feature = "test-helpers")]
     pub fn spent_autocommit_reservation_for_tests(
         &self,
-    ) -> std::sync::Arc<crate::backend::sqlite::reservation::Reservation> {
+    ) -> std::sync::Arc<crate::reservation::Reservation> {
         self.session.autocommit_reservation_for_tests()
     }
 
@@ -471,7 +490,7 @@ impl SqliteBackend {
     #[cfg(feature = "test-helpers")]
     pub async fn exec_on_reservation_for_tests(
         &self,
-        reservation: &std::sync::Arc<crate::backend::sqlite::reservation::Reservation>,
+        reservation: &std::sync::Arc<crate::reservation::Reservation>,
         sql: &str,
         params: &[&str],
     ) -> Result<u64, DbError> {
@@ -487,7 +506,7 @@ impl SqliteBackend {
         &self,
         client: &SqliteSessionHandle,
         intent: session::TerminalIntent,
-    ) -> Result<crate::backend::sqlite::reservation::TerminalOutcome, DbError> {
+    ) -> Result<crate::reservation::TerminalOutcome, DbError> {
         client.settle(intent).await
     }
 }
@@ -705,17 +724,17 @@ impl SqliteBackend {
     }
 }
 
-#[cfg(any(test, feature = "test-helpers"))]
+#[cfg(feature = "test-helpers")]
 impl SchemaIntrospect for SqliteBackend {
     // Same associated type as the PG impl — the diff engine consumes
     // a uniform `LiveSchema` shape; the SQLite impl populates the
     // PG-style `pg_type` strings with SQLite affinity names
     // (`TEXT`/`INTEGER`/`REAL`/`BLOB`/`NUMERIC`). Classifier
     // teaching about the new vocabulary follows in a later PR.
-    type LiveSchema = crate::diff::LiveSchema;
+    type LiveSchema = zeroship_schema::diff::LiveSchema;
 
     /// Walk the SQLite catalog for `app_id`'s attached database and
-    /// produce a [`crate::diff::LiveSchema`] in the same shape the PG
+    /// produce a [`zeroship_schema::diff::LiveSchema`] in the same shape the PG
     /// impl emits — populated via four PRAGMA round-trips per table:
     ///
     /// 1. `SELECT name FROM "<app_id>".sqlite_master WHERE type='table'`
@@ -748,7 +767,7 @@ impl SchemaIntrospect for SqliteBackend {
     /// only user-declared tables; surfacing system tables would
     /// trigger spurious "drop table" classifications.
     async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError> {
-        let mut out = crate::diff::LiveSchema::default();
+        let mut out = zeroship_schema::diff::LiveSchema::default();
 
         // 1. Table list. The `app_id` is interpolated as a quoted
         //    identifier — the dialect's `quote_ident` doubles embedded
@@ -786,7 +805,7 @@ impl SchemaIntrospect for SqliteBackend {
             // encryption metadata from the `/* zsenc:<mode>:<keyId>:
             // <wraps> */` sentinel the DDL emitter writes for every
             // `t.encrypted(...)`-declared column (see
-            // `crate::query::field_to_column`). PRAGMA `table_info`
+            // `zeroship_schema::query::field_to_column`). PRAGMA `table_info`
             // surfaces the declared type but strips comments; the
             // sentinel only survives in `sqlite_master.sql`.
             //
@@ -830,7 +849,7 @@ impl SchemaIntrospect for SqliteBackend {
                 let mask = mask_by_parent.get(&name).cloned();
                 col_map.insert(
                     name,
-                    crate::diff::ColumnInfo {
+                    zeroship_schema::diff::ColumnInfo {
                         pg_type,
                         not_null,
                         default_expr,
@@ -896,7 +915,7 @@ impl SchemaIntrospect for SqliteBackend {
 
                 idx_map.insert(
                     idx_name,
-                    crate::diff::IndexInfo {
+                    zeroship_schema::diff::IndexInfo {
                         is_unique,
                         columns,
                         // SQLite indexes are always considered valid
@@ -936,7 +955,7 @@ impl SchemaIntrospect for SqliteBackend {
                 let constraint_name = format!("fk_{fk_id}_{from_col}");
                 fk_map.insert(
                     from_col.clone(),
-                    crate::diff::ForeignKeyInfo {
+                    zeroship_schema::diff::ForeignKeyInfo {
                         constraint_name,
                         column: from_col,
                         target_table,
@@ -1003,8 +1022,8 @@ impl DialectBuilder for SqliteBackend {
     // per call — rustc inlines the value away because every method on
     // `SqliteDialect` is `&self` and side-effect-free.
 
-    #[cfg(any(test, feature = "test-helpers"))]
-    fn sql_dialect(&self) -> crate::query::SqlDialect {
+    #[cfg(feature = "test-helpers")]
+    fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
         SqliteDialect.sql_dialect()
     }
 
@@ -1034,8 +1053,10 @@ impl DialectBuilder for SqliteBackend {
 // orchestrator paths that migrate onto a backend-agnostic
 // bound (`<B: Backend>`) will pick up `SqliteBackend` via this impl
 // without any further per-trait wiring.
-#[cfg(any(test, feature = "test-helpers"))]
-impl Backend for SqliteBackend {}
+// The marker impl is NOT here: `Backend` is `zeroship-plugin-db`'s own
+// `pub(crate)` composition trait, so the orphan rule puts the impl in the crate
+// that owns the trait even though the type is this one's. See
+// `zeroship-plugin-db/src/backend/mod.rs`, beside the PostgreSQL arm's.
 
 // ---------------------------------------------------------------------------
 // `VectorIndex` impl (sqlite-vec `vec0` virtual table)
@@ -1091,7 +1112,7 @@ impl Backend for SqliteBackend {}
 // the same transaction. The broker sees the base-row event with the
 // vec0 index already updated at COMMIT time.
 
-impl crate::backend::VectorIndex for SqliteBackend {
+impl zeroship_data_core::storage::VectorIndex for SqliteBackend {
     /// vec0-powered top-k vector search. Composes a SQL of the form
     ///
     /// ```sql
@@ -1116,7 +1137,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
         column: &str,
         query: &[f32],
         k: usize,
-        metric: crate::backend::VectorMetric,
+        metric: zeroship_schema::descriptors::VectorMetric,
         filter: &serde_json::Value,
         schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
@@ -1139,11 +1160,11 @@ impl crate::backend::VectorIndex for SqliteBackend {
         // returns the WHERE expression text directly (or an empty
         // string if `filter` is non-object / `Null`).
         let mut params: Vec<String> = Vec::new();
-        let where_expr = crate::query::build_where_with_dialect(
+        let where_expr = zeroship_schema::query::build_where_with_dialect(
             filter,
             &mut params,
             &schema_hint,
-            crate::query::SqlDialect::Sqlite,
+            zeroship_schema::query::SqlDialect::Sqlite,
         )
         .map_err(DbError::from)?;
 
@@ -1183,7 +1204,7 @@ impl crate::backend::VectorIndex for SqliteBackend {
         )?;
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = self.session.query_typed(&sql, &param_refs).await?;
-        Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(
+        Ok(crate::row_json::typed_rows_to_json_value(
             &typed,
         ))
     }
@@ -1194,8 +1215,8 @@ fn build_spatial_near_base_query(
     collection: &str,
     filter: &serde_json::Value,
     schema_hint: &serde_json::Value,
-) -> Result<crate::query::BuiltQuery, DbError> {
-    crate::query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+) -> Result<zeroship_schema::query::BuiltQuery, DbError> {
+    zeroship_schema::query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         app_id,
         collection,
         filter,
@@ -1206,7 +1227,7 @@ fn build_spatial_near_base_query(
         schema_hint,
         /* unmask_columns */ &[],
         /* filter_soft_deleted */ false,
-        crate::query::SqlDialect::Sqlite,
+        zeroship_schema::query::SqlDialect::Sqlite,
     )
     .map_err(DbError::from)
 }
@@ -1232,13 +1253,13 @@ fn build_spatial_near_base_query(
 //     `limit`, and re-emit as JSON with a synthetic `_distance_m: f64`
 //     field.
 
-impl crate::backend::SpatialIndex for SqliteBackend {
+impl zeroship_data_core::storage::SpatialIndex for SqliteBackend {
     async fn spatial_near(
         &self,
         binding: &zeroship_data_core::binding::DbBinding,
         collection: &str,
         column: &str,
-        point: crate::backend::GeoPoint,
+        point: zeroship_schema::descriptors::GeoPoint,
         radius_m: f64,
         filter: &serde_json::Value,
         limit: Option<usize>,
@@ -1321,7 +1342,7 @@ impl crate::backend::SpatialIndex for SqliteBackend {
         for (d, idx) in scored {
             let row = &typed.rows[idx];
             let mut obj =
-                crate::backend::sqlite::row_json::typed_row_to_json_object(&typed.columns, row);
+                crate::row_json::typed_row_to_json_object(&typed.columns, row);
             obj.insert(
                 "_distance_m".to_string(),
                 serde_json::Number::from_f64(d)
@@ -1338,7 +1359,7 @@ impl crate::backend::SpatialIndex for SqliteBackend {
 // ===========================================================================
 //
 // Symmetric to the PG-side impl in `backend/postgres.rs`. Crypto math
-// is shared with PG via `crate::encryption::aead`, and key sourcing no
+// is shared with PG via `zeroship_data_core::encryption::aead`, and key sourcing no
 // longer diverges at all: both backends take a `LocalKeySource`, so a
 // root comes either from the isolate's supplied keys or from
 // `ZEROSHIP_COLUMN_KEY_<KEYID>`. PG used to try a SECURITY DEFINER
@@ -1355,7 +1376,7 @@ impl SqliteBackend {
     /// All that remains of the `EncryptedColumn` impl deleted on 2026-09-02;
     /// see the twin on `PostgresBackend`. Both bodies were identical, which is
     /// what made the trait a vendor coupling with no vendor content.
-    pub fn key_store(&self) -> &crate::encryption::KeyStore {
+    pub fn key_store(&self) -> &zeroship_data_core::encryption::KeyStore {
         &self.key_store
     }
 }
@@ -1363,9 +1384,9 @@ impl SqliteBackend {
 /// Recover per-column encryption metadata from the
 /// `/* zsenc:<mode>:<keyId>:<wraps> */` sentinel comments the DDL
 /// emitter writes into the `CREATE TABLE` text (see
-/// `crate::query::field_to_column`).
+/// `zeroship_schema::query::field_to_column`).
 ///
-/// Returns a map from column name → [`crate::diff::EncryptionMeta`].
+/// Returns a map from column name → [`zeroship_schema::diff::EncryptionMeta`].
 /// Columns without an attached sentinel are absent from the map (which
 /// is the same shape `EncryptionMeta` round-trips through —
 /// `ColumnInfo::encryption = None` for plain columns).
@@ -1391,8 +1412,8 @@ impl SqliteBackend {
 #[cfg(any(test, feature = "test-helpers"))]
 fn parse_encryption_sentinels(
     create_table_text: &str,
-) -> std::collections::HashMap<String, crate::diff::EncryptionMeta> {
-    use crate::diff::{EncryptionMeta, WrappedType};
+) -> std::collections::HashMap<String, zeroship_schema::diff::EncryptionMeta> {
+    use zeroship_schema::diff::{EncryptionMeta, WrappedType};
     let mut out = std::collections::HashMap::new();
     // Walk the body, finding each `/* zsenc:...` marker. For each one,
     // rewind to the most recent double-quoted identifier to recover the
@@ -1414,8 +1435,8 @@ fn parse_encryption_sentinels(
         let parts: Vec<&str> = body_trim.split(':').collect();
         if parts.len() == 3 {
             let mode = match parts[0] {
-                "randomised" | "randomized" => Some(crate::backend::EncryptionMode::Randomised),
-                "deterministic" => Some(crate::backend::EncryptionMode::Deterministic),
+                "randomised" | "randomized" => Some(zeroship_schema::descriptors::EncryptionMode::Randomised),
+                "deterministic" => Some(zeroship_schema::descriptors::EncryptionMode::Deterministic),
                 _ => None,
             };
             let key_id = parts[1];
@@ -1461,7 +1482,7 @@ fn parse_encryption_sentinels(
 /// Recover per-parent-column mask metadata from the
 /// `/* __zsmask:kind=…,classification=… */` sentinel comments the DDL
 /// emitter writes alongside every `<col>_masked` sibling column (see
-/// `crate::query::build_create_table_with_fks`).
+/// `zeroship_schema::query::build_create_table_with_fks`).
 ///
 /// Returns a map keyed on the **PARENT** column name (the sibling's
 /// existence is the discoverability hook, but the mask metadata
@@ -1474,7 +1495,7 @@ fn parse_encryption_sentinels(
 /// kind, unknown classification, malformed body) is logged via
 /// `tracing::warn!` and skipped — the parent column then reads as
 /// unmasked, and a re-deploy regenerates the sentinel. This mirrors
-/// the PG arm's treatment in `crate::backend::pg_introspect::read_live_schema` so both
+/// the PG arm's treatment in `zeroship-data-postgres's pg_introspect::read_live_schema` so both
 /// arms surface the same "loud-but-recoverable" failure shape.
 ///
 /// Same hand-rolled walker pattern as
@@ -1482,8 +1503,8 @@ fn parse_encryption_sentinels(
 #[cfg(any(test, feature = "test-helpers"))]
 fn parse_mask_sentinels(
     create_table_text: &str,
-) -> std::collections::HashMap<String, crate::diff::MaskMeta> {
-    use crate::diff::MaskMeta;
+) -> std::collections::HashMap<String, zeroship_schema::diff::MaskMeta> {
+    use zeroship_schema::diff::MaskMeta;
     let mut out = std::collections::HashMap::new();
     const MARKER: &str = "/* __zsmask:";
     let mut search_pos = 0usize;
@@ -1519,7 +1540,7 @@ fn parse_mask_sentinels(
                             MaskMeta {
                                 kind,
                                 classification,
-                                sibling_column: crate::query::raw_column_name(&column),
+                                sibling_column: zeroship_schema::query::raw_column_name(&column),
                             },
                         );
                     }
@@ -1646,20 +1667,20 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 // to in-crate unit tests - it fails the build with E0405/E0432, measured.
 
 #[cfg(feature = "test-helpers")]
-impl crate::backend::Backup for SqliteBackend {
+impl zeroship_data_core::storage::Backup for SqliteBackend {
     async fn snapshot(
         &self,
         app_id: &str,
         dest_uri: &str,
-        opts: crate::backend::SnapshotOpts,
-    ) -> Result<crate::backend::SnapshotHandle, DbError> {
+        opts: zeroship_data_core::capability::SnapshotOpts,
+    ) -> Result<zeroship_data_core::capability::SnapshotHandle, DbError> {
         backup_sqlite::snapshot_impl(self, app_id, dest_uri, opts).await
     }
 
     async fn restore(
         &self,
         app_id: &str,
-        snapshot: &crate::backend::SnapshotHandle,
+        snapshot: &zeroship_data_core::capability::SnapshotHandle,
     ) -> Result<(), DbError> {
         backup_sqlite::restore_impl(self, app_id, snapshot).await
     }
@@ -1667,7 +1688,7 @@ impl crate::backend::Backup for SqliteBackend {
     async fn pitr_replay(
         &self,
         _app_id: &str,
-        _target: crate::backend::PitrTarget,
+        _target: zeroship_data_core::capability::PitrTarget,
     ) -> Result<(), DbError> {
         Err(DbError::Configuration {
             code: "pitr_pg_only",
@@ -1701,7 +1722,7 @@ mod backup_sqlite {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::SqliteBackend;
-    use crate::backend::{
+    use zeroship_data_core::capability::{
         BusyPolicy, LockScope, PitrTarget, SNAPSHOT_RESTORE_LOCK_TAG, SnapshotHandle, SnapshotOpts,
     };
     use zeroship_data_core::error::DbError;
@@ -2080,7 +2101,7 @@ mod backup_sqlite {
 #[cfg(test)]
 mod tests {
     //! Compile-time trait-shape assertions, mirroring the PR-0 set
-    //! at `crate::backend::tests` (which target `PostgresBackend`).
+    //! at `zeroship_plugin_db::backend`'s conformance tests (which target `PostgresBackend`).
     //! These pin the SQLite-side surface so any future drift in the
     //! capability-trait composition trips compilation here rather
     //! than at a distant orchestrator / context call site.
@@ -2089,13 +2110,19 @@ mod tests {
     //! the bound itself is the assertion.
 
     use super::*;
-    use crate::backend::{Backend, DialectBuilder, LockManager, SchemaIntrospect, SqlExecutor};
+    use zeroship_data_core::storage::{DialectBuilder, LockManager, SqlExecutor};
+    #[cfg(feature = "test-helpers")]
+    use zeroship_data_core::storage::SchemaIntrospect;
 
     #[test]
     fn memory_backend_tempdir_is_removed_on_drop() {
         let runtime = compio::runtime::Runtime::new().expect("compio runtime");
         let temp_dir_path = runtime.block_on(async {
-            let backend = crate::backend_selection::open_sqlite_backend(":memory:")
+            let backend = SqliteBackend::open(
+                ":memory:",
+                crate::NullChangeSink,
+                zeroship_data_core::encryption::LocalKeySource::env_var(),
+            )
                 .await
                 .expect("open in-memory backend");
             let temp_dir_path = backend.db_dir().to_path_buf();
@@ -2136,7 +2163,7 @@ mod tests {
             bq.sql,
         );
         assert!(
-            !bq.sql.contains(&crate::query::raw_column_name("ssn")),
+            !bq.sql.contains(&zeroship_schema::query::raw_column_name("ssn")),
             "spatial base query must never name the raw column: {}",
             bq.sql,
         );
@@ -2148,10 +2175,11 @@ mod tests {
     /// regresses the super-bound relaxation back to
     /// `Client = compio_postgres::Client`) fails compilation in this
     /// module rather than at a distant orchestrator call site.
-    fn assert_sqlite_backend_impls_backend() {
-        fn assert_impl<T: Backend>() {}
-        assert_impl::<SqliteBackend>();
-    }
+    // `assert_sqlite_backend_impls_backend` is NOT here: `Backend` is the
+    // adapter's own `pub(crate)` marker, so the impl and the assertion pinning
+    // it both live in `zeroship-plugin-db/src/backend/mod.rs`. The sub-trait
+    // assertions below stay, because their traits are data-core's and visible.
+    fn assert_sqlite_backend_impls_backend() {}
 
     fn assert_sqlite_backend_impls_sql_executor() {
         fn assert_impl<T: SqlExecutor>() {}
@@ -2165,8 +2193,11 @@ mod tests {
 
     fn assert_sqlite_backend_impls_namespace_manager() {}
 
+    // Follows `SchemaIntrospect`'s own gate in data-core: the trait is absent
+    // from a default build, so an ungated assertion here cannot name it.
+    #[cfg(feature = "test-helpers")]
     fn assert_sqlite_backend_impls_schema_introspect() {
-        fn assert_impl<T: SchemaIntrospect<LiveSchema = crate::diff::LiveSchema>>() {}
+        fn assert_impl<T: SchemaIntrospect<LiveSchema = zeroship_schema::diff::LiveSchema>>() {}
         assert_impl::<SqliteBackend>();
     }
 
@@ -2180,7 +2211,7 @@ mod tests {
     /// regresses at compile time if the impl block is detached or
     /// the method shape drifts from the trait surface.
     fn assert_sqlite_backend_impls_vector_index() {
-        fn assert_impl<T: crate::backend::VectorIndex>() {}
+        fn assert_impl<T: zeroship_data_core::storage::VectorIndex>() {}
         assert_impl::<SqliteBackend>();
     }
 
@@ -2188,19 +2219,19 @@ mod tests {
     /// wire so the haversine flat-scan path's trait composition
     /// regresses at compile time if the impl block is detached.
     fn assert_sqlite_backend_impls_spatial_index() {
-        fn assert_impl<T: crate::backend::SpatialIndex>() {}
+        fn assert_impl<T: zeroship_data_core::storage::SpatialIndex>() {}
         assert_impl::<SqliteBackend>();
     }
 
     /// Pin the SQLite-arm [`ChangeStream`] adapter
-    /// (`crate::backend::sqlite::cdc::SqliteChangeStream`) with the
+    /// (`crate::cdc::SqliteChangeStream`) with the
     /// agreed `ConsumerHandle = SqliteConsumerHandle` shape. A
     /// regression that detaches the impl block — or renames the
     /// associated type — trips here, not at the
     /// `BackendHandle::as_change_stream_sqlite()` accessor.
     fn assert_sqlite_change_stream_impls_change_stream() {
-        use crate::backend::ChangeStream;
-        use crate::backend::sqlite::cdc::{SqliteChangeStream, SqliteConsumerHandle};
+        use zeroship_data_core::storage::ChangeStream;
+        use crate::cdc::{SqliteChangeStream, SqliteConsumerHandle};
         fn assert_impl<T: ChangeStream<ConsumerHandle = SqliteConsumerHandle>>() {}
         assert_impl::<SqliteChangeStream>();
     }
@@ -2233,9 +2264,9 @@ mod tests {
             \"name\" TEXT \n)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("ssn").expect("ssn must be parsed");
-        assert!(matches!(m.mode, crate::backend::EncryptionMode::Randomised));
+        assert!(matches!(m.mode, zeroship_schema::descriptors::EncryptionMode::Randomised));
         assert_eq!(m.key_id, "default");
-        assert!(matches!(m.wraps, crate::diff::WrappedType::String));
+        assert!(matches!(m.wraps, zeroship_schema::diff::WrappedType::String));
         assert!(
             !got.contains_key("name"),
             "non-encrypted col must be absent"
@@ -2252,10 +2283,10 @@ mod tests {
         let m = got.get("salary").expect("salary must be parsed");
         assert!(matches!(
             m.mode,
-            crate::backend::EncryptionMode::Deterministic
+            zeroship_schema::descriptors::EncryptionMode::Deterministic
         ));
         assert_eq!(m.key_id, "payroll_v2");
-        assert!(matches!(m.wraps, crate::diff::WrappedType::Number));
+        assert!(matches!(m.wraps, zeroship_schema::diff::WrappedType::Number));
     }
 
     /// US spelling `randomized` round-trips as canonical Randomised
@@ -2266,8 +2297,8 @@ mod tests {
         let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:randomized:default:bytes */)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("a").expect("a must be parsed");
-        assert!(matches!(m.mode, crate::backend::EncryptionMode::Randomised));
-        assert!(matches!(m.wraps, crate::diff::WrappedType::Bytes));
+        assert!(matches!(m.mode, zeroship_schema::descriptors::EncryptionMode::Randomised));
+        assert!(matches!(m.wraps, zeroship_schema::diff::WrappedType::Bytes));
     }
 
     /// Multiple encrypted columns in one CREATE TABLE — each attaches
@@ -2281,11 +2312,11 @@ mod tests {
         assert_eq!(got.len(), 2);
         assert!(matches!(
             got["ssn"].mode,
-            crate::backend::EncryptionMode::Randomised
+            zeroship_schema::descriptors::EncryptionMode::Randomised
         ));
         assert!(matches!(
             got["tin"].mode,
-            crate::backend::EncryptionMode::Deterministic
+            zeroship_schema::descriptors::EncryptionMode::Deterministic
         ));
         assert_eq!(got["tin"].key_id, "tax");
     }
@@ -2361,8 +2392,8 @@ mod tests {
     /// and carries the sentinel.
     #[test]
     fn sqlite_introspection_reads_mask_sentinel_in_create_sql() {
-        use crate::diff::{Classification, MaskKind};
-        let raw = crate::query::raw_column_name("ssn");
+        use zeroship_schema::diff::{Classification, MaskKind};
+        let raw = zeroship_schema::query::raw_column_name("ssn");
         let ddl = format!(
             "CREATE TABLE \"app\".\"users\" (\n  \
              \"id\" INTEGER PRIMARY KEY,\n  \
@@ -2384,15 +2415,15 @@ mod tests {
     /// Multiple masked columns in one table → one entry per field.
     #[test]
     fn sqlite_introspection_multiple_masked_columns() {
-        use crate::diff::{Classification, MaskKind};
+        use zeroship_schema::diff::{Classification, MaskKind};
         let ddl = format!(
             "CREATE TABLE t (\n  \
              \"{}\" TEXT,\n  \
              \"ssn\" TEXT /* __zsmask:kind=last4,classification=spi */,\n  \
              \"{}\" TEXT,\n  \
              \"email\" TEXT /* __zsmask:kind=email,classification=pii */\n)",
-            crate::query::raw_column_name("ssn"),
-            crate::query::raw_column_name("email"),
+            zeroship_schema::query::raw_column_name("ssn"),
+            zeroship_schema::query::raw_column_name("email"),
         );
         let got = parse_mask_sentinels(&ddl);
         assert_eq!(got.len(), 2);
@@ -2459,6 +2490,7 @@ mod tests {
         let _ = assert_sqlite_backend_impls_sql_executor as fn();
         let _ = assert_sqlite_backend_impls_lock_manager as fn();
         let _ = assert_sqlite_backend_impls_namespace_manager as fn();
+        #[cfg(feature = "test-helpers")]
         let _ = assert_sqlite_backend_impls_schema_introspect as fn();
         let _ = assert_sqlite_backend_impls_dialect_builder as fn();
         let _ = assert_sqlite_backend_impls_vector_index as fn();

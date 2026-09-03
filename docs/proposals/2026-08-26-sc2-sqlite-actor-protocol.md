@@ -173,7 +173,7 @@ a deliberate cancellation into a mystery:
   there was no transaction" as a failure - that case is classified by
   `is_autocommit`, per the table below.
 - **`SQLITE_INTERRUPT` (extended code 9) has its own arm in the error mapper**
-  (`backend/sqlite/error.rs:48,69-81`). Without one, a cancellation the platform
+  (`zeroship-data-sqlite/src/error.rs:48,69-81`). Without one, a cancellation the platform
   *asked for* surfaces as an unmapped, opaque database error, indistinguishable
   from a real fault at exactly the moment an operator is trying to understand a
   timeout.
@@ -200,7 +200,7 @@ we own:
 > `Reservation::running_seq` - not an unknowable first `sqlite3_step`.
 
 The handshake between a cancelling caller and the executing actor is Dekker's,
-on `SeqCst` (`backend/sqlite/reservation.rs:19-38`):
+on `SeqCst` (`zeroship-data-sqlite/src/reservation.rs:19-38`):
 
 ```text
 caller: terminal.store(CancelIntent)  ; then load(running_seq)
@@ -261,7 +261,7 @@ other reports a success that did not.
 So the contract is: after any terminal statement, the actor finalizes the
 statement, proves `!is_busy()`, and then **samples `is_autocommit`**. That
 sample, not the error, classifies the outcome (`classify_commit` /
-`classify_rollback`, `backend/sqlite/reservation.rs:519-620`):
+`classify_rollback`, `zeroship-data-sqlite/src/reservation.rs:519-620`):
 
 | terminal statement | raw result | `is_autocommit` after | outcome |
 | --- | --- | --- | --- |
@@ -384,11 +384,11 @@ unless noted.
 | A cancellation after commit does not roll the commit back | `a_cancellation_after_commit_does_not_roll_the_commit_back` (`:10129`) |
 | A cancel for a retired reservation does not touch the next transaction | `a_cancel_for_a_retired_reservation_does_not_roll_back_the_next_transaction` (`:10194`) |
 | A second cancellation is answered, not re-executed | `a_second_cancellation_is_answered_not_re_executed` (`:10290`) |
-| All eight classifier rows, with a fault injected at the terminal statement and `is_autocommit` sampled after | unit tests in `src/backend/sqlite/reservation.rs` (`:625+`) |
-| `SQLITE_INTERRUPT` maps to the cancellation code and does not fall through to the catch-all | `src/backend/sqlite/error.rs:288-303` |
+| All eight classifier rows, with a fault injected at the terminal statement and `is_autocommit` sampled after | unit tests in `src/zeroship-data-sqlite/src/reservation.rs` (`:625+`) |
+| `SQLITE_INTERRUPT` maps to the cancellation code and does not fall through to the catch-all | `src/zeroship-data-sqlite/src/error.rs:288-303` |
 | A write upgrade on a stale WAL snapshot is refused with `SQLITE_BUSY_SNAPSHOT` | `a_write_upgrade_on_a_stale_wal_snapshot_is_refused` (`:10718`) |
 | App files are DELETE, so the same schedule there is a plain `SQLITE_BUSY` | `an_app_files_write_upgrade_is_plain_busy_because_it_is_not_in_wal` (`:10806`) |
-| `ReattachFile` swaps the file with both connections detached first | unit tests in `src/backend/sqlite/session.rs` (`:2785+`) |
+| `ReattachFile` swaps the file with both connections detached first | unit tests in `src/zeroship-data-sqlite/src/session.rs` (`:2785+`) |
 
 Three notes on what these arms do **not** establish, so nobody reads them for
 more than they carry:

@@ -516,7 +516,7 @@ one changes a shape:
 | cost accrues to one app, throttling hits it, the causer is unthrottled | `crates/zeroship-metering/src/meter.rs:1` | #57 |
 | binding a 2nd app refuses its first deploy | `crates/zeroship-control/src/registry.rs:469` | #49 |
 | an apply with no deploy strands running isolates | same | #51 |
-| SQLite CDC + transaction lanes key on alias==app_id | `crates/zeroship-plugin-db/src/backend/sqlite/cdc.rs:121` | #54 |
+| SQLite CDC + transaction lanes key on alias==app_id | `crates/zeroship-data-sqlite/src/cdc.rs:121` | #54 |
 | teardown is app-keyed end to end | `crates/zeroship-plugin-db/src/drop_namespace.rs:69` | #55 |
 
 Every path above is a full repo path on purpose: `tests/doc_citation_gate.sh` only
@@ -654,9 +654,9 @@ measurements under it were wrong, and each was wrong in a different way.
    conclusion reached through a wrong mechanism. A citation that supports the
    verdict is not thereby verified.)*
 3. **"The SQLite introspector drops all mask metadata with no `else`
-   (`backend/sqlite/mod.rs:2220-2237`)."** True as written and irrelevant on the
+   (`zeroship-data-sqlite/src/lib.rs:2220-2237`)."** True as written and irrelevant on the
    production path: `parse_mask_sentinels`
-   (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:2201`) and its only
+   (`crates/zeroship-data-sqlite/src/lib.rs:2232`) and its only
    caller, the `SchemaIntrospect for SqliteBackend` impl (`:804`, call at
    `:917`), are both `#[cfg(any(test, feature = "test-helpers"))]`. The dev tier
    does not run it, and `crates/zeroship-plugin-db/src/descriptor.rs:30-32`
@@ -746,7 +746,7 @@ count is not invented here".
 statements in `crates/zeroship-plugin-db/src/`, creating **three** tables, each
 with a PostgreSQL arm and a SQLite arm, and none of the six is `cfg`-gated:
 `"<app>"."__zeroship_migrations"` (`audit.rs:236`,
-`backend/sqlite/mod.rs:1292`), `"<app>"."__zeroship_audit_mask_drift"`
+`zeroship-data-sqlite/src/lib.rs:1292`), `"<app>"."__zeroship_audit_mask_drift"`
 (`crud/mask_drift.rs:793`, `:827`), and `"<app>"."__zeroship_audit_unmask"`
 (`crud/unmask.rs:850`, `:901`). The unmask table is created from
 `ensure_audit_unmask_table` (`crud/unmask.rs:838`), called at `:732` inside
@@ -1031,7 +1031,7 @@ has no `session_ctx` at all.** The SQLite backend says so in its own words -
 "SQLite has no `session_ctx` table - there is no per-PID session-context concept
 here", and downstream audit paths "bind context through the session actor's
 per-call state instead"
-(`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:1652-1655`). **Two tiers
+(`crates/zeroship-data-sqlite/src/lib.rs:1652-1655`). **Two tiers
 disagreeing about where identity is enforced is either a contract-parity break
 or evidence that one of them is sufficient; it was read as neither, and the
 question stayed open.**
@@ -1040,7 +1040,7 @@ question stayed open.**
 "`SessionMinter` and the backup/snapshot contracts are either assigned a
 destination in SC-3's ledger or deleted with the feature they serve" - resolves
 as a deletion. The SQLite side goes too
-(`crates/zeroship-plugin-db/src/backend/sqlite/session_minter.rs` - DELETED
+(`crates/zeroship-data-sqlite/src/session_minter.rs` - DELETED
 2026-09-02, along with the trait, `SessionInit`, `MintedToken`, the
 `SqliteBackend` impl and its secrets constructor, and the nine integration
 tests; the PG half had gone on 2026-08-27), and the
@@ -1283,7 +1283,7 @@ would port this one.**
 `Backup::pitr_replay` (`crates/zeroship-data-core/src/storage.rs:603`) goes
 with the table, along with its PostgreSQL implementation, which does nothing but
 `INSERT INTO __zeroship_admin.pitr_targets` (`backend/postgres.rs:1702-1718`),
-and its SQLite stub (`backend/sqlite/mod.rs:2362`). Nothing calls it:
+and its SQLite stub (`zeroship-data-sqlite/src/lib.rs:2362`). Nothing calls it:
 `DbPlatform` exposes only `registerModel` and `setMaskPolicy`
 (`v8_classes/db_platform.rs:115`, `:145`), both of which this design deletes.
 
@@ -1368,7 +1368,7 @@ value. **A creator can select the mode and cannot use what it is for.**"
 
 **True.** The last sentence is false: **a creator cannot select the mode at
 all.** The paragraph was written from the runtime, where the mode is real
-(`aad.rs:75-78`, `backend/postgres.rs:1173`, `backend/sqlite/mod.rs:2053`,
+(`aad.rs:75-78`, `backend/postgres.rs:1173`, `zeroship-data-sqlite/src/lib.rs:2074`,
 `crud/mask_drift.rs:575`, `crud/unmask.rs:234`). It is unreachable from the
 authoring surface, which is the only surface a creator has:
 `ColType::Encrypted { of }` (`crates/zeroship-migrate-ir/src/ir.rs:670`) carries

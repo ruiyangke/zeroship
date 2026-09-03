@@ -846,7 +846,7 @@ not of the tree: `attach_generation` has zero occurrences in `crates/`.
 `SqliteBackend::attach_app_file` takes an `app_id`, derives
 `zs-{app_id}.sqlite`, aliases the attachment by app id and dedups on an
 `app_id_cache`
-(`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:751-775`). One file per
+(`crates/zeroship-data-sqlite/src/lib.rs:770-775`). One file per
 app, one app per file. So the decoupling **does** reach this group: if an app
 may hold several databases, the file name, the alias and the cache key can no
 longer all be the app id.

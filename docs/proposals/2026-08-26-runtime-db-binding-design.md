@@ -217,7 +217,7 @@ belongs to the CDC service, specified in
 
 **SQLite has no `session_ctx` at all**, and says so in its own words -
 downstream audit paths "bind context through the session actor's per-call state
-instead" (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:1652-1655`,
+instead" (`crates/zeroship-data-sqlite/src/lib.rs:1652-1655`,
 unverified). Two tiers disagreeing about where identity is enforced is either a
 contract-parity break or evidence that one of them is sufficient; here it is the
 second.
@@ -335,7 +335,7 @@ and the same SSI-predicate-lock amplification.
 
   | | PostgreSQL 18.4 | SQLite |
   | --- | --- | --- |
-  | funnel | `query_text_params` (`backend/postgres.rs:312-319`) | `session.exec` (`backend/sqlite/mod.rs:625-632`) |
+  | funnel | `query_text_params` (`backend/postgres.rs:312-319`) | `session.exec` (`zeroship-data-sqlite/src/lib.rs:625-632`) |
   | outcome | accepted; stored bytes decode to the plaintext | accepted; `typeof()` = `text` in a `BLOB` column |
 
   The deploy pipeline's ordering guarantee above does **not** cover this. Ordering
@@ -527,7 +527,7 @@ it would reinstate the owner this design removes; and D2 deletes
 `Backup::pitr_replay` (`crates/zeroship-data-core/src/storage.rs:603`)
 along with its PostgreSQL implementation, which does nothing but
 `INSERT INTO __zeroship_admin.pitr_targets` (`backend/postgres.rs:1727`), and
-its SQLite stub (`backend/sqlite/mod.rs:2362`).
+its SQLite stub (`zeroship-data-sqlite/src/lib.rs:2362`).
 
 **`DbPlan` is defined by SC-3.** This document does not contain the grammar and
 does not claim to. Its shared core and read family exist on disk as
@@ -754,7 +754,7 @@ arm in section 8 pairs it with a granted-path control.
 - `dispatch_set_mask_policy` (`crates/zeroship-plugin-db/src/crud/mask_policy.rs:224`);
 - the SQLite JSON sidecar - `mask_policies.json` under the backend's db
   directory, reached only by `persist_sqlite` / `load_sqlite`
-  (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:207-211`,
+  (`crates/zeroship-data-sqlite/src/lib.rs:207-211`,
   `crud/mask_policy.rs:350-358`);
 - the broad `DbPlatform` V8 class, its private slot, `__zsDbPlatform`, and
   creator-facing replication diagnostics. `DbPlatform` exposes only
@@ -1156,7 +1156,7 @@ rather than the contract describing the code.
 
    | table | PostgreSQL | SQLite |
    | --- | --- | --- |
-   | `"<app>"."__zeroship_migrations"` | `audit.rs:236` | `backend/sqlite/mod.rs:1298` |
+   | `"<app>"."__zeroship_migrations"` | `audit.rs:236` | `zeroship-data-sqlite/src/lib.rs:1319` |
    | `"<app>"."__zeroship_audit_mask_drift"` | `crud/mask_drift.rs:793` | `crud/mask_drift.rs:827` |
    | `"<app>"."__zeroship_audit_unmask"` | `crud/unmask.rs:850` | `crud/unmask.rs:901` |
 
@@ -1392,7 +1392,7 @@ about the current code bound that work:
    strips it at `:716`; a non-matching column falls through both `if`s while the
    malformed-sentinel arm ten lines below warns loudly (`:737-744`). That arm is
    production and feeds the migration engine's diff. The SQLite equivalent,
-   `parse_mask_sentinels` (`backend/sqlite/mod.rs:2201`) and its only caller the
+   `parse_mask_sentinels` (`zeroship-data-sqlite/src/lib.rs:2232`) and its only caller the
    `SchemaIntrospect for SqliteBackend` impl (`:804`), are both
    `#[cfg(any(test, feature = "test-helpers"))]` and the dev tier never runs
    them.
@@ -1422,7 +1422,7 @@ half; it is a code path no creator input can reach.
 nonce as `HMAC-SHA256(k_siv, aad || plaintext)`, so identical plaintext yields
 byte-identical output, with tests pinning it. The mode also has real runtime -
 it selects the AAD shape, dropping `row_pk` (`aad.rs:75-78`,
-`backend/postgres.rs:1173`, `backend/sqlite/mod.rs:2053`,
+`backend/postgres.rs:1173`, `zeroship-data-sqlite/src/lib.rs:2074`,
 `crud/mask_drift.rs:575`, `crud/unmask.rs:234`).
 
 The query-by-plaintext design
