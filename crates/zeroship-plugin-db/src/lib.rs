@@ -92,6 +92,12 @@ pub mod broker;
 // runtime's `OpError`, because `OpError` is a delivery mechanism and a domain
 // type may not name one.
 pub mod op_error;
+// The advisory-lock RETRY POLICY, split out of `backend::LockManager` on
+// 2026-09-02 for the same reason `op_error` stayed here: the trait is rank-0
+// vocabulary bound for `zeroship-data-core`, and the policy names an executor.
+// A default method body travels with its trait, so the split had to happen
+// before the trait can move, not after.
+pub mod lock_policy;
 // The DDL builders + `QueryError` + `SqlDialect` +
 // the system-field / validation helpers were extracted into the leaf crate
 // `zeroship-schema`. plugin-db re-exports the module wholesale so every

@@ -188,7 +188,7 @@ cd "$SRC" || { echo "no such tree: $SRC" >&2; exit 1; }
 tier_of_file() {
   case "$1" in
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
-    ./crud/*|./transaction/*|./exec.rs|./broker.rs|./backend_selection.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs) echo ENGINE ;;
+    ./crud/*|./transaction/*|./exec.rs|./broker.rs|./backend_selection.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs|./lock_policy.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
     ./backend/postgres.rs|./backend/pg_row_json.rs|./backend/pg_session_sql.rs|./backend/pg_autocommit.rs|./backend/pg_error.rs|./backend/pg_introspect.rs) echo PG ;;
     ./backend/sqlite/*)                                  echo SQLITE ;;

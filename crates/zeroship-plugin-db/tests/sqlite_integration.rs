@@ -39,6 +39,8 @@ use zeroship_plugin_db::backend::{
     BackendHandle, ChangeStream, LockManager, LockScope, SchemaIntrospect, SqlExecutor,
 };
 use zeroship_plugin_db::backend_selection::new_sqlite_backend;
+// The bounded-retry surface is the policy extension trait, not `LockManager`.
+use zeroship_plugin_db::lock_policy::BoundedLockAcquire;
 use zeroship_plugin_db::broker::{Subscription, SubscriptionMessage, subscribe};
 use zeroship_plugin_db::query::{IndexKind, IndexSpec, raw_column_name};
 

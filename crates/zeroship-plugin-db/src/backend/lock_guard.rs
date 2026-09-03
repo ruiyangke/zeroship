@@ -57,6 +57,9 @@
 use compio_postgres::OwnedPooledClient;
 
 use crate::backend::{LockManager, LockScope};
+// The bounded-retry `acquire` is policy, not contract: it lives on the
+// blanket-implemented extension trait so `LockManager` itself names no runtime.
+use crate::lock_policy::BoundedLockAcquire;
 use zeroship_data_core::error::DbError;
 
 /// Session-scoped advisory-lock guard. See module docs for the lifecycle
