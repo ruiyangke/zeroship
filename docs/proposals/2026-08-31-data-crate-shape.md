@@ -585,6 +585,43 @@ reason. **The verification standard for every remaining move is therefore three
 commands, not one**: the crate alone with helpers and all targets, the crate
 alone WITHOUT them, and at least one dependent.
 
+### The vendor cut is blocked by three names, not by twelve thousand lines
+
+Measured 2026-09-02, after the traits landed in `data-core`. The two vendor
+tiers are 12,048 production lines - `backend/postgres.rs` and the five `pg_*`
+files at 3,123, `backend/sqlite/` at 8,925 - and that size is what made this cut
+look like the hard one. It is not. Resolving every `crate::` reference in those
+files to a specific ITEM rather than a module gives a blocker set of three.
+
+**Free, despite appearing in the first-segment counts:**
+
+| edge | refs | why it is free |
+| --- | --- | --- |
+| `crate::diff::*` | 15 | `lib.rs:173` is `pub use zeroship_schema::diff;` - `data-core` already depends on that crate |
+| `crate::query::*` | 25 | same shape, `pub use zeroship_schema::query` |
+| `crate::backend::{the 8 traits, the 8 value items, VectorMetric, GeoPoint, EncryptionMode}` | ~30 | all now `data-core` re-exports; they repoint, they do not move |
+| `crate::backend::{pg_error, pg_session_sql, pg_row_json, sqlite}` | 30 | intra-vendor |
+| `crate::backend_selection::{open,new}_sqlite_backend` | 2 | both inside `#[cfg(test)] mod tests` (`sqlite/mod.rs:2064`, `mask_policy_store.rs:179`), verified by finding the nearest enclosing gate rather than by eye |
+
+**The actual blockers:**
+
+| item | refs | sites |
+| --- | --- | --- |
+| `crate::descriptor::collection_schema` | 4 | `postgres.rs:558,648`, `sqlite/mod.rs:1117,1235` - the `schema_hint` in vector-search and spatial-near, production on both arms |
+| `crate::context::isolate_key_source` | 2 | `postgres.rs:103`, `sqlite/mod.rs:374` - backend construction, production on both arms |
+| `crate::encryption::{KeyStore, LocalKeySource}` | 7 | rank question rather than a defect: ENCRYPT is its own tier, and if it sits below the vendors this is not an up-edge at all |
+
+Thirteen references. `descriptor` and `context` are both ENGINE - `data-core`'s
+own `lib.rs` already explains why the descriptor travels with the engine, since
+both its production functions call `context::with`. So the vendor cut needs the
+same contract-vs-behaviour question asked of exactly two functions, and an
+answer to where ENCRYPT ranks.
+
+**Read the size and the difficulty as unrelated.** Every cut this session came
+in smaller than its line count implied, and the three that dissolved entirely
+did so because a name was in the wrong place rather than because a design was
+wrong.
+
 #### And two of the value types close a cycle: the broker guards
 
 Measured 2026-09-02, and found only by scanning `impl` blocks rather than
