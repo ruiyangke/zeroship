@@ -214,7 +214,30 @@ fn ready_action(app_id: &str) -> Result<ReadyAction, DbError> {
 /// A Postgres subscription does not report ready until publication/slot
 /// provisioning and START_REPLICATION have both succeeded. Configuration and
 /// startup failures therefore reject the stream before its initial snapshot.
-pub(crate) async fn ensure_ready(app_id: &str) -> Result<(), DbError> {
+///
+/// **`backend` and `worker_id` are handed in, not fetched.** Both used to be
+/// read out of `crate::context` inside [`start_on_current_isolate`], which was
+/// the last CDC-to-ADAPTER reference in the crate and the sole up-edge of the
+/// ADAPTER/CDC cycle on `tests/lib/tier_direction_census.sh`. The cold-init
+/// half of that read is `tx_scope::ensure_backend()` verbatim, so the caller
+/// already has the funnel; the worker identity is adapter configuration stamped
+/// by `DbPlugin::register`. This is the same inversion `bind_route` and
+/// `dispatch_set_mask_policy` took: the tier that owns the state resolves it,
+/// and the tier that consumes it receives it.
+///
+/// `worker_id` arrives as an `Option` rather than pre-validated because the
+/// refusal is CDC's, not the adapter's: only the `Start` arm needs an identity,
+/// and only this module knows what to say when there is none. Resolving the
+/// BACKEND has no such lazy form - it is fallible and async - so a `ready()` or
+/// `next()` that finds the consumer already running now warms this isolate's
+/// backend where before it would not have. That is the one behaviour this
+/// change moves, and it is the direction the handshake already documents:
+/// a subscription whose isolate cannot reach the database is not ready.
+pub(crate) async fn ensure_ready(
+    app_id: &str,
+    backend: BackendHandle,
+    worker_id: Option<String>,
+) -> Result<(), DbError> {
     loop {
         match ready_action(app_id)? {
             ReadyAction::Ready => return Ok(()),
@@ -232,32 +255,29 @@ pub(crate) async fn ensure_ready(app_id: &str) -> Result<(), DbError> {
                 })?;
             }
             ReadyAction::Start { generation } => {
-                let result = start_on_current_isolate(app_id).await;
+                let result = start_on_current_isolate(app_id, backend, worker_id).await;
                 return finish_start(app_id, generation, result);
             }
         }
     }
 }
 
-async fn start_on_current_isolate(app_id: &str) -> Result<RunningConsumer, DbError> {
-    if crate::context::with(|context| context.backend().is_none()) {
-        crate::init_pool_async().await.map_err(|message| {
-            DbError::config(
-                "cdc_start_failed",
-                format!("db CDC startup failed: {message}"),
-            )
-        })?;
-    }
-
-    let worker_id = crate::context::with(|context| context.cdc_worker_id()).ok_or_else(|| {
+/// Spawn this process's consumer for `app_id` on the calling isolate.
+///
+/// The name still describes WHERE the consumer task runs - `spawn_consumer`
+/// detaches onto this thread's compio runtime - but no longer implies that the
+/// inputs are read off it. See [`ensure_ready`] for why they are parameters.
+async fn start_on_current_isolate(
+    app_id: &str,
+    backend: BackendHandle,
+    worker_id: Option<String>,
+) -> Result<RunningConsumer, DbError> {
+    let worker_id = worker_id.ok_or_else(|| {
         DbError::config_hinted(
             "cdc_worker_id_missing",
             "db CDC worker identity is not configured",
             "construct DbPlugin with the worker process identity",
         )
-    })?;
-    let backend = crate::context::with(|context| context.backend()).ok_or_else(|| {
-        DbError::config("backend_not_initialized", "db backend is not initialized")
     })?;
 
     match backend {
@@ -532,5 +552,63 @@ mod tests {
         assert_eq!(subscriber_count_for_tests(&app), 0);
         drop(lease);
         assert_eq!(subscriber_count_for_tests(&app), 0);
+    }
+
+    fn config_code(error: &DbError) -> &str {
+        match error {
+            DbError::Configuration { code, .. } => code,
+            other => panic!("expected a Configuration error, got {other:?}"),
+        }
+    }
+
+    /// The worker identity is refused on the START arm and nowhere else.
+    ///
+    /// Both halves pass `worker_id: None` and differ in exactly one variable -
+    /// whether a lease exists, which is what decides between `ReadyAction::Start`
+    /// and the no-such-app refusal. The claimed app reaches the start path and
+    /// gets `cdc_worker_id_missing`; the unclaimed one never does and gets
+    /// `subscription_closed`.
+    ///
+    /// That pair is what pins the shape of the fix rather than only its result.
+    /// [`ensure_ready`] takes an `Option` because only this arm needs an
+    /// identity: hoisting the `ok_or_else` into the prologue, or raising it in
+    /// `tx_scope::cdc_worker_id`, would make the SECOND assertion report
+    /// `cdc_worker_id_missing` and fail a `next()` on a consumer that another
+    /// isolate already started. Handing the backend in is bound by the same
+    /// test compiling at all - there is no ambient read left to fall back on.
+    #[test]
+    fn a_missing_worker_id_is_refused_by_the_start_arm_and_only_there() {
+        crate::reset_context_for_tests();
+        let dir = tempfile::tempdir().expect("create tempdir");
+        let url = format!("sqlite:{}", dir.path().join("cdc.sqlite").display());
+        crate::set_db_url_for_tests(&url);
+
+        let claimed = format!("cdc-start-{}", uuid::Uuid::new_v4());
+        let unclaimed = format!("cdc-unclaimed-{}", uuid::Uuid::new_v4());
+
+        compio::runtime::Runtime::new()
+            .expect("compio runtime")
+            .block_on(async {
+                // The adapter half, exactly as `v8_classes::subscription`
+                // performs it: open through the funnel, then hand the handle
+                // down. Nothing in this module can reach the thread context.
+                let backend = crate::tx_scope::ensure_backend()
+                    .await
+                    .expect("the adapter funnel must open a cold sqlite backend");
+
+                let lease = acquire(&claimed);
+                let refused = ensure_ready(&claimed, backend.clone(), None)
+                    .await
+                    .expect_err("a start with no worker identity must refuse");
+                assert_eq!(config_code(&refused), "cdc_worker_id_missing");
+                drop(lease);
+
+                let closed = ensure_ready(&unclaimed, backend, None)
+                    .await
+                    .expect_err("an app with no lease has nothing to make ready");
+                assert_eq!(config_code(&closed), "subscription_closed");
+            });
+
+        crate::reset_context_for_tests();
     }
 }
