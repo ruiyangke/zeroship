@@ -457,6 +457,48 @@ destination: a teardown coordinator behind `zeroship-migrate-server`.
 | `data-sqlite` | `backend/sqlite/` |
 | `data-cdc-server` | `wal_consumer.rs`, `replication.rs`, `slot_reaper.rs` |
 
+### The eight modules this table did not assign
+
+Measured 2026-09-02 by diffing plugin-db's `mod` declarations against the rows
+above. An unassigned module is an extraction blocker in the most literal way:
+when a tier becomes a crate, every `crate::X` it names must resolve to a crate
+at or below it, and a module with no destination has no answer.
+
+| module | lines | consumed by | destination |
+| --- | --- | --- | --- |
+| `budgets` | 35 | engine 1, vendor 1 | **`data-core`** - three `const u32` timeouts named by BOTH `backend/pg_session_sql.rs` and `transaction/driver.rs`, so it has to sit below both |
+| `metrics` | 77 | engine 8 | **`data-engine`** |
+| `system_shape_charter` | 234 | engine 4 | **`data-engine`** |
+| `op_error` | 722 | adapter 7 | **`plugin-db` (thin)** - the table already calls `to_op_error` "the adapter's own translator" |
+| `backend_selection` | 53 | engine 9, vendor 2 (both `cfg(test)`) | **`data-engine`** - it is the factory that picks a backend, not a backend |
+| `auth` | 1407 | vendor 5, all test-gated | **DELETE - see below** |
+| `service` | 611 | none of the three tiers | plugin registration; **`plugin-db` (thin)** unless a consumer census says otherwise |
+| `test_support` | 336 | none of the three tiers | test-only; follows whatever it supports |
+
+**`auth/` is a leftover copy of work that already moved to the migration
+service.** Its own header says the data plane's `SET LOCAL ROLE` batch "comes
+from here on every transaction". It does not:
+
+- **Two implementations exist.** The live one is `backend/pg_session_sql.rs:39`
+  and `:66` - the string `pg_error.rs:263` asserts against. `auth/bootstrap.rs:140`
+  is the other, and every caller of its `set_local_role_sql`,
+  `ensure_per_app_role` and `drop_per_app_role` is a plugin-db TEST target
+  (`mask_flip.rs`, `native_transaction.rs`, `integration.rs`, `parity/mod.rs`).
+  Zero production callers anywhere under `crates/`.
+- **Role creation belongs to migrate-server and is already there**:
+  `zeroship-migrate-server/src/provisioning.rs:176` and `apply.rs:1389-1400`
+  issue the `CREATE ROLE` for both the template and the per-app role, through
+  `zeroship_core::database_role::per_app_role_name`.
+
+That is AGENTS.md's standing invariant already satisfied - privileged work in a
+service that does not execute creator code - with plugin-db keeping a copy
+nothing calls. `auth/util.rs` is separately `#[cfg]`-gated and only its
+test-gated SQLite consumers name it.
+
+Deleting it is not free: the test targets above use `ensure_per_app_role` as
+FIXTURE SETUP, so they need repointing at the migrate-server path or their own
+helper first. Sized, not done.
+
 **The `data-engine` row WAS the weakest line in this table. It is not any more, and the
 paragraph that said so is kept below because the reason it stopped being true is the
 work itself.**
