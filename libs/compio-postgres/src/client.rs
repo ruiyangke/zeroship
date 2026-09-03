@@ -2767,6 +2767,60 @@ impl Client {
             .transpose()
     }
 
+    /// Run a cached statement, retrying exactly once if
+    /// `reprepare_cached_statement_once` supplies a replacement, and otherwise
+    /// propagating the ORIGINAL error rather than the retry's.
+    ///
+    /// `query_raw` reaches this from two entry paths - one for a statement
+    /// promoted out of the probationary unnamed slot, one for an already-named
+    /// cached statement - and until 2026-09-03 each carried its own verbatim
+    /// copy. Only the second copy was held by a test: mutating the propagated
+    /// error in the probationary branch left the lib (771) and suite (797)
+    /// suites green, while the same mutation in the other failed
+    /// `statement_cache_does_not_retry_0a000_after_parameter_input` and
+    /// `statement_cache_requires_server_provenance_before_retrying_26000`.
+    /// One path means those two now hold the behaviour for both callers, and
+    /// the copies can no longer drift apart.
+    async fn query_cached_with_one_reprepare<P>(
+        &self,
+        statement: Statement,
+        cache_sql: &str,
+        replay_permitted: bool,
+        params: Vec<P>,
+    ) -> Result<RowStream, Error>
+    where
+        P: BorrowToSql,
+    {
+        let first = query::query_cached(
+            &self.inner,
+            statement,
+            params.iter().map(BorrowToSql::borrow_to_sql),
+        )
+        .await;
+        match first {
+            Ok(stream) => Ok(stream),
+            Err(error) => {
+                let Some(replacement) = self
+                    .reprepare_cached_statement_once(
+                        Some(cache_sql),
+                        replay_permitted,
+                        params.len(),
+                        &error,
+                    )
+                    .await
+                else {
+                    return Err(error);
+                };
+                query::query_cached(
+                    &self.inner,
+                    replacement?,
+                    params.iter().map(BorrowToSql::borrow_to_sql),
+                )
+                .await
+            }
+        }
+    }
+
     /// The maximally flexible version of [`query`].
     ///
     /// [`query`]: #method.query
@@ -2801,34 +2855,14 @@ impl Client {
                 return query::query(&self.inner, execution.statement, params).await;
             }
 
-            let first = query::query_cached(
-                &self.inner,
-                execution.statement,
-                params.iter().map(BorrowToSql::borrow_to_sql),
-            )
-            .await;
-            return match first {
-                Ok(stream) => Ok(stream),
-                Err(error) => {
-                    let Some(replacement) = self
-                        .reprepare_cached_statement_once(
-                            Some(cache_sql),
-                            replay_permitted,
-                            params.len(),
-                            &error,
-                        )
-                        .await
-                    else {
-                        return Err(error);
-                    };
-                    query::query_cached(
-                        &self.inner,
-                        replacement?,
-                        params.iter().map(BorrowToSql::borrow_to_sql),
-                    )
-                    .await
-                }
-            };
+            return self
+                .query_cached_with_one_reprepare(
+                    execution.statement,
+                    cache_sql,
+                    replay_permitted,
+                    params,
+                )
+                .await;
         }
         let Some(cache_sql) = execution.cache_sql else {
             return query::query(&self.inner, execution.statement, params).await;
@@ -2839,34 +2873,13 @@ impl Client {
         }
 
         let params = params.into_iter().collect::<Vec<_>>();
-        let first = query::query_cached(
-            &self.inner,
+        self.query_cached_with_one_reprepare(
             execution.statement,
-            params.iter().map(BorrowToSql::borrow_to_sql),
+            cache_sql,
+            replay_permitted,
+            params,
         )
-        .await;
-        match first {
-            Ok(stream) => Ok(stream),
-            Err(error) => {
-                let Some(replacement) = self
-                    .reprepare_cached_statement_once(
-                        Some(cache_sql),
-                        replay_permitted,
-                        params.len(),
-                        &error,
-                    )
-                    .await
-                else {
-                    return Err(error);
-                };
-                query::query_cached(
-                    &self.inner,
-                    replacement?,
-                    params.iter().map(BorrowToSql::borrow_to_sql),
-                )
-                .await
-            }
-        }
+        .await
     }
 
     /// Like `query`, but requires the types of query parameters to be explicitly specified.
