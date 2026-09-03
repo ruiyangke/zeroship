@@ -8,6 +8,16 @@
 //!   the active read-set ([`crate::read_set`]) for subscription narrowing,
 //!   and applying the DB-3 actor fence. It returns a plan - a `BuiltQuery`, a
 //!   [`FindPlan`], a [`SearchPlan`] - and touches no connection.
+//!
+//!   Nine of them take the [`crate::tx_route::CapturedRoute`] the same prelude
+//!   froze, and take it for its `dialect()` alone - a plan is SQL TEXT, and
+//!   text has a dialect long before it has a connection. Taking the route
+//!   rather than a bare `dialect:` argument is what makes "planned Postgres,
+//!   executed on SQLite" unrepresentable: the plan and the connection are two
+//!   halves of ONE capture, and a dispatcher that plans before it captures no
+//!   longer compiles. `plan_search` / `plan_near` take a bare dialect instead,
+//!   because their dispatches deliberately capture no route (they never reach
+//!   `crate::exec::run_sql`); see [`crate::v8_classes::dispatch`].
 //! * `run_*` is the **async** half. It takes the plan plus a
 //!   [`crate::tx_route::TxRoute`] captured by the caller, drives the backend
 //!   through [`crate::exec`], and returns data.
@@ -245,33 +255,38 @@ fn record_read_set(binding: &DbBinding, collection: &str, filter: &Value) {
     crate::read_set::record_if_active(collection, filter, &schema);
 }
 
-/// Which dialect the statements below must be written in.
-///
-/// **Asked, not derived.** This used to match `BackendHandle`'s variants and
-/// then fall back to matching `BackendUrl`'s - an engine function naming a
-/// vendor-selection enum from the adapter to answer a question about SQL text.
-/// The context owns both inputs and now answers directly; see
-/// [`crate::context::ThreadDbContext::sql_dialect`] for the precedence.
-fn current_sql_dialect() -> query::SqlDialect {
-    crate::context::with(|c| c.sql_dialect())
-}
-
+// `current_sql_dialect()` WAS HERE and is deleted (2026-09-03). It was
+// `crate::context::with(|c| c.sql_dialect())` - the last production
+// ENGINE-to-ADAPTER reference in the crate, and the whole of the
+// `ENGINE crud/mod.rs -> ADAPTER crate::context::with` row on
+// `tests/lib/tier_direction_census.sh`.
+//
+// It is not replaced by another lookup. The dialect is a CONFIGURATION fact,
+// so it is read ONCE per dispatch, in the adapter, by
+// `crate::tx_scope::configured_dialect`, and stamped into the
+// [`crate::tx_route::CapturedRoute`] that same prelude freezes. Every function
+// below is HANDED the dialect - off the route where it has one, as a parameter
+// where it does not - which is why the plan and the connection can no longer
+// disagree about which SQL was written.
+//
 // The four `maybe_lower_sqlite_boolean_*` helpers take the ALREADY-RESOLVED
 // descriptor entry rather than resolving one of their own. Each dispatch site
 // needs the schema anyway - the read builders take it, and the write pipeline
 // keys its encrypt/mask stages off it - so resolving once per operation both
 // removes a second store lookup and puts the `collection_not_declared` refusal
-// at ONE place per dispatch instead of silently returning here.
+// at ONE place per dispatch instead of silently returning here. `dialect` rides
+// alongside it for the same reason: resolved once by the caller, not re-asked
+// four times per write.
 
-fn maybe_lower_sqlite_boolean_doc(schema: &Value, doc: &mut Value) {
-    if current_sql_dialect() != query::SqlDialect::Sqlite {
+fn maybe_lower_sqlite_boolean_doc(dialect: query::SqlDialect, schema: &Value, doc: &mut Value) {
+    if dialect != query::SqlDialect::Sqlite {
         return;
     }
     lower_boolean_doc_with_schema(schema, doc);
 }
 
-fn maybe_lower_sqlite_boolean_docs(schema: &Value, docs: &mut Value) {
-    if current_sql_dialect() != query::SqlDialect::Sqlite {
+fn maybe_lower_sqlite_boolean_docs(dialect: query::SqlDialect, schema: &Value, docs: &mut Value) {
+    if dialect != query::SqlDialect::Sqlite {
         return;
     }
     let Some(arr) = docs.as_array_mut() else {
@@ -282,15 +297,23 @@ fn maybe_lower_sqlite_boolean_docs(schema: &Value, docs: &mut Value) {
     }
 }
 
-fn maybe_lower_sqlite_boolean_update(schema: &Value, patch: &mut Value) {
-    if current_sql_dialect() != query::SqlDialect::Sqlite {
+fn maybe_lower_sqlite_boolean_update(
+    dialect: query::SqlDialect,
+    schema: &Value,
+    patch: &mut Value,
+) {
+    if dialect != query::SqlDialect::Sqlite {
         return;
     }
     lower_boolean_update_with_schema(schema, patch);
 }
 
-fn maybe_lower_sqlite_boolean_filter(schema: &Value, filter: &mut Value) {
-    if current_sql_dialect() != query::SqlDialect::Sqlite {
+fn maybe_lower_sqlite_boolean_filter(
+    dialect: query::SqlDialect,
+    schema: &Value,
+    filter: &mut Value,
+) {
+    if dialect != query::SqlDialect::Sqlite {
         return;
     }
     lower_boolean_filter_with_schema(schema, filter);
@@ -730,7 +753,7 @@ pub(crate) async fn run_find(
     // Soft-delete auto-filter gate.
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(plan.include_deleted);
     let mut sql_filter = filter;
-    maybe_lower_sqlite_boolean_filter(&schema_hint, &mut sql_filter);
+    maybe_lower_sqlite_boolean_filter(route.dialect(), &schema_hint, &mut sql_filter);
     let bq = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         binding.app_id(),
         &coll,
@@ -742,7 +765,7 @@ pub(crate) async fn run_find(
         &schema_hint,
         &plan.unmask_columns,
         filter_soft_deleted,
-        current_sql_dialect(),
+        route.dialect(),
     )
     .map_err(DbError::from)?;
     let rows = exec_query(&route, bq).await?;
@@ -807,6 +830,7 @@ pub(crate) async fn run_insert(
     // that will store the ciphertext.
     write_pipeline::apply(
         route.backend().key_store(),
+        route.dialect(),
         &binding,
         &coll,
         &mut doc,
@@ -819,15 +843,10 @@ pub(crate) async fn run_insert(
     // this resolution cannot fail here; it re-reads the same store entry
     // rather than threading the schema back out through `apply`'s result.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
-    let bq = query::build_insert_with_dialect(
-        binding.app_id(),
-        &coll,
-        &schema,
-        &doc,
-        current_sql_dialect(),
-    )
-    .map_err(DbError::from)?;
+    maybe_lower_sqlite_boolean_doc(route.dialect(), &schema, &mut doc);
+    let bq =
+        query::build_insert_with_dialect(binding.app_id(), &coll, &schema, &doc, route.dialect())
+            .map_err(DbError::from)?;
     let rows = exec_mutation_with_emit(
         bq,
         &route,
@@ -861,6 +880,7 @@ pub(crate) async fn run_insert_many(
     let mut docs = docs;
     prepare_insert_many_docs_for_binding(
         route.backend().key_store(),
+        route.dialect(),
         &mut docs,
         &binding,
         &coll,
@@ -868,14 +888,14 @@ pub(crate) async fn run_insert_many(
     )
     .await?;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    maybe_lower_sqlite_boolean_docs(&schema, &mut docs);
+    maybe_lower_sqlite_boolean_docs(route.dialect(), &schema, &mut docs);
 
     let bq = query::build_insert_many_with_dialect(
         binding.app_id(),
         &coll,
         &schema,
         &docs,
-        current_sql_dialect(),
+        route.dialect(),
     )
     .map_err(DbError::from)?;
     let rows = exec_mutation_with_emit(
@@ -932,9 +952,15 @@ pub(crate) async fn run_update_one(
     let per_row_encrypted_update =
         write_pipeline::update_requires_per_row_encryption(&schema, &update);
     let target_row = if per_row_encrypted_update {
-        let target_rows =
-            write_pipeline::resolve_target_row_ids(&route, &coll, &filter, 1, &schema)
-                .await?;
+        let target_rows = write_pipeline::resolve_target_row_ids(
+            &route,
+            route.dialect(),
+            &coll,
+            &filter,
+            1,
+            &schema,
+        )
+        .await?;
         let Some(target_row) = target_rows.first().cloned() else {
             if let Some(expected_version) = cas_version {
                 let row_id = filter
@@ -969,13 +995,14 @@ pub(crate) async fn run_update_one(
     // Key store off the route, for the reason given on [`run_insert`].
     write_pipeline::apply(
         route.backend().key_store(),
+        route.dialect(),
         &binding,
         &coll,
         &mut update,
         write_pipeline::ApplyMode::Update { row_pk },
     )
     .await?;
-    maybe_lower_sqlite_boolean_update(&schema, &mut update);
+    maybe_lower_sqlite_boolean_update(route.dialect(), &schema, &mut update);
     let sql_filter = if let Some(target_row) = target_row {
         let mut sql_filter = serde_json::json!({ "id": target_row.id_value });
         if let Some(expected_version) = cas_version {
@@ -984,7 +1011,7 @@ pub(crate) async fn run_update_one(
         sql_filter
     } else {
         let mut sql_filter = filter.clone();
-        maybe_lower_sqlite_boolean_filter(&schema, &mut sql_filter);
+        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut sql_filter);
         sql_filter
     };
     // Auto-bump via the system-fields-aware builder.
@@ -1004,7 +1031,7 @@ pub(crate) async fn run_update_one(
         &schema,
         &sql_filter,
         &update,
-        current_sql_dialect(),
+        route.dialect(),
         &autobump,
     );
     let bq = built.map_err(DbError::from)?;
@@ -1067,6 +1094,11 @@ pub(crate) async fn run_update_many(
     actor_id: Option<String>,
 ) -> Result<usize, DbError> {
     let mut update = update;
+    // Read off the route ONCE, here, because the per-row arm below MOVES the
+    // route into `AtomicWriteFrame::begin` - the frame's route carries the same
+    // stamp, so this is the same value either arm would read, taken before the
+    // move rather than through two different accessors.
+    let dialect = route.dialect();
     write_pipeline::inspect_update(binding.app_id(), &coll, &mut update)?;
     let cas_version = system_fields_pass::extract_cas_version(&filter, &coll)?;
     if cas_version.is_some() && !system_fields_pass::filter_has_id_predicate(&filter) {
@@ -1092,6 +1124,7 @@ pub(crate) async fn run_update_many(
         let work_result: Result<usize, DbError> = async {
             let target_rows = write_pipeline::resolve_target_row_ids(
                 frame.route(),
+                dialect,
                 &coll,
                 &filter,
                 query::MAX_QUERY_LIMIT + 1,
@@ -1136,13 +1169,14 @@ pub(crate) async fn run_update_many(
                 // this atomic write runs on.
                 write_pipeline::apply(
                     frame.route().backend().key_store(),
+                    dialect,
                     &binding,
                     &coll,
                     &mut row_update,
                     write_pipeline::ApplyMode::Update { row_pk: &row_pk },
                 )
                 .await?;
-                maybe_lower_sqlite_boolean_update(&schema, &mut row_update);
+                maybe_lower_sqlite_boolean_update(dialect, &schema, &mut row_update);
                 let mut row_filter = serde_json::json!({ "id": row_id });
                 if let Some(expected_version) = cas_version {
                     row_filter["version"] = Value::from(expected_version);
@@ -1159,7 +1193,7 @@ pub(crate) async fn run_update_many(
                         &schema,
                         &row_filter,
                         &row_update,
-                        current_sql_dialect(),
+                        dialect,
                         &autobump,
                     )
                     .map_err(DbError::from)?,
@@ -1202,22 +1236,23 @@ pub(crate) async fn run_update_many(
     // here to supply the key store.
     write_pipeline::apply(
         route.backend().key_store(),
+        dialect,
         &binding,
         &coll,
         &mut update,
         write_pipeline::ApplyMode::Update { row_pk: "" },
     )
     .await?;
-    maybe_lower_sqlite_boolean_update(&schema, &mut update);
+    maybe_lower_sqlite_boolean_update(dialect, &schema, &mut update);
     let mut sql_filter = filter.clone();
-    maybe_lower_sqlite_boolean_filter(&schema, &mut sql_filter);
+    maybe_lower_sqlite_boolean_filter(dialect, &schema, &mut sql_filter);
     let bq = query::build_update_many_with_system_fields(
         binding.app_id(),
         &coll,
         &schema,
         &sql_filter,
         &update,
-        current_sql_dialect(),
+        dialect,
         &autobump,
     )
     .map_err(DbError::from)?;
@@ -1268,6 +1303,7 @@ pub(crate) async fn run_update_many(
 /// for why that read must not drift into an async tail.
 pub(crate) fn plan_delete_one(
     binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
@@ -1282,13 +1318,13 @@ pub(crate) fn plan_delete_one(
     // filter this deploy has no schema to lower.
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_soft_delete_one_with_system_fields(
             app,
             collection,
             &schema,
             &filter,
-            current_sql_dialect(),
+            route.dialect(),
             &autobump,
         )
         .map_err(DbError::from)
@@ -1302,6 +1338,7 @@ pub(crate) fn plan_delete_one(
 /// only the builder differs.
 pub(crate) fn plan_delete_many(
     binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
@@ -1313,13 +1350,13 @@ pub(crate) fn plan_delete_many(
     };
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_soft_delete_many_with_system_fields(
             app,
             collection,
             &schema,
             &filter,
-            current_sql_dialect(),
+            route.dialect(),
             &autobump,
         )
         .map_err(DbError::from)
@@ -1342,19 +1379,20 @@ pub(crate) fn plan_delete_many(
 /// this function is a write on the not-needed side.
 pub(crate) fn plan_purge_one(
     binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
 ) -> Result<query::BuiltQuery, DbError> {
     let app_id = binding.app_id();
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_delete_one_with_dialect(
             app_id,
             collection,
             &schema,
             &filter,
-            current_sql_dialect(),
+            route.dialect(),
         )
         .map_err(DbError::from)
     })
@@ -1366,21 +1404,16 @@ pub(crate) fn plan_purge_one(
 /// so no `actor_id`.
 pub(crate) fn plan_purge_many(
     binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
 ) -> Result<query::BuiltQuery, DbError> {
     let app_id = binding.app_id();
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
-        query::build_delete_many(
-            app_id,
-            collection,
-            &schema,
-            &filter,
-            current_sql_dialect(),
-        )
-        .map_err(DbError::from)
+        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
+        query::build_delete_many(app_id, collection, &schema, &filter, route.dialect())
+            .map_err(DbError::from)
     })
 }
 
@@ -1393,6 +1426,7 @@ pub(crate) fn plan_purge_many(
 /// flag silently, so each plan is transcribed from its own dispatch.
 pub(crate) fn plan_restore_one(
     binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
@@ -1405,13 +1439,13 @@ pub(crate) fn plan_restore_one(
     };
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_restore_one_with_system_fields(
             app,
             collection,
             &schema,
             &filter,
-            current_sql_dialect(),
+            route.dialect(),
             &autobump,
         )
         .map_err(DbError::from)
@@ -1424,6 +1458,7 @@ pub(crate) fn plan_restore_one(
 /// sets `dispatch_write: true`; only the builder differs.
 pub(crate) fn plan_restore_many(
     binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
@@ -1436,13 +1471,13 @@ pub(crate) fn plan_restore_many(
     };
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_restore_many_with_system_fields(
             app,
             collection,
             &schema,
             &filter,
-            current_sql_dialect(),
+            route.dialect(),
             &autobump,
         )
         .map_err(DbError::from)
@@ -1472,6 +1507,7 @@ pub(crate) fn plan_restore_many(
 /// three-value return; it travels with the outstanding second cut instead.
 pub(crate) fn plan_aggregate(
     binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
     collection: &str,
     pipeline: &Value,
     opts: &Value,
@@ -1507,7 +1543,7 @@ pub(crate) fn plan_aggregate(
             pipeline,
             filter_soft_deleted,
             &schema,
-            current_sql_dialect(),
+            route.dialect(),
         )
         .map_err(DbError::from)
     })
@@ -1533,6 +1569,7 @@ pub(crate) fn plan_aggregate(
 /// original body, not an omission - do not "restore" it.
 pub(crate) fn plan_distinct(
     binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
     collection: &str,
     field: &str,
     filter: Value,
@@ -1556,7 +1593,7 @@ pub(crate) fn plan_distinct(
     let distinct_reads_masked_sibling = query::column_is_masked(field, &schema_hint);
 
     let mut filter = filter;
-    maybe_lower_sqlite_boolean_filter(&schema_hint, &mut filter);
+    maybe_lower_sqlite_boolean_filter(route.dialect(), &schema_hint, &mut filter);
 
     let built = query::build_distinct_with_soft_delete_with_dialect(
         app_id,
@@ -1565,7 +1602,7 @@ pub(crate) fn plan_distinct(
         &filter,
         filter_soft_deleted,
         &schema_hint,
-        current_sql_dialect(),
+        route.dialect(),
     )
     .map_err(DbError::from)?;
 
@@ -1598,6 +1635,7 @@ pub(crate) fn plan_distinct(
 /// proven by a test.
 pub(crate) fn plan_count(
     binding: &DbBinding,
+    route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
     opts: &Value,
@@ -1615,14 +1653,14 @@ pub(crate) fn plan_count(
     let app_id = binding.app_id();
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
-        maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+        maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_count_with_soft_delete(
             app_id,
             collection,
             &schema,
             &filter,
             filter_soft_deleted,
-            current_sql_dialect(),
+            route.dialect(),
         )
         .map_err(DbError::from)
     })
@@ -1654,14 +1692,14 @@ pub(crate) async fn run_upsert(
     )
     .await?;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    maybe_lower_sqlite_boolean_doc(&schema, &mut doc);
+    maybe_lower_sqlite_boolean_doc(route.dialect(), &schema, &mut doc);
     let bq = query::build_upsert_with_dialect(
         binding.app_id(),
         &coll,
         &schema,
         &doc,
         &conflict_fields,
-        current_sql_dialect(),
+        route.dialect(),
     )
     .map_err(DbError::from)?;
     // Upsert can be either INSERT (new row) or UPDATE (existing).
@@ -1728,6 +1766,7 @@ pub(crate) struct SearchPlan {
 /// question [`plan_find`] documents, and this half is where the original put it.
 pub(crate) fn plan_search(
     binding: &DbBinding,
+    dialect: query::SqlDialect,
     collection: &str,
     args: &Value,
 ) -> Result<SearchPlan, DbError> {
@@ -1792,8 +1831,14 @@ pub(crate) fn plan_search(
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
     // The backend arms resolve the same entry for their projection; this one is
     // for the SQLite boolean lowering of the caller's filter.
+    //
+    // `dialect` is a bare parameter rather than something taken off a route,
+    // because `dispatch_search` captures none: the search family never reaches
+    // `crate::exec::run_sql`, so an `in_tx` bit would be frozen and discarded.
+    // The adapter reads the dialect for it, from the same
+    // `crate::tx_scope::configured_dialect` a capture would have stamped.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+    maybe_lower_sqlite_boolean_filter(dialect, &schema, &mut filter);
 
     Ok(SearchPlan {
         vector,
@@ -1901,6 +1946,7 @@ pub(crate) struct NearPlan {
 /// tidied - the SDK branches on the code.
 pub(crate) fn plan_near(
     binding: &DbBinding,
+    dialect: query::SqlDialect,
     collection: &str,
     args: &Value,
 ) -> Result<NearPlan, DbError> {
@@ -1956,9 +2002,10 @@ pub(crate) fn plan_near(
         .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
 
     // Same as `plan_search`: the backend arm resolves the entry again for its
-    // own projection; this one lowers the caller's filter.
+    // own projection; this one lowers the caller's filter, and `dialect` is a
+    // bare parameter for the reason given there.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    maybe_lower_sqlite_boolean_filter(&schema, &mut filter);
+    maybe_lower_sqlite_boolean_filter(dialect, &schema, &mut filter);
 
     Ok(NearPlan {
         field,
@@ -2029,12 +2076,13 @@ pub(crate) async fn run_near(
 // ===========================================================================
 // Transparent column encryption hooks
 // ===========================================================================
-/// `keys` is a parameter for the same reason it is one on
-/// [`write_pipeline::apply`]: this prep encrypts, and encryption wants a key
-/// store, not a backend and not a route. The production caller takes it off
-/// the route the insert will run on.
+/// `keys` and `dialect` are parameters for the same reason they are ones on
+/// [`write_pipeline::apply`]: this prep encrypts and lowers, and neither the
+/// key store nor the dialect is a routing decision. The production caller takes
+/// both off the route the insert will run on.
 async fn prepare_insert_many_docs_for_binding(
     keys: &crate::encryption::KeyStore,
+    dialect: query::SqlDialect,
     docs: &mut Value,
     binding: &DbBinding,
     collection: &str,
@@ -2042,6 +2090,7 @@ async fn prepare_insert_many_docs_for_binding(
 ) -> Result<(), DbError> {
     write_pipeline::apply(
         keys,
+        dialect,
         binding,
         collection,
         docs,
@@ -2058,15 +2107,23 @@ pub async fn prepare_insert_many_docs_for_write(
     actor_id: Option<&str>,
 ) -> Result<(), DbError> {
     let binding = DbBinding::cold_start(app_id);
-    // Resolves its key store through the adapter's funnel for the same reason
-    // `finalize_rows_on_read_for_tests` below does: it stands in for the V8
-    // dispatcher, which is the frame that resolves the handle before the
-    // engine sees it. A production caller here would be an ENGINE-to-ADAPTER
-    // edge; this one is `test-helpers`-gated, and its callers are integration
-    // targets with no route to take a handle off.
+    // Resolves its key store AND its dialect through the adapter for the same
+    // reason `finalize_rows_on_read_for_tests` below resolves its backend: it
+    // stands in for the V8 dispatcher, which is the frame that resolves both
+    // before the engine sees them. A production caller here would be an
+    // ENGINE-to-ADAPTER edge; this one is `test-helpers`-gated, and its callers
+    // are integration targets with no dispatch prelude to capture from.
     let backend = crate::tx_scope::ensure_backend().await?;
-    prepare_insert_many_docs_for_binding(backend.key_store(), docs, &binding, collection, actor_id)
-        .await
+    let dialect = crate::tx_scope::configured_dialect();
+    prepare_insert_many_docs_for_binding(
+        backend.key_store(),
+        dialect,
+        docs,
+        &binding,
+        collection,
+        actor_id,
+    )
+    .await
 }
 
 /// Test helper that drives the REAL read pipeline
@@ -2128,12 +2185,14 @@ async fn prepare_upsert_doc_for_write(
     actor_id: Option<&str>,
     conflict_fields: &Value,
 ) -> Result<(), DbError> {
-    // The key store comes off the route this upsert already carries. That is
-    // not "thread a route to reach a key": the route is here because the
-    // conflict probe issues SQL, and taking the store from it keeps the write
-    // and its ciphertext on one handle.
+    // The key store and the dialect both come off the route this upsert already
+    // carries. That is not "thread a route to reach a key": the route is here
+    // because the conflict probe issues SQL, and taking the store from it keeps
+    // the write and its ciphertext on one handle - and taking the dialect from
+    // it keeps the probe's SQL in the same dialect the upsert was planned in.
     write_pipeline::apply(
         route.backend().key_store(),
+        route.dialect(),
         binding,
         collection,
         doc,
@@ -2265,14 +2324,12 @@ mod tests {
     use super::*;
     use base64::Engine as _;
 
-    #[test]
-    fn configured_sqlite_dialect_does_not_require_an_open_backend() {
-        crate::reset_context_for_tests();
-        crate::set_db_url_for_tests("sqlite::memory:");
-        assert!(crate::context::with(|context| context.backend()).is_none());
-        assert_eq!(current_sql_dialect(), query::SqlDialect::Sqlite);
-        crate::reset_context_for_tests();
-    }
+    // `configured_sqlite_dialect_does_not_require_an_open_backend` MOVED to
+    // `crate::tx_route`'s test module (2026-09-03), as
+    // `a_configured_sqlite_dialect_is_captured_without_an_open_backend`. It
+    // pinned `current_sql_dialect()`, which is deleted; the property it pins -
+    // the dialect is knowable before any backend is opened - is what permits
+    // the stamp that replaced it, so it rules on the captured route instead.
 
     #[test]
     fn lower_boolean_filter_with_schema_keeps_json_booleans_untouched() {

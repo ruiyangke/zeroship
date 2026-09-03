@@ -143,6 +143,22 @@ pub(crate) fn leave(scope: &mut v8::PinScope<'_, '_>, prev: Option<v8::Global<v8
     scope.set_continuation_preserved_embedder_data(local);
 }
 
+/// Which SQL dialect this thread's statements must be written in.
+///
+/// **The one place the dialect question is asked**, and it is here because the
+/// answer is ADAPTER state: [`crate::context::ThreadDbContext::sql_dialect`]
+/// owns both inputs (an open backend, else the service's selection). The engine
+/// used to ask it directly from `crud::current_sql_dialect`, which was the last
+/// ENGINE-to-ADAPTER edge on `tests/lib/tier_direction_census.sh`.
+///
+/// It answers WITHOUT an open backend, which is what makes the stamp below
+/// possible at all - the eager `plan_*` half runs before anything is opened.
+/// Pinned by `tx_route`'s
+/// `a_configured_sqlite_dialect_is_captured_without_an_open_backend`.
+pub(crate) fn configured_dialect() -> crate::query::SqlDialect {
+    crate::context::with(|c| c.sql_dialect())
+}
+
 /// Read the transaction frame out of V8 and freeze a [`TxRoute`] from it.
 ///
 /// This is the whole of the V8 half of routing, and it lives here because this
@@ -154,11 +170,25 @@ pub(crate) fn leave(scope: &mut v8::PinScope<'_, '_>, prev: Option<v8::Global<v8
 /// Call this from a dispatch prologue while `scope` is live. The answer is only
 /// correct at the dispatch boundary: the runtime's continuation slot rotates on
 /// the next pump turn.
+///
+/// **WHY A CACHED DIALECT CANNOT GO STALE.** The dialect is stamped once, here,
+/// and every statement of this dispatch - the ones the sync prelude plans and
+/// the ones the async body builds after `bind_route` - is written in it. That is
+/// sound because the only thing that changes a thread's configured dialect is
+/// `ThreadDbContext::set_resource`, which the service calls at REQUEST
+/// ADMISSION, never inside a dispatch; capture and bind are both inside one
+/// dispatch. Re-reading it in the async body would be the weaker choice, not the
+/// safer one: it could answer a different dialect than the prelude planned
+/// against, which is precisely the split this stamp closes.
 pub(crate) fn capture_route(
     scope: &mut v8::PinScope<'_, '_>,
     app_id: &str,
 ) -> crate::tx_route::CapturedRoute {
-    crate::tx_route::CapturedRoute::capture(current_tx_app(scope).as_deref(), app_id)
+    crate::tx_route::CapturedRoute::capture(
+        current_tx_app(scope).as_deref(),
+        app_id,
+        configured_dialect(),
+    )
 }
 
 /// Open this thread's backend if it is cold, and hand it back.

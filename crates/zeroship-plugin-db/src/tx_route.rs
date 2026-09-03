@@ -63,6 +63,7 @@
 //! the type the exec helpers take.
 
 use crate::backend::BackendHandle;
+use crate::query::SqlDialect;
 
 /// The routing decision, frozen at the dispatch frame and not yet bound to a
 /// backend.
@@ -78,6 +79,18 @@ pub struct CapturedRoute {
     /// `true` iff this dispatch is lexically-and-asynchronously inside a
     /// `db.transaction(fn)` callback **for this same app**.
     in_tx: bool,
+    /// Which SQL dialect this dispatch's statements must be written in.
+    ///
+    /// **A configuration fact, not a connection fact**, which is why it can
+    /// ride here at all: the eager `plan_*` half runs in the V8 prelude,
+    /// BEFORE [`Self::bind`] has opened anything, and still has to emit SQL
+    /// text. `crate::tx_scope::capture_route` reads it once, from the one
+    /// place that can answer it cold, and stamps it here.
+    ///
+    /// Carrying it on the route rather than passing it beside one is what
+    /// makes "planned Postgres, executed on SQLite" unrepresentable instead
+    /// of merely avoided: the plan and the connection come from ONE capture.
+    dialect: SqlDialect,
 }
 
 /// Where one CRUD dispatch's SQL must go, decided at the dispatch frame and
@@ -104,6 +117,7 @@ pub struct TxRoute {
     app_id: String,
     in_tx: bool,
     backend: BackendHandle,
+    dialect: SqlDialect,
 }
 
 impl CapturedRoute {
@@ -128,11 +142,21 @@ impl CapturedRoute {
     /// Deliberately not a `bool` parameter: a caller cannot assert "I am in a
     /// transaction", only report which app the frame belongs to. The
     /// comparison that turns that into a route is not the caller's to make.
-    pub(crate) fn capture(current_tx_app: Option<&str>, app_id: &str) -> Self {
+    ///
+    /// `dialect` arrives the same way and for the same reason: it is read from
+    /// the thread's database configuration, which is ADAPTER state this module
+    /// may not name. See [`crate::tx_scope::capture_route`] for the read, and
+    /// [`Self::dialect`] for why the answer is stable for the whole dispatch.
+    pub(crate) fn capture(
+        current_tx_app: Option<&str>,
+        app_id: &str,
+        dialect: SqlDialect,
+    ) -> Self {
         let in_tx = current_tx_app == Some(app_id);
         Self {
             app_id: app_id.to_string(),
             in_tx,
+            dialect,
         }
     }
 
@@ -150,6 +174,21 @@ impl CapturedRoute {
         self.in_tx
     }
 
+    /// The dialect the eager `plan_*` half must write its SQL in.
+    ///
+    /// Readable BEFORE [`Self::bind`], which is the whole reason the dialect is
+    /// stamped at capture rather than derived from the backend: nine `plan_*`
+    /// functions build SQL in the synchronous V8 prelude, where no backend
+    /// exists yet.
+    ///
+    /// It cannot go stale between here and the statement running. The only
+    /// thing that changes a thread's configured dialect is
+    /// `ThreadDbContext::set_resource`, which runs at request admission - never
+    /// inside a dispatch - and capture and bind are both inside ONE dispatch.
+    pub(crate) fn dialect(&self) -> SqlDialect {
+        self.dialect
+    }
+
     /// Bind the frozen decision to the backend its SQL will run on.
     ///
     /// Consuming, and the ONLY way to build a [`TxRoute`]. The adapter calls
@@ -161,6 +200,7 @@ impl CapturedRoute {
             app_id: self.app_id,
             in_tx: self.in_tx,
             backend,
+            dialect: self.dialect,
         }
     }
 
@@ -169,25 +209,37 @@ impl CapturedRoute {
     /// For test harnesses that drive the exec helpers directly, with no
     /// V8 isolate to capture from. Gated so it cannot appear in a shipped
     /// binary; see the module docs. Still has to be `bind`-ed.
+    ///
+    /// **THE DIALECT IT STAMPS IS NOT THE CONFIGURED ONE, AND NOTHING READS
+    /// IT.** A capture without a V8 frame also has no adapter to ask, and this
+    /// module may not read `crate::context` to find out. The routes this mints
+    /// reach only `exec_query` / `exec_mutation_with_emit`, which route a
+    /// statement that is already built and never look at [`TxRoute::dialect`];
+    /// every builder call takes the dialect as a parameter from the caller that
+    /// resolved it. A test that needs a route whose dialect drives a builder has
+    /// to go through [`Self::capture`], which is handed the real answer.
     #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
     pub fn pool_for_tests(app_id: &str) -> Self {
         Self {
             app_id: app_id.to_string(),
             in_tx: false,
+            dialect: SqlDialect::Postgres,
         }
     }
 
     /// **Test-only**: a decision that claims the app's open transaction.
     ///
     /// Pairs with `crate::install_tx_marker_for_tests`, which parks a real
-    /// connection in the per-isolate slot. Gated like [`Self::pool_for_tests`].
+    /// connection in the per-isolate slot. Gated like [`Self::pool_for_tests`],
+    /// and carrying the same inert dialect for the same reason.
     #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
     pub fn tx_for_tests(app_id: &str) -> Self {
         Self {
             app_id: app_id.to_string(),
             in_tx: true,
+            dialect: SqlDialect::Postgres,
         }
     }
 }
@@ -205,6 +257,18 @@ impl TxRoute {
     /// holds by the time the statement finally runs.
     pub(crate) fn backend(&self) -> &BackendHandle {
         &self.backend
+    }
+
+    /// The dialect this dispatch's statements are written in.
+    ///
+    /// The value [`CapturedRoute::capture`] stamped, carried through
+    /// [`CapturedRoute::bind`] unchanged. Deliberately NOT re-derived from
+    /// [`Self::backend`]: matching on the handle's variants is the
+    /// vendor-enum read the engine was taken off in the first place, and it
+    /// would let the async half answer a different dialect than the eager half
+    /// planned against.
+    pub(crate) fn dialect(&self) -> SqlDialect {
+        self.dialect
     }
 
     /// `true` when this dispatch's SQL must run on the app's open
@@ -288,6 +352,33 @@ mod tests {
             let context = v8::Context::new(handle_scope, Default::default());
             let $scope = &mut v8::ContextScope::new(handle_scope, context);
         };
+    }
+
+    /// The dialect is knowable COLD, and the capture is where that is proven.
+    ///
+    /// This lived in `crud/mod.rs` as
+    /// `configured_sqlite_dialect_does_not_require_an_open_backend`, pinned on
+    /// the engine's own `current_sql_dialect()` - the function that read
+    /// `crate::context` from an ENGINE file, and the edge this change removes.
+    /// It is here rather than deleted because the property it pins is what
+    /// permits the stamp at all: nine `plan_*` functions build SQL in the
+    /// synchronous prelude, so if the dialect needed an open backend the whole
+    /// design would be unavailable. Now it rules on the value a dispatch will
+    /// actually plan against, one hop further along.
+    #[test]
+    fn a_configured_sqlite_dialect_is_captured_without_an_open_backend() {
+        in_scope!(let scope);
+        crate::reset_context_for_tests();
+        crate::set_db_url_for_tests("sqlite::memory:");
+        assert!(
+            crate::context::with(|context| context.backend()).is_none(),
+            "precondition: nothing has opened a backend on this thread"
+        );
+        assert_eq!(
+            crate::tx_scope::capture_route(scope, "app_a").dialect(),
+            crate::query::SqlDialect::Sqlite
+        );
+        crate::reset_context_for_tests();
     }
 
     #[test]
