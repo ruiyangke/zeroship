@@ -55,12 +55,33 @@
 //! to the pool, which would be a WORSE defect than the one being fixed
 //! (a transactional write leaking out of its transaction).
 //!
-//! The one non-`scope` constructor, `TxRoute::pool_for_tests`, is
+//! The one non-`scope` constructor, `CapturedRoute::pool_for_tests`, is
 //! `#[cfg(any(test, feature = "test-helpers"))]`: the `test-helpers`
 //! feature is declared in this crate's `[features]` and is enabled only by
-//! its own `[[test]]` targets, never by a binary that ships.
+//! its own `[[test]]` targets, never by a binary that ships. It yields a
+//! `CapturedRoute`, so even a test still has to `bind` a backend to reach
+//! the type the exec helpers take.
 
-/// Where one CRUD dispatch's SQL must go, decided at the dispatch frame.
+use crate::backend::BackendHandle;
+
+/// The routing decision, frozen at the dispatch frame and not yet bound to a
+/// backend.
+///
+/// **This exists because capture is SYNC and resolution is ASYNC.** The
+/// decision has to be taken while the V8 scope is live; opening the backend
+/// may have to connect, which cannot happen there. Splitting the two states
+/// into two types is what keeps that gap from becoming an `Option` - see
+/// [`TxRoute`].
+#[derive(Debug)]
+pub struct CapturedRoute {
+    app_id: String,
+    /// `true` iff this dispatch is lexically-and-asynchronously inside a
+    /// `db.transaction(fn)` callback **for this same app**.
+    in_tx: bool,
+}
+
+/// Where one CRUD dispatch's SQL must go, decided at the dispatch frame and
+/// bound to the backend it will run on.
 ///
 /// Carries the `app_id` too, so the exec helpers take a single argument
 /// and cannot be handed a route captured for one app alongside another
@@ -69,15 +90,23 @@
 /// Deliberately NOT `Clone`/`Copy`: a route is minted for one dispatch and
 /// moved into that dispatch's future. Deliberately NOT `Default` and with
 /// no `From<&str>` — see the module docs.
+///
+/// **There is no `TxRoute::capture` and no public constructor.**
+/// [`CapturedRoute::bind`] is the only way to obtain one, so a dispatcher that
+/// forgets to capture and a dispatcher that captures but forgets to bind are
+/// BOTH compile errors. Carrying `Option<BackendHandle>` on a single type
+/// would have demoted the second one to a runtime `None`, surfacing as
+/// `not_configured` - the same error a genuinely unconfigured plugin returns -
+/// which is precisely the silent-fallthrough class the module docs above say
+/// this type exists to prevent.
 #[derive(Debug)]
 pub struct TxRoute {
     app_id: String,
-    /// `true` iff this dispatch is lexically-and-asynchronously inside a
-    /// `db.transaction(fn)` callback **for this same app**.
     in_tx: bool,
+    backend: BackendHandle,
 }
 
-impl TxRoute {
+impl CapturedRoute {
     /// Freeze the routing decision for a dispatch.
     ///
     /// The ONLY production constructor. `current_tx_app` is whichever app
@@ -110,6 +139,72 @@ impl TxRoute {
     /// The app whose schema/role/metering this dispatch runs under.
     pub(crate) fn app_id(&self) -> &str {
         &self.app_id
+    }
+
+    /// The decision itself, before a backend is attached.
+    ///
+    /// Readable here because the SEC-1 comparison happens in [`Self::capture`],
+    /// so this is the value that comparison produced - the tests below assert
+    /// on it directly rather than having to bind a backend first.
+    pub(crate) fn in_tx(&self) -> bool {
+        self.in_tx
+    }
+
+    /// Bind the frozen decision to the backend its SQL will run on.
+    ///
+    /// Consuming, and the ONLY way to build a [`TxRoute`]. The adapter calls
+    /// it once per dispatch from the async body, because that is the first
+    /// point at which a backend can be opened; see
+    /// [`crate::tx_scope::bind_route`].
+    pub(crate) fn bind(self, backend: BackendHandle) -> TxRoute {
+        TxRoute {
+            app_id: self.app_id,
+            in_tx: self.in_tx,
+            backend,
+        }
+    }
+
+    /// **Test-only**: a decision known to be outside any transaction.
+    ///
+    /// For test harnesses that drive the exec helpers directly, with no
+    /// V8 isolate to capture from. Gated so it cannot appear in a shipped
+    /// binary; see the module docs. Still has to be `bind`-ed.
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[doc(hidden)]
+    pub fn pool_for_tests(app_id: &str) -> Self {
+        Self {
+            app_id: app_id.to_string(),
+            in_tx: false,
+        }
+    }
+
+    /// **Test-only**: a decision that claims the app's open transaction.
+    ///
+    /// Pairs with `crate::install_tx_marker_for_tests`, which parks a real
+    /// connection in the per-isolate slot. Gated like [`Self::pool_for_tests`].
+    #[cfg(any(test, feature = "test-helpers"))]
+    #[doc(hidden)]
+    pub fn tx_for_tests(app_id: &str) -> Self {
+        Self {
+            app_id: app_id.to_string(),
+            in_tx: true,
+        }
+    }
+}
+
+impl TxRoute {
+    /// The app whose schema/role/metering this dispatch runs under.
+    pub(crate) fn app_id(&self) -> &str {
+        &self.app_id
+    }
+
+    /// The backend this dispatch's SQL runs on.
+    ///
+    /// Bound at [`CapturedRoute::bind`], so it is the handle the adapter
+    /// resolved for THIS dispatch rather than whatever the thread's context
+    /// holds by the time the statement finally runs.
+    pub(crate) fn backend(&self) -> &BackendHandle {
+        &self.backend
     }
 
     /// `true` when this dispatch's SQL must run on the app's open
@@ -153,34 +248,6 @@ impl TxRoute {
     pub(crate) fn into_internal_transaction(mut self) -> Self {
         self.in_tx = true;
         self
-    }
-
-    /// **Test-only**: a route that is known to be outside any transaction.
-    ///
-    /// For test harnesses that drive the exec helpers directly, with no
-    /// V8 isolate to capture from. Gated so it cannot appear in a shipped
-    /// binary; see the module docs.
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[doc(hidden)]
-    pub fn pool_for_tests(app_id: &str) -> Self {
-        Self {
-            app_id: app_id.to_string(),
-            in_tx: false,
-        }
-    }
-
-    /// **Test-only**: a route that claims the app's open transaction.
-    ///
-    /// Pairs with `crate::install_tx_marker_for_tests`, which parks a real
-    /// connection in the per-isolate slot. Gated like
-    /// [`Self::pool_for_tests`].
-    #[cfg(any(test, feature = "test-helpers"))]
-    #[doc(hidden)]
-    pub fn tx_for_tests(app_id: &str) -> Self {
-        Self {
-            app_id: app_id.to_string(),
-            in_tx: true,
-        }
     }
 }
 

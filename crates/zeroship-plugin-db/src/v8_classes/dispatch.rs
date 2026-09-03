@@ -113,7 +113,7 @@ pub(crate) fn dispatch_find<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        run_find(binding, coll, route, filter, plan),
+        async move { run_find(binding, coll, crate::tx_scope::bind_route(route).await?, filter, plan).await },
         |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
     )));
 
@@ -145,7 +145,7 @@ pub(crate) fn dispatch_insert<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        run_insert(binding, coll, route, doc, actor_id),
+        async move { run_insert(binding, coll, crate::tx_scope::bind_route(route).await?, doc, actor_id).await },
         |result| crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
     )));
 
@@ -168,7 +168,7 @@ pub(crate) fn dispatch_insert_many<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        run_insert_many(binding, coll, route, docs, actor_id),
+        async move { run_insert_many(binding, coll, crate::tx_scope::bind_route(route).await?, docs, actor_id).await },
         |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
     )));
 
@@ -207,7 +207,7 @@ pub(crate) fn dispatch_update_one<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        run_update_one(binding, coll, route, filter, update, actor_id),
+        async move { run_update_one(binding, coll, crate::tx_scope::bind_route(route).await?, filter, update, actor_id).await },
         |(rows, has_masked)| crate::v8_bridge::first_row_or_null_masked(rows, has_masked),
     )));
 
@@ -245,7 +245,7 @@ pub(crate) fn dispatch_update_many<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        run_update_many(binding, coll, route, filter, update, actor_id),
+        async move { run_update_many(binding, coll, crate::tx_scope::bind_route(route).await?, filter, update, actor_id).await },
         crate::v8_bridge::usize_count_as_f64,
     )));
 
@@ -276,14 +276,15 @@ pub(crate) fn dispatch_delete_one<'s>(
         // Tagged as Update because soft-delete IS an UPDATE
         // setting `deleted_at`. Subscribers wanting to react
         // to soft-deletes inspect `new_tuple.deleted_at`.
-        move |bq| {
+        move |bq| async move {
             exec_mutation_then_read(
                 binding,
                 coll,
-                route,
+                crate::tx_scope::bind_route(route).await?,
                 bq,
                 zeroship_core::change_event::ChangeOp::Update,
             )
+            .await
         },
         |result: read_pipeline::ApplyResult| {
             crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked)
@@ -315,6 +316,7 @@ pub(crate) fn dispatch_delete_many<'s>(
         request_id,
         built,
         move |bq| async move {
+            let route = crate::tx_scope::bind_route(route).await?;
             exec_mutation_with_emit(
                 bq,
                 &route,
@@ -356,14 +358,15 @@ pub(crate) fn dispatch_purge_one<'s>(
         resolver,
         request_id,
         built,
-        move |bq| {
+        move |bq| async move {
             exec_mutation_then_read(
                 binding,
                 coll,
-                route,
+                crate::tx_scope::bind_route(route).await?,
                 bq,
                 zeroship_core::change_event::ChangeOp::Delete,
             )
+            .await
         },
         |result: read_pipeline::ApplyResult| {
             crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked)
@@ -394,6 +397,7 @@ pub(crate) fn dispatch_purge_many<'s>(
         request_id,
         built,
         move |bq| async move {
+            let route = crate::tx_scope::bind_route(route).await?;
             exec_mutation_with_emit(
                 bq,
                 &route,
@@ -429,14 +433,15 @@ pub(crate) fn dispatch_restore_one<'s>(
         resolver,
         request_id,
         built,
-        move |bq| {
+        move |bq| async move {
             exec_mutation_then_read(
                 binding,
                 coll,
-                route,
+                crate::tx_scope::bind_route(route).await?,
                 bq,
                 zeroship_core::change_event::ChangeOp::Update,
             )
+            .await
         },
         |result: read_pipeline::ApplyResult| {
             crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked)
@@ -468,6 +473,7 @@ pub(crate) fn dispatch_restore_many<'s>(
         request_id,
         built,
         move |bq| async move {
+            let route = crate::tx_scope::bind_route(route).await?;
             exec_mutation_with_emit(
                 bq,
                 &route,
@@ -510,7 +516,10 @@ pub(crate) fn dispatch_aggregate<'s>(
         resolver,
         request_id,
         built,
-        move |bq| exec_aggregate_read(binding, coll, route, bq, group_fields, result_columns),
+        move |bq| async move {
+            let route = crate::tx_scope::bind_route(route).await?;
+            exec_aggregate_read(binding, coll, route, bq, group_fields, result_columns).await
+        },
         |result: read_pipeline::ApplyResult| {
             crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked)
         },
@@ -550,7 +559,10 @@ pub(crate) fn dispatch_distinct<'s>(
         resolver,
         request_id,
         built,
-        move |bq| exec_distinct_read(binding, coll, route, bq, distinct_reads_masked_sibling),
+        move |bq| async move {
+            let route = crate::tx_scope::bind_route(route).await?;
+            exec_distinct_read(binding, coll, route, bq, distinct_reads_masked_sibling).await
+        },
         |result: read_pipeline::ApplyResult| {
             // Extract single-column values into a flat array. `rows`
             // is the pre-decoded result set — no JSON parse needed
@@ -598,7 +610,10 @@ pub(crate) fn dispatch_count<'s>(
         resolver,
         request_id,
         built,
-        move |bq| async move { exec_count(&route, bq).await },
+        move |bq| async move {
+            let route = crate::tx_scope::bind_route(route).await?;
+            exec_count(&route, bq).await
+        },
         |n: i64| {
             #[allow(clippy::cast_precision_loss)]
             ResolveValue::F64(n as f64)
@@ -628,7 +643,7 @@ pub(crate) fn dispatch_upsert<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        run_upsert(binding, coll, route, doc, conflict_fields, actor_id),
+        async move { run_upsert(binding, coll, crate::tx_scope::bind_route(route).await?, doc, conflict_fields, actor_id).await },
         |result| crate::v8_bridge::first_row_or_null_masked(result.rows, result.has_masked),
     )));
 

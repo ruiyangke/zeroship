@@ -58,6 +58,8 @@
 /// Global-registry key for the transaction-scope entry in the shared
 /// continuation-preserved `Map`. Namespaced so it cannot collide with a
 /// creator's own `Symbol.for(...)` key.
+use zeroship_data_core::error::DbError;
+
 const SCOPE_SYMBOL_KEY: &str = "zeroship.plugin-db.txScope";
 
 fn scope_symbol<'s>(scope: &mut v8::PinScope<'s, '_>) -> Option<v8::Local<'s, v8::Symbol>> {
@@ -152,6 +154,46 @@ pub(crate) fn leave(scope: &mut v8::PinScope<'_, '_>, prev: Option<v8::Global<v8
 /// Call this from a dispatch prologue while `scope` is live. The answer is only
 /// correct at the dispatch boundary: the runtime's continuation slot rotates on
 /// the next pump turn.
-pub(crate) fn capture_route(scope: &mut v8::PinScope<'_, '_>, app_id: &str) -> crate::tx_route::TxRoute {
-    crate::tx_route::TxRoute::capture(current_tx_app(scope).as_deref(), app_id)
+pub(crate) fn capture_route(
+    scope: &mut v8::PinScope<'_, '_>,
+    app_id: &str,
+) -> crate::tx_route::CapturedRoute {
+    crate::tx_route::CapturedRoute::capture(current_tx_app(scope).as_deref(), app_id)
+}
+
+/// Open this thread's backend if it is cold, and hand it back.
+///
+/// **This is the funnel, and it lives here because the state it reads is the
+/// adapter's.** It was `exec::ensure_backend_for_shared_sql` until 2026-09-03,
+/// which put an ENGINE file's hands on `crate::context` and `init_pool_async`,
+/// the one edge direction the crate split forbids. Nothing about the body
+/// changed; only its address did, so the engine now receives a backend instead
+/// of fetching one.
+///
+/// **The cold-init half is load-bearing, not incidental.** Mask-policy
+/// installation runs at boot, before any creator code, and is the call that
+/// warms a cold isolate; deleting the `init_pool_async` arm and keeping only
+/// the read would make `installSchema`'s `setMaskPolicy` fail
+/// `not_configured` on every fresh isolate, which on the SQLite dev tier is
+/// every boot.
+pub(crate) async fn ensure_backend() -> Result<crate::backend::BackendHandle, DbError> {
+    if crate::context::with(|c| c.backend().is_none()) {
+        crate::init_pool_async()
+            .await
+            .map_err(|e| DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}")))?;
+    }
+
+    crate::context::with(|c| c.backend())
+        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized".to_string()))
+}
+
+/// Bind a captured routing decision to the backend its SQL will run on.
+///
+/// The one place the two halves meet. Call it from the dispatch's async body:
+/// `capture_route` must run while the V8 scope is live, and this must run
+/// where it can `await`.
+pub(crate) async fn bind_route(
+    captured: crate::tx_route::CapturedRoute,
+) -> Result<crate::tx_route::TxRoute, DbError> {
+    Ok(captured.bind(ensure_backend().await?))
 }
