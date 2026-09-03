@@ -983,3 +983,46 @@ async fn query_one_scalar_still_reports_a_missing_row_as_a_row_problem() {
         "a one-column query with no row is a row problem, got: {error}"
     );
 }
+
+/// The OTHER half of `query_one_scalar`'s row contract, and the sibling
+/// asymmetry that hid it: `query_opt_scalar` carries a two-row assertion, while
+/// `query_one_scalar` had only the columns test and the no-row one above.
+///
+/// The no-row case does not hold the `rows.len() != 1` guard. With that guard
+/// disabled an empty result still fails, because `.next().ok_or_else(row_count)`
+/// one line later raises the same error - so both tests above stay green
+/// without it. Only MORE than one row separates the two paths, and there a
+/// missing guard is silent: `query_one_scalar` would return the FIRST of
+/// several rows and call it the answer.
+///
+/// Measured 2026-09-03: disabling the guard left the lib (771) and suite (798)
+/// suites entirely green.
+#[compio::test]
+async fn query_one_scalar_refuses_more_than_one_row() {
+    let client = connect().await;
+
+    let cause = common::error_chain(
+        &client
+            .query_one_scalar::<i32, _>("SELECT g FROM generate_series(1, 2) g", &[])
+            .await
+            .expect_err("query_one_scalar must refuse more than one row"),
+    );
+    assert!(
+        cause.contains("unexpected number of rows"),
+        "two rows of one column must fail on the row count, not on {cause:?}"
+    );
+    assert!(
+        !cause.contains("unexpected number of columns"),
+        "a row-count failure was reported as an arity failure: {cause:?}"
+    );
+
+    // Control, one variable: the same query shape with a single row is exactly
+    // what the helper is for, so the refusal turns on the row count alone.
+    assert_eq!(
+        client
+            .query_one_scalar::<i32, _>("SELECT g FROM generate_series(1, 1) g", &[])
+            .await
+            .expect("a single-column single-row query is what this is for"),
+        1
+    );
+}
