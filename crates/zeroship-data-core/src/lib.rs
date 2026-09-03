@@ -17,6 +17,13 @@
 //!   domain type may not name one.
 //! * [`binding`] - `DbBinding`, the immutable identity of one `env.db` binding
 //!   (app id + deploy token). A pure value type with no dependencies at all.
+//! * [`budgets`] - the DB-1 execution budgets. Three `u32` constants, moved
+//!   here from `zeroship-plugin-db` on 2026-09-02 because BOTH a vendor tier
+//!   (`backend/pg_session_sql.rs`, which renders them into PostgreSQL GUCs) and
+//!   the engine (`transaction/driver.rs`, which derives the cross-backend
+//!   protocol deadline from `DB_IDLE_IN_TX_TIMEOUT_MS`) name them. Two tiers
+//!   naming one module is what puts it at rank 0; the module's own header had
+//!   already said so.
 //!
 //! # What deliberately does NOT live here
 //!
@@ -33,4 +40,5 @@
 //! `ToOpError` extension trait in `zeroship-plugin-db`.
 
 pub mod binding;
+pub mod budgets;
 pub mod error;

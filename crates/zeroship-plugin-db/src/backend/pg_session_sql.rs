@@ -5,7 +5,7 @@
 //! `statement_timeout`, `idle_in_transaction_session_timeout` and `lock_timeout`
 //! are PostgreSQL GUCs; SQLite has no equivalent and never will. The NUMBERS
 //! these render are the opposite - cross-backend policy - and live in
-//! [`crate::budgets`], because `transaction/driver.rs` derives BOTH backends'
+//! [`zeroship_data_core::budgets`], because `transaction/driver.rs` derives BOTH backends'
 //! protocol execution deadline from `DB_IDLE_IN_TX_TIMEOUT_MS`.
 //!
 //! Both functions lived in `auth/bootstrap.rs` until 2026-09-01, which the tier
@@ -20,7 +20,7 @@
 
 use zeroship_core::database_role::per_app_role_name;
 
-use crate::budgets::{DB_IDLE_IN_TX_TIMEOUT_MS, DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS};
+use zeroship_data_core::budgets::{DB_IDLE_IN_TX_TIMEOUT_MS, DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS};
 use zeroship_data_core::error::DbError;
 
 /// Combined per-transaction client setup: `SET LOCAL ROLE` + the DB-1 timeout

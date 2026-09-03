@@ -178,11 +178,16 @@ pub(crate) mod v8_bridge;
 // THE schema authority for the data plane: the runtime descriptor this isolate
 // was built from. One resolution function, no `Option`, no catalog read.
 pub(crate) mod descriptor;
-// DB-1 execution budgets. CORE tier: cross-backend policy numbers, deliberately
-// separated from the PostgreSQL `SET LOCAL` strings that render them, because
-// the transaction driver derives BOTH backends' protocol deadline from one of
-// them. `pub` so the live suites can assert the guards they represent.
-pub mod budgets;
+// DB-1 execution budgets MOVED to `zeroship_data_core::budgets` on 2026-09-02.
+// They are named by a vendor tier (`backend/pg_session_sql.rs`, which renders
+// them into PostgreSQL GUCs) AND by the engine (`transaction/driver.rs`, whose
+// cross-backend protocol deadline is derived from one of them). Two tiers
+// naming one module is what puts it at rank 0, below both.
+//
+// Re-exported here rather than left as a path change for callers to chase: the
+// live suites assert against these guards by name, and `zeroship-plugin-db`
+// remains their public surface until the tiers themselves are crates.
+pub use zeroship_data_core::budgets;
 // Raw usage metrics and the single emit point. The metric NAMES are a billing
 // contract shared with `zeroship-metering` and the control plane's pricing
 // catalog, not a detail of whichever module happens to run the statement; they
