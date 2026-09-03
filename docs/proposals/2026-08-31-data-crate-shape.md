@@ -457,16 +457,36 @@ destination: a teardown coordinator behind `zeroship-migrate-server`.
 | `data-sqlite` | `backend/sqlite/` |
 | `data-cdc-server` | `wal_consumer.rs`, `replication.rs`, `slot_reaper.rs` |
 
-**The `data-engine` row is the weakest line in this table.** It reads as whole modules moving intact.
-Five do not: `crud/`, `transaction/`, `tx_route.rs`, `crud/unmask.rs` and `tx_scope.rs` hold
-**production functions whose signatures carry `v8::`** - `run_op`, the `dispatch_*` family,
-`transaction_dispatch` and the promise finalizer chain - inside a crate whose entire premise is that
-it does not link V8. `tx_scope.rs` is not a split at all: all of its production functions are V8
-context-map manipulation, so it moves to the adapter whole. The others are dispatch stacked on engine
-and must be cut along that line first.
+**The `data-engine` row WAS the weakest line in this table. It is not any more, and the
+paragraph that said so is kept below because the reason it stopped being true is the
+work itself.**
 
-`tests/lib/tier_signature_census.sh` is the instrument that enumerates them; read the current count
-from a run rather than from this document.
+It used to read: *"Five do not: `crud/`, `transaction/`, `tx_route.rs`, `crud/unmask.rs`
+and `tx_scope.rs` hold production functions whose signatures carry `v8::` - `run_op`, the
+`dispatch_*` family, `transaction_dispatch` and the promise finalizer chain - inside a
+crate whose entire premise is that it does not link V8."*
+
+**Re-measured 2026-09-02 at `b5d37e1dc`, across every module this row assigns to
+`data-engine`** (`crud/`, `transaction/`, `exec.rs`, `broker.rs`, `read_set.rs`,
+`tx_route.rs`, and `backend/mod.rs` for `BackendHandle`):
+
+| | count |
+| --- | --- |
+| `v8::` in a signature or a struct field | **0** |
+| `v8::` anywhere outside a comment | **4** |
+
+All four are `tx_route.rs:219-222`, inside a `macro_rules! in_scope` that lives under the
+file's `#[cfg(test)]` at `:187` - a test harness that spins up an isolate, not a shipped
+path. So the row now reads as it always claimed to: these modules move without a V8 cut.
+
+Two further corrections to the old text. `tx_scope.rs` was never in this row - the table
+assigns it to `plugin-db (thin)`, so its V8 content was never an obstacle to extracting
+`data-engine`. And the instrument it named, `tests/lib/tier_signature_census.sh`, does not
+exist in the tree; the measurement above is a direct grep over the assigned modules,
+separating signature/field hits from body hits because a `v8::` in a body is equally fatal
+to extraction (the crate would still link V8) but is a different amount of work to remove.
+
+Re-derive this before relying on it. It has been wrong once in each direction.
 
 **The error hierarchy is neutral with per-vendor translators** (Spring Data's shape). `DbError`'s 14
 variants name a vendor type **zero** times - the type was never the problem, only the translation is
