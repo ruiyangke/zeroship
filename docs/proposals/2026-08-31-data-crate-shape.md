@@ -615,6 +615,41 @@ Its production dependency set, measured over the four non-test files plus
 zeroship_schema::descriptors::EncryptionMode` - a re-export, so it repoints
 rather than moves.
 
+### The 21-item map was incomplete: `use super::` is invisible to it
+
+Measured 2026-09-02, and it is the THIRD successive scan of this boundary to
+find something the previous one could not see. Read that as the finding.
+
+The map below counts QUALIFIED paths (`crate::backend::postgres::…`) and `use`
+lines naming a vendor module. The Postgres files reach the shared tier a second
+way, through `use super::{…}`, which contains no `crate::` and no vendor module
+name - so it matched nothing. Enumerating those imports adds two items:
+
+| item | where | why it must travel with `data-postgres` |
+| --- | --- | --- |
+| `PgSqlExecutor` | `backend/mod.rs:220` | `SqlExecutor<Client = compio_postgres::OwnedPooledClient>` |
+| `PgLockManager` | `backend/mod.rs:251` | `LockManager<Client = compio_postgres::OwnedPooledClient>` |
+
+Both are `#[cfg(any(test, feature = "test-helpers"))]`, both are live -
+`PostgresBackend` implements each, and `crud/mask_drift.rs` imports
+`PgSqlExecutor` at four sites - so they move rather than being deleted.
+
+**Moving them REMOVES a vendor-gate baseline entry rather than adding one.**
+`tests/vendor_embedding_gate.sh` records `backend/mod.rs` as naming a vendor four
+times; the four production lines are `:220`, `:226`, `:251`, `:267`, which are
+exactly these two declarations and their method signatures. Everything else in
+that file naming `compio_postgres` is a doc comment or inside its test module.
+
+What stays behind is `impl Backend for PostgresBackend`. `Backend` is
+plugin-db's own `pub(crate)` conformance marker, so a local-trait /
+foreign-type impl is legal there and nowhere else.
+
+**Stop scanning; compile.** Three passes found three different gaps - the
+qualified-path sweep missed bare identifiers, the visibility check missed
+`pub(crate) const fn`, and this one missed `use super::`. The next instrument
+should be `cargo check` against a real crate boundary, which cannot be blind in
+any of those ways.
+
 ### The vendor cut's public surface is 21 items, 12 of which need promoting
 
 Measured 2026-09-02, after the three blockers below were cleared. A crate
