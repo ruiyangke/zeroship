@@ -251,40 +251,12 @@ impl SqliteBackend {
         Ok(Self::finish_open(opened, sink))
     }
 
-    /// **Test helper** - open a [`crate::backend::BrokerPauseGuard`]
-    /// for `app_id`. While the returned guard is bound, the SQLite CDC
-    /// publisher drops every packet whose `app_id` matches; on drop
-    /// the suppression flag clears and one `Resync` is pushed per
-    /// active subscription registered on the app.
-    ///
-    /// Gated to `cfg(any(test, feature = "test-helpers"))` so the
-    /// production binary doesn't carry this convenience. The orchestrator
-    /// reaches the same guard via
-    /// `BackendHandle::as_change_stream_sqlite(...).pause_broker(app_id)`;
-    /// the test helper exists because the integration test fixture
-    /// owns the `SqliteBackend` directly rather than wrapping it in a
-    /// `BackendHandle::Sqlite(Rc<...>)`.
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn pause_broker_for_tests(&self, app_id: &str) -> crate::backend::BrokerPauseGuard {
-        crate::backend::BrokerPauseGuard::new(app_id.to_string())
-    }
-
-    /// **Test helper** - engage [`crate::backend::SchemaPendingGuard`]
-    /// for `app_id`. While the guard is bound,
-    /// [`crate::broker::Broker::try_subscribe`] returns
-    /// `DbError::Coded { code: "schema_pending" }` for the app AND
-    /// the SQLite CDC publisher drops every packet for the app. On
-    /// drop the flag clears and one `Resync` is pushed per active
-    /// subscription. Same gating + rationale as
-    /// [`Self::pause_broker_for_tests`].
-    #[cfg(any(test, feature = "test-helpers"))]
-    pub fn engage_schema_pending_for_tests(
-        &self,
-        app_id: &str,
-    ) -> crate::backend::SchemaPendingGuard {
-        crate::backend::SchemaPendingGuard::new(app_id.to_string())
-    }
-
+    // `pause_broker_for_tests` and `engage_schema_pending_for_tests` were here
+    // until 2026-09-02. They forwarded to guard constructors without reading
+    // any backend state, which is what made the guards look like a vendor
+    // concern. Tests now call `broker::BrokerPauseGuard::new(app_id)` and
+    // `broker::SchemaPendingGuard::new(app_id)` directly - there was never a
+    // backend to dispatch on.
     #[allow(dead_code)]
     pub(crate) fn new<S: ChangeSink>(db_dir: PathBuf, sink: S) -> Result<Self, DbError> {
         let session_path = db_dir.join("zs-control.sqlite");

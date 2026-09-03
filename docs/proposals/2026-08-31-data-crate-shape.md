@@ -586,12 +586,37 @@ constructs them - while their `new` and `Drop` drive engine state. That is
 exists: a Cargo cycle, unbuildable, exactly the one `data-core`'s own `lib.rs`
 already refuses for `descriptor.rs`.
 
-**Same cut as `LockManager`, and as `budgets` before it.** The guard as a VALUE -
-an opaque token saying "app X holds a broker pause" - is rank-0 vocabulary. The
-EFFECT - registering the pause on construction, releasing it on drop, and the
-refcount `BrokerPauseGuard`'s own rustdoc describes - is engine behaviour. Either
-the type carries no `Drop` and the engine brackets it, or `ChangeStream` stops
-returning it and the engine wraps the vendor call.
+**RESOLVED 2026-09-02, and the resolution refutes the framing above.** The
+paragraph assumed a genuine contract-vs-behaviour tension, the kind
+`LockManager` had. There was none. All FOUR impls of the two methods - PG at
+`change_stream_pg.rs:269,276`, SQLite at `backend/sqlite/cdc.rs:785,792` - were
+the same two lines:
+
+```rust
+fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard {
+    BrokerPauseGuard::new(app_id.to_string())
+}
+```
+
+They ignore `self` and read no backend state. Pausing the broker does not depend
+on which database you are talking to, so these were never vendor behaviour -
+they were free functions hung on a trait, and the "cycle" was an artifact of
+where someone hung them.
+
+So: no cut. The two methods are DELETED from `ChangeStream`, all four impls with
+them, plus the two `*_for_tests` forwarders on `SqliteBackend` that existed only
+because the guards looked like a backend concern. Both guards moved to
+`broker.rs`, the module owning the registries their `Drop` mutates; their impls
+now reach only `self::`, measured with comments stripped. `new` became `pub` -
+not a widening, since the deleted `pub trait ChangeStream` method reached the
+same capability through `BackendHandle::as_change_stream_pg`.
+
+**Read this as the pattern, not the exception.** Three of the five items that
+looked like blockers this session dissolved on measurement rather than needing a
+design: `SessionMinter` was dead, these two were misfiled, and only `LockManager`
+had a real tension. Before designing a cut, check whether every impl of the
+method is the same body - a trait method no implementor specialises is not a
+contract.
 
 **This is the pattern to expect for the rest of the extraction, and the reason
 a declaration-level census is not enough.** Three items so far - `budgets`,

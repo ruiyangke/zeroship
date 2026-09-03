@@ -94,7 +94,7 @@ use zeroship_core::change_event::{ChangeEvent, ChangeOp};
 use crate::backend::sqlite::SqliteBackend;
 use crate::backend::sqlite::change_sink::{ChangeSink, DeliveryDisposition};
 use crate::backend::sqlite::session::SqliteSession;
-use crate::backend::{BrokerPauseGuard, ChangeStream, SchemaPendingGuard};
+use crate::backend::ChangeStream;
 use zeroship_data_core::error::DbError;
 
 // ---------------------------------------------------------------------------
@@ -779,19 +779,6 @@ impl ChangeStream for SqliteChangeStream {
         Ok(SqliteConsumerHandle)
     }
 
-    /// Returns a [`BrokerPauseGuard`], which engages the suppression
-    /// flag on construction; its `Drop` unsuppresses and emits
-    /// `Broker::resume_app_with_resync`.
-    fn pause_broker(&self, app_id: &str) -> BrokerPauseGuard {
-        BrokerPauseGuard::new(app_id.to_string())
-    }
-
-    /// Returns a [`SchemaPendingGuard`], which engages the broker's
-    /// thread-local `schema_pending_apps` entry on construction (so
-    /// `subscribe` is rejected while held) and disengages on `Drop`.
-    fn engage_schema_pending(&self, app_id: &str) -> SchemaPendingGuard {
-        SchemaPendingGuard::new(app_id.to_string())
-    }
 }
 
 #[cfg(test)]
