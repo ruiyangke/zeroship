@@ -1776,6 +1776,7 @@ pub(crate) fn plan_search(
 /// helps nor worsens that; it relocates the same code to the tier that will be
 /// fixed.
 pub(crate) async fn run_search(
+    backend: &crate::backend::BackendHandle,
     binding: DbBinding,
     coll: String,
     plan: SearchPlan,
@@ -1788,12 +1789,15 @@ pub(crate) async fn run_search(
         filter,
     } = plan;
 
-    // Reach the backend through the per-isolate context; runtime wiring stashes
-    // a `BackendHandle` per isolate. `BackendHandle` itself implements
-    // `VectorIndex`, so the vendor branch - and the SQLite ATTACH prelude that
-    // used to sit here - lives in `backend/mod.rs` where naming a vendor is
-    // legitimate. This function no longer knows either backend exists.
-    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+    // The backend arrives as an argument, NOT as a route. `BackendHandle`
+    // implements `VectorIndex`, so the vendor branch lives in `backend/mod.rs`
+    // where naming a vendor is legitimate, and this function still does not
+    // know either backend exists.
+    //
+    // Deliberately not a `TxRoute`: `impl VectorIndex for BackendHandle`
+    // branches on the vendor and never reads `in_tx`, and this family reaches
+    // the database without passing through `exec::run_sql` at all. A route here
+    // would carry a routing promise the scan discards.
     // The descriptor slice is resolved HERE and handed down. The vendor used to
     // fetch it from `crate::context` itself, which is the backend tier reaching
     // into engine state - an edge that cannot survive the crate split.
@@ -1934,6 +1938,7 @@ pub(crate) fn plan_near(
 /// Like [`run_search`], this still names both backends by their accessors. That
 /// belongs to the backend-downcast inversion, not to this cut.
 pub(crate) async fn run_near(
+    backend: &crate::backend::BackendHandle,
     binding: DbBinding,
     coll: String,
     plan: NearPlan,
@@ -1947,8 +1952,8 @@ pub(crate) async fn run_near(
     } = plan;
 
     // As in `run_search`: `BackendHandle` implements `SpatialIndex`, so the
-    // vendor branch and the SQLite ATTACH prelude live in the vendor tier.
-    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
+    // vendor branch and the SQLite ATTACH prelude live in the vendor tier, and
+    // the handle is a parameter rather than a route for the same reason.
     // Resolved here for the same reason as `run_search` above.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     use crate::backend::SpatialIndex as _;

@@ -664,7 +664,13 @@ pub(crate) fn dispatch_search<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        async move { run_search(binding, coll, planned?).await },
+        async move {
+            // No route: the search family never goes through `exec::run_sql`,
+            // so an `in_tx` bit would be captured and discarded. It needs the
+            // backend and nothing else.
+            let backend = crate::tx_scope::ensure_backend().await?;
+            run_search(&backend, binding, coll, planned?).await
+        },
         |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
     )));
 
@@ -685,7 +691,11 @@ pub(crate) fn dispatch_near<'s>(
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
         request_id,
-        async move { run_near(binding, coll, planned?).await },
+        async move {
+            // No route, for the same reason as `dispatch_search`.
+            let backend = crate::tx_scope::ensure_backend().await?;
+            run_near(&backend, binding, coll, planned?).await
+        },
         |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
     )));
 
