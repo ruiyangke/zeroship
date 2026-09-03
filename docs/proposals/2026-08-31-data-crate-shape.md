@@ -475,6 +475,36 @@ at or below it, and a module with no destination has no answer.
 | `service` | 611 | none of the three tiers | plugin registration; **`plugin-db` (thin)** unless a consumer census says otherwise |
 | `test_support` | 336 | none of the three tiers | test-only; follows whatever it supports |
 
+### `backend/mod.rs` is TWO destinations, and the trait count is nine
+
+The `data-engine` row lists `BackendHandle`, and the `data-core` row lists "the
+six vendor-free capability traits". Both are in `backend/mod.rs`, and that file
+cannot go to one crate: the vendors have to see the traits, and the handle has
+to see the vendors.
+
+Measured 2026-09-02 - what `backend/postgres.rs`, `pg_*.rs` and `backend/sqlite/`
+name under `crate::backend::`, with sibling references (`pg_error`,
+`pg_session_sql`, `pg_row_json`, `sqlite`) excluded because those move with
+their own tier:
+
+| what the vendors need from the shared module | items |
+| --- | --- |
+| dispatch traits - **nine, not six** | `SqlExecutor`, `LockManager`, `SchemaIntrospect`, `SessionMinter`, `DialectBuilder`, `ChangeStream`, `VectorIndex`, `SpatialIndex`, `Backup` |
+| shared value types they take or return | `SnapshotHandle`, `SnapshotOpts`, `PitrTarget`, `MintedToken`, `SchemaPendingGuard`, `BrokerPauseGuard`, `SessionInit`, `LockScope`, `BusyPolicy`, `ScalarRead`, `UnmaskAuditRow`, `SNAPSHOT_RESTORE_LOCK_TAG` |
+
+So `backend/mod.rs` splits: **the nine traits and those value types go to
+`data-core`**, below both vendors; **`BackendHandle` and its dispatch methods go
+to `data-engine`**, above them. (`EncryptionMode`, `VectorMetric` and `GeoPoint`
+also appear in the vendors' `crate::backend::` paths, but they are re-exports of
+`zeroship_schema::descriptors` and are already below. `Backend` is the test-only
+conformance marker of decision #112.)
+
+**The graph is acyclic, and this is the measurement that settles it: NEITHER
+vendor tier names `BackendHandle` anywhere, comments included.** A vendor naming
+the handle would be `vendor -> engine` while `engine -> vendor` already exists
+(the enum wraps an `Rc` of each), and that cycle would have to be broken before
+either crate could be created. It does not exist.
+
 **`auth/` is a leftover copy of work that already moved to the migration
 service.** Its own header says the data plane's `SET LOCAL ROLE` batch "comes
 from here on every transaction". It does not:
