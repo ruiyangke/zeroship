@@ -100,8 +100,14 @@ where
             // A pre-BindComplete ErrorResponse has already crossed the
             // connection dispatcher, which invalidates this same statement
             // before waking the response consumer. This idempotent call is a
-            // defensive second check; local send/read errors are not stale
-            // statement errors and therefore cannot make it observable alone.
+            // defensive second check.
+            //
+            // The last sentence here used to add that local send/read errors
+            // "cannot make it observable alone", which read as: no test can
+            // see this. Not so - a scripted 26000 in the start slot reaches it
+            // directly, and `a_stale_start_error_invalidates_the_cached_
+            // statement` binds this line and the `execute` twin at :573.
+            // Deleting either reddens that test and nothing else.
             statement.invalidate_cache_on_error(&error);
             return Err(error);
         }
@@ -962,6 +968,90 @@ mod tests {
     use std::error::Error as _;
     use std::future::Future;
     use std::task::{Context, Poll};
+
+    /// A stale cached statement must leave the cache when `query` fails before
+    /// Bind, and again when `execute` does.
+    ///
+    /// Measured 2026-09-02: deleting the `query` call left every lib and suite
+    /// test green, and deleting the `execute` one reddened only
+    /// `frontend_sequence::a_completed_copy_in_ends_with_copy_done_and_sync` -
+    /// a COPY framing test that says nothing about the statement cache, so a
+    /// regression there would have reported the wrong defect. `bind.rs` and
+    /// the two COPY paths assert the same call by name; these are the last two
+    /// that did not.
+    #[compio::test]
+    async fn a_stale_start_error_invalidates_the_cached_statement() {
+        use crate::codec::BackendMessages;
+        use crate::config::ProtocolVersion;
+        use futures_util::StreamExt as _;
+        use std::num::NonZeroUsize;
+        use std::sync::Arc;
+
+        // (label, drive the operation and return only whether it failed)
+        let mut ruled_on = 0usize;
+        for label in ["query", "execute"] {
+            let (sender, mut receiver) = mpsc::unbounded();
+            let client = Client::new_with_statement_cache(
+                sender,
+                SslMode::Disable,
+                SslNegotiation::Postgres,
+                0,
+                Some(0.into()),
+                None,
+                ProtocolVersion::V3_0,
+                crate::client::StatementCacheSettings::new(1, NonZeroUsize::MIN),
+            );
+            let inner = Arc::clone(client.inner());
+            let sql = format!("SELECT {label}");
+            let statement =
+                Statement::new(&inner, format!("s_stale_{label}"), vec![], vec![], false);
+            let statement = inner.cache_statement(&sql, statement, inner.type_cache_generation());
+            assert!(inner.cached_statement(&sql).is_some(), "{label} fixture");
+
+            let respond = async {
+                let mut request = receiver
+                    .next()
+                    .await
+                    .unwrap_or_else(|| panic!("{label} enqueued no request"));
+                let body =
+                    b"SERROR\0C26000\0Mscripted stale statement\0RFetchPreparedStatement\0\0";
+                let mut frame = vec![b'E'];
+                frame.extend_from_slice(&(u32::try_from(body.len()).unwrap() + 4).to_be_bytes());
+                frame.extend_from_slice(body);
+                request
+                    .sender
+                    .try_send(crate::client::ResponseMessages::Raw(
+                        BackendMessages::from_test_bytes(BytesMut::from(frame.as_slice())),
+                    ))
+                    .unwrap_or_else(|_| panic!("{label} could not receive its stale error"));
+            };
+
+            if label == "query" {
+                let run = super::query_inner::<&(dyn crate::types::ToSql + Sync), _>(
+                    &inner,
+                    statement,
+                    crate::slice_iter(&[]),
+                );
+                let (result, ()) = futures_util::future::join(run, respond).await;
+                assert!(result.is_err(), "{label} accepted a stale cached statement");
+            } else {
+                let run = super::execute_inner::<&(dyn crate::types::ToSql + Sync), _>(
+                    &inner,
+                    statement,
+                    crate::slice_iter(&[]),
+                );
+                let (result, ()) = futures_util::future::join(run, respond).await;
+                assert!(result.is_err(), "{label} accepted a stale cached statement");
+            }
+
+            assert!(
+                inner.cached_statement(&sql).is_none(),
+                "{label} left its stale statement cached"
+            );
+            ruled_on += 1;
+        }
+        assert_eq!(ruled_on, 2, "both start paths must be ruled on");
+    }
 
     fn test_client() -> (Client, mpsc::UnboundedReceiver<crate::connection::Request>) {
         let (sender, receiver) = mpsc::unbounded();
