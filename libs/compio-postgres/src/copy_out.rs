@@ -58,7 +58,8 @@ async fn copy_out_inner(
                 // `invalidate_cached_statement_on_error` returns early unless the
                 // error is a genuine stale-statement one. `query.rs` carries the
                 // same call with the same reasoning spelled out; the sites in
-                // `copy_in.rs` and `bind.rs` share the shape and say nothing.
+                // `copy_in.rs` and `bind.rs` carry no such comment, though both
+                // are bound by name.
                 //
                 // Nothing bound this line until 2026-09-02: replacing the condition
                 // with `if false` left all 1694 tests green across every target.
