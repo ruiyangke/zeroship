@@ -1,36 +1,39 @@
 //! Read-set capture + predicate evaluation.
 //!
-//! # NOTHING BELOW RUNS TODAY. Measured 2026-09-02.
+//! # WIRED 2026-09-02. It was inert on both ends until then.
 //!
-//! Everything after this block describes the feature as designed, in the
-//! present tense, and it is worth reading that way - but the narrowing does not
-//! happen in any shipped path, and delivery is coarse-grained. **BOTH ends are
-//! disconnected, and each was checked separately because "inert on both ends"
-//! is two claims:**
+//! This module was fully built and connected to nothing, while its own text
+//! described the narrowing in the present tense - which is what made every
+//! reader believe it ran. The two ends, each verified separately because
+//! "inert on both ends" is two claims:
 //!
-//! * **Producer.** [`record_if_active`] has exactly one call site,
-//!   `crud/mod.rs:242`, and it is real production code - which is why a caller
-//!   grep alone reads as "live". But its first line is `if !is_active()`, and
-//!   `is_active()` is true only inside an [`Active`] capture. **`Active::begin`
-//!   has no caller anywhere outside this module**, so `CURRENT_BUFFER` is
-//!   always `None` and the function returns immediately. No entry is ever
-//!   recorded.
-//! * **Consumer.** `broker::Subscription::set_read_set` has ten call sites and
-//!   every one is inside `broker.rs`'s own `#[cfg(test)]` module (it begins at
-//!   line 1106; the calls run 1374-1612). So `Subscription::read_set` is `None`
-//!   on every production subscription, and `Subscription::accepts` opens with
-//!   `let Some(rs) = ... else { return true }` - it accepts every event.
+//! * **Producer.** [`record_if_active`] had one production call site and still
+//!   recorded nothing: its first line is `if !is_active()`, and the only thing
+//!   that made `is_active()` true was [`Active::begin`], which is `#[cfg(test)]`
+//!   and so did not exist in a shipped build.
+//! * **Consumer.** `broker::Subscription::set_read_set` had ten call sites, all
+//!   inside `broker.rs`'s own `#[cfg(test)]` module, so `read_set` was `None`
+//!   on every real subscription and `Subscription::accepts` returned `true` for
+//!   every event.
 //!
-//! **The consequence is a delivery-semantics fact, not just dead code.** Every
-//! subscriber on `(app_id, collection)` receives every change to that
-//! collection, including rows its filter excludes. That is the coarse-grained
-//! default the paragraph below says this module removes.
+//! **What now connects them:**
 //!
-//! Wiring it is two connections, not a rewrite: open a capture around the
-//! `query()` handler dispatch (adapter-side - #117 moved the kind gate INTO
-//! the capture precisely so this module need not ask), and hand
-//! [`Active::take`]'s entries to the subscription the handler opened. That is
-//! a change to what subscribers receive, so it is a decision, not a cleanup.
+//! * [`ensure_capture`] opens the buffer, called from
+//!   `v8_bridge::ensure_read_set_capture` at the three adapter read entries
+//!   (`dispatch_find` / `dispatch_aggregate` / `dispatch_count`) before the
+//!   engine plans the query. It is keyed on the runtime's dispatch generation
+//!   rather than held as a guard, because the handler is JS and the functions
+//!   that bracket it live in a crate BELOW this one.
+//! * [`snapshot_for`] hands the entries to the subscription, at
+//!   `v8_classes::subscription`'s `openSubscription`. `db.live(fn)` runs the
+//!   reads first and only then calls `subscribe(name)` per collection, so the
+//!   buffer is populated by the time a subscription is opened.
+//!
+//! **The one rule that keeps this from being worse than what it replaced:**
+//! `accepts` treats `None` as "coarse, take everything" but `Some(vec![])` as
+//! "take nothing". So the caller attaches a read-set ONLY when it is non-empty
+//! for that collection; a handler that subscribes without having read the
+//! collection stays coarse instead of going silent.
 //!
 //! Without a read-set, the broker and the cross-worker WAL consumer
 //! deliver **coarse-grained**: every subscription on
@@ -415,6 +418,14 @@ struct Capture {
     /// the caller learns the kind and opens the scope at the same moment and
     /// should not have to branch.
     recording: bool,
+    /// Which dispatch frame this buffer belongs to. See [`ensure_capture`];
+    /// a buffer whose generation is stale belongs to a handler that has
+    /// already returned and must not be read by the next one.
+    ///
+    /// `None` for a capture installed by the test-only [`Active`] guard,
+    /// which brackets its own lifetime explicitly and is never reset by
+    /// generation.
+    generation: Option<u64>,
     entries: Vec<ReadSetEntry>,
 }
 
@@ -459,6 +470,7 @@ impl Active {
             );
             *slot = Some(Capture {
                 recording,
+                generation: None,
                 entries: Vec::new(),
             });
         });
@@ -492,6 +504,70 @@ impl Drop for Active {
 /// True if a read-set capture is active on this thread.
 pub fn is_active() -> bool {
     CURRENT_BUFFER.with(|c| c.borrow().is_some())
+}
+
+/// Install a capture for dispatch frame `generation`, or keep the existing one
+/// if it already belongs to that frame.
+///
+/// # Why a generation and not an RAII guard
+///
+/// The production capture cannot be a guard held across the handler: the
+/// handler is JS, and the two Rust functions that bracket it
+/// (`__zsEnterKind` / `__zsExitKind`) live in `zeroship-runtime`, which sits
+/// BELOW this crate and must not call up into it. So the boundary is pulled
+/// rather than pushed - the caller passes the frame's generation, and a buffer
+/// tagged with an older one is discarded rather than inherited.
+///
+/// The kind alone cannot substitute. `current_kind()` reads `Some(Query)` for
+/// two consecutive query handlers exactly as it does for one; the `None`
+/// between them is only visible from inside the runtime.
+///
+/// `recording` is the caller's answer to "is this frame a `query()`?", for the
+/// same reason [`Active::begin`] takes it: the kind is ambient adapter state
+/// and this module does not reach for it.
+pub fn ensure_capture(generation: u64, recording: bool) {
+    CURRENT_BUFFER.with(|c| {
+        let mut slot = c.borrow_mut();
+        let stale = match slot.as_ref() {
+            // A test guard owns its own lifetime; never reset it from here.
+            Some(cap) => cap.generation.is_some_and(|g| g != generation),
+            None => true,
+        };
+        if stale || slot.is_none() {
+            *slot = Some(Capture {
+                recording,
+                generation: Some(generation),
+                entries: Vec::new(),
+            });
+        }
+    });
+}
+
+/// The entries recorded for `collection` in the current capture.
+///
+/// **Clones rather than drains.** One handler may open several subscriptions -
+/// `db.live(fn)` calls `subscribe(name)` once per collection the tracker saw -
+/// and each must get the read-set, so taking the buffer would leave every
+/// subscription after the first with nothing.
+///
+/// Filtered by collection because the emptiness of the RESULT is what the
+/// caller branches on, and an unfiltered non-empty buffer would let a
+/// subscription attach a read-set containing no entry for its own collection.
+/// `Subscription::accepts` skips non-matching entries and then returns
+/// `false`, so that subscription would go permanently silent.
+pub fn snapshot_for(collection: &str) -> Vec<ReadSetEntry> {
+    CURRENT_BUFFER.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|cap| {
+                cap.entries
+                    .iter()
+                    .filter(|e| e.collection == collection)
+                    .cloned()
+                    .collect()
+            })
+            .unwrap_or_default()
+    })
 }
 
 /// If a capture is active AND the active procedure kind is `Query`,
@@ -737,5 +813,96 @@ mod tests {
             assert!(is_active());
         }
         assert!(!is_active(), "drop must clear the buffer");
+    }
+
+    // -----------------------------------------------------------------
+    // The production lifecycle: `ensure_capture` + `snapshot_for`.
+    //
+    // These bind the WIRING, not the predicate logic the tests above
+    // cover. Before the wiring landed, `Active::begin` had no production
+    // caller and `set_read_set` had none outside `broker.rs`'s own tests,
+    // so every subscription ran coarse.
+    // -----------------------------------------------------------------
+
+    /// The buffer must NOT survive into the next handler. Without the
+    /// generation check, one isolate thread serving two query handlers in a
+    /// row would attach the first handler's reads to the second's
+    /// subscription - delivering the wrong rows to the wrong subscriber.
+    #[test]
+    fn ensure_capture_resets_on_a_new_dispatch_generation() {
+        ensure_capture(1, true);
+        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
+        assert_eq!(snapshot_for("messages").len(), 1);
+
+        // Same frame: the buffer is kept and appended to.
+        ensure_capture(1, true);
+        record_if_active("messages", &json!({ "userId": 7 }), &json!({}));
+        assert_eq!(snapshot_for("messages").len(), 2, "same frame must append");
+
+        // New frame: the buffer is discarded.
+        ensure_capture(2, true);
+        assert!(
+            snapshot_for("messages").is_empty(),
+            "a new dispatch generation must not inherit the previous frame's reads"
+        );
+        CURRENT_BUFFER.with(|c| {
+            let _ = c.borrow_mut().take();
+        });
+    }
+
+    /// `snapshot_for` clones. `db.live(fn)` opens one subscription per
+    /// collection the tracker saw, so a draining read would leave every
+    /// subscription after the first with nothing.
+    #[test]
+    fn snapshot_for_clones_and_filters_by_collection() {
+        ensure_capture(10, true);
+        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
+        record_if_active("todos", &json!({ "done": false }), &json!({}));
+
+        assert_eq!(snapshot_for("messages").len(), 1);
+        assert_eq!(
+            snapshot_for("messages").len(),
+            1,
+            "snapshot must clone, not drain - the second subscription needs it too"
+        );
+        assert_eq!(snapshot_for("todos").len(), 1);
+        assert_eq!(snapshot_for("messages")[0].collection, "messages");
+        CURRENT_BUFFER.with(|c| {
+            let _ = c.borrow_mut().take();
+        });
+    }
+
+    /// The cliff `v8_classes::subscription` guards against. `accepts` reads
+    /// `Some(vec![])` as "take nothing" (`broker`'s
+    /// `b8b_empty_read_set_filters_everything_on_collection`), so a
+    /// subscription on a collection this handler never read must be left
+    /// coarse rather than handed an empty set - otherwise it goes silent,
+    /// which is strictly worse than the delivery it replaced.
+    #[test]
+    fn snapshot_for_is_empty_when_that_collection_was_never_read() {
+        ensure_capture(20, true);
+        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
+        assert!(
+            snapshot_for("todos").is_empty(),
+            "an unread collection yields nothing, so the caller must skip set_read_set"
+        );
+        CURRENT_BUFFER.with(|c| {
+            let _ = c.borrow_mut().take();
+        });
+    }
+
+    /// A non-query frame installs an inert capture, so a `mutation` that
+    /// opens a subscription attaches no read-set and stays coarse.
+    #[test]
+    fn ensure_capture_is_inert_when_not_recording() {
+        ensure_capture(30, false);
+        record_if_active("messages", &json!({ "userId": 42 }), &json!({}));
+        assert!(
+            snapshot_for("messages").is_empty(),
+            "a non-query frame must record nothing"
+        );
+        CURRENT_BUFFER.with(|c| {
+            let _ = c.borrow_mut().take();
+        });
     }
 }

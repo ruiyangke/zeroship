@@ -317,6 +317,26 @@ pub fn mint_subscription<'s>(
         Ok(subscription) => subscription,
         Err(error) => return Err(error.to_op_error()),
     };
+
+    // Narrow delivery to the rows this handler actually read.
+    //
+    // `db.live(fn)` runs `fn` - which does the reads - and only then calls
+    // `subscribe(name)` for each collection the tracker saw, so the buffer is
+    // already populated by the time we get here. `snapshot_for` clones rather
+    // than drains because that loop opens one subscription per collection.
+    //
+    // ATTACH ONLY A NON-EMPTY SET. `Subscription::accepts` treats `None` as
+    // "coarse - take everything" but `Some(vec![])` as "take nothing" (see
+    // `broker::tests::b8b_empty_read_set_filters_everything_on_collection`).
+    // A `query()` that subscribes without having read this collection - or a
+    // `mutation`/`action`, where capture is inert by design - would otherwise
+    // attach an empty set and go permanently silent, which is strictly worse
+    // than the coarse delivery it replaces.
+    let entries = crate::read_set::snapshot_for(collection);
+    if !entries.is_empty() {
+        broker_sub.set_read_set(entries);
+    }
+
     let cdc_lease = crate::cdc_lifecycle::acquire(app_id);
 
     let state = Subscription {
