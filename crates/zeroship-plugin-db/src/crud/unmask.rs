@@ -365,7 +365,7 @@ pub(crate) fn check_unmask_authorization(
         return Ok(false); // unauthenticated → denied
     };
     let kind = actor_obj.get("kind").and_then(|v| v.as_str()).unwrap_or("");
-    let policy = crate::context::with(|c| c.mask_policy_for(app_id));
+    let policy = super::mask_policy::cache_get(app_id);
     match policy {
         Some(p) => Ok(p.allows(kind, classification)),
         None => {
@@ -397,11 +397,11 @@ pub(crate) fn check_unmask_authorization(
 ///
 /// A storage miss is a no-op (cache stays empty, the default-deny
 /// fallback applies); a hit installs the loaded policy via
-/// [`crate::context::ThreadDbContext::set_mask_policy_for_app`]. A
+/// [`crate::crud::mask_policy::cache_put`]. A
 /// corrupt sidecar propagates as `DbError` so operators see the real
 /// fault instead of a silent default-deny.
 async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
-    if crate::context::with(|c| c.has_mask_policy(app_id)) {
+    if super::mask_policy::cache_has(app_id) {
         return Ok(());
     }
     let backend = match crate::context::with(|c| c.backend()) {
@@ -416,7 +416,7 @@ async fn ensure_mask_policy_cached(app_id: &str) -> Result<(), DbError> {
     // SQLite's sidecar out of this file.
     if let Some(stored) = backend.load_mask_policy(app_id).await? {
         let policy = crate::crud::mask_policy::MaskPolicy::from_json(&stored)?;
-        crate::context::with_mut(|c| c.set_mask_policy_for_app(app_id, Some(policy)));
+        super::mask_policy::cache_put(app_id, Some(policy));
     }
     Ok(())
 }
@@ -1704,17 +1704,13 @@ mod tests {
     struct PolicyGuard(String);
     impl PolicyGuard {
         fn install(app_id: &str, policy: crate::crud::mask_policy::MaskPolicy) -> Self {
-            crate::context::with_mut(|c| {
-                c.set_mask_policy_for_app(app_id, Some(policy));
-            });
+            crate::crud::mask_policy::cache_put(app_id, Some(policy));
             Self(app_id.to_string())
         }
     }
     impl Drop for PolicyGuard {
         fn drop(&mut self) {
-            crate::context::with_mut(|c| {
-                c.set_mask_policy_for_app(&self.0, None);
-            });
+            crate::crud::mask_policy::cache_put(&self.0, None);
         }
     }
 

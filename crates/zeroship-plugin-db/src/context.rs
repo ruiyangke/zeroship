@@ -30,7 +30,6 @@
 //! storage alone does not provide isolate identity.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -75,9 +74,6 @@ pub struct ThreadDbContext {
     /// different values.
     cdc_worker_id: Option<String>,
 
-    ///
-
-
     /// The backend generation stamped on the next installed transaction
     /// session, for SC-1's guard order step 4.
     ///
@@ -89,8 +85,6 @@ pub struct ThreadDbContext {
     /// coincidence.
     backend_generation: u64,
 
-    /// This thread's slice of THE schema authority: the runtime descriptor.
-    ///
     /// The identity of the database this thread's resources belong to.
     ///
     /// Minted once from validated configuration by `DbService` and stamped here
@@ -109,21 +103,6 @@ pub struct ThreadDbContext {
     /// `init_pool_async` reads it instead of re-parsing the URL. `None` until a
     /// URL is installed, which is also the "DB plugin disabled" state.
     backend_selection: Option<crate::BackendUrl>,
-
-    /// Per-thread, per-app mask-policy cache. Seeded
-    /// on first unmask attempt by reading durable storage (PG admin
-    /// schema or SQLite sidecar file); refreshed write-through by the
-    /// `setMaskPolicy` op when the SDK's `defineMaskPolicy()` flushes.
-    ///
-    /// `Some(policy)` — the app declared a policy; the unmask
-    /// authorisation path honours it.
-    /// `None` (entry missing) — no policy cached on this worker thread
-    /// yet. The unmask path then falls through to the default-deny
-    /// rule (`auto` actor allowed; everyone else denied).
-    ///
-    /// Keyed by `app_id`. The entry is never proactively evicted, so it lives
-    /// for the worker thread's lifetime unless explicitly replaced.
-    mask_policies: HashMap<String, crate::crud::mask_policy::MaskPolicy>,
 
     /// Backend handle wrapping the pool, as the typed
     /// [`BackendHandle`] enum (see `docs/archive/db-system-design.md`
@@ -174,19 +153,6 @@ pub struct ThreadDbContext {
     /// `crate::supply_root_keys_for_tests`, which is how the test suites
     /// drive encrypted columns without mutating the process environment.
     supplied_root_keys: Option<Rc<SuppliedRootKeys>>,
-
-    /// This thread's projection of the OPERATOR CHARTER: which columns the
-    /// platform assigns, by which generator, on which write event.
-    ///
-    /// Stamped by `DbPlugin::register` from the charter the plugin prototype
-    /// parsed at composition - the same route `meter` and `resource_key` take,
-    /// and for the same reason: the value is process-wide, so threading it
-    /// through every CRUD call site would carry one constant down every path.
-    ///
-    /// It is deliberately NOT keyed by app or deploy. The charter is compiled
-    /// into the binary; a creator's descriptor may mirror it but may never
-    /// replace it, so there is nothing per-tenant to key on.
-    assignment_plan: Option<Rc<crate::system_shape_charter::AssignmentPlan>>,
 }
 
 impl ThreadDbContext {
@@ -204,37 +170,11 @@ impl ThreadDbContext {
             backend_generation: 0,
             resource_key: DbResourceKey::UNBOUND,
             backend_selection: None,
-            mask_policies: HashMap::new(),
             backend: None,
             backend_init_in_progress: false,
             meter: None,
             supplied_root_keys: None,
-            assignment_plan: None,
         }
-    }
-
-    // ----- operator assignment charter --------------------------------
-
-    /// This thread's projection of the operator charter, if one is stamped.
-    ///
-    /// `None` on a thread whose plugin has not registered yet;
-    /// [`crate::system_shape_charter::plan`] is the accessor every consumer
-    /// uses, and it derives-and-stamps from the same compiled bytes on a miss.
-    pub(crate) fn assignment_plan(
-        &self,
-    ) -> Option<Rc<crate::system_shape_charter::AssignmentPlan>> {
-        self.assignment_plan.as_ref().map(Rc::clone)
-    }
-
-    /// Stamp the charter projection (called from `DbPlugin::register`, and by
-    /// the derive-on-miss path). Idempotent overwrite - registration may fire
-    /// more than once per worker thread, and every plugin projects the same
-    /// compiled charter.
-    pub(crate) fn set_assignment_plan(
-        &mut self,
-        plan: Rc<crate::system_shape_charter::AssignmentPlan>,
-    ) {
-        self.assignment_plan = Some(plan);
     }
 
     // ----- column root keys -------------------------------------------
@@ -297,7 +237,11 @@ impl ThreadDbContext {
     /// `pool()` and matches on the `Option` because it wants the handle, so this
     /// predicate had no shipped caller and the resulting `dead_code` warning sat
     /// in the build output where it could mask a real one.
-    #[cfg(any(test, feature = "test-helpers"))]
+    // `cfg(test)` alone, NOT `any(test, test-helpers)`: no integration target
+    // uses either method (checked across tests/ and benches/), so the wider gate
+    // compiled them into the `test-helpers` lib with no caller and re-raised the
+    // very dead_code warning it was added to remove.
+    #[cfg(test)]
     pub(crate) fn pool_initialised(&self) -> bool {
         self.pool.is_some()
     }
@@ -382,7 +326,7 @@ impl ThreadDbContext {
     /// TEST-ONLY for the same reason as [`Self::pool_initialised`]: the key is
     /// SET on every URL install and read back only by the tests that assert two
     /// URLs land on different keys. Production reads it off `service`, not here.
-    #[cfg(any(test, feature = "test-helpers"))]
+    #[cfg(test)]
     pub(crate) fn resource_key(&self) -> DbResourceKey {
         self.resource_key
     }
@@ -454,45 +398,6 @@ impl ThreadDbContext {
     pub(crate) fn set_cdc_worker_id(&mut self, worker_id: &str) {
         self.cdc_worker_id = Some(worker_id.to_string());
     }
-
-    // ----- MASK_POLICIES ---------------------------------------------
-
-    /// Fetch the cached mask policy for `app_id`.
-    /// Returns `None` when the cache holds no entry for the app
-    /// (caller falls through to durable-storage load + cache install,
-    /// or to the default-deny rule on a miss).
-    pub(crate) fn mask_policy_for(
-        &self,
-        app_id: &str,
-    ) -> Option<crate::crud::mask_policy::MaskPolicy> {
-        self.mask_policies.get(app_id).cloned()
-    }
-
-    /// Write-through cache install. `Some(policy)`
-    /// upserts; `None` clears the entry (used by tests + the
-    /// "no-policy-declared" path).
-    pub(crate) fn set_mask_policy_for_app(
-        &mut self,
-        app_id: &str,
-        policy: Option<crate::crud::mask_policy::MaskPolicy>,
-    ) {
-        match policy {
-            Some(p) => {
-                self.mask_policies.insert(app_id.to_string(), p);
-            }
-            None => {
-                self.mask_policies.remove(app_id);
-            }
-        }
-    }
-
-    /// `true` iff a mask-policy entry is cached for
-    /// `app_id`. Cheaper than `mask_policy_for` when callers only need
-    /// to gate the durable-storage load.
-    pub(crate) fn has_mask_policy(&self, app_id: &str) -> bool {
-        self.mask_policies.contains_key(app_id)
-    }
-
 
     /// Mint the backend generation for the next installed session.
     pub(crate) const fn next_backend_generation(&mut self) -> u64 {

@@ -15,6 +15,7 @@
 //! **Why `include_str!` rather than a file read.** There is no runtime path, no
 //! deployment step and no creator-controlled source: the bytes are in the binary.
 
+use std::cell::RefCell;
 use std::rc::Rc;
 
 use zeroship_migrate_policy::{
@@ -153,12 +154,39 @@ impl AssignmentPlan {
 /// either path, so the two cannot disagree. What the stamp buys is that a
 /// production worker fails at composition rather than inside its first write.
 pub(crate) fn plan() -> Result<Rc<AssignmentPlan>, DbError> {
-    if let Some(plan) = crate::context::with(super::context::ThreadDbContext::assignment_plan) {
+    if let Some(plan) = PLAN.with_borrow(Clone::clone) {
         return Ok(plan);
     }
     let plan = Rc::new(AssignmentPlan::from_charter(&load()?));
-    crate::context::with_mut(|c| c.set_assignment_plan(Rc::clone(&plan)));
+    PLAN.with_borrow_mut(|slot| *slot = Some(Rc::clone(&plan)));
     Ok(plan)
+}
+
+thread_local! {
+    /// This thread's projection, held HERE rather than as a field on the
+    /// adapter's `ThreadDbContext`.
+    ///
+    /// `AssignmentPlan` is this module's own type and `plan()` is its only
+    /// reader, so parking the slot on the adapter meant the engine reached UP
+    /// into the adapter twice - once to read, once to memoise - to consult a
+    /// value it owns outright. The adapter's remaining involvement is [`stamp`],
+    /// which is a downward call and therefore fine.
+    static PLAN: RefCell<Option<Rc<AssignmentPlan>>> = const { RefCell::new(None) };
+}
+
+/// Stamp this thread's projection at composition time.
+///
+/// Called from `DbPlugin::register`, so a production worker fails at
+/// composition rather than inside its first write; see [`plan`] for why the
+/// lazy fallback there is not a competing authority.
+pub(crate) fn stamp(plan: Rc<AssignmentPlan>) {
+    PLAN.with_borrow_mut(|slot| *slot = Some(plan));
+}
+
+/// Drop this thread's projection, so the next [`plan`] re-derives.
+#[cfg(any(test, feature = "test-helpers"))]
+pub(crate) fn reset_for_tests() {
+    PLAN.with_borrow_mut(|slot| *slot = None);
 }
 
 #[cfg(test)]

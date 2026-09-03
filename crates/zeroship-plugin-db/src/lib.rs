@@ -526,13 +526,18 @@ impl NativePlugin for DbPlugin {
             // Stamp the process-wide meter so the exec boundary can emit a
             // per-app usage metric on each successful op.
             c.set_meter(self.meter.clone());
-            // Stamp the operator charter's assignment projection, so the write
-            // pass reads the authority this process was composed with rather
-            // than deriving one on its first write.
-            c.set_assignment_plan(std::rc::Rc::new(
-                system_shape_charter::AssignmentPlan::from_charter(self.system_shape_charter()),
-            ));
         });
+        // Stamp the operator charter's assignment projection, so the write pass
+        // reads the authority this process was composed with rather than
+        // deriving one on its first write.
+        //
+        // OUTSIDE the `ctx_mut` closure, and on the charter's own thread-local:
+        // the projection is an engine-owned value that the adapter merely
+        // composes, so the adapter calls DOWN to store it rather than parking it
+        // in its own struct for the engine to reach back up for.
+        system_shape_charter::stamp(std::rc::Rc::new(
+            system_shape_charter::AssignmentPlan::from_charter(self.system_shape_charter()),
+        ));
         // Every JS-visible entry point lives on the Db v8_class wrapper
         // (see `v8_classes::db`).
         let _ = r;
@@ -765,6 +770,8 @@ pub fn reset_context_for_tests() {
     // would hand the next phase a stale transaction claim and a parked session,
     // inside one test.
     tx_lanes::reset_for_tests();
+    crud::mask_policy::reset_for_tests();
+    system_shape_charter::reset_for_tests();
     zeroship_data_core::schema_cache::reset_for_tests();
 }
 
@@ -884,7 +891,7 @@ pub fn cache_schema_for_deploy_for_tests(
 #[cfg(any(test, feature = "test-helpers"))]
 #[doc(hidden)]
 pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
-    ctx_mut(|c| c.set_mask_policy_for_app(app_id, None));
+    crud::mask_policy::cache_put(app_id, None);
 }
 
 /// **Test-only**: install a real Postgres client into the active
