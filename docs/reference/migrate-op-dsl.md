@@ -1294,14 +1294,23 @@ This is the one place authors see the IR — you never hand-write it; the build
 evaluator records it from your `.ts`. It is shown here so the "one script, both
 backends" claim is concrete.
 
-**What the doc-example gate does and does not prove.** The existing TypeScript
-doc gate (`packages/zero-migrate/tests/doc-examples.test.ts`) compiles snippets
-from `docs/writing-migrations.md` and `docs/getting-started.md`; it does **not**
-extract this reference file. The recorder's runtime invariants are covered by
+**What the doc-example gate does and does not prove — it does not run here.**
+`packages/zero-migrate/tests/doc-examples.test.ts` typechecks DSL snippets, and
+it is worth knowing that it cannot do so in this repository. It resolves its
+docs directory as `../../docs` relative to the package, which lands on this
+repo's `docs/`, and none of the five files it reads are there: `writing-migrations`,
+`getting-started`, `architecture`, `concepts` and `upgrading`, all expected as
+markdown at that root. Every arm reads its file with `readFileSync`, so each one
+raises rather than skipping. That path is correct for the package's own
+standalone layout and wrong for this vendored one; treat the suite as unrun here
+until it is repointed, not as coverage.
+
+The recorder's runtime invariants are covered by
 `packages/zero-migrate/tests/ops.test.ts`, but that suite does not keep the
-examples above type-correct. No gate currently compiles this file's snippets or
-applies the appendix IR against a live database, so do not read either suite as
-that proof.
+examples above type-correct. So nothing compiles this file's snippets, nothing
+applies the appendix IR against a live database, and the snippet gate that looks
+like it might is reading a directory that does not hold its inputs. Do not read
+any of the three as that proof.
 
 ## Further reading
 
