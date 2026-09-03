@@ -59,7 +59,7 @@ pub(crate) use super::ScalarRead;
 ///
 /// Returns a typed database error if the pool checkout, the `BEGIN`, the
 /// per-app session setup, the statement itself, or the `COMMIT` fails.
-pub(crate) async fn roled_rows(
+pub async fn roled_rows(
     pool: &Rc<compio_postgres::Pool>,
     app_id: &str,
     sql: &str,

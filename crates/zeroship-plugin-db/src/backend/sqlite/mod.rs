@@ -39,7 +39,7 @@ use zeroship_data_core::error::DbError;
 
 use self::change_sink::ChangeSink;
 
-pub(crate) mod change_sink;
+pub mod change_sink;
 // `cdc` is the home for the SQLite-side `ChangeStream` adapter (the
 // `preupdate_hook` install + worker->compio publisher integration).
 // Crate-private - the public consumer surface is
