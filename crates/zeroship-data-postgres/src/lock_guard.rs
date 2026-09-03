@@ -367,8 +367,21 @@ mod tests {
     fn release_flips_flag_after_unlock_await_structural() {
         let src = include_str!("lock_guard.rs");
         // Locate the release() function body.
+        //
+        // The needle is SPLIT so this test's own source cannot satisfy it.
+        // `include_str!` pulls in these very lines, so a whole-literal needle
+        // matches ITSELF - and on 2026-09-02 it did: promoting `release` from
+        // `pub(crate)` to `pub` for the crate extraction left the old literal
+        // matching only here, at the end of the file, so the search below found
+        // no following doc comment and the test failed. It failed LOUDLY by
+        // luck. Had one more doc-commented item followed this test, the
+        // assertion would have passed while inspecting a string literal, and
+        // [I42] would have been silently unguarded.
+        //
+        // Same technique as `direct_connection_sites_do_not_grow` in
+        // `zeroship-plugin-db/tests/integration.rs`, for the same reason.
         let release_start = src
-            .find("pub(crate) async fn release(")
+            .find(concat!("pub async", " fn release("))
             .expect("release fn signature should exist");
         // The next `fn ` after release() bounds its body.
         let release_end = release_start
