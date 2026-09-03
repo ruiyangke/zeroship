@@ -4242,6 +4242,47 @@ mod tests {
             .expect("parse a TLS connection string")
     }
 
+    /// The two capability checks that run BEFORE server verification.
+    ///
+    /// Measured 2026-09-02: deleting either left the lib suite (763) and the
+    /// integration suite (797) green, while the verification sibling below is
+    /// bound by two tests. The comment on those guards explains the ordering -
+    /// an unhonoured `sslmode` is silent, an unhonoured `sslsni` or
+    /// `sslcertmode` "changes what the wire carries" - which is a reason to
+    /// check verification last, not a reason to leave the other two unasserted.
+    ///
+    /// The default `TlsConnect` impls report that a connector always sends SNI
+    /// (`can_honor_sslsni(enabled) == enabled`) and applies only
+    /// `sslcertmode=allow`, so each row below asks for a policy the connector
+    /// cannot deliver and must be refused by name.
+    #[test]
+    fn a_connector_that_cannot_honour_sni_or_certmode_is_refused() {
+        let mut ruled_on = 0usize;
+        for (extra, setting) in [
+            ("sslmode=require sslsni=0", "sslsni=0"),
+            ("sslmode=require sslcertmode=require", "sslcertmode=require"),
+            ("sslmode=require sslcertmode=disable", "sslcertmode=disable"),
+        ] {
+            let config = tls_config(extra);
+            let error = validate_tls_connector_parameters::<crate::Socket, _>(
+                &UnattestedTls,
+                Encryption::Tls,
+                &config,
+            )
+            .expect_err(&format!(
+                "`{extra}` accepted a connector that cannot honour it"
+            ));
+            let cause = std::error::Error::source(&error)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                cause.contains(setting),
+                "the refusal must name the setting it could not honour: {cause}"
+            );
+            ruled_on += 1;
+        }
+        assert_eq!(ruled_on, 3, "every unhonourable setting must be ruled on");
+    }
     /// A connector that never read `sslrootcert` cannot have checked the
     /// server certificate against it, so the modes that promise verification
     /// must refuse it rather than report an authenticated session.
