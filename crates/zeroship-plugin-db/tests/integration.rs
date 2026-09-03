@@ -2769,7 +2769,7 @@ async fn c1_abandoned_reaper_preserves_a_connected_idle_consumer() {
 
     let threshold = std::time::Duration::from_secs(3600);
     let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
-        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone()),
+        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source()),
     ));
     let consumer = backend
         .as_change_stream_pg()
@@ -3238,7 +3238,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     // The production adapter provisions, spawns, and returns only
     // after Postgres accepts START_REPLICATION.
     let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
-        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone()),
+        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source()),
     ));
     let consumer = backend
         .as_change_stream_pg()
@@ -3451,7 +3451,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     let sub = zeroship_plugin_db::broker::subscribe(app, "events");
 
     let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
-        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone()),
+        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source()),
     ));
     let consumer = backend
         .as_change_stream_pg()
@@ -3838,7 +3838,7 @@ async fn vector_search_returns_k_nearest() {
     // top-10. We assert MEMBERSHIP (not strict order) because pgvector
     // distance ties between FP-close vectors can re-order across builds.
     let query = mk_unit(0, dims);
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
     // The search's projection is the descriptor's field list; install the entry
     // this deploy's runtime descriptor would have planted at boot.
     zeroship_plugin_db::cache_schema_for_tests(
@@ -3927,7 +3927,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
         return release_pg(pool).await;
     }
 
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
 
     // No descriptor entry is installed for `vector_missing`, and that is
     // deliberate: `ensure_pgvector_available` runs BEFORE the schema resolve,
@@ -4174,7 +4174,7 @@ async fn near_returns_within_radius() {
         }
     }
 
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
     let rows = SpatialIndex::spatial_near(
         &backend,
         &DbBinding::cold_start(app),
@@ -4240,7 +4240,7 @@ async fn postgis_extension_missing_reports_typed_error() {
         return release_pg(pool).await;
     }
 
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
 
     // No descriptor entry, deliberately: the extension probe runs BEFORE the
     // schema resolve, so this must still surface `postgis_extension_missing`.
@@ -4366,7 +4366,7 @@ async fn encrypted_column_round_trip_randomised() {
     .await
     .unwrap();
 
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
     let key = backend
         .key_store()
         .resolve("app1", "default")
@@ -4449,7 +4449,7 @@ async fn encrypted_randomised_row_swap_rejected() {
     .await
     .unwrap();
 
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
     let key = backend
         .key_store()
         .resolve("app1", "default")
@@ -4561,7 +4561,7 @@ async fn encrypted_deterministic_equality_lookup() {
     .await
     .unwrap();
 
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
     let key = backend
         .key_store()
         .resolve("app1", "default")
@@ -5100,7 +5100,7 @@ async fn encrypted_column_missing_key_typed_error() {
     // set cannot.
     let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[]);
 
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
     let err = backend
         .key_store()
         .resolve("app1", "missing_test")
@@ -5200,7 +5200,7 @@ fn pg_dump_on_path() -> bool {
 async fn snapshot_during_migration_returns_typed_error() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
     let app_id = "p5_pr4_miglock_app";
 
     // Acquire the snapshot_restore lock on a dedicated standalone
@@ -5321,7 +5321,7 @@ async fn snapshot_restore_round_trip_pg() {
         .unwrap();
     }
 
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
 
     // Snapshot to a tempdir-backed file:// URI.
     let dir = tempfile::tempdir().unwrap();
@@ -5426,7 +5426,7 @@ async fn snapshot_uri_content_hash_round_trip() {
     .await
     .unwrap();
 
-    let backend = PostgresBackend::new(pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
     let dir = tempfile::tempdir().unwrap();
     let dest_path = dir.path().join("hash_check.dump");
     let dest_uri = format!("file://{}", dest_path.to_string_lossy());
@@ -6164,7 +6164,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
         "login role must be blocked by FORCE RLS before vector_search proves the role fence"
     );
 
-    let backend = PostgresBackend::new(login_pool.clone(), login_url);
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(login_pool.clone(), login_url, zeroship_plugin_db::isolate_key_source());
     let rows = VectorIndex::vector_search(
         &backend,
         &DbBinding::cold_start(app),
@@ -6259,7 +6259,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         "login role must be blocked by FORCE RLS before spatial_near proves the role fence"
     );
 
-    let backend = PostgresBackend::new(login_pool.clone(), login_url);
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(login_pool.clone(), login_url, zeroship_plugin_db::isolate_key_source());
     let rows = SpatialIndex::spatial_near(
         &backend,
         &DbBinding::cold_start(app),
@@ -6446,7 +6446,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     // Real ciphertext from the platform's own encryptor, under the AAD the read
     // path recomputes: canonical_aad(collection, column, Some(row_pk)) for the
     // randomised mode (crud/unmask.rs:503-510).
-    let backend = PostgresBackend::new(admin_pool.clone(), url.clone());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(admin_pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
     let key = backend
         .key_store()
         .resolve(app, "default")
@@ -6862,9 +6862,10 @@ use zeroship_plugin_db::drop_namespace::{DropNamespaceOpts, DropNamespaceOutcome
 /// the drop-namespace tests. (`PostgresBackend` is already imported at
 /// module scope earlier in this file — referenced unqualified here.)
 fn pg_backend_handle(pool: &std::rc::Rc<Pool>, url: &str) -> BackendHandle {
-    BackendHandle::Postgres(std::rc::Rc::new(PostgresBackend::new(
+    BackendHandle::Postgres(std::rc::Rc::new(zeroship_plugin_db::backend::PostgresBackend::new(
         std::rc::Rc::clone(pool),
         url.to_string(),
+        zeroship_plugin_db::isolate_key_source(),
     )))
 }
 
@@ -7432,7 +7433,7 @@ async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     let backend =
-        zeroship_plugin_db::backend::PostgresBackend::new(std::rc::Rc::clone(&pool), url.clone());
+        zeroship_plugin_db::backend::PostgresBackend::new(std::rc::Rc::clone(&pool), url.clone(), zeroship_plugin_db::isolate_key_source());
 
     let active_before = pool.active_count();
     let created_before = pool.metrics.connections_created.get();
@@ -7487,7 +7488,7 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
             .expect("pool"),
     );
     let backend =
-        zeroship_plugin_db::backend::PostgresBackend::new(std::rc::Rc::clone(&pool), url.clone());
+        zeroship_plugin_db::backend::PostgresBackend::new(std::rc::Rc::clone(&pool), url.clone(), zeroship_plugin_db::isolate_key_source());
 
     use zeroship_plugin_db::backend::SqlExecutor as _;
     let first = backend

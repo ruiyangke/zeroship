@@ -128,6 +128,19 @@ pub(crate) mod backend_selection;
 #[cfg(feature = "test-helpers")]
 pub mod backend_selection;
 pub(crate) mod context;
+/// This isolate's column-key source, for callers that construct a backend.
+///
+/// A backend constructor takes its key source as a PARAMETER - the per-isolate
+/// context is ENGINE state, and once the backends are their own crates they
+/// cannot name the crate that depends on them. This is the one function that
+/// reads it, exported so a caller holding a pool can pass it in. The engine
+/// composer cannot do the passing for the Postgres arm: taking the pool would
+/// put `compio_postgres::Pool` in an engine signature, which
+/// `tests/vendor_embedding_gate.sh` refuses.
+#[cfg(any(test, feature = "test-helpers"))]
+pub fn isolate_key_source() -> encryption::LocalKeySource {
+    context::isolate_key_source()
+}
 // The operator charter the worker parses once at construction. `pub(crate)`
 // because nothing outside the crate has business reading the assignment
 // authority - the descriptor mirror is what consumers verify against.
@@ -936,9 +949,9 @@ pub async fn drop_pooled_lock_guard_without_release_for_tests(
     app_id: &str,
     name: &str,
 ) -> Result<(), String> {
-    use crate::backend::{LockScope, PostgresBackend};
+    use crate::backend::LockScope;
 
-    let backend = PostgresBackend::new(Rc::clone(&pool), url.to_string());
+    let backend = crate::backend::PostgresBackend::new(Rc::clone(&pool), url.to_string(), crate::context::isolate_key_source());
     let client = pool
         .get_owned()
         .await

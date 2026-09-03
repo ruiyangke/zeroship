@@ -241,6 +241,7 @@ impl SqliteBackend {
     pub(crate) async fn open<S: ChangeSink>(
         path: impl AsRef<Path>,
         sink: S,
+        key_source: crate::encryption::LocalKeySource,
     ) -> Result<Self, DbError> {
         let path = path.as_ref().to_path_buf();
         let opened = compio::runtime::spawn_blocking(move || Self::open_blocking(path))
@@ -248,7 +249,7 @@ impl SqliteBackend {
             .map_err(|_| {
                 DbError::internal("SqliteBackend::open: spawn_blocking task panicked")
             })??;
-        Ok(Self::finish_open(opened, sink))
+        Ok(Self::finish_open(opened, sink, key_source))
     }
 
     // `pause_broker_for_tests` and `engage_schema_pending_for_tests` were here
@@ -258,9 +259,13 @@ impl SqliteBackend {
     // `broker::SchemaPendingGuard::new(app_id)` directly - there was never a
     // backend to dispatch on.
     #[allow(dead_code)]
-    pub(crate) fn new<S: ChangeSink>(db_dir: PathBuf, sink: S) -> Result<Self, DbError> {
+    pub(crate) fn new<S: ChangeSink>(
+        db_dir: PathBuf,
+        sink: S,
+        key_source: crate::encryption::LocalKeySource,
+    ) -> Result<Self, DbError> {
         let session_path = db_dir.join("zs-control.sqlite");
-        Self::open_with_session_path(db_dir, session_path, sink)
+        Self::open_with_session_path(db_dir, session_path, sink, key_source)
     }
 
     fn open_blocking(path: PathBuf) -> Result<OpenedBackend, DbError> {
@@ -312,9 +317,10 @@ impl SqliteBackend {
         db_dir: PathBuf,
         session_path: PathBuf,
         sink: S,
+        key_source: crate::encryption::LocalKeySource,
     ) -> Result<Self, DbError> {
         let opened = Self::open_session(db_dir, session_path, None)?;
-        Ok(Self::finish_open(opened, sink))
+        Ok(Self::finish_open(opened, sink, key_source))
     }
 
     fn open_session(
@@ -342,7 +348,16 @@ impl SqliteBackend {
         })
     }
 
-    fn finish_open<S: ChangeSink>(opened: OpenedBackend, sink: S) -> Self {
+    /// `key_source` is a parameter rather than a
+    /// `crate::context::isolate_key_source()` lookup, for the same tier reason
+    /// the Postgres constructor takes one: the context is ENGINE state, and
+    /// once this subtree is `zeroship-data-sqlite` the vendor cannot name the
+    /// crate that depends on it. `crate::backend_selection` does the lookup.
+    fn finish_open<S: ChangeSink>(
+        opened: OpenedBackend,
+        sink: S,
+        key_source: crate::encryption::LocalKeySource,
+    ) -> Self {
         let OpenedBackend {
             session,
             db_dir,
@@ -371,7 +386,7 @@ impl SqliteBackend {
         // LOCAL: the roots this isolate was handed, else
         // `ZEROSHIP_COLUMN_KEY_<KEYID>`. Cache lives for the lifetime of the
         // backend; clears on backend drop.
-        let key_store = crate::encryption::KeyStore::new(crate::context::isolate_key_source());
+        let key_store = crate::encryption::KeyStore::new(key_source);
 
         Self {
             memory_db_dir,
