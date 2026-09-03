@@ -1251,7 +1251,10 @@ pub async fn init_pool_async() -> Result<(), String> {
                 ctx_mut(|c| c.set_postgres_backend(Rc::new(backend)));
             }
             BackendUrl::Sqlite { path } => {
-                let backend = crate::backend_selection::open_sqlite_backend(&path)
+                let backend = crate::backend_selection::open_sqlite_backend(
+                    &path,
+                    context::isolate_key_source(),
+                )
                     .await
                     .map_err(DbError::into_string)?;
                 service::note_backend_open();
