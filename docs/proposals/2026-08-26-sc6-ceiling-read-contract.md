@@ -480,7 +480,7 @@ projection narrowing may never drop `id`.
 
 **The AAD, where the requirement is cryptographic rather than conventional.**
 `canonical_aad(collection, column, row_pk_bytes)`
-(`crates/zeroship-plugin-db/src/encryption/aad.rs:75`) binds all three into the
+(`crates/zeroship-data-core/src/encryption/aad.rs:75`) binds all three into the
 AEAD additional data, so a child's ciphertext is decryptable **only** under the
 child's own collection name and the child's own row primary key. Hand the
 decrypt pass a flat joined row and it has the parent's collection and the

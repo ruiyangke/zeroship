@@ -61,8 +61,8 @@
 /// operation on an encrypted column.
 ///
 /// `row_pk_bytes` is `Some(bytes)` in
-/// [`crate::backend::EncryptionMode::Randomised`] (Camp A binding),
-/// `None` in [`crate::backend::EncryptionMode::Deterministic`]. The
+/// [`zeroship_schema::descriptors::EncryptionMode::Randomised`] (Camp A binding),
+/// `None` in [`zeroship_schema::descriptors::EncryptionMode::Deterministic`]. The
 /// caller is responsible for choosing the mode; this function just
 /// serialises the result. See the module-level docs for the
 /// rationale.

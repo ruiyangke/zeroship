@@ -1,5 +1,5 @@
 //! Cross-backend column encryption — AES-256-GCM at the storage
-//! boundary, reached identically whichever [`crate::backend`] arm is
+//! boundary, reached identically whichever backend arm is
 //! configured.
 //!
 //! ## What this module ships

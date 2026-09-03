@@ -48,6 +48,29 @@ zeroship-core = { workspace = true }
 # `impl` blocks, which is why this edge cannot be feature-gated away. See the
 # hole described above.
 zeroship-schema = { workspace = true }
+# The `encryption` module, moved here from `zeroship-plugin-db` on 2026-09-02.
+# It had to leave the adapter before either backend can be its own crate: both
+# name `KeyStore` and `LocalKeySource`, so extracting a vendor first would make
+# it depend on the crate that depends on it.
+#
+# Five crates, all PURE COMPUTE - no driver, no runtime, no V8 - so none of them
+# widens what this tier is allowed to know. Randomness comes from
+# `aes_gcm::aead::OsRng`; there is deliberately no `rand` here. (A first scan
+# reported one: all four hits were the string literal "openssl rand -hex 32" in
+# an error hint, which a comment-stripper cannot remove.)
+aes-gcm = { workspace = true }
+hkdf = { workspace = true }
+hmac = { workspace = true }
+sha2 = { workspace = true }
+zeroize = { version = "1", features = ["alloc", "derive"] }
+
+[dev-dependencies]
+# `encryption::keys`'s tests build a runtime to drive the key-source futures.
+# A DEV dependency only: the five `compio::runtime::Runtime::new()` calls are
+# all inside `keys.rs`'s `#[cfg(test)] mod tests`, so production here still
+# names no runtime and this crate's "no driver, no runtime, no V8" claim holds
+# for everything it ships.
+compio = { workspace = true }
 
 [features]
 # `DbBinding::cold_start` only. It was gated `#[cfg(any(test, feature =

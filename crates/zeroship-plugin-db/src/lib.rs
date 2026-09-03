@@ -247,10 +247,20 @@ pub mod service;
 // `test-helpers` so `tests/integration.rs` can reach
 // `encryption::canonical_aad` etc. for the round-trip + row-swap
 // fences.
+// `encryption` MOVED to `zeroship-data-core` on 2026-09-02, and had to: both
+// backends name `KeyStore` and `LocalKeySource`, so extracting either vendor
+// while this module lived here would have made the vendor crate depend on the
+// adapter that depends on it.
+//
+// Re-exported rather than repointed, so every `crate::encryption::…` call site
+// resolves unchanged - the mechanism `budgets`, `capability` and `storage` used
+// before it. The two-arm ladder is kept because it describes THIS crate's
+// release surface: `pub(crate)` normally, `pub` under `test-helpers` so
+// `tests/integration.rs` can reach `canonical_aad` for the round-trip fences.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod encryption;
+pub(crate) use zeroship_data_core::encryption;
 #[cfg(feature = "test-helpers")]
-pub mod encryption;
+pub use zeroship_data_core::encryption;
 
 // `change_stream_pg` is the PG-arm adapter for the `ChangeStream`
 // capability declared in `crate::backend::mod`. Crate-private — the

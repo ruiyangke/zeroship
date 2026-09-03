@@ -819,7 +819,7 @@ config with a validated floor (`crates/zeroship-core/src/config/secrets.rs`:
 
 **The reason is cryptographic, and the ordering matters.**
 `canonical_aad(collection, column, row_pk_bytes)`
-(`crates/zeroship-plugin-db/src/encryption/aad.rs:75`) already binds domain
+(`crates/zeroship-data-core/src/encryption/aad.rs:75`) already binds domain
 separation more tightly than per-column keys ever did: it separates *rows*,
 which keys never did at any granularity, and it authenticates the column name,
 which is the property a per-column key was reaching for. It also binds the wire
@@ -837,7 +837,7 @@ query-time one and the threat is a bytes-at-rest one.
 the literal `"default"` in both producers
 (`crates/zeroship-schema/src/query.rs:2295`, `diff.rs:1636`), and `derive_key`
 already salts the root by `app_id`
-(`crates/zeroship-plugin-db/src/encryption/keys.rs:427`). Per-column keying was
+(`crates/zeroship-data-core/src/encryption/keys.rs:427`). Per-column keying was
 nominal; this decision deletes a table that was not providing separation, not
 the separation itself.
 
@@ -849,7 +849,7 @@ the column's stored sentinel `zsenc:<mode>:<keyId>:<wraps>`, built at
 column names exactly one key version at a time; and the ciphertext envelope's
 leading byte is the **wire-format** version, not a key version, with `unpack`
 rejecting anything but `0x01`
-(`crates/zeroship-plugin-db/src/encryption/wire.rs:83-88`). The insertion point
+(`crates/zeroship-data-core/src/encryption/wire.rs:83-88`). The insertion point
 is already identified in the code: `wire.rs:7-17` reserves the leading byte so a
 future shape "requires no in-place data migration", and `aad.rs:84-89` commits
 to threading the version through `canonical_aad` as a parameter when `0x02`
@@ -996,7 +996,7 @@ the one that was always the worst:
 **The encryption `KeyStore` is unbounded and on the hot path.** Its module
 documentation states the property outright: "once a `(app_id, key_id)` entry is
 inserted, it stays for the lifetime of the `KeyStore`. There is no rotation
-surface today" (`crates/zeroship-plugin-db/src/encryption/keys.rs:48-55`). It
+surface today" (`crates/zeroship-data-core/src/encryption/keys.rs:48-55`). It
 holds tenant key material for every encrypted app the thread has ever served,
 and the `KeyStore` belongs to the backend, which lives in the thread-local
 context until backend reset or thread exit - **not** isolate eviction.
@@ -1398,7 +1398,7 @@ half; it is a code path no creator input can reach.
 
 **The crypto half IS built**, which is what makes the wrong reading plausible:
 `encrypt_deterministic`
-(`crates/zeroship-plugin-db/src/encryption/aead.rs:92`) derives a synthetic
+(`crates/zeroship-data-core/src/encryption/aead.rs:92`) derives a synthetic
 nonce as `HMAC-SHA256(k_siv, aad || plaintext)`, so identical plaintext yields
 byte-identical output, with tests pinning it. The mode also has real runtime -
 it selects the AAD shape, dropping `row_pk` (`aad.rs:75-78`,
