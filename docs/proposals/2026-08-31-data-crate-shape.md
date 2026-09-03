@@ -562,8 +562,28 @@ independently of the loop. Mutation: dropping the 1000ms attempt reddens
 production caller, `backend/lock_guard.rs`, is `#[cfg(any(test,
 feature = "test-helpers"))]`, so the default check compiled a green tree with
 `acquire` deleted and its caller unbuilt. `--features test-helpers --all-targets`
-found it immediately. Verify every remaining move under that configuration, not
-the bare one.
+found it immediately.
+
+**And that command is not sufficient either - proved on the very next move.**
+A cfg attribute CHANGES MEANING when the item it guards crosses a crate
+boundary. `SnapshotOpts`, `BusyPolicy`, `SnapshotHandle` and `PitrTarget` carry
+`#[cfg(feature = "test-helpers")]`; in `zeroship-plugin-db` that named
+plugin-db's feature, and in `zeroship-data-core` it names data-core's. The two
+are wired together (`test-helpers = ["zeroship-data-core/test-helpers"]`), so
+they turn on together - and a check that turns them on sees four items that a
+dependent, building plugin-db with default features, does not.
+
+Measured 2026-09-02: `cargo check -p zeroship-plugin-db --features test-helpers
+--all-targets` reported ZERO errors while `cargo check -p zeroship-worker
+-p zeroship-cli` failed with four unresolved imports. The `pub use` had to be
+split into an ungated arm and a `#[cfg(feature = "test-helpers")]` arm.
+
+`zeroship-data-core`'s own manifest already warned about the neighbouring case -
+"across a crate boundary `cfg(test)` is THIS crate's test build and never fires
+for a consumer" - and the feature arm fails the same way for the opposite
+reason. **The verification standard for every remaining move is therefore three
+commands, not one**: the crate alone with helpers and all targets, the crate
+alone WITHOUT them, and at least one dependent.
 
 #### And two of the value types close a cycle: the broker guards
 
