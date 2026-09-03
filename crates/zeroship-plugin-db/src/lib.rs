@@ -917,6 +917,70 @@ pub fn clear_mask_policy_cache_for_tests(app_id: &str) {
     crud::mask_policy::cache_put(app_id, None);
 }
 
+/// **Test-only**: run the write-side prep an insert dispatch performs before the
+/// engine sees the docs (encrypt + lower + system fields), without an isolate.
+///
+/// It lives HERE and not beside `crud::prepare_insert_many_docs_for_binding`,
+/// which it calls, because resolving the key store and the dialect is the
+/// DISPATCHER's frame: `tx_scope` is adapter state, so an engine module reading
+/// it is an ENGINE-to-ADAPTER call. `test-helpers` is a normal cargo feature, so
+/// such a call compiles into the library; the gate only hides it from
+/// `tests/lib/tier_direction_census.sh`, which excises gated items. Cargo will
+/// not be as forgiving once the engine is its own crate. Same argument, same
+/// words, at `exec::ambient_route_for_tests`.
+///
+/// The binding is a COLD START, matching every other `_for_tests` seam here.
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+pub async fn prepare_insert_many_docs_for_tests(
+    docs: &mut serde_json::Value,
+    app_id: &str,
+    collection: &str,
+    actor_id: Option<&str>,
+) -> Result<(), DbError> {
+    let binding = zeroship_data_core::binding::DbBinding::cold_start(app_id);
+    let backend = tx_scope::ensure_backend().await?;
+    let dialect = tx_scope::configured_dialect();
+    crud::prepare_insert_many_docs_for_binding(
+        backend.key_store(),
+        dialect,
+        docs,
+        &binding,
+        collection,
+        actor_id,
+    )
+    .await
+}
+
+/// **Test-only**: drive the REAL read pipeline (`crud::read_pipeline::apply`
+/// with default options: decrypt + mask-wrap on) over a set of freshly-fetched
+/// rows, so a round-trip test exercises the descriptor-sourced decrypt +
+/// mask-wrap path end to end rather than an AEAD-unit shim. Returns the
+/// finalized rows; `has_masked` is dropped (the caller asserts on contents).
+///
+/// Adapter-side for the reason spelled out on
+/// [`prepare_insert_many_docs_for_tests`]: resolving the backend is the
+/// dispatcher's job, and this helper is standing in for the dispatcher.
+#[cfg(feature = "test-helpers")]
+#[doc(hidden)]
+pub async fn finalize_rows_on_read_for_tests(
+    app_id: &str,
+    collection: &str,
+    rows: Vec<serde_json::Value>,
+) -> Result<Vec<serde_json::Value>, DbError> {
+    let binding = zeroship_data_core::binding::DbBinding::cold_start(app_id);
+    let backend = tx_scope::ensure_backend().await?;
+    let result = crud::read_pipeline::apply(
+        &backend,
+        &binding,
+        collection,
+        rows,
+        crud::read_pipeline::ApplyOptions::default(),
+    )
+    .await?;
+    Ok(result.rows)
+}
+
 /// **Test-only**: install a real Postgres client into the active
 /// isolate's `ThreadDbContext::tx_conn` slot (formerly the `TX_CONN`
 /// thread-local, folded into `ThreadDbContext`) so the Gap B

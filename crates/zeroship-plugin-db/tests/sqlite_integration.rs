@@ -2874,7 +2874,7 @@ fn insert_many_encrypts_ciphertext_before_sqlite_storage() {
             { "name": "Alice", "ssn": "123-45-6789" },
             { "name": "Bob", "ssn": "987-65-4321" }
         ]);
-        zeroship_plugin_db::crud::prepare_insert_many_docs_for_write(
+        zeroship_plugin_db::prepare_insert_many_docs_for_tests(
             &mut docs,
             app_id,
             collection,
