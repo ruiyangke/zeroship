@@ -130,6 +130,48 @@ impl PostgresBackend {
         }
     }
 
+    /// Connect a pool and wrap it, in one call.
+    ///
+    /// **This exists so that no crate above this one has to name
+    /// `compio_postgres::Pool`.** Until 2026-09-02 the adapter connected the
+    /// pool itself and handed it to [`Self::new`], which put the vendor type in
+    /// `ThreadDbContext::set_pool`'s signature - flagged by
+    /// `tests/lib/tier_signature_census.sh` as the adapter embedding a vendor
+    /// type. Pushing the composer DOWN instead of up is the only direction that
+    /// works: an `open_postgres_backend` in the engine's `backend_selection` was
+    /// tried the same day and refused by `tests/vendor_embedding_gate.sh`,
+    /// because taking `Rc<Pool>` names the vendor from a non-vendor crate just
+    /// as surely. Inside this crate the name is simply local.
+    ///
+    /// The key source stays a PARAMETER for the reason [`Self::new`] documents:
+    /// the vendor may not reach up into the engine to look it up.
+    ///
+    /// # Errors
+    ///
+    /// [`DbError::config`] with code `db_connect_failed`, carrying the driver's
+    /// whole `source` chain. The chain walk is here rather than at the call site
+    /// because the root cause - `ECONNREFUSED`, a TLS handshake failure - is
+    /// otherwise hidden behind the driver's generic wrapper by the time a caller
+    /// sees it.
+    pub async fn connect(
+        url: &str,
+        max_size: usize,
+        key_source: zeroship_data_core::encryption::LocalKeySource,
+    ) -> Result<Self, DbError> {
+        let pool = compio_postgres::Pool::connect(url, max_size)
+            .await
+            .map_err(|e| {
+                let mut msg = format!("db: failed to connect: {e}");
+                let mut cur: &dyn std::error::Error = &e;
+                while let Some(src) = std::error::Error::source(cur) {
+                    msg.push_str(&format!(" - caused by: {src}"));
+                    cur = src;
+                }
+                DbError::config("db_connect_failed", msg)
+            })?;
+        Ok(Self::new(Rc::new(pool), url.to_string(), key_source))
+    }
+
     /// Borrow the inner pool. Provided for the few places that still
     /// need the raw `Pool` (e.g. the v8_classes layer's `ensure_pool`
     /// shim until the consumer migration completes).

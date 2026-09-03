@@ -236,26 +236,22 @@ impl ThreadDbContext {
         matches!(self.backend, Some(BackendHandle::Postgres(_)))
     }
 
-    /// Install the pool — called by `init_pool_async` once Postgres
-    /// `connect` succeeds. Constructs the [`PostgresBackend`] facade and wraps
-    /// it in the [`BackendHandle::Postgres`] arm.
+    /// Install an already-connected Postgres backend, wrapped in the
+    /// [`BackendHandle::Postgres`] arm. The exact peer of
+    /// [`Self::set_sqlite_backend`], and it did not used to be.
     ///
-    /// **The pool is NOT also kept in a field of its own.** It was, until
-    /// 2026-09-02: `self.pool = Some(pool)` stored the very `Rc` that had just
-    /// been cloned into `PostgresBackend`, so two slots held one pool and every
-    /// write site had to remember to move both. The backend is the single
-    /// owner; `pool.is_some()` was always exactly
-    /// `matches!(backend, Some(Postgres(_)))`, which is what the predicate above
-    /// now says outright.
+    /// **The pool is not a parameter, and not a field.** Until 2026-09-02 this
+    /// was `set_pool(Rc<compio_postgres::Pool>)`: it connected nothing but took
+    /// the driver's pool, built the facade here, and ALSO stored the pool in a
+    /// second slot - the very `Rc` it had just cloned into `PostgresBackend`. So
+    /// one pool lived in two places, and the adapter named a vendor type in a
+    /// signature, which is the conflict recorded as #166.
     ///
-    /// That redundant field was also the ONLY reason this adapter module named
-    /// `compio_postgres::Pool` in a return position - the conflict recorded as
-    /// #166 between "the adapter holds the pool" and "no non-vendor crate
-    /// embeds a vendor type". Deleting it settles half of that by construction;
-    /// the parameter below is the half that remains.
-    pub(crate) fn set_pool(&mut self, pool: Rc<Pool>) {
-        let url = self.db_url.clone().unwrap_or_default();
-        let backend = Rc::new(PostgresBackend::new(pool, url, self.local_key_source()));
+    /// Both halves are gone. `PostgresBackend::connect` owns the connect inside
+    /// the vendor crate, which is the only tier permitted to name
+    /// `compio_postgres::Pool` - pushing the composer UP into the engine instead
+    /// was tried the same day and refused by `tests/vendor_embedding_gate.sh`.
+    pub(crate) fn set_postgres_backend(&mut self, backend: Rc<PostgresBackend>) {
         self.backend = Some(BackendHandle::Postgres(backend));
     }
 
