@@ -3045,6 +3045,47 @@ mod tests {
         );
     }
 
+    /// A hashed CRL entry must belong to the issuer its FILE NAME claims.
+    ///
+    /// OpenSSL looks a CRL up BY that name, so a CRL filed under another
+    /// issuer's hash means the real one is never found for either issuer and
+    /// revocation quietly goes unchecked - the same fail-open the directory
+    /// guards refuse elsewhere.
+    ///
+    /// The sibling test above shares this entry point but cannot reach this
+    /// arm: both of its fixtures are refused by the load and count arms first,
+    /// which is how the mismatch check came to be unbound. Disabling it left
+    /// the lib (767) and suite (797) suites entirely green.
+    #[test]
+    fn a_hashed_crl_entry_must_belong_to_the_issuer_it_is_filed_under() {
+        let directory = tempfile::tempdir().expect("create a hashed CRL directory");
+        let pem = include_str!("../tests/data/stale_guard_crl.pem");
+        let misfiled = directory.path().join("00000000.r0");
+        std::fs::write(&misfiled, pem).expect("write the misfiled entry");
+
+        let error = crls_from_hashed_directory(directory.path())
+            .expect_err("a CRL filed under another issuer's hash must be refused");
+        assert!(
+            error.contains("00000000.r0"),
+            "the refusal must name the offending entry: {error}"
+        );
+        assert!(
+            error.contains("not 00000000"),
+            "the refusal must name the hash the entry was filed under: {error}"
+        );
+
+        // Control: the same CRL under its own issuer hash loads, so the
+        // refusal turns on the mismatch rather than on the fixture.
+        let crl = crls_from_pem_file(&misfiled).expect("the fixture is one loadable CRL");
+        let hash = openssl_crl_issuer_hash(&crl[0]).expect("hash the fixture's issuer");
+        std::fs::remove_file(&misfiled).expect("remove the misfiled entry");
+        std::fs::write(directory.path().join(format!("{hash}.r0")), pem)
+            .expect("write the correctly filed entry");
+        let loaded =
+            crls_from_hashed_directory(directory.path()).expect("a correctly filed CRL loads");
+        assert_eq!(loaded.len(), 1, "the correctly filed CRL must be loaded");
+    }
+
     /// `sslcrldir` naming a directory with nothing usable in it must FAIL,
     /// because the alternative is silently verifying without revocation.
     ///
