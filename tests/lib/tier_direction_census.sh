@@ -20,10 +20,15 @@
 # backend/sqlite/ naming the Postgres WAL decoder.
 #
 #     4  ADAPTER    plugin-db: the Rust <-> V8 seam
-#     3  ENGINE     crud, transaction, exec, broker
+#     3  ENGINE     crud, transaction, exec
 #     2  PG SQLITE CDC   drivers and the relay - peers, mutually forbidden
 #     1  ENCRYPT
-#     0  CORE       DbError, descriptor, binding, budgets
+#     0  CORE       DbError, descriptor, binding, budgets, broker, read_set
+#
+#   `broker` sat at rank 3 until 2026-09-03 and that was the error the CDC cut
+#   kept tripping over: the ENGINE publishes into it on local mutation and CDC
+#   publishes into it from the WAL, so it is named by two tiers and belongs
+#   below both. It is rank 0 now, with `read_set` (which it evaluates) beside it.
 #
 #   CONTESTED modules have no settled destination, so they are neither judged
 #   nor trusted: they are skipped as a SOURCE and ignored as a TARGET. That is
@@ -188,13 +193,17 @@ cd "$SRC" || { echo "no such tree: $SRC" >&2; exit 1; }
 tier_of_file() {
   case "$1" in
     ./v8_classes/*|./v8_bridge.rs|./lib.rs|./tx_scope.rs)  echo ADAPTER ;;
-    ./crud/*|./transaction/*|./exec.rs|./broker.rs|./backend_selection.rs|./read_set.rs|./tx_route.rs|./drop_namespace.rs) echo ENGINE ;;
+    ./crud/*|./transaction/*|./exec.rs|./backend_selection.rs|./tx_route.rs|./drop_namespace.rs) echo ENGINE ;;
     ./auth/bootstrap.rs)                                 echo ENGINE ;;
     # NO ARMS for ./backend/pg_*.rs, ./backend/postgres.rs, ./backend/sqlite/*,
-    # ./encryption/* or ./lock_policy.rs. Every one of those was extracted into a
-    # dependency crate, and an arm for a file that does not exist is not inert -
-    # see the tier_of_target note below for what it cost. Measured 2026-09-03:
-    # ./backend/ holds only cancel.rs and mod.rs, and ./encryption/ is gone.
+    # ./encryption/*, ./lock_policy.rs, ./broker.rs or ./read_set.rs. Every one
+    # of those was extracted into a dependency crate, and an arm for a file that
+    # does not exist is not inert - see the tier_of_target note below for what it
+    # cost. Measured 2026-09-03: ./backend/ holds only cancel.rs and mod.rs, and
+    # ./encryption/ is gone. `broker.rs` and `read_set.rs` left the same day, for
+    # `zeroship-data-core`: the broker is published into by the ENGINE
+    # (`exec::emit_local`) AND by CDC (`wal_consumer`), so it had to sit below
+    # both, and `read_set` went first because the broker names `ReadSetEntry`.
     ./wal_consumer.rs|./replication.rs|./slot_reaper.rs) echo CDC ;;
     # Settled by docs/proposals/2026-09-02-thread-context-ownership.md, whose
     # ownership table places `lanes` and `mask_policies` in data-engine,
@@ -255,8 +264,19 @@ tier_of_target() {
     backend::postgres|backend::pg_row_json|backend::pg_session_sql|backend::pg_autocommit|backend::pg_error|backend::pg_introspect)
       if [ -f "backend/${1#backend::}.rs" ]; then echo PG; else echo EXTERNAL; fi ;;
     v8_classes*|v8_bridge*|tx_scope*)                    echo ADAPTER ;;
-    crud*|transaction*|exec*|broker*|backend_selection*|read_set*|tx_route*|drop_namespace*) echo ENGINE ;;
+    crud*|transaction*|exec*|backend_selection*|tx_route*|drop_namespace*) echo ENGINE ;;
     auth::bootstrap)                                     echo ENGINE ;;
+    # Same file-existence resolution as `backend::*` and `encryption*` above,
+    # and for the same reason: both left for `zeroship-data-core` on 2026-09-03
+    # and lib.rs now re-exports them (`pub use zeroship_data_core::broker;`,
+    # `pub use zeroship_data_core::read_set;`). Asserting ENGINE here would keep
+    # reporting `wal_consumer.rs -> crate::broker` as a CDC-to-ENGINE up-edge
+    # after cargo had already made it a plain dependency edge - which is the
+    # whole point of the move.
+    broker*)
+      if [ -f broker.rs ]; then echo ENGINE; else echo EXTERNAL; fi ;;
+    read_set*)
+      if [ -f read_set.rs ]; then echo ENGINE; else echo EXTERNAL; fi ;;
     # Same treatment: `src/encryption/` no longer exists; lib.rs re-exports
     # `zeroship_data_core::encryption`. The ENCRYPT tier has zero files in this
     # crate - it is already extracted.

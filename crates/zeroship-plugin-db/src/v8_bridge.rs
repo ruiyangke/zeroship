@@ -506,6 +506,78 @@ mod tests {
     use super::*;
     use zeroship_runtime::init_v8;
 
+    // -----------------------------------------------------------------
+    // The read-set kind gate.
+    //
+    // These three arms came from `read_set.rs`'s own test module on
+    // 2026-09-03, when that module moved to `zeroship-data-core` and could no
+    // longer name `zeroship_runtime`. They belong here on the merits, not just
+    // by exclusion: the mapping from procedure kind to `recording` is made
+    // HERE, in `ensure_read_set_capture`, and nowhere else. The versions they
+    // replace called `Active::begin(recording_for_current_kind())` - a
+    // test-local copy of that mapping, which would still have passed with the
+    // production mapping inverted.
+    //
+    // `libtest` runs each test on its own thread, so the thread-local capture
+    // buffer starts empty in every arm and needs no teardown.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn capture_records_in_query_kind() {
+        use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
+        use crate::read_set::Predicate;
+
+        let _kg = KindGuard::enter(ProcedureKind::Query);
+        ensure_read_set_capture();
+        crate::read_set::record_if_active(
+            "messages",
+            &serde_json::json!({ "userId": 42 }),
+            &serde_json::json!({}),
+        );
+        crate::read_set::record_if_active(
+            "messages",
+            &serde_json::json!({}),
+            &serde_json::json!({}),
+        );
+
+        let entries = crate::read_set::snapshot_for("messages");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].collection, "messages");
+        assert!(entries[0].predicate.is_some());
+        assert_eq!(entries[1].predicate, Some(Predicate::All(vec![])));
+    }
+
+    #[test]
+    fn capture_skipped_in_mutation_kind() {
+        use zeroship_runtime::rpc::{KindGuard, ProcedureKind};
+
+        let _kg = KindGuard::enter(ProcedureKind::Mutation);
+        ensure_read_set_capture();
+        crate::read_set::record_if_active(
+            "messages",
+            &serde_json::json!({ "userId": 42 }),
+            &serde_json::json!({}),
+        );
+        assert!(
+            crate::read_set::snapshot_for("messages").is_empty(),
+            "mutations must not record read-set"
+        );
+    }
+
+    #[test]
+    fn capture_skipped_outside_any_procedure_kind() {
+        // No `KindGuard`, so `current_kind()` is `None` and the capture is
+        // installed inert rather than not installed at all.
+        ensure_read_set_capture();
+        assert!(crate::read_set::is_active(), "the capture is still opened");
+        crate::read_set::record_if_active(
+            "messages",
+            &serde_json::json!({ "userId": 42 }),
+            &serde_json::json!({}),
+        );
+        assert!(crate::read_set::snapshot_for("messages").is_empty());
+    }
+
     #[test]
     fn decode_caps_recursion_depth_db6() {
         // DB-6: a deeply-nested arg must not overflow the worker thread's

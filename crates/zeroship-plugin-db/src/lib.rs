@@ -75,8 +75,19 @@ zeroship_core::declare_env_consumer!(
     target = "zeroship-plugin-db",
     scope = "plugin_db");
 
-// Always pub:
-pub mod broker;
+// `broker` MOVED to `zeroship-data-core` on 2026-09-03, and it is the move the
+// CDC extraction was waiting on. Two tiers publish into the broker - the ENGINE
+// on local mutation (`exec::emit_local`) and CDC from the WAL
+// (`wal_consumer`) - and the ADAPTER subscribes. While it lived here it was
+// ENGINE-tier, so `cdc_lifecycle.rs` and `wal_consumer.rs` naming
+// `crate::broker` were CDC-to-ENGINE up-edges; extracting data-engine WITH the
+// broker inside it would have turned them into a CDC/data-engine cycle. A
+// primitive two tiers both use belongs BELOW both.
+//
+// Re-exported rather than repointed, the same mechanism `budgets`, `encryption`
+// and `lock_policy` used: every `crate::broker::*` call site resolves unchanged,
+// including the ~30 in `wal_consumer.rs`.
+pub use zeroship_data_core::broker;
 // `binding` mirrors `backend` below: crate-private in release builds, `pub`
 // under `test-helpers` so the integration targets can name the `DbBinding` that
 // the descriptor store, the CRUD dispatchers and the search backends are keyed
@@ -204,14 +215,25 @@ pub mod crud;
 pub(crate) use zeroship_schema::diff;
 #[cfg(feature = "test-helpers")]
 pub use zeroship_schema::diff;
-// `pub` only under `test-helpers`, matching `diff` above: the mask-flip suite
-// asserts that a predicate on a masked column is LOWERED rather than compared
-// as written, and that assertion has to reach `normalise_filter`'s output. The
-// production visibility is unchanged.
+// `read_set` MOVED to `zeroship-data-core` on 2026-09-03, ahead of `broker`,
+// which is the only in-crate item it had to shed before the broker could follow
+// it. The read-set is a domain value - a normalised predicate over a row - and
+// it had to go below the ENGINE because the BROKER evaluates it and the broker
+// is named by two tiers at once.
+//
+// Re-exported rather than repointed, the same mechanism `budgets`, `encryption`
+// and `lock_policy` used, so every `crate::read_set::*` call site resolves
+// unchanged.
+//
+// The two-arm ladder is kept because it describes THIS crate's release surface,
+// matching `diff` above: the mask-flip suite asserts that a predicate on a
+// masked column is LOWERED rather than compared as written, and that assertion
+// has to reach `normalise_filter`'s output. The production visibility is
+// unchanged.
 #[cfg(not(feature = "test-helpers"))]
-pub(crate) mod read_set;
+pub(crate) use zeroship_data_core::read_set;
 #[cfg(feature = "test-helpers")]
-pub mod read_set;
+pub use zeroship_data_core::read_set;
 pub(crate) mod v8_bridge;
 
 // THE schema authority for the data plane: the runtime descriptor this isolate
