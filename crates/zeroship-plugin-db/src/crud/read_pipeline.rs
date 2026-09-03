@@ -393,8 +393,11 @@ async fn decrypt_rows_on_read(
     schema: &Value,
     rows: &mut [Value],
 ) -> Result<(), DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
+    // The funnel, not a direct context read. Every caller already reached this
+        // point through a path that installed the backend, so this is idempotent -
+        // but saying so with a call rather than relying on the ordering means a
+        // future caller that has NOT done that still works instead of failing.
+    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
     // One arm, not two. This was a PG branch and a SQLite branch calling the
     // SAME function with the SAME arguments, differing only in the concrete
     // type they passed - a monomorphisation artifact of the `EncryptedColumn`

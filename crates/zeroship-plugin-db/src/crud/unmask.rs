@@ -555,8 +555,10 @@ async fn fetch_and_decrypt(
     args: &UnmaskFieldArgs,
     enc_meta: &ColumnEncryptionMeta,
 ) -> Result<String, DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
+    // The funnel, not a direct context read: every unmask path reaches here
+    // through `ensure_unmask_backend`, so this is idempotent, and calling it
+    // states the prerequisite instead of leaving it to call order.
+    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
 
     let aad = crate::encryption::aad::canonical_aad(
         &args.collection,
@@ -653,8 +655,10 @@ async fn fetch_and_decrypt(
 /// the parent slot holds the plaintext on disk; the sibling
 /// `<col>_masked` carries the safe display form.
 async fn fetch_plaintext_parent(app_id: &str, args: &UnmaskFieldArgs) -> Result<String, DbError> {
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
+    // The funnel, not a direct context read: every unmask path reaches here
+    // through `ensure_unmask_backend`, so this is idempotent, and calling it
+    // states the prerequisite instead of leaving it to call order.
+    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
 
     // The real value lives in the RAW column - the field's own column holds
     // the mask. This read and its encrypted sibling are the only readers of
@@ -800,8 +804,10 @@ async fn write_audit_unmask_row(
         })
         .unwrap_or((None, None));
 
-    let backend = crate::context::with(|c| c.backend())
-        .ok_or_else(|| DbError::config("not_configured", "db: backend not initialized"))?;
+    // The funnel, not a direct context read: every unmask path reaches here
+    // through `ensure_unmask_backend`, so this is idempotent, and calling it
+    // states the prerequisite instead of leaving it to call order.
+    let backend = crate::exec::ensure_backend_for_shared_sql().await?;
 
     // The refused claim, serialised whole. Whole rather than picked apart into
     // id/kind because it is UNTRUSTED INPUT: an operator reading it is reading
