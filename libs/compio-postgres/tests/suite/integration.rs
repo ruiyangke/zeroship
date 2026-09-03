@@ -5969,6 +5969,88 @@ async fn post_bind_error_keeps_copy_out_statement_cached() {
     );
 }
 
+/// The COPY IN twin of the test above: a failure arriving AFTER `BindComplete`
+/// is propagated, and the cached COPY wrapper survives it.
+///
+/// Measured 2026-09-03, and the three facts are worth separating because they
+/// are NOT the same claim.
+///
+/// 1. Both of `copy_in`'s error returns were unbound: replacing either left the
+///    lib (771) and suite (797) suites green.
+/// 2. This test binds the FIRST of them - the post-Bind propagation. Replacing
+///    that error fails this test and nothing else (797 others green).
+/// 3. It does NOT bind the `!before_bind_complete` CONDITION, and no fixture
+///    shaped like this one can. Disabling the condition leaves the whole suite
+///    green, because control then falls through to
+///    `reprepare_cached_statement_once`, which DECLINES for this error and
+///    returns the identical `error` from the next arm. The two paths are
+///    observationally equal here.
+///
+/// Binding the condition needs a post-Bind failure that is replay-ELIGIBLE -
+/// a parameter-free stale-plan `0A000` with server provenance, which `ALTER
+/// TABLE` between prepare and execute produces. Only then does disabling the
+/// condition cause a real second COPY, which is the outcome the guard exists
+/// to prevent. That fixture is not built yet; this test does not stand in for
+/// it.
+#[compio::test]
+async fn post_bind_error_keeps_copy_in_statement_cached() {
+    use bytes::Bytes;
+
+    let url = test_url();
+    let client = connect_with_statement_cache(&url, 2).await.unwrap();
+    let target = common::test_object_name("cpg_copy_in_inner_execute");
+    let sql = format!("EXECUTE {target} /* cpg_copy_in_post_bind_cache */");
+
+    client
+        .batch_execute(&format!("PREPARE {target} AS SELECT 1::int4"))
+        .await
+        .expect("prepare the SQL-level target");
+
+    let Err(initial) = client.copy_in::<_, Bytes>(&sql).await else {
+        panic!("copy_in accepted a statement that is not COPY FROM STDIN")
+    };
+    assert!(
+        initial.code().is_none(),
+        "the initial COPY refusal unexpectedly came from PostgreSQL: {}",
+        common::error_chain(&initial)
+    );
+    assert_eq!(
+        prepared_statement_names(&client, &sql).await.len(),
+        1,
+        "the COPY wrapper was not cached before the post-Bind error"
+    );
+
+    client
+        .batch_execute(&format!("DEALLOCATE {target}"))
+        .await
+        .expect("remove only the SQL-level target");
+    let Err(error) = client.copy_in::<_, Bytes>(&sql).await else {
+        panic!("copy_in accepted EXECUTE of a missing statement")
+    };
+    assert_eq!(
+        error.code(),
+        Some(&SqlState::INVALID_SQL_STATEMENT_NAME),
+        "the missing inner statement reported the wrong error: {}",
+        common::error_chain(&error)
+    );
+    assert_eq!(
+        error
+            .as_db_error()
+            .and_then(compio_postgres::error::DbError::routine),
+        Some("FetchPreparedStatement"),
+        "the fixture did not reach the stale-statement provenance"
+    );
+    client
+        .simple_query("")
+        .await
+        .expect("drain any statement-cache cleanup");
+    assert_eq!(
+        prepared_statement_names(&client, &sql).await.len(),
+        1,
+        "a post-Bind inner EXECUTE error evicted the valid COPY wrapper"
+    );
+}
+
 #[compio::test]
 async fn statement_cache_execution_count_resets_after_prepared_eviction() {
     let url = test_url();
