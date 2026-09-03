@@ -135,8 +135,10 @@ pub mod reducer;
 /// The driver: the only place a reducer action becomes I/O.
 pub mod driver;
 
-/// The out-of-band canceller forced cleanup uses to reach a session another
-/// future is holding.
+// The canceller's doc comment used to sit here, above a `pub mod cancel;` that
+// #122 moved to `backend/cancel.rs` - the declaration went, the documentation
+// stayed, and rustdoc then attached it to whatever came next. Deleted rather
+// than re-pointed: `backend/mod.rs:80` declares the module and carries its own.
 
 /// The `test-helpers` seam onto the driver, for integration targets that need a
 /// live server. Not compiled into a production build.

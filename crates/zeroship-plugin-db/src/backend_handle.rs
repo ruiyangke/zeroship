@@ -182,7 +182,7 @@ impl BackendHandle {
                 let sql = format!(
                     "SELECT \"{raw_column}\" FROM \"{app_id}\".\"{collection}\" WHERE id = $1"
                 );
-                pg.read_roled_scalar_bytes(app_id, &sql, &[&row_pk]).await
+                pg.read_roled_scalar_bytes(app_id, &sql, &[row_pk]).await
             }
             Self::Sqlite(sq) => {
                 let q_app = sq.quote_ident(app_id);
@@ -225,7 +225,7 @@ impl BackendHandle {
                 let sql = format!(
                     "SELECT \"{raw_column}\" FROM \"{app_id}\".\"{collection}\" WHERE id = $1"
                 );
-                pg.read_roled_scalar_text(app_id, &sql, &[&row_pk]).await
+                pg.read_roled_scalar_text(app_id, &sql, &[row_pk]).await
             }
             Self::Sqlite(sq) => {
                 let q_app = sq.quote_ident(app_id);
@@ -273,15 +273,15 @@ impl BackendHandle {
                     app_id,
                     &sql,
                     &[
-                        &row.actor_id,
-                        &row.actor_role,
-                        &row.claimed_actor,
-                        &row.collection,
-                        &row.row_pk,
-                        &row.column,
-                        &row.classification,
-                        &row.reason,
-                        &row.outcome,
+                        row.actor_id,
+                        row.actor_role,
+                        row.claimed_actor,
+                        row.collection,
+                        row.row_pk,
+                        row.column,
+                        row.classification,
+                        row.reason,
+                        row.outcome,
                     ],
                 )
                 .await?;
