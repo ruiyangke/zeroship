@@ -352,6 +352,9 @@ pub mod tx_scope;
 // The transaction lane owner. Engine-bound: it moves to `zeroship-data-engine`
 // as a file rather than as an extraction, which is the point of separating it
 // from `context.rs` (the adapter's composition root).
+// The per-isolate dispatch enum. Engine-bound, and separated from
+// backend/mod.rs so the data-engine cut moves a file.
+pub(crate) mod backend_handle;
 pub(crate) mod tx_lanes;
 pub mod tx_route;
 
