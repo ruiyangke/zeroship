@@ -28,8 +28,8 @@ pub mod superjson;
 
 pub use abort::{entered_for_eviction, register_in_flight, AbortGuard};
 pub use capability::{
-    build_capability_violation, current_kind, install_globals as install_capability_globals,
-    KindGuard, ProcedureKind,
+    build_capability_violation, current_kind, dispatch_generation,
+    install_globals as install_capability_globals, KindGuard, ProcedureKind,
 };
 pub use ctx_holder::{mint_rpc_ctx, RpcCtx};
 pub use dispatch::{

@@ -108,6 +108,34 @@ thread_local! {
     /// Monotonic token counter. `u32` so tokens round-trip through a
     /// V8 `Integer` without loss.
     static KIND_TOKEN_COUNTER: Cell<u32> = const { Cell::new(1) };
+
+    /// Monotonic count of dispatch frames entered on this thread.
+    ///
+    /// Exists so a consumer that caches per-dispatch state can tell "still
+    /// inside the handler I opened this for" from "a new handler started"
+    /// WITHOUT the runtime calling into it. `CURRENT_KIND` cannot answer that:
+    /// it reads `Some(Query)` for two consecutive query handlers just as it
+    /// does for one, and the `None` in between is only observable from a hook.
+    ///
+    /// `zeroship-plugin-db`'s read-set capture is the consumer. It lives above
+    /// this crate, so an observer callback here would invert the dependency;
+    /// a generation it can pull keeps the arrow pointing one way.
+    static DISPATCH_GENERATION: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Generation of the innermost dispatch frame entered on this thread.
+///
+/// Bumped by every `__zsEnterKind` and by [`KindGuard::enter`]. Compare a
+/// cached value against this to detect a handler boundary; it never repeats
+/// within a thread (`u64`, saturating rather than wrapping so a rollover
+/// cannot make two different dispatches compare equal).
+#[inline]
+pub fn dispatch_generation() -> u64 {
+    DISPATCH_GENERATION.with(|c| c.get())
+}
+
+fn bump_dispatch_generation() {
+    DISPATCH_GENERATION.with(|c| c.set(c.get().saturating_add(1)));
 }
 
 /// Mint a fresh token. Skips 0 — the SSR-entry treats `tok < 0` as
@@ -138,6 +166,7 @@ pub struct KindGuard {
 
 impl KindGuard {
     pub fn enter(kind: ProcedureKind) -> Self {
+        bump_dispatch_generation();
         let previous = CURRENT_KIND.with(|c| {
             let prev = c.get();
             c.set(Some(kind));
@@ -181,6 +210,10 @@ fn enter_kind_callback(
         None
     };
 
+    // Bumped even when `kind` is unparseable: the frame was still entered, and
+    // a consumer keyed on the generation must see the boundary or it will
+    // attribute the new handler's reads to the previous one.
+    bump_dispatch_generation();
     let token = next_kind_token();
     let prev = CURRENT_KIND.with(|c| c.get());
     KIND_SAVES.with(|m| {
@@ -440,6 +473,47 @@ mod tests {
             current_kind(),
             None,
             "CURRENT_KIND must restore after panic unwinds the guard"
+        );
+    }
+
+    /// Two consecutive frames of the SAME kind must be distinguishable.
+    ///
+    /// This is the whole reason the counter exists: `current_kind()` reads
+    /// `Some(Query)` inside either of two back-to-back query handlers, so a
+    /// consumer caching per-dispatch state cannot tell them apart from it.
+    /// `zeroship-plugin-db`'s read-set capture keys its reset on this, and
+    /// without a bump it would attach the first handler's reads to the
+    /// second handler's subscription.
+    #[test]
+    fn dispatch_generation_advances_per_frame_even_for_the_same_kind() {
+        let before = dispatch_generation();
+        {
+            let _g = KindGuard::enter(ProcedureKind::Query);
+            assert!(dispatch_generation() > before);
+        }
+        let first = dispatch_generation();
+        {
+            let _g = KindGuard::enter(ProcedureKind::Query);
+            assert!(
+                dispatch_generation() > first,
+                "a second query frame must not reuse the first frame's generation"
+            );
+        }
+    }
+
+    /// The generation is not restored on exit. It identifies a frame, not a
+    /// depth - restoring it would make a sibling frame compare equal to the
+    /// one that just closed.
+    #[test]
+    fn dispatch_generation_does_not_rewind_on_exit() {
+        let inside = {
+            let _g = KindGuard::enter(ProcedureKind::Mutation);
+            dispatch_generation()
+        };
+        assert_eq!(
+            dispatch_generation(),
+            inside,
+            "generation must not rewind when the frame exits"
         );
     }
 }
