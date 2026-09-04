@@ -1848,6 +1848,7 @@ mod live_audit_unmask_provisioning {
                 "ts",
                 "actor_id",
                 "actor_role",
+                "claimed_actor",
                 "collection",
                 "row_pk",
                 "column",
@@ -1858,8 +1859,9 @@ mod live_audit_unmask_provisioning {
             ],
             "the audit table's columns, in order: {columns:?}"
         );
-        // The five the data plane always supplies must be NOT NULL; the four it
-        // may omit must accept a NULL rather than refuse the row.
+        // The five the data plane always supplies must be NOT NULL; the five it
+        // may omit must accept a NULL rather than refuse the row. `claimed_actor`
+        // is the DB-3 refusal record and is NULL on every ordinary call.
         for (name, nullable) in [
             ("collection", false),
             ("row_pk", false),
@@ -1868,6 +1870,7 @@ mod live_audit_unmask_provisioning {
             ("outcome", false),
             ("actor_id", true),
             ("actor_role", true),
+            ("claimed_actor", true),
             ("reason", true),
             ("request_id", true),
         ] {
