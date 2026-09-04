@@ -21,13 +21,49 @@
 #
 # WHAT THIS GATE CHECKS
 # ---------------------
-# No Rust test code issues `CREATE DATABASE`, except the files named below,
-# each with the reason it is exempt.
+# No Rust test code issues a POSTGRESQL `CREATE DATABASE`, except the files
+# named below, each with the reason it is exempt.
 #
 # BOTH DIRECTIONS. An allowlist entry that no longer matches anything FAILS
 # this gate too. An exemption nobody removed after the code changed is how the
 # next violation gets waved through: the reader sees a name on the list and
 # assumes somebody still thinks about it.
+#
+# WHY "POSTGRESQL" IS LOAD-BEARING IN THAT SENTENCE
+# -------------------------------------------------
+# Every reason above is a fact about a PostgreSQL CLUSTER: a database is a
+# top-level object there, `CREATE DATABASE ... WITH TEMPLATE` needs exclusive
+# access to its source, and the prescription this gate hands out - "use the
+# database you were given and take a private SCHEMA inside it" - depends on
+# `CREATE SCHEMA` being a cheaper, cluster-invisible thing than
+# `CREATE DATABASE`.
+#
+# IN MYSQL THOSE TWO STATEMENTS ARE THE SAME STATEMENT. `CREATE SCHEMA` is
+# documented as a synonym for `CREATE DATABASE`, and a MySQL "database" is the
+# namespace a PostgreSQL schema is. The tree says so itself, at
+# crates/zeroship-migrate/tests/dialect_matrix/dialect_conformance_live.rs:139:
+# "because MySQL has no CREATE SCHEMA that is not a CREATE DATABASE". So a
+# MySQL `CREATE DATABASE` is not the offence this gate is about - it IS the
+# prescription, spelled the only way MySQL spells it.
+#
+# THIS MATTERED THE FIRST TIME THE GATE WAS RUN IN CI, 2026-09-04. It reported
+# 26 offending files and ruled on 4. Of the 22 it had not ruled on, TWENTY-ONE
+# were MySQL: the in-sourced `crates/zeroship-migrate*` engine crates, whose
+# live suites take a per-test MySQL database and drop it through a
+# `DatabaseGuard` - which is exactly what this gate asks for. Writing 21 ALLOW
+# rows would have been a census of another dialect's normal practice, and the
+# comments above already argue why a census rots. The population was wrong, so
+# the population is what changed.
+#
+# The discriminator is the DRIVER the file names, not the directory it sits in
+# (`tests/pg_drift/drift_column_physical_type.rs` is a live-MySQL test) and not
+# the statement's spelling (`CREATE DATABASE {}` reads identically in both).
+# MEASURED 2026-09-04 across all 26 matching files: the split is total - 21
+# name a MySQL session type and NO PostgreSQL driver, 5 name a PostgreSQL
+# driver and no MySQL one. Nothing is mixed, so nothing is being guessed at.
+#
+# It fails CLOSED: a file naming neither driver stays in scope. Only positive
+# evidence of MySQL-and-not-PostgreSQL takes a file out.
 #
 # Run directly: tests/tests_do_not_create_databases_gate.sh
 # ============================================================================
@@ -56,7 +92,23 @@ ALLOW=(
   # holding the template. It provisions its own template and its own clone and
   # drops both; every other test in that 2400-line file works inside a private
   # SCHEMA of the harness-provided database.
-  "libs/compio-postgres/tests/integration.rs|the statement under test is CREATE DATABASE WITH TEMPLATE itself"
+  # The path moved on 2026-08-26 in 6301e2c61 ("fold 74 test files into one
+  # binary without changing a case") - a pure move, and the named test is still
+  # there, at tests/suite/integration.rs:4968. The row was repointed rather than
+  # dropped for that reason: the ruling survived the move, only its address did
+  # not. It went unnoticed for nine days because nothing ran this gate until it
+  # was wired into CI.
+  "libs/compio-postgres/tests/suite/integration.rs|the statement under test is CREATE DATABASE WITH TEMPLATE itself"
+
+  # ON THE MERITS, and the same merit as the row above: the SUBJECT of
+  # `c1_cleanup_sweep_does_not_cross_database_boundaries` is that the residue
+  # sweep must not reach ANOTHER database's replication slots. A second database
+  # on the same cluster is not this test's isolation strategy, it is the thing
+  # being observed - `pg_replication_slots` is a cluster-wide view, so a test
+  # confined to one database cannot see the bug it guards. It creates the
+  # neighbour, drops it first with `DROP DATABASE IF EXISTS`, and holds
+  # `cdc_budget::exclusive()` while it runs.
+  "crates/zeroship-plugin-db/tests/integration.rs|the subject is a sweep crossing database boundaries, which one database cannot show"
 
   # NOT an exemption on the merits - a TRACKED VIOLATION, listed so the gate
   # reports the rest of the tree rather than staying unwritten until this is
@@ -114,7 +166,17 @@ candidates() {
     \( -path '*/tests/*' -o -path '*/src/*' \) 2>/dev/null | LC_ALL=C sort
 }
 
+# The engine discriminator. See "WHY POSTGRESQL IS LOAD-BEARING" above.
+#
+# Driver IDENTITIES, not the words "postgres" and "mysql": a doc comment
+# comparing the two dialects names both and connects to neither, and every one
+# of these files is full of such prose. A `MysqlDevSession` is a MySQL
+# connection; the string "mysql" is a topic.
+PG_DRIVER='compio_postgres|compio-postgres|PgSession|PG_TEST_URL|require_pg|Pool::connect|tokio_postgres'
+MY_DRIVER='MysqlDevSession|require_live_mysql|MYSQL_TEST_URL|MysqlBackend|mysql_ident|quote_ident_mysql'
+
 offenders=""
+n_mysql_scoped_out=0
 n_scanned=0
 while IFS= read -r file; do
   [ -f "$file" ] || continue
@@ -132,6 +194,12 @@ while IFS= read -r file; do
   # `[[:space:]]` rather than a literal space so a wrapped `CREATE\n DATABASE`
   # in a format! string is still caught.
   if sed 's|//.*||' "$file" | tr '\n' ' ' | grep -qiE 'CREATE[[:space:]]+DATABASE'; then
+    # MySQL's CREATE DATABASE is MySQL's CREATE SCHEMA. Fails closed: a file
+    # naming neither driver is NOT scoped out.
+    if ! grep -qE "$PG_DRIVER" "$file" && grep -qE "$MY_DRIVER" "$file"; then
+      n_mysql_scoped_out=$((n_mysql_scoped_out + 1))
+      continue
+    fi
     offenders="${offenders}${file}
 "
   fi
@@ -151,20 +219,43 @@ if ! gate_arm candidates_scanned "$n_scanned" "$CANDIDATE_SCAN_FLOOR"; then
   exit 1
 fi
 
+# The scoping arm. It counts the files this gate DECLINED to judge, and it is
+# here because a silent exclusion is the same defect as a silent inclusion: if
+# `MY_DRIVER` were widened by accident - or if `PG_DRIVER` stopped matching -
+# every PostgreSQL offender in the tree would be scoped out and the gate would
+# report a clean tree. This number moving is how that shows up.
+#
+# MEASURED 2026-09-04: 21 of the 26 matching files are scoped out, all of them
+# in the in-sourced `crates/zeroship-migrate*` engine crates. Floor 10 - under
+# half, so an ordinary MySQL test being added or retired never trips it, but a
+# collapse of the whole migrate corpus (or of the discriminator) does. The
+# ceiling is the arm below: anything wrongly scoped out here stops being
+# available for `offenders_ruled` to count.
+if ! gate_arm mysql_scoped_out "$n_mysql_scoped_out" 10; then
+  echo "GATE CANNOT ANSWER: only $n_mysql_scoped_out file(s) were scoped out as" >&2
+  echo "  MySQL, below the floor of 10. 21 were measured 2026-09-04. Either the" >&2
+  echo "  MySQL engine corpus left the tree, or MY_DRIVER stopped matching it -" >&2
+  echo "  in which case the FAILs below are this gate misreading another dialect." >&2
+  exit 1
+fi
+
 status=0
 
 # Direction 1: an offender nobody has ruled on.
 #
 # n_off is computed here, before the loop, because the loop is what RULES on
 # each of these files (checks it against ALLOW) - the count of items decided
-# is the count of files, not the count of FAILs. MEASURED 2026-08-20: 6, all 6
-# ruled (matching ALLOW). Floor 3: half of today's count, well clear of the
-# ordinary case (one file added or removed) but not of the enumeration or the
-# offender-detection regex breaking, which would drop this to 0.
+# is the count of files, not the count of FAILs. MEASURED 2026-09-04: 5, all 5
+# ruled (matching ALLOW) - 26 files match the statement, 21 are scoped out as
+# MySQL by the arm above. It was 6 on 2026-08-20, before the migrate engine
+# crates were in-sourced and before the two PostgreSQL suites reshuffled.
+# Floor 3: about half of today's count, well clear of the ordinary case (one
+# file added or removed) but not of the enumeration or the offender-detection
+# regex breaking, which would drop this to 0.
 n_off_direction1="$(printf '%s' "$offenders" | grep -c . || true)"
 if ! gate_arm offenders_ruled "$n_off_direction1" 3; then
   echo "GATE CANNOT ANSWER: direction 1 had $n_off_direction1 offender(s) to rule" >&2
-  echo "  on, below the floor of 3. 6 were measured 2026-08-20. Either every" >&2
+  echo "  on, below the floor of 3. 5 were measured 2026-09-04. Either every" >&2
   echo "  CREATE DATABASE call site was genuinely removed from crates/ and libs/," >&2
   echo "  or the offender-detection regex above stopped matching." >&2
   exit 1
@@ -211,7 +302,7 @@ $file
   esac
 done
 
-# MEASURED 2026-08-20: all 6 ALLOW entries still name a file that still issues
+# MEASURED 2026-09-04: all 5 ALLOW entries still name a file that still issues
 # CREATE DATABASE. Floor 3, the same reasoning as offenders_ruled above: this
 # is the reverse-direction check skip_marker_gate.sh had to add after the fact
 # because its forward count collapsed to a legitimate 0 - here direction 1's
@@ -221,15 +312,16 @@ done
 # rendering the trailing-newline-delimited form this case statement matches).
 if ! gate_arm allow_still_offends "$n_allow_still_offending" 3; then
   echo "GATE CANNOT ANSWER: only $n_allow_still_offending of ${#ALLOW[@]} ALLOW" >&2
-  echo "  entries still match an offending file, below the floor of 3. All 6" >&2
-  echo "  matched 2026-08-20. Either most exemptions were legitimately retired" >&2
+  echo "  entries still match an offending file, below the floor of 3. All 5" >&2
+  echo "  matched 2026-09-04. Either most exemptions were legitimately retired" >&2
   echo "  (direction 1 above should show the same drop) or this loop's match" >&2
   echo "  against \$offenders stopped working." >&2
   status=1
 fi
 
 n_off="$(printf '%s' "$offenders" | grep -c . )"
-echo "==> ${n_off} file(s) issue CREATE DATABASE, ${#ALLOW[@]} ruled on"
+echo "==> ${n_off} file(s) issue a PostgreSQL CREATE DATABASE, ${#ALLOW[@]} ruled on"
+echo "==> ${n_mysql_scoped_out} more issue MySQL's, which is MySQL's CREATE SCHEMA and out of scope"
 
 gate_arms_finish || status=1
 
