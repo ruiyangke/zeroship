@@ -378,9 +378,26 @@ pub struct MaskMeta {
     /// authorization and audit-row tagging.
     pub classification: Classification,
     /// Name of the physical sibling column holding the REAL value.
-    /// Always `raw_column_name(field)`. Stored explicitly so the
-    /// read/write passes can quote the right identifier without
-    /// re-deriving it from the field name at each call site.
+    /// Always `crate::query::raw_column_name(field)`.
+    ///
+    /// **It is a DERIVATION, not a catalog record, and this doc said the
+    /// opposite until 2026-09-04** - that it was "stored explicitly so the
+    /// read/write passes can quote the right identifier without re-deriving it".
+    /// Both introspectors that populate it call `raw_column_name` themselves
+    /// (`zeroship_data_postgres::pg_introspect`, `zeroship_data_sqlite`), because
+    /// the mask sentinel rides the MASKED column on both vendors and nothing
+    /// marks the raw one - there is no pairing in the catalog to read. Storing a
+    /// derivation does not make a consumer independent of it, and no read or
+    /// write pass ever consumed this field: measured 2026-09-04, its only
+    /// readers in the tree are three assertions in test code.
+    ///
+    /// The passes get the name from the descriptor instead, via
+    /// `crate::query::declared_raw_column`. Nothing in `src` reads this field on
+    /// any path - not even the diff classifier, whose own mask arms call
+    /// `crate::query::raw_column_name(field)` directly rather than consulting the
+    /// `MaskMeta` beside them. Do not add a consumer without deciding what the
+    /// field is FOR; a struct member that only tests read is a claim about the
+    /// system that the system does not make.
     pub sibling_column: String,
 }
 
