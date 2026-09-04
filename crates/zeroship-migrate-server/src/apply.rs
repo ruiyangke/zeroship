@@ -36,7 +36,7 @@ use crate::policy::{
 };
 use crate::provisioning::{
     exec_retry, migrator_executor_config, provision_audit_unmask_table, provision_migrator,
-    ProvisionRoleError, AUDIT_UNMASK_TABLE,
+    ProvisionRoleError, AUDIT_UNMASK_TABLE, RESERVED_SYSTEM_TABLE_PREFIX,
 };
 use crate::publication::{reconcile_app_publication, PublicationError};
 use crate::schema_apply_store::{
@@ -492,7 +492,7 @@ async fn run_apply(
     provision_runtime_app_role(session.client(), schema, role)
         .await
         .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
-    let outcome = apply_sealed(
+    let applied = apply_sealed(
         backend,
         sealed_policy.sealed,
         &sealed_policy.verifier,
@@ -502,10 +502,20 @@ async fn run_apply(
         Approval::None,
         &applied_by,
     )
-    .await?;
-    provision_runtime_app_role(session.client(), schema, role)
+    .await;
+    // RE-PROVISION ON BOTH PATHS, AND `?` THE APPLY ONLY AFTERWARDS. A failed
+    // apply still commits DDL - the engine bootstraps its journal before the
+    // first migration runs, and `run_backfill` creates
+    // `__zeroship_schema_backfills` on the way in - and the call above has
+    // already handed the runtime role DML on every table then present. Ending
+    // here on `?` used to leave those reserved relations writable by creator
+    // code until some LATER apply happened to succeed. The sweep inside this
+    // call is what strips them, so it has to run whatever the apply returned.
+    let reprovisioned = provision_runtime_app_role(session.client(), schema, role)
         .await
-        .map_err(ApplyRequestError::ProvisionRuntimeRole)?;
+        .map_err(ApplyRequestError::ProvisionRuntimeRole);
+    let outcome = applied?;
+    reprovisioned?;
     reconcile_app_publication(session.client(), schema).await?;
     Ok(outcome)
 }
@@ -1223,6 +1233,7 @@ pub struct RuntimeRoleProvisioningSql {
     role_name: String,
     create_role: String,
     grants: String,
+    revoke_reserved: String,
     revoke_audit: String,
     grant_audit: String,
     dependents: String,
@@ -1235,15 +1246,95 @@ impl RuntimeRoleProvisioningSql {
         &self.role_name
     }
 
-    fn statements(&self) -> [&str; 5] {
+    /// The plan, in execution order. THE ORDER IS THE PRIVILEGE.
+    ///
+    /// `grants` deliberately hands the runtime role DML on every table in the
+    /// app schema, which includes the platform's own reserved `__zeroship_*`
+    /// relations. `revoke_reserved` takes all of that back - the migration
+    /// journal included - and `revoke_audit` + `grant_audit` then re-issue the
+    /// single narrow exception the worker needs. Move any of the last four
+    /// above `grants` and the wide grant simply overwrites them.
+    fn statements(&self) -> [&str; 6] {
         [
             &self.create_role,
             &self.grants,
+            &self.revoke_reserved,
             &self.revoke_audit,
             &self.grant_audit,
             &self.dependents,
         ]
     }
+}
+
+/// Strip the runtime role's reach on every reserved `__zeroship_*` relation in
+/// the app schema.
+///
+/// # Why this exists
+///
+/// The migration journal lives IN the creator's schema for locality -
+/// `"<app_uuid>".__zeroship_schema_migrations` and its siblings. `grants` above
+/// says `ON ALL TABLES IN SCHEMA`, and `ALL` includes those. That handed the
+/// role creator code executes under INSERT/UPDATE/DELETE on the migration
+/// service's own record of its work: an app could forge an `applied` event, or
+/// delete the two-phase `..._inflight` marker the executor's recovery path
+/// reads on the next apply.
+///
+/// This is NOT the masking argument from the per-column grant discussion. A
+/// creator reading their own masked data is their data under their own policy.
+/// The ledger is not creator data - it is state a SEPARATE SERVICE writes and
+/// the tenant must not be able to forge, which is exactly the one shape the
+/// `__zeroship_` prefix was introduced to fence.
+///
+/// # Why a full revoke, SELECT included
+///
+/// The data plane never reads the journal. `zeroship-data-engine`'s
+/// `descriptor.rs` is its sole schema authority (the runtime descriptor rides in
+/// the `.zship`), and no CRUD, transaction or CDC path in `zeroship-data-engine`
+/// or `zeroship-plugin-db` names any journal table. Nothing is left to grant.
+///
+/// # Why the sweep is by PREFIX and takes the audit table too
+///
+/// A named list would go stale the day the engine adds a seventh journal table;
+/// the prefix is the contract creator-declared collections are refused from, so
+/// matching it catches whatever the engine creates next. The unmask audit table
+/// shares the prefix and is swept with the rest - it is re-granted immediately
+/// afterwards by the dedicated `revoke_audit` / `grant_audit` recipe, which is
+/// why that pair must stay AFTER this statement. A second reserved table the
+/// worker may write therefore has to be given its own explicit recipe, rather
+/// than inheriting reach from a wildcard.
+fn revoke_runtime_reserved_privileges_sql(schema: &str, runtime_role: &str) -> String {
+    let schema_lit = quote_lit(schema);
+    let role_lit = quote_lit(runtime_role);
+    let prefix_lit = quote_lit(RESERVED_SYSTEM_TABLE_PREFIX);
+    format!(
+        "DO $runtime_reserved_revoke$ \
+         DECLARE \
+           reserved_rel record; \
+         BEGIN \
+           FOR reserved_rel IN \
+             SELECT n.nspname, c.relname, c.relkind \
+               FROM pg_class c \
+               JOIN pg_namespace n ON n.oid = c.relnamespace \
+              WHERE n.nspname = '{schema_lit}' \
+                AND c.relkind IN ('r', 'p', 'v', 'm', 'f', 'S') \
+                AND left(c.relname, {prefix_len}) = '{prefix_lit}' \
+           LOOP \
+             IF reserved_rel.relkind = 'S' THEN \
+               EXECUTE format( \
+                 'REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I', \
+                 reserved_rel.nspname, reserved_rel.relname, '{role_lit}' \
+               ); \
+             ELSE \
+               EXECUTE format( \
+                 'REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I', \
+                 reserved_rel.nspname, reserved_rel.relname, '{role_lit}' \
+               ); \
+             END IF; \
+           END LOOP; \
+         END \
+         $runtime_reserved_revoke$",
+        prefix_len = RESERVED_SYSTEM_TABLE_PREFIX.len(),
+    )
 }
 
 /// Clear every additive privilege from the runtime role's audit objects.
@@ -1417,9 +1508,27 @@ pub fn runtime_role_provisioning_sql(
         // creator table. This grants SELECT, INSERT, UPDATE, and DELETE on every
         // existing table in the app schema and the same defaults on tables the
         // migrator creates later. It does not exclude masked or encrypted raw
-        // columns, or migration-journal tables. The audit revoke/grant statements
-        // that follow narrow the unmask audit table back to INSERT only. Replace
-        // these two table statements with the real per-column producer.
+        // columns. Replace these two table statements with the real per-column
+        // producer.
+        //
+        // IT NO LONGER LEAVES THE MIGRATION JOURNAL EXPOSED. `ALL TABLES` still
+        // sweeps the reserved `__zeroship_*` relations in - PostgreSQL has no
+        // "all except" form - so the wide grant is UNDONE for exactly that
+        // namespace by `revoke_runtime_reserved_privileges_sql`, which runs next,
+        // before the audit recipe re-grants the one exception.
+        //
+        // THE `ALTER DEFAULT PRIVILEGES` LINES NEED NO MATCHING EXCLUSION, and
+        // that is measured rather than assumed: an entry `FOR ROLE <migrator>`
+        // fires only for objects the MIGRATOR creates, and the engine bootstraps
+        // its journal on the migration service's own admin session with no `SET
+        // ROLE` (`zeroship_migrate_postgres::backend::journal_sql::ensure_journal`,
+        // `backfill_sql::ensure_progress`). Measured on PostgreSQL 18.6: with
+        // these entries installed, a table created by the migrator came out with
+        // the runtime role holding INSERT and one created by the admin came out
+        // without it. Should that ever change, the sweep still runs on both of the
+        // apply path's `provision_runtime_app_role` calls - including the one on
+        // the failure path - so a journal table born mid-apply is stripped before
+        // the apply returns either way.
         "GRANT USAGE ON SCHEMA {schema_q} TO {role_q};
          GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {schema_q} TO {role_q};
          GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {schema_q} TO {role_q};
@@ -1428,6 +1537,7 @@ pub fn runtime_role_provisioning_sql(
          ALTER DEFAULT PRIVILEGES FOR ROLE {migrator_q} IN SCHEMA {schema_q}
              GRANT USAGE, SELECT ON SEQUENCES TO {role_q};"
     );
+    let revoke_reserved = revoke_runtime_reserved_privileges_sql(schema, &role_name);
     let revoke_audit = revoke_runtime_audit_privileges_sql(schema, &role_name);
     let grant_audit = grant_runtime_audit_append_privileges_sql(schema, &role_name);
 
@@ -1438,6 +1548,7 @@ pub fn runtime_role_provisioning_sql(
         role_name,
         create_role,
         grants,
+        revoke_reserved,
         revoke_audit,
         grant_audit,
         dependents,
@@ -1461,6 +1572,82 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    /// The reserved sweep runs AFTER the wide grant and BEFORE the audit recipe.
+    ///
+    /// Both edges are the whole mechanism, and both are silent when broken:
+    /// `PostgreSQL` grants are additive and last-writer-wins, so a sweep hoisted
+    /// above `grants` leaves the journal writable and a sweep dropped below
+    /// `grant_audit` leaves the audit table unwritable. Positions, not mere
+    /// presence.
+    ///
+    /// This says nothing about whether the server honoured the REVOKE -
+    /// `live_reserved_journal_privileges` is the only thing that can.
+    #[test]
+    fn the_reserved_sweep_sits_between_the_wide_grant_and_the_audit_recipe() {
+        let provisioning = runtime_role_provisioning_sql(
+            "0191e7a2-b3c4-4d5e-8f90-123456789abc",
+            "zs_migrator_fixture",
+        )
+        .expect("test runtime role name");
+        let statements = provisioning.statements();
+        let position = |needle: &str| {
+            statements
+                .iter()
+                .position(|s| s.contains(needle))
+                .unwrap_or_else(|| panic!("no statement contains {needle:?}: {statements:?}"))
+        };
+        let wide_grant = position("ON ALL TABLES IN SCHEMA");
+        let sweep = position("$runtime_reserved_revoke$");
+        let audit_revoke = position("$runtime_audit_revoke$");
+        let audit_grant = position("$runtime_audit_grant$");
+        assert!(
+            wide_grant < sweep,
+            "the sweep must undo the wide grant, not be undone by it: \
+             grant at {wide_grant}, sweep at {sweep}"
+        );
+        assert!(
+            sweep < audit_revoke && audit_revoke < audit_grant,
+            "the audit recipe re-grants the one reserved table the worker writes, \
+             so it must follow the sweep: sweep at {sweep}, revoke at \
+             {audit_revoke}, grant at {audit_grant}"
+        );
+    }
+
+    /// The sweep matches the reserved namespace by PREFIX, with the length the
+    /// prefix actually has.
+    ///
+    /// `left(relname, N)` with the wrong `N` matches nothing (too long) or a
+    /// wider namespace than intended (too short), and either way the statement
+    /// still parses, still runs, and still reports success.
+    #[test]
+    fn the_reserved_sweep_matches_the_whole_prefix_and_nothing_shorter() {
+        let provisioning = runtime_role_provisioning_sql(
+            "0191e7a2-b3c4-4d5e-8f90-123456789abc",
+            "zs_migrator_fixture",
+        )
+        .expect("test runtime role name");
+        let sql = provisioning.revoke_reserved;
+        assert_eq!(RESERVED_SYSTEM_TABLE_PREFIX, "__zeroship_");
+        assert!(
+            sql.contains("left(c.relname, 11) = '__zeroship_'"),
+            "the prefix predicate must carry the prefix's own length: {sql}"
+        );
+        // Sequences are a separate REVOKE verb; a table-only sweep would leave
+        // the journal's identity sequences reachable.
+        assert!(
+            sql.contains("REVOKE ALL PRIVILEGES ON SEQUENCE %I.%I FROM %I")
+                && sql.contains("REVOKE ALL PRIVILEGES ON TABLE %I.%I FROM %I"),
+            "both relation kinds must be revoked: {sql}"
+        );
+        // No name is exempted here. The audit table is re-granted afterwards by
+        // its own recipe, which is what makes a NEW writable reserved table have
+        // to be added deliberately rather than inherited.
+        assert!(
+            !sql.contains(AUDIT_UNMASK_TABLE),
+            "the sweep must not carve out an exception by name: {sql}"
+        );
+    }
 
     #[test]
     fn runtime_provisioning_delegates_only_precreated_narrow_roles() {
@@ -2082,6 +2269,402 @@ mod live_audit_unmask_provisioning {
         teardown(&admin, &before).await;
         teardown(&admin, &after).await;
         teardown(&admin, &between).await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Live proof that the app runtime role cannot reach the migration journal
+// ---------------------------------------------------------------------------
+//
+// The journal lives IN the creator's schema, so `GRANT ... ON ALL TABLES IN
+// SCHEMA` reaches it. This module proves the sweep that follows takes it back,
+// and it proves it by DOING THE WRITE rather than by reading the statement:
+// a GRANT is a claim, and only the server can say whether it took. Deleting
+// `revoke_runtime_reserved_privileges_sql` from the plan turns these cases red
+// by letting a forged `applied` row COMMIT.
+//
+// The journal's table names come from the ENGINE here - `ensure_journal` is the
+// real producer - so a rename in `zeroship-migrate-postgres` shows up as a failed
+// expectation instead of a sweep that quietly rules on nothing.
+#[cfg(all(test, feature = "live-db-tests"))]
+mod live_reserved_journal_privileges {
+    use super::*;
+    use compio_postgres::NoTls;
+    use zeroship_migrate_postgres::role::migrator_role_name;
+
+    /// The five journal tables `ensure_journal` creates, as the engine spells
+    /// them.
+    ///
+    /// Not the doc's list and not this module's guess: the assertion below reads
+    /// the catalog after a real bootstrap and compares. `__zeroship_schema_backfills`
+    /// is the sixth reserved journal table, created lazily by `run_backfill`
+    /// rather than by `ensure_journal`; it is covered by the same prefix, and the
+    /// "created after provisioning" arm stands in for it.
+    const ENGINE_JOURNAL_TABLES: [&str; 5] = [
+        "__zeroship_schema_deploy_recovery",
+        "__zeroship_schema_migrations",
+        "__zeroship_schema_migrations_inflight",
+        "__zeroship_schema_migrations_supersedes",
+        "__zeroship_schema_pending_contracts",
+    ];
+
+    fn test_dsn() -> String {
+        zeroship_core::config::test_database_url()
+    }
+
+    async fn admin_client() -> compio_postgres::Client {
+        let (client, conn) = compio_postgres::connect(&test_dsn(), NoTls)
+            .await
+            .expect("connect to the migrate-server test database");
+        compio::runtime::spawn(async move {
+            let _ = conn.run().await;
+        })
+        .detach();
+        client
+    }
+
+    /// Drop everything a case created, by name. Roles are CLUSTER-wide, so a
+    /// case that leaves one behind poisons the next run in any database here.
+    async fn teardown(admin: &compio_postgres::Client, schema: &str) {
+        let _ = admin
+            .batch_execute(&format!(
+                "DROP SCHEMA IF EXISTS {} CASCADE; DROP SCHEMA IF EXISTS {} CASCADE;",
+                quote_ident(schema),
+                quote_ident(&format!("app_{schema}")),
+            ))
+            .await;
+        for role in [
+            per_app_role_name(schema).expect("scratch runtime role name"),
+            migrator_role_name(schema).unwrap_or_default(),
+        ] {
+            if role.is_empty() {
+                continue;
+            }
+            let q = quote_ident(&role);
+            let _ = admin
+                .batch_execute(&format!("DROP OWNED BY {q} CASCADE"))
+                .await;
+            let _ = admin
+                .batch_execute(&format!("DROP ROLE IF EXISTS {q}"))
+                .await;
+        }
+    }
+
+    /// Run `sql` with the connection's role switched to the app runtime role -
+    /// the identity creator code executes under - and switch back either way.
+    async fn as_runtime_role(
+        admin: &compio_postgres::Client,
+        schema: &str,
+        sql: &str,
+    ) -> Result<(), compio_postgres::Error> {
+        let role = per_app_role_name(schema).expect("scratch runtime role name");
+        admin
+            .batch_execute(&format!("SET ROLE {}", quote_ident(&role)))
+            .await
+            .expect("SET ROLE to the app runtime role");
+        let result = admin.batch_execute(sql).await;
+        admin
+            .batch_execute("RESET ROLE")
+            .await
+            .expect("RESET ROLE after the probe");
+        result
+    }
+
+    fn is_insufficient_privilege(err: &compio_postgres::Error) -> bool {
+        err.code() == Some(&compio_postgres::error::SqlState::INSUFFICIENT_PRIVILEGE)
+    }
+
+    /// A forged terminal journal event, satisfying every CHECK the engine put on
+    /// the table. Only the ACL can refuse it.
+    fn forge_applied_event(schema: &str) -> String {
+        format!(
+            "INSERT INTO {}.\"__zeroship_schema_migrations\" \
+               (event_kind, version, name, checksum, \"by\", phase, outcome, kind) \
+             VALUES ('applied', 'mig_forged', 'forged', 'deadbeef', 'creator-code', \
+                     'completed', 'applied', 'apply')",
+            quote_ident(schema)
+        )
+    }
+
+    /// Deleting the two-phase marker is the OTHER half: the executor's recovery
+    /// path reads it on the next apply, and the inflight table is deliberately
+    /// mutable, so no immutability trigger stands between creator code and it.
+    fn delete_inflight_marker(schema: &str) -> String {
+        format!(
+            "DELETE FROM {}.\"__zeroship_schema_migrations_inflight\"",
+            quote_ident(schema)
+        )
+    }
+
+    /// Every reserved relation in the schema, as the catalog has it.
+    async fn reserved_tables(admin: &compio_postgres::Client, schema: &str) -> Vec<String> {
+        admin
+            .query(
+                "SELECT c.relname FROM pg_class c \
+                   JOIN pg_namespace n ON n.oid = c.relnamespace \
+                  WHERE n.nspname = $1 AND c.relkind IN ('r', 'p') \
+                    AND left(c.relname, 11) = '__zeroship_' \
+                  ORDER BY c.relname",
+                &[&schema],
+            )
+            .await
+            .expect("read reserved relations")
+            .iter()
+            .map(|r| r.get::<_, String>(0))
+            .collect()
+    }
+
+    async fn has_privilege(
+        admin: &compio_postgres::Client,
+        schema: &str,
+        table: &str,
+        privilege: &str,
+    ) -> bool {
+        let role = per_app_role_name(schema).expect("scratch runtime role name");
+        admin
+            .query_one_scalar::<bool, _>(
+                "SELECT has_table_privilege($1, format('%I.%I', $2::text, $3::text), $4)",
+                &[&role, &schema, &table, &privilege],
+            )
+            .await
+            .expect("read has_table_privilege")
+    }
+
+    /// The full production sequence: create the database, bootstrap the engine's
+    /// journal, create the audit table, provision the runtime role. Returns the
+    /// migrator role name.
+    async fn provision_through_the_apply_path(
+        admin: &compio_postgres::Client,
+        schema: &str,
+    ) -> String {
+        crate::provisioning::provision_database(admin, schema)
+            .await
+            .expect("create scratch app database");
+        let (exec_cfg, migrator) =
+            migrator_executor_config(schema).expect("derive the migrator executor config");
+        // The real producer. `attest_complete_history` calls exactly this before
+        // the apply path's first `provision_runtime_app_role`.
+        let session = CompioPgSession::connect(&test_dsn())
+            .await
+            .expect("open an engine session");
+        PostgresBackend::new_generic(&session)
+            .ensure_journal(&exec_cfg)
+            .await
+            .expect("bootstrap the engine journal");
+        provision_audit_unmask_table(admin, schema)
+            .await
+            .expect("provision the audit table");
+        provision_runtime_app_role(admin, schema, &migrator)
+            .await
+            .expect("provision the runtime role");
+        migrator
+    }
+
+    /// THE REGRESSION. Creator code cannot read, write or delete the migration
+    /// journal, and the two writes that would corrupt it are refused BY THE
+    /// SERVER.
+    ///
+    /// The creator-table and audit-table arms are the controls: they differ from
+    /// the journal arms in the table's name and nothing else, so a sweep that
+    /// over-revoked - or a provisioning call that simply failed - cannot pass
+    /// here by making everything unreachable.
+    #[compio::test]
+    async fn the_runtime_role_cannot_touch_the_migration_journal() {
+        let admin = admin_client().await;
+        let schema = Uuid::new_v4().to_string();
+        teardown(&admin, &schema).await;
+        let migrator = provision_through_the_apply_path(&admin, &schema).await;
+
+        // A creator table, created by the migrator exactly as an apply would.
+        admin
+            .batch_execute(&format!(
+                "SET ROLE {}; CREATE TABLE {}.notes (id bigint PRIMARY KEY, body text); RESET ROLE",
+                quote_ident(&migrator),
+                quote_ident(&schema),
+            ))
+            .await
+            .expect("create a creator table as the migrator");
+        // A marker for the DELETE probe to aim at, so a pre-fix pass cannot be
+        // an empty-table no-op.
+        admin
+            .batch_execute(&format!(
+                "INSERT INTO {}.\"__zeroship_schema_migrations_inflight\" \
+                   (version, name, checksum, applied_by) \
+                 VALUES ('mig_marker', 'marker', 'cafe', 'migrate-server')",
+                quote_ident(&schema)
+            ))
+            .await
+            .expect("seed an inflight marker");
+        provision_runtime_app_role(&admin, &schema, &migrator)
+            .await
+            .expect("the apply path's second provisioning call");
+
+        // 1. The engine's journal is what we think it is. If this fails, the
+        // sweep below may be ruling on a set that no longer contains the ledger.
+        let reserved = reserved_tables(&admin, &schema).await;
+        let mut expected: Vec<String> = ENGINE_JOURNAL_TABLES
+            .iter()
+            .map(|s| (*s).to_string())
+            .collect();
+        expected.push(AUDIT_UNMASK_TABLE.to_string());
+        expected.sort();
+        assert_eq!(
+            reserved, expected,
+            "the reserved relations the engine + provisioning actually created"
+        );
+
+        // 1b. WHO OWNS THEM, because that is the premise for leaving the
+        // `ALTER DEFAULT PRIVILEGES ... ON TABLES` entries alone. Those entries
+        // are declared `FOR ROLE <migrator>` and fire only for objects the
+        // migrator creates; the engine bootstraps its journal on the migration
+        // service's own session instead. If this ever flips, journal tables
+        // start arriving pre-granted and the comment on `grants` is wrong.
+        let journal_owner: String = admin
+            .query_one_scalar(
+                "SELECT tableowner FROM pg_tables \
+                  WHERE schemaname = $1 AND tablename = '__zeroship_schema_migrations'",
+                &[&schema],
+            )
+            .await
+            .expect("read the journal's owner");
+        assert_ne!(
+            journal_owner, migrator,
+            "the engine journal is created by the migration service's own \
+             session, not by the migrator role"
+        );
+
+        // 2. NO privilege of any kind survives on any journal table.
+        for table in ENGINE_JOURNAL_TABLES {
+            for privilege in ["SELECT", "INSERT", "UPDATE", "DELETE"] {
+                assert!(
+                    !has_privilege(&admin, &schema, table, privilege).await,
+                    "the app runtime role still holds {privilege} on {table}"
+                );
+            }
+        }
+
+        // 3. THE WRITES, ATTEMPTED FOR REAL. `has_table_privilege` and the
+        // executor consult the same ACL, but only this shows the row does not
+        // land.
+        let forged = as_runtime_role(&admin, &schema, &forge_applied_event(&schema))
+            .await
+            .expect_err("creator code must not be able to journal an applied event");
+        assert!(
+            is_insufficient_privilege(&forged),
+            "expected permission denied, got {forged}"
+        );
+        let deleted = as_runtime_role(&admin, &schema, &delete_inflight_marker(&schema))
+            .await
+            .expect_err("creator code must not be able to clear an inflight marker");
+        assert!(
+            is_insufficient_privilege(&deleted),
+            "expected permission denied, got {deleted}"
+        );
+        let journal_rows: i64 = admin
+            .query_one_scalar(
+                &format!(
+                    "SELECT count(*) FROM {}.\"__zeroship_schema_migrations\"",
+                    quote_ident(&schema)
+                ),
+                &[],
+            )
+            .await
+            .expect("count journal rows");
+        assert_eq!(journal_rows, 0, "a forged event reached the ledger");
+        let marker_rows: i64 = admin
+            .query_one_scalar(
+                &format!(
+                    "SELECT count(*) FROM {}.\"__zeroship_schema_migrations_inflight\"",
+                    quote_ident(&schema)
+                ),
+                &[],
+            )
+            .await
+            .expect("count inflight markers");
+        assert_eq!(marker_rows, 1, "the inflight marker was deleted");
+
+        // 4. THE CONTROLS. The sweep is scoped to the reserved namespace, so an
+        // ordinary creator table keeps full DML and the audit table keeps its
+        // append.
+        as_runtime_role(
+            &admin,
+            &schema,
+            &format!(
+                "INSERT INTO {}.notes (id, body) VALUES (1, 'hello'); \
+                 UPDATE {}.notes SET body = 'edited' WHERE id = 1; \
+                 DELETE FROM {}.notes WHERE id = 1",
+                quote_ident(&schema),
+                quote_ident(&schema),
+                quote_ident(&schema),
+            ),
+        )
+        .await
+        .expect("a creator table must stay fully writable by the app");
+        as_runtime_role(
+            &admin,
+            &schema,
+            &format!(
+                "INSERT INTO {}.\"__zeroship_audit_unmask\" \
+                   (collection, row_pk, \"column\", classification, outcome) \
+                 VALUES ('users', '1', 'ssn', 'pii', 'granted')",
+                quote_ident(&schema)
+            ),
+        )
+        .await
+        .expect("the unmask audit table is the one reserved table the worker appends to");
+
+        teardown(&admin, &schema).await;
+    }
+
+    /// A reserved table born AFTER the runtime role was provisioned is stripped
+    /// by the next provisioning call - which the apply path always makes.
+    ///
+    /// This is the `ALTER DEFAULT PRIVILEGES` arm. Those entries are declared
+    /// `FOR ROLE <migrator>`, so this creates the table AS THE MIGRATOR: the one
+    /// way a future reserved table could arrive already granted. Arm 1 measures
+    /// that it does, which is why the sweep cannot be a one-time cleanup at
+    /// database-create time; arm 2 measures that the sweep takes it back.
+    #[compio::test]
+    async fn a_reserved_table_created_after_provisioning_is_stripped_by_the_next_call() {
+        let admin = admin_client().await;
+        let schema = Uuid::new_v4().to_string();
+        teardown(&admin, &schema).await;
+        let migrator = provision_through_the_apply_path(&admin, &schema).await;
+
+        // The lazily-created sixth journal table, made the way a migrator-owned
+        // one would be.
+        admin
+            .batch_execute(&format!(
+                "SET ROLE {}; \
+                 CREATE TABLE {}.\"__zeroship_schema_backfills\" \
+                   (backfill_id text PRIMARY KEY, rows_done bigint NOT NULL DEFAULT 0); \
+                 RESET ROLE",
+                quote_ident(&migrator),
+                quote_ident(&schema),
+            ))
+            .await
+            .expect("create a reserved table as the migrator");
+
+        // ARM 1 - the hazard is real: default privileges granted it on creation.
+        assert!(
+            has_privilege(&admin, &schema, "__zeroship_schema_backfills", "INSERT").await,
+            "ALTER DEFAULT PRIVILEGES FOR ROLE <migrator> no longer grants a \
+             migrator-created table to the runtime role. If this is false the \
+             arm below proves nothing, because there was nothing to strip"
+        );
+
+        // ARM 2 - and the apply path's next provisioning call takes it back.
+        provision_runtime_app_role(&admin, &schema, &migrator)
+            .await
+            .expect("re-provision the runtime role");
+        for privilege in ["SELECT", "INSERT", "UPDATE", "DELETE"] {
+            assert!(
+                !has_privilege(&admin, &schema, "__zeroship_schema_backfills", privilege).await,
+                "a reserved table created after provisioning kept {privilege}"
+            );
+        }
+
+        teardown(&admin, &schema).await;
     }
 }
 
