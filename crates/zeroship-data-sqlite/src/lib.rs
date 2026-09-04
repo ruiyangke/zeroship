@@ -1538,7 +1538,34 @@ fn parse_encryption_sentinels(
         // matching `*/` to bound it.
         let body_start = abs_marker + "/* ".len();
         let Some(end_rel) = create_table_text[body_start..].find("*/") else {
-            break; // unterminated comment — bail out of the walk
+            // Unterminated comment. ABORT the walk, and abort it LOUDLY - this
+            // is the walk's only early exit, and a silent one is
+            // indistinguishable from a table that carried no sentinels at all,
+            // which is the fail-open shape every other arm here was made loud
+            // to avoid.
+            //
+            // Aborting rather than skipping past the marker costs nothing. The
+            // `find` above scans to the END of the whole text, not to the end
+            // of this column's DDL, so `None` means no `*/` exists anywhere at
+            // or after `body_start`. Every later marker starts later still, so
+            // its own terminator search is over a subset of this one and must
+            // also come back `None`. Continuing would therefore emit one
+            // warning per remaining marker and recover exactly nothing.
+            //
+            // Reaching this at all means the DDL did not come from a CREATE
+            // TABLE SQLite accepted: an unterminated `/*` inside a statement
+            // body makes SQLite refuse the whole statement with "incomplete
+            // input" (measured against sqlite3 3.51.2), so `sqlite_master.sql`
+            // cannot hold one. An emitter bug or a hand-edited database is the
+            // only way in. That it is rare is the argument for one loud line,
+            // not for silence.
+            let truncated = create_table_text[body_start..].trim();
+            tracing::warn!(
+                sentinel = %truncated,
+                "diff: unterminated encryption sentinel comment in the CREATE TABLE text; \
+                 abandoning the sentinel walk for this table",
+            );
+            break;
         };
         let body = create_table_text[body_start..body_start + end_rel].trim();
         // Reuse the canonical parser so the wire shape is centralised, and so a
@@ -1617,6 +1644,18 @@ fn parse_mask_sentinels(
         // the full sentinel payload.
         let body_start = abs_marker + "/* ".len();
         let Some(end_rel) = create_table_text[body_start..].find("*/") else {
+            // Unterminated comment: abort the walk, loudly. Same decision and
+            // same reasoning as [`parse_encryption_sentinels`] states in full
+            // at its own terminator search - the `*/` scan runs to end-of-text,
+            // so a `None` here forces a `None` for every later marker, and
+            // skipping ahead instead of breaking would recover nothing while
+            // warning once per marker. The two walkers deliberately agree.
+            let truncated = create_table_text[body_start..].trim();
+            tracing::warn!(
+                sentinel = %truncated,
+                "diff: unterminated mask sentinel comment in the CREATE TABLE text; \
+                 abandoning the sentinel walk for this table",
+            );
             break;
         };
         let body = create_table_text[body_start..body_start + end_rel].trim();
@@ -2676,12 +2715,74 @@ mod tests {
         assert!(got.is_empty());
     }
 
-    /// Unterminated comment doesn't loop forever; we bail out.
+    /// An unterminated comment ends the walk without looping - and says so.
+    ///
+    /// The `break` is the walk's ONLY early exit, and it was also its only
+    /// SILENT one until this assertion existed: the returned map is simply
+    /// missing an entry, which is byte-identical to DDL that carried no
+    /// sentinel at all.
     #[test]
-    fn parse_encryption_sentinel_handles_unterminated_comment() {
+    fn parse_encryption_sentinel_warns_on_an_unterminated_comment() {
         let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised:default:string";
-        let got = parse_encryption_sentinels(ddl);
-        assert!(got.is_empty());
+        let (got, fields) = sole_warning(|| parse_encryption_sentinels(ddl));
+        assert!(
+            got.is_empty(),
+            "an unterminated comment must stamp nothing: {got:?}"
+        );
+        assert!(
+            fields.contains_key("sentinel"),
+            "the warning must carry the truncated comment body: {fields:?}"
+        );
+    }
+
+    /// The blast radius of the `break`, pinned: everything BEFORE the
+    /// unterminated comment survives, and nothing after it was recoverable in
+    /// the first place.
+    ///
+    /// `create_table_text[body_start..].find("*/")` scans to the end of the
+    /// WHOLE text, not to the end of this column's DDL, so `None` means no
+    /// terminator exists anywhere after `body_start`. Every later marker starts
+    /// later still, so it cannot find one either. `"c"` below is the witness:
+    /// it carries a perfectly well-formed sentinel BODY and is still
+    /// unrecoverable, because its own comment has no terminator. Continuing the
+    /// walk instead of breaking would warn once per remaining marker and return
+    /// exactly this map.
+    ///
+    /// The control is the same DDL with both comments closed; it differs only
+    /// in the two ` */` terminators and recovers all three columns silently.
+    #[test]
+    fn parse_encryption_sentinel_unterminated_comment_strands_nothing_recoverable() {
+        let unterminated = "CREATE TABLE t (\n  \
+             \"a\" BYTEA /* zero-migrate:enc:randomised:default:string */,\n  \
+             \"b\" BYTEA /* zero-migrate:enc:randomised:default:string,\n  \
+             \"c\" BYTEA /* zero-migrate:enc:deterministic:default:number\n)";
+        let (got, fields) = sole_warning(|| parse_encryption_sentinels(unterminated));
+        assert_eq!(
+            got.keys().collect::<Vec<_>>(),
+            vec!["a"],
+            "only the column ahead of the unterminated comment survives: {got:?}"
+        );
+        assert!(
+            fields.contains_key("sentinel"),
+            "the abort must name the truncated body: {fields:?}"
+        );
+
+        let control = "CREATE TABLE t (\n  \
+             \"a\" BYTEA /* zero-migrate:enc:randomised:default:string */,\n  \
+             \"b\" BYTEA /* zero-migrate:enc:randomised:default:string */,\n  \
+             \"c\" BYTEA /* zero-migrate:enc:deterministic:default:number */\n)";
+        let (got, events) = capture_events(|| parse_encryption_sentinels(control));
+        let mut names: Vec<_> = got.keys().cloned().collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["a", "b", "c"],
+            "closing the comments recovers every column: {got:?}"
+        );
+        assert!(
+            events.is_empty(),
+            "the well-formed control must be silent: {events:?}"
+        );
     }
 
     /// `recover_preceding_quoted_ident` finds the most recent quoted
@@ -2795,12 +2896,63 @@ mod tests {
         );
     }
 
-    /// Unterminated mask comment doesn't loop forever; we bail out.
+    /// An unterminated mask comment ends the walk without looping - and says
+    /// so. The encryption sibling's twin; see
+    /// [`parse_encryption_sentinel_warns_on_an_unterminated_comment`] for why
+    /// the silence was the defect rather than the abort.
     #[test]
-    fn sqlite_introspection_unterminated_comment() {
+    fn sqlite_introspection_warns_on_an_unterminated_comment() {
         let ddl = "CREATE TABLE t (\"ssn_masked\" TEXT NOT NULL /* zero-migrate:mask:kind=last4,classification=spi";
-        let got = parse_mask_sentinels(ddl);
-        assert!(got.is_empty());
+        let (got, fields) = sole_warning(|| parse_mask_sentinels(ddl));
+        assert!(
+            got.is_empty(),
+            "an unterminated comment must stamp nothing: {got:?}"
+        );
+        assert!(
+            fields.contains_key("sentinel"),
+            "the warning must carry the truncated comment body: {fields:?}"
+        );
+    }
+
+    /// The mask twin of
+    /// [`parse_encryption_sentinel_unterminated_comment_strands_nothing_recoverable`]:
+    /// columns ahead of the unterminated comment survive, and `"phone"` -
+    /// whose sentinel body is well-formed - is unrecoverable only because its
+    /// own comment has no terminator either, which is forced by the `*/` search
+    /// running to end-of-text.
+    #[test]
+    fn sqlite_introspection_unterminated_comment_strands_nothing_recoverable() {
+        let unterminated = "CREATE TABLE t (\n  \
+             \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */,\n  \
+             \"email\" TEXT /* zero-migrate:mask:kind=email,classification=pii,\n  \
+             \"phone\" TEXT /* zero-migrate:mask:kind=last4,classification=spi\n)";
+        let (got, fields) = sole_warning(|| parse_mask_sentinels(unterminated));
+        assert_eq!(
+            got.keys().collect::<Vec<_>>(),
+            vec!["ssn"],
+            "only the column ahead of the unterminated comment survives: {got:?}"
+        );
+        assert!(
+            fields.contains_key("sentinel"),
+            "the abort must name the truncated body: {fields:?}"
+        );
+
+        let control = "CREATE TABLE t (\n  \
+             \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */,\n  \
+             \"email\" TEXT /* zero-migrate:mask:kind=email,classification=pii */,\n  \
+             \"phone\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */\n)";
+        let (got, events) = capture_events(|| parse_mask_sentinels(control));
+        let mut names: Vec<_> = got.keys().cloned().collect();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["email", "phone", "ssn"],
+            "closing the comments recovers every column: {got:?}"
+        );
+        assert!(
+            events.is_empty(),
+            "the well-formed control must be silent: {events:?}"
+        );
     }
 
     #[test]
