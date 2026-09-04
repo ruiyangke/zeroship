@@ -20,7 +20,7 @@
 # day only because somebody read the diff; nothing in CI had an opinion.
 #
 # ---------------------------------------------------------------------------
-# THE THREE ARMS, and what each one alone would miss
+# THE FOUR ARMS, and what each one alone would miss
 # ---------------------------------------------------------------------------
 #
 # 1. `declared` - no manifest WE OWN names tokio, in any dependency table.
@@ -47,14 +47,25 @@
 #    `[dev-dependencies]` with its own version, where the kind is unambiguous
 #    and this arm can see it.
 #
-# 2. `carriers` - the exact set of THIRD-PARTY packages that reach tokio in the
+# 2. `root_workspace_deps` - the root `[workspace.dependencies]` table, which
+#    arm 1 structurally cannot see: the virtual manifest is not a package, so
+#    `cargo metadata` carries no entry for it. This half is hand-rolled, and it
+#    is the one place in this gate where nothing upstream has already parsed the
+#    file for us. It therefore keys on TOML STRUCTURE rather than on line text -
+#    see the block above the scanner for the eleven spellings that walked past
+#    the text-keyed predicate it replaced, the cheapest of which was a trailing
+#    comment on the section header. Its count is the number of dependency
+#    entries the scan classified, NOT the manifest count arm 1 reports: arm 1's
+#    number is `members + 1` whether this scan read 112 entries or none.
+#
+# 3. `carriers` - the exact set of THIRD-PARTY packages that reach tokio in the
 #    built graph, pinned. Fails when the set changes IN EITHER DIRECTION.
 #    Arm 1 cannot see this: nothing we own declares tokio today and the edge is
 #    there anyway.
 #
-# 3. `entrypoints` - the exact set of OUR crates that take a direct dependency
+# 4. `entrypoints` - the exact set of OUR crates that take a direct dependency
 #    on one of those carriers, pinned. This is the "who has to change" list, and
-#    it is the arm that answers a question arms 1 and 2 cannot: a new crate of
+#    it is the arm that answers a question the others cannot: a new crate of
 #    ours reaching for the tokio-carrying HTTP client is invisible to both, and
 #    is precisely the drift that grows the edge.
 #
@@ -107,7 +118,29 @@
 #       `declared`, naming tokio; a text grep for `tokio =` sees nothing here
 #   tokio in the root [workspace.dependencies], and the renamed form there
 #       -> red, arm `declared`, naming Cargo.toml; cargo metadata carries no
-#       virtual-manifest table, so this is the arm's second, hand-rolled half
+#       virtual-manifest table, so this is the hand-rolled scan, whose own
+#       population is arm `root_workspace_deps`
+#
+# RE-MEASURED 2026-09-04, when the root scan stopped keying on line text. Each
+# mutation applied to the REAL root Cargo.toml, gate run, tree restored from a
+# byte copy and `git diff -- Cargo.toml` confirmed empty afterwards:
+#
+#   [workspace.dependencies] # shared versions   + tokio = { ... }  -> exit 1
+#   tokio={ version = "1" }                                         -> exit 1
+#   [workspace.dependencies.tokio] / version = "1"                  -> exit 1
+#   [workspace.dependencies.rt]    / package = "tokio"              -> exit 1
+#   rationale = "we vendored tokio here" under [workspace.metadata.notes]
+#       -> exit 1, via the unclassified-mention backstop
+#
+#   All five printed exit 0 - clean, indistinguishable from an untouched tree -
+#   under the predicate this replaced. The first is the cheapest: one trailing
+#   comment.
+#
+#   `dependencies = { tokio = { version = "1" } }` under `[workspace]` is caught
+#   in the corpus but cannot be measured against the real manifest, which
+#   already declares `[workspace.dependencies]` as a table: TOML refuses the
+#   duplicate and cargo metadata refuses first, so the gate is red for the wrong
+#   reason. That is what the 16-manifest corpus in the scratch harness is for.
 #   "tokio1" added to lettre's feature list in crates/mailer -> red, arm
 #       `carriers`, naming lettre. NO manifest declares tokio and NO package
 #       enters the lockfile; one feature word moves the edge. This is why the
@@ -121,13 +154,18 @@
 #
 # THE ONE-VARIABLE CONTROL: `url = { version = "2", features = ["serde"] }`,
 # added to the same file, in the same table, in the same edit shape -> GREEN.
-# The gate reacts to tokio, not to a Cargo.toml having been touched.
+# The gate reacts to tokio, not to a Cargo.toml having been touched. Re-run
+# 2026-09-04 in both of the new shapes - `urlx = { ... }` under a header that
+# carries a trailing comment, and `rationale = "we vendored compio here"` under
+# `[workspace.metadata.notes]` - both exit 0.
 #
 # WHAT THIS DOES NOT CHECK. It does not read source: a crate could use tokio
 # types re-exported by something else and this would not know. It does not rule
 # on `third_party/zero-migrate`, which is its own cargo workspace and is
 # excluded from ours. It says nothing about whether the accepted edge SHOULD be
-# accepted - only that it has not moved.
+# accepted - only that it has not moved. And the root scan is a TOML-structure
+# scanner, not a TOML parser: it refuses on a multi-line string rather than read
+# past one, and any member manifest's own tables are arm 1's business, not its.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -221,21 +259,204 @@ members_checked=$(jq -r '(.workspace_members) as $ws
   | [.packages[] | select(.id as $id | $ws | index($id))] | length' "$TMP/meta.json")
 
 # The virtual root manifest is not a package, so cargo metadata does not carry
-# its `[workspace.dependencies]` table. Read the keys, and the renamed form.
-# A section header is `[` followed by a letter, so a value that happens to start
-# a line with `[` does not silently end the table scan.
+# its `[workspace.dependencies]` table. This half is hand-rolled, and it keys on
+# TOML STRUCTURE - table paths, dotted keys, quoting, comments - rather than on
+# a line's exact text.
+#
+# IT USED TO KEY ON TEXT, and eleven valid spellings walked past it. Every one
+# below is TOML that `tomlq -c '.workspace.dependencies | keys'` reports as
+# declaring tokio (or a rename onto it), and every one produced ZERO hits from
+# the predicate this replaced, measured 2026-09-04 against a 16-manifest corpus:
+#
+#   [workspace.dependencies] # shared versions    trailing comment on the header
+#   [workspace.dependencies]<TAB># versions       the same, with a tab
+#   tokio={ version = "1" }                       no space before `=`
+#   "tokio" = { version = "1" }                   quoted key
+#   [workspace.dependencies.tokio]                the dep as its own table
+#   tokio.version = "1"                           dotted key
+#   ["workspace".dependencies]                    quoted header segment
+#   dependencies.tokio = "1"       under [workspace]
+#   dependencies = { tokio = "1" } under [workspace]
+#   [workspace.dependencies.rt] + package = "tokio"    rename, split over lines
+#   rt.package = "tokio"                               rename, dotted
+#
+# The cheapest is the first: ONE trailing comment on the section header made the
+# old `^\[workspace\.dependencies\]\s*$` test fail, `in_ws` stayed 0, and the
+# whole table went unread while the gate printed exactly what a clean tree
+# prints. That table is named in AGENTS.md's zero-tokio invariant precisely
+# because it carries no dependency kind and a member inherits it with
+# `workspace = true` into whichever table it likes - so a bypass there is a
+# bypass of the invariant, not of a convenience.
+#
+# WHAT THE SCANNER DOES. It tracks the current table path across `[a.b.c]` and
+# `[[a.b]]` headers, splits dotted keys, unquotes segments, strips comments with
+# a quote-aware pass (so a `#` inside a string value is not a comment), and
+# tracks bracket depth so a multi-line array's continuation lines are never read
+# as headers. A declaration is a full path of `workspace.dependencies.<name>`
+# with `<name>` matching `^tokio(-|$)`, or that path carrying `package =
+# "tokio…"` in any of its three spellings.
+#
+# AND THEN A BACKSTOP, because a structural classifier still has arms and any
+# arm can be missing one: after classification, ANY surviving `tokio` token in
+# the comment-stripped manifest is itself a hit, reported as unclassified. That
+# is what catches `dependencies = { tokio = "1" }` and anything nested deeper
+# than this scanner walks. It is deliberately fail-closed: the root manifest
+# mentions tokio six times today and all six are in whole-line comments, so the
+# backstop is silent, and the day a seventh mention appears anywhere outside a
+# comment this gate goes red and names the line. Rewording is the fix; the
+# alternative is a classifier whose blind spots are silent.
+#
+# NOT A TOML PARSER, and it does not need to be. It refuses on a multi-line
+# string rather than scan past one, and there are none in a Cargo manifest.
 awk '
-  /^[[:space:]]*\[[A-Za-z]/ { in_ws = ($0 ~ /^[[:space:]]*\[workspace\.dependencies\][[:space:]]*$/); next }
-  !in_ws { next }
-  /^[[:space:]]*#/ { next }
-  /^[[:space:]]*[A-Za-z0-9_-]+[[:space:]]*=/ {
-    key = $1
-    if (key ~ /^tokio(-|$)/) { print "Cargo.toml\t[workspace.dependencies]\t" key }
-    else if ($0 ~ /package[[:space:]]*=[[:space:]]*"tokio(-[A-Za-z0-9_-]+)?"/) {
-      print "Cargo.toml\t[workspace.dependencies]\t" key " (renamed onto tokio)"
+  BEGIN { SQ = sprintf("%c", 39); depth = 0; tn = 0; scanned = 0 }
+
+  function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+
+  # Truncate at the first `#` that is NOT inside a string.
+  function strip_comment(s,   i, c, n, q) {
+    n = length(s); q = ""
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1)
+      if (q == "") {
+        if (c == "#") return substr(s, 1, i - 1)
+        if (c == "\"" || c == SQ) q = c
+      } else if (q == "\"") {
+        if (c == "\\") { i++; continue }
+        if (c == "\"") q = ""
+      } else if (c == SQ) q = ""
     }
+    return s
   }
-' "$ROOT/Cargo.toml" > "$TMP/root-declared.txt"
+
+  # Net `[` minus `]` outside strings, so a multi-line array value is tracked by
+  # structure and its continuation lines are never read as a table header.
+  function bracket_delta(s,   i, c, n, q, d) {
+    n = length(s); q = ""; d = 0
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1)
+      if (q == "") {
+        if (c == "\"" || c == SQ) { q = c; continue }
+        if (c == "[") d++
+        else if (c == "]") d--
+      } else if (q == "\"") {
+        if (c == "\\") { i++; continue }
+        if (c == "\"") q = ""
+      } else if (c == SQ) q = ""
+    }
+    return d
+  }
+
+  # Offset of the first `=` outside a string: the key/value separator.
+  function find_eq(s,   i, c, n, q) {
+    n = length(s); q = ""
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1)
+      if (q == "") {
+        if (c == "\"" || c == SQ) { q = c; continue }
+        if (c == "=") return i
+      } else if (q == "\"") {
+        if (c == "\\") { i++; continue }
+        if (c == "\"") q = ""
+      } else if (c == SQ) q = ""
+    }
+    return 0
+  }
+
+  # A TOML dotted key into arr[1..n], unquoting each segment. This is what makes
+  # `tokio.version = "1"`, `"tokio" = "1"` and `[workspace.dependencies.tokio]`
+  # the same path as a plain `tokio = "1"`.
+  function split_key(s, arr,   i, c, n, q, cur, cnt) {
+    n = length(s); q = ""; cur = ""; cnt = 0
+    for (i = 1; i <= n; i++) {
+      c = substr(s, i, 1)
+      if (q == "") {
+        if (c == "\"" || c == SQ) { q = c; continue }
+        if (c == ".") { cnt++; arr[cnt] = trim(cur); cur = ""; continue }
+        cur = cur c
+      } else if (q == "\"") {
+        if (c == "\\") { i++; cur = cur substr(s, i, 1); continue }
+        if (c == "\"") { q = ""; continue }
+        cur = cur c
+      } else {
+        if (c == SQ) { q = ""; continue }
+        cur = cur c
+      }
+    }
+    cnt++; arr[cnt] = trim(cur)
+    return cnt
+  }
+
+  function hit(where, what) { print "HIT\t" where "\t" what; fired = 1 }
+
+  {
+    fired = 0
+    raw = $0
+    if (index(raw, "\"\"\"") || index(raw, SQ SQ SQ))
+      hit("Cargo.toml", "multi-line string: this scanner cannot classify the rest of the file")
+    line = strip_comment(raw)
+    t = trim(line)
+    if (t == "") next
+
+    if (depth <= 0 && substr(t, 1, 1) == "[") {
+      inner = t
+      if (substr(inner, 1, 2) == "[[") { sub(/^\[\[/, "", inner); sub(/\]\][ \t]*$/, "", inner) }
+      else { sub(/^\[/, "", inner); sub(/\][ \t]*$/, "", inner) }
+      tn = split_key(inner, T)
+      path = ""
+      for (i = 1; i <= tn; i++) path = path (i > 1 ? "." : "") T[i]
+      if (tn >= 3 && T[1] == "workspace" && T[2] == "dependencies" && T[3] ~ /^tokio(-|$)/)
+        hit("[" path "]", T[3])
+      if (!fired && index(line, "tokio"))
+        hit("[" path "]", "unclassified `tokio` in a table header")
+      depth = 0
+      next
+    }
+
+    if (depth > 0) {
+      depth += bracket_delta(line)
+      if (index(line, "tokio")) hit("(multi-line value)", "unclassified `tokio`")
+      next
+    }
+
+    eq = find_eq(t)
+    if (eq > 0) {
+      keyspec = trim(substr(t, 1, eq - 1))
+      val = trim(substr(t, eq + 1))
+      kn = split_key(keyspec, K)
+      pn = 0
+      for (i = 1; i <= tn; i++) { pn++; P[pn] = T[i] }
+      for (i = 1; i <= kn; i++) { pn++; P[pn] = K[i] }
+      path = ""
+      for (i = 1; i < pn; i++) path = path (i > 1 ? "." : "") P[i]
+
+      if (pn >= 3 && P[1] == "workspace" && P[2] == "dependencies") {
+        scanned++
+        if (P[3] ~ /^tokio(-|$)/) hit("[" path "]", P[3])
+        else if (P[pn] == "package" && val ~ /^"tokio(-[A-Za-z0-9_-]+)?"/)
+          hit("[" path "]", P[3] " (renamed onto tokio)")
+        else if (val ~ /package[ \t]*=[ \t]*"tokio(-[A-Za-z0-9_-]+)?"/)
+          hit("[" path "]", P[3] " (renamed onto tokio)")
+      }
+      if (!fired && index(line, "tokio"))
+        hit("[" path "]", "unclassified `tokio` in key `" keyspec "`")
+      depth = bracket_delta(val)
+      next
+    }
+
+    if (index(line, "tokio")) hit("(unparsed line)", "unclassified `tokio`")
+  }
+
+  END { print "COUNT\t" scanned }
+' "$ROOT/Cargo.toml" > "$TMP/root-scan.txt"
+
+# Two channels out of one pass, split on the leading field rather than on the
+# shape of a message: `HIT` rows are findings, the single `COUNT` row is the
+# arm-2 population. A scanner that dies mid-file emits neither, and the empty
+# `root_keys` that results is a gate_arm refusal, not a zero.
+awk -F'\t' '$1 == "HIT" { print "Cargo.toml\t" $2 "\t" $3 }' \
+  "$TMP/root-scan.txt" > "$TMP/root-declared.txt"
+root_keys=$(awk -F'\t' '$1 == "COUNT" { print $2 }' "$TMP/root-scan.txt")
 
 manifests_checked=$((members_checked + 1))
 declared_hits=$(( $(wc -l < "$TMP/declared.txt") + $(wc -l < "$TMP/root-declared.txt") ))
@@ -259,6 +480,20 @@ fi
 # Floor 20 against 30: a query that stops matching the metadata shape returns an
 # empty array and this arm would otherwise print the same clean line.
 gate_arm declared "$manifests_checked" 20 || fail=1
+
+# The root table gets its OWN arm, because `manifests_checked` cannot see it.
+# That number is `members + 1` whatever the root scan did: the scan reading zero
+# keys - which is exactly what a trailing comment on the section header used to
+# produce - moved it not at all. Counting the entries the scan actually
+# classified is the only number whose collapse means what it says.
+#
+# Floor 40 against 112. The 112 is DERIVED here and agrees exactly with an
+# independent parser (`tomlq -r '.workspace.dependencies | keys | length'`
+# reports 112 on the same file, measured 2026-09-04), which is the check a
+# hand-kept expected-count cannot make. Nothing is pinned: dependencies come and
+# go, and only a collapse crosses 40.
+echo "root [workspace.dependencies] entries ruled on: $root_keys"
+gate_arm root_workspace_deps "$root_keys" 40 || fail=1
 
 # ---------------------------------------------------------------------------
 # ARM 2: the third-party carriers of tokio, pinned.
