@@ -203,25 +203,18 @@ pub fn prefix_for_collection(
 /// Idempotent: calling this twice on the same doc is a no-op the
 /// second time (every check is "field absent → inject").
 ///
-/// Visibility: `pub` in release builds; `pub` under
-/// `test-helpers` so the integration tests can drive the helper
-/// directly without standing up V8.
+/// Unconditionally `pub`: this crate's real release-vs-`test-helpers`
+/// visibility gate is on the ENCLOSING `system_fields_pass` module in
+/// `crud/mod.rs` (`pub(crate)` in release, `pub` under `test-helpers`), the
+/// same mechanism `encryption_pass` uses. This function used to be declared
+/// twice, once per feature arm, both times as `pub fn` with an identical
+/// body - a second, redundant no-op split one level below the module gate
+/// that already does the narrowing. Collapsed 2026-09-04.
 ///
 /// # Errors
 ///
 /// Returns a validation error before minting when the resolved typed-id prefix
 /// is malformed or reserved for platform ids.
-#[cfg(not(feature = "test-helpers"))]
-pub fn apply_system_fields_on_insert(
-    doc: &mut Value,
-    schema: &Value,
-    collection: &str,
-    actor_id: Option<&str>,
-) -> Result<(), DbError> {
-    apply_system_fields_on_insert_impl(doc, schema, collection, actor_id)
-}
-
-#[cfg(feature = "test-helpers")]
 pub fn apply_system_fields_on_insert(
     doc: &mut Value,
     schema: &Value,
@@ -255,23 +248,14 @@ fn assignment_plan() -> Result<Rc<AssignmentPlan>, DbError> {
 /// is the same for every doc in the batch (the batch is issued under
 /// one request context).
 ///
-/// Same visibility rationale as [`apply_system_fields_on_insert`].
+/// Same visibility rationale as [`apply_system_fields_on_insert`]: the module
+/// gate does the narrowing, so this is unconditionally `pub` rather than
+/// duplicated per feature arm.
 ///
 /// # Errors
 ///
 /// Returns a validation error before minting when the resolved typed-id prefix
 /// is malformed or reserved for platform ids.
-#[cfg(not(feature = "test-helpers"))]
-pub fn apply_system_fields_on_insert_many(
-    docs: &mut Value,
-    schema: &Value,
-    collection: &str,
-    actor_id: Option<&str>,
-) -> Result<(), DbError> {
-    apply_system_fields_on_insert_many_impl(docs, schema, collection, actor_id)
-}
-
-#[cfg(feature = "test-helpers")]
 pub fn apply_system_fields_on_insert_many(
     docs: &mut Value,
     schema: &Value,
@@ -396,18 +380,10 @@ fn inject_into_object(
 /// statement about the request - nothing remained to write - and it is the
 /// builder's own message rather than a second refusal here.
 ///
-/// Visibility: `pub` in release builds; `pub` under
-/// `test-helpers` so integration tests can drive the helper directly.
-#[cfg(not(feature = "test-helpers"))]
-pub fn apply_system_fields_on_update(
-    patch: &mut Value,
-    app_id: &str,
-    collection: &str,
-) -> Result<(), DbError> {
-    apply_system_fields_on_update_impl(patch, app_id, collection)
-}
-
-#[cfg(feature = "test-helpers")]
+/// Unconditionally `pub`: same rationale as
+/// [`apply_system_fields_on_insert`] - the module gate in `crud/mod.rs`
+/// does the release-vs-`test-helpers` narrowing, so this is not duplicated
+/// per feature arm.
 pub fn apply_system_fields_on_update(
     patch: &mut Value,
     app_id: &str,
