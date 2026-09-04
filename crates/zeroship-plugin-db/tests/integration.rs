@@ -64,6 +64,15 @@ async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
         .expect("the backend the V8 dispatcher would have opened")
 }
 
+/// The route the unmask dispatchers now take, in place of a bare handle.
+///
+/// See the twin in `mask_flip.rs` for why. No fixture that reaches it here
+/// parks a transaction, so every call binds `in_tx = false` and takes the lane
+/// it took before.
+async fn unmask_route(app: &str) -> zeroship_plugin_db::tx_route::TxRoute {
+    zeroship_plugin_db::exec::ambient_route_for_tests(app, unmask_backend().await)
+}
+
 async fn require_pg() -> String {
     let url = test_url();
     match compio_postgres::connect(&url, NoTls).await {
@@ -6379,7 +6388,7 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
-        &unmask_backend().await,
+        &unmask_route(app).await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
@@ -6507,7 +6516,7 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
-        &unmask_backend().await,
+        &unmask_route(app).await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
@@ -6647,7 +6656,7 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
 
     let result = unmask::dispatch_unmask(
-        &unmask_backend().await,
+        &unmask_route(app).await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
@@ -6777,7 +6786,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
 
     // A role the declared policy grants reads through.
     let granted = unmask::dispatch_unmask(
-        &unmask_backend().await,
+        &unmask_route(app).await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
@@ -6796,7 +6805,7 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     // test would pass on an implementation that authorized everything,
     // which is exactly the failure mode a cache-only policy could hide.
     let err = unmask::dispatch_unmask(
-        &unmask_backend().await,
+        &unmask_route(app).await,
         &DbBinding::cold_start(app),
         UnmaskFieldArgs {
             collection: coll.to_string(),
@@ -7420,7 +7429,20 @@ fn direct_connection_sites_do_not_grow() {
     // 123 -> 124: the pin was raised, the test stayed red, and the extra site
     // was the prose describing the sites. Say "connect sites", never the
     // literal.
-    const PINNED: usize = 123;
+    // Raised to 128 on 2026-09-03. The arithmetic, again, because a pin moved
+    // without one is a rubber stamp - and again the two numbers disagree, this
+    // time because the pin was ALREADY one behind:
+    //   +1  `tests/mask_flip.rs` went 13 -> 14 connect sites before this change
+    //       (measured at HEAD, bdc3be963). The pin above says 13 and was never
+    //       raised, so the gate was red on a clean tree.
+    //   +4  `tests/unmask_tx_lane.rs`, added the same day: one `require_pg`
+    //       probe plus one pool per test. Each test ends in
+    //       `release_pg(pool).await` and the probe drops its client and detaches
+    //       the connection task, which is the property this pin exists to keep.
+    //       They cannot share one pool: each fixture drops and recreates its own
+    //       app schema, and a shared pool would let one test's DROP SCHEMA run
+    //       against another's live rows.
+    const PINNED: usize = 128;
     // 10 files today, one of them nested. This floor alone does NOT catch a walk
     // that stops descending - measured: flattening it reads 9 and clears 9. That
     // is what the second assertion is for. This one catches the scan being

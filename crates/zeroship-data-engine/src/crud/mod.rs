@@ -159,7 +159,7 @@ pub async fn exec_mutation_then_read(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_mutation_with_emit(bq, &route, &coll, op).await?;
     read_pipeline::apply(
-        route.backend(),
+        &route,
         &binding,
         &coll,
         rows,
@@ -185,7 +185,7 @@ pub async fn exec_aggregate_read(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_query(&route, bq).await?;
     read_pipeline::apply(
-        route.backend(),
+        &route,
         &binding,
         &coll,
         rows,
@@ -223,7 +223,7 @@ pub async fn exec_distinct_read(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_query(&route, bq).await?;
     read_pipeline::apply(
-        route.backend(),
+        &route,
         &binding,
         &coll,
         rows,
@@ -725,25 +725,32 @@ pub async fn run_find(
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     validate_unmask_projection(plan.select.as_ref(), &plan.unmask_columns)?;
 
-    // Upfront auth fence for the unmask hint. The fence, the SELECT, the read
-    // pipeline's unmask fetch and the audit row below all take the SAME HANDLE -
-    // `route.backend()`, the one the adapter bound for THIS dispatch. That is
-    // what the argument buys: the unmask module used to resolve its own from the
-    // thread's context, which is ADAPTER state an ENGINE file may not read, and
-    // which could name a different handle than the one the read ran on.
+    // Upfront auth fence for the unmask hint.
     //
-    // ONE HANDLE IS NOT ONE CONNECTION, and this comment claimed it was until
-    // 2026-09-03. Only the SELECT goes through `exec_query`, which honours
-    // `route.in_tx()` and issues on the app's parked transaction client. The
-    // fence, the unmask fetch and the audit INSERT call the handle directly and
-    // therefore land on the autocommit lane, inside a transaction as much as
-    // outside it. So a `find({ unmask })` in a `db.transaction(fn)` callback
-    // reads its rows in the transaction and authorises, unmasks and audits them
-    // outside it - uncommitted rows are invisible to the unmask fetch, and the
-    // audit row survives a rollback of the read that produced it.
+    // ONE HANDLE IS NOT ONE CONNECTION. This comment used to say the fence, the
+    // SELECT, the unmask fetch and the audit row "all run on `route.backend()`,
+    // the handle the adapter bound for THIS dispatch" - true of the HANDLE and
+    // false of the CONNECTION, which is what the sentence was read as meaning.
+    // Only `exec_query` honours `route.in_tx()`; every `BackendHandle` read
+    // lowers to a fresh pooled checkout. So a `find({ unmask })` inside
+    // `db.transaction(fn)` selected its rows on the transaction and then sent a
+    // pooled connection to fetch their plaintext, which returned
+    // `unmask_not_found` for any row the same transaction had inserted.
+    // Measured, then fixed, on 2026-09-03.
     //
-    // That split is PRE-EXISTING and tracked on its own; do not read the
-    // paragraph above as a claim that it is closed.
+    // What each of the four takes NOW, and why they differ:
+    //
+    // * the SELECT (`exec_query`) and the unmask fetch (inside
+    //   `read_pipeline::apply`) take the ROUTE, so both run on this dispatch's
+    //   CONNECTION - the transaction's when there is one.
+    // * the fence and the audit row below take the HANDLE, so both run on the
+    //   autocommit lane whatever the caller's transaction is doing. That is
+    //   deliberate: the audit table is append-only evidence, and an attempt
+    //   must not be erasable by rolling back the transaction it was made in.
+    //   The reasoning, and how it interacts with the DB-3 actor strip, is on
+    //   `crud::unmask::write_audit_unmask_row`.
+    //
+    // Both halves are bound by `plugin-db/tests/unmask_tx_lane.rs`.
     if !plan.unmask_columns.is_empty() {
         crate::crud::unmask::authorize_query_hint(
             route.backend(),
@@ -784,7 +791,7 @@ pub async fn run_find(
     .map_err(DbError::from)?;
     let rows = exec_query(&route, bq).await?;
     let result = read_pipeline::apply(
-        route.backend(),
+        &route,
         &binding,
         &coll,
         rows,
@@ -869,7 +876,7 @@ pub async fn run_insert(
     )
     .await?;
     read_pipeline::apply(
-        route.backend(),
+        &route,
         &binding,
         &coll,
         rows,
@@ -920,7 +927,7 @@ pub async fn run_insert_many(
     )
     .await?;
     read_pipeline::apply(
-        route.backend(),
+        &route,
         &binding,
         &coll,
         rows,
@@ -1057,7 +1064,7 @@ pub async fn run_update_one(
     )
     .await?;
     let result = read_pipeline::apply(
-        route.backend(),
+        &route,
         &binding,
         &coll,
         rows,
@@ -1729,7 +1736,7 @@ pub async fn run_upsert(
     )
     .await?;
     read_pipeline::apply(
-        route.backend(),
+        &route,
         &binding,
         &coll,
         rows,
@@ -1870,7 +1877,7 @@ pub fn plan_search(
 /// helps nor worsens that; it relocates the same code to the tier that will be
 /// fixed.
 pub async fn run_search(
-    backend: &crate::backend::BackendHandle,
+    route: &crate::tx_route::TxRoute,
     binding: DbBinding,
     coll: String,
     plan: SearchPlan,
@@ -1883,21 +1890,26 @@ pub async fn run_search(
         filter,
     } = plan;
 
-    // The backend arrives as an argument, NOT as a route. `BackendHandle`
-    // implements `VectorIndex`, so the vendor branch lives in `backend/mod.rs`
-    // where naming a vendor is legitimate, and this function still does not
-    // know either backend exists.
+    // `BackendHandle` implements `VectorIndex`, so the vendor branch lives in
+    // `backend/mod.rs` where naming a vendor is legitimate, and this function
+    // still does not know either backend exists.
     //
-    // Deliberately not a `TxRoute`: `impl VectorIndex for BackendHandle`
-    // branches on the vendor and never reads `in_tx`, and this family reaches
-    // the database without passing through `exec::run_sql` at all. A route here
-    // would carry a routing promise the scan discards.
+    // **This took a bare `&BackendHandle` until 2026-09-03**, on the argument
+    // that `impl VectorIndex for BackendHandle` never reads `in_tx`, so a route
+    // would carry a promise the scan discards. The scan still discards it -
+    // that part was accurate, and it means a vector search inside
+    // `db.transaction(fn)` does not see the transaction's own uncommitted rows.
+    // What the argument missed is `read_pipeline::apply` below, which needs the
+    // LANE for its unmask stage and cannot get it from a handle. Carrying the
+    // route puts the discarded bit where a fix could read it instead of hiding
+    // it behind a type that never had it.
     // The descriptor slice is resolved HERE and handed down. The vendor used to
     // fetch it from `crate::context` itself, which is the backend tier reaching
     // into engine state - an edge that cannot survive the crate split.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     use crate::backend::VectorIndex as _;
-    let rows = backend
+    let rows = route
+        .backend()
         .vector_search(&binding, &coll, &column, &vector, k, metric, &filter, &schema)
         .await?;
 
@@ -1916,7 +1928,7 @@ pub async fn run_search(
     crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
 
     read_pipeline::apply(
-        backend,
+        route,
         &binding,
         &coll,
         rows,
@@ -2035,7 +2047,7 @@ pub fn plan_near(
 /// Like [`run_search`], this still names both backends by their accessors. That
 /// belongs to the backend-downcast inversion, not to this cut.
 pub async fn run_near(
-    backend: &crate::backend::BackendHandle,
+    route: &crate::tx_route::TxRoute,
     binding: DbBinding,
     coll: String,
     plan: NearPlan,
@@ -2050,11 +2062,13 @@ pub async fn run_near(
 
     // As in `run_search`: `BackendHandle` implements `SpatialIndex`, so the
     // vendor branch and the SQLite ATTACH prelude live in the vendor tier, and
-    // the handle is a parameter rather than a route for the same reason.
+    // the scan itself still discards `route.in_tx()` - the route is here
+    // because the read pipeline below needs the lane.
     // Resolved here for the same reason as `run_search` above.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     use crate::backend::SpatialIndex as _;
-    let rows = backend
+    let rows = route
+        .backend()
         .spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit, &schema)
         .await?;
 
@@ -2072,7 +2086,7 @@ pub async fn run_near(
     crate::metrics::emit_db_metric(binding.app_id(), crate::metrics::DB_READS, 1);
 
     read_pipeline::apply(
-        backend,
+        route,
         &binding,
         &coll,
         rows,

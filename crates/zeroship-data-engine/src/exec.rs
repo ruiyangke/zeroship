@@ -165,6 +165,24 @@ fn tx_slot_unavailable(app_id: &str) -> DbError {
     }
 }
 
+/// Take this dispatch's parked transaction client, or refuse the way every
+/// other routed statement refuses.
+///
+/// `TxClientSlotGuard::take` reports an empty slot as a bare internal error,
+/// which is not what a creator should see: a route that says "in transaction"
+/// and finds no session means either that the transaction has settled under a
+/// continuation that outlived it, or that another op is holding its one
+/// connection. [`tx_slot_unavailable`] tells those apart and mints the coded
+/// errors documented on [`TxRoute::in_tx`].
+///
+/// `pub(crate)` because the routed raw-column reads in
+/// [`crate::backend_handle`] need the same claim, and they must not re-derive
+/// the classification.
+pub(crate) fn take_tx_lane(route: &TxRoute) -> Result<crate::tx_lanes::TxClientSlotGuard, DbError> {
+    crate::tx_lanes::TxClientSlotGuard::take(route.app_id())
+        .map_err(|_| tx_slot_unavailable(route.app_id()))
+}
+
 /// Execute SQL with text params — uses the app's TX connection when this
 /// dispatch was issued inside that transaction, otherwise the pool.
 pub async fn run_sql(

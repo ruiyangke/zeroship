@@ -38,6 +38,7 @@ use crate::backend::{
     ChangeStream, DialectBuilder, LockManager, PostgresBackend, ScalarRead,
     SpatialIndex, SqlExecutor, SqliteBackend, UnmaskAuditRow, VectorIndex, postgres, sqlite,
 };
+use crate::tx_lanes::TxConnection;
 use zeroship_data_core::error::{BeginIntent, OpenSessionError};
 
 /// Per-isolate backend handle — the typed enum stashed on
@@ -154,96 +155,183 @@ impl SpatialIndex for BackendHandle {
     }
 }
 
+/// The unmask fetch's lane vendor disagreed with the bound backend's.
+///
+/// Unreachable in production - a lane is opened by the same backend the route
+/// carries - and typed rather than `unreachable!()` because the two come from
+/// different per-thread slots and a panic in the data plane is worse than a
+/// refused read.
+fn lane_vendor_mismatch() -> DbError {
+    DbError::internal(
+        "db: the transaction lane's connection does not match the bound backend".to_string(),
+    )
+}
+
+/// Read the RAW sibling of a masked column as BYTES, **on this dispatch's
+/// lane**.
+///
+/// The encrypted-storage half of unmask: the field's own column holds the
+/// mask, the ciphertext lives in the raw sibling. Bytes, not text - the
+/// sibling of an encrypted column is BYTEA on PostgreSQL and a BLOB on
+/// SQLite, and rendering either through a text path is what made every
+/// PostgreSQL unmask of an encrypted column fail (see the regression
+/// `unmask_encrypted_column_on_pg_reads_bytea_raw_sibling`).
+///
+/// **Why the SQL is here and not in `crud::unmask`.** It was written twice
+/// in the engine, once per vendor, behind an `as_postgres()` / `as_sqlite()`
+/// downcast - the shape #119 exists to remove. Only the lowering differs (`$1`
+/// and a roled scalar read against `?1`, quoted identifiers and a typed cell);
+/// key resolution, AEAD and the wrap step above this are vendor-neutral and
+/// stayed put.
+///
+/// **Why this takes a `TxRoute` and not a `&BackendHandle` + `app_id`.** It
+/// took the latter until 2026-09-03, and a handle does not say which
+/// CONNECTION. Every arm below reached the autocommit lane - a fresh pooled
+/// checkout on PostgreSQL, `op_conn` on SQLite - while the SELECT whose rows it
+/// was unmasking had gone through `exec_query`, which honours `route.in_tx()`.
+/// So a `find({ unmask })` over a row the SAME transaction had inserted
+/// returned `unmask_not_found`: the row existed, and the connection sent to
+/// fetch its ciphertext could not see it. The route carries both halves - the
+/// handle picks the dialect, `in_tx` picks the connection - so the two cannot
+/// come apart again. Bound by
+/// `plugin-db/tests/unmask_tx_lane.rs`.
+///
+/// # Errors
+///
+/// The statement's own database error; `transaction_scope_expired` /
+/// `transaction_connection_busy` when the route claims a transaction whose
+/// session is not reachable; a decode failure when the raw sibling is not
+/// byte-typed.
+pub async fn read_raw_column_bytes(
+    route: &crate::tx_route::TxRoute,
+    collection: &str,
+    raw_column: &str,
+    row_pk: &str,
+) -> Result<ScalarRead<Vec<u8>>, DbError> {
+    let app_id = route.app_id();
+    match route.backend() {
+        BackendHandle::Postgres(pg) => {
+            let sql =
+                format!("SELECT \"{raw_column}\" FROM \"{app_id}\".\"{collection}\" WHERE id = $1");
+            if route.in_tx() {
+                let lane = crate::exec::take_tx_lane(route)?;
+                let TxConnection::Postgres(client) = lane.client() else {
+                    return Err(lane_vendor_mismatch());
+                };
+                let rows = client
+                    .query_text_params(&sql, &[row_pk])
+                    .await
+                    .map_err(|e| crate::backend::pg_error::classify(&e))?;
+                return zeroship_data_postgres::pg_autocommit::scalar_bytes(&rows);
+            }
+            pg.read_roled_scalar_bytes(app_id, &sql, &[row_pk]).await
+        }
+        BackendHandle::Sqlite(sq) => {
+            let q_app = sq.quote_ident(app_id);
+            let q_coll = sq.quote_ident(collection);
+            let q_col = sq.quote_ident(raw_column);
+            let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
+            let (_lane_claim, lane) = sqlite_lane(route, sq)?;
+            let typed = lane.query_typed_internal(&sql, &[row_pk]).await?;
+            if typed.rows.is_empty() {
+                return Ok(ScalarRead::NoRow);
+            }
+            match &typed.rows[0][0] {
+                sqlite::session::TypedCell::Blob(b) => Ok(ScalarRead::Value(b.clone())),
+                sqlite::session::TypedCell::Null => Ok(ScalarRead::Null),
+                other => Err(DbError::internal(format!(
+                    "unmask: expected BLOB for encrypted column, got {other:?}"
+                ))),
+            }
+        }
+    }
+}
+
+/// Read the RAW sibling of a masked column as TEXT, on this dispatch's lane.
+///
+/// The plaintext-storage half: the column carries `.mask({...})` WITHOUT
+/// `.encrypted(...)`, so the sibling holds the value in its own declared
+/// type. Distinct from [`read_raw_column_bytes`] because the encrypted path
+/// must not go near a text rendering; routed for the reason spelled out there.
+///
+/// # Errors
+///
+/// As [`read_raw_column_bytes`], with the decode failure reported when the raw
+/// sibling is not text-typed.
+pub async fn read_raw_column_text(
+    route: &crate::tx_route::TxRoute,
+    collection: &str,
+    raw_column: &str,
+    row_pk: &str,
+) -> Result<ScalarRead<String>, DbError> {
+    let app_id = route.app_id();
+    match route.backend() {
+        BackendHandle::Postgres(pg) => {
+            let sql =
+                format!("SELECT \"{raw_column}\" FROM \"{app_id}\".\"{collection}\" WHERE id = $1");
+            if route.in_tx() {
+                let lane = crate::exec::take_tx_lane(route)?;
+                let TxConnection::Postgres(client) = lane.client() else {
+                    return Err(lane_vendor_mismatch());
+                };
+                let rows = client
+                    .query_text_params(&sql, &[row_pk])
+                    .await
+                    .map_err(|e| crate::backend::pg_error::classify(&e))?;
+                return zeroship_data_postgres::pg_autocommit::scalar_text(&rows);
+            }
+            pg.read_roled_scalar_text(app_id, &sql, &[row_pk]).await
+        }
+        BackendHandle::Sqlite(sq) => {
+            let q_app = sq.quote_ident(app_id);
+            let q_coll = sq.quote_ident(collection);
+            let q_col = sq.quote_ident(raw_column);
+            let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
+            let (_lane_claim, lane) = sqlite_lane(route, sq)?;
+            let rows = lane.query_internal(&sql, &[row_pk]).await?;
+            if rows.is_empty() {
+                return Ok(ScalarRead::NoRow);
+            }
+            match rows[0].first().and_then(|c| c.clone()) {
+                Some(value) => Ok(ScalarRead::Value(value)),
+                None => Ok(ScalarRead::Null),
+            }
+        }
+    }
+}
+
+/// The SQLite session handle this dispatch's raw-column read must use, with the
+/// slot claim that has to outlive the statement.
+///
+/// The guard comes back to the caller rather than being dropped here, and that
+/// is load-bearing: `TxClientSlotGuard` is what keeps a second op on this
+/// thread from issuing on the same transaction connection while this read is
+/// awaiting, and restores the session to the SAME app's slot on drop (SEC-1).
+/// `crate::exec::exec_sqlite_json` holds it across its await for the same
+/// reason. The handle is cloned out because a borrow of the guard cannot be
+/// returned alongside it.
+fn sqlite_lane(
+    route: &crate::tx_route::TxRoute,
+    backend: &sqlite::SqliteBackend,
+) -> Result<
+    (
+        Option<crate::tx_lanes::TxClientSlotGuard>,
+        sqlite::session::SqliteSessionHandle,
+    ),
+    DbError,
+> {
+    if !route.in_tx() {
+        return Ok((None, backend.autocommit_client()));
+    }
+    let guard = crate::exec::take_tx_lane(route)?;
+    let handle = match guard.client() {
+        TxConnection::Sqlite(client) => client.clone(),
+        TxConnection::Postgres(_) => return Err(lane_vendor_mismatch()),
+    };
+    Ok((Some(guard), handle))
+}
+
 impl BackendHandle {
-    /// Read the RAW sibling of a masked column as BYTES.
-    ///
-    /// The encrypted-storage half of unmask: the field's own column holds the
-    /// mask, the ciphertext lives in the raw sibling. Bytes, not text - the
-    /// sibling of an encrypted column is BYTEA on PostgreSQL and a BLOB on
-    /// SQLite, and rendering either through a text path is what made every
-    /// PostgreSQL unmask of an encrypted column fail (see the regression
-    /// `unmask_encrypted_column_on_pg_reads_bytea_raw_sibling`).
-    ///
-    /// **Why the SQL is here and not in `crud::unmask`.** It was written twice
-    /// in the engine, once per vendor, behind an `as_postgres()` /
-    /// `as_sqlite()` downcast - the shape #119 exists to remove. Only the
-    /// lowering differs (`$1` and a roled scalar read against `?1`, quoted
-    /// identifiers and a typed cell); key resolution, AEAD and the wrap step
-    /// above this are vendor-neutral and stayed put.
-    pub async fn read_raw_column_bytes(
-        &self,
-        app_id: &str,
-        collection: &str,
-        raw_column: &str,
-        row_pk: &str,
-    ) -> Result<ScalarRead<Vec<u8>>, DbError> {
-        match self {
-            Self::Postgres(pg) => {
-                let sql = format!(
-                    "SELECT \"{raw_column}\" FROM \"{app_id}\".\"{collection}\" WHERE id = $1"
-                );
-                pg.read_roled_scalar_bytes(app_id, &sql, &[row_pk]).await
-            }
-            Self::Sqlite(sq) => {
-                let q_app = sq.quote_ident(app_id);
-                let q_coll = sq.quote_ident(collection);
-                let q_col = sq.quote_ident(raw_column);
-                let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-                let typed = sq
-                    .autocommit_client()
-                    .query_typed_internal(&sql, &[row_pk])
-                    .await?;
-                if typed.rows.is_empty() {
-                    return Ok(ScalarRead::NoRow);
-                }
-                match &typed.rows[0][0] {
-                    sqlite::session::TypedCell::Blob(b) => Ok(ScalarRead::Value(b.clone())),
-                    sqlite::session::TypedCell::Null => Ok(ScalarRead::Null),
-                    other => Err(DbError::internal(format!(
-                        "unmask: expected BLOB for encrypted column, got {other:?}"
-                    ))),
-                }
-            }
-        }
-    }
-
-    /// Read the RAW sibling of a masked column as TEXT.
-    ///
-    /// The plaintext-storage half: the column carries `.mask({...})` WITHOUT
-    /// `.encrypted(...)`, so the sibling holds the value in its own declared
-    /// type. Distinct from [`Self::read_raw_column_bytes`] because the
-    /// encrypted path must not go near a text rendering.
-    pub async fn read_raw_column_text(
-        &self,
-        app_id: &str,
-        collection: &str,
-        raw_column: &str,
-        row_pk: &str,
-    ) -> Result<ScalarRead<String>, DbError> {
-        match self {
-            Self::Postgres(pg) => {
-                let sql = format!(
-                    "SELECT \"{raw_column}\" FROM \"{app_id}\".\"{collection}\" WHERE id = $1"
-                );
-                pg.read_roled_scalar_text(app_id, &sql, &[row_pk]).await
-            }
-            Self::Sqlite(sq) => {
-                let q_app = sq.quote_ident(app_id);
-                let q_coll = sq.quote_ident(collection);
-                let q_col = sq.quote_ident(raw_column);
-                let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-                let rows = sq.autocommit_client().query_internal(&sql, &[row_pk]).await?;
-                if rows.is_empty() {
-                    return Ok(ScalarRead::NoRow);
-                }
-                match rows[0].first().and_then(|c| c.clone()) {
-                    Some(value) => Ok(ScalarRead::Value(value)),
-                    None => Ok(ScalarRead::Null),
-                }
-            }
-        }
-    }
-
     /// Append one row to the app's `__zeroship_audit_unmask` table.
     ///
     /// **Through the role fence on both vendors.** The PostgreSQL arm goes via
@@ -561,4 +649,135 @@ impl BackendHandle {
     // tests, which reach the impls through the `Backup` trait instead. Whether
     // the capability itself ships is still open; the impls stay, and reviving
     // an accessor is a line of code if a consumer ever appears.
+}
+
+#[cfg(test)]
+mod routed_read_tests {
+    //! The SQLite half of the routed raw-column read.
+    //!
+    //! The PostgreSQL half is bound live by
+    //! `zeroship-plugin-db/tests/unmask_tx_lane.rs`, which needs a server.
+    //! SQLite needs none, and it is the tier `pnpm dev` runs on - so the arm
+    //! that would otherwise ship unbound is this one. It is a REAL divergence
+    //! there and not a formality: SC-2 Decision 1 gave the session actor a
+    //! shared `op_conn` plus a transaction connection per app, so an unmask
+    //! sent to `op_conn` inside a transaction cannot see that transaction's
+    //! writes, exactly as on PostgreSQL.
+
+    use std::path::PathBuf;
+    use std::rc::Rc;
+
+    use super::*;
+    use crate::tx_route::CapturedRoute;
+
+    /// A raw-sibling read inside a transaction must see that transaction's own
+    /// write; the same read outside it must not.
+    ///
+    /// The two arms differ in ONE token - `in_tx` on the route - so a failure
+    /// cannot be a missing table, a missing ATTACH or an unwritten row.
+    #[test]
+    fn a_routed_raw_read_follows_the_transaction_lane_on_sqlite() {
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
+        runtime.block_on(async {
+            let app = "sqlite_routed_raw_read";
+            let dir = tempfile::tempdir().expect("tempdir");
+            let backend = Rc::new(
+                crate::backend_selection::new_sqlite_backend(
+                    PathBuf::from(dir.path()),
+                    crate::encryption::LocalKeySource::env_var(),
+                )
+                .expect("open sqlite backend"),
+            );
+            backend
+                .attach_app_file(app)
+                .await
+                .expect("attach the app file");
+            backend
+                .pool_exec(
+                    &format!(
+                        r#"CREATE TABLE "{app}"."people" (
+                               id TEXT PRIMARY KEY,
+                               ssn TEXT,
+                               "__zs_raw__ssn" TEXT
+                           )"#
+                    ),
+                    &[],
+                )
+                .await
+                .expect("CREATE TABLE people");
+
+            let handle = BackendHandle::Sqlite(Rc::clone(&backend));
+
+            // Park a real transaction connection, the way `exec_begin` does.
+            let client = backend
+                .acquire_dedicated_client(app)
+                .await
+                .expect("acquire tx client");
+            backend
+                .client_exec(&client, "BEGIN", &[])
+                .await
+                .expect("BEGIN");
+            // Write the row ON that connection, so it exists only there.
+            backend
+                .client_exec(
+                    &client,
+                    &format!(
+                        r#"INSERT INTO "{app}"."people" (id, ssn, "__zs_raw__ssn")
+                           VALUES ('p1', '***', '123-45-6789')"#
+                    ),
+                    &[],
+                )
+                .await
+                .expect("INSERT on the transaction connection");
+            crate::tx_lanes::with_mut(|l| {
+                let previous = l.install_tx_client(app, TxConnection::Sqlite(client));
+                assert!(previous.is_none(), "the tx slot must start empty");
+            });
+
+            // CONTROL: a pool-lane read cannot see the uncommitted row.
+            let outside = read_raw_column_text(
+                &CapturedRoute::pool_for_tests(app).bind(handle.clone()),
+                "people",
+                "__zs_raw__ssn",
+                "p1",
+            )
+            .await
+            .expect("the pooled read itself must succeed");
+            assert!(
+                matches!(outside, ScalarRead::NoRow),
+                "the row must be invisible on the autocommit lane, or the arm \
+                 below rules on nothing: {outside:?}",
+            );
+
+            // SUBJECT: the same read, routed onto the transaction.
+            let inside = read_raw_column_text(
+                &CapturedRoute::tx_for_tests(app).bind(handle.clone()),
+                "people",
+                "__zs_raw__ssn",
+                "p1",
+            )
+            .await
+            .expect("a routed read inside the transaction must reach the row");
+            assert!(
+                matches!(&inside, ScalarRead::Value(v) if v == "123-45-6789"),
+                "the transaction lane must return its own uncommitted value: {inside:?}",
+            );
+
+            // The guard must have handed the session back, or the next op in
+            // this transaction would find an empty slot.
+            let parked = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app));
+            match parked {
+                Some(TxConnection::Sqlite(client)) => {
+                    let _ = client.exec("ROLLBACK", &[]).await;
+                }
+                Some(TxConnection::Postgres(_)) => {
+                    panic!("the slot must hold the SQLite session this test parked")
+                }
+                None => panic!(
+                    "the routed read must hand the tx session back; an empty slot here \
+                     means the next op in the same transaction would refuse"
+                ),
+            }
+        });
+    }
 }

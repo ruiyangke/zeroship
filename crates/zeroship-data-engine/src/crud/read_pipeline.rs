@@ -78,24 +78,32 @@ pub struct ApplyResult {
 /// an EMPTY declared field map still behaves the same way it always did: the
 /// platform system timestamps normalize, and no creator field is coerced.
 ///
-/// `backend` is a PARAMETER because step 5 issues SQL of its own - one SELECT
-/// per (row, unmasked column), outside `exec` - and the handle it runs on must
-/// be the one the read itself ran on. Every caller here already holds a
-/// [`crate::tx_route::TxRoute`] and hands over `route.backend()`. Step 5 used
-/// to resolve its own through the engine funnel, which read ADAPTER state from
-/// an ENGINE file; the funnel now lives at `crate::tx_scope::ensure_backend`
+/// `route` is a PARAMETER because step 5 issues SQL of its own - one SELECT per
+/// (row, unmasked column), outside `exec` - and it has to run on the same
+/// CONNECTION as the read that produced the rows. Every caller here already
+/// holds a [`crate::tx_route::TxRoute`] and hands it over whole. Step 5 used to
+/// resolve its own backend through the engine funnel, which read ADAPTER state
+/// from an ENGINE file; the funnel now lives at `crate::tx_scope::ensure_backend`
 /// and the value travels down instead.
 ///
-/// **The parameter is spelled `crate::backend_handle::BackendHandle`, not the
-/// `crate::backend` re-export, and that is not cosmetic.** `backend/mod.rs` is
+/// **It was a `&BackendHandle` until 2026-09-03, and a handle is not a
+/// connection.** Every caller passed `route.backend()`, which lost `in_tx` on
+/// the way in, so step 5's SELECTs went to the autocommit lane while the rows
+/// they were unmasking had come back from the transaction's. Taking the route
+/// whole is what keeps the two together; see
+/// [`super::unmask::dispatch_unmask_for_query`].
+///
+/// **The one backend reference left here is spelled
+/// `route.backend().key_store()`, and reaching for
+/// `crate::backend_handle::BackendHandle` by that path rather than the
+/// `crate::backend` re-export is not cosmetic.** `backend/mod.rs` is
 /// deliberately CONTESTED in `tests/lib/tier_direction_census.sh` - it has no
 /// settled tier - so a reference wearing that path is neither judged nor
 /// trusted: it lands in the census's DROPPED bucket, an ENGINE-to-ENGINE edge
-/// the instrument cannot rule on. `backend_handle.rs` is tiered ENGINE, so the
-/// definition path makes this file's one backend reference judgeable. Do not
-/// "simplify" it back to the re-export.
+/// the instrument cannot rule on. `backend_handle.rs` is tiered ENGINE. Do not
+/// "simplify" a re-export path back in.
 pub async fn apply(
-    backend: &crate::backend_handle::BackendHandle,
+    route: &crate::tx_route::TxRoute,
     binding: &DbBinding,
     collection: &str,
     mut rows: Vec<Value>,
@@ -121,10 +129,17 @@ pub async fn apply(
 
     if opts.apply_decrypt && super::schema_has_encrypted_columns(&schema) {
         // The key store comes off the handle this read ran on, not off a
-        // second resolution of its own: `backend` is already here for step 5,
+        // second resolution of its own: `route` is already here for step 5,
         // and one handle per call is what keeps the decrypt keyed to the same
         // backend that returned the ciphertext.
-        decrypt_rows_on_read(backend.key_store(), app_id, collection, &schema, &mut rows).await?;
+        decrypt_rows_on_read(
+            route.backend().key_store(),
+            app_id,
+            collection,
+            &schema,
+            &mut rows,
+        )
+        .await?;
     }
 
     let has_masked = if opts.wrap_masked && super::schema_has_masked_columns(&schema) {
@@ -136,7 +151,7 @@ pub async fn apply(
 
     if !opts.unmask_columns.is_empty() {
         super::unmask::dispatch_unmask_for_query(
-            backend,
+            route,
             binding,
             collection,
             opts.unmask_columns,
@@ -630,11 +645,11 @@ mod tests {
         let binding = DbBinding::cold_start("app_aggregate_scope");
         let alias = ["secret".to_string()];
         let rt = compio::runtime::Runtime::new().expect("compio runtime build");
-        // `apply` takes the backend rather than resolving one; none of the
+        // `apply` takes the ROUTE rather than resolving a backend; none of the
         // three cases in this module reaches a statement through it (empty
-        // `unmask_columns`, no encrypted column in scope), so any real handle
+        // `unmask_columns`, no encrypted column in scope), so any real route
         // does. Opened INSIDE the runtime, which its CDC publisher's `spawn`
-        // requires - see `crate::test_support::unit_backend`.
+        // requires - see `crate::test_support::unit_route`.
         //
         // ORACLE NOTE: installing a real handle COST this test its second,
         // free oracle. With no backend installed, a regression in the
@@ -642,10 +657,10 @@ mod tests {
         // failed loudly on `not_configured`. It now reaches a working backend
         // instead, so the `assert_eq!` on `result.rows` below is the ONLY thing
         // that rules on the narrowing. Do not weaken it.
-        let (backend, dir) = rt.block_on(async { crate::test_support::unit_backend() });
+        let (route, dir) = rt.block_on(async { crate::test_support::unit_route(binding.app_id()) });
         let result = rt
             .block_on(apply(
-                &backend,
+                &route,
                 &binding,
                 "users",
                 rows.clone(),
@@ -667,7 +682,7 @@ mod tests {
         // what makes `Declared` a usable default for the other twelve sites.
         let defaulted = rt
             .block_on(apply(
-                &backend,
+                &route,
                 &binding,
                 "users",
                 rows,
@@ -680,12 +695,13 @@ mod tests {
             .expect("apply");
         assert_eq!(defaulted.rows, vec![serde_json::json!({})]);
 
-        // Drop backend-then-directory explicitly. `unit_backend` returns
-        // `(BackendHandle, TempDir)`, and scope exit drops a tuple pattern's
-        // bindings in reverse declaration order - `dir` first, which would
-        // delete the directory out from under a still-open backend. See the
-        // ordering note on `crate::test_support::unit_backend`.
-        drop(backend);
+        // Drop route-then-directory explicitly. `unit_route` returns
+        // `(TxRoute, TempDir)` and the route owns the backend; scope exit drops
+        // a tuple pattern's bindings in reverse declaration order - `dir`
+        // first, which would delete the directory out from under a still-open
+        // backend. See the ordering note on
+        // `crate::test_support::unit_backend`.
+        drop(route);
         drop(dir);
     }
 
@@ -715,10 +731,10 @@ mod tests {
         // `wrap_masked: false` narrowing used to trip, so the `assert_eq!` on
         // `result.rows` and the `has_masked` assertion below are the ONLY
         // things ruling on it.
-        let (backend, dir) = rt.block_on(async { crate::test_support::unit_backend() });
+        let (route, dir) = rt.block_on(async { crate::test_support::unit_route(binding.app_id()) });
         let result = rt
             .block_on(apply(
-                &backend,
+                &route,
                 &binding,
                 "users",
                 rows,
@@ -735,8 +751,8 @@ mod tests {
         );
         assert!(!result.has_masked);
 
-        // Backend before directory: see the sibling test above.
-        drop(backend);
+        // Route before directory: see the sibling test above.
+        drop(route);
         drop(dir);
     }
 }

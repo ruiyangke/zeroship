@@ -674,14 +674,13 @@ pub(crate) fn dispatch_search<'s>(
     collection: &str,
     args: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    // No route to stamp a dialect on (see the async body), so the adapter reads
-    // it directly from the same place a capture would have.
-    let planned = plan_search(
-        &binding,
-        crate::tx_scope::configured_dialect(),
-        collection,
-        &args,
-    );
+    // The route is captured here like every other dispatcher's, and the plan is
+    // built against ITS dialect rather than a second read of the same thread
+    // state. This used to skip the capture on the grounds that the scan never
+    // reads `in_tx`; the scan still does not, but `read_pipeline::apply` does -
+    // see `run_search`.
+    let route = crate::tx_scope::capture_route(scope, binding.app_id());
+    let planned = plan_search(&binding, route.dialect(), collection, &args);
 
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
@@ -691,11 +690,8 @@ pub(crate) fn dispatch_search<'s>(
         resolver,
         request_id,
         async move {
-            // No route: the search family never goes through `exec::run_sql`,
-            // so an `in_tx` bit would be captured and discarded. It needs the
-            // backend and nothing else.
-            let backend = crate::tx_scope::ensure_backend().await?;
-            run_search(&backend, binding, coll, planned?).await
+            let route = crate::tx_scope::bind_route(route).await?;
+            run_search(&route, binding, coll, planned?).await
         },
         |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
     )));
@@ -708,13 +704,10 @@ pub(crate) fn dispatch_near<'s>(
     collection: &str,
     args: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    // No route, for the same reason as `dispatch_search`; same dialect read.
-    let planned = plan_near(
-        &binding,
-        crate::tx_scope::configured_dialect(),
-        collection,
-        &args,
-    );
+    // Captured like `dispatch_search`, and the plan takes its dialect from the
+    // same capture.
+    let route = crate::tx_scope::capture_route(scope, binding.app_id());
+    let planned = plan_near(&binding, route.dialect(), collection, &args);
 
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
@@ -724,9 +717,8 @@ pub(crate) fn dispatch_near<'s>(
         resolver,
         request_id,
         async move {
-            // No route, for the same reason as `dispatch_search`.
-            let backend = crate::tx_scope::ensure_backend().await?;
-            run_near(&backend, binding, coll, planned?).await
+            let route = crate::tx_scope::bind_route(route).await?;
+            run_near(&route, binding, coll, planned?).await
         },
         |result| crate::v8_bridge::rows_as_json_array_masked(result.rows, result.has_masked),
     )));
@@ -863,27 +855,33 @@ pub(crate) fn dispatch_unmask_field<'s>(
     // before anything is spawned and cannot race the spawn.
     let parsed = parse_args(&args_v);
     let binding = binding.clone();
+    // The route is captured HERE, on the adapter side, while the V8 frame is
+    // live, and handed to the engine. `crud::unmask` used to open a backend
+    // itself through `exec::ensure_backend_for_shared_sql`, which read
+    // `crate::context` from an ENGINE file.
+    //
+    // **This captured NOTHING until 2026-09-03**, on the stated grounds that
+    // "an unmask is not a routed statement". It is: the ciphertext read is a
+    // SELECT, and one issued inside a `db.transaction(fn)` callback has to run
+    // on that transaction's connection or it cannot see a row the transaction
+    // has just written.
+    let route = crate::tx_scope::capture_route(scope, binding.app_id());
 
     // The parse error folds into `settle`'s error arm via `?`; it made the same
     // `reject_op` call the hand-rolled arm here did.
     state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
         resolver,
         request_id,
-        // The backend is resolved HERE, on the adapter side, and handed to the
-        // engine. `crud::unmask` used to open one itself through
-        // `exec::ensure_backend_for_shared_sql`, which read `crate::context`
-        // from an ENGINE file. There is no route to take it off: an unmask is
-        // not a routed statement, so this dispatch owns the resolution.
         async move {
             // `parsed?` is taken BEFORE the first await, so a malformed payload
             // rejects with its own typed parse error rather than whatever
-            // `ensure_backend` happens to say on an isolate that cannot open one
-            // (`not_configured` / `lazy_init_failed`). Writing it as
+            // `bind_route` happens to say on an isolate that cannot open a
+            // backend (`not_configured` / `lazy_init_failed`). Writing it as
             // `dispatch_unmask(.., parsed?)` reads the same and is not: the `?`
             // then runs behind the await, and the backend error wins.
             let args = parsed?;
-            let backend = crate::tx_scope::ensure_backend().await?;
-            dispatch_unmask(&backend, &binding, args).await
+            let route = crate::tx_scope::bind_route(route).await?;
+            dispatch_unmask(&route, &binding, args).await
         },
         |result| {
             // Wire shape: `{ plaintext: <string> }`. The SDK reads
@@ -912,21 +910,22 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
 
     let parsed = parse_bulk_args(&args_v);
     let binding = binding.clone();
+    // Captured adapter-side, as in [`dispatch_unmask_field`].
+    let route = crate::tx_scope::capture_route(scope, binding.app_id());
 
     state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
         resolver,
         request_id,
-        // Resolved adapter-side, as in [`dispatch_unmask_field`].
         async move {
             // Ahead of the await, for the reason spelled out in
             // [`dispatch_unmask_field`]: the parse error must win over a
             // backend-open failure. Note this orders the PARSE only; the
             // descriptor validation inside `dispatch_bulk_unmask` still runs
-            // after the backend is in hand, which is a separate deliberate
+            // after the route is bound, which is a separate deliberate
             // trade documented in `crud/unmask.rs`.
             let args = parsed?;
-            let backend = crate::tx_scope::ensure_backend().await?;
-            dispatch_bulk_unmask(&backend, &binding, args).await
+            let route = crate::tx_scope::bind_route(route).await?;
+            dispatch_bulk_unmask(&route, &binding, args).await
         },
         |result| {
             // Wire shape: `{ results: { <rowPk>: { <col>: <plaintext> } } }`.
