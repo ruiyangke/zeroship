@@ -50,7 +50,7 @@ pub mod bootstrap;
 
 /// A template role that per-app roles inherit membership from. Per-app
 /// roles (`app_<id>_role`) are created by
-/// [`bootstrap::ensure_per_app_role`], which also creates this anchor
+/// `bootstrap::ensure_per_app_role`, which also creates this anchor
 /// on first use.
 ///
 /// It carries no grants of its own. It exists so a cluster-wide audit

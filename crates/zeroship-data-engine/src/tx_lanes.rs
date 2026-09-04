@@ -187,7 +187,7 @@ impl TxConnection {
     ///
     /// **The vendor is read off the pinned session, never off the thread's
     /// ambient backend.** The pair really can disagree: a `register` with a
-    /// changed URL calls [`ThreadDbContext::clear_pool`], which nulls `backend`
+    /// changed URL calls the adapter tier's `ThreadDbContext::clear_pool`, which nulls `backend`
     /// and leaves the lanes untouched. When it did, an open transaction on a
     /// live connection settled `Indeterminate` and had its session withdrawn.
     /// The variants ARE the two `SqlExecutor::Client` associated types, so the

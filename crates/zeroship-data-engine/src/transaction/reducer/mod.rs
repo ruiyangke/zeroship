@@ -8,7 +8,7 @@
 //!
 //! ## The single most important property
 //!
-//! **Forced cleanup does not route through [`TxState::Poisoned`].** Invariant
+//! **Forced cleanup does not route through [`crate::transaction::reducer::TxState::Poisoned`].** Invariant
 //! 13 makes `Poisoned` recoverable by construction - a successful
 //! `ROLLBACK TO` of the recovery child returns the parent to `Idle`. So a
 //! transaction parked in `Poisoned` by an expired deadline or by a
@@ -17,7 +17,7 @@
 //! authority the classifier terminally denied, past a deadline that already
 //! fired. That is a privilege defect.
 //!
-//! Every force therefore enters [`TxState::Cancelling`], which is terminal by
+//! Every force therefore enters [`crate::transaction::reducer::TxState::Cancelling`], which is terminal by
 //! invariant 16: no path leads back to any state that can issue creator data
 //! SQL, exactly one cleanup cause is ever latched, and every exit is
 //! `Settled`. `a_force_never_routes_through_poisoned` and
@@ -29,7 +29,7 @@
 //! No supervisor, no `FenceJobRegistry`, no durable fence jobs, no
 //! `Quarantining` state. SC-1 declines all of it: terminal delivery is an
 //! in-memory gate, and the answer to unknown backend health is
-//! [`SessionOwnership::Withdrawn`] - the physical connection is destroyed
+//! [`crate::transaction::reducer::SessionOwnership::Withdrawn`] - the physical connection is destroyed
 //! rather than returned, which needs no supervisor because closing the
 //! connection *is* the proof that nothing further can run on it.
 
@@ -739,7 +739,7 @@ impl TxReducer {
     /// `BEGIN` on. `None` before `BeginCompleted`.
     ///
     /// Monotonic for the life of the thread and never reset
-    /// ([`crate::context::ThreadDbContext::next_backend_generation`]), which is
+    /// (`transaction::driver`'s private `next_backend_generation`), which is
     /// what makes it usable as a session identity rather than only as a
     /// staleness counter: a later transaction can never mint a value an earlier
     /// one already held.

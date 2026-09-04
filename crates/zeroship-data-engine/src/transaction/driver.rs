@@ -1,6 +1,7 @@
-//! The SC-1 driver: the only place a reducer [`Action`] becomes I/O.
+//! The SC-1 driver: the only place a reducer
+//! [`Action`](crate::transaction::reducer::Action) becomes I/O.
 //!
-//! [`super::reducer`] is pure - it owns no session, no client, no timer and no
+//! [`crate::transaction::reducer`] is pure - it owns no session, no client, no timer and no
 //! future. This module is its counterpart: it holds the session, executes every
 //! action the reducer emits, and feeds the outcome straight back in as the next
 //! event. Nothing here decides a transition; every branch below is either
@@ -27,38 +28,38 @@
 //! reordered.
 //!
 //! **That rule is now enforced where the evidence is.** Both cleanup arms live
-//! in their own backend and only [`CleanupAck`] crosses back, so this file
+//! in their own backend and only [`CleanupAck`](zeroship_data_core::error::CleanupAck) crosses back, so this file
 //! states the constraint but no longer implements it for either vendor.
 //!
 //! ## Forced cleanup CANCELS; it withdraws only when it cannot prove a rollback
 //!
 //! The second constraint on this file is that a force must not answer a slow
-//! statement by destroying the connection. It used to: [`cleanup`] can only roll
+//! statement by destroying the connection. It used to: this module's private `cleanup` can only roll
 //! a transaction back if it can reach the session, the session is out of the
 //! slot for the whole of any statement, and the execution deadline fires
 //! **because a statement is slow** - so the mechanism that exists to bound one
 //! responded, in its own common case, by killing the backend.
 //!
-//! [`cancel_and_reclaim`] is the answer, and it does not need the session:
+//! `cancel_and_reclaim` is the answer, and it does not need the session:
 //! PostgreSQL's `CancelRequest` travels on a second connection and names the
 //! backend by process id, and SQLite's is a message to the session actor. The
-//! canceller is captured at [`install`] - the one moment we still own the client
-//! - and lives in [`crate::context::ThreadDbContext::tx_cancellers`].
+//! canceller is captured at `install` - the one moment we still own the client
+//! - and lives in the adapter tier's `ThreadDbContext::tx_cancellers`.
 //!
 //! Withdrawal remains the fallback and is still reached, by every route that
 //! leaves the cleanup unproved: a cancellation that cannot be delivered, one the
 //! server discards because nothing was running, a statement that does not
-//! release the session within [`CANCEL_RECLAIM_GRACE`], and a `ROLLBACK` whose
+//! release the session within [`CANCEL_RECLAIM_GRACE`](crate::transaction::driver::CANCEL_RECLAIM_GRACE), and a `ROLLBACK` whose
 //! oracle does not read `Idle`. It is no longer the FIRST answer.
 //!
 //! ## What a withdrawal has to defeat here, specifically
 //!
-//! [`Action::WithdrawSession`] says "destroy the physical connection rather than
+//! [`Action::WithdrawSession`](crate::transaction::reducer::Action::WithdrawSession) says "destroy the physical connection rather than
 //! returning it". On PostgreSQL the transaction session is a
 //! [`compio_postgres::OwnedPooledClient`], whose `Drop` calls
 //! `pool.return_client(entry)` - so **dropping a withdrawn session hands it to
 //! the next borrower**, which is the exact opposite of the action. Withdrawal is
-//! therefore [`destroy_session`], which closes the client's request channel
+//! therefore this module's private `destroy_session`, which closes the client's request channel
 //! first: `Pool::return_client` checks `PoolEntry::is_pool_eligible`, that checks
 //! `!client.is_closed()`, and a closed client is evicted and its capacity slot
 //! released instead of being published as idle.
@@ -67,7 +68,7 @@
 //! other future holds the session out of the slot behind a
 //! [`crate::tx_lanes::TxClientSlotGuard`], whose `Drop` puts it back. So
 //! withdrawal also sets a per-app tombstone
-//! ([`crate::context::ThreadDbContext::withdraw_tx_session`]) and
+//! (the adapter tier's `ThreadDbContext::withdraw_tx_session`) and
 //! `put_tx_client_for` destroys anything that returns under it. Without that,
 //! "withdrawn" would hold only for the sessions that happened to be in the slot.
 
@@ -413,7 +414,8 @@ pub async fn deadline_fired(
     .await
 }
 
-/// Force this transaction to end under [`CleanupCause::Cancelled`].
+/// Force this transaction to end under
+/// [`CleanupCause::Cancelled`](crate::transaction::reducer::CleanupCause::Cancelled).
 ///
 /// The event carries the authority the transaction was admitted under, so guard
 /// order step 1 has something to compare: a cancel naming a different identity

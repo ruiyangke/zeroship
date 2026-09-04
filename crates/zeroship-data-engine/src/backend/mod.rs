@@ -18,8 +18,9 @@
 //!   `query.rs` (4099 LOC) and the review's R2 recommendation: "wait
 //!   until a real sqlite or planetscale prototype is in motion." This
 //!   trait fixes the *non-builder* surface (orchestrator + audit).
-//! - **Not a leakage-free abstraction.** [`crate::replication`] and
-//!   [`crate::wal_consumer`] talk raw `pg_replication_slots` and the
+//! - **Not a leakage-free abstraction.** The adapter tier's `replication` and
+//!   `wal_consumer` modules (in `zeroship-plugin-db`, which this crate cannot
+//!   name) talk raw `pg_replication_slots` and the
 //!   streaming WAL protocol; those stay Postgres-only behind their own
 //!   files. The `auth/*` SECURITY DEFINER bootstrap is likewise PG-only.
 //! - **Not async-trait-Boxed.** `compio-postgres` is single-threaded
@@ -46,7 +47,7 @@
 //!   Owns the `LiveSchema` associated type that used to live on
 //!   `Backend`.
 //!
-//! A PG-only extension trait, [`PgSqlExecutor`], exposes `pool_handle()`
+//! A PG-only extension trait, `zeroship_data_postgres::PgSqlExecutor`, exposes `pool_handle()`
 //! so free-function helpers can reach `&compio_postgres::Pool` without
 //! naming the concrete backend. **It has no callers as of 2026-09-03** - the
 //! last four were in `crud/mask_drift.rs`, deleted that day - and it is

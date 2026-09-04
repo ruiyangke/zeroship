@@ -3,7 +3,7 @@
 //!
 //! ## Why this exists at all
 //!
-//! [`super::driver::cleanup`] can only roll a transaction back if it can reach
+//! `transaction::driver`'s private `cleanup` can only roll a transaction back if it can reach
 //! the session, and the session is in the per-app slot only when nothing is
 //! running on it. A forced cleanup usually arrives at exactly the moment that is
 //! false: the execution deadline fires **because a statement is slow**, and a
@@ -21,7 +21,8 @@
 //!
 //! ## The delivery barrier is the load-bearing part
 //!
-//! [`TxCanceller::cancel`] uses `Pool::cancel_query`, which sends the packet and
+//! [`TxCanceller::cancel`](crate::backend::cancel::TxCanceller::cancel) uses
+//! `Pool::cancel_query`, which sends the packet and
 //! then **waits for the postmaster to close the cancellation connection**
 //! (`cancel_query_raw::wait_for_server_close`). That EOF is a cross-connection
 //! ordering barrier: PostgreSQL closes that socket only after consuming the
@@ -39,7 +40,7 @@
 //! held past the end of the transaction refuses with "its pool lease has ended"
 //! rather than cancelling whatever the next borrower is running. This module
 //! therefore does not have to police its own lifetime for *safety*; it is
-//! dropped at [`crate::context::ThreadDbContext::retire_transaction`] for
+//! dropped at the adapter tier's `ThreadDbContext::retire_transaction` for
 //! tidiness, not for correctness.
 
 use std::rc::Rc;
@@ -71,7 +72,7 @@ pub enum CancelDelivery {
 /// The capability to cancel whatever one app's transaction session is running.
 ///
 /// Cloned out of the context before every use: `cancel` is `async`, and a
-/// `RefCell` borrow of [`crate::context::ThreadDbContext`] must never be held
+/// `RefCell` borrow of the adapter tier's `ThreadDbContext` must never be held
 /// across an await. Every field is itself a cheap handle - an `Rc`, an `Arc`
 /// and a `Bytes` - so the clone copies no connection state.
 /// The PostgreSQL half of [`TxCanceller`], boxed.

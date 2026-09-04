@@ -26,9 +26,10 @@
 //! `zeroship_plugin_db::…` here is E0433.
 //!
 //! Where a helper here genuinely needed adapter state, the state is a
-//! PARAMETER: [`exec::ambient_route_for_tests`] takes the backend,
-//! [`backend_selection::new_sqlite_backend`] takes the key source, and
-//! [`transaction::probe::begin`] takes the handle. The caller that owns the
+//! PARAMETER: `exec::ambient_route_for_tests` takes the backend,
+//! `backend_selection::new_sqlite_backend` takes the key source, and
+//! `transaction::probe::begin` takes the handle (all three are behind
+//! `test-helpers`, so a default build has none of them). The caller that owns the
 //! context does the lookup, which is the same correction
 //! `PostgresBackend::new` and `open_sqlite_backend` already took one tier down.
 //!
