@@ -197,7 +197,7 @@ claim_pairs() {
 LEDGER='
 crates/zeroship-cdc-wire/src/ids.rs	zeroship_core	bound=crates/zeroship-cdc-wire/tests/typed_id_oracle.rs#zeroship_core::typed_id
 crates/zeroship-data-engine/src/exec.rs	compio_postgres	prose
-crates/zeroship-data-sqlite/src/vector.rs	zeroship_migrate_core	unbound
+crates/zeroship-data-sqlite/src/vector.rs	zeroship_migrate_core	bound=crates/zeroship-plugin-db/tests/sqlite_integration.rs#fn engine_shadow_relation
 crates/zeroship-migrate-backend/src/backend.rs	zeroship_migrate_postgres	prose
 crates/zeroship-migrate-backend/src/constraint_definition.rs	zeroship_migrate	prose
 crates/zeroship-migrate-backend/src/ddl.rs	zeroship_migrate	prose
@@ -217,10 +217,10 @@ crates/zeroship-migrate-postgres/src/backend/session.rs	zeroship_migrate_backend
 crates/zeroship-migrate-postgres/src/role.rs	zeroship_migrate_backend	prose
 crates/zeroship-migrate-postgres/src/role.rs	zeroship_migrate_ir	prose
 crates/zeroship-migrate-sqlite/src/backend/actor.rs	zeroship_migrate_backend	bound=crates/zeroship-migrate-sqlite/src/backend/actor.rs#step::BindValue::Bytes
-crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_migrate_server	unbound
-crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_plugin_db	unbound
+crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_migrate_server	bound=crates/zeroship-plugin-db/tests/audit_table_parity.rs#POSTGRES_CREATOR
+crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_plugin_db	bound=crates/zeroship-plugin-db/tests/audit_table_parity.rs#SQLITE_CREATOR
 crates/zeroship-migrate-sqlite/src/dml.rs	zeroship_migrate_backend	prose
-crates/zeroship-migrate-sqlite/src/schema.rs	zeroship_schema	unbound
+crates/zeroship-migrate-sqlite/src/schema.rs	zeroship_schema	bound=crates/zeroship-schema/src/query.rs#mod sqlite_now_parity
 crates/zeroship-plugin-db/src/drop_namespace.rs	zeroship_migrate_server	prose
 crates/zeroship-schema/src/ident.rs	zeroship_migrate	bound=crates/zeroship-schema/src/ident.rs#mod engine_parity
 crates/zeroship-schema/src/ident.rs	zeroship_migrate_core	bound=crates/zeroship-schema/src/ident.rs#mod engine_parity
