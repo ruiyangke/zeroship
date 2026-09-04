@@ -186,7 +186,14 @@ pub use zeroship_data_core::storage::{
 };
 #[cfg(feature = "test-helpers")]
 pub use zeroship_data_core::storage::Backup;
-#[cfg(any(test, feature = "test-helpers"))]
+// UNGATED since 2026-09-04, and the gate it lost is the one that broke the
+// shipped binaries. `BackendHandle::introspect_schema` is called from the
+// PRODUCTION write path by `crate::crud::protection_floor`, so this re-export,
+// the trait in data-core and both vendor impls have to exist in a default
+// build. They did not: `test-helpers` is a DEV-dependency feature here, so every
+// `--all-targets` / `--all-features` / clippy / test invocation unified it ON
+// and reported zero errors while `cargo check -p zeroship-worker --bins` failed.
+// `tests/shipped_config_gate.sh` builds the configuration that actually ships.
 pub use zeroship_data_core::storage::SchemaIntrospect;
 
 

@@ -87,7 +87,25 @@ jobs:
         run: cargo build -p zeroship-cli --bin zeroship
       - name: Project config contract
         run: bash tests/project_config_gate.sh
+      # THE BARE TARGET SELECTION IS LOAD-BEARING. Cargo defaults to lib and
+      # bins, which is the configuration that ships; adding `--all-targets`
+      # would check strictly more code and yet catch strictly less, because a
+      # test target in the unit graph unifies dev-dependency features into the
+      # normal edge. That is not hypothetical: on 2026-09-04 the shipped
+      # binaries had not built for a day while `--all-targets`, `--all-features`,
+      # the clippy gate and every `cargo test` reported zero errors. THIS LINE
+      # would have caught it (measured: exit 101, three errors). Do not "improve"
+      # it. tests/shipped_config_gate.sh below states that contract in a form
+      # that survives an edit to this line.
       - run: cargo check --workspace
+      # The same configuration, as a gate: it audits cargo's artifact stream
+      # against `cargo metadata` so a scheduling abort cannot read as a clean
+      # tree, and it asserts that `test-helpers` really resolved OFF for the
+      # five members that declare it. The line above reads only an exit code and
+      # has no opinion on feature resolution, which is the axis the defect lived
+      # on. Twenty seconds; no services, no database.
+      - name: shipped configuration compiles
+        run: tests/shipped_config_gate.sh
       # WPT BEFORE `cargo test`, for exactly the reason the SDK dist files are
       # built before any cargo command above, and discovered the same way.
       #

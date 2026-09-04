@@ -31,11 +31,6 @@ use std::sync::Arc;
 use serde_json::Value;
 use tempfile::TempDir;
 
-#[cfg(any(test, feature = "test-helpers"))]
-// `SchemaIntrospect` is `cfg(feature)` in data-core, so the feature is the whole
-// gate here - `cfg(test)` would name this crate's test build and could never
-// turn data-core's feature on, leaving the impl without its trait.
-#[cfg(feature = "test-helpers")]
 use zeroship_data_core::storage::SchemaIntrospect;
 use zeroship_data_core::storage::{DialectBuilder, LockManager, SqlExecutor};
 use zeroship_data_core::error::DbError;
@@ -744,7 +739,6 @@ impl SqliteBackend {
     }
 }
 
-#[cfg(feature = "test-helpers")]
 impl SchemaIntrospect for SqliteBackend {
     // Same associated type as the PG impl — the diff engine consumes
     // a uniform `LiveSchema` shape; the SQLite impl populates the
@@ -1518,7 +1512,6 @@ impl SqliteBackend {
 /// out a sidecar `__zs_schema_meta` table as the eventual upgrade;
 /// the regex ships per the implementation plan's §5
 /// trade-off acknowledgement.
-#[cfg(any(test, feature = "test-helpers"))]
 fn parse_encryption_sentinels(
     create_table_text: &str,
 ) -> std::collections::HashMap<String, zeroship_schema::diff::EncryptionMeta> {
@@ -1614,7 +1607,6 @@ fn parse_encryption_sentinels(
 ///
 /// Same hand-rolled walker pattern as
 /// [`parse_encryption_sentinels`] — no `regex` dep required.
-#[cfg(any(test, feature = "test-helpers"))]
 fn parse_mask_sentinels(
     create_table_text: &str,
 ) -> std::collections::HashMap<String, zeroship_schema::diff::MaskMeta> {
@@ -1687,7 +1679,6 @@ fn parse_mask_sentinels(
 /// Find the most recent double-quoted identifier in `text`, returning
 /// the identifier's contents (with `""` un-escaped to `"`). Returns
 /// `None` if no closing-then-opening `"` pair is found.
-#[cfg(any(test, feature = "test-helpers"))]
 fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
     // Scan from the right for a closing `"`, then for the matching
     // opening `"`. Handles the SQL `""` doubled-quote escape: a
@@ -2228,7 +2219,8 @@ mod tests {
 
     use super::*;
     use zeroship_data_core::storage::{DialectBuilder, LockManager, SqlExecutor};
-    #[cfg(feature = "test-helpers")]
+    // A plain `use` is private, so the module-level import does not arrive via
+    // `use super::*`. UNGATED since 2026-09-04 with the trait itself.
     use zeroship_data_core::storage::SchemaIntrospect;
 
     #[test]
@@ -2310,9 +2302,10 @@ mod tests {
 
     fn assert_sqlite_backend_impls_namespace_manager() {}
 
-    // Follows `SchemaIntrospect`'s own gate in data-core: the trait is absent
-    // from a default build, so an ungated assertion here cannot name it.
-    #[cfg(feature = "test-helpers")]
+    // Follows `SchemaIntrospect`'s own gate in data-core, which is now NONE:
+    // the trait ships, because the protection floor on the write path reads
+    // this catalog. The assertion is ungated with it - a witness that only
+    // compiles under `test-helpers` says nothing about the build that ships.
     fn assert_sqlite_backend_impls_schema_introspect() {
         fn assert_impl<T: SchemaIntrospect<LiveSchema = zeroship_schema::diff::LiveSchema>>() {}
         assert_impl::<SqliteBackend>();

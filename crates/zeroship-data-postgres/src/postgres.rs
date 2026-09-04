@@ -20,10 +20,7 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
-#[cfg(any(test, feature = "test-helpers"))]
-// Feeds only the `SchemaIntrospect` impl, whose trait is `cfg(feature)` in
-// data-core - so this import carries that gate, not `any(test, feature)`.
-#[cfg(feature = "test-helpers")]
+// Feeds only the `SchemaIntrospect` impl, which is ungated since 2026-09-04.
 use zeroship_schema::diff::LiveSchema;
 use zeroship_data_core::error::{BeginIntent, CleanupAck, DbError, SettleIntent, TerminalResult};
 
@@ -31,7 +28,6 @@ use zeroship_data_core::error::{BeginIntent, CleanupAck, DbError, SettleIntent, 
 // `pub(crate)` composition marker, so by the orphan rule
 // `impl Backend for PostgresBackend` can only be written in that crate - and
 // its compile-time conformance assertion lives beside it.
-#[cfg(feature = "test-helpers")]
 use super::pg_introspect;
 use zeroship_data_core::storage::{
     DialectBuilder, LockManager, SpatialIndex, SqlExecutor, VectorIndex,
@@ -39,12 +35,6 @@ use zeroship_data_core::storage::{
 use zeroship_schema::descriptors::{GeoPoint, VectorMetric};
 #[cfg(any(test, feature = "test-helpers"))]
 use super::{PgLockManager, PgSqlExecutor};
-// `SchemaIntrospect` is `cfg(feature = "test-helpers")` in data-core, so ACROSS
-// THE CRATE BOUNDARY the feature is the whole gate: a `cfg(test)` here names
-// THIS crate's test build and can never turn data-core's feature on. Import and
-// impl must therefore agree on the feature alone, or `cargo test` on this crate
-// compiles the impl without the trait.
-#[cfg(feature = "test-helpers")]
 use zeroship_data_core::storage::SchemaIntrospect;
 use super::{pg_autocommit, pg_error};
 
@@ -494,7 +484,6 @@ impl LockManager for PostgresBackend {
     }
 }
 
-#[cfg(feature = "test-helpers")]
 impl SchemaIntrospect for PostgresBackend {
     type LiveSchema = LiveSchema;
 
@@ -1629,7 +1618,11 @@ mod tests {
     use super::*;
     use crate::{PgLockManager, PgSqlExecutor};
     use zeroship_data_core::storage::{DialectBuilder, LockManager, SqlExecutor};
-    #[cfg(feature = "test-helpers")]
+    // A plain `use` is private, so `use super::*` above does not re-export the
+    // module-level import; the assertion below needs its own. UNGATED since
+    // 2026-09-04 along with the trait - a conformance assertion that only
+    // compiles under `test-helpers` cannot witness the shipped configuration,
+    // which is the whole defect it now guards against.
     use zeroship_data_core::storage::SchemaIntrospect;
 
     // The `Backend` conformance assertion is NOT here: that trait is the
@@ -1644,13 +1637,11 @@ mod tests {
     fn assert_postgres_backend_impls_sub_traits() {
         fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::OwnedPooledClient>>() {}
         fn impls_lock_manager<T: LockManager<Client = compio_postgres::OwnedPooledClient>>() {}
-        #[cfg(feature = "test-helpers")]
         fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = zeroship_schema::diff::LiveSchema>>() {}
         fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
         fn impls_pg_lock_manager<T: PgLockManager>() {}
         impls_sql_executor::<PostgresBackend>();
         impls_lock_manager::<PostgresBackend>();
-        #[cfg(feature = "test-helpers")]
         impls_schema_introspect::<PostgresBackend>();
         impls_pg_sql_executor::<PostgresBackend>();
         impls_pg_lock_manager::<PostgresBackend>();

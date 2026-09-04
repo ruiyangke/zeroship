@@ -295,17 +295,42 @@ pub trait LockManager: SqlExecutor {
 /// associated type via the `SchemaIntrospect<LiveSchema = LiveSchema>`
 /// super-bound below so the constraint is unchanged for existing
 /// callers.
-#[cfg(feature = "test-helpers")]
+///
+/// **UNGATED, and it was `#[cfg(feature = "test-helpers")]` until 2026-09-04.**
+/// The gate was correct while the only consumers were conformance assertions
+/// and the migration-facing diff. It stopped being correct the moment
+/// `zeroship_data_engine::crud::protection_floor` made a catalog read a
+/// PRODUCTION SECURITY FENCE on the write path: the floor refuses a write whose
+/// descriptor dropped a mask or an encryption block the database still records,
+/// and it recovers those records through this trait. A fence that compiles only
+/// into test builds is not a fence, so the capability ships.
+///
+/// It cost nothing to ship. Both impls read their own vendor's catalog with the
+/// driver the crate already depends on; ungating pulled in no new dependency in
+/// either tier. What stays gated is what is genuinely test-only: `Backup` (and
+/// the `sha2` it hashes dumps with), `PgSqlExecutor`'s raw-pool escape hatch,
+/// and the `Backend` conformance marker. Those three are code SPANS and not
+/// intra-doc links on purpose - each is cfg-gated out of a default build, and
+/// `tests/run_doc_gate.sh` requires zero unresolved links in the default and
+/// `--all-features` doc builds alike, so a link here would be red in one of
+/// them whichever way it was written.
 pub trait SchemaIntrospect: 'static {
     /// Concrete live-schema snapshot returned by
     /// [`Self::introspect_schema`]. The Postgres impl uses
-    /// [`crate::diff::LiveSchema`]; each vendor tier populates that neutral
-    /// shape from its own catalog.
+    /// [`zeroship_schema::diff::LiveSchema`]; each vendor tier populates that
+    /// neutral shape from its own catalog.
+    ///
+    /// Both links said `crate::diff::…` until 2026-09-04 and resolved to
+    /// nothing: this crate has no `diff` module, and never has - the path is a
+    /// leftover from when these traits lived in `zeroship-plugin-db`. It went
+    /// unnoticed because the trait was `cfg(feature = "test-helpers")`, so a
+    /// DEFAULT doc build never rendered it; ungating the trait is what put the
+    /// two dead links in front of `tests/run_doc_gate.sh`.
     type LiveSchema;
 
     /// Introspect the live schema for an app. Returns the typed
     /// snapshot the diff engine consumes via
-    /// [`crate::diff::compute_diff`].
+    /// [`zeroship_schema::diff::compute_diff`].
     #[allow(async_fn_in_trait)]
     async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError>;
 
