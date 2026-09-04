@@ -9,7 +9,7 @@
 //!
 //! * **Producer.** [`record_if_active`] had one production call site and still
 //!   recorded nothing: its first line is `if !is_active()`, and the only thing
-//!   that made `is_active()` true was [`Active::begin`], which is `#[cfg(test)]`
+//!   that made `is_active()` true was `Active::begin`, which is `#[cfg(test)]`
 //!   and so did not exist in a shipped build.
 //! * **Consumer.** `broker::Subscription::set_read_set` had ten call sites, all
 //!   inside `broker.rs`'s own `#[cfg(test)]` module, so `read_set` was `None`
@@ -523,7 +523,7 @@ pub fn is_active() -> bool {
 /// between them is only visible from inside the runtime.
 ///
 /// `recording` is the caller's answer to "is this frame a `query()`?", for the
-/// same reason [`Active::begin`] takes it: the kind is ambient adapter state
+/// same reason `Active::begin` takes it: the kind is ambient adapter state
 /// and this module does not reach for it.
 pub fn ensure_capture(generation: u64, recording: bool) {
     CURRENT_BUFFER.with(|c| {

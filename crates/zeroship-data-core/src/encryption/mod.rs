@@ -13,8 +13,9 @@
 //!
 //! ## Layout
 //!
-//! - [`aead`] — [`AeadKey`] + [`encrypt_randomised`] /
-//!   [`encrypt_deterministic`] / [`decrypt`]. Mode-agnostic on the
+//! - [`aead`] — [`AeadKey`] + the `pub(crate)` `encrypt_randomised` /
+//!   `encrypt_deterministic` pair behind [`encrypt`], plus [`decrypt`].
+//!   Mode-agnostic on the
 //!   decrypt side (the synthetic-nonce vs random-nonce distinction
 //!   lives only on the write path).
 //! - [`keys`] — [`KeyStore`] caches `(app_id, key_id) → AeadKey`,

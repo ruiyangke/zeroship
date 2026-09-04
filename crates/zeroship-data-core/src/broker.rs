@@ -809,7 +809,8 @@ pub fn unsuppress_app(app_id: &str) {
 }
 
 /// True when the given app's local-emit path is suppressed anywhere in this
-/// PROCESS (i.e. a [`WalConsumer`] or a backfill guard is running for it).
+/// PROCESS (i.e. a `WalConsumer` - the adapter tier's, in `zeroship-plugin-db` -
+/// or a backfill guard is running for it).
 ///
 /// Not "on this thread": `SUPPRESSED_APPS` is a `LazyLock<Mutex<..>>`, and it
 /// has to be process-wide because a worker runs many single-threaded compio

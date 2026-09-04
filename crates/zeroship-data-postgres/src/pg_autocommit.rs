@@ -3,7 +3,7 @@
 //! **PG TIER.** Every function here is PostgreSQL dialect and vendor types:
 //! `SET LOCAL ROLE`, an explicit `BEGIN`/`COMMIT` around a single statement,
 //! and `compio_postgres` rows. The policy these encode - which timeouts, which
-//! role - lives one tier down in [`crate::budgets`], and the SQL that renders
+//! role - lives one tier down in [`zeroship_data_core::budgets`], and the SQL that renders
 //! it is [`crate::pg_session_sql`].
 //!
 //! # Why this module exists

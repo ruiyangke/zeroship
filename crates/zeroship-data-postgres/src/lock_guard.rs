@@ -109,7 +109,7 @@ impl LockGuard {
     ///
     /// Takes a [`LockScope`] rather than a raw
     /// `(key: String, tag: &'static str)` pair. The
-    /// [`LockManager::acquire`] default impl derives the underlying
+    /// [`BoundedLockAcquire::acquire`] default impl derives the underlying
     /// `(key1, key2)` strings via [`LockScope::to_keys`] (§7.2 /
     /// §10.5); we cache the derived pair locally so `release()`'s
     /// `pg_advisory_unlock` matches the acquisition exactly even if
