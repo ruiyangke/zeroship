@@ -281,12 +281,30 @@ left is one legal downward call plus two things the grep cannot distinguish from
 code. Anyone re-running that command should expect `2` and `1`, not `0`.
 
 **Every step was verified the same way**, because the live suite on this target
-is flaky (#105, #143) and a total proves nothing: `cargo test --lib` for both
+was flaky (#105) and a total proves nothing: `cargo test --lib` for both
 crates, `cargo check --all-targets` on the default AND `test-helpers` feature
 sets (different builds since `b589cabe9`), `cargo check` on
 `zeroship-worker`/`zeroship-runtime` for dependents, and the live
 `native_transaction` suite compared **by failing NAME** against a baseline
 measured at the pre-lane commit - identical every time, at 19 passed / 5 failed.
+
+**THAT BASELINE WAS AN ARTEFACT, AND THIS PARAGRAPH USED IT AS EVIDENCE UNTIL
+2026-09-04.** `native_transaction` has no failures. Measured at `ebb1e1d7f` on a
+database created for the measurement alone: **24 passed, 0 failed**, at the
+default thread count, twice in a row with no reset. The five "failures" were
+residue - schemas, roles, an orphaned replication slot, publications - left in a
+reused database by an earlier parallel run of the same suite. #105 fixed the
+isolation; #143, which recorded those failures as pre-existing, is closed as
+refuted.
+
+The comparison-by-failing-NAME above was still the right technique and its
+conclusion still holds: the lane move changed no test's state. But note what the
+phrase "identical every time" was actually measuring. It reproduced because the
+residue was always there, and stability is what made it credible. **A number that
+comes back the same every run is not thereby correct** - it can be a constant
+defect. When a suite is known to leak state, re-derive its baseline on a database
+no previous run of that suite has touched, and treat every figure taken before
+the leak was fixed as suspect, including this one.
 
 Where a moved rule could have gone slack it was mutation-checked in its new
 home: sampling `transaction_status()` before the cleanup `ROLLBACK` still turns
