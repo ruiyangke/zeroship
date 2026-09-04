@@ -54,7 +54,8 @@
 //! Each runtime receives the same descriptor shape that a deploy carries; the
 //! tables are applied ahead of boot by the fixture. The orchestrator logic is
 //! also covered without a DB by the Rust unit tests + tx-view shape
-//! tests in `crates/plugin-db/src/{orchestrator,v8_classes}/transaction.rs`,
+//! tests in `crates/zeroship-data-engine/src/transaction/mod.rs` and
+//! `crates/zeroship-plugin-db/src/v8_classes/transaction.rs`,
 //! the `db_v8_class.rs` surface tests, the SQLite SAVEPOINT SQL tests in
 //! `sqlite_integration.rs`, and the SDK-side mock tests in
 //! `sdks/db/tests/p9-pr3-native-transaction.test.ts`.
