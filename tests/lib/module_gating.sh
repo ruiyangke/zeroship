@@ -66,6 +66,12 @@
 #     SHIPPED, which is deliberate: `"test-helpers"` CONTAINS `test`, and
 #     matching that naively is how a sibling census went to zero rows while
 #     printing that as calmly as a real number.
+#   - Inside the attribute it matches `test` as a TOKEN, not as a substring, and
+#     strips a trailing `//` comment first. Both are the SAME defect this file
+#     was written for, one level down: `#[cfg(feature = "latest")]` and
+#     `#[cfg(unix)] // the test harness is the only caller` were each read as
+#     test-gated until 2026-09-04. See `_module_gating_cfg_names_test` for the
+#     measurement that says this was latent rather than live.
 #   - A multi-line attribute defeats it. `#[cfg(any(\n test,\n ...))]` presents
 #     `))]` on the line above the declaration, which is neither an attribute nor
 #     a comment, so the walk stops and the module reads as SHIPPED. False
@@ -97,10 +103,39 @@
 # The roots are ARGUMENTS. The four copies this replaces each hard-coded a
 # different search root (`$ROOTS`, `$ROOT`, `$SRC`, `.`), and a shared helper
 # that picked one of them would silently change what the other three rule on.
+# _module_gating_cfg_names_test <cfg attribute text, comment-stripped>
+#
+# True when the cfg predicate names `test` AS A TOKEN, or names a feature whose
+# name is test-ish: `test`, `testing`, `test-*`/`test_*`, `*-test`/`*_test`.
+#
+# WHY A TOKEN AND NOT A SUBSTRING. The predicate here was `*test*` against the
+# whole line until 2026-09-04. `latest`, `fastest`, `protest` and `attest` all
+# contain `test`, and any of them as a feature name would have made an ordinary
+# shipped module read as compiled-out - which is the direction that makes a
+# census QUIETER, not louder. Measured the same day over crates/ and libs/:
+# every cfg attribute that today decorates a `mod` declaration and reaches this
+# arm is genuinely test-related (`#[cfg(test)]` x19, `feature = "test-helpers"`
+# x7, `any(test, feature = "test-helpers")` x4, `any(test, feature = "testing")`
+# x2), and no cfg attribute line anywhere in either tree carries a trailing `//`
+# comment. So this was LATENT, not live, and is fixed on the reasoning that the
+# whole file exists because a latent prose-versus-attribute confusion became
+# live the day somebody wrote a careful comment.
+#
+# It does NOT evaluate cfg algebra; the `not(` arm above still short-circuits.
+_module_gating_cfg_names_test() {
+  local tok
+  for tok in ${1//[^A-Za-z0-9_-]/ }; do
+    case "$tok" in
+      test|testing|test[-_]*|*[-_]test) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 module_is_test_gated() {
   local file="$1"
   shift
-  local name decls gated hit decl_file decl_line prev trimmed i
+  local name decls gated hit decl_file decl_line prev trimmed code i
   name=$(basename "$file" .rs)
   # `foo/mod.rs` is declared as `mod foo;`, not `mod mod;`.
   if [ "$name" = "mod" ]; then
@@ -123,14 +158,29 @@ module_is_test_gated() {
       # is not one; the arms below cannot both match.
       trimmed="${prev#"${prev%%[![:space:]]*}"}"
       case "$trimmed" in
-        "#[cfg("*)
-          case "$trimmed" in
-            *"not("*) break ;;
-            *test*) gated=$((gated + 1)); break ;;
-            *) break ;;
+        "#["*)
+          # Drop a trailing `//` comment before reading the attribute. This file
+          # exists because prose that QUOTED an attribute was read as one; prose
+          # that merely MENTIONS `test` beside a real attribute is the same
+          # mistake one level down, and `#[cfg(unix)] // the test harness is the
+          # only caller` used to be recorded as test-gated.
+          code="${trimmed%%//*}"
+          case "$code" in
+            "#[cfg("*)
+              case "$code" in
+                *"not("*) break ;;
+                *)
+                  if _module_gating_cfg_names_test "$code"; then
+                    gated=$((gated + 1))
+                  fi
+                  break
+                  ;;
+              esac
+              ;;
+            *) i=$((i - 1)) ;;
           esac
           ;;
-        "#["*|"///"*|"//!"*|"") i=$((i - 1)) ;;
+        "///"*|"//!"*|"") i=$((i - 1)) ;;
         *) break ;;
       esac
     done
@@ -182,6 +232,12 @@ pub mod ladder;
 pub mod sub;
 /// See `#[cfg(test)]` for how this is compiled out.
 pub mod docquote;
+#[cfg(feature = "latest")]
+pub mod latest;
+#[cfg(unix)] // the test harness is the only caller
+pub mod unixonly;
+#[cfg(feature = "integration-test")]
+pub mod inttest;
 RS
   cat > "$tmp/src/indent.rs" <<'RS'
 mod outer {
@@ -191,7 +247,7 @@ mod outer {
 RS
   local f
   for f in gated prose trailing shipped helpers docrun plaincomment attrrun \
-           ungated ladder docquote indented; do
+           ungated ladder docquote indented latest unixonly inttest; do
     : > "$tmp/src/$f.rs"
   done
   : > "$tmp/src/sub/mod.rs"
@@ -220,6 +276,13 @@ RS
   _mg_case "foo/mod.rs is keyed on the DIRECTORY name"            yes "$tmp/src/sub/mod.rs"
   _mg_case "a DOC comment quoting #[cfg(test)] does NOT gate"     no  "$tmp/src/docquote.rs"
   _mg_case "an indented #[cfg(test)] still gates"                 yes "$tmp/src/indented.rs"
+
+  # The `test` TOKEN, not the substring. These three are the 2026-09-04
+  # regression: the first two pass against a `*test*` case pattern only by
+  # accident of nothing in the tree being spelled that way yet.
+  _mg_case "feature \"latest\" merely CONTAINS test - not gated"   no  "$tmp/src/latest.rs"
+  _mg_case "a comment mentioning the test harness does NOT gate"  no  "$tmp/src/unixonly.rs"
+  _mg_case "feature \"integration-test\" DOES gate"                yes "$tmp/src/inttest.rs"
 
   # A file whose module is declared NOWHERE must not read as gated: `decls > 0`
   # is what separates "every declaration is gated" from "there were none".
