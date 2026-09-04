@@ -189,6 +189,17 @@ impl ThreadDbContext {
     /// uses it (checked across `tests/` and `benches/`), so the wider gate
     /// compiled it into the `test-helpers` lib with no caller and raised the
     /// very dead_code warning it was added to remove.
+    ///
+    /// **`matches!` is correct here and stays**, unlike
+    /// `exec::backend_publishes_committed_changes`, which was the same spelling
+    /// and had to become an exhaustive `match` on 2026-09-04. The difference is
+    /// what is being asked. This asks "is the installed arm the Postgres one",
+    /// a question whose subject is one named variant; a third backend answers
+    /// `false` and that answer is right without anybody deciding it. That one
+    /// asked a per-backend CAPABILITY question wearing a variant test as a
+    /// disguise, where `false` for an unwritten backend is an assumption.
+    /// Making this exhaustive would only conscript a future author into
+    /// writing an arm with exactly one possible value.
     #[cfg(test)]
     pub(crate) fn pool_initialised(&self) -> bool {
         matches!(self.backend, Some(BackendHandle::Postgres(_)))
@@ -303,6 +314,17 @@ impl ThreadDbContext {
     /// `tests/lib/tier_direction_census.sh` reported the `BackendUrl` half as
     /// `ENGINE crud/mod.rs -> ADAPTER`. Neither enum is the answer; the dialect
     /// is, and only this struct can produce it without reaching anywhere.
+    ///
+    /// **Both matches spell every variant out; the inner one did not until
+    /// 2026-09-04.** It read `_ => SqlDialect::Postgres`, which folded
+    /// `Some(BackendUrl::Postgres)` together with `None` and would have folded a
+    /// third backend's URL in with them - handing `Postgres` SQL text to a
+    /// backend that cannot parse it, before any connection exists to reject it.
+    /// The default for `None` is deliberate and unchanged, and it is still
+    /// spelled beside the arm it shares a body with rather than under a `_`: a
+    /// dialect is needed to BUILD a statement, so "no selection yet" has to
+    /// answer something. "Selected, and not one of the two I know about" does
+    /// not, and now cannot.
     pub(crate) fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
         use zeroship_schema::query::SqlDialect;
         match &self.backend {
@@ -310,7 +332,7 @@ impl ThreadDbContext {
             Some(BackendHandle::Postgres(_)) => SqlDialect::Postgres,
             None => match &self.backend_selection {
                 Some(crate::BackendUrl::Sqlite { .. }) => SqlDialect::Sqlite,
-                _ => SqlDialect::Postgres,
+                Some(crate::BackendUrl::Postgres) | None => SqlDialect::Postgres,
             },
         }
     }

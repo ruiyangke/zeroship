@@ -13,10 +13,11 @@
 //! - `exec_mutation_with_emit` — write path + broker wakeup on backends
 //!   that still need SDK-local publication.
 //!
-//! All four route through `run_sql`, which uses the per-isolate TX
-//! client (`ThreadDbContext::tx_conns`) when the DISPATCH THAT STARTED
-//! THIS OP was issued inside the app's own `db.transaction(fn)` callback,
-//! and the pool otherwise.
+//! All four dispatch on [`BackendHandle`] with an exhaustive `match`. The
+//! `Postgres` arm is `run_sql`, which uses the per-isolate TX client
+//! (`ThreadDbContext::tx_conns`) when the DISPATCH THAT STARTED THIS OP was
+//! issued inside the app's own `db.transaction(fn)` callback, and the pool
+//! otherwise; the `Sqlite` arm is `exec_sqlite_json`.
 //!
 //! ## Why the entry points take `&TxRoute` and not `app_id: &str`
 //!
@@ -229,16 +230,27 @@ pub async fn run_sql(
 /// take a single row without paying for an intermediate serialise +
 /// reparse round-trip. The final JSON string is materialised once at
 /// the V8 boundary (`ResolveValue::Json`).
+///
+/// # The backend dispatch below is an exhaustive `match`, and stays one
+///
+/// This and its two siblings ([`exec_count`], [`exec_mutation`]) each opened
+/// with `if let BackendHandle::Sqlite(sq) = route.backend() { ...; return }` and
+/// fell through to [`run_sql`] until 2026-09-04. That made `Postgres` the
+/// engine's DEFAULT execution route rather than one arm of a choice, at three
+/// sites. It was caught, but only downstream and only by accident: the
+/// fall-through reaches the exhaustive `match` in
+/// [`exec_postgres_autocommit_with_role`], so a third backend broke the build at
+/// a function whose name does not mention the branch the author had to write.
+/// Spelled as a `match` here, the error lands where the routing is decided.
+/// **Do not reopen any of the three as an `if let`.**
 pub async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    if let BackendHandle::Sqlite(sq) = route.backend() {
-        let rows = exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?;
-        // Success arm only: one read op. Unforgeable (emitted by the primitive).
-        emit_db_metric(app_id, DB_READS, 1);
-        return Ok(rows);
-    }
-    let rows = run_sql(route, &bq.sql, &param_refs).await?;
+    let rows = match route.backend() {
+        BackendHandle::Sqlite(sq) => exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?,
+        BackendHandle::Postgres(_) => run_sql(route, &bq.sql, &param_refs).await?,
+    };
+    // Success arm only: one read op. Unforgeable (emitted by the primitive).
     emit_db_metric(app_id, DB_READS, 1);
     Ok(rows)
 }
@@ -248,25 +260,22 @@ pub async fn exec_query(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, D
 /// Returns the raw integer; callers wrap into the appropriate
 /// `OpResult` shape (typically `ResolveValue::F64` so JS sees a real
 /// `number`).
+///
+/// Exhaustive backend dispatch, for the reason on [`exec_query`].
 pub async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError> {
     let app_id = route.app_id();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    if let BackendHandle::Sqlite(sq) = route.backend() {
-        let rows = exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?;
-        // Success arm only: a count is a read op.
-        emit_db_metric(app_id, DB_READS, 1);
-        return Ok(rows
-            .first()
-            .and_then(|row| row.get("count"))
-            .and_then(Value::as_i64)
-            .unwrap_or(0));
-    }
-    let rows = run_sql(route, &bq.sql, &param_refs).await?;
+    let rows = match route.backend() {
+        BackendHandle::Sqlite(sq) => exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?,
+        BackendHandle::Postgres(_) => run_sql(route, &bq.sql, &param_refs).await?,
+    };
+    // Success arm only: a count is a read op.
     emit_db_metric(app_id, DB_READS, 1);
 
-    // Byte-identical to the SQLite arm above, and that is the point: since
-    // `run_sql` returns JSON rather than `compio_postgres::Row`, the two
-    // dialects agree on the shape a count comes back in. PostgreSQL renders
+    // ONE extraction for both dialects, which is the point: this was written
+    // twice, byte-identically, once per arm, back when each arm returned on its
+    // own. Both arms hand back JSON rather than a `compio_postgres::Row`, so the
+    // two dialects agree on the shape a count comes back in. PostgreSQL renders
     // `count(*)` as INT8 (OID 20), which `row_to_json` maps to an exact
     // `Number::from(i64)` - so `as_i64` reads it back losslessly rather than
     // going via `f64` the way the FLOAT arms do.
@@ -285,20 +294,19 @@ pub async fn exec_count(route: &TxRoute, bq: BuiltQuery) -> Result<i64, DbError>
 /// to build broker events without paying for a JSON parse of its own
 /// output; the CRUD resolver chain then serialises once at the V8
 /// boundary.
+///
+/// Exhaustive backend dispatch, for the reason on [`exec_query`].
 pub async fn exec_mutation(route: &TxRoute, bq: BuiltQuery) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    if let BackendHandle::Sqlite(sq) = route.backend() {
-        let rows = exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?;
-        // Success arm only: one write op + the affected/RETURNING row count.
-        emit_db_metric(app_id, DB_WRITES, 1);
-        emit_db_metric(app_id, DB_ROWS_WRITTEN, rows.len() as u64);
-        return Ok(rows);
-    }
-    let values = run_sql(route, &bq.sql, &param_refs).await?;
+    let rows = match route.backend() {
+        BackendHandle::Sqlite(sq) => exec_sqlite_json(route, sq, &bq.sql, &param_refs).await?,
+        BackendHandle::Postgres(_) => run_sql(route, &bq.sql, &param_refs).await?,
+    };
+    // Success arm only: one write op + the affected/RETURNING row count.
     emit_db_metric(app_id, DB_WRITES, 1);
-    emit_db_metric(app_id, DB_ROWS_WRITTEN, values.len() as u64);
-    Ok(values)
+    emit_db_metric(app_id, DB_ROWS_WRITTEN, rows.len() as u64);
+    Ok(rows)
 }
 
 /// Run `sql` on the shared Postgres backend under `app_id`'s role.
@@ -436,8 +444,41 @@ pub async fn exec_mutation_with_emit(
 /// the unqualified `context::` call does not match the extractor's
 /// `crate::`-prefixed pattern, so only the `use` at the top of this file kept
 /// the edge visible at all.
+///
+/// # This `match` is the guard, and it is the only guard there can be
+///
+/// It was `matches!(backend, BackendHandle::Sqlite(_))` until 2026-09-04 -
+/// equivalent while [`BackendHandle`] has exactly two variants, so the defect
+/// was LATENT, not live. It goes live at the event decision 4 of
+/// `docs/proposals/2026-08-31-data-crate-shape.md` governs: a third backend
+/// reads `false` here, [`emit_for_rows`] then publishes on its behalf, and a
+/// backend that publishes its OWN commits delivers every change to every
+/// subscriber twice. Nothing names the branch the author failed to write - no
+/// compile error, no failing test.
+///
+/// So this is written as a `match` with one arm per variant and NO wildcard,
+/// and the compile error a third variant produces here IS the regression test.
+/// **Do not reopen it as `matches!`, an `if let`, or a `_ =>` arm.** The
+/// question is not "is this the `Sqlite` arm" (which a new backend can answer
+/// `false` to safely); it is "does this backend publish its own committed
+/// changes", whose answer for a backend nobody has written yet is UNKNOWN, and
+/// `false` is an assumption rather than a default.
+///
+/// What that buys, stated plainly: the compiler refuses a new variant that does
+/// not answer HERE. What it does not buy: it cannot check that the answer is
+/// CORRECT, it says nothing about the other non-exhaustive `BackendHandle`
+/// sites in this workspace, and nothing in `tests/` prevents a future edit from
+/// collapsing it back into a `matches!`. Only a source gate can hold that last
+/// one; see the report attached to tracker #189.
 fn backend_publishes_committed_changes(backend: &BackendHandle) -> bool {
-    matches!(backend, BackendHandle::Sqlite(_))
+    match backend {
+        // The writer actor's commit hook publishes committed changes itself;
+        // an SDK-local emit here would race it and duplicate every event.
+        BackendHandle::Sqlite(_) => true,
+        // The WAL consumer is a separate process concern and is not always
+        // running, so the local emit below is what feeds subscribers here.
+        BackendHandle::Postgres(_) => false,
+    }
 }
 
 /// Build and queue/emit broker events for a mutation's RETURNING rows.
