@@ -1,8 +1,30 @@
 # This crate is a full member of the root workspace: it inherits
 # the shared `[workspace.package]` metadata + `[workspace.lints]` and resolves against
-# the single root lockfile. The root keeps it OUT of the default build/test flow via
+# the single root lockfile. `cargo build -p zeroship-migrate-node` (or `napi build`)
+# compiles it, and so does a plain workspace-wide `cargo build` / `cargo test`.
+#
+# THIS COMMENT CLAIMED A PROTECTION THAT NEVER EXISTED, from `79b339aa7` until
+# 2026-09-04. It said: "The root keeps it OUT of the default build/test flow via
 # `default-members`, so a plain `cargo build`/`cargo test` never pulls the napi
-# toolchain path; `cargo build -p zeroship-migrate-node` (or `napi build`) compiles it.
+# toolchain path." Every clause of that is false, and checking took one command:
+# `grep -n default-members Cargo.toml` at the repo root exits 1. The root declares
+# `members = ["crates/*", "libs/*"]` with `resolver = "3"` and an `exclude` list of
+# three unrelated paths; `cargo metadata` puts this package in BOTH
+# `workspace_members` and `workspace_default_members`, 44 of 44 either way.
+#
+# The claim was not merely inaccurate, it was load-bearing in the wrong direction: it
+# described the reason a workspace-wide `cargo test` was safe, while that command was
+# in fact selecting a package that could not link. Two other documents repeated it
+# (`docs/proposals/2026-07-11-migrate-napi-shell-design.md`,
+# `docs/proposals/2026-07-12-zero-migrate-redesign-plan.md`) and two open-question
+# lists had already flagged the mismatch without anyone acting on it. A comment
+# asserting an isolation mechanism is worth less than nothing when the mechanism is
+# absent, because it stops the next reader looking.
+#
+# It is recorded rather than quietly deleted so the belief is closed instead of
+# deferred. The isolation is not restored and is not wanted: the package builds and
+# tests as a default member, which is what `tests/test_target_packages.txt` and
+# `tests/shipped_config_gate.sh` both now rule on.
 [package]
 name = "zeroship-migrate-node"
 version.workspace = true

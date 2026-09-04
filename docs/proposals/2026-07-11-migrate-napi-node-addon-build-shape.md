@@ -164,14 +164,21 @@ so a CRLF checkout digests differently from an LF one.
    `zeroship-migrate-node-wasm32-wasi`, and `__test__/force_wasi.mjs` exercises that fallback,
    but `package.json` declares no wasi target. Decide whether to ship a wasi artifact or to
    accept the branch as permanently unreachable in this package.
-4. **The addon's Cargo.toml describes a workspace arrangement the root does not have.** Its
-   header says the root keeps it out of the default build and test flow via `default-members`;
-   the root `Cargo.toml` has no `default-members` key and its `exclude` list holds only
-   `crates/zeroship-runtime/benches/ntex-bench`,
-   `libs/compio-postgres/vendor/postgres-types` and `refs`. The addon is therefore a default
-   member, and with `napi` on by default a workspace-wide `cargo test` reaches a target that
-   cannot link. Decide whether to add `default-members`, to flip the `napi` default off, or to
-   correct the comment.
+4. ~~**The addon's Cargo.toml describes a workspace arrangement the root does not have.**~~
+   **RESOLVED 2026-09-04, by the third option.** The finding was correct: the header claimed
+   the root kept the addon out of the default build and test flow via `default-members`, and
+   the root `Cargo.toml` has no such key (`members = ["crates/*", "libs/*"]`, `resolver = "3"`,
+   an `exclude` list of three unrelated paths). The addon was a default member all along, so a
+   workspace-wide `cargo test` did reach a target that could not link - exit 101, 1719
+   `undefined reference` lines.
+
+   Of the three options offered - add `default-members`, flip the `napi` default off, or
+   correct the comment - NONE was taken as written, because each of the first two removes
+   coverage. What shipped is a fourth: the addon stays a default member with `napi` ON, and a
+   `napi` entry in `[dev-dependencies]` carrying `dyn-symbols` makes its test binaries link.
+   `cargo test --workspace --no-run` now exits 0 with no `--exclude`, and `src/bridge.rs` is
+   type-checked by `cargo check --workspace` for the first time. The false comment is deleted
+   and recorded as false in the manifest itself.
 5. **No host-side shadow harness exists**, so `dry_run` is unavailable over the host-driven
    backends. Decide whether to supply one or to keep `ShadowUnsupported` as the permanent
    answer for this host.
