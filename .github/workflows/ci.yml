@@ -106,6 +106,18 @@ jobs:
       # on. Twenty seconds; no services, no database.
       - name: shipped configuration compiles
         run: tests/shipped_config_gate.sh
+      # The same shipped-vs-test feature split, one member down, read off the
+      # EMITTED OBJECT rather than off a comment. zeroship-migrate-node keeps
+      # `napi` as a default feature and links its test binaries through
+      # `napi/dyn-symbols` declared on the dev-dependency. Both halves are
+      # silent when broken: dyn-symbols reaching the shipped cdylib compiles
+      # and tests green while producing a .node that resolves N-API through its
+      # own loader (measured: `cargo test -p zeroship-migrate-node` exits 0 with
+      # all 12 blocks ok while the object's undefined `napi_*` count is 0
+      # instead of 52), and losing the dev-dependency returns a 1719-line
+      # linker wall that names a symbol but never the manifest.
+      - name: napi addon symbol shape
+        run: tests/napi_symbol_shape_gate.sh
       # WPT BEFORE `cargo test`, for exactly the reason the SDK dist files are
       # built before any cargo command above, and discovered the same way.
       #

@@ -40,6 +40,12 @@ gates the N-API entrypoints (`bridge.rs`, `#[napi]` functions, `ThreadsafeFuncti
 `JsDeferred`). `--no-default-features` builds the pure-Rust core, the marshal and session
 bridge, and the mock-apply integration test without the Node ABI.
 
+A SECOND `napi` entry sits in `[dev-dependencies]`, adding `dyn-symbols`, so test binaries
+resolve the Node ABI through libloading and have no undefined symbols to link. It is
+declared on the dev-dependency and never routed through `[features]`, because any route
+reachable from `default` would put libloading into the shipped `.node`
+(`tests/dev_dep_feature_route_gate.sh`, `tests/napi_symbol_shape_gate.sh`).
+
 `napi` is declared `version = "3", default-features = false, features = ["napi6", "serde-json"]`.
 `napi4` supplies the ThreadsafeFunction, `napi5` supplies `Env::create_function_from_closure`
 and Deferred, `napi6` supplies the BigInt bindings so the exact-integer domain (verb row
@@ -180,12 +186,21 @@ removal made moot - lives in this file's git history.
 
 Do-not notes, each recording something that was tried or measured:
 
-- Do not expect a bare `cargo test -p zeroship-migrate-node` to work. `napi` is a default
-  feature, so the integration targets are built with the N-API entrypoints in and fail at
-  link with `undefined reference to napi_create_function`, surfacing as
-  `_napi_rs_internal_register_status`. Node ABI symbols resolve only at `.node` dlopen time.
-  Build offline with `--no-default-features`; the boundary itself is tested by `npm test`
-  through the real `.node`.
+- ~~Do not expect a bare `cargo test -p zeroship-migrate-node` to work.~~ **CORRECTED
+  2026-09-04: the bare command works, with `napi` ON.** This bullet was accurate when
+  written and stayed accurate until the fix below, so the link failure it describes is
+  real history: exit 101, 1719 `undefined reference` lines, the first
+  `napi_create_function` from `src/bridge.rs:1222` in `_napi_rs_internal_register_status`.
+  What it got wrong was the conclusion that no test binary could ever link. The crate now
+  declares `napi` in `[dev-dependencies]` with the `dyn-symbols` feature, which swaps
+  napi-sys's extern block for a libloading-populated pointer table - the same code that
+  already ships on `x86_64-pc-windows-msvc`. Under resolver v3 that reaches test targets
+  and NOT the shipped `--lib` build, so the `.node` is byte-for-byte unchanged.
+  `--no-default-features` still builds the napi-free core but is no longer required and no
+  longer the recommended path; it type-checks 1486 fewer lines. `tests/napi_symbol_shape_gate.sh`
+  holds both halves. The boundary itself is still `npm test`'s question, through the real
+  `.node`: no Rust test may CALL an N-API function, because with no host loaded the
+  napi-sys stub returns a value that can read as success.
 - Do not enable napi's `async` or `tokio_rt` features. They install a tokio runtime on an
   extra thread and break the workspace zero-tokio invariant inside the leaf.
 - Do not `join()` the engine worker thread from the JS thread. It deadlocks libuv and Bun.

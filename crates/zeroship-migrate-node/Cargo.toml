@@ -26,17 +26,30 @@ crate-type = ["cdylib", "rlib"]
 # defines `napi_build_metadata` / links against the Node ABI). `napi` gates them
 # (`#[napi]` fns, ThreadsafeFunction, JsDeferred).
 #
-# **A bare `cargo test -p zeroship-migrate-node` DOES NOT WORK**, and an earlier
-# version of this comment said it did. `napi` is a DEFAULT feature, so a bare
-# `cargo test` builds the integration targets with the N-API entrypoints in and
-# fails at LINK - `undefined reference to napi_create_function`, surfacing as
-# `_napi_rs_internal_register_status`. Node ABI symbols resolve only at `.node`
-# dlopen time, so no test binary can link them.
+# **A bare `cargo test -p zeroship-migrate-node` WORKS**, with `napi` ON. Two
+# earlier versions of this comment were both wrong, in opposite directions: one
+# said the bare command worked when it did not, and its correction said no test
+# binary could ever link the Node ABI. The second was true of the manifest as it
+# then stood, not of the linker. Measured at 1144d787c: the bare command exited
+# 101 with 1719 `undefined reference` lines, the first `napi_create_function`
+# from src/bridge.rs:1222 in `_napi_rs_internal_register_status`.
 #
-# The offline path is `--no-default-features`: that builds the pure-Rust core,
-# the marshal/session bridge and the mock-apply integration test without the
-# Node ABI. The napi boundary itself is exercised by `npm test`, through the
-# real `.node`.
+# What resolves it is the `napi` entry in `[dev-dependencies]` below, which turns
+# on `dyn-symbols`. Node ABI symbols are exported by the host process and resolve
+# only at `.node` dlopen time; `dyn-symbols` replaces the extern block with a
+# libloading-populated pointer table, so a test binary has nothing to resolve at
+# link. `napi` therefore STAYS a default feature, and src/bridge.rs is compiled
+# and type-checked by `cargo test` and by `cargo check --workspace` - which it
+# never was before, because the only configuration that built was the one that
+# excluded it.
+#
+# `--no-default-features` still builds the napi-free core and is still a valid
+# way to compile this crate without the N-API surface, but it is NO LONGER
+# REQUIRED and is no longer the recommended path: it type-checks 1486 fewer lines.
+#
+# NO cargo test may CALL an N-API function - see the `[dev-dependencies] napi`
+# comment for the false-success mechanism. The napi boundary is `npm test`'s
+# question, through the real `.node`.
 default = ["napi"]
 napi = ["dep:napi", "dep:napi-derive"]
 
@@ -104,10 +117,46 @@ tracing-subscriber = { workspace = true }
 # reverses what apply did. Workspace-pinned, and test-only.
 tempfile = { workspace = true }
 
+# The Node ABI resolved through libloading instead of static externs, FOR TEST
+# BINARIES ONLY. `napi_*` symbols are exported by the Node host and resolve only
+# at `.node` dlopen time, so a test binary that links them fails with `undefined
+# reference to napi_create_function`. `dyn-symbols` (napi 3.4.0 Cargo.toml:58 ->
+# napi-sys/dyn-symbols) swaps the extern block for a libloading-populated function
+# pointer table, so there is nothing to resolve at link. This is not an exotic
+# path: napi-sys 3.0.1 src/lib.rs:5 gates on `any(target_env = "msvc", feature =
+# "dyn-symbols")`, so it is the code that ALREADY SHIPS on x86_64-pc-windows-msvc.
+#
+# DECLARED ON THE DEV-DEPENDENCY, never routed through `[features]`, per
+# tests/dev_dep_feature_route_gate.sh. Under resolver v3 a dev-dependency's
+# features unify into the normal edge WHENEVER A TEST TARGET IS IN THE UNIT GRAPH,
+# so `cargo test` gets it and a `--lib`/`--bins` build does not. Measured: the
+# shipped cdylib keeps 52 undefined `napi_*` symbols and a defined
+# `napi_register_module_v1`; tests/napi_symbol_shape_gate.sh holds both halves.
+#
+# NO cargo test may CALL an N-API function. With no host loaded the napi-sys stub
+# prints `Node-API symbol ... has not been loaded` to stderr and returns 1 for a
+# `-> napi_status` fn and `mem::zeroed()` for every other return type - and
+# `mem::zeroed()` of a `napi_status` reads as `napi_ok`, i.e. a false success with
+# an uninitialised out-param. Measured: zero such lines across all 115 tests,
+# because nothing enters bridge.rs except through `napi_register_module_v1`, which
+# only a `.node` dlopen calls. The napi boundary is `npm test`'s question.
+napi = { version = "3", default-features = false, features = ["napi6", "serde-json", "dyn-symbols"] }
+
 [build-dependencies]
-# `napi_build::setup()` only emits cdylib link args (allow-undefined for the Node
-# ABI symbols, resolved at `.node` load time) — it needs NO Node headers at build
-# time, so it is safe to run for both `napi build` and a plain `cargo test`.
+# `napi_build::setup()` needs NO Node headers at build time, so it is safe to run
+# for both `napi build` and a plain `cargo test`.
+#
+# IT DOES NOT MAKE TEST BINARIES LINK, and this comment claimed otherwise until
+# 2026-09-04 ("only emits cdylib link args (allow-undefined for the Node ABI
+# symbols)"), which reads as an explanation for why undefined `napi_*` symbols are
+# tolerated. Read in napi-build 2.2.4, the version Cargo.lock resolves: on Linux
+# `setup()` matches `CARGO_CFG_TARGET_OS` and takes its `_ => {}` arm (src/lib.rs:39),
+# emitting NO link args at all. The cdylib links only because GNU ld permits
+# undefined symbols in `-shared` by default. The allow-undefined flags are macOS
+# ONLY (src/macos.rs: `-undefined dynamic_lookup`) and are `rustc-cdylib-link-arg`,
+# which by definition never reaches a test binary on any platform.
+#
+# What makes test binaries link is `napi/dyn-symbols` on the dev-dependency above.
 napi-build = "2"
 
 # The workspace source digest `buildInfo()` reports is folded here, at build time,
