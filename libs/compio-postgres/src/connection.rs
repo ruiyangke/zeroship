@@ -658,11 +658,19 @@ where
     /// A custom `TlsConnect` whose stream answers `Err` to `try_into_split`
     /// still gets the serialized loop, and still has this limitation.
     ///
-    /// This is a KNOWN DEFECT, not a design decision, and it is being tracked.
-    /// It is documented here rather than left silent because the failure has
-    /// no error and no log - the events simply never come. Until it is fixed,
-    /// a listener that needs TLS must poll instead of waiting, or run its
-    /// subscription over a plaintext connection.
+    /// That residue is a KNOWN DEFECT rather than a design decision, and it is
+    /// worth stating plainly because the failure has no error and no log - the
+    /// events simply never come. Nothing this crate ships reaches it: both the
+    /// plain socket and rustls split, and the only in-tree stream that refuses
+    /// to is `test_utils::SerializedSocket`, which exists to make the
+    /// serialized loop testable at all.
+    ///
+    /// THIS PARAGRAPH ADVISED, UNTIL 2026-09-02, that "a listener that needs
+    /// TLS must poll instead of waiting, or run its subscription over a
+    /// plaintext connection". That was right before the 2026-08-24 fix and
+    /// wrong after it, and it contradicted this comment's own heading four
+    /// paragraphs up. It is a public doc, so the stale version told every
+    /// reader to work around a defect their TLS listener does not have.
     pub fn notifications(&mut self) -> mpsc::UnboundedReceiver<AsyncMessage> {
         let (tx, rx) = mpsc::unbounded();
         self.async_sender = Some(tx);
@@ -2490,6 +2498,22 @@ where
                             // pool poison before the prefix can wake its
                             // borrower; the terminal error itself remains
                             // behind that prefix in the read FIFO.
+                            // NOT PEER-OBSERVABLE, and that is measured. This
+                            // shutdown is redundant with `ConnectionDropRelease
+                            // ::drop`: the deferred error retires the connection,
+                            // so the driver completes and drops the release
+                            // handle before any peer read can distinguish the two
+                            // closes. Deleting this line leaves the lib suite
+                            // (763) and the integration suite (797) green.
+                            //
+                            // A test written for it on 2026-09-02 passed with the
+                            // line deleted, which is the whole point: it was
+                            // observing Drop. Asserting the driver was still
+                            // pending when the peer saw the close - the check
+                            // `replication.rs` uses for its release arms - fails,
+                            // because by then the driver is Ready. Keep the call
+                            // for promptness; do not read a mutation report
+                            // calling it unbound as a missing test.
                             read_error_status.store(READ_RETIRED_STATUS, Ordering::Release);
                             if let Some(release) = &read_error_release {
                                 release.shutdown();
@@ -3123,6 +3147,33 @@ mod tests {
             inner.state.get(),
             ReadObligationState::Active,
             "the displaced pause re-paused a response the terminal had released"
+        );
+    }
+
+    /// `route_async` handles exactly the three frames PostgreSQL may deliver
+    /// out of band - NoticeResponse, NotificationResponse and ParameterStatus.
+    /// Anything else arriving on that path means the decoder classified a
+    /// synchronous frame as asynchronous, which would hand a response belonging
+    /// to an in-flight request to the notification channel instead. Refusing
+    /// retires the connection rather than silently losing that reply.
+    ///
+    /// A `ReadyForQuery` is the sharpest probe: it is unambiguously
+    /// synchronous, so routing it here can only be a misclassification.
+    #[test]
+    fn routing_a_synchronous_frame_as_asynchronous_is_refused() {
+        let parameters = Mutex::new(HashMap::new());
+        let mut frame = BytesMut::from(&b"Z\0\0\0\x05I"[..]);
+        let ready_for_query = Message::parse(&mut frame)
+            .expect("decode the scripted ReadyForQuery")
+            .expect("the scripted ReadyForQuery was incomplete");
+
+        let Err(error) = route_async(&parameters, None, ready_for_query) else {
+            panic!("a synchronous frame was accepted on the asynchronous path")
+        };
+        assert_eq!(error.to_string(), "unexpected message from server");
+        assert!(
+            parameters.lock().is_empty(),
+            "the refused frame still mutated the parameter map"
         );
     }
 
@@ -4826,6 +4877,50 @@ mod tests {
             tx_status.load(Ordering::Acquire),
             READ_RETIRED_STATUS,
             "unsupported client_encoding did not poison the session"
+        );
+    }
+
+    /// An ErrorResponse whose field list does not parse yields NO diagnosis.
+    ///
+    /// The ASCII scan walks every field before trusting the text, so a frame
+    /// that fails partway through that walk has already been half-read. Taking
+    /// the fields decoded so far would present a truncated server message as
+    /// though it were the whole one; returning `None` leaves the caller with
+    /// its local error instead of a diagnosis the server never finished
+    /// sending.
+    ///
+    /// **This pins the OUTCOME, not one arm.** Two independent paths refuse a
+    /// malformed frame: the scan's own `Err(_) => return None`, and the
+    /// trailing `DbError::parse(..).ok()`, which walks the same bytes and fails
+    /// the same way. Measured: turning the scan's arm into a `break` leaves
+    /// this test green, because the parse behind it still yields `None`. So the
+    /// scan's arm is REDUNDANT here rather than unbound - do not read a green
+    /// mutation as evidence that it can be deleted, and do not expect this test
+    /// to notice if it is.
+    #[test]
+    fn a_malformed_error_response_yields_no_diagnosis() {
+        // 'M' names a field whose value never reaches its NUL terminator, so
+        // the field iterator errors instead of ending cleanly.
+        let mut payload = Vec::new();
+        payload.extend_from_slice(b"SERROR\0");
+        payload.extend_from_slice(b"Munterminated");
+        let mut bytes = vec![b'E'];
+        bytes.extend_from_slice(&(u32::try_from(payload.len()).unwrap() + 4).to_be_bytes());
+        bytes.extend_from_slice(&payload);
+        bytes.extend_from_slice(b"Z\0\0\0\x05I");
+        let malformed = BackendMessages::from_test_bytes(BytesMut::from(bytes.as_slice()));
+
+        assert!(
+            first_ascii_server_error(&malformed).is_none(),
+            "a half-parsed ErrorResponse was presented as a server diagnosis"
+        );
+
+        // Control, one variable away: the same shape properly terminated does
+        // decode, so the refusal is the truncation and not the frame itself.
+        let terminated = error_response_batch("22012", "division by zero");
+        assert_eq!(
+            first_ascii_server_error(&terminated).map(|error| error.code().code().to_owned()),
+            Some("22012".to_owned())
         );
     }
 
@@ -8592,6 +8687,62 @@ mod tests {
             ResponseMessages::Raw(messages) | ResponseMessages::Filtered(messages)
                 if messages.contains_tag(postgres_protocol::message::backend::COPY_IN_RESPONSE_TAG)
         ));
+    }
+
+    /// The COPY startup drain loops until the server answers `CopyInResponse`.
+    /// If the connection dies first, the read error is the ONLY way out: there
+    /// is no producer to wait on and no frame left to dispatch, so without this
+    /// arm the loop would keep calling `read_backend` on a dead socket.
+    ///
+    /// The script delivers `BindComplete` and then nothing, so startup never
+    /// finishes and the next read is EOF - which is precisely the shape of a
+    /// server that closes between `Bind` and `CopyInResponse`.
+    #[compio::test]
+    async fn a_read_failure_during_copy_startup_retires_the_request() {
+        let (response_tx, _response_rx) = mpsc::channel(4);
+        let (copy_in, _producer) = CopyInReceiver::for_connection_test(
+            Some(FrontendMessage::Raw(bytes::Bytes::from_static(
+                b"scripted COPY startup",
+            ))),
+            None,
+        );
+        let request = Request {
+            messages: RequestMessages::CopyIn(copy_in),
+            sender: response_tx,
+            disposition: RequestDisposition::Awaited,
+            transaction_effect: TransactionEffect::MayChange,
+            prepare_cleanup: None,
+            statement: None,
+            observation: None,
+            request_server_error: Arc::default(),
+        };
+        let (_request_tx, request_rx) = mpsc::unbounded();
+        let mut connection: Connection<ScriptedDuplex, ScriptedDuplex> = Connection::new(
+            BufStream::new(MaybeTlsStream::Raw(ScriptedDuplex {
+                // BindComplete and NOTHING else: startup cannot finish, so the
+                // drain reads again and finds the socket closed.
+                chunks: VecDeque::from([vec![b'2', 0, 0, 0, 4]]),
+            })),
+            VecDeque::new(),
+            HashMap::new(),
+            Arc::default(),
+            request_rx,
+            Arc::new(AtomicU8::new(b'I')),
+            Arc::new(AtomicUsize::new(1)),
+            Arc::default(),
+            None,
+        );
+
+        let Err(error) = connection.handle_request(request).await else {
+            panic!("a COPY startup read failure was not reported to the caller")
+        };
+        // The socket ended mid-startup, so this surfaces as the read failure it
+        // is rather than as a protocol complaint about a missing frame.
+        assert_eq!(
+            error.to_string(),
+            "error communicating with the server",
+            "the retiring error did not name the failed read"
+        );
     }
 
     #[compio::test]

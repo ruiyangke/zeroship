@@ -542,6 +542,22 @@ fn serve_copy_in(stream: &mut TcpStream, tags: &std::sync::mpsc::Sender<(u8, Vec
 ///
 /// MEASURED: `P D S B E S d c S`. The prepare and the execute are separate
 /// Sync round trips, as for any query, and only then does the sink stream.
+///
+/// OBSERVED FAILING ONCE UNDER CONTENTION, 2026-09-02, as
+/// `got PDSBESdcSCS` - the expected sequence plus a trailing Close and Sync.
+/// That pair is NOT a shape change: `copy_in` with a `&str` prepares an
+/// internal statement, and `Statement::drop` sends its own Close + Sync
+/// (`dropping_a_statement_sends_its_own_close_and_sync` asserts exactly that
+/// frame pair). Whether it reaches the wire before the connection tears down
+/// is a race, so it is normally absent and occasionally present.
+///
+/// Left as an equality assertion deliberately. The sibling makes its Close
+/// deterministic by issuing a query after the drop - "the drop is its own
+/// trip" - and doing that here would change what this test measures. Filtering
+/// a trailing `CS` was considered and rejected: the race could not be forced
+/// (a 50ms sleep after `drop(client)` does not reproduce it, because the
+/// flush-versus-teardown decision is already made by then), so the fix could
+/// not be shown to fail before it.
 #[compio::test]
 async fn a_completed_copy_in_ends_with_copy_done_and_sync() {
     let (seq, _) = Box::pin(copy_in_frames(631, false)).await;

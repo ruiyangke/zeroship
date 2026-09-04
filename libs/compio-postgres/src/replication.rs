@@ -2376,6 +2376,28 @@ pub mod pgoutput {
 
     /// Decode a tuple - a u16 column count followed by per-column
     /// `(format_byte, [u32 len + bytes])`.
+
+    /// How much to reserve for `claimed` items when `remaining` bytes are left
+    /// and each item costs at least `min_bytes_per_item` on the wire.
+    ///
+    /// The count is peer-chosen and the byte budget is not, so the budget is
+    /// the sound bound: it can never refuse valid input, because an item that
+    /// is really there has already paid its minimum. Reserving the raw count
+    /// lets an eight-byte frame claiming 65535 columns allocate megabytes, a
+    /// ~300000x amplification repeatable per frame.
+    ///
+    /// NAMED so it can be asserted. The decode-level tests cannot see it - a
+    /// malformed frame errors identically whether the capacity came from the
+    /// frame or from the wire count - and `VmPeak`, the only memory instrument
+    /// available here, does not resolve megabytes. Extracting the expression
+    /// is what turns a documented "no assertion here could" into a bound one.
+    pub(crate) fn reservation(
+        claimed: usize,
+        remaining: usize,
+        min_bytes_per_item: usize,
+    ) -> usize {
+        claimed.min(remaining / min_bytes_per_item)
+    }
     fn read_tuple(buf: &mut &[u8]) -> Result<TupleData, DecodeError> {
         let n = read_u16(buf)? as usize;
         // Reserve for what the frame can still CONTAIN, not for what it
@@ -2386,7 +2408,10 @@ pub mod pgoutput {
         // columns reserved about 2.6 MB before the first column byte was even
         // read, which is a ~300000x amplification a peer can repeat per frame.
         //
-        // NO TEST DISCRIMINATES THIS, and that is measured rather than assumed.
+        // THIS IS NOW BOUND, by `a_reservation_is_bounded_by_the_bytes_left_not_
+        // the_claimed_count`. It was not until 2026-09-02, and the reasoning that
+        // kept it unbound is worth keeping because it was correct as far as it
+        // went:
         // A `u16` count caps the over-reservation at ~2.6 MB where Truncate's
         // `u32` reaches ~17 GB, and 2.6 MB is below what the only instrument
         // available here can see: `tests/suite/pgoutput_allocation.rs` reads
@@ -2395,9 +2420,11 @@ pub mod pgoutput {
         // the workspace sets `unsafe_code = "deny"`. A VmPeak assertion written
         // for these two sites PASSES with the clamps deleted - checked
         // 2026-08-26 - so shipping one would have claimed cover it does not
-        // give. This is defence in depth on the same argument as Truncate's
-        // clamp, not a fix with a regression test behind it.
-        let mut columns = Vec::with_capacity(n.min(buf.len()));
+        // give. What that argument missed is that the clamp does not have to be
+        // observed through memory at all: naming the expression makes it
+        // assertable directly. Deleting the clamp now fails one test and leaves
+        // the other 71 in this module green.
+        let mut columns = Vec::with_capacity(reservation(n, buf.len(), 1));
         for _ in 0..n {
             let fmt = read_u8(buf)?;
             match fmt {
@@ -2612,7 +2639,7 @@ pub mod pgoutput {
                 // Same clamp as `read_tuple`: a Relation column costs at least
                 // its flags byte, so the remaining length bounds how many can
                 // really follow.
-                let mut columns = Vec::with_capacity(ncols.min(cur.len()));
+                let mut columns = Vec::with_capacity(reservation(ncols, cur.len(), 1));
                 for _ in 0..ncols {
                     let flags = read_u8(&mut cur)?;
                     let col_name = read_cstr(&mut cur)?;
@@ -2728,7 +2755,7 @@ pub mod pgoutput {
                 // refuse valid input - and because the WAL consumer propagates
                 // a decode error out of its run loop, refusing valid input
                 // kills replication permanently rather than degrading.
-                let mut relation_ids = Vec::with_capacity(nrelations.min(cur.len() / 4));
+                let mut relation_ids = Vec::with_capacity(reservation(nrelations, cur.len(), 4));
                 for _ in 0..nrelations {
                     relation_ids.push(read_u32(&mut cur)?);
                 }
@@ -3798,7 +3825,7 @@ mod tests {
     //
     // So: adding a variant means adding a LIVE test for it, not just a round
     // trip here. `parse_lsn`/`format_lsn` above are the cautionary case - they
-    // had only the self-referential test until `tests/lsn_server_parity.rs`.
+    // had only the self-referential test until `tests/suite/lsn_server_parity.rs`.
     #[test]
     fn pgoutput_decode_begin() {
         let bytes = pgoutput::encode::begin(0x16B3750, 700_000_000_000, 42);
@@ -4379,22 +4406,18 @@ mod tests {
     /// leaves it green, because the vector still grows; that mutation was tried
     /// first and passed, so this test does not cover it.
     ///
-    /// That uncovered case is a HOLE, not a handoff - nothing else in this
-    /// crate asserts the reservation size, and no assertion here could: the
-    /// malformed frame below errors identically whether the capacity came from
-    /// the frame or from the wire count. Stated rather than left implicit,
-    /// because an exclusion that does not say where the class IS covered leaves
-    /// a reader unable to tell a gap from a delegation.
+    /// That case is covered SINCE 2026-09-02 by
+    /// `a_reservation_is_bounded_by_the_bytes_left_not_the_claimed_count`, which
+    /// asserts the clamp directly. This comment used to call it a HOLE on the
+    /// grounds that "no assertion here could" tell the two capacities apart -
+    /// true of a decode-level assertion, and the reason the expression was
+    /// given a name instead.
     ///
     /// `TRUNCATE ... CASCADE` on a heavily partitioned table emits one id per
     /// partition and PostgreSQL enforces no ceiling, so a rejecting limit
     /// refuses valid input - and the WAL consumer propagates a decode error out
     /// of its run loop, so refusing valid input stops replication permanently
     /// instead of degrading.
-    ///
-    /// It does NOT test the reservation itself. Decoding the malformed frame
-    /// below errors identically whether the capacity is bounded by the frame
-    /// or taken from the wire count, so no assertion here can tell those apart.
     #[test]
     fn pgoutput_decode_accepts_a_truncate_larger_than_any_fixed_cap() {
         const N: u32 = 70_000; // above the u16 ceiling a sibling arm uses
@@ -4415,6 +4438,37 @@ mod tests {
         }
     }
 
+    /// Binds the reservation clamp the sibling test above documents as a HOLE.
+    ///
+    /// It is a hole only while the expression is anonymous: a decode-level test
+    /// cannot separate a capacity taken from the frame from one taken from the
+    /// wire count, because both decode identically. Naming the expression makes
+    /// the amplification directly assertable, with no memory instrument.
+    #[test]
+    fn a_reservation_is_bounded_by_the_bytes_left_not_the_claimed_count() {
+        // An eight-byte Insert claiming the u16 ceiling of columns. Each column
+        // costs at least one byte, so eight is all the frame can hold.
+        assert_eq!(
+            pgoutput::reservation(65_535, 8, 1),
+            8,
+            "a claimed column count outran the bytes that could carry it"
+        );
+        // Truncate's ids are four bytes each, so the same eight bytes cap at 2.
+        assert_eq!(
+            pgoutput::reservation(u32::MAX as usize, 8, 4),
+            2,
+            "a claimed relation count outran the bytes that could carry it"
+        );
+        // The clamp must never refuse or shrink input that really is present:
+        // a TRUNCATE naming 70000 partitions is valid and must reserve in full.
+        assert_eq!(
+            pgoutput::reservation(70_000, 70_000 * 4, 4),
+            70_000,
+            "the clamp shrank a reservation the frame could actually fill"
+        );
+        assert_eq!(pgoutput::reservation(0, 0, 1), 0);
+    }
+
     /// A TRUNCATE whose relation count exceeds what the frame can hold is
     /// rejected.
     ///
@@ -4423,10 +4477,15 @@ mod tests {
     /// invisible from here: `decode` answers `UnexpectedEof` on this frame
     /// whether the capacity came from the frame or from the claimed count,
     /// so deleting the clamp leaves the assertion below green. The
-    /// reservation is measured in `tests/pgoutput_allocation.rs`, which
+    /// reservation is measured in `tests/suite/pgoutput_allocation.rs`, which
     /// watches the process's own peak address space instead - the sibling
     /// above (`pgoutput_decode_accepts_a_truncate_larger_than_any_fixed_cap`)
     /// already carried that exclusion; this one kept the claim.
+    ///
+    /// The clamp ITSELF is bound since 2026-09-02 by
+    /// `a_reservation_is_bounded_by_the_bytes_left_not_the_claimed_count`,
+    /// which asserts `pgoutput::reservation` directly rather than through any
+    /// memory instrument. This is a delegation, not a gap.
     #[test]
     fn pgoutput_decode_rejects_a_truncate_count_larger_than_the_frame() {
         // count = u32::MAX, options = 0, and no ids at all.
@@ -4682,6 +4741,67 @@ mod tests {
             stream.column_formats(),
             &[crate::CopyFormat::Text, crate::CopyFormat::Binary]
         );
+    }
+
+    /// A tag the `START_REPLICATION` loop does not expect must END the
+    /// command, not be skipped.
+    ///
+    /// The loop consumes `NoticeResponse`, `NotificationResponse` and
+    /// `ParameterStatus` and keeps waiting, because those are asynchronous and
+    /// answer nothing. Every other tag is a walsender saying something this
+    /// command cannot use -- a backend that is not a walsender at all answers
+    /// `CommandComplete` + `ReadyForQuery`, and a pooler can put either in
+    /// front of the stream.
+    ///
+    /// Widening the async arm to a bare `_` is the rewrite this guards
+    /// against, and it is not a cosmetic one. MEASURED against that mutation:
+    /// the payload is dropped, nothing has changed, the loop reads again and
+    /// reports `connection closed by server` -- against a real peer it blocks
+    /// until the read deadline instead. So the binding assertion is that the
+    /// offending tag is NAMED, which a silent skip cannot produce.
+    ///
+    /// `read_header` does not filter tags -- it reads the tag and length and
+    /// hands both on -- so each case below reaches the match rather than
+    /// being refused earlier by the framer.
+    #[compio::test]
+    async fn an_unexpected_tag_answering_start_replication_is_refused() {
+        let unexpected: &[(&str, u8, &[u8])] = &[
+            ("CommandComplete", b'C', b"START_REPLICATION\0"),
+            ("ReadyForQuery", b'Z', b"I"),
+            ("RowDescription", b'T', b"\x00\x00"),
+            ("CopyInResponse", b'G', b"\x00\x00\x00"),
+        ];
+
+        let mut ruled_on = 0usize;
+        for (case, tag, body) in unexpected {
+            ruled_on += 1;
+            let connection = replication_connection_over(startup_frame(*tag, body));
+            let outcome = connection
+                .start_logical_replication(StartReplicationOptions {
+                    slot_name: "slot",
+                    ..Default::default()
+                })
+                .await;
+            let Err(error) = outcome else {
+                panic!("{case} was accepted as a START_REPLICATION answer")
+            };
+            // The text lives on the io source, not on `Error`'s own Display.
+            let chain = std::iter::successors(std::error::Error::source(&error), |source| {
+                std::error::Error::source(*source)
+            })
+            .fold(error.to_string(), |chain, source| {
+                format!("{chain}: {source}")
+            });
+            assert!(
+                chain.contains("unexpected message tag during START_REPLICATION"),
+                "{case} did not end the command by name: {chain}"
+            );
+            assert!(
+                chain.contains(&format!("0x{tag:02x}")),
+                "{case} was refused without naming the tag that caused it: {chain}"
+            );
+        }
+        assert_eq!(ruled_on, 4, "the unexpected-tag matrix shrank");
     }
 
     /// A peer that accepts a configured number of writes, writes part of the
@@ -5375,7 +5495,7 @@ mod tests {
 
     /// Randomised CopyBoth frames against the bespoke replication framer.
     ///
-    /// `codec.rs` has `tests/frame_fuzz.rs`; this framer has had nothing. It is
+    /// `codec.rs` has `tests/suite/frame_fuzz.rs`; this framer has had nothing. It is
     /// a SEPARATE, hand-rolled framer -- [`read_header`] plus `next_inner` --
     /// with its own length arithmetic ([`WireHeader::body_len`] subtracts 4 and
     /// documents that underflowing it hands a `usize::MAX`-ish size to
@@ -5384,7 +5504,7 @@ mod tests {
     /// corpus, because a replication stream never goes through
     /// `Message::parse`.
     ///
-    /// Same bargain as `tests/frame_fuzz.rs`: weak per-case assertions, many
+    /// Same bargain as `tests/suite/frame_fuzz.rs`: weak per-case assertions, many
     /// cases. ASSERTED -- the framer terminates, does not panic, and once it
     /// has REFUSED the stream (`Error::cancelled`, which only `InFlight::enter`
     /// produces and which nothing clears) it never decodes another message.
@@ -5414,7 +5534,7 @@ mod tests {
         const MAX_FRAMES_READ: usize = 24;
 
         /// xorshift64*, inline so this adds no dependency (as in
-        /// `tests/frame_fuzz.rs`).
+        /// `tests/suite/frame_fuzz.rs`).
         struct Rng(u64);
         impl Rng {
             fn new(seed: u64) -> Self {
@@ -5632,6 +5752,56 @@ mod tests {
 
     /// A `ReplicationStream` reading the given bytes as if the walsender had
     /// sent them inside the CopyBoth channel.
+    /// A `BufStream` whose read buffer already holds `bytes`, with no peer
+    /// behind it. `take_buffered_server_error` only PEEKS, so what is already
+    /// buffered is the whole of its input.
+    fn buffered_stream(bytes: &[u8]) -> BufStream<ScriptedPeer> {
+        let mut stream = BufStream::new(ScriptedPeer { unread: Vec::new() });
+        stream.buf().extend_from_slice(bytes);
+        stream
+    }
+
+    /// The buffered-error scan must STOP rather than misread.
+    ///
+    /// It runs after a local failure, to prefer a server diagnosis the socket
+    /// already delivered. Every stop condition below leaves the bytes where
+    /// they are and reports "no diagnosis here", so the caller keeps its own
+    /// error. Guessing instead would attach an unrelated frame's contents to a
+    /// failure it had nothing to do with.
+    #[test]
+    fn the_buffered_error_scan_stops_on_anything_it_cannot_trust() {
+        // A length below the 4-byte header cannot describe a frame.
+        assert!(
+            take_buffered_server_error(&mut buffered_stream(&[ERROR_RESPONSE_TAG, 0, 0, 0, 2]))
+                .is_none(),
+            "an impossible frame length was scanned as a diagnosis"
+        );
+
+        // A complete header whose body has not arrived yet.
+        assert!(
+            take_buffered_server_error(&mut buffered_stream(&[ERROR_RESPONSE_TAG, 0, 0, 0, 64]))
+                .is_none(),
+            "a frame still in flight was scanned as a diagnosis"
+        );
+
+        // A synchronous frame: ReadyForQuery belongs to the request, not here.
+        assert!(
+            take_buffered_server_error(&mut buffered_stream(b"Z\0\0\0\x05I")).is_none(),
+            "a synchronous frame was scanned as a diagnosis"
+        );
+
+        // Control: a complete ErrorResponse IS taken, so the refusals above are
+        // the stop conditions and not a scan that never finds anything.
+        let error_frame = error_response_message(&[
+            (b'S', "FATAL"),
+            (b'C', "57P01"),
+            (b'M', "scripted buffered diagnosis"),
+        ]);
+        let found = take_buffered_server_error(&mut buffered_stream(&error_frame))
+            .expect("a complete ErrorResponse was not taken");
+        assert_eq!(found.code(), Some(&crate::error::SqlState::ADMIN_SHUTDOWN));
+    }
+
     fn stream_over(bytes: Vec<u8>) -> ReplicationStream<ScriptedPeer, ScriptedPeer> {
         ReplicationStream {
             stream: BufStream::new(MaybeTlsStream::Raw(ScriptedPeer { unread: bytes })),

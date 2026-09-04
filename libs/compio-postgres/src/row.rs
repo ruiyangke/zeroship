@@ -627,7 +627,7 @@ mod tests {
     /// whatever default it had chosen for NULL, and no layer above could see
     /// that it had asked for a column the query never returned.
     ///
-    /// The DB-free twin of `tests/raw_value_column_identity.rs`: this pins the
+    /// The DB-free twin of `tests/suite/raw_value_column_identity.rs`: this pins the
     /// accessor, that one pins it against what a real `RowDescription` and
     /// `DataRow` produce.
     #[test]

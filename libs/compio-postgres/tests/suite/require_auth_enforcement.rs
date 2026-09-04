@@ -37,8 +37,15 @@
 //! "the connection failed for some unrelated reason", which is the failure mode
 //! that makes security tests worthless.
 //!
-//! NOT covered here: SCRAM channel binding, TLS, GSSAPI or SSPI (the driver
-//! cannot perform the latter two and accepts them only in negative policies).
+//! NOT covered here: SCRAM channel binding, or TLS.
+//!
+//! GSSAPI IS covered, at the bottom of this file. This note used to exclude it
+//! on the grounds that the driver "cannot perform" it and accepts it "only in
+//! negative policies" - true of what a policy may CONTAIN, since
+//! `require_auth=gss` is refused while parsing, but not of what a policy
+//! REFUSES. A positive policy naming another method does not allow `Gss`, so a
+//! GSSAPI demand still reaches `check_require_auth` and is turned away by
+//! name. SSPI is the same shape and is left to the GSSAPI pair.
 
 use compio_postgres::Config;
 use compio_postgres::config::{AuthMethod, AuthMethods, RequireAuth, SslMode};
@@ -372,4 +379,112 @@ async fn the_same_method_is_accepted_when_the_policy_requires_it() {
     })
     .await
     .expect("require_auth accepted-method test exceeded its outer watchdog");
+}
+
+/// A server that demands GSSAPI under a positive policy is refused BY NAME.
+///
+/// The module header says GSSAPI and SSPI are "not covered here ... the driver
+/// cannot perform the latter two and accepts them only in negative policies".
+/// That is true of what a policy may CONTAIN - `require_auth=gss` is refused
+/// while parsing, because requiring a method this driver cannot perform could
+/// never succeed - but it is not true of what a policy REFUSES. A positive
+/// policy naming any other method does not allow `Gss`, so a server demanding
+/// GSSAPI reaches `check_require_auth` and must be turned away with the reason
+/// that names what the server asked for.
+///
+/// That naming is the point. `connect_raw` records that all four unsupported
+/// methods once returned the same "unsupported authentication method", which
+/// "tells an operator nothing about what their server asked for or what to
+/// reconfigure". A rewrite that collapses these arms would restore exactly
+/// that, and the control below is what separates the two messages.
+fn gssapi_demanding_server(
+    process_id: i32,
+) -> (
+    impl FnOnce(TcpListener) + Send + 'static,
+    std::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    let (sent_tx, sent_rx) = std::sync::mpsc::channel();
+    let script = move |listener: TcpListener| {
+        let mut stream = accept_bounded(&listener);
+        read_startup(&mut stream);
+        // AuthenticationGSS is request code 7.
+        let _ = stream.write_all(&backend_frame(b'R', &7u32.to_be_bytes()));
+        let _ = stream.flush();
+        let mut sent = Vec::new();
+        let mut byte = [0u8; 1];
+        while stream.read_exact(&mut byte).is_ok() {
+            sent.extend_from_slice(&byte);
+            if sent.len() > 4096 {
+                break;
+            }
+        }
+        let _ = sent_tx.send(sent);
+        let _ = process_id;
+        thread::sleep(Duration::from_millis(50));
+    };
+    (script, sent_rx)
+}
+
+#[compio::test]
+async fn a_gssapi_demand_is_refused_by_the_name_of_what_the_server_asked_for() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (script, _sent) = gssapi_demanding_server(701);
+        let server = StubServer::spawn(script);
+        let mut config = base_config(server.addr);
+        // A positive policy that cannot name `gss` - the parser refuses that -
+        // but which equally does not allow it.
+        config.require_auth(RequireAuth::Require(AuthMethods::new(AuthMethod::Password)));
+
+        let Err(error) =
+            compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
+                .await
+                .expect("connect hung instead of refusing a GSSAPI demand")
+        else {
+            panic!("the driver accepted a GSSAPI demand under a password-only policy")
+        };
+
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("server requested GSSAPI authentication"),
+            "the refusal did not name GSSAPI as what the server asked for: {chain}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("GSSAPI policy-refusal test exceeded its outer watchdog");
+}
+
+/// The ONE-VARIABLE CONTROL for the test above: identical scripted bytes, no
+/// policy. The connection still fails - this driver cannot speak GSSAPI - but
+/// with the "unsupported" message rather than the policy one. Without this,
+/// the assertion above could not tell a policy refusal from the driver simply
+/// being unable to continue.
+#[compio::test]
+async fn the_same_gssapi_demand_without_a_policy_is_refused_as_unsupported() {
+    compio::time::timeout(ASYNC_WATCHDOG, async {
+        let (script, _sent) = gssapi_demanding_server(702);
+        let server = StubServer::spawn(script);
+        let config = base_config(server.addr);
+
+        let Err(error) =
+            compio::time::timeout(CONNECT_WATCHDOG, config.connect(common::suite_tls()))
+                .await
+                .expect("connect hung instead of refusing an unsupported method")
+        else {
+            panic!("the driver claimed to have performed GSSAPI authentication")
+        };
+
+        let chain = common::error_chain(&error);
+        assert!(
+            chain.contains("unsupported authentication method: GSSAPI"),
+            "an unpoliced GSSAPI demand must fail as unsupported: {chain}"
+        );
+        assert!(
+            !chain.contains("authentication method requirement"),
+            "no policy was set, so no policy refusal should appear: {chain}"
+        );
+        server.finish();
+    })
+    .await
+    .expect("GSSAPI unsupported-control test exceeded its outer watchdog");
 }

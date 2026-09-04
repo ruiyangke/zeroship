@@ -16,26 +16,41 @@
 //! be feature-gated: gating it stopped that target building under the plain
 //! test command.
 //!
-//! The three `*_for_test` synthesisers are used by NOTHING here. Their callers
-//! are all in `plugin-db`, and there are THREE of them, not the two benches
-//! this note used to name (checked 2026-08-25):
+//! The `*_for_test` synthesisers are used by NOTHING here. Their callers are
+//! all in `plugin-db`, and there are now TWO of them - re-counted 2026-09-02
+//! by grepping CALL sites (`name(`) rather than mentions, because every hit
+//! inside this crate is a doc comment explaining why the code beside it uses
+//! a real row instead:
 //!
 //! * `benches/bench_row_to_json.rs` and `benches/bench_first_row_or_null.rs`,
 //!   which price row decoding and would measure a network round trip instead
-//!   if they had to fetch a real row.
-//! * `src/audit.rs`'s `#[cfg(test)]` module, which decodes synthetic `jsonb`
-//!   audit rows - a pure decoding test that has no reason to need a server.
+//!   if they had to fetch a real row. Both call `row_for_test` and
+//!   `column_for_test`.
+//!
+//! The third caller this note named on 2026-08-25 - `src/audit.rs`'s
+//! `#[cfg(test)]` module - is GONE; no such file exists in `plugin-db` now.
+//! So the count has been wrong in both directions: two when there were three,
+//! and then three when there were two.
+//!
+//! `statement_for_test` has no caller OUTSIDE this module, but it is NOT
+//! dead: `row_for_test` builds its `Statement` with it (below), so deleting
+//! it breaks both benches through their `row_for_test` call. This note said
+//! "ZERO call sites anywhere in the workspace" for one commit, because the
+//! grep behind that claim excluded this file to skip the definition and hid
+//! the call with it. A caller search that cannot see the defining module
+//! cannot answer whether a function is dead.
 //!
 //! Keeping them was re-ruled on 2026-08-25. The alternative considered was
 //! having the benches fetch one real row before the timed loop, which would
-//! put a network round trip inside a decode benchmark, and would still leave
-//! the audit test needing a live database to check pure decoding.
+//! put a network round trip inside a decode benchmark. That argument stands on
+//! the benches alone now; the audit-decoding leg it also rested on went with
+//! the file.
 //!
 //! `Row::new` is `pub(crate)`, so an external bench cannot build one. Both
 //! places in this crate that could have used them deliberately do not, and
 //! their reasons are worth knowing before reaching for one:
 //!
-//! * `tests/raw_value_column_identity.rs` wants the claim to be about what a
+//! * `tests/suite/raw_value_column_identity.rs` wants the claim to be about what a
 //!   real server sends, because a fixture cannot be wrong about a wire format
 //!   in the same direction the driver is.
 //! * `row.rs`'s own test module needs a `DataRow` whose field count does NOT

@@ -2281,6 +2281,95 @@ async fn the_first_delayed_frame_crossing_the_byte_budget_is_refused() {
     .expect("delayed-byte boundary test exceeded its outer watchdog");
 }
 
+/// The delayed queue is bounded by MESSAGE COUNT as well as by bytes, and the
+/// count is the bound that matters for small frames.
+///
+/// The byte budget above charges each frame its WIRE length. A minimal notice
+/// is about 32 bytes, so a peer can send roughly thirty thousand of them
+/// inside the 1 MiB budget - and every one becomes a heap-allocated `Message`
+/// whose real footprint is far larger than the bytes it was charged. The
+/// 256-message cap is what stops that, and nothing asserted it: the byte test
+/// stays green with the count check removed.
+///
+/// Both cases here stay THREE ORDERS OF MAGNITUDE under the byte budget, which
+/// is what makes the count the only thing that can answer. The peer asserts
+/// that itself rather than leaving it to arithmetic in this comment.
+#[compio::test]
+async fn the_delayed_handshake_queue_is_bounded_by_message_count_not_only_bytes() {
+    compio::time::timeout(
+        OPERATION_WATCHDOG,
+        Box::pin(async {
+            let cases: [(&str, usize, i32, bool); 2] = [
+                ("at the count limit", 256, 4301, true),
+                ("one past the count limit", 257, 4302, false),
+            ];
+
+            let mut ruled_on = 0usize;
+            for (label, count, process_id, accepted) in cases {
+                let server = StubServer::spawn(move |listener| {
+                    let mut stream = accept_bounded(&listener);
+                    assert_eq!(read_startup_protocol(&mut stream), 0x0003_0002);
+
+                    let mut response = Vec::new();
+                    for _ in 0..count {
+                        response.extend_from_slice(&notice_frame("x"));
+                    }
+                    assert!(
+                        response.len() < 1024 * 1024,
+                        "{label} sent {} bytes, so the BYTE budget could answer and this \
+                     case would not isolate the count bound",
+                        response.len()
+                    );
+                    response.extend_from_slice(&successful_startup_frames(
+                        process_id,
+                        &1234i32.to_be_bytes(),
+                    ));
+                    stream
+                        .write_all(&response)
+                        .expect("write count-budget startup response");
+                    stream.flush().expect("flush count-budget startup response");
+                    thread::sleep(Duration::from_millis(100));
+                });
+
+                let result = compio::time::timeout(
+                    OPERATION_WATCHDOG,
+                    stub_config(server.addr).connect(compio_postgres::NoTls),
+                )
+                .await
+                .unwrap_or_else(|_| panic!("{label} handshake hung"));
+                server.finish();
+
+                match (accepted, result) {
+                    (true, Ok((client, connection))) => {
+                        assert_eq!(client.process_id(), process_id);
+                        drop((client, connection));
+                    }
+                    (true, Err(error)) => {
+                        panic!("exactly 256 delayed messages were refused: {error}")
+                    }
+                    (false, Err(error)) => {
+                        let chain = common::error_chain(&error);
+                        assert!(
+                            chain.contains("too many asynchronous messages"),
+                            "message 257 was refused by something other than the count \
+                         bound: {chain}"
+                        );
+                    }
+                    (false, Ok(pair)) => {
+                        drop(pair);
+                        panic!("the handshake retained a 257th delayed message")
+                    }
+                }
+                ruled_on += 1;
+            }
+
+            assert_eq!(ruled_on, 2, "the count boundary ruled on no cases");
+        }),
+    )
+    .await
+    .expect("delayed-count boundary test exceeded its outer watchdog");
+}
+
 #[compio::test]
 async fn duplicate_backend_key_data_during_startup_is_refused() {
     Box::pin(compio::time::timeout(ASYNC_WATCHDOG, async {
@@ -6737,4 +6826,86 @@ fn read_frontend_frame_any(stream: &mut impl Read) -> (u8, Vec<u8>) {
         .read_exact(&mut body)
         .expect("read frontend frame body");
     (tag[0], body)
+}
+
+/// A command-timeout recovery that never finishes must DISCARD the session.
+///
+/// `run_pool_command` wraps recovery in `COMMAND_TIMEOUT_RECOVERY_GRACE` and
+/// calls `recovery_guard.disarm()` in exactly ONE arm: the one where rollback,
+/// `check_connection` and the idle-status check all completed. Every other
+/// path leaves the guard armed so the entry is dropped instead of returned,
+/// which is what stops a half-recovered backend reaching the next borrower.
+///
+/// The grace arm is the one no test reached. The peer that never answers
+/// reaches the neighbouring `Ok(Err(..))` arm instead, because a socket error
+/// arrives before five seconds elapse. Reaching the grace needs a peer that
+/// keeps the connection OPEN and silent, with no `Config::read_timeout` set,
+/// so nothing else can end the recovery first.
+///
+/// Slow on purpose: the grace is five seconds and this test has to outlast it,
+/// which is why it carries its own watchdog rather than `OPERATION_WATCHDOG`.
+#[compio::test]
+async fn a_command_timeout_whose_recovery_never_finishes_discards_the_session() {
+    let server = StubServer::spawn(move |listener| {
+        let mut stream = accept_bounded(&listener);
+        let _ = read_startup_protocol(&mut stream);
+        stream
+            .write_all(&successful_startup_frames(4242, b"scripted"))
+            .expect("write scripted startup");
+        stream.flush().expect("flush scripted startup");
+        // Take the query and answer NOTHING. The socket stays open and
+        // readable for longer than the recovery grace, so the driver's own
+        // deadline is the only thing that can end the attempt.
+        let _ = expect_frontend_frame_from(&mut stream, b'Q');
+        // Long enough to outlast the five-second grace measured from when
+        // recovery starts, short enough that this thread is already finished
+        // when `finish()` waits on it under THREAD_WATCHDOG.
+        thread::sleep(Duration::from_millis(6_500));
+    });
+
+    let mut pool_config = compio_postgres::PoolConfig::new();
+    pool_config.max_size(1);
+    pool_config.min_idle(0);
+    pool_config.command_timeout(Duration::from_millis(300));
+
+    let pool = compio_postgres::Pool::connect_with_config(stub_config(server.addr), pool_config)
+        .await
+        .expect("build a pool against the silent peer");
+    let mut client = pool.get().await.expect("lease the pooled connection");
+
+    let outcome = compio::time::timeout(
+        Duration::from_secs(20),
+        client.command(async |client| client.simple_query("SELECT 1").await.map(|_| ())),
+    )
+    .await
+    .expect("the stalled recovery outlived this test's own watchdog");
+    let error = outcome.expect_err("a silent peer cannot answer, so this must fail");
+
+    let chain = common::error_chain(&error);
+    assert!(
+        chain.contains("CancelRequest recovery did not reach ReadyForQuery"),
+        "the stalled recovery did not report its own deadline: {chain}"
+    );
+    assert!(
+        chain.contains("the pooled session was discarded"),
+        "the refusal must say the session was dropped rather than reused: {chain}"
+    );
+
+    // The message above says the session was discarded; this checks it was.
+    //
+    // It binds the OUTCOME, not the recovery guard: measured by adding
+    // `recovery_guard.disarm()` to the grace arm, this stays 0 and all 95
+    // hostile_peer tests still pass, because a stalled backend is kept out of
+    // the idle set by more than the guard alone. The assertions that isolate
+    // this arm are the two message checks above - only the grace arm renders
+    // that deadline. Do not read this line as a guard test.
+    drop(client);
+    assert_eq!(
+        pool.idle_count(),
+        0,
+        "a backend whose recovery never finished was handed to the next borrower"
+    );
+
+    drop(pool);
+    server.finish();
 }

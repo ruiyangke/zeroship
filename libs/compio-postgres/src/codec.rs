@@ -998,6 +998,83 @@ mod tests {
         .await;
     }
 
+    /// The controls for the deferred cases above.
+    ///
+    /// Those tests establish that a local failure standing behind a server
+    /// ErrorResponse is ATTACHED rather than raised. That is only safe because
+    /// attachment is gated on `saw_error_response`, and something depends on
+    /// the gate: `connect_raw` destructures `BackendMessage::Normal { messages,
+    /// .. }` and DISCARDS the deferred error, on the stated grounds that such a
+    /// batch always carries the ErrorResponse that fails startup anyway.
+    ///
+    /// Each case here is the SAME malformed input with the ErrorResponse prefix
+    /// removed - one variable - and must be raised immediately. Were the gate
+    /// ever to attach unconditionally, these go red while every deferred test
+    /// above stays green, and `connect_raw` would swallow the only diagnosis
+    /// the caller was going to get.
+    ///
+    /// `malformed_copy_response_metadata_is_rejected_before_dispatch` is
+    /// already the control for the COPY-metadata arm; these are the other four.
+    #[compio::test]
+    async fn a_local_failure_without_an_error_response_is_raised_immediately() {
+        let startup_limit = {
+            let mut frame = vec![b'K'];
+            frame.extend_from_slice(&265u32.to_be_bytes());
+            frame.extend_from_slice(&vec![0u8; 265 - 4]);
+            frame
+        };
+        let ready_for_query = [
+            vec![backend::READY_FOR_QUERY_TAG],
+            5u32.to_be_bytes().to_vec(),
+            vec![b'X'],
+        ]
+        .concat();
+        let cases: Vec<(&str, Vec<u8>, usize, &str)> = vec![
+            (
+                "invalid header",
+                [vec![b'D'], 3u32.to_be_bytes().to_vec()].concat(),
+                usize::MAX,
+                "invalid message length",
+            ),
+            (
+                "message ceiling",
+                data_row(&[b'x'; 192]),
+                128,
+                "message too large",
+            ),
+            ("startup limit", startup_limit, usize::MAX, "BackendKeyData"),
+            (
+                "ReadyForQuery",
+                ready_for_query,
+                usize::MAX,
+                "ReadyForQuery",
+            ),
+        ];
+
+        let mut ruled_on = 0usize;
+        for (case, malformed, max_message_size, expected_error) in cases {
+            let mut framer = ScriptedFramer::new(vec![malformed]);
+            framer.max_message_size = max_message_size;
+            let error = match read_backend(&mut framer).await {
+                Ok(mut decoded) => panic!(
+                    "{case} was accepted with no ErrorResponse to defer behind; deferred={:?}",
+                    decoded.take_deferred_error().map(|e| error_chain(&e))
+                ),
+                Err(error) => error,
+            };
+            let chain = error_chain(&error);
+            assert!(
+                chain.contains(expected_error),
+                "{case} raised the wrong failure: {chain}"
+            );
+            ruled_on += 1;
+        }
+        assert_eq!(
+            ruled_on, 4,
+            "every deferred case without its own control must be ruled on here"
+        );
+    }
+
     /// Every frame in a coalesced batch is measured, not just the first.
     ///
     /// `read_backend` validates the head frame from its header and then walks

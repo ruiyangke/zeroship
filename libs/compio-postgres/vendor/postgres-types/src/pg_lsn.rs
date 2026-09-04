@@ -36,11 +36,17 @@ impl FromStr for PgLsn {
         let Some((split_hi, split_lo)) = lsn_str.split_once('/') else {
             return Err(ParseLsnError(()));
         };
+        // Each half is 32 bits, so parse them AS u32. Parsing into u64 accepts
+        // an overlong half and then silently yields a different position:
+        // `hi << 32` drops the excess high bits, and an oversized low half
+        // folds into the high word through the `|`. PostgreSQL refuses both
+        // ("invalid input syntax for type pg_lsn", SQLSTATE 22P02), and this
+        // driver's own replication LSN parser already uses u32.
         let (hi, lo) = (
-            u64::from_str_radix(split_hi, 16).map_err(|_| ParseLsnError(()))?,
-            u64::from_str_radix(split_lo, 16).map_err(|_| ParseLsnError(()))?,
+            u32::from_str_radix(split_hi, 16).map_err(|_| ParseLsnError(()))?,
+            u32::from_str_radix(split_lo, 16).map_err(|_| ParseLsnError(()))?,
         );
-        Ok(PgLsn((hi << 32) | lo))
+        Ok(PgLsn((u64::from(hi) << 32) | u64::from(lo)))
     }
 }
 

@@ -13,7 +13,8 @@
 use std::error::Error;
 use std::fmt::Write as _;
 
-use compio_postgres::types::{self, IsNull, ToSql, Type};
+use compio_postgres::error::SqlState;
+use compio_postgres::types::{self, IsNull, PgLsn, ToSql, Type};
 use futures_util::{SinkExt, TryStreamExt};
 
 use crate::common;
@@ -1509,24 +1510,69 @@ async fn temporal_and_vector_core_arrays_match_binary_copy() {
     .await;
 }
 
-/// A core empty `Vec` emits one zero-length dimension instead of the server's
-/// canonical zero-dimensional header. Binary COPY accepts it, stores an equal
-/// array, and canonicalizes the header when emitting the stored value.
+/// A core empty `Vec` emits the server's own canonical zero-dimensional
+/// header. Binary COPY accepts it and stores an equal array.
 #[compio::test]
-async fn empty_vec_array_is_valid_but_noncanonical() {
+async fn empty_vec_array_matches_the_servers_canonical_header() {
     let client = compio_client().await;
     let empty = Vec::<i32>::new();
     let ours = outbound_wire(&empty, &Type::INT4_ARRAY);
     let server = server_wire(&client, "'{}'::int4[]").await;
-    assert_eq!(decode_array_wire(&ours).dimensions, [(0, 1)]);
+    assert!(
+        decode_array_wire(&ours).dimensions.is_empty(),
+        "an empty array must carry no dimension header"
+    );
     assert!(decode_array_wire(&server).dimensions.is_empty());
-    assert_ne!(ours, server);
+    assert_eq!(ours, server);
 
     let feedback =
         copy_feedback(&client, "empty_int4_array", "int4[]", &ours, "'{}'::int4[]").await;
     assert!(feedback.equal, "empty array must remain SQL-equal");
     assert_eq!(feedback.stored_text, "{}");
     assert_eq!(feedback.stored_wire, server);
+}
+
+/// `oidvector` and `int2vector` are the exception, and the exception is the
+/// server's, not ours: they keep ONE zero-length dimension when empty, with the
+/// zero lower bound those two types require. Ordinary arrays drop the header
+/// entirely (above), so a single "empty means ndim = 0" rule would encode these
+/// two wrongly and discard their lower bound with the dimension.
+///
+/// Both cases assert against `server_wire`, so PostgreSQL is the oracle rather
+/// than a constant transcribed from it.
+#[compio::test]
+async fn empty_oid_and_int2_vectors_keep_their_zero_lower_bound_dimension() {
+    let client = compio_client().await;
+
+    assert_array_server_wire(
+        &client,
+        "empty int2vector Vec",
+        "''::int2vector",
+        &Vec::<i16>::new(),
+        &Type::INT2_VECTOR,
+        ArrayExpectation {
+            element_type: &Type::INT2,
+            dimensions: &[(0, 0)],
+            has_null: false,
+            element_count: 0,
+        },
+    )
+    .await;
+
+    assert_array_server_wire(
+        &client,
+        "empty oidvector Vec",
+        "''::oidvector",
+        &Vec::<u32>::new(),
+        &Type::OID_VECTOR,
+        ArrayExpectation {
+            element_type: &Type::OID,
+            dimensions: &[(0, 0)],
+            has_null: false,
+            element_count: 0,
+        },
+    )
+    .await;
 }
 
 const RANGE_EMPTY: u8 = 0x01;
@@ -2541,4 +2587,53 @@ async fn test_only_money_wire_matches_binary_copy() {
         ],
     )
     .await;
+}
+
+/// `PgLsn`'s text parser must refuse what `PostgreSQL` refuses.
+///
+/// Each half of an LSN is 32 bits. Parsing a half as `u64` accepts an overlong
+/// one and then silently produces a DIFFERENT position: `hi << 32` discards the
+/// excess high bits, and an oversized low half folds into the high word through
+/// the `|`. Measured before the fix, both of these were accepted rather than
+/// refused - `FFFFFFFFF/0` became `FFFFFFFF/0` and `0/FFFFFFFFF` became
+/// `F/FFFFFFFF`. An LSN is a position, so a silently wrong one resumes from the
+/// wrong place instead of failing loudly.
+///
+/// The driver's own LSN parser in `replication.rs` already uses `u32` for
+/// exactly this reason; this pins the public carrier to the same rule.
+///
+/// `PostgreSQL` is the oracle here rather than a transcribed constant: every
+/// string below is put to the server in this test, so a disagreement about
+/// which inputs are valid shows up as a failure.
+#[compio::test]
+async fn pg_lsn_text_parsing_refuses_what_the_server_refuses() {
+    let client = compio_client().await;
+
+    for text in ["0/0", "A/B", "FFFFFFFF/FFFFFFFF"] {
+        let rendered: String = client
+            .query_one(&format!("SELECT '{text}'::pg_lsn::text"), &[])
+            .await
+            .unwrap_or_else(|error| panic!("{text}: server refused a valid LSN: {error}"))
+            .get(0);
+        let ours = text
+            .parse::<PgLsn>()
+            .unwrap_or_else(|_| panic!("{text}: we refused an LSN the server accepts"));
+        assert_eq!(ours.to_string(), rendered, "{text}: round trip");
+    }
+
+    for text in ["FFFFFFFFF/0", "0/FFFFFFFFF"] {
+        let error = client
+            .query_one(&format!("SELECT '{text}'::pg_lsn::text"), &[])
+            .await
+            .expect_err(&format!("{text}: server accepted an overlong LSN half"));
+        assert_eq!(
+            error.code(),
+            Some(&SqlState::INVALID_TEXT_REPRESENTATION),
+            "{text}: server refused it for some other reason: {error}"
+        );
+        assert!(
+            text.parse::<PgLsn>().is_err(),
+            "{text}: accepted an LSN the server refuses, silently changing the position"
+        );
+    }
 }
