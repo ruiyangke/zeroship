@@ -335,8 +335,18 @@ LEDGER_ROWS="$(printf '%s\n' "$LEDGER" | grep -c .)"
 
 # --- Arm 1: every claim in the tree is on the ledger -----------------------
 #
-# THE FLOOR. 33 pairs measured 2026-09-04 across the 399 `.rs` files under
-# ROOTS. Set at 24, well under that: comment edits move this number by ones,
+# THE FLOOR. 34 pairs at the time of writing, across the `.rs` files under
+# ROOTS.
+#
+# THAT NUMBER IS A SNAPSHOT AND IT ROTS. It read 33 for part of 2026-09-04 and
+# was 34 by the end of the same day: repointing the citations the crate rename
+# broke put `zeroship-migrate` next to an agreement phrase in `render/fold.rs`
+# and `render/lower.rs`, so two REAL cross-crate claims became visible to the
+# enumeration that had not been. Nothing was added to the tree - the detector
+# simply started seeing what was already there. Expect this to happen again;
+# read the gate's own output for today's count, not this line.
+#
+# Set at 24, well under that: comment edits move this number by ones,
 # while the failure it guards - the phrase list stops matching, a root moves,
 # the crate-token regex breaks - takes it toward zero, not to 23. Do not raise
 # it to today's count: every deleted claim would then be a gate failure, and
