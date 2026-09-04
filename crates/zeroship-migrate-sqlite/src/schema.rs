@@ -292,6 +292,13 @@ impl SchemaRenderer for SqliteSchemaRenderer {
         // are compared BYTEWISE (' ' = 0x20 < 'T' = 0x54), so two spellings in one
         // column invert same-day ordering. The parentheses are required by SQLite
         // in a DEFAULT clause and harmless in an assignment.
+        //
+        // BOUND, as of 2026-09-04, by `mod sqlite_now_parity` at the bottom of
+        // `crates/zeroship-schema/src/query.rs`. It drives the SQLite vendor out
+        // of the shipping composition and compares all three declarations against
+        // a literal stated once in that module, so a COORDINATED edit of the
+        // three fails as well - which is what the per-crate literal pins each of
+        // these three already had could not see.
         "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))"
     }
 

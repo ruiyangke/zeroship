@@ -8005,6 +8005,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-data-query-builder",
  "zeroship-migrate",
+ "zeroship-migrate-backend",
  "zeroship-migrate-core",
 ]
 

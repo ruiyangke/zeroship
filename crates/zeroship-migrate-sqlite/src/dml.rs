@@ -837,6 +837,11 @@ impl DmlRenderer for SqliteDmlRenderer {
     }
 
     fn synth_now(&self) -> String {
+        // BOUND, as of 2026-09-04, by `mod sqlite_now_parity` at the bottom of
+        // `crates/zeroship-schema/src/query.rs`, which holds this string, the
+        // DEFAULT clause `schema.rs` renders, and the data plane's own
+        // expression against one literal stated in that module.
+        //
         // NOT `CURRENT_TIMESTAMP`, which SQLite renders space-separated
         // ("YYYY-MM-DD HH:MM:SS"). The data plane writes the ISO-T spelling for
         // every Unix-ms bind (`zeroship-schema/src/query.rs:3085`), and these
