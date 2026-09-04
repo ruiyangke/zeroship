@@ -68,6 +68,39 @@ mapfile -t SRCS < <(
   ' "$DF"
 )
 
+# ---------------------------------------------------------------------------
+# THE SAME NUMBER, DERIVED A SECOND WAY.
+#
+# This replaces a hand-maintained `EXPECT_RAN=30` that sat at the bottom of this
+# file, was measured on 2026-08-28, and was WRONG by eight on 2026-09-04 - so
+# this gate exited 1 on every tree, including main, from `18c6816aa`
+# ("record the measurement behind the wholesale crate copy") forward. That commit
+# collapsed the `sdks` stage's eight individually-named crate COPYs into one
+# `COPY crates/ crates/`. Nothing about that is a defect; it is exactly the
+# ordinary edit a pinned census cannot survive, and the repository's convention
+# (tests/lib/gate_arms.sh) is that a number lives beside the code producing it
+# rather than in a pinned table. Four gates went red the same week two crates
+# landed, for that reason.
+#
+# What the pin was actually FOR is worth keeping: "fewer means sources went
+# missing from the parse", i.e. the awk above silently losing its match. A census
+# is a poor instrument for that and a SECOND EXTRACTOR is a good one, because the
+# two are blind differently - awk matches on field 1 and splits on fields, this
+# one matches with grep and counts whitespace-separated tokens. Per context COPY
+# line the tokens are: the COPY keyword, zero or more `--flags`, one or more
+# sources, and exactly one destination. So
+#
+#   sources = tokens - flags - 2 * lines
+#
+# MEASURED 2026-09-04 at 6b3cc0641: lines=17 tokens=55 flags=0 -> 21, which is
+# what the awk parse also yields. They agree by derivation, not by a number
+# anyone typed, so adding or removing a COPY moves both together.
+CTX_COPY_LINES="$(grep -iE '^[[:space:]]*COPY[[:space:]]' "$DF" | grep -v -- '--from=')"
+N_CTX_LINES=$(printf '%s\n' "$CTX_COPY_LINES" | grep -c .)
+N_CTX_TOKENS=$(printf '%s\n' "$CTX_COPY_LINES" | tr -s '[:space:]' '\n' | grep -c .)
+N_CTX_FLAGS=$(printf '%s\n' "$CTX_COPY_LINES" | tr -s '[:space:]' '\n' | grep -c -- '^--')
+DERIVED_SRCS=$((N_CTX_TOKENS - N_CTX_FLAGS - 2 * N_CTX_LINES))
+
 N_SRCS=${#SRCS[@]}
 # MEASURED 2026-08-20: 14 context COPY sources in deploy/Dockerfile. Floor well
 # under that: adding or dropping a COPY line for one workspace member should
@@ -77,6 +110,20 @@ if ! gate_arm context_copy_sources "$N_SRCS" 5; then
   echo "  x REFUSED: parsed too few context COPY sources out of $DF." >&2
   echo "    Either the Dockerfile changed shape or this parser is broken." >&2
   echo "    A gate that checks nothing must not report success." >&2
+  exit 1
+fi
+
+# The two extractors must agree. This is the check the deleted `EXPECT_RAN` pin
+# was reaching for, done against a second reading of the same file instead of
+# against a number from a previous week.
+if [ "$N_SRCS" -ne "$DERIVED_SRCS" ]; then
+  echo "  x REFUSED: the two COPY-source extractors disagree." >&2
+  echo "    awk field parse: $N_SRCS   grep/token parse: $DERIVED_SRCS" >&2
+  echo "    ($N_CTX_LINES context COPY lines, $N_CTX_TOKENS tokens, $N_CTX_FLAGS flags)" >&2
+  echo "    One of them has lost its match on a Dockerfile shape it does not" >&2
+  echo "    handle - a line continuation, a quoted path, or the JSON array form." >&2
+  echo "    Neither count can be trusted until they agree; fix the parser, do" >&2
+  echo "    not pin the number." >&2
   exit 1
 fi
 
@@ -114,8 +161,16 @@ done
 #
 # WHAT IT STILL DOES NOT CATCH: any other root that is needed and uncopied. The
 # blocker-2 and blocker-7 shapes remain uncovered by anything here.
+#
+# IT IS CONDITIONAL, so it contributes to the assertion count only when its
+# premise holds. `BUILDER_CHECKS` carries that, rather than the tail of this file
+# assuming it always ran: if `.cargo/config.toml` ever stops setting rustflags
+# the premise is genuinely gone, and the bookkeeping below must shrink with it
+# instead of reporting a lost assertion.
 # ---------------------------------------------------------------------------
+BUILDER_CHECKS=0
 if [ -f "$ROOT/.cargo/config.toml" ] && grep -q "rustflags" "$ROOT/.cargo/config.toml"; then
+  BUILDER_CHECKS=1
   BUILDER_BODY="$(awk '/^FROM .* AS builder/{f=1;next} /^FROM /{f=0} f' "$DF")"
   N_BUILDER_LINES=$(printf '%s\n' "$BUILDER_BODY" | grep -c .)
   # MEASURED 2026-08-20: 100 lines in the `AS builder` stage body. Floor well
@@ -140,39 +195,29 @@ echo "  $PASS passed, $FAIL failed, $((PASS+FAIL)) ran"
 # Counts assertions that RAN, not that PASSED: a mutation moves an outcome
 # BETWEEN those columns, so only a LOST assertion drops the sum.
 #
-# EXACT, not a floor, and not overridable. Pure parse of a tracked Dockerfile, so
-# deterministic; when a COPY is added or removed, re-measure and change this line
-# in the same commit.
+# EXACT, and DERIVED rather than pinned. Every context COPY source gets exactly
+# one assertion in the loop above, and the conditional builder-stage check
+# contributes `BUILDER_CHECKS`, so the sum is fully determined by the Dockerfile
+# this run just read. It cannot go stale, and it still catches what a pin caught:
+# an assertion that stopped being emitted while its source was still parsed.
 #
-# RE-MEASURED 2026-08-28: 19 - 18 context COPY sources plus the .cargo/
-# builder-stage check. It was 15 (14 sources) on 2026-08-19, and before that a
-# floor of 14 that had gone slack by one, so a tree that LOST a COPY source still
-# cleared it - which is why this is exact.
-#
-# The four sources before that were the `migrate` stage the compose one-shot
-# builds, added when the platform schema moved off the deleted
-# `zeroship-platform-migrate` binary and onto the `zero-migrate` CLI: the pnpm
-# store and package tree the CLI resolves through, the charter and table-owner
-# registry it applies under, and its entrypoint wrapper.
-#
-# RE-MEASURED 2026-08-28 (later the same day): 29. The `sdks` stage gained eleven
-# context sources when the `migrate` target was built for the FIRST time and did
-# not work - `Cargo.toml` and `Cargo.lock` plus the addon's eight remaining local
-# crates (its `cargo metadata` closure is nine, one of which was already copied),
-# without which `napi build` cannot find a workspace root, and `db/migrations-ts`,
-# which is now a pnpm workspace member. One source left the count in exchange: the
-# migrate stage's corpus COPY became `COPY --from=sdks`, which is not a context
-# source, because the corpus has to arrive carrying the `node_modules` link that
-# resolves its `@zeroship/migrate` import. 19 + 11 - 1 = 29, plus `libs/` (the root
-# manifest's second members glob refuses to match nothing) = 30.
-EXPECT_RAN=30
+# A PINNED `EXPECT_RAN=30` STOOD HERE UNTIL 2026-09-04 AND WAS RED ON MAIN. It was
+# re-measured three times in ten days (14 -> 15 -> 19 -> 29 -> 30, each with a
+# paragraph of arithmetic), and then `18c6816aa` collapsed the `sdks` stage's
+# eight per-crate COPYs into one `COPY crates/ crates/`. 22 ran, 30 was expected,
+# and the gate failed for eight commits on a Dockerfile that was correct - while
+# reporting "0 failed" one line above, which is what a census does when it
+# outlives its measurement. The history above is deleted with it: it recorded how
+# the number reached 30, which is of no use once nothing is pinned to 30.
+EXPECT_RAN=$((N_SRCS + BUILDER_CHECKS))
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1
 if [ "$RAN" -ne "$EXPECT_RAN" ]; then
-  echo "  x COUNT: $RAN COPY sources checked, expected exactly $EXPECT_RAN." >&2
-  echo "    Fewer means sources went missing from the parse - a smaller green is" >&2
-  echo "    not a pass. More means a COPY was added; re-measure and bump this line." >&2
+  echo "  x COUNT: $RAN assertions ran, but the Dockerfile just parsed yields" >&2
+  echo "    $EXPECT_RAN ($N_SRCS context COPY sources + $BUILDER_CHECKS builder-stage check)." >&2
+  echo "    An assertion was lost between the parse and the loop that emits it;" >&2
+  echo "    a smaller green is not a pass." >&2
   rc=1
 fi
 
