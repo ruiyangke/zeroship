@@ -133,7 +133,16 @@ libs/compio-postgres/src"
 # The agreement phrases, matched case-insensitively. Extend deliberately: a
 # phrase added here can only ADD ledger rows, never remove one, so a widening
 # shows up as an arm-1 refusal naming the new pairs rather than as silence.
-CLAIM_PHRASES='byte-identical|byte identical|must agree|must match|kept in sync|stay in sync|stays in sync|in lockstep|must not drift|cannot drift|identical to|mirror of|copy of|one spelling|spelled the same|keep them that way|must stay'
+#
+# `must equal` joined the list on 2026-09-04, found by anchoring arm 2's lookup
+# (see there). `crates/zeroship-schema/src/ident.rs:44` had rewritten its own
+# claim away from "byte-for-byte identical" - which matches nothing here, the
+# hyphenation differs - to the conditional obligation "`cap_ident_name(n)` must
+# equal `plan::author::cap_ident_name(zeroship_migrate::shipping_vendors(), n)`".
+# The claim got MORE precise and left the enumeration in the same edit.
+# Measured: it adds exactly one pair, ident.rs <-> zeroship_migrate, which the
+# ledger already carried, so arm 1 is unchanged and arm 2 goes clean.
+CLAIM_PHRASES='byte-identical|byte identical|must agree|must match|must equal|kept in sync|stay in sync|stays in sync|in lockstep|must not drift|cannot drift|identical to|mirror of|copy of|one spelling|spelled the same|keep them that way|must stay'
 
 # known_crates <out-file> - every crate/lib directory name, underscored.
 known_crates() {
@@ -395,6 +404,18 @@ fi
 # row matching nothing is either an exemption nobody removed or - the case that
 # matters - proof that the enumeration stopped matching, which arm 1's floor
 # would only catch once the collapse was near-total.
+#
+# `-qxF`, NOT `-qF`, AND THAT ONE LETTER WAS HIDING A REAL FINDING. A `$PAIRS`
+# row is exactly `<file><TAB><crate>`, so an unanchored match lets a row be
+# satisfied by any crate whose name it PREFIXES. Arm 1 above already guards
+# against this by matching `$file\t$crate\t` with the terminator; this arm had
+# no terminator to use, and no anchor either. Measured 2026-09-04: one ledger
+# row - `crates/zeroship-schema/src/ident.rs` <-> `zeroship_migrate` - was being
+# vouched for by the `zeroship_migrate_core` pair, and the claim it records
+# ("`cap_ident_name(n)` must equal `plan::author::cap_ident_name(...)`",
+# ident.rs:47-49) was invisible to the enumeration because `must equal` was not
+# a claim phrase. That is the "enumeration stopped matching" case in this arm's
+# own comment, and the prefix match is what kept it quiet.
 stale=""
 n_ledger=0
 while IFS= read -r row; do
@@ -402,7 +423,7 @@ while IFS= read -r row; do
   n_ledger=$((n_ledger + 1))
   file="$(printf '%s' "$row" | cut -f1)"
   crate="$(printf '%s' "$row" | cut -f2)"
-  printf '%s\n' "$PAIRS" | grep -qF "$file	$crate" || stale="$stale
+  printf '%s\n' "$PAIRS" | grep -qxF "$file	$crate" || stale="$stale
     $file  <->  $crate"
 done <<EOF
 $LEDGER
