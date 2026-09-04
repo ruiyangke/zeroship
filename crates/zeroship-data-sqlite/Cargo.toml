@@ -43,6 +43,15 @@ tracing = { workspace = true }
 base64 = { workspace = true }
 uuid = { workspace = true }
 
+[dev-dependencies]
+# The sentinel walkers in `lib.rs` report a malformed or unattachable sentinel
+# by `tracing::warn!` and nothing else - the column simply reads back without
+# its metadata - so "did it warn" is the ONLY observable that distinguishes a
+# refused sentinel from one that was never there. Capturing the event is how
+# those arms are testable at all. DEV-only: the lib emits through the `tracing`
+# facade and never installs a subscriber.
+tracing-subscriber = { workspace = true }
+
 [features]
 # Mirrors the adapter's flag, and must be FORWARDED rather than merely declared:
 # the capability traits this crate impls are themselves feature-gated in
