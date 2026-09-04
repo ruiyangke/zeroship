@@ -68,15 +68,29 @@ gate_arms_init doc_citation
 
 FAILED=0
 
-# Two paths AGENTS.md names that are BUILD OUTPUTS, absent from a clean
-# checkout and present after the command that makes them. Listed here, beside
-# the code that consumes the list, with the reason - not in a central table.
+# Paths AGENTS.md names that are BUILD OUTPUTS: absent from a clean checkout,
+# present after the command that makes them. Whether they exist is a fact about
+# the MACHINE, not about the document, so a gate that ruled on them would pass
+# or fail on who ran what.
+#
+# Two are named here because they are absent even on a fully set-up tree unless
+# you ran their specific script (measured 2026-09-04: both are absent right now),
+# and git has never heard of them either way.
+#
+# The rest is DERIVED: `git check-ignore` is the repository stating outright that
+# it does not track a path. That arm replaced nothing - it was simply missing,
+# and two citations were being ruled on by whether this machine had run a setup
+# script. Measured 2026-09-04, `crates/zeroship-runtime/tests/wpt/` (fetched by
+# setup-wpt.sh, .gitignore:43) and `sdks/db/dist/internal.js` (a pnpm build
+# output) were both on disk here and would have failed a clean checkout. The
+# second is ALREADY an ALLOW row in tests/source_citation_gate.sh for exactly
+# this reason, so the two gates were giving opposite verdicts on one citation.
 is_generated_artifact() {
   case "$1" in
     sdks/ui/coverage/*|sdks/ui/coverage) return 0 ;;   # pnpm test-storybook:coverage
     tests/data/live/tls_live.conf) return 0 ;;         # libs/compio-postgres/tests/tls_live_setup.sh
-    *) return 1 ;;
   esac
+  git check-ignore -q "$1" 2>/dev/null
 }
 
 # ---------------------------------------------------------------------------
@@ -88,6 +102,19 @@ agents_bad=0
 # `crates/plugin-{db,kv,storage}/` is captured WHOLE and then skipped below.
 # Excluding those characters instead truncates it to `crates/plugin-`, which is
 # not a brace form, is not skipped, and is reported as a missing path.
+#
+# `set -f` BEFORE THE LOOP, and it is not tidiness. `for p in $(...)` unquoted
+# runs PATHNAME EXPANSION on the extracted tokens, so a token carrying `*`
+# never reached the "brace/glob forms are prose" skip on the line below - the
+# shell had already replaced it with its filesystem expansion. Measured
+# 2026-09-04: `sdks/*` and `crates/zeroship-migrate*/` expanded into 30 extra
+# entries, taking this arm's declared count from 113 to 143. Every one of the
+# 30 came OFF THE FILESYSTEM, so every one passed the `-e` test by
+# construction: 21% of what this arm said it ruled on was items that could not
+# fail. Brace forms were never at risk - brace expansion is not applied to the
+# result of a command substitution - which is why the comment above reasoned
+# about `{}` and not about `*`.
+set -f
 for p in $(grep -oE '(crates|libs|sdks|db|tests|deploy|policies|schema|examples|docs)/[A-Za-z0-9_./{},*-]+' AGENTS.md \
            | tr -d '`' | sed 's/[.,)]*$//' | sort -u); do
   case "$p" in *[{}\*]*) continue ;; esac      # brace/glob forms are prose
@@ -98,6 +125,7 @@ for p in $(grep -oE '(crates|libs|sdks|db|tests|deploy|policies|schema|examples|
     agents_bad=$((agents_bad + 1))
   fi
 done
+set +f
 gate_arm agents_md_paths "$agents_examined" 40 || FAILED=1
 [ "$agents_bad" -eq 0 ] || FAILED=1
 
