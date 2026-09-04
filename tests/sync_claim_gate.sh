@@ -208,6 +208,8 @@ crates/zeroship-migrate-core/src/apply/executor.rs	zeroship_migrate_sqlite	prose
 crates/zeroship-migrate-core/src/ops/squash.rs	zeroship_migrate_postgres	prose
 crates/zeroship-migrate-core/src/render/backends/mod.rs	zeroship_migrate_backend	prose
 crates/zeroship-migrate-core/src/render/dml.rs	zeroship_migrate_postgres	prose
+crates/zeroship-migrate-core/src/render/fold.rs	zeroship_migrate	bound=crates/zeroship-migrate/tests/fold_live/fold_roundtrip_pg.rs#async fn assert_roundtrip
+crates/zeroship-migrate-core/src/render/lower.rs	zeroship_migrate	bound=crates/zeroship-migrate/tests/ir_contract/ir_author_render_parity.rs#fn create_table_render_is_byte_identical_pg
 crates/zeroship-migrate-core/src/render/vendor.rs	zeroship_migrate_postgres	prose
 crates/zeroship-migrate-core/src/schema/query.rs	zeroship_migrate	prose
 crates/zeroship-migrate-core/src/schema/query.rs	zeroship_migrate_backend	prose

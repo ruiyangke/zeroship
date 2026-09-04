@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# source_citation_selftest.sh — prove `source_citation_scan.sh` can still fail.
+# source_citation_selftest.sh — prove `source_citation_gate.sh` can still fail.
 #
 # The gate it guards passes at zero unresolvable citations, which is also what a
 # gate that has quietly stopped matching reports. A pattern that no longer fires,
@@ -44,7 +44,7 @@
 set -uo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
 
-SCAN=tests/source_citation_scan.sh
+SCAN=tests/source_citation_gate.sh
 # Planted inside a real scanned root so the probe exercises the same resolution
 # path a genuine citation would. A temp file outside the tree would prove
 # nothing: the scan would never look at it.

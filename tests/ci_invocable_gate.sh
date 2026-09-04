@@ -56,7 +56,7 @@ while IFS= read -r cmd; do
   first="${cmd%% *}"
   # Must look like a PATH, not a flag that happens to end in .sh. The first
   # draft of this gate reported two failures on a clean tree, both
-  # `--exclude=source_citation_scan.sh` - a grep flag sitting as the first
+  # `--exclude=source_citation_gate.sh` - a grep flag sitting as the first
   # token of a continuation line. Requiring a leading non-dash and an embedded
   # slash removes that class; every real invocation here is under tests/, and a
   # repo-root script would still carry a leading dot-slash, which has a slash.
