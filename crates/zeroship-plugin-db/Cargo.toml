@@ -192,6 +192,19 @@ zeroship-migrate-server = { workspace = true }
 # while production drifted away from it. DEV-only; `zeroship-migrate-sqlite`
 # does not depend on plugin-db, so no cycle.
 zeroship-migrate-sqlite = { workspace = true }
+# The SAME argument again, for the PROTECTION-FLOOR fixture. The floor's input is
+# the mask/encryption sentinel a creator table carries, and in production that
+# sentinel is written by the migration engine - never by
+# `zeroship_schema::query::build_create_table_with_fks`, whose only callers are
+# tests (measured: zero `src` call sites outside its own module). A fixture that
+# builds its table with the data plane's emitter therefore cannot see a
+# disagreement between the two, which is exactly the defect that shipped. The
+# migration-engine fixture renders its CREATE TABLE through
+# `zeroship_migrate::schema::query` under `zeroship_migrate_postgres::DIALECT`,
+# the same pair `zeroship-migrate-server` drives. DEV-only; neither crate depends
+# on plugin-db, so no cycle.
+zeroship-migrate = { workspace = true }
+zeroship-migrate-postgres = { workspace = true }
 
 [[bench]]
 name = "bench_query_build"

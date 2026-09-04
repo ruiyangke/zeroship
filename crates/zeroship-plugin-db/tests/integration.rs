@@ -1923,7 +1923,7 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
         build_create_table_with_fks(app, collection, &schema, &FkEmission::Inline).unwrap();
     // `build_create_table_with_fks` emits MULTI-statement DDL (the CREATE TABLE
     // plus the system-field index `CREATE INDEX`s, and on PG the
-    // `COMMENT ON COLUMN … '__zsmask:…'` / `'zsenc:…'` sentinels). The
+    // `COMMENT ON COLUMN … 'zero-migrate:mask:…'` / `'zero-migrate:enc:…'` sentinels). The
     // extended/prepared `execute` path rejects that with `42601 cannot insert
     // multiple commands into a prepared statement`; the simple-query
     // `batch_execute` is the correct executor for rendered DDL batches.
@@ -4990,7 +4990,7 @@ async fn encrypted_deterministic_equality_lookup() {
 ///     the encrypted column to plaintext and wraps the masked column.
 ///
 /// **The metadata source changed and the round trip did not.** This test used to
-/// plant `COMMENT ON COLUMN ... 'zsenc:...'` / `'__zsmask:...'` sentinels and
+/// plant `COMMENT ON COLUMN ... 'zero-migrate:enc:...'` / `'zero-migrate:mask:...'` sentinels and
 /// assert the data plane RECOVERED the encryption mode and mask kind from the
 /// live catalog. That recovery is deleted: the sentinels were emitted by the
 /// migration engine out of the same DSL the descriptor is folded from, so the
@@ -5263,7 +5263,7 @@ async fn schema_relation_count(pool: &std::rc::Rc<Pool>, app: &str) -> Option<i6
 /// emits). Encryption + mask CRUD then round-trip end-to-end from the runtime
 /// descriptor while the catalog relation count stays unchanged.
 ///
-/// The `zsenc` / `__zsmask` column-comment sentinels this fixture used to plant
+/// The `zero-migrate:enc` / `zero-migrate:mask` column-comment sentinels this fixture used to plant
 /// are gone with the catalog read that recovered them; see
 /// `p4_round_trip_encrypted_masked_vector_via_descriptor_metadata` for the full
 /// reasoning. The round trip below is unchanged.
@@ -7879,7 +7879,18 @@ fn direct_connection_sites_do_not_grow() {
     //       `release_pg(pool)`, which is the pairing this pin exists to keep.
     //       They add no `require_pg` site - that helper already existed in the
     //       file and is one site however many tests call it.
-    const PINNED: usize = 134;
+    // Raised to 136 on 2026-09-04, and the arithmetic closes exactly:
+    //   +2  `tests/mask_flip.rs`, one connect site per test for the two
+    //       migration-engine protection gates. Measured by needle: that file
+    //       held 16 sites at bc7b05be4 and holds 18 now, and the directory
+    //       total moved 134 -> 136. They cannot share a pool with their
+    //       data-plane-emitter peers: each calls a fixture that DROPs and
+    //       recreates its own app schema, and the encryption one supplies a
+    //       root key the mask one must not see. Both end in `release_pg(pool)`,
+    //       which is the pairing this pin exists to keep. They add no
+    //       `require_pg` site - that helper already existed in the file and is
+    //       one site however many tests call it.
+    const PINNED: usize = 136;
     // 10 files today, one of them nested. This floor alone does NOT catch a walk
     // that stops descending - measured: flattening it reads 9 and clears 9. That
     // is what the second assertion is for. This one catches the scan being
