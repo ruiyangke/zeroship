@@ -489,7 +489,13 @@ check_compose_alias_equality() {
 #      nothing else, so a command item spelling `--<name>` for any secret the
 #      COMPILED contract declares is passing the material where only a path may
 #      go. The set comes from the contract dump, so a new secret is covered
-#      without anyone editing this file.
+#      without anyone editing this file. BOTH argv spellings count: `--flag
+#      value` and `--flag=value`. Only the first was checked until 2026-09-04,
+#      and the joined form is present in this very compose file (`--check=false`
+#      at deploy/compose/docker-compose.yml:776), so the miss was one edit away
+#      from being live rather than theoretical. `--self-test` now plants the
+#      same secret in both spellings; the joined case fails against the
+#      predicate this replaced.
 #
 # WHAT THIS DOES NOT CHECK, so a green is not over-read:
 #   - a bare high-entropy literal with no flag and no URL grammar to mark it.
@@ -526,8 +532,16 @@ check_compose_command_secrets() {
             continue
         fi
         # B: a declared secret's value flag rather than its `-file` path flag.
+        #
+        # THE FLAG IS THE TEXT BEFORE THE SEPARATOR, and argv has two of them:
+        # `--flag value` is two elements, `--flag=value` is one. Taking only the
+        # first whitespace-delimited token made the joined form compare as
+        # `--control-key=t0psecret` against `--control-key` and miss - and the
+        # joined form is not hypothetical for this file, which already carries
+        # `--check=false`. Strip at whichever separator comes first.
         [ -n "$secret_flags" ] || continue
         local head="${item%%[[:space:]]*}"
+        head="${head%%=*}"
         case "$head" in
             --*)
                 if printf '%s\n' "$secret_flags" | grep -qxF -- "$head"; then
@@ -961,6 +975,27 @@ if [ "${1:-}" = "--self-test" ]; then
         pass "self-test: a secret's value flag in a command block is rejected"
     else
         fail "self-test: the command check PASSED a secret passed as a value flag"
+    fi
+
+    # Check 6c, detector B, THE OTHER SPELLING. `--flag=value` is one argv
+    # element, not two, and the detector took the first whitespace-delimited
+    # token as the flag - so `--control-key=t0psecret` compared as a whole
+    # against `--control-key` and did not match. The joined form is not
+    # hypothetical for this file: deploy/compose/docker-compose.yml already
+    # carries `--check=false`. Same secret, same block, one variable changed.
+    sed 's|^        --allow-unsupported-billing$|        --control-key=t0psecret|' \
+        "$COMPOSE" >"$TMP/self/cmd_flag_eq.yml"
+    if ! grep -q -- '--control-key=t0psecret' "$TMP/self/cmd_flag_eq.yml"; then
+        fail "self-test: the joined command-flag mutation did not apply; the run below proves nothing"
+        exit 1
+    fi
+    before=$FAIL
+    check_compose_command_secrets argv_flag_eq_mutation "$TMP/self/cmd_flag_eq.yml" "command-flag-joined self-test" "$TMP/contract.tsv" >/dev/null 2>&1
+    if [ "$FAIL" -gt "$before" ]; then
+        FAIL=$before
+        pass "self-test: a secret's value flag spelled --flag=value is rejected"
+    else
+        fail "self-test: the command check PASSED a secret spelled --flag=value"
     fi
 
     # Check 6d: the SUPERUSER credential inlined as an `environment:` default.
