@@ -10,8 +10,7 @@
 //! orchestrator against real Postgres.
 //!
 //! These dispatch through a real `Runtime` + the `DbPlugin` and call
-//! `env.db.transaction(async tx => {...})` directly — the native
-//! v8_method, not the bootstrap wrapper. They exercise the full
+//! `env.db.transaction(async tx => {...})`. They exercise the full
 //! Rust→V8→Rust flow the orchestrator relies on:
 //!
 //!   begin (spawned op) → Continuation (mint tx-view, call callback,
@@ -27,6 +26,24 @@
 //!     writes persist);
 //!   - savepoint depth cap (9th level → `savepoint_depth_exceeded`);
 //!   - tx-view is collections-only (no `commit`/`rollback`).
+//!
+//! **`env.db.transaction` HERE IS THE BOOTSTRAP WRAPPER, NOT THE RAW
+//! v8_method, and this header claimed the opposite until 2026-09-04.** Every
+//! dispatch in this file goes through `dispatch_zs_for_app_with_descriptor`,
+//! which sets `.runtime_descriptor(Some(...))`; the runtime then splices
+//! `runtime-entry.js`, which calls `installSchema`, which overwrites
+//! `env.db.transaction` with its own `transactionImpl`
+//! (`sdks/bootstrap/src/install-schema.ts`). That wrapper is what makes
+//! `tx.notes` exist, so it is not removable - it is the shape a deployed app
+//! actually calls. Its published contract is
+//! `transaction(fn) -> Promise<Result<R>>` **which never throws**
+//! (`sdks/db/src/db-types.ts`, `docs/reference/db.md`): a rollback, a setup
+//! denial or a depth-cap refusal arrives as `result.error`, not as an
+//! exception. Assertions in this file must read that envelope, or rethrow
+//! `result.error` deliberately when the test is about the terminal HTTP
+//! remedy. Five tests asserted a throw against this wrapper and had failed
+//! continuously since it was installed; the false sentence above is why they
+//! were repeatedly waved through as "pre-existing".
 //!
 //! Requires: the test PostgreSQL named by the overlay
 //! (`deploy/ops/zeroship.test.toml`, written by
@@ -603,6 +620,17 @@ const _procedures = { autocommitBeforeMigrate };
     );
 }
 
+/// The unmigrated-app classification must reach the creator, and it must reach
+/// them with the terminal HTTP remedy when nothing catches it.
+///
+/// `env.db.transaction` is the bootstrap wrapper (module header), so it folds
+/// the classified denial into `result.error` and the handler answers 200 with
+/// `{data:null,error:{...}}`. THAT IS THE PUBLISHED CONTRACT, not a defect -
+/// but it means the handler has to rethrow to make the response terminal, and
+/// this test is about the terminal response. `Error#message` is non-enumerable,
+/// so a bare `JSON.stringify(result.error)` would drop the remediation text;
+/// rethrowing hands the error to the shim, which copies `message` out
+/// explicitly and reads `status` off the error object.
 #[test]
 fn unmigrated_app_transaction_response_names_migrate() {
     let url = require_pg();
@@ -610,7 +638,9 @@ fn unmigrated_app_transaction_response_names_migrate() {
     let src = build_src(
         r#"
 async function transactionBeforeMigrate(_input, _ctx) {
-    return await env.db.transaction(async () => "unreachable");
+    const r = await env.db.transaction(async () => "unreachable");
+    if (r.error) throw r.error;
+    return r.data;
 }
 transactionBeforeMigrate.config = { kind: "action" };
 const _procedures = { transactionBeforeMigrate };
@@ -638,8 +668,14 @@ const _procedures = { transactionBeforeMigrate };
 /// A classified failure from the top-level transaction's session setup must
 /// survive the begin-completion event. Revoking the login role's membership in
 /// the app role makes the first setup statement, `SET LOCAL ROLE`, return the
-/// measured SQLSTATE 42501. The callback must never run, and the error caught
-/// by app code must name the terminal grant denial rather than generic BEGIN.
+/// measured SQLSTATE 42501. The callback must never run, and the error app code
+/// sees must name the terminal grant denial rather than generic BEGIN.
+///
+/// Two arms, one variable apart. The first reads `result.error` off the
+/// wrapper's envelope, which is the published contract and answers 200. The
+/// second RETHROWS it, which is the only way the terminal HTTP remedy reaches
+/// the wire - and that 403 arm had never executed before 2026-09-04, because
+/// the first arm's `try/catch` shape panicked the test first.
 #[test]
 fn revoked_grant_transaction_surfaces_grant_revoked() {
     let admin_url = require_pg();
@@ -725,20 +761,22 @@ fn revoked_grant_transaction_surfaces_grant_revoked() {
         r#"
 async function transactionAfterGrantRevoke(_input, _ctx) {
     let callbackReached = false;
-    try {
-        await env.db.transaction(async () => {
-            callbackReached = true;
-            return "unreachable";
-        });
-        return { code: null, callbackReached };
-    } catch (error) {
-        return { code: error?.code ?? null, callbackReached };
-    }
+    // The wrapper folds the setup denial into `result.error` and never
+    // throws, so read the envelope (module header).
+    const r = await env.db.transaction(async () => {
+        callbackReached = true;
+        return "unreachable";
+    });
+    return { code: r.error?.code ?? null, callbackReached };
 }
 transactionAfterGrantRevoke.config = { kind: "action" };
 
 async function transactionAfterGrantRevokeUncaught(_input, _ctx) {
-    return await env.db.transaction(async () => "unreachable");
+    // Rethrow so the denial is TERMINAL: that is what puts the classified
+    // 403 on the wire instead of a 200 carrying an ignored `error`.
+    const r = await env.db.transaction(async () => "unreachable");
+    if (r.error) throw r.error;
+    return r.data;
 }
 transactionAfterGrantRevokeUncaught.config = { kind: "action" };
 
@@ -786,7 +824,7 @@ const _procedures = {
 
     assert_eq!(
         status, 200,
-        "the handler catches the setup denial; body={body}"
+        "the handler reads the setup denial off the envelope; body={body}"
     );
     let result = body.get("json").expect("caught error result");
     assert_eq!(
@@ -905,15 +943,20 @@ fn transaction_rolls_back_on_async_reject() {
     let src = build_src(
         r#"
 async function insertThenThrow(_input, _ctx) {
-    try {
-        await env.db.transaction(async (tx) => {
-            await tx.notes.insert({ title: "rolledBack" });
-            throw Object.assign(new Error("abort it"), { code: "user_abort" });
-        });
-        return { reached: "no-throw" };
-    } catch (e) {
-        return { caught: e.message, code: e.code ?? null };
-    }
+    // `transaction()` returns a Result and never throws (see the module
+    // header). The creator's thrown error arrives as `result.error`, so read
+    // it off the envelope. `message` is a non-enumerable own property of
+    // Error, so JSON.stringify would drop it - copy it out explicitly.
+    const r = await env.db.transaction(async (tx) => {
+        await tx.notes.insert({ title: "rolledBack" });
+        throw Object.assign(new Error("abort it"), { code: "user_abort" });
+    });
+    return {
+        threw: false,
+        data: r.data ?? null,
+        message: r.error?.message ?? null,
+        code: r.error?.code ?? null,
+    };
 }
 insertThenThrow.config = { kind: "action" };
 const _procedures = { insertThenThrow };
@@ -924,15 +967,21 @@ const _procedures = { insertThenThrow };
     assert_eq!(status, 200, "harness should succeed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
-        inner.get("caught").and_then(|v| v.as_str()),
+        inner.get("message").and_then(|v| v.as_str()),
         Some("abort it"),
-        "transaction(fn) must reject with the thrown error verbatim; body={body}"
+        "transaction(fn) must surface the thrown error verbatim on result.error; body={body}"
     );
     assert_eq!(
         inner.get("code").and_then(|v| v.as_str()),
         Some("user_abort"),
         "the thrown error's custom .code must survive the rollback path; body={body}"
     );
+    assert!(
+        inner.get("data").is_some_and(serde_json::Value::is_null),
+        "a rolled-back transaction must carry no data; body={body}"
+    );
+    // THE REAL PRODUCT CLAIM, and it had never executed: the old assertion
+    // panicked on the envelope shape before reaching this line.
     assert_eq!(count_notes(&url), 0, "rolled-back tx must not persist");
 }
 
@@ -947,15 +996,11 @@ fn transaction_sync_throw_in_callback_rolls_back() {
     let src = build_src(
         r#"
 async function syncThrow(_input, _ctx) {
-    try {
-        await env.db.transaction((tx) => {
-            // Not async — throws synchronously before any Promise exists.
-            throw new Error("sync boom");
-        });
-        return { reached: "no-throw" };
-    } catch (e) {
-        return { caught: e.message };
-    }
+    const r = await env.db.transaction((tx) => {
+        // Not async — throws synchronously before any Promise exists.
+        throw new Error("sync boom");
+    });
+    return { message: r.error?.message ?? null, data: r.data ?? null };
 }
 syncThrow.config = { kind: "action" };
 const _procedures = { syncThrow };
@@ -966,9 +1011,9 @@ const _procedures = { syncThrow };
     assert_eq!(status, 200, "harness should succeed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
-        inner.get("caught").and_then(|v| v.as_str()),
+        inner.get("message").and_then(|v| v.as_str()),
         Some("sync boom"),
-        "a synchronous throw inside the callback must reject transaction(fn); body={body}"
+        "a synchronous throw inside the callback must land on result.error; body={body}"
     );
     assert_eq!(count_notes(&url), 0);
 }
@@ -1145,9 +1190,17 @@ const _procedures = { nestedBothCommit };
 }
 
 /// Savepoint depth cap: nesting `transaction()` past MAX_SAVEPOINT_DEPTH
-/// (8) rejects the 9th level with `savepoint_depth_exceeded`.
+/// (`crates/zeroship-data-engine/src/transaction/mod.rs`, = 8) refuses the 9th
+/// savepoint with `savepoint_depth_exceeded`.
+///
+/// NAMED `..._is_refused`, not `..._throws`: the refusal arrives as
+/// `result.error` on the level that could not open its savepoint, because
+/// `env.db.transaction` here is the bootstrap wrapper (module header). It
+/// asserted a throw until 2026-09-04 and had never once observed the cap - it
+/// panicked on `tripped: false` while the very same body reported
+/// `reachedLevel: 10`, which is the cap doing exactly its job.
 #[test]
-fn savepoint_depth_cap_8_exceeded_throws() {
+fn savepoint_depth_cap_8_exceeded_is_refused() {
     let url = require_pg();
     reset_schema(&url);
 
@@ -1159,19 +1212,23 @@ fn savepoint_depth_cap_8_exceeded_throws() {
         r#"
 async function deepNest(_input, _ctx) {
     let level = 0;
+    let refusal = null;
     async function go() {
         level += 1;
         if (level > 12) return; // safety stop (should never reach)
-        await env.db.transaction(async () => {
+        const r = await env.db.transaction(async () => {
             await go();
         });
+        // The recursion unwinds innermost-first, so the FIRST error observed
+        // is the one from the level that could not open its savepoint. Every
+        // enclosing level's callback resolves normally afterwards and its own
+        // RELEASE SAVEPOINT / COMMIT succeeds, so exactly one level reports.
+        if (r.error && refusal === null) {
+            refusal = { code: r.error.code ?? null, atLevel: level };
+        }
     }
-    try {
-        await go();
-        return { tripped: false, reachedLevel: level };
-    } catch (e) {
-        return { tripped: true, code: e.code ?? null, reachedLevel: level };
-    }
+    await go();
+    return { tripped: refusal !== null, refusal, reachedLevel: level };
 }
 deepNest.config = { kind: "action" };
 const _procedures = { deepNest };
@@ -1179,12 +1236,9 @@ const _procedures = { deepNest };
     );
 
     let (status, body) = dispatch_zs(&url, &src, "deepNest");
-    // The deepest reject propagates up through every level (each inner
-    // rejection rolls its savepoint back and re-rejects), so the
-    // outermost transaction(fn) rejects — the handler catches it.
     assert_eq!(
         status, 200,
-        "handler should catch the depth-cap error: {body}"
+        "the wrapper returns the depth-cap refusal as data: {body}"
     );
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
@@ -1193,9 +1247,24 @@ const _procedures = { deepNest };
         "deep nesting must trip the savepoint depth cap; body={body}"
     );
     assert_eq!(
-        inner.get("code").and_then(|v| v.as_str()),
+        inner.pointer("/refusal/code").and_then(|v| v.as_str()),
         Some("savepoint_depth_exceeded"),
-        "the depth-cap rejection must carry code=savepoint_depth_exceeded; body={body}"
+        "the depth-cap refusal must carry code=savepoint_depth_exceeded; body={body}"
+    );
+    // THE ARITHMETIC, pinned rather than implied. Level 1 is the BEGIN and
+    // opens no savepoint; levels 2..=9 open savepoints 1..=8, which is
+    // MAX_SAVEPOINT_DEPTH; level 10 would be savepoint 9 and is refused. So
+    // the refusal must land at level 10 and the recursion must stop there,
+    // well short of the JS safety stop at 12.
+    assert_eq!(
+        inner.pointer("/refusal/atLevel").and_then(|v| v.as_u64()),
+        Some(10),
+        "the 9th savepoint is the 10th transaction() level; body={body}"
+    );
+    assert_eq!(
+        inner.get("reachedLevel").and_then(|v| v.as_u64()),
+        Some(10),
+        "the cap must stop the recursion, not the JS safety stop; body={body}"
     );
 }
 
