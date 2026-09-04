@@ -144,18 +144,23 @@ pub use zeroship_data_core::capability::{ScalarRead, UnmaskAuditRow};
 // of both, and it travelled to the PostgreSQL crate with `LockGuard`.
 #[cfg(any(test, feature = "test-helpers"))]
 pub use zeroship_data_core::capability::{LockScope, SNAPSHOT_RESTORE_LOCK_TAG};
-// The backup/snapshot four carry `#[cfg(feature = "test-helpers")]`, and THAT
-// ATTRIBUTE CHANGED MEANING WHEN THEY CROSSED THE CRATE BOUNDARY: it used to
-// name this crate's feature, and now names `zeroship-data-core`'s. The two are
-// wired (`test-helpers = ["zeroship-data-core/test-helpers"]`) so they turn on
-// together - but only when something turns them on. A dependent building
-// plugin-db with default features gets data-core WITHOUT the feature, so an
-// unconditional re-export here names four items that do not exist.
+// The backup/snapshot four were `#[cfg(feature = "test-helpers")]` in
+// `zeroship-data-core` until 2026-09-04, which forced the same gate here and
+// made this re-export a running instance of the trap recorded below: THE
+// ATTRIBUTE CHANGED MEANING WHEN THEY CROSSED THE CRATE BOUNDARY. It used to
+// name this crate's feature and came to name `zeroship-data-core`'s; the two
+// are wired (`test-helpers = ["zeroship-data-core/test-helpers"]`) so they turn
+// on together, but only when something turns them on, and a dependent building
+// with default features got data-core WITHOUT the feature. The keeping-in-sync
+// was the defect. All four are unconditional in data-core now - they are
+// `Backup`'s signature vocabulary, so they are contract - and this re-export
+// follows.
 //
-// `cargo check -p zeroship-plugin-db --features test-helpers --all-targets`
-// CANNOT SEE THAT. It passed clean while zeroship-worker and zeroship-cli both
-// failed to build. Only a dependent build reveals it; check one.
-#[cfg(feature = "test-helpers")]
+// The measurement that paragraph carried is worth keeping, because it is why a
+// gate mismatch here is invisible: `cargo check -p zeroship-plugin-db --features
+// test-helpers --all-targets` passed clean while zeroship-worker and
+// zeroship-cli both failed to build. Only a dependent lib/bins build reveals
+// it; `tests/shipped_config_gate.sh` is that build.
 pub use zeroship_data_core::capability::{BusyPolicy, PitrTarget, SnapshotHandle, SnapshotOpts};
 
 // The eight capability traits followed their vocabulary down on 2026-09-02.
@@ -164,28 +169,29 @@ pub use zeroship_data_core::capability::{BusyPolicy, PitrTarget, SnapshotHandle,
 // across this crate, including two on `BackendHandle` - because the orphan rule
 // puts an impl in the crate owning the type, not the crate owning the trait.
 //
-// THE TWO GATED TRAITS NEED TWO DIFFERENT GATES, and the asymmetry is the whole
-// lesson of this move. In `zeroship-data-core` both are `#[cfg(feature =
-// "test-helpers")]`, because across a crate boundary a `cfg(test)` arm means
-// THAT crate's test build and never fires for a consumer - data-core's own
-// manifest says so.
+// NONE OF THE EIGHT IS GATED ANY MORE, as of 2026-09-04, and the two paragraphs
+// that used to explain how to keep two gates in sync are deleted rather than
+// updated. `SchemaIntrospect` lost its gate when the write path's protection
+// floor started reading the catalog; `Backup` lost its gate because a capability
+// contract's SHAPE must not depend on a DEV-dependency feature that
+// `--all-targets` and `--all-features` silently unify ON. The reasoning is in
+// `zeroship-data-core`'s `storage.rs` module header.
 //
-// Here the gate has to match THIS crate's impls instead:
+// The lesson those paragraphs recorded still applies to anything that IS gated
+// here: `#[cfg(feature = "test-helpers")]` on an item from data-core names
+// DATA-CORE's feature, while the same attribute on an impl in this file names
+// THIS crate's, and `cfg(test)` names neither for a consumer. That mismatch was
+// invisible to all three `cargo check` configurations and produced 7 errors in
+// the lib-TEST target. The fix is to stop gating contracts, not to align the
+// gates more carefully.
 //
-//   * `Backup`'s two impls carry `#[cfg(feature = "test-helpers")]`, so the
-//     re-export does too.
-//   * `SchemaIntrospect`'s two impls carry `#[cfg(any(test, feature = ...))]`,
-//     so it is in scope during `cargo test --lib`, which does NOT set this
-//     crate's feature. Gating the re-export on the feature alone left the impls
-//     present and the trait absent - 7 errors in the lib-TEST target while all
-//     three check configurations were clean. data-core still supplies the item
-//     there: the `[dev-dependencies]` entry turns ITS feature on for test
-//     targets.
+// `Backup`'s two vendor impls are still `#[cfg(feature = "test-helpers")]`, and
+// deliberately: the trait is free to ship, a `pg_dump` shell-out with a
+// destructive `DROP SCHEMA ... CASCADE` restore arm is not. The compile-time
+// witnesses in `mod tests` below carry that gate with them.
 pub use zeroship_data_core::storage::{
-    ChangeStream, DialectBuilder, LockManager, SpatialIndex, SqlExecutor, VectorIndex,
+    Backup, ChangeStream, DialectBuilder, LockManager, SpatialIndex, SqlExecutor, VectorIndex,
 };
-#[cfg(feature = "test-helpers")]
-pub use zeroship_data_core::storage::Backup;
 // UNGATED since 2026-09-04, and the gate it lost is the one that broke the
 // shipped binaries. `BackendHandle::introspect_schema` is called from the
 // PRODUCTION write path by `crate::crud::protection_floor`, so this re-export,

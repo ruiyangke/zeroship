@@ -28,19 +28,61 @@
 //! across `zeroship-plugin-db` today, including two on its `BackendHandle`
 //! dispatch enum. The orphan rule permits exactly that shape: a local type may
 //! implement a foreign trait.
-
+//!
+//! # NO `cfg(feature)` ON A TRAIT OR A TRAIT MEMBER IN THIS FILE
+//!
+//! This file declares CONTRACTS, and a contract whose shape depends on a
+//! feature is not one. Every `#[cfg(feature = "test-helpers")]` that used to
+//! sit on a trait or a member here is gone as of 2026-09-04; `test-helpers`
+//! gates HELPERS AND FIXTURES - `DbBinding::cold_start`, the broker's
+//! per-thread test isolation, `schema_cache::reset_for_tests` - and never the
+//! shape of a capability.
+//!
+//! It is not a style rule. `test-helpers` is a DEV-dependency feature of every
+//! crate above this one, so `--all-targets`, `--all-features`, clippy and every
+//! `cargo test` invocation unify it ON and report a shape no shipped binary
+//! has. Three distinct breakages have come out of that blind spot:
+//!
+//! * A REQUIRED member behind the gate (`DialectBuilder::sql_dialect`) turns
+//!   into `error[E0046]: not all trait items implemented` in any build that
+//!   enables this crate's feature without the vendor's - feature unification
+//!   makes that reachable from a single dependent's manifest, and it was
+//!   already observed against `zeroship-data-postgres`.
+//! * An OVERRIDE behind the gate (`SqlExecutor::pool_exec_ddl` on the PG arm)
+//!   is `error[E0407]` in the mirror configuration, and worse than an error in
+//!   the one that compiles: the default body silently takes over, sending
+//!   multi-statement DDL down the extended protocol PostgreSQL rejects.
+//! * A whole TRAIT behind the gate (`SchemaIntrospect`) stopped the shipped
+//!   worker and CLI binaries from compiling for a day on 2026-09-04, the moment
+//!   a production caller reached it.
+//!
+//! The invariant is checkable rather than remembered:
+//!
+//! ```text
+//! grep -nE '^[[:space:]]*#\[cfg' crates/zeroship-data-core/src/storage.rs \
+//!                                crates/zeroship-data-core/src/capability.rs
+//! ```
+//!
+//! must print nothing. The anchor is load-bearing - the prose in both files
+//! quotes the attribute repeatedly, so an unanchored `grep 'cfg(feature'`
+//! matches six comment lines and reports a violation that is not one.
+//!
+//! Two gates enforce it, and each is blind to what the other sees:
+//!
+//! * `tests/contract_feature_invariance_gate.sh` reads every `pub trait` here
+//!   and refuses a `cfg` attribute on one, and separately BUILDS each
+//!   dependent with this crate's feature on and its own off - the
+//!   configuration this workspace does not contain and the one the E0046 came
+//!   from.
+//! * `tests/shipped_config_gate.sh` builds the lib/bins configuration that
+//!   actually ships, which is what catches a production caller of anything
+//!   still gated.
 
 use zeroship_schema::descriptors::{GeoPoint, VectorMetric};
-#[cfg(feature = "test-helpers")]
 use zeroship_schema::query::SqlDialect;
 
 use crate::binding::DbBinding;
-use crate::capability::LockScope;
-// `Backup` carries `#[cfg(feature = "test-helpers")]` and is the only consumer
-// of these three, so the import carries the same gate. An ungated import here
-// names items that do not exist in a default build.
-#[cfg(feature = "test-helpers")]
-use crate::capability::{PitrTarget, SnapshotHandle, SnapshotOpts};
+use crate::capability::{LockScope, PitrTarget, SnapshotHandle, SnapshotOpts};
 use crate::error::DbError;
 
 /// SQL execution capability — the "connection lifecycle + run a
@@ -104,7 +146,13 @@ pub trait SqlExecutor: 'static {
     /// CREATE TABLE emission bundles the table definition with its
     /// implicit system-field indexes (and, on PG, `COMMENT ON COLUMN`
     /// mask sentinels) into one `;`-separated script — see
-    /// [`crate::query::build_create_table_with_fks_for_dialect`]. The
+    /// [`zeroship_schema::query::build_create_table_with_fks_for_dialect`].
+    /// (That path read `crate::query::` and resolved to nothing until
+    /// 2026-09-04: this crate has no `query` module, and the link is a leftover
+    /// from when these traits lived in `zeroship-plugin-db`. Ungating the
+    /// member is what put it in front of `tests/run_doc_gate.sh` - the same
+    /// thing that happened to `SchemaIntrospect`'s two `crate::diff::` links
+    /// the day before.) The
     /// Postgres extended/prepared protocol used by [`Self::pool_exec`]
     /// (`query_text_params` issues `Parse`/`Bind`/`Execute`) rejects
     /// multi-statement strings with `cannot insert multiple commands
@@ -116,7 +164,29 @@ pub trait SqlExecutor: 'static {
     /// the SQLite arm (whose `pool_exec` routes through `sqlite3_exec`,
     /// natively multi-statement) and for mocks. The Postgres backend
     /// overrides it to use `batch_execute`.
-    #[cfg(feature = "test-helpers")]
+    ///
+    /// **UNGATED, and it was `#[cfg(feature = "test-helpers")]` until
+    /// 2026-09-04.** A defaulted member is the WORST place to put a feature
+    /// gate, because only one of its two failure modes is an error. Gate the
+    /// member and leave the PG override ungated and you get `error[E0407]:
+    /// method `pool_exec_ddl` is not a member of trait `SqlExecutor``. Gate
+    /// both, then enable this crate's feature without the vendor's - which
+    /// feature unification does from a single dependent's manifest - and it
+    /// COMPILES, with the default body quietly taking over: PG would send a
+    /// `;`-separated CREATE TABLE script through `query_text_params`, which is
+    /// the extended protocol, and PostgreSQL answers `cannot insert multiple
+    /// commands into a prepared statement` at runtime. That is exactly the
+    /// divergence the override exists to prevent, reintroduced by a cfg.
+    /// Measured 2026-09-04 by restoring the gate on this member alone:
+    /// `cargo check -p zeroship-data-postgres` (default features) reports
+    /// `error[E0407]: method `pool_exec_ddl` is not a member of trait
+    /// `SqlExecutor``.
+    ///
+    /// The member has no caller today - schema belongs to `zeroship-migrate`,
+    /// which issues its own DDL - and that is not a reason to gate it. It is
+    /// the DDL half of the SQL-execution contract, it is the one member whose
+    /// default is wrong for a shipped vendor, and both facts are properties of
+    /// the contract rather than of the current call graph.
     #[allow(async_fn_in_trait)]
     async fn pool_exec_ddl(&self, sql: &str) -> Result<(), DbError> {
         self.pool_exec(sql, &[]).await.map(|_| ())
@@ -307,13 +377,23 @@ pub trait LockManager: SqlExecutor {
 ///
 /// It cost nothing to ship. Both impls read their own vendor's catalog with the
 /// driver the crate already depends on; ungating pulled in no new dependency in
-/// either tier. What stays gated is what is genuinely test-only: `Backup` (and
-/// the `sha2` it hashes dumps with), `PgSqlExecutor`'s raw-pool escape hatch,
-/// and the `Backend` conformance marker. Those three are code SPANS and not
-/// intra-doc links on purpose - each is cfg-gated out of a default build, and
+/// either tier.
+///
+/// **This paragraph named `Backup` as something that "stays gated" until later
+/// the same day, and that was the wrong lesson to draw from its own fix.** The
+/// trait it named is a capability CONTRACT, and it was gated for the same
+/// reason this one was: at the time the only callers were tests. That is a fact
+/// about the call graph, not about the shape, and it is the fact that expired
+/// here overnight. [`Backup`] is ungated too now; what stayed behind the
+/// feature are its two vendor IMPLS, which is a separate decision with a
+/// separate cost - see that trait's own rustdoc.
+///
+/// What is still genuinely test-only, and still a code SPAN rather than an
+/// intra-doc link: `PgSqlExecutor`'s raw-pool escape hatch and the `Backend`
+/// conformance marker. Both are cfg-gated out of a default build, and
 /// `tests/run_doc_gate.sh` requires zero unresolved links in the default and
-/// `--all-features` doc builds alike, so a link here would be red in one of
-/// them whichever way it was written.
+/// `--all-features` doc builds alike, so a link to either would be red in one
+/// of them whichever way it was written.
 pub trait SchemaIntrospect: 'static {
     /// Concrete live-schema snapshot returned by
     /// [`Self::introspect_schema`]. The Postgres impl uses
@@ -364,7 +444,39 @@ pub trait SchemaIntrospect: 'static {
 /// per-backend struct) is the canonical shape.
 pub trait DialectBuilder: 'static {
     /// Concrete SQL dialect this builder targets.
-    #[cfg(feature = "test-helpers")]
+    ///
+    /// **UNGATED, and it was `#[cfg(feature = "test-helpers")]` until
+    /// 2026-09-04 - the most dangerous gate in this file.** A REQUIRED member
+    /// with no default does not merely disappear when the feature is off; it
+    /// changes what every implementor must write. Enable this crate's feature
+    /// without a vendor's - which one dependent's manifest does through feature
+    /// unification, with no source change anywhere - and both vendors stop
+    /// compiling:
+    ///
+    /// ```text
+    /// cargo check -p zeroship-data-postgres --features zeroship-data-core/test-helpers
+    ///   error[E0046]: not all trait items implemented, missing: `sql_dialect`
+    ///     x2 - `impl DialectBuilder for PgDialect` and `for PostgresBackend`
+    /// cargo check -p zeroship-data-sqlite --features zeroship-data-core/test-helpers
+    ///   error[E0046]: ... x2 - `for SqliteDialect` and `for SqliteBackend`
+    /// ```
+    ///
+    /// Measured 2026-09-04 at 26e996ef5, where the gate was still on. Line
+    /// numbers are deliberately not quoted: they were `postgres.rs:809` /
+    /// `:863` then, they moved when this comment was written, and a citation
+    /// that rots inside its own commit is worse than the impl names.
+    ///
+    /// Deleting the configuration that trips a latent hazard does not retire
+    /// the hazard, and those four `impl` blocks are the whole reason: they were
+    /// never protected by anything except nobody having written that manifest
+    /// line yet. `tests/contract_feature_invariance_gate.sh` builds all four
+    /// dependents in exactly that resolution now.
+    ///
+    /// A `DialectBuilder` that cannot say which dialect it builds is not one -
+    /// this is the trait's identity, not a probe. Its ungated peers
+    /// ([`Self::quote_ident`], [`Self::map_zs_type`]) already answer
+    /// per-dialect questions; this answers WHICH dialect, and it was the only
+    /// member of the five that a release build could not ask.
     fn sql_dialect(&self) -> SqlDialect;
 
     /// Quote an identifier (column / table / schema name) per the
@@ -592,26 +704,45 @@ pub trait SpatialIndex: 'static {
 /// trait sits beside the `Backend` super-trait rather than joining it.
 /// App code never reaches it.
 ///
-/// # This capability is NOT in a release build
+/// # The CONTRACT ships; the IMPLEMENTATIONS do not
 ///
-/// The `#[cfg]` below is the whole story: the trait, both impls
-/// (`PostgresBackend` in `backend/postgres.rs`, `SqliteBackend` in
-/// `backend/sqlite/mod.rs`), both `BackendHandle::as_backup_*`
-/// accessors, and the three compile-time assertions in `mod tests` are
-/// each gated on `feature = "test-helpers"`. Nothing in the workspace
-/// enables that feature outside this crate's own integration targets,
-/// so there is no backup orchestrator calling in and no shipped path
-/// that can take a snapshot. Read the bodies as a design placeholder
-/// exercised by tests, not as operable backup.
+/// **This trait was `#[cfg(feature = "test-helpers")]` until 2026-09-04**, and
+/// the rustdoc here opened with "This capability is NOT in a release build".
+/// Both halves of that were true and only one of them still is. The trait ships
+/// now, for the reason at the top of this file: a contract whose shape depends
+/// on a feature is not a contract, and this one is the sibling of
+/// [`ChangeStream`], [`VectorIndex`] and [`SpatialIndex`], none of which was
+/// ever gated. A trait declaration with no implementor generates no code, so
+/// the cost of shipping it is zero and not merely small.
 ///
-/// The two `as_backup_*` accessors have no caller at all - the
-/// integration tests reach the impls through the trait directly.
+/// What is STILL out of a release build is everything that does work:
 ///
-/// Bodies, for what they will do: PG shells out to
-/// `pg_dump`/`pg_restore` and writes a PITR placeholder row; SQLite
-/// does `VACUUM INTO` + atomic-rename restore and refuses PITR with
-/// `pitr_pg_only`.
-#[cfg(feature = "test-helpers")]
+/// * both impls - `zeroship-data-postgres`'s `backup_pg` (a `pg_dump` /
+///   `pg_restore` shell-out and a destructive `DROP SCHEMA ... CASCADE` on the
+///   restore path) and `zeroship-data-sqlite`'s `VACUUM INTO` + atomic rename;
+/// * the `sha2` both use to hash dump artifacts, which is `optional = true` in
+///   each vendor manifest and pulled in by `test-helpers`;
+/// * both `BackendHandle::as_backup_*` accessors, which have no caller at all;
+/// * the three compile-time assertions in `zeroship-data-engine`'s
+///   `backend::tests`.
+///
+/// That line is drawn deliberately and is not the same line the gate on the
+/// trait drew. A capability contract costs nothing to ship and is what a future
+/// backup orchestrator would be written against. An uncallable body that
+/// `DROP SCHEMA ... CASCADE`es a tenant is not something to link into every
+/// worker, gateway and CLI binary in order to satisfy a symmetry argument.
+/// Whoever gives this capability a caller ungates the impls in the same change,
+/// and `tests/shipped_config_gate.sh` makes that a compile error rather than a
+/// discovery: an ungated caller of a gated impl fails the lib/bins build the
+/// way `SchemaIntrospect` did.
+///
+/// `pitr_replay` will not work even then. The PG arm records its target in
+/// `__zeroship_admin.pitr_targets`, a table deleted with the admin schema on
+/// 2026-08-27 and provisioned by nothing since, so the INSERT fails on every
+/// database; the SQLite arm refuses outright with `pitr_pg_only`. Snapshot and
+/// restore do not touch it. Re-verified 2026-09-04 against
+/// `zeroship-data-postgres`'s `backup_pg::pitr_replay_impl` and
+/// `db/migrations-ts/`, which provisions no such schema.
 pub trait Backup: 'static {
     /// Take a snapshot of the per-app data store and stream it to
     /// `dest_uri`. Returns a handle with the content hash for

@@ -389,9 +389,14 @@ impl SqlExecutor for PostgresBackend {
         Ok(rows.len() as u64)
     }
 
-    // Gate matches `SqlExecutor::pool_exec_ddl` in data-core, which is
-    // `cfg(feature = "test-helpers")`.
-    #[cfg(feature = "test-helpers")]
+    // UNGATED since 2026-09-04, with the trait member in data-core. The gate
+    // that was here read "matches `SqlExecutor::pool_exec_ddl` in data-core",
+    // and matching it was the whole problem: the member has a DEFAULT, so a
+    // configuration where the trait side is on and this side is off compiles
+    // clean and silently sends multi-statement DDL down the extended protocol
+    // this override exists to avoid. Feature unification reaches that
+    // configuration from one dependent's manifest. An override of a defaulted
+    // member must never be more conditional than the member.
     async fn pool_exec_ddl(&self, sql: &str) -> Result<(), DbError> {
         // Multi-statement DDL (CREATE TABLE + implicit system-field
         // CREATE INDEXes + `COMMENT ON COLUMN` mask sentinels) must use
@@ -807,7 +812,11 @@ impl PgLockManager for PostgresBackend {
 pub(crate) struct PgDialect;
 
 impl DialectBuilder for PgDialect {
-    #[cfg(feature = "test-helpers")]
+    // UNGATED since 2026-09-04, with the trait member. This impl block and the
+    // one on `PostgresBackend` below are the two sites that reported
+    // `error[E0046]: not all trait items implemented, missing: sql_dialect`
+    // under `--features zeroship-data-core/test-helpers`, which is one
+    // manifest line away in any dependent.
     fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
         zeroship_schema::query::SqlDialect::Postgres
     }
@@ -861,7 +870,6 @@ impl DialectBuilder for PgDialect {
 /// separate field. The bodies delegate to the `PgDialect` ZST; rustc
 /// inlines the value away because every method is `&self`.
 impl DialectBuilder for PostgresBackend {
-    #[cfg(feature = "test-helpers")]
     fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
         PgDialect.sql_dialect()
     }
