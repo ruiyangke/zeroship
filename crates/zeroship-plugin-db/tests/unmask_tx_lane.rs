@@ -51,7 +51,7 @@ use serde_json::{json, Value};
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
 use zeroship_plugin_db::crud::mask_policy::dispatch_set_mask_policy;
-use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission};
+use zeroship_plugin_db::query::{build_create_table_with_fks, FkEmission, SqlDialect};
 use zeroship_plugin_db::tx_route::{CapturedRoute, TxRoute};
 
 #[path = "support/mod.rs"]
@@ -145,13 +145,18 @@ async fn backend() -> zeroship_plugin_db::backend::BackendHandle {
 
 /// A route that claims the app's open transaction — what `CapturedRoute::capture`
 /// produces for a dispatch issued inside `db.transaction(fn)`.
+///
+/// The dialect is STATED, not inherited: the two test constructors stamped
+/// `Postgres` unconditionally until 2026-09-03, which happened to be right here
+/// and was wrong on every SQLite harness. This target is live-PostgreSQL only
+/// (`require_pg`), so `Postgres` is the answer its connection actually speaks.
 async fn tx_route(app: &str) -> TxRoute {
-    CapturedRoute::tx_for_tests(app).bind(backend().await)
+    CapturedRoute::tx_for_tests(app, SqlDialect::Postgres).bind(backend().await)
 }
 
-/// A route outside any transaction.
+/// A route outside any transaction. Dialect stated, as in [`tx_route`].
 async fn pool_route(app: &str) -> TxRoute {
-    CapturedRoute::pool_for_tests(app).bind(backend().await)
+    CapturedRoute::pool_for_tests(app, SqlDialect::Postgres).bind(backend().await)
 }
 
 /// Insert one document through the real `run_insert` on `route`, returning the

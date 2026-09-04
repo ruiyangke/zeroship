@@ -736,7 +736,8 @@ mod routed_read_tests {
 
             // CONTROL: a pool-lane read cannot see the uncommitted row.
             let outside = read_raw_column_text(
-                &CapturedRoute::pool_for_tests(app).bind(handle.clone()),
+                &CapturedRoute::pool_for_tests(app, crate::query::SqlDialect::Sqlite)
+                    .bind(handle.clone()),
                 "people",
                 "__zs_raw__ssn",
                 "p1",
@@ -751,7 +752,8 @@ mod routed_read_tests {
 
             // SUBJECT: the same read, routed onto the transaction.
             let inside = read_raw_column_text(
-                &CapturedRoute::tx_for_tests(app).bind(handle.clone()),
+                &CapturedRoute::tx_for_tests(app, crate::query::SqlDialect::Sqlite)
+                    .bind(handle.clone()),
                 "people",
                 "__zs_raw__ssn",
                 "p1",

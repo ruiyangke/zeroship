@@ -1225,9 +1225,12 @@ mod tests {
                 backend.key_store(),
                 // The conflict probe below is the ONE pre-pass that issues SQL
                 // of its own, so this is the arm where the dialect is load
-                // bearing: an ambient test route carries an inert dialect
-                // (see `CapturedRoute::pool_for_tests`), and the probe takes
-                // this parameter instead.
+                // bearing. `apply` takes it as its own parameter rather than
+                // reading the route's, which is why this line exists at all;
+                // the two now agree either way, because
+                // `ambient_route_for_tests` derives the route's dialect from
+                // the SQLite handle below instead of stamping `Postgres` on it
+                // (it did until 2026-09-03, and this comment called that inert).
                 SqlDialect::Sqlite,
                 &binding,
                 collection,
