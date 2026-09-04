@@ -136,7 +136,17 @@
 # Exit 0 when every citation resolves or is allowed; 1 otherwise.
 
 set -uo pipefail
-cd "$(dirname "${BASH_SOURCE[0]}")/.." || exit 1
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT" || exit 1
+
+# Per-arm anti-vacuity accounting (tests/lib/gate_arms.sh). This file passes at
+# ZERO unresolvable citations, which is also what a pattern that stopped
+# matching prints - the exact shape that library exists for. Two of the three
+# arms below were already here as bare `if [ "$found" -lt 200 ]` guards; they
+# are declared arms now so the census can see them, and the third is new.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init source_citation
 
 ROOTS="crates sdks libs tests db examples"
 PAT='(?<![A-Za-z0-9_/.-])(?:crates|sdks|libs|db|examples|tests)/[A-Za-z0-9_./-]+\.(?:tsx|rs|ts|js|sh|toml)(?![A-Za-z0-9])'
@@ -195,7 +205,6 @@ crates/zeroship-runtime/tests/call_fetch_handler.rs:tests/http.rs
 crates/zeroship-migrate-server/tests/typed_id_parity.rs:tests/core_id_parity.rs
 crates/zeroship-runtime/src/core/init.rs:crates/runtime/src/embed/websocket.js
 crates/zeroship-data-sqlite/src/session.rs:examples/simple-rust/demo.rs
-tests/golden_path.sh:tests/m0_gate.sh
 crates/zeroship-migrate-ir/src/id.rs:tests/core_id_parity.rs
 crates/zeroship-migrate-sqlite/src/backend/mod.rs:tests/sqlite_journal.rs
 crates/zeroship-config-contract/src/raw_env.rs:crates/core/src/config/env.rs
@@ -232,7 +241,6 @@ tests/lib/binary_freshness.sh:sdks/vite-plugin/dist/index.js
 AGENTS.md:sdks/db/dist/internal.js
 CONTRIBUTING.md:sdks/db/dist/internal.js
 ISSUES.md:sdks/bootstrap/dist/runtime-entry.js
-docs/build-and-deploy-golden-path.md:examples/workflows-order/dist/index.js
 "
 
 # A corpus check the count cannot do: a renamed root silently stops being
@@ -291,7 +299,14 @@ fi
 # on. The warning that used to report the divergence is gone with it - there is
 # nothing left for it to report.
 TRACKED_SET="$(mktemp)"
-trap 'rm -f "$TRACKED_SET"' EXIT
+# Every ALLOW pair that was actually consulted AND matched. The reverse
+# direction: an exemption that no longer matches anything is how the next
+# broken citation gets waved through, because a reader sees a row and assumes
+# somebody still thinks about it. Recorded rather than inferred, because the
+# two ways a row can die look identical from outside - the citing file stopped
+# citing it, or the target came back and it now resolves on its own.
+ALLOW_USED="$(mktemp)"
+trap 'rm -f "$TRACKED_SET" "$ALLOW_USED"' EXIT
 git ls-files | LC_ALL=C sort -u > "$TRACKED_SET"
 if [ ! -s "$TRACKED_SET" ]; then
   echo "::error::git ls-files returned nothing - every citation would report unresolvable"
@@ -356,6 +371,7 @@ while IFS= read -r line; do
 
   if printf '%s' "$ALLOW" | grep -qxF "$src:$cite"; then
     allowed=$((allowed + 1))
+    printf '%s\n' "$src:$cite" >> "$ALLOW_USED"
     continue
   fi
 
@@ -410,6 +426,7 @@ while IFS= read -r line; do
 
   if printf '%s' "$ALLOW" | grep -qxF "$src:$cite"; then
     doc_allowed=$((doc_allowed + 1))
+    printf '%s\n' "$src:$cite" >> "$ALLOW_USED"
     continue
   fi
 
@@ -451,13 +468,50 @@ echo "doc citations checked: $doc_found across docs/ + root *.md, excluding $DOC
 # going to zero on its own, and the doc corpus is the larger of the two - it
 # could vanish entirely and the combined number would still clear a floor set
 # for both.
-if [ "$found" -lt 200 ]; then
-  echo "::error::only $found source citations found (expected ~577); the extraction returned nothing usable, so a clean result would mean nothing"
+status=0
+if ! gate_arm source_citations "$found" 200; then
+  echo "::error::only $found source citations found (1936 measured 2026-09-04); the extraction returned nothing usable, so a clean result would mean nothing"
   exit 1
 fi
-if [ "$doc_found" -lt 400 ]; then
-  echo "::error::only $doc_found doc citations found (expected ~878); the extraction returned nothing usable, so a clean result would mean nothing"
+if ! gate_arm doc_citations "$doc_found" 400; then
+  echo "::error::only $doc_found doc citations found (1096 measured 2026-09-04); the extraction returned nothing usable, so a clean result would mean nothing"
   exit 1
 fi
 
-[ "$missing" -eq 0 ]
+# THE REVERSE DIRECTION, and this gate had none until 2026-09-04. It ruled on
+# citations that FAIL to resolve and never on the exemptions that excuse them,
+# so an ALLOW row could outlive its citation indefinitely and read to the next
+# person as a decision somebody is still making. That is not hypothetical: the
+# ALLOW list went from 22 rows to 43 in one commit, which is exactly the
+# condition under which nobody notices one going dead.
+#
+# `sort -u` on both sides because one pair can be consulted many times (the same
+# citation appears in several files' output), and the question is per ROW.
+#
+# MEASURED 2026-09-04: 41 rows declared, 41 consumed, after this very check
+# found two rows that had already gone dead (`tests/golden_path.sh` stopped
+# citing `m0_gate.sh`; the golden-path doc stopped citing a workflows-order
+# build output). Floor 20 - under half, so
+# retiring a batch of exemptions does not trip it, but the pair-matching itself
+# breaking (which sends every row to zero at once) does.
+n_allow_declared="$(printf '%s' "$ALLOW" | grep -c . || true)"
+sort -u "$ALLOW_USED" 2>/dev/null > "$ALLOW_USED.s" || : > "$ALLOW_USED.s"
+n_allow_used="$(grep -c . < "$ALLOW_USED.s" || true)"
+while IFS= read -r row; do
+  [ -n "$row" ] || continue
+  if ! grep -qxF "$row" "$ALLOW_USED.s"; then
+    echo "::error::ALLOW names $row, which is not an unresolvable citation any more - the citing file stopped citing it, or the target came back. Remove the row; a stale exemption reads as a live decision."
+    status=1
+  fi
+done <<EOF
+$ALLOW
+EOF
+rm -f "$ALLOW_USED.s"
+if ! gate_arm allow_rows_live "$n_allow_used" 20; then
+  echo "::error::only $n_allow_used of $n_allow_declared ALLOW row(s) matched an unresolvable citation, under the floor of 20. 43 of 43 matched 2026-09-04. Either the exemptions were legitimately retired, or the pair match stopped working and every citation below is unexcused."
+  status=1
+fi
+
+gate_arms_finish || status=1
+
+[ "$missing" -eq 0 ] && [ "$status" -eq 0 ]
