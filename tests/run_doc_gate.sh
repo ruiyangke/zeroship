@@ -246,14 +246,31 @@ run_config() {
   local rc=$?
 
   local unresolved crates
-  # An `unresolved link` DIAGNOSTIC, one per offending link. The old
-  # `grep -c 'unresolved link'` counted rendered LINES, and rustdoc renders the
-  # offending source line underneath the message - so a doc comment that quoted
-  # the phrase counted twice. Both ceilings are 0, so that never changed a
-  # verdict; it did make the number in the failure message wrong.
+  # One DIAGNOSTIC per offending link, selected by LINT CODE.
+  #
+  # Two narrowings have been walked back here, each one a subset that read like
+  # the whole set:
+  #
+  #   1. `grep -c 'unresolved link'` counted rendered LINES, and rustdoc renders
+  #      the offending source line underneath the message - so a doc comment
+  #      quoting the phrase counted twice. Ceilings are 0, so it never changed a
+  #      verdict; it did make the number in the failure message wrong.
+  #   2. `startswith("unresolved link")` keyed on rustdoc's PROSE. Measured
+  #      2026-09-04: it caught 89 of the 97 `rustdoc::broken_intra_doc_links`
+  #      diagnostics under default features and 83 of 91 under --all-features.
+  #      The eight it missed carry the SAME lint code and different wording -
+  #      "`env` is both a module and a macro", "unknown disambiguator ``".
+  #      Both totals exceeded 0 at the time, so the verdict was again unchanged
+  #      - but a tree reduced to only those eight would have printed
+  #      `unresolved=0` and PASSED, which is this gate's own founding defect
+  #      (see the header: a check that examines nothing prints what a clean tree
+  #      prints).
+  #
+  # The lint code is the thing rustdoc promises; its sentence is not. Key on the
+  # code, and a future rustdoc rewording cannot silently shrink the population.
   unresolved="$(jq -r '
     select(.reason == "compiler-message")
-    | select(.message.message | startswith("unresolved link"))
+    | select(.message.code.code == "rustdoc::broken_intra_doc_links")
     | .message.message
   ' "$JSON" | wc -l | tr -d ' ')"
   crates="$(doc_artifacts \
@@ -330,7 +347,7 @@ run_config() {
     echo "      resolve the name rather than raising the ceiling. Offenders:" >&2
     jq -r '
       select(.reason == "compiler-message")
-      | select(.message.message | startswith("unresolved link"))
+      | select(.message.code.code == "rustdoc::broken_intra_doc_links")
       | (.message.spans[0] // {}) as $s
       | "        "
         + ($s.file_name // "?") + ":" + (($s.line_start // 0) | tostring)
