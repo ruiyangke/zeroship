@@ -79,8 +79,11 @@ usage() {
 # THE ONLY NUMBER HERE, and it counts FILES, not findings.
 #
 # RE-MEASURED 2026-09-04 by `find tests -maxdepth 1 -name '*_gate.sh' | wc -l`:
-# 37 already present, + 1 for ci_wiring_gate.sh added in the same commit = 38.
-# It read 36 + 1 = 37 earlier the same day, for decision_four_gate.sh, and
+# 41, after source_citation_scan.sh, zship_artifact_contract.sh and
+# verdaccio_config_guard.sh were renamed into the glob - three checks a NAME had
+# been exempting from every meta-check. It read 37 + 1 = 38 earlier the same
+# day, for ci_wiring_gate.sh, and 36 + 1 = 37 before that, for
+# decision_four_gate.sh, and
 # 35 + 1 = 36 before that, for sync_claim_gate.sh, and
 # 34 + 1 = 35 before that, for noop_cfg_pair_gate.sh, and
 # 33 + 1 = 34 before that, for worker_replication_privilege_gate.sh;
@@ -143,6 +146,24 @@ refuse() { [ -n "$REFUSAL" ] || REFUSAL="$1"; }
 # the `if !` form - a filter that excuses exactly the cases it was built to rule
 # on, which is this repo's founding bug.
 # ---------------------------------------------------------------------------
+# The gate's source with its FULL-LINE comments removed.
+#
+# Every participation check below reads this rather than the file, for the
+# reason arm_calls already encodes one function down: a gate's own prose about
+# gate_arms is not a call. Measured 2026-09-04 against all 41 gates, deleting
+# the real `. "$ROOT/tests/lib/gate_arms.sh"` line from each in turn: the
+# whole-file substring this replaces read 40 of the 41 mutants as CLEAN, because
+# `# shellcheck source=tests/lib/gate_arms.sh` sits directly above the real one.
+# The init and finish checks were satisfied by a comment in 1 and 2 gates. On
+# the comment-stripped text, 0 of the 123 mutants get through.
+#
+# WHAT IT STILL CANNOT DO: a TRAILING comment on a code line is code to this
+# filter, so `foo # gate_arms_init` would satisfy the init check. Stripping
+# those needs a shell tokenizer to know a `#` inside quotes is not a comment,
+# and a wrong strip would fail correct gates. Full-line comments are where the
+# headers live and are the whole of the measured gap.
+code_lines() { grep -vE '^[[:space:]]*#' "$1"; }
+
 arm_calls() {
   awk '
     {
@@ -199,7 +220,7 @@ fi
 if [ -z "$REFUSAL" ]; then
   for path in "${GATES[@]}"; do
     name="$(basename "$path")"
-    src="$(cat "$path")"
+    src="$(code_lines "$path")"
     calls="$(arm_calls "$path")"
     n_calls=0
     [ -n "$calls" ] && n_calls="$(printf '%s\n' "$calls" | grep -c .)"
@@ -210,7 +231,14 @@ if [ -z "$REFUSAL" ]; then
     fi
 
     problems=""
-    case "$src" in *"lib/gate_arms.sh"*) ;; *) problems="does not source tests/lib/gate_arms.sh" ;; esac
+    # The SOURCE check wants a `.`/`source` COMMAND, not the path appearing
+    # somewhere. Every gate carries `# shellcheck source=tests/lib/gate_arms.sh`
+    # directly above the real line, so a bare substring is satisfied by the
+    # directive alone - see the header note on what this used to miss.
+    case "$src" in
+      *". "*"lib/gate_arms.sh"*|*"source "*"lib/gate_arms.sh"*) ;;
+      *) problems="does not source tests/lib/gate_arms.sh" ;;
+    esac
     case "$src" in *"gate_arms_init"*) ;; *) problems="${problems:+$problems; }never calls gate_arms_init" ;; esac
     case "$src" in
       *"gate_arms_finish"*) ;;
