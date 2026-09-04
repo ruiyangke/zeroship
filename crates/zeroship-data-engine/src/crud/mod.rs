@@ -104,12 +104,55 @@ pub mod mask_policy;
 // module nothing calls, which is exactly how one gets copied back into a live
 // path". Deleting is that reasoning carried to the module.
 
-// Drift detection: sample masked-column siblings vs.
-// recomputed mask of decrypt(parent). Same visibility pattern so the
-// SQLite + PG integration suites can drive `run_drift_check_*`
-// directly via the `test-helpers` gate.
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod mask_drift;
+// `mask_drift` WAS DECLARED HERE and is deleted (2026-09-03), by the same
+// reasoning as `mask_backfill` above. It sampled masked-column siblings against
+// the recomputed mask of decrypt(parent). 1287 lines, every caller a test.
+//
+// It was not merely unwired - it could not be wired as written. Three measured
+// blockers, any one of which alone is fatal:
+//
+//   * Its first act was `DbBinding::cold_start(app_id)`, itself
+//     `#[cfg(feature = "test-helpers")]`, whose own doc says "Nothing in a
+//     shipped binary should be constructing a deploy identity from an app id
+//     alone, and this gate is what makes that checkable". It did not compile
+//     into a release worker even in principle.
+//   * It resolved the schema through `zeroship_data_core::schema_cache`, a
+//     `thread_local!` keyed `<app>:<deploy_token>:<collection>` and published
+//     per-isolate at descriptor bind. A `cold_start` binding matches no
+//     production entry, so an operator sweep would miss every collection.
+//   * Its four `pool_handle()` calls were the ONLY remaining callers of
+//     `PgSqlExecutor` - the raw-pool escape hatch that skips the per-app role
+//     fence - which `docs/proposals/2026-08-28-app-database-decoupling.md`
+//     records as "Do not ungate it".
+//
+// And it did not catch the defect nearest to it. A masked column whose stored
+// mask has drifted is what a creator causes by deleting one descriptor `mask`
+// key, but the check resolved `MaskKind` FROM that descriptor: its own test
+// `run_drift_check_for_column_returns_empty_when_column_not_masked` asserted
+// `sampled: 0, drifted: 0` for exactly that shape. The sibling test refused an
+// undeclared COLLECTION as a typed error because "an undeclared collection must
+// not report a clean sweep"; the same reasoning was never applied one level
+// down, at the column, which is where the defect lives.
+//
+// A live-database enumeration cannot rescue it: the mask KIND exists only in
+// the creator descriptor (there is no durable policy store on PG - see
+// `mask_policy`'s header), so `expected` is uncomputable without the artifact
+// whose deletion is the bug. The check that DOES catch it is structural, not
+// statistical - a `__zs_raw__<col>` sibling present in the physical table while
+// the descriptor no longer declares `<col>` masked - and it needs no sampling,
+// no decryption, no key store and no `MaskKind`. That is a different tool; it
+// would have shared only the word "drift".
+//
+// Deleted rather than kept as scaffolding because the module carried three
+// re-derivations of live logic (`parse_mask_kind_str`, documented as a
+// duplicate of the schema-wire parser; `decrypt_parent_value`, a hand-rolled
+// second AAD/decrypt path; `decode_plaintext_per_wraps`, already
+// `#[allow(dead_code)]`), and its tests exercised THOSE, not the production
+// pass. That is the `mask_backfill` hazard verbatim: "a second, wrong
+// derivation ... alive in a module nothing calls".
+//
+// `docs/reference/db.md` promised creators a weekly cron for this in the
+// present tense. That section is deleted with the code.
 
 // INSERT-time auto-population of platform system fields
 // (`id`, `created_by`, `updated_by`). Same visibility pattern as the

@@ -447,13 +447,18 @@ prod() {
 # INSIDE a file. It still could not see a gate one directory up, on the parent's
 # `mod` line - and a per-file scan structurally cannot. So `crud/mask_drift.rs`
 # contributed SIX edge rows, including one of the eight `ENGINE -> SQLITE`
-# down-edges, while its sole declaration is
+# down-edges, while its sole declaration was
 #
-#     crud/mod.rs:90  #[cfg(any(test, feature = "test-helpers"))]
-#     crud/mod.rs:91  pub mod mask_drift;
+#     crud/mod.rs  #[cfg(any(test, feature = "test-helpers"))]
+#     crud/mod.rs  pub mod mask_drift;
 #
-# i.e. it is in no production build at all. The true production count for that
-# cycle is 7 down, not 8.
+# i.e. it was in no production build at all. The true production count for that
+# cycle was 7 down, not 8.
+#
+# That file was DELETED on 2026-09-03, so it is history rather than a live
+# example; `transaction/probe.rs` and `auth/util.rs` are the modules this rule
+# still excludes. The rule is unchanged - the deletion removes a case, not the
+# need for the check.
 #
 # THIS MATTERS BEYOND ONE FILE: the header promises the count is a FLOOR. For
 # UP-edges it is. For DOWN-edges it was not - the census could OVER-count, and a

@@ -170,8 +170,11 @@ pub fn cache_schema_for_deploy_for_tests(
 
 // Test-only: `tracing-subscriber` capture layer for warn/error-shape contract
 // tests. It moved here with the engine, and had to: every one of its six call
-// sites is an engine file (`crud/{mask_drift,read_pipeline,unmask}.rs`), and
-// after the cut `zeroship-plugin-db` had none left.
+// sites was an engine file (`crud/{mask_drift,read_pipeline,unmask}.rs`), and
+// after the cut `zeroship-plugin-db` had none left. `crud/mask_drift.rs` was
+// deleted on 2026-09-03 (see the epitaph in `crud/mod.rs`); it used
+// `unit_backend` rather than `capture`, so the capture layer's own reach is
+// unchanged by that deletion.
 //
 // Gate note: `cfg(test)` only (NOT `any(test, feature = "test-helpers")`)
 // because `tracing-subscriber` is a `[dev-dependencies]` entry - it is

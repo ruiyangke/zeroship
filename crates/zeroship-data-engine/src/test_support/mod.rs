@@ -279,7 +279,8 @@ where
 /// which makes the compiler impose `let (_dir, backend) = ...` and drop the
 /// backend first. It re-binds every call site, so it is not done here: the two
 /// sites in `crud/read_pipeline.rs` drop explicitly instead, and the sites in
-/// `crud/unmask.rs` and `crud/mask_drift.rs` still rely on scope exit.
+/// `crud/unmask.rs` still rely on scope exit. `crud/mask_drift.rs` was the
+/// other scope-exit caller and was deleted on 2026-09-03.
 ///
 /// # Panics
 ///

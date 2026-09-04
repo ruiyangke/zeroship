@@ -1581,34 +1581,13 @@ await defineMaskPolicy(env.db, {
 Policy is keyed by app id — app A's policy never leaks to app B's
 isolate. Two policies under the same app id replace, never merge.
 
-### Drift detection
-
-A weekly per-app cron samples 1% of rows per masked column,
-recomputes the mask from the live ciphertext, and writes a row to
-`__zeroship_audit_mask_drift` if the stored `<col>_masked` doesn't
-match. P6+ surfaces drift counts to the operator dashboard; until
-then, query the table directly:
-
-```sql
-SELECT collection, column_name, row_pk, stored_masked, expected_masked
-  FROM "<app_id>".__zeroship_audit_mask_drift
-  ORDER BY created_at DESC
-  LIMIT 100;
-```
-
-A persistent drift means a `.mask({ kind })` change landed without
-the row being rewritten — usually that's a P5.5-PR-6b migration
-that hasn't finished. The drift row carries enough context to
-re-run the rewrite cron for the affected slice.
-
 ### Audit tables
 
 | Table                              | Written by                          |
 |------------------------------------|-------------------------------------|
 | `__zeroship_audit_unmask`          | Every `.unmask()` call (granted or denied). |
-| `__zeroship_audit_mask_drift`      | Drift detection cron, on mismatch.  |
 
-Both tables live in the per-app schema; standard isolation rules
+This table lives in the per-app schema; standard isolation rules
 apply (`SELECT * FROM "<app>".__zeroship_audit_unmask`).
 
 **The unmask audit row is written OUTSIDE your transaction, on purpose.**

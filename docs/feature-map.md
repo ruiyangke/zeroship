@@ -215,7 +215,6 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Field masking (.mask() + MaskedValue) | 🟢 | `.mask({ kind, classification })` | `crates/zeroship-data-engine/src/crud/mask_pass.rs`, `v8_classes/masked_value.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr1-mask-builder-and-masked-value.test.ts` | 8 kinds × 6 classifications; __zsmask__ sentinel. |
 | MaskedValue.unmask() / bulkUnmask() | 🟢 | `MaskedValue.unmask(opts)` / `Collection.bulkUnmask(...)` | `crates/zeroship-data-engine/src/crud/unmask.rs`, `sdks/db/src/collection/masking.ts` | `docs/reference/db.md` | `sdks/db/tests/p55-pr7-per-query-unmask.test.ts` | Atomic; every call audited. |
 | defineMaskPolicy() | 🟢 | `import { defineMaskPolicy } from '@zeroship/db'` | `sdks/db/src/policy.ts`, `crates/zeroship-data-engine/src/crud/mask_policy.rs` | `docs/reference/db.md` | `sdks/db/tests/p55-pr5-define-mask-policy.test.ts` | Keyed by app_id; replace not merge. |
-| Mask drift detection cron | 🟡 | internal (no JS surface) | `crates/zeroship-data-engine/src/crud/mask_drift.rs` | `docs/reference/db.md` | — | Test-only cfg; cron scheduling not wired. |
 | Mask/encryption backfill pipeline | 🟡 | internal (DDL apply) | the migration engine (`crates/zeroship-migrate-core/src/schema/diff.rs`, `MaskBackfill`) | — | — | PG only; SQLite returns backend_unsupported. |
 | Data backfill migrations | ⚫ | none (superseded) | — | `docs/reference/migrate-op-dsl.md` | — | `@zeroship/migrations` and plugin-db's `migrations.rs` were REMOVED: the online-backfill orchestrator was redundant with the migration engine's own batched/cursor/resumable `.backfill()` op (`packages/zero-migrate/src/types.ts`, `BackfillArgs`), which is now the only way to backfill data. |
 | Migration sweeper (orphan reaper) | ⚫ | none | — | — | — | Deleted with `@zeroship/migrations`; there is no orphan-migration state left to reap. |
@@ -225,7 +224,6 @@ provides the native V8 surface; the TS SDK (`@zeroship/db`) wraps it. Both Postg
 | Replication slot/publication lifecycle | green | automatic on first subscription | `crates/zeroship-plugin-db/src/cdc_lifecycle.rs`, `replication.rs` | `docs/reference/db.md` | `crates/zeroship-plugin-db/tests/distributed_live.rs` | Shared app publication; one slot per subscribing worker; last-close teardown. Archive retains the worker feed and does not request CDC teardown. |
 | Migration event journal (__zeroship_schema_migrations) | &#x1F7E2; | internal (SQL-readable) | `crates/zeroship-migrate-postgres/src/backend/journal_sql.rs` | &mdash; | &mdash; | Admin-written append-only events in the per-app schema. |
 | Unmask audit log (__zeroship_audit_unmask) | 🟢 | internal (SQL-readable) | `crates/zeroship-data-engine/src/crud/unmask.rs` | `docs/reference/db.md` | — | Granted + denied audited. |
-| Mask drift audit log (__zeroship_audit_mask_drift) | 🟡 | internal (SQL-readable) | `crates/zeroship-data-engine/src/crud/mask_drift.rs` | `docs/reference/db.md` | — | Drift cron not scheduled. |
 | App namespace drop (drop_namespace) | &#x1F7E2; | internal library (no app-archive caller) | `crates/zeroship-plugin-db/src/drop_namespace.rs` | &mdash; | &mdash; | DROP SCHEMA CASCADE; PG-only. Archive never calls it; privileged database teardown belongs to zeroship-migrate-server. |
 | Dual-backend support (PG + SQLite) | 🟢 | internal (`DbService::new`) | `crates/zeroship-plugin-db/src/service.rs` | `docs/reference/sqlite-divergences.md` | `crates/zeroship-plugin-db/tests/sqlite_integration.rs` | URL-driven; the backend is selected once at composition. SQLite dev/test only. |
 | Per-app auth schema (PG roles, sessions) | 🟢 | internal (bootstrap) | `crates/zeroship-plugin-db/src/auth/` | — | — | PG-only; SQLite has shim. |
@@ -1176,7 +1174,7 @@ surfaces have no `docs/reference/` page. The actionable list, grouped by area:
   build↔runtime divergences are undocumented.
 
 **env.db:** CDC broker / `openSubscription`, WAL replication consumer, replication slot lifecycle,
-mask-drift cron, mask/encryption backfill DDL ops, `__zeroship_migrations` audit table, migration
+mask/encryption backfill DDL ops, `__zeroship_migrations` audit table, migration
 sweeper, `drop_namespace`, per-app PG auth bootstrap, DataLoader, encrypted-field filter fence,
 `init_pool_async` lazy-init contract. (`sqlite-divergences.md` omits auth/session bootstrap and
 the SQLite mask-migration limitation.)

@@ -82,13 +82,22 @@ pub use postgres::PostgresBackend;
 /// used `pool_handle()` until 2026-09-01 and was the single ungated production
 /// path in this crate reaching a tenant schema unfenced.
 ///
-/// It was unconditional until now, which made the escape hatch DISCOURAGED
-/// rather than IMPOSSIBLE. Its only four callers are in `crud::mask_drift`,
-/// which is itself `#[cfg(any(test, feature = "test-helpers"))]`, so gating the
-/// trait removes it from release builds and changes no behaviour. Three of
-/// those callers issue DDL the per-app role is not granted and so cannot be
-/// routed through the roled funnel - which is why the accessor is GATED here
-/// rather than deleted.
+/// It was unconditional until 2026-09-01, which made the escape hatch
+/// DISCOURAGED rather than IMPOSSIBLE. Its only four callers were in
+/// `crud::mask_drift`, which was itself `#[cfg(any(test, feature =
+/// "test-helpers"))]`, so gating the trait removed it from release builds and
+/// changed no behaviour.
+///
+/// **THAT MODULE WAS DELETED ON 2026-09-03, SO THIS TRAIT NOW HAS NO CALLERS
+/// AT ALL** - what remains is this definition, the `impl` in `postgres.rs`, and
+/// two `assert_impl`-style witnesses that only prove the impl exists. The
+/// reason it was gated rather than deleted was that three of those four callers
+/// issued DDL the per-app role is not granted, so they could not be routed
+/// through the roled funnel; with the callers gone, that reason is gone too.
+/// Deleting the trait is the open follow-up, tracked in
+/// `docs/proposals/2026-08-28-app-database-decoupling.md`. It is left standing
+/// here only because removing a role-fence escape hatch is a decision worth
+/// making on its own rather than as a side effect of deleting a drift checker.
 ///
 /// If a production path ever needs the pool, that is a design question, not a
 /// feature-flag question: route it through `PostgresBackend`'s roled entry

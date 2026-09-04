@@ -476,9 +476,11 @@ role fence is applied by two functions
 `crates/zeroship-data-postgres/src/postgres.rs`, `apply_per_app_role`); anything issuing SQL
 outside them is unfenced. That hole is closed TODAY, and only because
 `PgSqlExecutor::pool_handle` is `#[cfg(any(test, feature = "test-helpers"))]`
-(`crates/zeroship-data-postgres/src/postgres.rs:513-515`) - its remaining callers are in
-`crates/zeroship-data-engine/src/crud/mask_drift.rs`, itself test-gated with zero production
-callers. Do not ungate it. Under a private database the blast radius of one unfenced statement
+(`crates/zeroship-data-postgres/src/postgres.rs`, `impl PgSqlExecutor for PostgresBackend`).
+Its last four callers were in `crud/mask_drift.rs`, deleted 2026-09-03, so **it now has zero
+callers of any kind** - only the trait definition, the impl, and two `assert_impl` type-level
+witnesses remain. Do not ungate it; deleting the trait outright is now the cheaper option and is
+the recommended follow-up. Under a private database the blast radius of one unfenced statement
 was a single app's schema; under sharing it is every database in the datastore, and
 `WITH INHERIT FALSE` only converts such a statement from succeeding to failing at runtime. The
 compile-time route is what stops the site existing.

@@ -126,12 +126,16 @@ fi
 #
 # THE TWO NUMBERS DIFFER ON PURPOSE, and did not until 2026-09-02. The census
 # reports SHIPPED surface and now excludes items in test-gated submodules
-# (transaction/probe.rs, crud/mask_drift.rs, auth/util.rs - 35 items), because
-# a module no shipped binary compiles is not API the split publishes. This gate
-# counts them, because it runs UNDER `--features test-helpers`, where those
-# modules very much do compile and the lint very much can fire inside them.
-# Census 147 shipped + 35 gated = 182 here. A divergence of any other size is
-# worth reading rather than reconciling automatically.
+# (transaction/probe.rs, auth/util.rs - and crud/mask_drift.rs until it was
+# deleted on 2026-09-03), because a module no shipped binary compiles is not API
+# the split publishes. This gate counts them, because it runs UNDER
+# `--features test-helpers`, where those modules very much do compile and the
+# lint very much can fire inside them.
+#
+# The divergence was 35 items (census 147 shipped + 35 gated = 182 here) when
+# mask_drift still contributed to it. That module is gone, so re-derive the two
+# numbers rather than expecting 35; what the note is for is that a divergence
+# exists BY DESIGN and is worth reading rather than reconciling automatically.
 # ---------------------------------------------------------------------------
 # Brace-tracking, not "stop at the first #[cfg(test)] mod". That older rule
 # assumed a file's test module is last; five files here declare an early named

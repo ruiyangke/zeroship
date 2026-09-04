@@ -79,7 +79,7 @@ serde_json = { workspace = true }
 # On-disk SQLite fixtures for the exec, transaction and mask-policy suites.
 tempfile = { workspace = true }
 # `src/test_support/` - the capture layer the warn/error-shape contract tests in
-# `crud/{mask_drift,read_pipeline,unmask}.rs` assert against. DEV-only on
+# `crud/{read_pipeline,unmask}.rs` assert against. DEV-only on
 # purpose, which is why `test_support` is gated `cfg(test)` and not on
 # `test-helpers`: a consumer compiling this lib with the feature is doing
 # non-test compilation and would not have this crate.

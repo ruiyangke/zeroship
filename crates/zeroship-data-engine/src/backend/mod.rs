@@ -48,7 +48,11 @@
 //!
 //! A PG-only extension trait, [`PgSqlExecutor`], exposes `pool_handle()`
 //! so free-function helpers can reach `&compio_postgres::Pool` without
-//! naming the concrete backend.
+//! naming the concrete backend. **It has no callers as of 2026-09-03** - the
+//! last four were in `crud/mask_drift.rs`, deleted that day - and it is
+//! `test-helpers`-gated at its definition because a bare pool checkout skips
+//! the per-app role fence. Deleting it is the open follow-up; do not reach for
+//! it as a way around the fence.
 //!
 //! **No capability on this surface emits DDL, and that is the point.**
 //! `IndexBuilder` (`CREATE INDEX CONCURRENTLY` with retry recovery),
