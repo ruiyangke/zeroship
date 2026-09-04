@@ -29,15 +29,33 @@ scan_code_arm() {
   local pattern="$3"
   shift 3
   local -a files=("$@")
-  local findings status finding_count sample
+  local raw findings status finding_count sample
 
   if ! gate_arm "$arm" "${#files[@]}" "$floor"; then
     FAILURES=$((FAILURES + 1))
     return
   fi
 
-  findings="$(LC_ALL=C grep -HinEi -- "$pattern" "${files[@]}")"
+  raw="$(LC_ALL=C grep -HinEi -- "$pattern" "${files[@]}")"
   status=$?
+  # DROP COMMENT LINES, the way the migration arm below already does.
+  #
+  # The pattern is a SPELLING - `fts5`, `tsvector`, `full-text` - and a spelling
+  # reads identically in a comment RECORDING the deletion and in code REBUILDING
+  # it. That is the same discriminator error `tests_do_not_create_databases_gate`
+  # had with `CREATE DATABASE` in MySQL. The migration arm was given this filter
+  # because its crates hold the removal record; the split is not real, because
+  # any crate may explain a deletion in prose. Measured 2026-09-04, once the
+  # corpus above stopped exceeding ARG_MAX: 4 findings, all `//!` module docs in
+  # `zeroship-data-query-builder` (search.rs:7,9,10 and lib.rs:60) saying the
+  # feature WAS deleted. That crate was renamed in after this gate was written,
+  # so the gate had never seen it.
+  #
+  # The cost, stated: a live producer written on the same line as a trailing
+  # comment is not caught, and neither is one inside a `/* ... */` block whose
+  # continuation lines start with something else. This is a whole-line filter.
+  findings="$(printf '%s\n' "$raw" \
+    | LC_ALL=C grep -Ev '^[^:]+:[0-9]+:[[:space:]]*(//|/\*|\*|#!?\[)' || true)"
   if [ "$status" -gt 1 ]; then
     fail "$arm scan failed with grep status $status"
   elif [ -n "$findings" ]; then
@@ -54,14 +72,24 @@ scan_code_arm() {
 # retain the removal record that explains why no producer exists. Each live
 # source root has its own floor so losing SDK or example coverage cannot pass on
 # the crate count alone.
+#
+# `git ls-files`, NOT `find`, AND THE DIFFERENCE WAS 60,411 FILES. Tracked-ness
+# is what "our source" means; being on disk is not. Measured 2026-09-04, `find
+# crates -type f` with these filters returned 61,534 paths, of which 60,411 were
+# `crates/zeroship-runtime/tests/wpt/**` - a shallow clone this repo gitignores
+# at .gitignore:43 and does not own. The argv came to 7.4 MB against an ARG_MAX
+# of 2.1 MB, so grep exited 126 without reading a byte, and this arm declared
+# `examined=61534` over a scan that ruled on NOTHING. That is the gate_arms
+# contract inverted: the pre-filter total, published as the number the arm ruled
+# on, on the one run where it ruled on zero. The tracked corpus is 1,093 files.
 mapfile -d '' -t CRATE_FILES < <(
-  find crates -type f \( "${SOURCE_NAMES[@]}" \) \
-    ! -path '*/node_modules/*' \
-    ! -path '*/dist/*' \
-    ! -path 'crates/zeroship-runtime/tests/fixtures/*' \
-    ! -path 'crates/zeroship-migrate/*' \
-    ! -path 'crates/zeroship-migrate-*/*' \
-    -print0 | LC_ALL=C sort -z
+  git ls-files -z -- 'crates/**' \
+    | tr '\0' '\n' \
+    | grep -E '\.(rs|ts|tsx|js|jsx|mjs|cjs|mts|cts)$' \
+    | grep -vE '/(node_modules|dist)/' \
+    | grep -vE '^crates/zeroship-runtime/tests/fixtures/' \
+    | grep -vE '^crates/zeroship-migrate(-[A-Za-z0-9_-]+)?/' \
+    | LC_ALL=C sort | tr '\n' '\0'
 )
 scan_code_arm live_crate_code "900" "$CODE_PATTERN" "${CRATE_FILES[@]}"
 
