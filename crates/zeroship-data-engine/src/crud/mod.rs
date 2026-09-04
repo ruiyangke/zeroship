@@ -53,33 +53,45 @@ use crate::tx_route::TxRoute;
 // CRUD round-trip test (the orchestrator's CRUD entry today is PG-only,
 // so the SQLite e2e gate composes the helpers itself).
 #[cfg(not(feature = "test-helpers"))]
-pub mod encryption_pass;
+pub(crate) mod encryption_pass;
 #[cfg(feature = "test-helpers")]
 pub mod encryption_pass;
 
 // Sibling-column-based mask transforms + dual-write CRUD pass.
-// Same visibility pattern as `encryption_pass` so integration tests
-// can reach the helpers when `test-helpers` is on.
-#[cfg(not(feature = "test-helpers"))]
-pub mod mask_pass;
-#[cfg(feature = "test-helpers")]
+//
+// Unconditionally `pub`, unlike the sibling passes below: measured
+// 2026-09-04, `zeroship-plugin-db`'s `v8_classes/masked_value.rs` calls
+// `mask_pass::mask_sentinel_signature()` from the DB-7 fence that refuses an
+// app-JS-fabricated `{sentinel: "__zsmask__"}` object, and that call is in
+// production code (`v8_classes/mod.rs` declares `masked_value` `pub mod`
+// with no cfg), not behind `test-helpers`. Narrowing this to `pub(crate)` in
+// the default-feature arm makes `cargo check -p zeroship-plugin-db --lib`
+// fail with E0603 - confirmed by applying it and reading the error.
 pub mod mask_pass;
 
 // `unmask()` RPC dispatch + audit row writer.
-// Same visibility pattern as the sibling passes so integration tests
-// can exercise `dispatch_unmask` directly when `test-helpers` is on.
-#[cfg(not(feature = "test-helpers"))]
-pub mod unmask;
-#[cfg(feature = "test-helpers")]
+//
+// Unconditionally `pub`: measured 2026-09-04, `zeroship-plugin-db`'s
+// `v8_classes/dispatch.rs` (`dispatch_unmask_field` / `dispatch_bulk_unmask_field`,
+// the shipped `collection.unmaskField` / `.bulkUnmask` bridge) and
+// `v8_classes/masked_value.rs` (`MaskedValue::unmask`, the DB-3
+// `sanitize_app_actor` fence) both import from `crud::unmask` in
+// production code, not behind `test-helpers` - neither file is
+// `#[cfg(test)]` in `v8_classes/mod.rs`. Narrowing this to `pub(crate)` in
+// the default-feature arm makes `cargo check -p zeroship-plugin-db --lib`
+// fail with E0603 (five sites) - confirmed by applying it and reading the
+// error.
 pub mod unmask;
 
 // `defineMaskPolicy()` storage + dispatcher + cache.
-// Same visibility pattern: integration tests reach into the helpers
-// via the `test-helpers` gate to drive `dispatch_set_mask_policy`
-// directly without standing up V8.
-#[cfg(not(feature = "test-helpers"))]
-pub mod mask_policy;
-#[cfg(feature = "test-helpers")]
+//
+// Unconditionally `pub`: measured 2026-09-04, `zeroship-plugin-db`'s
+// `v8_classes/dispatch.rs` imports `mask_policy::dispatch_set_mask_policy`
+// for `dispatch_set_mask_policy_field` (the shipped `__platform.setMaskPolicy`
+// bridge), and that file is unconditional production code - not behind
+// `test-helpers`. Narrowing this to `pub(crate)` in the default-feature arm
+// makes `cargo check -p zeroship-plugin-db --lib` fail with E0603 -
+// confirmed by applying it and reading the error.
 pub mod mask_policy;
 
 
@@ -108,7 +120,7 @@ pub mod mask_policy;
 // a write whose descriptor dropped a mask or an encryption block the database
 // still records. Same visibility pattern as the sibling passes.
 #[cfg(not(feature = "test-helpers"))]
-pub mod protection_floor;
+pub(crate) mod protection_floor;
 #[cfg(feature = "test-helpers")]
 pub mod protection_floor;
 
@@ -178,7 +190,7 @@ pub mod protection_floor;
 // `apply_system_fields_on_insert*` directly under the `test-helpers`
 // gate.
 #[cfg(not(feature = "test-helpers"))]
-pub mod system_fields_pass;
+pub(crate) mod system_fields_pass;
 #[cfg(feature = "test-helpers")]
 pub mod system_fields_pass;
 
