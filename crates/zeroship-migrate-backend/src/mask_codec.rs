@@ -20,39 +20,30 @@ use crate::descriptors::EncryptionMode;
 use crate::mask_meta::{Classification, EncryptionMeta, MaskKind, WrappedType};
 use crate::schema_error::MaskSentinelError;
 
-/// The standalone-default encryption-sentinel prefix. The persisted sentinel is
-/// a wire contract co-written by any other engine writing into the same schema,
-/// so the prefix is a configurable knob ([`SentinelPrefix`]) rather than a
-/// hard-coded brand: a host that must interoperate with a legacy writer injects
-/// that writer's prefix (e.g. `"zsenc:"`), while the standalone default carries
-/// this crate's own brand so no stranger's `pg_dump` carries a foreign one.
-pub const DEFAULT_ENC_SENTINEL_PREFIX: &str = "zero-migrate:enc:";
+/// The encryption-sentinel prefix this engine persists.
+///
+/// # Why this is a constant and not a knob
+///
+/// It was a knob until 2026-09-04: a `SentinelPrefix` struct plus
+/// `build_*_with` / `parse_*_with` pairs, so "a host that must interoperate with
+/// a legacy writer" could inject that writer's prefix. Nothing ever injected
+/// one - `SentinelPrefix` occurred ten times in the whole tree, all inside its
+/// own defining file - and the reader that was supposed to be interoperated
+/// with (`zeroship-schema`'s copy of this codec, which the data plane uses to
+/// read the live catalog) simply spelled the sentinel differently and never
+/// learned this one.
+///
+/// That is what the knob cost. `zeroship_data_engine::crud::protection_floor`
+/// refuses a write whose descriptor dropped a protection the catalog still
+/// records; on every table THIS engine created it introspected, matched no
+/// sentinel, concluded nothing was protected, and permitted the downgrade. The
+/// spellings are converged now, and the knob is gone rather than wired, because
+/// a per-host prefix is precisely the shape that lets them diverge again -
+/// silently, and in the fail-open direction.
+pub const ENC_SENTINEL_PREFIX: &str = "zero-migrate:enc:";
 
-/// The standalone-default mask-sentinel prefix. See [`DEFAULT_ENC_SENTINEL_PREFIX`].
-pub const DEFAULT_MASK_SENTINEL_PREFIX: &str = "zero-migrate:mask:";
-
-/// The persisted enc/mask sentinel prefixes - an engine-config knob so a host
-/// can inject a legacy writer's prefix while the standalone default carries this
-/// crate's own brand. Both codec directions
-/// ([`build_encryption_sentinel_with`] / [`parse_encryption_sentinel_with`] and
-/// the mask peers) take this so build and parse stay symmetric under a
-/// non-default prefix.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct SentinelPrefix {
-    /// The encryption-sentinel prefix (`build`/`parse` prepend/strip it).
-    pub enc: String,
-    /// The mask-sentinel prefix.
-    pub mask: String,
-}
-
-impl Default for SentinelPrefix {
-    fn default() -> Self {
-        Self {
-            enc: DEFAULT_ENC_SENTINEL_PREFIX.to_string(),
-            mask: DEFAULT_MASK_SENTINEL_PREFIX.to_string(),
-        }
-    }
-}
+/// The mask-sentinel prefix this engine persists. See [`ENC_SENTINEL_PREFIX`].
+pub const MASK_SENTINEL_PREFIX: &str = "zero-migrate:mask:";
 
 /// The canonical wire string for an [`EncryptionMode`] in a
 /// `zero-migrate:enc:` sentinel. `randomised` is the canonical spelling (the US
@@ -117,16 +108,8 @@ fn wrapped_type_from_sql(s: &str) -> Option<WrappedType> {
 /// [`parse_encryption_sentinel`].
 #[must_use]
 pub fn build_encryption_sentinel(meta: &EncryptionMeta) -> String {
-    build_encryption_sentinel_with(DEFAULT_ENC_SENTINEL_PREFIX, meta)
-}
-
-/// [`build_encryption_sentinel`] with a host-injected prefix (see
-/// [`SentinelPrefix`]). Load-bearing for interop with a legacy writer that
-/// persisted a different prefix in the same schema.
-#[must_use]
-pub fn build_encryption_sentinel_with(prefix: &str, meta: &EncryptionMeta) -> String {
     format!(
-        "{prefix}{}:{}:{}",
+        "{ENC_SENTINEL_PREFIX}{}:{}:{}",
         encryption_mode_as_sql(meta.mode),
         meta.key_id,
         wrapped_type_as_sql(meta.wraps),
@@ -148,15 +131,6 @@ pub fn build_encryption_sentinel_with(prefix: &str, meta: &EncryptionMeta) -> St
 /// future-version sentinel produces a typed error rather than silently routing
 /// through a default codec (the fail-closed contract).
 pub fn parse_encryption_sentinel(s: &str) -> Result<EncryptionMeta, MaskSentinelError> {
-    parse_encryption_sentinel_with(DEFAULT_ENC_SENTINEL_PREFIX, s)
-}
-
-/// [`parse_encryption_sentinel`] with a host-injected prefix (see
-/// [`SentinelPrefix`]). The build and parse sides MUST share a prefix.
-pub fn parse_encryption_sentinel_with(
-    prefix: &str,
-    s: &str,
-) -> Result<EncryptionMeta, MaskSentinelError> {
     // Strip an optional inline `/* ... */` wrapper (the SQLite form) so both
     // the PG comment body and the SQLite inline comment parse identically.
     let trimmed = s.trim();
@@ -165,15 +139,16 @@ pub fn parse_encryption_sentinel_with(
         .and_then(|rest| rest.strip_suffix("*/"))
         .map_or(trimmed, str::trim);
 
-    let rest = body.strip_prefix(prefix).ok_or_else(|| {
+    let rest = body.strip_prefix(ENC_SENTINEL_PREFIX).ok_or_else(|| {
         MaskSentinelError::new(format!(
-            "enc_sentinel_malformed: expected {prefix:?} prefix, got {s:?}"
+            "enc_sentinel_malformed: expected {ENC_SENTINEL_PREFIX:?} prefix, got {s:?}"
         ))
     })?;
     let parts: Vec<&str> = rest.split(':').collect();
     if parts.len() != 3 {
         return Err(MaskSentinelError::new(format!(
-            "enc_sentinel_malformed: expected zero-migrate:enc:<mode>:<keyId>:<wraps>, got {s:?}"
+            "enc_sentinel_malformed: expected {ENC_SENTINEL_PREFIX}<mode>:<keyId>:<wraps>, \
+             got {s:?}"
         )));
     }
     let mode = encryption_mode_from_sql(parts[0]).ok_or_else(|| {
@@ -212,18 +187,8 @@ pub fn parse_encryption_sentinel_with(
 /// Format: `zero-migrate:mask:kind=<kind>,classification=<class>`.
 #[must_use]
 pub fn build_mask_sentinel(kind: MaskKind, classification: Classification) -> String {
-    build_mask_sentinel_with(DEFAULT_MASK_SENTINEL_PREFIX, kind, classification)
-}
-
-/// [`build_mask_sentinel`] with a host-injected prefix (see [`SentinelPrefix`]).
-#[must_use]
-pub fn build_mask_sentinel_with(
-    prefix: &str,
-    kind: MaskKind,
-    classification: Classification,
-) -> String {
     format!(
-        "{prefix}kind={},classification={}",
+        "{MASK_SENTINEL_PREFIX}kind={},classification={}",
         kind.as_sql(),
         classification.as_sql(),
     )
@@ -239,17 +204,9 @@ pub fn build_mask_sentinel_with(
 /// into `DbError::Internal { message }` verbatim, so the typed error the
 /// introspector surfaces (with the column name appended) is unchanged.
 pub fn parse_mask_sentinel(s: &str) -> Result<(MaskKind, Classification), MaskSentinelError> {
-    parse_mask_sentinel_with(DEFAULT_MASK_SENTINEL_PREFIX, s)
-}
-
-/// [`parse_mask_sentinel`] with a host-injected prefix (see [`SentinelPrefix`]).
-pub fn parse_mask_sentinel_with(
-    prefix: &str,
-    s: &str,
-) -> Result<(MaskKind, Classification), MaskSentinelError> {
-    let body = s.strip_prefix(prefix).ok_or_else(|| {
+    let body = s.strip_prefix(MASK_SENTINEL_PREFIX).ok_or_else(|| {
         MaskSentinelError::new(format!(
-            "mask_sentinel_malformed: expected {prefix:?} prefix, got {s:?}"
+            "mask_sentinel_malformed: expected {MASK_SENTINEL_PREFIX:?} prefix, got {s:?}"
         ))
     })?;
     let mut kind_str: Option<&str> = None;
@@ -291,42 +248,21 @@ pub fn parse_mask_sentinel_with(
 mod tests {
     use super::*;
 
-    // JUSTIFIED grep-gate exception: this is the ONE place the retired `zsenc:` /
-    // `__zsmask:` prefixes appear in code - deliberately, to prove the
-    // `SentinelPrefix` knob lets a host inject a legacy writer's prefix so the
-    // build and parse sides round-trip against a foreign brand. The STANDALONE
-    // DEFAULT (asserted in every other test here) is the `zero-migrate:` brand;
-    // the legacy strings live only inside this compat test, never in a default.
+    /// The persisted prefixes, pinned as literals.
+    ///
+    /// Not a tautology over the constants: every OTHER assertion in this module
+    /// spells the sentinel out, so renaming a constant alone would go red there
+    /// too - but only here does the failure message say what the wire is. The
+    /// peer that must agree is `zeroship_schema::mask_codec`'s pair of the same
+    /// names, which the data plane reads the live catalog with. Nothing in the
+    /// type system relates them (their `MaskKind`/`Classification` types are
+    /// separate), so the binding is behavioural and lives in
+    /// `zeroship-plugin-db`'s `mask_flip.rs`: it builds a table with THIS
+    /// emitter and reads it back with that codec.
     #[test]
-    fn sentinel_prefix_knob_accepts_an_injected_legacy_prefix() {
-        // Default carries this crate's own brand - no foreign string in the default.
-        assert_eq!(SentinelPrefix::default().enc, "zero-migrate:enc:");
-        assert_eq!(SentinelPrefix::default().mask, "zero-migrate:mask:");
-
-        // A host injecting a legacy writer's prefix round-trips from build to parse.
-        let legacy_enc = "zsenc:"; // legacy interop prefix - compat-only
-        let meta = EncryptionMeta {
-            mode: EncryptionMode::Randomised,
-            key_id: "default".to_string(),
-            wraps: WrappedType::String,
-        };
-        let s = build_encryption_sentinel_with(legacy_enc, &meta);
-        assert_eq!(s, "zsenc:randomised:default:string");
-        assert_eq!(
-            parse_encryption_sentinel_with(legacy_enc, &s).unwrap(),
-            meta
-        );
-        // The DEFAULT parser rejects the foreign prefix (fail-closed).
-        assert!(parse_encryption_sentinel(&s).is_err());
-
-        let legacy_mask = "__zsmask:"; // legacy interop prefix - compat-only
-        let m = build_mask_sentinel_with(legacy_mask, MaskKind::Last4, Classification::Spi);
-        assert_eq!(m, "__zsmask:kind=last4,classification=spi");
-        assert_eq!(
-            parse_mask_sentinel_with(legacy_mask, &m).unwrap(),
-            (MaskKind::Last4, Classification::Spi)
-        );
-        assert!(parse_mask_sentinel(&m).is_err());
+    fn the_persisted_sentinel_prefixes_are_the_zero_migrate_brand() {
+        assert_eq!(ENC_SENTINEL_PREFIX, "zero-migrate:enc:");
+        assert_eq!(MASK_SENTINEL_PREFIX, "zero-migrate:mask:");
     }
 
     #[test]

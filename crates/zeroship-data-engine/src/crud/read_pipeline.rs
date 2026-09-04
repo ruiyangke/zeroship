@@ -113,7 +113,7 @@ pub async fn apply(
     // The runtime data-access metadata (column types, encrypted
     // mode/keyId/wraps, mask kind/classification) comes from THE RUNTIME
     // DESCRIPTOR this isolate was built from. It used to come from a live
-    // catalog read plus the migration engine's `zsenc:` / `__zsmask:` column
+    // catalog read plus the migration engine's `zero-migrate:enc:` / `zero-migrate:mask:` column
     // comments - a round trip through the same DSL the descriptor is folded
     // from, which recovered a strict subset of it and cost one whole-schema
     // catalog walk per cold collection.

@@ -1177,7 +1177,7 @@ pub fn build_create_table_with_fks(
 ///   SQLite `<schema>.<index_name> ON <table>`.
 /// - whether `COMMENT ON COLUMN` mask sentinels (PG only) are
 ///   appended; the SQLite arm drops them (the inline
-///   `/* __zsmask:... */` comment on the sibling column is the
+///   `/* zero-migrate:mask:... */` comment on the sibling column is the
 ///   SQLite-side wire).
 ///
 /// The `id` and closed `ref` comparison domains are bytewise on both
@@ -1341,7 +1341,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
             // The field's own column is the only storage site and holds the
             // real value, exactly as an unmasked column does.
             if raw_column_for_field(field, def).is_some() {
-                // Attach a `/* __zsmask:kind=…, classification=… */` inline
+                // Attach a `/* zero-migrate:mask:kind=…, classification=… */` inline
                 // comment to the MASKED column's DDL so the SQLite
                 // introspector can recover the mask metadata from
                 // `sqlite_master.sql`. PG ignores SQL comments at parse time,
@@ -1460,7 +1460,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     // simple-query protocol) and by SQLite's `sqlite3_exec`. On the
     // SQLite arm `COMMENT ON COLUMN` is a syntax error — the
     // dialect-routing skips the `COMMENT ON COLUMN` append when
-    // `dialect == Sqlite`; the inline `/* __zsmask:... */` comment
+    // `dialect == Sqlite`; the inline `/* zero-migrate:mask:... */` comment
     // baked into the CREATE TABLE body is the SQLite-side wire (see
     // `mask_sentinel_for_field`).
     let create_table = format!(
@@ -1490,7 +1490,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     Ok(statements)
 }
 
-/// Render the `COMMENT ON COLUMN … 'zsenc:<mode>:<keyId>:<wraps>'`
+/// Render the `COMMENT ON COLUMN … 'zero-migrate:enc:<mode>:<keyId>:<wraps>'`
 /// statements for every `t.encrypted(...)` column in `schema` (PG only). The
 /// comment BODY is built by the shared codec
 /// ([`crate::mask_codec::build_encryption_sentinel`]) so it is byte-identical to
@@ -2308,7 +2308,7 @@ pub fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
 ///
 /// Only the PG arm executes these statements — SQLite doesn't support
 /// `COMMENT ON COLUMN`. The SQLite arm relies on the inline
-/// `/* __zsmask:... */` comment emitted by `build_create_table_with_fks`,
+/// `/* zero-migrate:mask:... */` comment emitted by `build_create_table_with_fks`,
 /// preserved verbatim in `sqlite_master.sql`.
 ///
 /// Returns the empty vector when the schema declares no masked
@@ -2378,11 +2378,11 @@ pub fn build_mask_sentinel_comment_for_field(
     ))
 }
 
-/// Render the inline `/* zsenc:{mode}:{keyId}:{wraps} */`
+/// Render the inline `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */`
 /// encryption sentinel for a field's `t.encrypted({...})` declaration, IFF the
 /// field carries an `encrypted` sub-object. Returns `None` for a plain column.
 ///
-/// This is the SINGLE source of truth for the `zsenc` wire shape — both
+/// This is the SINGLE source of truth for the `zero-migrate:enc` wire shape — both
 /// [`field_to_column_for_dialect`] (the column-DDL emitter that bakes it after
 /// the `BYTEA`/`BLOB` type) and the migration engine's declarative differ (which
 /// appends it to its own snapshot-rendered column) call it, so the sentinel the
@@ -2398,9 +2398,9 @@ pub fn encryption_sentinel_for_field(def: &serde_json::Value) -> Option<String> 
     encryption_sentinel_body_for_field(def).map(|body| format!("/* {body} */"))
 }
 
-/// The bare `zsenc:<mode>:<keyId>:<wraps>` sentinel BODY for a field's
+/// The bare `zero-migrate:enc:<mode>:<keyId>:<wraps>` sentinel BODY for a field's
 /// `t.encrypted({...})` declaration (no `/* */` wrapper, no comment statement),
-/// or `None` for a plain column. The SINGLE source of truth for the `zsenc` wire
+/// or `None` for a plain column. The SINGLE source of truth for the `zero-migrate:enc` wire
 /// grammar: [`encryption_sentinel_for_field`] wraps it in `/* */` for the inline
 /// DDL form, and [`build_encryption_sentinel_comments`] wraps it in a
 /// `COMMENT ON COLUMN … '…'` statement for the PG-recoverable form. The runtime
@@ -2428,7 +2428,10 @@ pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<Str
         .get("wraps")
         .and_then(|v| v.as_str())
         .unwrap_or("string");
-    Some(format!("zsenc:{mode_norm}:{key_id}:{wraps}"))
+    Some(format!(
+        "{}{mode_norm}:{key_id}:{wraps}",
+        crate::mask_codec::ENC_SENTINEL_PREFIX
+    ))
 }
 
 /// Convert a field definition to a full column definition for CREATE TABLE.
@@ -2483,7 +2486,7 @@ fn field_to_column_named_for_dialect(
     // out before the INSERT/UPDATE, and the SQL builder casts the
     // base64 parameter back to BYTEA via `decode($N, 'base64')::bytea`.
     //
-    // Emit a `/* zsenc:{mode}:{keyId}:{wraps} */` sentinel
+    // Emit a `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` sentinel
     // comment alongside the column type so the SQLite-arm introspector
     // can regex-recover the encryption metadata from `sqlite_master.sql`.
     // PG ignores SQL comments at parse time (the type is still BYTEA);
@@ -2505,7 +2508,7 @@ fn field_to_column_named_for_dialect(
     let sql_type = ddl_column_type_for_dialect(def, dialect);
     let constraints = def_to_constraints_for_dialect(physical, def, dialect);
     // The sentinel comment (when present) sits between the type and the
-    // constraints so the parsed shape is `"<col>" BYTEA /* zsenc:... */
+    // constraints so the parsed shape is `"<col>" BYTEA /* zero-migrate:enc:... */
     // <constraints>`. PG ignores the comment; SQLite preserves it in
     // `sqlite_master.sql` for the introspector regex.
     format!(
@@ -12376,7 +12379,7 @@ mod tests {
             "expected COMMENT ON COLUMN for the field's own (masked) column: {sql}"
         );
         assert!(
-            sql.contains("'__zsmask:kind=last4,classification=spi'"),
+            sql.contains("'zero-migrate:mask:kind=last4,classification=spi'"),
             "expected sentinel literal: {sql}"
         );
         assert!(
@@ -12388,7 +12391,7 @@ mod tests {
         );
     }
 
-    /// Inline `/* __zsmask:... */` comment rides on the field's OWN
+    /// Inline `/* zero-migrate:mask:... */` comment rides on the field's OWN
     /// (masked) column for SQLite-arm introspection (PG ignores SQL
     /// comments; SQLite preserves them in `sqlite_master.sql`).
     #[test]
@@ -12402,13 +12405,13 @@ mod tests {
         let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
-            sql.contains("\"email\" TEXT /* __zsmask:kind=email,classification=pii */"),
-            "expected inline /* __zsmask:... */ comment on the field's own \
+            sql.contains("\"email\" TEXT /* zero-migrate:mask:kind=email,classification=pii */"),
+            "expected inline /* zero-migrate:mask:... */ comment on the field's own \
              (masked) column: {sql}"
         );
         assert!(
             !sql.contains(&format!(
-                "\"{}\" TEXT /* __zsmask:",
+                "\"{}\" TEXT /* zero-migrate:mask:",
                 raw_column_name("email")
             )),
             "the raw column must never carry the inline mask-sentinel comment: {sql}"
@@ -12432,7 +12435,7 @@ mod tests {
             "kind=none must emit no COMMENT: {sql}"
         );
         assert!(
-            !sql.contains("__zsmask:"),
+            !sql.contains("zero-migrate:mask:"),
             "kind=none must emit no sentinel: {sql}"
         );
     }
@@ -12467,7 +12470,7 @@ mod tests {
             "the raw column must never carry the mask-sentinel comment: {sql}"
         );
         assert!(
-            sql.contains("'__zsmask:kind=last4,classification=spi'"),
+            sql.contains("'zero-migrate:mask:kind=last4,classification=spi'"),
             "sentinel: {sql}"
         );
     }
@@ -13912,10 +13915,10 @@ mod tests {
         assert!(via_stable.contains(r#"CREATE TABLE IF NOT EXISTS "app_demo"."accounts" ("#));
     }
 
-    /// `MainUnqualified` SQLite carries the goodies: the inline `__zsmask:`
+    /// `MainUnqualified` SQLite carries the goodies: the inline `zero-migrate:mask:`
     /// mask sentinel rides on the field's own (masked) `ssn` column - not a
     /// `_masked` sibling, which is gone after the storage flip - the inline
-    /// `zsenc:` encryption sentinel rides on the (unmasked) `secret` BLOB
+    /// `zero-migrate:enc:` encryption sentinel rides on the (unmasked) `secret` BLOB
     /// column, and an unqualified FK clause is present - so all three
     /// survive into `sqlite_master.sql` for the drift snapshot to recover.
     #[test]
@@ -13932,21 +13935,21 @@ mod tests {
 
         // Mask sentinel rides inline on the field's own (masked) column.
         assert!(
-            sql.contains(r#""ssn" TEXT /* __zsmask:"#),
+            sql.contains(r#""ssn" TEXT /* zero-migrate:mask:"#),
             "mask sentinel must ride inline on the field's own (masked) column: {sql}"
         );
         // The raw column (the real ssn value) must never carry the mask
         // sentinel.
         assert!(
-            !sql.contains(&format!("\"{}\" TEXT /* __zsmask:", raw_column_name("ssn"))),
+            !sql.contains(&format!("\"{}\" TEXT /* zero-migrate:mask:", raw_column_name("ssn"))),
             "the raw column must never carry the inline mask sentinel: {sql}"
         );
-        // Encryption: BLOB physical column + inline `zsenc:` sentinel. (The
+        // Encryption: BLOB physical column + inline `zero-migrate:enc:` sentinel. (The
         // `secret` field carries no `mask` declaration, so it stays on its
         // own column - no raw sibling here.)
         assert!(
-            sql.contains("BLOB") && sql.contains("/* zsenc:"),
-            "encrypted column must be BLOB with an inline zsenc sentinel: {sql}"
+            sql.contains("BLOB") && sql.contains("/* zero-migrate:enc:"),
+            "encrypted column must be BLOB with an inline zero-migrate:enc sentinel: {sql}"
         );
         // FK present and UNqualified (SQLite REFERENCES rejects a schema-qualified
         // parent name).

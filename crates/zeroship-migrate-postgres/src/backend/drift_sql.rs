@@ -157,7 +157,11 @@ fn split_column_catalog_comment(comment: Option<String>) -> (Option<String>, Opt
 }
 
 fn is_internal_column_comment_sentinel(comment: &str) -> bool {
-    comment.starts_with("zero-migrate:mask:") || comment.starts_with("zero-migrate:enc:")
+    use zeroship_migrate_backend::mask_codec::{ENC_SENTINEL_PREFIX, MASK_SENTINEL_PREFIX};
+    // The constants, not literals: this predicate DISPATCHES, so a spelling that
+    // drifts from the emitter's does not misparse - it stops recognising the
+    // sentinel, and drift is then reported against a comment the engine wrote.
+    comment.starts_with(MASK_SENTINEL_PREFIX) || comment.starts_with(ENC_SENTINEL_PREFIX)
 }
 
 fn strip_prefix_ci<'a>(s: &'a str, prefix: &str) -> Option<&'a str> {

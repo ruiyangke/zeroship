@@ -1281,7 +1281,11 @@ fn recover_inline_sentinel(create_sql: &str, column: &str) -> Option<String> {
     let open = clause.find("/*")?;
     let close_rel = clause[open + 2..].find("*/")?;
     let body = clause[open + 2..open + 2 + close_rel].trim();
-    if body.starts_with("zero-migrate:mask:") || body.starts_with("zero-migrate:enc:") {
+    // The constants, not literals, for the reason PostgreSQL's
+    // `is_internal_column_comment_sentinel` states: this recognises rather than
+    // parses, so a drifted spelling is a silent miss.
+    use zeroship_migrate_backend::mask_codec::{ENC_SENTINEL_PREFIX, MASK_SENTINEL_PREFIX};
+    if body.starts_with(MASK_SENTINEL_PREFIX) || body.starts_with(ENC_SENTINEL_PREFIX) {
         Some(body.to_string())
     } else {
         None

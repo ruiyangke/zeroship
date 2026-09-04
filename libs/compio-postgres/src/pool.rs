@@ -2042,7 +2042,7 @@ impl Pool {
     /// **simple-query** protocol, then return the connection.
     ///
     /// This is the correct primitive for multi-statement DDL - e.g. the
-    /// `CREATE TABLE ...; COMMENT ON COLUMN ... IS 'zsenc:...'` / `'__zsmask:...'`
+    /// `CREATE TABLE ...; COMMENT ON COLUMN ... IS 'zero-migrate:enc:...'` / `'zero-migrate:mask:...'`
     /// sentinel batches the schema builder emits (P4 HALF A / P5.5 PR 6).
     /// `Pool::execute` cannot run those (it prepares a single command).
     ///

@@ -472,7 +472,7 @@ of which carry both halves in one artifact.
 **What is lost: rotating one column without touching its siblings.** Rotation
 survives at app granularity, and its lazy-re-encryption-on-write half is not
 implementable today: the key version has no per-row carrier. `key_id` lives in
-the column's stored sentinel `zsenc:<mode>:<keyId>:<wraps>`, so a column names
+the column's stored sentinel `zero-migrate:enc:<mode>:<keyId>:<wraps>`, so a column names
 exactly one key version at a time; the ciphertext envelope's leading byte is the
 **wire-format** version, not a key version, and `unpack` rejects anything but
 `0x01`. The insertion point is reserved in the code, and a key version placed in
@@ -982,7 +982,7 @@ record.
 **DO-NOT notes.** Each records a mistake that would otherwise be remade.
 
 - **Do not reintroduce live introspection as a second schema authority.** It was
-  never independent evidence - the `zsenc:` / `__zsmask:` sentinels it parsed are
+  never independent evidence - the `zero-migrate:enc:` / `zero-migrate:mask:` sentinels it parsed are
   emitted by the migration engine out of the same DSL the descriptor is folded
   from, so the catalog could only ever agree with the descriptor or be stale. It
   was also strictly poorer (no `vector` or `geoPoint` tokens, no `vectorDims`, no

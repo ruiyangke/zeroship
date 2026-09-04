@@ -305,7 +305,7 @@ fn exec_owner_sql(url: &str, sql: &str) {
 /// The table the deploy-time migration would have created for
 /// [`build_encrypted_users_src`]'s declared schema.
 ///
-/// It used to end with `COMMENT ON COLUMN ... 'zsenc:randomised:<key>:string'`.
+/// It used to end with `COMMENT ON COLUMN ... 'zero-migrate:enc:randomised:<key>:string'`.
 /// That sentinel is gone with the catalog read that recovered it: the encryption
 /// metadata the CRUD passes act on now comes from the RUNTIME DESCRIPTOR, which
 /// in these tests is installed from the RuntimeBuilder descriptor. `key_id` is
