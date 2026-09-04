@@ -1231,7 +1231,7 @@ impl SqliteBackend {
         let where_expr = zeroship_schema::query::build_where_with_dialect(
             filter,
             &mut params,
-            &schema_hint,
+            schema_hint,
             zeroship_schema::query::SqlDialect::Sqlite,
         )
         .map_err(DbError::from)?;
@@ -1268,7 +1268,7 @@ impl SqliteBackend {
             &query_hex,
             k,
             &where_expr,
-            &schema_hint,
+            schema_hint,
         )?;
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
         let typed = session.query_typed_internal(&sql, &param_refs).await?;
@@ -1380,7 +1380,7 @@ impl SqliteBackend {
         // positionally on rusqlite). No ORDER BY at the SQL layer —
         // we sort in Rust by computed distance.
         let schema_hint = schema;
-        let bq = build_spatial_near_base_query(app_id, collection, filter, &schema_hint)?;
+        let bq = build_spatial_near_base_query(app_id, collection, filter, schema_hint)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let typed = session.query_typed_internal(&bq.sql, &param_refs).await?;
 
