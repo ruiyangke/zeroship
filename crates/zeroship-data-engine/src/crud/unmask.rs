@@ -215,6 +215,40 @@ fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
     })
 }
 
+/// The physical column holding `canonical_column`'s REAL value, as the
+/// DESCRIPTOR names it.
+///
+/// The two fetch helpers below are the only readers of that column in the tree.
+/// They formatted the name themselves until this existed, which was coherent
+/// only while the write side did too: `crud::mask_pass` now places the value
+/// under the name `zeroship_schema::query::declared_raw_column` resolves, so a
+/// SELECT that kept its own `format!` would miss every row a renamed column
+/// stored - and on SQLite it would MISS QUIETLY, because a double-quoted
+/// identifier that matches no column is taken as a string literal and the
+/// "plaintext" that comes back is the column name.
+///
+/// Resolved by the two dispatchers rather than inside the fetchers so the
+/// descriptor is consulted once per dispatch, beside the mask and encryption
+/// lookups that already read it, and so a fetch helper cannot be called without
+/// one.
+///
+/// # Errors
+///
+/// The refusal `declared_raw_column` raises for a descriptor naming a column
+/// creator code could reach. Also [`DbError::internal`] if the column has no
+/// mask, which is unreachable: every caller has already been through
+/// [`lookup_mask_meta`], and that is the same test.
+fn resolve_raw_column(schema: &Value, canonical_column: &str) -> Result<String, DbError> {
+    let def = schema
+        .get(canonical_column)
+        .ok_or_else(|| DbError::internal(format!("unmask: column '{canonical_column}' vanished")))?;
+    crate::query::declared_raw_column(canonical_column, def)?.ok_or_else(|| {
+        DbError::internal(format!(
+            "unmask: column '{canonical_column}' has no raw column but passed the mask lookup"
+        ))
+    })
+}
+
 /// Encryption metadata for the target column (when present).
 ///
 /// Carried no `#[allow(dead_code)]` justification that was true. The old one
@@ -528,10 +562,13 @@ pub async fn dispatch_unmask(
         });
     }
 
-    // Step 3 — fetch + decrypt (or fetch-plaintext).
+    // Step 3 — fetch + decrypt (or fetch-plaintext). The raw column is
+    // resolved from the same descriptor entry Step 0 pinned, so this SELECT
+    // and the write that placed the value name one column.
+    let raw_column = resolve_raw_column(&schema, &args.column)?;
     let plaintext = match lookup_encryption_meta(&schema, &args.column)? {
-        Some(enc_meta) => fetch_and_decrypt(route, &args, &enc_meta).await?,
-        None => fetch_plaintext_parent(route, &args).await?,
+        Some(enc_meta) => fetch_and_decrypt(&raw_column, route, &args, &enc_meta).await?,
+        None => fetch_plaintext_parent(&raw_column, route, &args).await?,
     };
     // Both arms ran exactly one SELECT and both `?`, so reaching here means it
     // succeeded. Neither goes through `exec::run_sql`, so neither was billed
@@ -573,6 +610,7 @@ fn meter_audit_write(app_id: &str) {
 /// surfaces the f64's `to_string()` form.
 #[allow(unused_variables)]
 async fn fetch_and_decrypt(
+    raw_column: &str,
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
     enc_meta: &ColumnEncryptionMeta,
@@ -639,7 +677,7 @@ async fn fetch_and_decrypt(
         let bytes = match crate::backend_handle::read_raw_column_bytes(
             route,
             &args.collection,
-            &crate::query::raw_column_name(&args.column),
+            raw_column,
             &args.row_pk,
         )
         .await?
@@ -683,6 +721,7 @@ async fn fetch_and_decrypt(
 /// the parent slot holds the plaintext on disk; the sibling
 /// `<col>_masked` carries the safe display form.
 async fn fetch_plaintext_parent(
+    raw_column: &str,
     route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
 ) -> Result<String, DbError> {
@@ -705,7 +744,7 @@ async fn fetch_plaintext_parent(
     match crate::backend_handle::read_raw_column_text(
         route,
         &args.collection,
-        &crate::query::raw_column_name(&args.column),
+        raw_column,
         &args.row_pk,
     )
     .await?
@@ -1115,9 +1154,12 @@ pub async fn dispatch_bulk_unmask(
             // the FETCH helpers directly (not `dispatch_unmask`,
             // which would re-audit per pair). This is the
             // "wrap-over-many" pattern the proposal describes.
+            let raw_column = resolve_raw_column(&schema, canonical_col)?;
             let plaintext = match lookup_encryption_meta(&schema, canonical_col)? {
-                Some(enc_meta) => fetch_and_decrypt(route, &single_args, &enc_meta).await?,
-                None => fetch_plaintext_parent(route, &single_args).await?,
+                Some(enc_meta) => {
+                    fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta).await?
+                }
+                None => fetch_plaintext_parent(&raw_column, route, &single_args).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1433,8 +1475,24 @@ pub async fn dispatch_unmask_for_query(
             // alias-tolerant) and then read `__zs_raw__contactEmail`, which no
             // migration creates. It failed closed, but three siblings behaving
             // two ways at one boundary is how the next divergence gets in.
+            //
+            // The `None` arm no longer falls back to the caller's spelling.
+            // That fallback fed an unmasked column's own name to the raw-column
+            // read, and the read is not merely wrong there - on SQLite it is
+            // SILENT, because a double-quoted identifier matching no column is
+            // taken as a string literal, so the "plaintext" that came back was
+            // the column NAME. `authorize_query_hint` already refuses an
+            // unmasked column with `unmask_column_not_masked` before this
+            // function runs (`crud/mod.rs:828`), so this arm is unreachable and
+            // says so rather than reading something.
             let canonical = lookup_mask_meta(&schema, col)
-                .map_or_else(|| col.clone(), |meta| meta.canonical_column);
+                .map(|meta| meta.canonical_column)
+                .ok_or_else(|| {
+                    DbError::internal(format!(
+                        "unmask hint reached the fetch for unmasked column '{col}' on \
+                         '{collection}'; authorize_query_hint must refuse it first"
+                    ))
+                })?;
             // Use the single-cell fetch helpers directly — auth was
             // already checked upstream via `authorize_query_hint`.
             let single_args = UnmaskFieldArgs {
@@ -1448,9 +1506,12 @@ pub async fn dispatch_unmask_for_query(
                 // where any refused claim was recorded.
                 rejected_claim: None,
             };
+            let raw_column = resolve_raw_column(&schema, &canonical)?;
             let plaintext = match lookup_encryption_meta(&schema, &canonical)? {
-                Some(enc_meta) => fetch_and_decrypt(route, &single_args, &enc_meta).await?,
-                None => fetch_plaintext_parent(route, &single_args).await?,
+                Some(enc_meta) => {
+                    fetch_and_decrypt(&raw_column, route, &single_args, &enc_meta).await?
+                }
+                None => fetch_plaintext_parent(&raw_column, route, &single_args).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and

@@ -6653,6 +6653,85 @@ fn unmask_writes_audit_row_with_correct_classification() {
     });
 }
 
+/// The unmask SELECT names the raw column the DESCRIPTOR declares.
+///
+/// The end-to-end half of the change `zeroship_schema::query::declared_raw_column`
+/// carries. The unit tests in `zeroship-data-engine`'s `crud::mask_pass` bind the
+/// WRITE side - which column the plaintext is relocated INTO - in the engine's
+/// default-feature build. Nothing there rules on the READ, because the read is a
+/// SELECT against a real database and the fetch helpers are private.
+///
+/// Coherence is the property, not tidiness: if the write pass places the value
+/// by the descriptor's name and this SELECT keeps formatting its own, every
+/// unmask of a renamed column fails with "no such column" on a row that is
+/// perfectly well stored. The fixture therefore declares a name
+/// `raw_column_name` does NOT produce, and the table has ONLY that column - so a
+/// dispatch that re-derives cannot accidentally find the value.
+///
+/// Mask-only (no `encrypted` block) so it lands on `fetch_plaintext_parent`; the
+/// encrypted twin reads the same resolved name through `fetch_and_decrypt`.
+#[test]
+fn unmask_reads_the_raw_column_the_descriptor_declares() {
+    let declared_raw = "__zs_raw2__ssn";
+    let schema = serde_json::json!({
+        "id": { "type": "string" },
+        "ssn": {
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" },
+            "storage": { "valueColumn": "ssn", "rawColumn": declared_raw },
+        },
+    });
+    let app_id = "app_unmask_declared_raw";
+    let collection = "people";
+
+    run(async {
+        let (backend, _dir) = unmask_setup_with_schema(app_id, collection, schema).await;
+        assert_ne!(
+            declared_raw,
+            raw_column_name("ssn"),
+            "the fixture must declare a name the derivation does not produce, or it \
+             passes against a dispatch that ignores the descriptor",
+        );
+        backend
+            .pool_exec(
+                &format!(
+                    "CREATE TABLE \"{app_id}\".\"{collection}\" (\
+                         id TEXT PRIMARY KEY, \"{declared_raw}\" TEXT, ssn TEXT)"
+                ),
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+        backend
+            .pool_exec(
+                &format!(
+                    "INSERT INTO \"{app_id}\".\"{collection}\" (id, \"{declared_raw}\", ssn) \
+                     VALUES ('per_01', '123-45-6789', '***-**-6789')"
+                ),
+                &[],
+            )
+            .await
+            .expect("INSERT");
+
+        let args = unmask::UnmaskFieldArgs {
+            collection: collection.to_string(),
+            row_pk: "per_01".to_string(),
+            column: "ssn".to_string(),
+            actor: Some(serde_json::json!({ "kind": "auto", "id": null })),
+            reason: Some("integration test".to_string()),
+            rejected_claim: None,
+        };
+        let result = unmask::dispatch_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect("the unmask SELECT must name the declared raw column");
+        assert_eq!(result.plaintext, "123-45-6789");
+    });
+}
+
 // ===========================================================================
 // defineMaskPolicy + per-app policy storage + real authorization
 // ===========================================================================

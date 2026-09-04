@@ -2239,6 +2239,13 @@ pub const MAX_MASKED_FIELD_NAME_BYTES: usize = 63 - RAW_COLUMN_PREFIX.len();
 /// is what removes the need for a hashing cap; see
 /// [`MAX_MASKED_FIELD_NAME_BYTES`].
 ///
+/// **The data plane's CRUD passes no longer call this directly.** They resolve
+/// the name through [`declared_raw_column`], which reads what the migration fold
+/// recorded and falls back to this spelling only for a field map that carries no
+/// `storage` block. This function is still what the two backend introspectors
+/// call, because the catalog records no pairing for them to read - see
+/// [`declared_raw_column`] for why that is not a gap the descriptor closes.
+///
 /// # What holds the two spellings together
 ///
 /// The `raw_column_parity` module at the bottom of this file. It compares this
@@ -2282,8 +2289,11 @@ pub fn raw_column_name(field: &str) -> String {
 /// live.
 ///
 /// Called by `build_create_table_with_fks` and `build_add_column` (DDL
-/// emission), `build_create_indexes` (constraints follow the real value), and
-/// the runtime's write relocation / read strip / unmask fetch.
+/// emission), `build_create_indexes` (constraints follow the real value), and by
+/// [`declared_raw_column`], which is how the runtime's write relocation, read
+/// strip and unmask fetch reach it. Those three named this function directly
+/// until 2026-09-04; they ask the DESCRIPTOR now, and this is the fallback
+/// underneath that question rather than their answer.
 pub fn raw_column_for_field(field: &str, def: &serde_json::Value) -> Option<String> {
     let mask_meta = def.get("mask").and_then(|v| v.as_object())?;
     let kind = mask_meta
@@ -2294,6 +2304,105 @@ pub fn raw_column_for_field(field: &str, def: &serde_json::Value) -> Option<Stri
         return None;
     }
     Some(raw_column_name(field))
+}
+
+/// The raw-value column the RUNTIME DESCRIPTOR names for `field`.
+///
+/// The data-plane reader of a masked field's real value. Where
+/// [`raw_column_for_field`] SPELLS the name - it is the DDL emitter's own
+/// function, and the migration engine's byte-identical twin is what creates the
+/// column - this one READS the name the emitter recorded, and falls back to the
+/// spelling only when the field map carries none.
+///
+/// # Why the descriptor and not the catalog
+///
+/// The obvious objection to trusting a creator-authored artifact is
+/// `crate::query`'s neighbour in the data plane,
+/// `zeroship_data_engine::crud::protection_floor`: the live database is the
+/// authority on a column's protections and the descriptor may not lower them.
+/// That argument does not transfer to the column's NAME, because **the catalog
+/// does not record the pairing at all**. The mask sentinel rides the MASKED
+/// column - `COMMENT ON COLUMN` on PostgreSQL, an inline `/* zero-migrate:mask: */`
+/// comment on SQLite - and nothing marks the raw column. Both introspectors
+/// therefore DERIVE the sibling name rather than reading it
+/// (`zeroship_data_postgres::pg_introspect`, `zeroship_data_sqlite`, each
+/// calling [`raw_column_name`]), so `crate::diff::MaskMeta::sibling_column` is a
+/// re-spelling of the convention and not an independent record. There is no
+/// catalog answer to prefer.
+///
+/// So the two INDEPENDENT statements of this name are the DDL the migration
+/// engine applied and the `storage.rawColumn` the same fold emitted beside it -
+/// one function, one build. Reading the second is what removes the data plane's
+/// third, separately-maintained spelling from the hot paths; the
+/// `raw_column_parity` module at the bottom of this file still binds the
+/// spelling itself, because the two introspection sites above cannot be told.
+///
+/// # The fence
+///
+/// A descriptor rides in the `.zship` the worker executes, so a name it supplies
+/// is creator-authored. Accepting one unchecked would let a descriptor that
+/// declares a mask - and so satisfies `protection_floor`, which compares the
+/// PRESENCE of a protection and never its placement - redirect the field's
+/// PLAINTEXT into an ordinary column, where a `where` filter reads it back
+/// byte by byte with no unmask audit row.
+///
+/// The invariant that closes it is the one the storage flip already rests on
+/// (see [`RAW_COLUMN_PREFIX`]): the raw column is named something
+/// [`validate_field_name`] REFUSES, so no inbound surface can reach it. This
+/// asserts exactly that, rather than pinning the prefix - which is what keeps a
+/// future physical rename a producer-side change.
+///
+/// Well-formedness is checked separately and first. `validate_field_name`
+/// refuses `""` and `a"b` too, so "the validator refuses it" is satisfied by
+/// garbage; a declared raw column has to be a real identifier AND a reserved
+/// one.
+///
+/// # Errors
+///
+/// [`QueryError::InvalidIdent`], naming the offending column, when the
+/// descriptor declares a raw column that is malformed or that creator code
+/// could name.
+pub fn declared_raw_column(
+    field: &str,
+    def: &serde_json::Value,
+) -> Result<Option<String>, QueryError> {
+    // A field with no effective mask has no raw column, and a `rawColumn` on
+    // one is ignored rather than refused: there is nothing to place, so there
+    // is no placement to get wrong. Refusing here would report the wrong
+    // defect for the descriptor `protection_floor` exists to catch.
+    let derived = match raw_column_for_field(field, def) {
+        Some(raw) => raw,
+        None => return Ok(None),
+    };
+    let Some(declared) = def
+        .get("storage")
+        .and_then(|storage| storage.get("rawColumn"))
+        .and_then(serde_json::Value::as_str)
+    else {
+        // Absent means the derivation, not a refusal. Every hand-written test
+        // schema in the tree and any field map that did not go through the
+        // migration fold carries no `storage` block; the same reasoning as
+        // `field_is_readable`'s absent-flag arm.
+        return Ok(Some(derived));
+    };
+    if declared.is_empty()
+        || declared.len() > 63
+        || !declared
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_')
+    {
+        return Err(QueryError::InvalidIdent(format!(
+            "descriptor declares a malformed raw column for field '{field}': {declared:?}"
+        )));
+    }
+    if validate_field_name(declared).is_ok() {
+        return Err(QueryError::InvalidIdent(format!(
+            "descriptor declares raw column '{declared}' for masked field '{field}', but that \
+             name is one creator code can reach in a filter, a sort or a projection; a masked \
+             field's real value may only be stored under a platform-reserved name"
+        )));
+    }
+    Ok(Some(declared.to_string()))
 }
 
 /// Render the canonical mask-sentinel comment payload
@@ -12293,6 +12402,120 @@ mod tests {
         assert_eq!(raw_column_for_field("name", &def), None);
     }
 
+    // -----------------------------------------------------------------
+    // `declared_raw_column` - the descriptor names it, the data plane reads it
+    // -----------------------------------------------------------------
+
+    /// A masked field def as the migration fold emits it: `storage.rawColumn`
+    /// present, spelled by the emitter that wrote the DDL.
+    fn masked_def_with_raw(raw: &str) -> serde_json::Value {
+        serde_json::json!({
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" },
+            "storage": { "valueColumn": "ssn", "rawColumn": raw },
+        })
+    }
+
+    /// The whole point: the emitted name WINS over the local derivation.
+    ///
+    /// The fixture deliberately declares a name the derivation does NOT
+    /// produce, because a fixture that declared `__zs_raw__ssn` would pass
+    /// against a body that ignored the descriptor entirely.
+    #[test]
+    fn declared_raw_column_prefers_the_name_the_descriptor_carries() {
+        let def = masked_def_with_raw("__zs_raw2__ssn");
+        assert_eq!(
+            declared_raw_column("ssn", &def).unwrap(),
+            Some("__zs_raw2__ssn".to_string()),
+            "the descriptor's name must win over `raw_column_name`",
+        );
+    }
+
+    /// The fence. A descriptor is CREATOR-AUTHORED - it rides in the `.zship`
+    /// the worker executes - so a name it supplies must still be one every
+    /// inbound surface refuses. Without this, a descriptor could redirect a
+    /// masked field's PLAINTEXT into an ordinary, filterable column and read it
+    /// back through a `where` oracle with no audit row, while
+    /// `crud::protection_floor` waved the deploy through: that fence compares
+    /// the PRESENCE of a mask declaration, never its placement.
+    #[test]
+    fn a_descriptor_naming_a_creator_reachable_raw_column_is_refused() {
+        for reachable in ["nickname", "notes", "id", "ssn"] {
+            let def = masked_def_with_raw(reachable);
+            let err = declared_raw_column("ssn", &def)
+                .expect_err("a raw column a creator can name in a filter must be refused");
+            assert!(
+                format!("{err:?}").contains(reachable),
+                "the refusal must name the offending column; got {err:?}",
+            );
+        }
+    }
+
+    /// The malformed arm, which the reserved-name test alone does NOT cover:
+    /// `validate_field_name` refuses an empty name and a name with a quote in
+    /// it too, so "is refused by the validator" is satisfied by garbage. A
+    /// declared raw column has to be a well-formed identifier AND reserved.
+    #[test]
+    fn a_malformed_declared_raw_column_is_refused() {
+        for malformed in ["", "__zs_raw__a\"b", &"_".repeat(64)] {
+            let def = masked_def_with_raw(malformed);
+            assert!(
+                declared_raw_column("ssn", &def).is_err(),
+                "a malformed raw column name must be refused: {malformed:?}",
+            );
+        }
+    }
+
+    /// An absent `storage.rawColumn` means the derivation, not a refusal.
+    ///
+    /// Same shape as `field_is_readable`'s absent-flag arm and for the same
+    /// reason: every hand-written test schema in the tree, and any field map
+    /// that did not go through the migration fold, carries no `storage` block
+    /// at all. Refusing those would take the write pipeline to zero masked
+    /// fields rather than to a stricter one.
+    #[test]
+    fn declared_raw_column_falls_back_to_the_derivation_when_absent() {
+        let def = serde_json::json!({
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" },
+        });
+        assert_eq!(
+            declared_raw_column("ssn", &def).unwrap(),
+            Some(raw_column_name("ssn")),
+        );
+        // A `storage` block that carries `valueColumn` but no `rawColumn` is
+        // the same case, and is what the fold emits for an UNMASKED field.
+        let partial = serde_json::json!({
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" },
+            "storage": { "valueColumn": "ssn" },
+        });
+        assert_eq!(
+            declared_raw_column("ssn", &partial).unwrap(),
+            Some(raw_column_name("ssn")),
+        );
+    }
+
+    /// A field with no mask has no raw column, and a `rawColumn` on one is
+    /// IGNORED rather than refused - there is nothing to place, so there is no
+    /// placement to get wrong. `crud::protection_floor` is what refuses a
+    /// descriptor that dropped the mask from a column the database still
+    /// records as masked; duplicating that verdict here would report the wrong
+    /// defect.
+    #[test]
+    fn declared_raw_column_is_none_for_a_field_that_declares_no_mask() {
+        assert_eq!(
+            declared_raw_column("name", &serde_json::json!({ "type": "string" })).unwrap(),
+            None,
+        );
+        let opted_out = serde_json::json!({
+            "type": "string",
+            "mask": { "kind": "none", "classification": "spi" },
+            "storage": { "valueColumn": "ssn", "rawColumn": "nickname" },
+        });
+        assert_eq!(declared_raw_column("ssn", &opted_out).unwrap(), None);
+    }
+
     #[test]
     fn raw_column_for_field_returns_none_for_kind_none() {
         let def = serde_json::json!({
@@ -14343,12 +14566,26 @@ mod tests {
 /// [`raw_column_name`] are declared TWICE, once per side of that boundary, and
 /// the two declarations are related by nothing a compiler can see:
 ///
-/// - **here**, in the DATA PLANE, which READS and WRITES the column.
-///   `zeroship_data_engine::crud::unmask` names it in the SELECT the unmask API
-///   issues, `crud::mask_pass::relocate_masked_columns` moves the real value
-///   into it on every write, and both backend introspectors
-///   (`zeroship_data_postgres::pg_introspect`, `zeroship_data_sqlite`) report it
-///   as a masked column's `sibling_column`.
+/// - **here**, in the DATA PLANE, which READS and WRITES the column. Both
+///   backend introspectors (`zeroship_data_postgres::pg_introspect`,
+///   `zeroship_data_sqlite`) report it as a masked column's `sibling_column`.
+///
+///   **THE THREE CRUD CONSUMERS THIS BULLET USED TO LEAD WITH LEFT ON
+///   2026-09-04**, and the guard is narrower for it. `crud::unmask`'s SELECT,
+///   `crud::mask_pass::relocate_masked_columns` and that module's read strip now
+///   resolve the name through [`declared_raw_column`], which reads the
+///   `storage.rawColumn` the migration fold recorded beside the DDL. This
+///   spelling is their FALLBACK - taken only for a field map with no `storage`
+///   block, which is every hand-written test schema and nothing the fold emits.
+///   A divergence therefore no longer reaches them on a real deploy.
+///
+///   The two introspectors stay, and they are why this module does. Neither can
+///   be told: the mask sentinel rides the MASKED column on both vendors and
+///   nothing marks the raw one, so `crate::diff::MaskMeta::sibling_column` is
+///   DERIVED by calling [`raw_column_name`] and is not a catalog record, whatever
+///   its own doc says about being "stored explicitly". There is no descriptor in
+///   scope there either - introspection's whole job is to report what a database
+///   contains.
 /// - **in `zeroship_migrate_backend::schema`**, in the MIGRATION ENGINE, which
 ///   CREATES it. Every creator table that exists on the platform is rendered
 ///   there and applied by `zeroship-migrate-server`.
@@ -14382,14 +14619,23 @@ mod tests {
 ///   consequence of the derivation rather than a second binding.
 ///   [`each_side_derives_its_cap_from_its_own_prefix_and_the_same_budget`] is the
 ///   arm a prefix mutation does NOT fail, and the one that isolates the `63`.
-/// - `RAW_COLUMN_PREFIX` is the half that ships. A divergence is LOUD on two
-///   paths and quiet on a third:
+/// - `RAW_COLUMN_PREFIX` is the half that shipped, and it reaches strictly less
+///   than it did. The three CRUD paths below take this spelling only when the
+///   field map carries no `storage.rawColumn`; a v2 descriptor always does for a
+///   masked field, so on a real deploy a divergence hits the introspectors and
+///   the fallback alone. The analysis is kept because the fallback is live for
+///   every hand-written schema, and because it is what a divergence WOULD do:
 ///   - **loud** on the write relocation and on the unmask SELECT, which would
-///     name a column the migration engine never created (reasoned from
-///     Postgres' undefined-column error, not run against a live server here);
+///     name a column the migration engine never created. That was reasoned from
+///     Postgres' undefined-column error and is now MEASURED to be false of
+///     SQLite: `plugin-db/tests/sqlite_integration.rs`'s
+///     `unmask_reads_the_raw_column_the_descriptor_declares` failed its first
+///     run by returning the string `"__zs_raw__ssn"` as the plaintext, because
+///     SQLite reads a double-quoted identifier matching no column as a string
+///     literal. On the dev tier this arm is QUIET and returns the column NAME.
 ///   - **quiet** at `crud::mask_pass::wrap_row_on_read`, whose strip of the raw
-///     column is keyed by `raw_column_name(col)` and would simply stop matching -
-///     except that containment there is a disjunction, not one fence.
+///     column would simply stop matching - except that containment there is a
+///     disjunction, not one fence.
 ///     `read_pipeline::restrict_rows_to_surface` runs last and retains only
 ///     [`read_surface_columns`], an ALLOWLIST of logical field names that knows
 ///     nothing about the prefix. A raw column under any spelling is off that
