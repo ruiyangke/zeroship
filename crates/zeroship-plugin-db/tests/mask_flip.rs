@@ -2481,7 +2481,7 @@ async fn physical_rows(
 ///
 /// A creator deletes the `mask` key from one field and redeploys. No migration
 /// runs, so the physical table is untouched: `__zs_raw__ssn` is still there and
-/// the column still carries its `__zsmask:` sentinel. The database therefore
+/// the column still carries its `zero-migrate:mask:` sentinel. The database therefore
 /// still declares the column masked while the descriptor no longer does.
 ///
 /// A write under that descriptor must not store the plaintext under the field's
@@ -2635,6 +2635,340 @@ async fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext
             "a descriptor that dropped the encryption block must not be able to \
              write the plaintext this column still protects",
         );
+    assert!(
+        format!("{err:?}").contains("protection_removed_from_descriptor"),
+        "the refusal must carry the typed code a creator branches on, got {err:?}",
+    );
+    assert!(
+        format!("{err:?}").contains("secret"),
+        "and must name the column whose protection went missing, got {err:?}",
+    );
+
+    let leaked = pool
+        .query_text_params(
+            &format!(
+                "SELECT count(*)::text AS n FROM \"{app}\".\"people\" \
+                 WHERE encode(\"secret\", 'escape') = $1"
+            ),
+            &["hunter3-also-real"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        leaked[0].get::<_, String>("n"),
+        "0",
+        "the refused write must not have stored the plaintext",
+    );
+
+    release_pg(pool).await;
+}
+
+// ---------------------------------------------------------------------------
+// 6. The protection floor against a table PRODUCTION built
+// ---------------------------------------------------------------------------
+
+/// The confined ceiling `zeroship-migrate-server` ships, composed for one app.
+///
+/// Not a fixture charter: `ManagedPolicyConfig::default_confined` loads
+/// `CONFINED_CEILING_TOML`, which is
+/// `crates/zeroship-migrate-server/policies/confined.policy.toml` concatenated
+/// with `policies/confined-system-shape.inject.toml` at compile time. A charter
+/// written here would inject whatever columns its author had in mind; this one
+/// injects the seven every creator table on the platform carries, because it is
+/// the same bytes the deployed server uses.
+fn confined_ceiling_for(app_uuid: &uuid::Uuid) -> zeroship_migrate_policy::EffectivePolicy {
+    // 32 bytes is the seal-key floor `ManagedPolicyConfig::new` enforces. Nothing
+    // below seals anything - the key is a construction precondition, not an input
+    // to the composition this reads.
+    zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined([7u8; 32], 1)
+        .expect("the shipped confined ceiling must load")
+        .current_ceiling_for_app(app_uuid, None)
+        .expect("the shipped confined ceiling must compose for an app")
+        .policy
+}
+
+/// Create `<app>.<collection>` the way PRODUCTION creates a creator table.
+///
+/// [`fixture`] renders its DDL with the DATA PLANE's emitter,
+/// `zeroship_schema::query::build_create_table_with_fks`, whose only callers are
+/// tests (measured 2026-09-04: no `src` call site outside its own module in any
+/// crate). Every creator table that exists on the platform is instead rendered by
+/// the MIGRATION ENGINE and applied by `zeroship-migrate-server`. A protection
+/// test that builds its table with the data-plane emitter therefore agrees with
+/// the reader by construction and cannot see a disagreement between the two -
+/// which is how the protection floor shipped with an input that was empty on
+/// every real table.
+///
+/// So this one renders through `zeroship_migrate::schema::query` under
+/// `zeroship_migrate_postgres::DIALECT`, the exact pair `apply.rs` drives, with
+/// the shipped confined ceiling supplying the injected system columns.
+async fn fixture_via_the_migration_engine(
+    pool: &Rc<Pool>,
+    url: &str,
+    app_uuid: &uuid::Uuid,
+    collection: &str,
+    schema: &Value,
+) -> String {
+    let app = app_uuid.to_string();
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
+        .await
+        .unwrap();
+
+    let statements =
+        zeroship_migrate::schema::query::build_create_table_with_fks_for_dialect_scoped_statements(
+            zeroship_migrate::shipping_vendors(),
+            &app,
+            collection,
+            schema,
+            &zeroship_migrate::schema::query::FkEmission::Inline,
+            &zeroship_migrate_postgres::DIALECT,
+            false,
+            &confined_ceiling_for(app_uuid),
+        )
+        .expect("the migration engine's own CREATE TABLE emitter");
+    // The sentinel COMMENTs are the tail of this list, so an emitter that stopped
+    // producing them would leave the count short. Assert the payload is not a
+    // bare CREATE before executing it.
+    assert!(
+        statements.len() > 1,
+        "the engine emitted only {} statement(s); the sentinel COMMENTs are part \
+         of this payload and a fixture without them measures nothing: {statements:?}",
+        statements.len(),
+    );
+    for statement in &statements {
+        pool.batch_execute(statement)
+            .await
+            .unwrap_or_else(|e| panic!("engine-emitted DDL must apply: {e}\n{statement}"));
+    }
+    zeroship_plugin_db::set_postgres_pool_for_tests(Rc::clone(pool), url);
+    zeroship_plugin_db::cache_schema_for_tests(&app, collection, schema.clone());
+    app
+}
+
+/// The `pg_description` comment on `<app>.<collection>.<column>`, or `None`.
+///
+/// The same catalog row `read_live_schema`'s `LEFT JOIN pg_description` reads, so
+/// what this returns is what the protection floor's introspector sees.
+async fn column_comment(
+    pool: &Rc<Pool>,
+    app: &str,
+    collection: &str,
+    column: &str,
+) -> Option<String> {
+    let rows = pool
+        .query_text_params(
+            "SELECT pgd.description AS comment
+               FROM pg_attribute a
+               JOIN pg_class c ON c.oid = a.attrelid
+               JOIN pg_namespace n ON n.oid = c.relnamespace
+               LEFT JOIN pg_description pgd
+                      ON pgd.objoid = c.oid AND pgd.objsubid = a.attnum
+              WHERE n.nspname = $1 AND c.relname = $2 AND a.attname = $3",
+            &[app, collection, column],
+        )
+        .await
+        .unwrap();
+    rows.first().and_then(|row| row.try_get("comment").ok())
+}
+
+/// **The floor's input must be the sentinel PRODUCTION writes.**
+///
+/// [`deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext`] proves
+/// the fence refuses a downgrade on a table the DATA PLANE's emitter built. That
+/// emitter has no production caller. This asks the same question of a table the
+/// MIGRATION ENGINE built, which is the only kind that exists on the platform.
+///
+/// It failed before the sentinel spellings were converged: the engine wrote
+/// `zero-migrate:mask:...`, the runtime introspector recognised only
+/// `__zsmask:...`, so `floor_from_live` saw no protected column, the fence had
+/// nothing to compare, and the write that deleted the `mask` key stored the
+/// plaintext under the field's own name - the exact downgrade the fence exists
+/// to refuse, on the exact tables it was built for.
+#[compio::test]
+async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
+    let url = require_pg().await;
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    // A FIXED uuid rather than a fresh one: the app id IS the schema name, and a
+    // random one per run leaves a schema behind on every failing run that the
+    // rerun's `DROP SCHEMA IF EXISTS` can never reclaim.
+    let app_uuid = uuid::Uuid::from_u128(0x6d61_736b_5f65_6e67_696e_655f_666c_6f6f);
+    let masked = flip_schema();
+    let app = fixture_via_the_migration_engine(&pool, &url, &app_uuid, "people", &masked).await;
+
+    // CONTROL 1, and the one that binds the two crates' codecs together: the
+    // comment the ENGINE wrote must be byte-identical to what the RUNTIME's codec
+    // builds for the same declaration. Everything below is downstream of that
+    // equality; without it the fence reads a spelling nobody writes.
+    let stored = column_comment(&pool, &app, "people", "ssn")
+        .await
+        .expect("the engine must attach a mask sentinel to the masked column");
+    assert_eq!(
+        stored,
+        zeroship_schema::mask_codec::build_mask_sentinel(
+            zeroship_schema::diff::MaskKind::Full,
+            zeroship_schema::diff::Classification::Pci,
+        ),
+        "the migration engine writes the protection record and the data plane \
+         reads it; a spelling only one of them knows is a fence with no input",
+    );
+
+    // CONTROL 2: under the mask-declaring descriptor the write goes through and
+    // the mask lands in the field's own column. Without it a fence that refused
+    // every write would satisfy the assertion below.
+    let first = insert_through_the_pipeline(
+        &pool,
+        &app,
+        "people",
+        &masked,
+        json!({ "ssn": "123-45-6789", "nickname": "alice" }),
+    )
+    .await;
+    let raw = raw_column_name("ssn");
+    let before = physical_rows(
+        &pool,
+        &app,
+        &format!("\"ssn\", \"{raw}\""),
+        [first.id.as_str(), first.id.as_str()],
+    )
+    .await;
+    assert_eq!(
+        before[&first.id]["ssn"].as_str(),
+        Some("***"),
+        "control: the mask-declaring deploy stores the mask under the field's \
+         own name: {before:?}",
+    );
+    assert_eq!(
+        before[&first.id][&raw].as_str(),
+        Some("123-45-6789"),
+        "control: and the real value in the raw sibling: {before:?}",
+    );
+
+    // The one-key deletion, against the table the engine built.
+    zeroship_plugin_db::cache_schema_for_tests(&app, "people", flip_schema_without_the_mask_key());
+    let mut docs = json!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
+    // Not `expect_err`: the failure this test exists for is the pipeline PREPARING
+    // the write, and the prepared document is the downgrade itself. Reporting it
+    // is the difference between "returned Ok(())" and naming the plaintext that
+    // was about to be stored under the field's own name.
+    let err = match zeroship_plugin_db::prepare_insert_many_docs_for_tests(
+        &mut docs, &app, "people", None,
+    )
+    .await
+    {
+        Ok(()) => panic!(
+            "a descriptor that dropped the mask must not be able to write the \
+             plaintext this table still protects, but the pipeline prepared \
+             it: {docs}",
+        ),
+        Err(err) => err,
+    };
+    assert!(
+        format!("{err:?}").contains("protection_removed_from_descriptor"),
+        "the refusal must carry the typed code a creator branches on, got {err:?}",
+    );
+    assert!(
+        format!("{err:?}").contains("ssn"),
+        "and must name the column whose protection went missing, got {err:?}",
+    );
+
+    // The refusal is a refusal: the plaintext is nowhere in the field's own
+    // column. Asserted separately from the error because the failure this test
+    // exists for is a SILENT one - the write succeeding is the defect, and the
+    // row it leaves behind is the evidence.
+    let leaked = pool
+        .query_text_params(
+            &format!("SELECT count(*)::text AS n FROM \"{app}\".\"people\" WHERE \"ssn\" = $1"),
+            &["987-65-4321"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(leaked[0].get::<_, String>("n"), "0");
+
+    release_pg(pool).await;
+}
+
+/// The same shape for ENCRYPTION, on a migration-engine-built table.
+///
+/// Measured separately for the reason its data-plane peer is: the two passes read
+/// different descriptor keys and their sentinels are different strings on
+/// different columns, so one answer says nothing about the other. Here that is
+/// sharper still - the encryption sentinel rides the ENCRYPTED column while the
+/// mask sentinel rides the masked one, and the PG introspector dispatches on the
+/// comment's prefix, so the two prefixes fail independently.
+#[compio::test]
+async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
+    let url = require_pg().await;
+    let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[(
+        "k1",
+        "0101010101010101010101010101010101010101010101010101010101010101",
+    )]);
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app_uuid = uuid::Uuid::from_u128(0x656e_635f_656e_6769_6e65_5f66_6c6f_6f72);
+    let encrypted = encrypted_schema();
+    let app = fixture_via_the_migration_engine(&pool, &url, &app_uuid, "people", &encrypted).await;
+
+    // CONTROL 1: the engine's encryption sentinel, compared against the runtime
+    // codec's own build for the same declaration.
+    let stored = column_comment(&pool, &app, "people", "secret")
+        .await
+        .expect("the engine must attach an encryption sentinel to the encrypted column");
+    assert_eq!(
+        stored,
+        zeroship_schema::mask_codec::build_encryption_sentinel(
+            &zeroship_schema::diff::EncryptionMeta {
+                mode: zeroship_schema::descriptors::EncryptionMode::Randomised,
+                key_id: "k1".to_string(),
+                wraps: zeroship_schema::diff::WrappedType::String,
+            }
+        ),
+        "the migration engine writes the protection record and the data plane \
+         reads it; a spelling only one of them knows is a fence with no input",
+    );
+
+    // CONTROL 2: the encrypting deploy stores ciphertext, so this test is not
+    // green because writes stopped working.
+    let first = insert_through_the_pipeline(
+        &pool,
+        &app,
+        "people",
+        &encrypted,
+        json!({ "secret": "hunter2-the-real-one", "nickname": "alice" }),
+    )
+    .await;
+    let before = physical_rows(
+        &pool,
+        &app,
+        "encode(\"secret\", 'escape') AS secret_bytes",
+        [first.id.as_str(), first.id.as_str()],
+    )
+    .await;
+    assert_ne!(
+        before[&first.id]["secret_bytes"].as_str(),
+        Some("hunter2-the-real-one"),
+        "control: the encrypting deploy must not store plaintext: {before:?}",
+    );
+
+    zeroship_plugin_db::cache_schema_for_tests(
+        &app,
+        "people",
+        encrypted_schema_without_the_encrypted_key(),
+    );
+    let mut docs = json!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
+    let err = match zeroship_plugin_db::prepare_insert_many_docs_for_tests(
+        &mut docs, &app, "people", None,
+    )
+    .await
+    {
+        Ok(()) => panic!(
+            "a descriptor that dropped the encryption block must not be able \
+             to write the plaintext this column still protects, but the \
+             pipeline prepared it: {docs}",
+        ),
+        Err(err) => err,
+    };
     assert!(
         format!("{err:?}").contains("protection_removed_from_descriptor"),
         "the refusal must carry the typed code a creator branches on, got {err:?}",
