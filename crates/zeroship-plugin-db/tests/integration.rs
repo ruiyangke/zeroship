@@ -559,11 +559,26 @@ async fn bytes_column_stores_raw_bytes_on_postgres() {
 
     // And the value the caller reads back through `env.db` is the base64 of
     // exactly those bytes - one encode, not two.
-    assert_eq!(
-        pg.typed["payload_bytes"],
-        json!(parity::typed_bytes_b64()),
-        "env.db must hand back the base64 of the stored bytes"
-    );
+    //
+    // INDEX AT THE LEVEL `typed` IS BUILT AT. `run_matrix` stores the whole
+    // `typedRoundTrip` return value, which is `{ source, echo }` - two
+    // projected rows (`parity/mod.rs`, `typedRoundTrip` returns
+    // `{ source: projectTypedRow(source), echo: ... }`). `payload_bytes` lives
+    // one level down inside each. A bare `pg.typed["payload_bytes"]` is
+    // therefore `Value::Null` WHATEVER the product does - it named a key the
+    // map does not have - and that is exactly how this assertion failed from
+    // the day it was written: `left: Null, right: String("3q2+7w==")`. It could
+    // not have gone green for a correct product or red for a broken one.
+    for row in ["source", "echo"] {
+        assert_eq!(
+            pg.typed[row]["payload_bytes"],
+            json!(parity::typed_bytes_b64()),
+            "env.db must hand back the base64 of the stored bytes on the `{row}` \
+             row; got {:?} in {:?}",
+            pg.typed[row]["payload_bytes"],
+            pg.typed,
+        );
+    }
 }
 
 /// Render bytes as lowercase hex for the failure messages above. Not a helper
