@@ -7537,6 +7537,7 @@ dependencies = [
  "sqlite-vec",
  "tempfile",
  "tracing",
+ "tracing-subscriber",
  "uuid",
  "zeroship-core",
  "zeroship-data-core",

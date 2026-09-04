@@ -1493,28 +1493,31 @@ impl SqliteBackend {
 /// is the same shape `EncryptionMeta` round-trips through —
 /// `ColumnInfo::encryption = None` for plain columns).
 ///
-/// **Implementation note**: this is a tiny hand-rolled parser instead
-/// of a `regex` dep — the workspace doesn't carry `regex` for plugin-db
-/// and the sentinel format is fixed enough that a few `.split` /
-/// `.find` calls cover every case the DDL emitter produces. The
-/// canonical regex equivalent is
-/// `/"([^"]+)"\s+\w+\s*\/\* zero-migrate:enc:(randomised|deterministic):
-/// ([A-Za-z0-9_]+):(string|number|bytes) \*\//` — every column DDL the
-/// emitter writes for an encrypted field is of the shape
-/// `"<col>" BYTEA /* zero-migrate:enc:<mode>:<keyId>:<wraps> */ <constraints>`,
-/// so we walk the CREATE TABLE body finding `/* zero-migrate:enc:...` markers and
-/// rewind to the preceding double-quoted identifier.
+/// **Implementation note**: this walker is hand-rolled instead of a `regex`
+/// dep — the workspace doesn't carry `regex` for plugin-db, and finding the
+/// comment markers is a couple of `.find` calls. It walks the CREATE TABLE
+/// body for `/* zero-migrate:enc:...` markers and rewinds to the preceding
+/// double-quoted identifier, because every column DDL the emitter writes for
+/// an encrypted field is of the shape
+/// `"<col>" BYTEA /* zero-migrate:enc:<mode>:<keyId>:<wraps> */ <constraints>`.
 ///
-/// **Sidecar upgrade path**: regex-on-DDL is fragile — a future SDK
-/// that emits column DDL with non-trivial line breaks or stacked
+/// **The SENTINEL BODY is not parsed here.** Locating the comment is this
+/// function's job; interpreting it belongs to
+/// [`zeroship_schema::mask_codec::parse_encryption_sentinel`], the one
+/// authority on the wire shape (shared with the PG introspector and the
+/// migration backend). Hand-parsing it here made a third opinion of it, and
+/// the third opinion drifted: it enforced a `[A-Za-z0-9_]` keyId alphabet the
+/// codec does not, and dropped every mismatch in silence.
+///
+/// **Sidecar upgrade path**: recovering metadata from DDL TEXT is fragile — a
+/// future SDK that emits column DDL with non-trivial line breaks or stacked
 /// comments could trip per-column attachment. The plan §11 Q-P5 calls
 /// out a sidecar `__zs_schema_meta` table as the eventual upgrade;
-/// the regex ships per the implementation plan's §5
+/// the text walk ships per the implementation plan's §5
 /// trade-off acknowledgement.
 fn parse_encryption_sentinels(
     create_table_text: &str,
 ) -> std::collections::HashMap<String, zeroship_schema::diff::EncryptionMeta> {
-    use zeroship_schema::diff::{EncryptionMeta, WrappedType};
     let mut out = std::collections::HashMap::new();
     // Walk the body, finding each `/* zero-migrate:enc:...` marker. For each one,
     // rewind to the most recent double-quoted identifier to recover the
@@ -1522,62 +1525,53 @@ fn parse_encryption_sentinels(
     // first token in the column DDL (e.g. `"ssn" BYTEA /* zero-migrate:enc:...`),
     // so the rewind is unambiguous.
     // Composed from the shared prefix rather than spelled here: this walker
-    // DISPATCHES on the marker and only then hands the body to the codec, so a
-    // literal that drifts from the codec's prefix does not fail to parse - it
-    // finds nothing, and a column reads back unencrypted.
+    // DISPATCHES on the marker and then hands the whole body - prefix included -
+    // to the codec, so a literal that drifts from the codec's prefix does not
+    // fail to parse, it finds nothing, and a column reads back unencrypted.
     let marker = format!("/* {}", zeroship_schema::mask_codec::ENC_SENTINEL_PREFIX);
     let marker = marker.as_str();
     let mut search_pos = 0usize;
     while let Some(found) = create_table_text[search_pos..].find(marker) {
         let abs_marker = search_pos + found;
-        // Find the matching `*/` after the marker.
-        let body_start = abs_marker + marker.len();
+        // The marker swallows the leading `/* `, so the comment body starts at
+        // `zero-migrate:enc:` - the exact string the codec expects. Find the
+        // matching `*/` to bound it.
+        let body_start = abs_marker + "/* ".len();
         let Some(end_rel) = create_table_text[body_start..].find("*/") else {
             break; // unterminated comment — bail out of the walk
         };
-        let body = &create_table_text[body_start..body_start + end_rel];
-        let body_trim = body.trim();
-        // body = "<mode>:<keyId>:<wraps>"
-        let parts: Vec<&str> = body_trim.split(':').collect();
-        if parts.len() == 3 {
-            let mode = match parts[0] {
-                "randomised" | "randomized" => Some(zeroship_schema::descriptors::EncryptionMode::Randomised),
-                "deterministic" => Some(zeroship_schema::descriptors::EncryptionMode::Deterministic),
-                _ => None,
-            };
-            let key_id = parts[1];
-            let wraps = match parts[2] {
-                "string" => Some(WrappedType::String),
-                "number" => Some(WrappedType::Number),
-                "bytes" => Some(WrappedType::Bytes),
-                _ => None,
-            };
-            // Validate the key_id alphabet ([A-Za-z0-9_]) — matches
-            // the SDK's `encrypted_invalid_key_id` guard. A malformed
-            // key id would have been rejected at register time; here
-            // we just guard against parsing garbage from a hand-edited
-            // DDL.
-            let key_id_ok = !key_id.is_empty()
-                && key_id
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || c == '_');
-
-            if let (Some(mode), Some(wraps), true) = (mode, wraps, key_id_ok) {
+        let body = create_table_text[body_start..body_start + end_rel].trim();
+        // Reuse the canonical parser so the wire shape is centralised, and so a
+        // sentinel this crate cannot interpret produces the codec's typed error
+        // rather than a silent absence. Structured exactly like the mask
+        // sibling below, for the same reason: both failure arms are LOUD.
+        match zeroship_schema::mask_codec::parse_encryption_sentinel(body) {
+            Ok(meta) => {
                 // Rewind from `abs_marker` to find the column name. The
                 // column name is the most recent `"…"` token before the
                 // marker — scan backwards for the closing `"` then the
                 // opening `"`.
                 let before = &create_table_text[..abs_marker];
-                if let Some(col_name) = recover_preceding_quoted_ident(before) {
-                    out.insert(
-                        col_name,
-                        EncryptionMeta {
-                            mode,
-                            key_id: key_id.to_string(),
-                            wraps,
-                        },
-                    );
+                match recover_preceding_quoted_ident(before) {
+                    Some(col_name) => {
+                        out.insert(col_name, meta);
+                    }
+                    None => {
+                        tracing::warn!(
+                            sentinel = %body,
+                            "diff: encryption sentinel with no recoverable column name \
+                             in the CREATE TABLE text; ignoring",
+                        );
+                    }
                 }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    sentinel = %body,
+                    error = %e,
+                    "diff: malformed encryption sentinel on SQLite column; \
+                     treating the column as unencrypted",
+                );
             }
         }
         search_pos = body_start + end_rel + "*/".len();
@@ -2360,6 +2354,123 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // Sentinel-walker event capture
+    // -----------------------------------------------------------------
+
+    /// One captured `tracing` event: its level plus its rendered fields.
+    /// The format-string body arrives under the synthetic `"message"` key
+    /// the macros assign, so it needs no separate slot.
+    type CapturedEvent = (tracing::Level, std::collections::HashMap<String, String>);
+
+    /// Collects every event emitted under it into a shared buffer.
+    struct CaptureLayer {
+        events: std::sync::Arc<std::sync::Mutex<Vec<CapturedEvent>>>,
+    }
+
+    #[derive(Default)]
+    struct FieldVisitor {
+        fields: std::collections::HashMap<String, String>,
+    }
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields
+                .insert(field.name().to_string(), format!("{value:?}"));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .insert(field.name().to_string(), value.to_string());
+        }
+    }
+
+    impl<S> tracing_subscriber::layer::Layer<S> for CaptureLayer
+    where
+        S: tracing::Subscriber + for<'lookup> tracing_subscriber::registry::LookupSpan<'lookup>,
+    {
+        fn on_event(
+            &self,
+            event: &tracing::Event<'_>,
+            _ctx: tracing_subscriber::layer::Context<'_, S>,
+        ) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            self.events
+                .lock()
+                .expect("capture buffer mutex poisoned")
+                .push((*event.metadata().level(), visitor.fields));
+        }
+    }
+
+    /// Run `f` under a capturing subscriber; return its result plus every
+    /// event it emitted.
+    ///
+    /// This exists because the sentinel walkers signal a REFUSAL by
+    /// `tracing::warn!` and nothing else - the returned map is simply missing
+    /// an entry, which is byte-identical to a DDL that carried no sentinel at
+    /// all. Without capture, "refused loudly" and "dropped in silence" are the
+    /// same observation, which is precisely the defect the tests below pin.
+    ///
+    /// `with_default` installs the subscriber on the CURRENT THREAD only and
+    /// libtest gives every test its own thread, so a parallel run cannot mix
+    /// two tests' events.
+    fn capture_events<R>(f: impl FnOnce() -> R) -> (R, Vec<CapturedEvent>) {
+        use tracing_subscriber::layer::SubscriberExt;
+
+        let events = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = tracing_subscriber::registry().with(CaptureLayer {
+            events: std::sync::Arc::clone(&events),
+        });
+        let result = tracing::subscriber::with_default(subscriber, f);
+        let captured = events
+            .lock()
+            .expect("capture buffer mutex poisoned")
+            .clone();
+        (result, captured)
+    }
+
+    /// The single WARN event `f` emitted, or a failure naming what it did
+    /// emit instead.
+    fn sole_warning<R>(f: impl FnOnce() -> R) -> (R, std::collections::HashMap<String, String>) {
+        let (result, events) = capture_events(f);
+        let warnings: Vec<_> = events
+            .iter()
+            .filter(|(level, _)| *level == tracing::Level::WARN)
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "expected exactly one WARN; captured {events:?}"
+        );
+        (result, warnings[0].1.clone())
+    }
+
+    /// Assert `ddl` yields no encryption metadata AND that the walker said so
+    /// out loud, carrying the codec's typed error verbatim.
+    fn assert_enc_sentinel_refused_loudly(ddl: &str, expected_error_fragment: &str) {
+        let (got, fields) = sole_warning(|| parse_encryption_sentinels(ddl));
+        assert!(
+            got.is_empty(),
+            "a refused sentinel must stamp no column: {got:?}"
+        );
+        let error = fields
+            .get("error")
+            .expect("the warning must carry the codec's typed error");
+        assert!(
+            error.contains("enc_sentinel_malformed"),
+            "the codec's discriminator must survive into the log line: {error:?}"
+        );
+        assert!(
+            error.contains(expected_error_fragment),
+            "expected {expected_error_fragment:?} in {error:?}"
+        );
+        assert!(
+            fields.contains_key("sentinel"),
+            "the warning must name the offending sentinel: {fields:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------
     // Encryption sentinel parser unit tests
     // -----------------------------------------------------------------
 
@@ -2430,29 +2541,130 @@ mod tests {
         assert_eq!(got["tin"].key_id, "tax");
     }
 
-    /// Malformed sentinel — wrong number of parts → ignored (the
-    /// column ends up without metadata; no panic).
+    /// Malformed sentinel — wrong number of parts → refused, and the refusal
+    /// is AUDIBLE. A column whose sentinel does not parse reads back
+    /// unencrypted, so the log line is the only difference between "the
+    /// metadata was rejected" and "there was never any metadata".
     #[test]
     fn parse_encryption_sentinel_rejects_malformed() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:only_one_part */)";
-        let got = parse_encryption_sentinels(ddl);
-        assert!(got.is_empty());
+        assert_enc_sentinel_refused_loudly(
+            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:only_one_part */)",
+            "expected zero-migrate:enc:",
+        );
     }
 
-    /// Unknown mode / wraps → ignored.
+    /// Unknown mode → refused loudly, through the codec's typed error.
     #[test]
     fn parse_encryption_sentinel_rejects_unknown_mode() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:hashed:default:string */)";
-        let got = parse_encryption_sentinels(ddl);
-        assert!(got.is_empty());
+        assert_enc_sentinel_refused_loudly(
+            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:hashed:default:string */)",
+            "unknown mode",
+        );
     }
 
-    /// Invalid key_id alphabet → ignored.
+    /// Unknown wraps → refused loudly. This arm had no test at all before the
+    /// walker was collapsed onto the codec.
     #[test]
-    fn parse_encryption_sentinel_rejects_invalid_key_id() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised:bad key:string */)";
-        let got = parse_encryption_sentinels(ddl);
-        assert!(got.is_empty());
+    fn parse_encryption_sentinel_rejects_unknown_wraps() {
+        assert_enc_sentinel_refused_loudly(
+            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised:default:blob */)",
+            "unknown wraps",
+        );
+    }
+
+    /// Empty keyId → refused loudly. There is no key to look up, so this must
+    /// stay a refusal even though the codec dropped the alphabet check.
+    ///
+    /// The body has to carry all three fields (`<mode>::<wraps>`) to reach
+    /// this arm; drop one and the codec refuses on ARITY first, which is a
+    /// different arm and a different message.
+    #[test]
+    fn parse_encryption_sentinel_rejects_empty_key_id() {
+        assert_enc_sentinel_refused_loudly(
+            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised::string */)",
+            "empty keyId",
+        );
+    }
+
+    /// A key id outside the SDK's `[A-Za-z0-9_]` alphabet is ACCEPTED.
+    ///
+    /// The hand-rolled walker this replaced enforced that alphabet itself and
+    /// dropped anything else in silence. That check was a THIRD opinion on the
+    /// wire shape: `zeroship_schema::mask_codec::parse_encryption_sentinel`
+    /// requires only a non-empty keyId, and `t.encrypted()` already fences the
+    /// alphabet at author time (`sdks/db/src/types.ts`, `/^[A-Za-z0-9_]+$/`).
+    /// The decided direction is one authority for the wire, enforcement at the
+    /// authoring edge — so a hand-edited DDL, or a future rotation scheme
+    /// spelling ids `payroll-2026-09`, now round-trips instead of quietly
+    /// reading the column back as plaintext.
+    #[test]
+    fn parse_encryption_sentinel_accepts_a_key_id_outside_the_sdk_alphabet() {
+        let ddl =
+            "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised:payroll-2026-09:string */)";
+        let (got, events) = capture_events(|| parse_encryption_sentinels(ddl));
+        assert_eq!(
+            got.get("a").map(|m| m.key_id.as_str()),
+            Some("payroll-2026-09"),
+            "the codec accepts any non-empty keyId: {got:?}"
+        );
+        assert!(
+            events.is_empty(),
+            "an accepted sentinel must be silent: {events:?}"
+        );
+    }
+
+    /// A well-formed sentinel with no recoverable column name in front of it
+    /// is skipped — loudly. This is the walker's own failure, not the codec's,
+    /// so the event carries no `error` field.
+    #[test]
+    fn parse_encryption_sentinel_warns_when_no_column_precedes_it() {
+        let ddl = "CREATE TABLE t (\n  /* zero-migrate:enc:randomised:default:string */\n)";
+        let (got, fields) = sole_warning(|| parse_encryption_sentinels(ddl));
+        assert!(
+            got.is_empty(),
+            "a sentinel with no column must stamp nothing: {got:?}"
+        );
+        assert!(
+            fields.contains_key("sentinel"),
+            "the warning must name the orphaned sentinel: {fields:?}"
+        );
+    }
+
+    /// Every `(mode, wraps)` the emitter can produce round-trips through the
+    /// walker unchanged, and silently.
+    ///
+    /// The input is BUILT by `zeroship_schema::mask_codec::build_encryption_sentinel`
+    /// rather than hand-written, so this pins walker-against-emitter rather
+    /// than walker-against-one-literal: a change to the wire shape moves both
+    /// sides and this test keeps passing, which is the point of collapsing the
+    /// parse onto the codec.
+    #[test]
+    fn parse_encryption_sentinel_round_trips_every_built_sentinel() {
+        use zeroship_schema::descriptors::EncryptionMode;
+        use zeroship_schema::diff::{EncryptionMeta, WrappedType};
+
+        for mode in [EncryptionMode::Randomised, EncryptionMode::Deterministic] {
+            for wraps in [WrappedType::String, WrappedType::Number, WrappedType::Bytes] {
+                let meta = EncryptionMeta {
+                    mode,
+                    key_id: "default".to_string(),
+                    wraps,
+                };
+                let sentinel = zeroship_schema::mask_codec::build_encryption_sentinel(&meta);
+                let ddl = format!("CREATE TABLE t (\"ssn\" BYTEA /* {sentinel} */ NOT NULL)");
+                let (got, events) = capture_events(|| parse_encryption_sentinels(&ddl));
+                let parsed = got.get("ssn").unwrap_or_else(|| {
+                    panic!("built sentinel {sentinel:?} must round-trip: {got:?}")
+                });
+                assert_eq!(parsed.mode, meta.mode, "mode drifted for {sentinel:?}");
+                assert_eq!(parsed.key_id, meta.key_id, "keyId drifted for {sentinel:?}");
+                assert_eq!(parsed.wraps, meta.wraps, "wraps drifted for {sentinel:?}");
+                assert!(
+                    events.is_empty(),
+                    "the success path must be silent for {sentinel:?}: {events:?}"
+                );
+            }
+        }
     }
 
     /// DDL with no sentinels → empty map (no allocations beyond the
