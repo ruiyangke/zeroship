@@ -722,9 +722,14 @@ required now, like Postgres, for the same reason
 ### The surviving test-only names
 
 `PG_TEST_URL` `REDIS_TEST_URL` `DRAGONFLY_CLUSTER_SEEDS`
-`AUTH_TEST_SMTP_SINK`
-`ZEROSHIP_SESSION_SECRET` `ZEROSHIP_SESSION_SECRET_PREV`
-`ZEROSHIP_SESSION_NONCE_CAPACITY` `ZEROSHIP_DW_E2E*`
+`AUTH_TEST_SMTP_SINK` `ZEROSHIP_DW_E2E*`
+
+`ZEROSHIP_SESSION_SECRET`, `ZEROSHIP_SESSION_SECRET_PREV` and
+`ZEROSHIP_SESSION_NONCE_CAPACITY` were on that list until 2026-09-04 and
+nothing read any of them. They configured the SQLite session minter, which went
+with the HMAC session anchor the operator deleted on 2026-08-27; the names
+outlived it here and in `tests/test_only_env_gate.sh`'s inventory, where arm 2
+had been red for a week because that gate was not wired into CI.
 
 `ZEROSHIP_NET_TEST_DNS_HANG_HOST` and `ZEROSHIP_NET_TEST_DNS_HANG_MS` were on
 that list until 2026-08-20 and NOTHING READ EITHER ONE. They appeared in this

@@ -79,8 +79,9 @@ usage() {
 # THE ONLY NUMBER HERE, and it counts FILES, not findings.
 #
 # RE-MEASURED 2026-09-04 by `find tests -maxdepth 1 -name '*_gate.sh' | wc -l`:
-# 36 already present, + 1 for decision_four_gate.sh added in the same commit = 37.
-# It read 35 + 1 = 36 earlier the same day, for sync_claim_gate.sh, and
+# 37 already present, + 1 for ci_wiring_gate.sh added in the same commit = 38.
+# It read 36 + 1 = 37 earlier the same day, for decision_four_gate.sh, and
+# 35 + 1 = 36 before that, for sync_claim_gate.sh, and
 # 34 + 1 = 35 before that, for noop_cfg_pair_gate.sh, and
 # 33 + 1 = 34 before that, for worker_replication_privilege_gate.sh;
 # before that it was 31, and two gates arrived without moving it, so it was two
@@ -95,7 +96,13 @@ usage() {
 # half-break unnoticed, which is the precise failure this script exists to catch
 # one level down. RAISE THIS WHEN YOU ADD A GATE - leaving it behind the real
 # count is how a floor stops meaning anything without ever going red.
-GATE_FILE_FLOOR=37
+#
+# THIS IS THE ONLY EXACT PIN ON THIS GLOB. `tests/ci_wiring_gate.sh` enumerates
+# the identical population and deliberately takes a SLACK floor instead, so
+# adding a gate moves one number and not two - the second of two pins is the
+# one that gets forgotten, and a forgotten pin is the stale census both scripts
+# warn about.
+GATE_FILE_FLOOR=38
 
 DIR=""
 RUN=()
