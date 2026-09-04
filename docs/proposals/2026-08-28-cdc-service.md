@@ -17,7 +17,9 @@ was built ahead of it.** The reasoning, stated so it can be refuted: a
 length-prefixed frame over a byte stream is carrier-independent, so the
 `ntex`/`cyper` experiment can change WHO carries the frames but not their layout.
 If that is wrong the crate is premature rather than incorrect - no relay code
-depends on it yet.
+depends on it yet. **The experiment has since run and the reasoning held**: the
+carrier delivers opaque bytes with arbitrary chunk boundaries, so the frame
+layout was never at stake. See the transport paragraph below.
 
 The consumption path it replaces lives in
 `crates/zeroship-plugin-db/` (`wal_consumer.rs`, `replication.rs`,
@@ -26,10 +28,70 @@ The consumption path it replaces lives in
 Datastore/Database/Grant entities of
 `docs/proposals/2026-08-28-app-database-decoupling.md`, none of which exist, and
 on a platform move to PostgreSQL 18.4 that the deployment does not make
-(`deploy/compose/docker-compose.yml:73` pins `postgres:16`). Its transport
-foundation is unvalidated: `ntex` v3 response streaming (`Cargo.toml:46`) and
-`cyper`'s `stream` feature (`Cargo.toml:49`) are both present in the workspace
-and **no code has been written against them**.
+(`deploy/compose/docker-compose.yml:73` pins `postgres:16`).
+
+**The transport foundation is VALIDATED as of 2026-09-03, and the sentence that
+stood here was wrong on its facts.** It read: "`ntex` v3 response streaming
+(`Cargo.toml:46`) and `cyper`'s `stream` feature (`Cargo.toml:49`) are both
+present in the workspace and no code has been written against them." Both
+citations are right and the claim after them is false, and was false when
+written. ntex response streaming ships in the gateway -
+`crates/zeroship-gateway/src/proxy.rs:419` and `:876` return
+`ResponseBuilder::streaming`, and `crates/zeroship-gateway/src/router/static_serve.rs:344`
+and `:375` return `SizedStream`. cyper's `stream` feature ships in the runtime's
+`fetch` and in the S3 client -
+`crates/zeroship-runtime/src/web/fetch/http_network.rs:144`,
+`libs/compio-s3/src/client.rs:460`, `:532` and `:1223` all call
+`Response::bytes_stream`. What had no evidence was the PAIR, and the two
+properties the relay actually rests on: that the worker sees frame N before the
+relay has produced frame N+1, and that a worker which stops reading cannot stall
+the ring writer.
+
+`crates/zeroship-cdc-transport-spike/` is that evidence, as twelve tests anyone
+can re-run with `cargo test -p zeroship-cdc-transport-spike`. It is a spike, not
+a relay: no election, no slot, no pgoutput, no frames from `zeroship-cdc-wire`.
+Measured on ntex 3.7.2 and cyper 0.8.3 (the versions in `Cargo.lock`):
+
+- **Incremental in both directions.** The handler will not produce frame N+1
+  until the client acknowledges frame N, so a buffered response deadlocks rather
+  than passing; the shared transcript came back
+  `produced 0, consumed 0, ... produced 7, consumed 7`, strict alternation, and
+  8 frames arrived as 8 separate 11-byte transport chunks. The response carries
+  no `Content-Length`.
+- **On compio, with no tokio reactor.** The ntex handler and the cyper client
+  each assert `compio::runtime::Runtime::try_with_current(..).is_ok()` at
+  runtime, and the process's own thread names after the exchange are the libtest
+  threads plus `futures-timer` - no tokio worker. The linked-not-driven edge
+  AGENTS.md describes is unchanged in kind but did move in size: the spike's dev
+  dependency on cyper took `PINNED_ENTRYPOINTS` in `tests/zero_tokio_gate.sh`
+  from nine names to ten, and the gate went red until the pin and the AGENTS.md
+  sentence were updated with it.
+- **ntex applies write backpressure to the response body**, which is the
+  mechanism the ring design needs and had assumed.
+  `ntex-3.7.2/src/http/h1/dispatcher.rs`, `poll_send_payload`, runs
+  `ready!(self.io.poll_flush(cx, false))` before every `poll_next_chunk`, and
+  `poll_flush(_, false)` in `ntex-io-3.9.2/src/io.rs` returns `Pending` with
+  `BUF_W_BACKPRESSURE` once the write buffer reaches half its maximum. Measured
+  against a client that stopped reading: the socket path absorbed 666 frames /
+  2,730,600 bytes and the body stream then stopped being polled at all. That
+  byte figure is this machine's, not a constant - `net.ipv4.tcp_wmem` maxes at
+  4,194,304 and `tcp_rmem` at 6,291,456 here.
+- **"The relay sheds, it never blocks" is expressible as written.** An egress
+  buffer whose `push` is not `async` and takes `&self` compiles as an ntex
+  response body. With a 64 KiB buffer and a stalled consumer it shed 215 frames
+  while the producer kept looping (iteration 1 to 112 across the measurement
+  window), and a 500 ms `slow_consumer_timeout` closed the response, after which
+  the client drained the socket and saw EOF. The one-variable control - same
+  producer, same rate, same buffer, a consumer that reads promptly - shed 0 and
+  delivered all 4,096 frames / 16,793,600 bytes byte for byte.
+
+**What the spike does NOT establish, so nobody reads it as more than it is.** It
+runs plaintext HTTP/1.1 on loopback. TLS terminating in the relay process is
+untested and needs an ntex feature the workspace does not enable today; so are
+HTTP/2, the `application/problem+json` error surface, `503
+ConnectionCapacityExceeded` admission, the global egress byte semaphore, and
+every cost question at real fan-out. A multi-minute hold and a many-subscriber
+fan-out are both still unmeasured.
 
 ---
 
@@ -1623,11 +1685,18 @@ not an option, because PostgreSQL binds a logical slot to one Datastore.
    new-column-defaults-out arm (16.15 only), the `messages` negative (16.15 and
    17.11 only), and the slot-invalidation transcript (server version unrecorded).
    Until then those three claims are not target evidence.
-4. **BUILDABLE (6h): validate the transport foundation.** Whether `ntex` v3
-   response streaming and `cyper`'s `stream` feature compose into a long-lived
-   push channel is unknown - both are in the workspace and no code has been
-   written against them. A throwaway server-plus-client holding a multi-minute
-   framed response answers it, and the answer gates the wire crate.
+4. **MOSTLY ANSWERED, 2026-09-03. What is left is TLS and duration.** `ntex` v3
+   response streaming and `cyper`'s `stream` feature do compose into an
+   incremental framed channel, and ntex's write backpressure reaches the body
+   stream, which is what lets the ring bound its egress. The evidence is
+   `crates/zeroship-cdc-transport-spike/` and the numbers are in the Status
+   block. Two pieces of the original question are still open and neither gates
+   the wire crate: the spike is plaintext, so TLS terminating in the relay
+   process is unproven and needs an ntex feature the workspace does not enable;
+   and the longest hold measured is seconds, not the multi-minute channel this
+   item asked for. **This item claimed no code had been written against either
+   library. That was false when written** - both ship today, in the gateway and
+   in `fetch`/`compio-s3` respectively; see the Status block for the sites.
 5. **BUILDABLE (8h): measure advisory-lock release latency after a leader loss.**
    Three kill shapes are not equivalent and only one is the real case; see the
    DO-NOT note in History. Governed by `tcp_keepalives_idle`, `_interval` and
