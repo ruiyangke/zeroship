@@ -336,6 +336,19 @@ pub async fn provision_workflow_journal_schema(
 /// is `zeroship_migrate_sqlite::backend::AUDIT_UNMASK_TABLE`.
 pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 
+/// The name prefix reserved for platform relations inside a creator's schema.
+///
+/// Everything carrying it - the engine's six migration-journal tables, the
+/// unmask audit table - is written by a service that does NOT execute creator
+/// code, and creator-declared collections are refused from this namespace. It is
+/// therefore the exact set the app runtime role's privileges are swept from
+/// (`apply::revoke_runtime_reserved_privileges_sql`).
+///
+/// `publication.rs` fences the same namespace out of the worker-visible WAL feed
+/// with a `LIKE '\_\_zeroship\_%' ESCAPE '\'` pattern; it spells the prefix as an
+/// escaped literal because a `LIKE` pattern is not this string.
+pub(crate) const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
+
 /// The DDL that gives an app its unmask audit table, in the app's OWN schema.
 ///
 /// # Why this is here and not in the worker
