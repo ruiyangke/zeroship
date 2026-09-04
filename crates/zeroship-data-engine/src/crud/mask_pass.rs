@@ -96,11 +96,30 @@ use zeroship_data_core::masking::apply_mask_kind;
 /// column's masked output without a redundant decrypt round-trip.
 pub type MaskPlaintextSidechannel = HashMap<String, Zeroizing<String>>;
 
-/// The masks [`apply_mask_on_write`] derived, keyed by LOGICAL field name.
+/// One masked field's derived mask, with the physical column its REAL value
+/// belongs in.
+///
+/// The raw column's name travels with the mask rather than being re-derived at
+/// placement time, because it is the DESCRIPTOR that names it
+/// (`zeroship_schema::query::declared_raw_column`) and
+/// [`relocate_masked_columns`] does not hold the descriptor - it holds this.
+/// [`apply_mask_on_write`], which does hold it, is where the resolution and its
+/// fence belong.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedMask {
+    /// The LOGICAL field name. Its own column receives [`Self::masked`].
+    pub field: String,
+    /// The physical column that receives the field's real value.
+    pub raw_column: String,
+    /// The mask, as the field's own column will store it.
+    pub masked: String,
+}
+
+/// The masks [`apply_mask_on_write`] derived, in declared-field order.
 ///
 /// Held rather than written straight into the row so that exactly one stage -
 /// [`relocate_masked_columns`] - owns physical placement. See the module doc.
-pub type DerivedMasks = Vec<(String, String)>;
+pub type DerivedMasks = Vec<DerivedMask>;
 
 /// Derive the masked representation of every masked column on `row`.
 ///
@@ -146,6 +165,21 @@ pub fn apply_mask_on_write(
         }
         let kind = parse_mask_kind(kind_str)?;
 
+        // Resolved BEFORE the plaintext branch, so a descriptor that names a
+        // creator-reachable raw column refuses every write to the collection
+        // rather than only the ones that mention the column. Same reasoning as
+        // `crud::protection_floor::refuse_protection_downgrade`: a write that
+        // happens to omit `ssn` is harmless in itself, but letting it through
+        // means the broken deploy appears to work until the first write that
+        // does mention it.
+        let Some(raw_column) = crate::query::declared_raw_column(col, def)? else {
+            // Unreachable: `declared_raw_column` returns `None` only for a
+            // field with no effective mask, and both of those arms already
+            // `continue`d above. Handled rather than unwrapped because the two
+            // mask tests are separate reads of the same JSON.
+            continue;
+        };
+
         // Plaintext source: sidechannel first (encrypted column case),
         // then the row's current value (non-encrypted case). The row
         // value MAY already be the base64 ciphertext if the encryption
@@ -174,7 +208,11 @@ pub fn apply_mask_on_write(
         };
 
         if let Some(pt) = plaintext {
-            derived.push((col.clone(), apply_mask_kind(kind, pt.as_str())));
+            derived.push(DerivedMask {
+                field: col.clone(),
+                raw_column,
+                masked: apply_mask_kind(kind, pt.as_str()),
+            });
         }
     }
 
@@ -213,13 +251,17 @@ pub fn relocate_masked_columns(masks: &DerivedMasks, row: &mut Value) -> Result<
             "relocate_masked_columns: row must be a JSON object",
         ));
     };
-    for (field, masked) in masks {
-        let raw_col = crate::query::raw_column_name(field);
+    for DerivedMask {
+        field,
+        raw_column,
+        masked,
+    } in masks
+    {
         if let Some(value) = obj.remove(field.as_str()) {
-            obj.insert(raw_col.clone(), value);
+            obj.insert(raw_column.clone(), value);
         }
         if let Some(marker) = obj.remove(&format!("__zsbin__{field}")) {
-            obj.insert(format!("__zsbin__{raw_col}"), marker);
+            obj.insert(format!("__zsbin__{raw_column}"), marker);
         }
         obj.insert(field.clone(), Value::String(masked.clone()));
     }
@@ -349,9 +391,17 @@ pub fn wrap_row_on_read(
         // `RETURNING *`, back when the write builders starred). Strip it here -
         // `read_pipeline`'s surface stage would too, but this pass runs first
         // and the sentinel it writes must not sit beside the value it hides.
-        let raw_key = crate::query::raw_column_name(col);
-        if obj.contains_key(&raw_key) {
-            to_strip.push(raw_key);
+        //
+        // The name comes from the descriptor, not from a `format!` here: see
+        // `zeroship_schema::query::declared_raw_column`, which also refuses a
+        // descriptor naming a column creator code could reach. Propagated
+        // rather than swallowed - falling back to the derivation on a refusal
+        // would leave the pass reading a column the write pass refused to
+        // write, and report success.
+        if let Some(raw_key) = crate::query::declared_raw_column(col, def)? {
+            if obj.contains_key(&raw_key) {
+                to_strip.push(raw_key);
+            }
         }
 
         let Some(masked) = masked_value else {
@@ -952,5 +1002,112 @@ mod tests {
                 "col {col}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------
+    // The raw column's name comes from the DESCRIPTOR, not from a `format!`
+    // -----------------------------------------------------------------
+
+    /// A masked field def as the migration fold emits it, with the raw column
+    /// spelled by the emitter that wrote the DDL.
+    ///
+    /// The fixtures below declare a name `zeroship_schema::query::raw_column_name`
+    /// does NOT produce. That is deliberate: a fixture spelling the derived name
+    /// passes against a body that ignores the descriptor entirely, which is the
+    /// state this pair of tests exists to move off.
+    fn masked_def_with_raw(raw: &str) -> Value {
+        json!({
+            "type": "string",
+            "mask": { "kind": "last4", "classification": "spi" },
+            "storage": { "valueColumn": "ssn", "rawColumn": raw },
+        })
+    }
+
+    #[test]
+    fn a_write_relocates_to_the_raw_column_the_descriptor_declares() {
+        let schema = json!({ "ssn": masked_def_with_raw("__zs_raw2__ssn") });
+        let mut row = json!({ "id": "usr_01", "ssn": "123-45-6789", "__zsbin__ssn": true });
+
+        derive_and_relocate(&schema, &MaskPlaintextSidechannel::new(), &mut row);
+
+        let obj = row.as_object().unwrap();
+        assert_eq!(
+            obj.get("__zs_raw2__ssn").and_then(|v| v.as_str()),
+            Some("123-45-6789"),
+            "the real value belongs in the column the descriptor names: {row}",
+        );
+        assert!(
+            obj.get(&crate::query::raw_column_name("ssn")).is_none(),
+            "nothing may be written to a column the descriptor did not name: {row}",
+        );
+        assert_eq!(obj.get("ssn").and_then(|v| v.as_str()), Some("***-**-6789"));
+        // The binary-bind marker follows the value to whichever column holds
+        // it, so it has to be renamed off the DECLARED name too.
+        assert_eq!(obj.get("__zsbin____zs_raw2__ssn"), Some(&json!(true)));
+        assert!(obj.get("__zsbin__ssn").is_none());
+    }
+
+    #[test]
+    fn wrap_row_on_read_strips_the_raw_column_the_descriptor_declares() {
+        let schema = json!({ "ssn": masked_def_with_raw("__zs_raw2__ssn") });
+        let mut row = json!({
+            "id": "usr_01",
+            "ssn": "***-**-6789",
+            "__zs_raw2__ssn": "123-45-6789",
+        });
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+
+        assert!(
+            !serde_json::to_string(&row).unwrap().contains("123-45-6789"),
+            "the declared raw column's value must not survive to the JS boundary: {row}",
+        );
+    }
+
+    /// The fence, at both pass boundaries.
+    ///
+    /// `zeroship_schema::query::declared_raw_column` owns the verdict; these two
+    /// arms prove each pass PROPAGATES it rather than falling back to the
+    /// derivation, which would place plaintext in a filterable column while
+    /// reporting success. `crud::protection_floor` does not catch this shape -
+    /// the descriptor still declares the mask, so its presence comparison is
+    /// satisfied.
+    #[test]
+    fn a_descriptor_naming_a_creator_reachable_raw_column_refuses_both_passes() {
+        let schema = json!({ "ssn": masked_def_with_raw("nickname") });
+
+        let row = json!({ "id": "usr_01", "ssn": "123-45-6789" });
+        let err = apply_mask_on_write(&schema, &MaskPlaintextSidechannel::new(), &row)
+            .expect_err("the write pass must refuse a reachable raw column");
+        assert!(
+            format!("{err:?}").contains("nickname"),
+            "the refusal must name the offending column; got {err:?}",
+        );
+
+        let mut read_row = json!({ "id": "usr_01", "ssn": "***-**-6789" });
+        wrap_row_on_read(&schema, "users", &mut read_row)
+            .expect_err("the read pass must refuse a reachable raw column");
+    }
+
+    /// The control every arm above needs: a descriptor with NO `storage` block
+    /// still relocates and strips, under the derived name. Without it, a body
+    /// that refused every masked field would satisfy the fence arm and look
+    /// green on a tree where masking no longer worked at all.
+    #[test]
+    fn a_descriptor_without_a_storage_block_still_uses_the_derived_name() {
+        let schema = json!({
+            "ssn": { "type": "string", "mask": { "kind": "last4", "classification": "spi" } }
+        });
+        let raw = crate::query::raw_column_name("ssn");
+        let mut row = json!({ "id": "usr_01", "ssn": "123-45-6789" });
+
+        derive_and_relocate(&schema, &MaskPlaintextSidechannel::new(), &mut row);
+        assert_eq!(row[raw.as_str()].as_str(), Some("123-45-6789"));
+
+        wrap_row_on_read(&schema, "users", &mut row).unwrap();
+        assert!(
+            row.get(&raw).is_none(),
+            "the derived raw column is still stripped on read: {row}",
+        );
     }
 }
