@@ -7,7 +7,7 @@
 # ----------------------
 # `cargo test --workspace` provisions no database, so any target that dials one
 # either fails there or (worse) skips and reports a pass. Those targets carry
-# `required-features = ["live-db-tests"]` in crates/control/Cargo.toml and
+# `required-features = ["live-db-tests"]` in crates/zeroship-control/Cargo.toml and
 # crates/zeroship-migrate-server/Cargo.toml, which removes them from the default build. This
 # script is what runs them, against a database it creates and migrates itself.
 #
@@ -163,7 +163,7 @@ export PG_TEST_URL="$DSN"
 
 # ONE BRIDGE REMAINS, and it is temporary and load-bearing.
 #
-# crates/control/tests/workflow_engine_test.rs still reads CONTROL_TEST_DB. It
+# crates/zeroship-control/tests/workflow_engine_test.rs still reads CONTROL_TEST_DB. It
 # was the single file left unconverted, because another worktree is editing it
 # and converting it here would have produced a conflict rather than a change.
 #

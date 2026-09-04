@@ -214,7 +214,7 @@ function checkField(
     //
     // The loss happens in the native V8->serde decoder, NOT at a JSON.stringify
     // boundary - `env.db` ops receive the document as V8 values. In
-    // `crates/plugin-db/src/v8_bridge.rs` the number arm skips its lossless-integer
+    // `crates/zeroship-plugin-db/src/v8_bridge.rs` the number arm skips its lossless-integer
     // branch (non-finite `fract()` is NaN) and then calls
     // `serde_json::Number::from_f64`, which returns `None` for anything non-finite,
     // so the arm falls through to `Value::Null`. Measured, and pinned there by

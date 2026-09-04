@@ -163,7 +163,7 @@ pub fn statement_for_test(columns: Vec<Column>) -> Statement {
 /// `TIMESTAMPTZ` is an 8-byte BE `i64` of microseconds since
 /// 2000-01-01 UTC. See
 /// `crates/zeroship-data-postgres/src/pg_row_json.rs::column_to_json` for the
-/// conversion table. (Cited as `crates/plugin-db/src/v8_bridge.rs` until
+/// conversion table. (Cited as `crates/zeroship-plugin-db/src/v8_bridge.rs` until
 /// 2026-09-04: the crate is `crates/zeroship-plugin-db`, and the function moved
 /// out of `v8_bridge.rs` on the data-plane split - it is now the tree's only
 /// `column_to_json`.)

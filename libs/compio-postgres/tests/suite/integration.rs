@@ -4639,7 +4639,7 @@ const ONE_CONNECTION_ABRUPT_FDS: i64 = 2;
 /// crate's own `integration` target, 98 tests in one process at
 /// `--test-threads=1`, was watched from outside on 2026-08-20: the count went
 /// `7 -> 301`, ending on 198 `anon_inode` (99 runtimes x 2) and 109 sockets.
-/// `crates/auth/tests/main.rs` is 257 tests in one process. What the cost
+/// `crates/zeroship-auth/tests/main.rs` is 257 tests in one process. What the cost
 /// surfaces as, when it does, is EMFILE against a 1024 soft `RLIMIT_NOFILE` in
 /// a test unrelated to whatever raised it.
 ///

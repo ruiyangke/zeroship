@@ -7,7 +7,7 @@
 //! 1. "Wrong password on a real user" — exercises Argon2 verify against the
 //!    user's stored PHC.
 //! 2. "Any password on a non-existent user" — falls through to the dummy
-//!    PHC branch in `crates/auth/src/ui/login.rs::post`.
+//!    PHC branch in `crates/zeroship-auth/src/ui/login.rs::post`.
 //!
 //! If these diverge in status, body length, or wall time, the dummy-hash
 //! arm has regressed and an attacker can probe for valid emails.

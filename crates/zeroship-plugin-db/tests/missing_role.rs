@@ -25,7 +25,7 @@
 //! WHAT THIS TEST DOES NOT CATCH:
 //!   - The HTTP boundary. It asserts the classification and the message
 //!     plugin-db produces, not that the runtime rail lets it through --
-//!     that is `crates/runtime/src/core/dispatch.rs`'s
+//!     that is `crates/zeroship-runtime/src/core/dispatch.rs`'s
 //!     `schema_not_provisioned_survives_the_5xx_rail_in_both_spellings`
 //!     and its one-variable control.
 //!   - A non-English server. The classifier matches PostgreSQL's

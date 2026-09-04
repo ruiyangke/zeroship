@@ -4,8 +4,8 @@
 //!
 //! The backing store is a `thread_local!`, and a worker OS thread
 //! multiplexes up to `--max-isolates` (default **200**, see
-//! `crates/worker/src/main.rs:67`) app isolates — they `enter`/`exit` around
-//! each dispatch (`crates/worker/src/handler.rs:386-396`) rather than each
+//! `crates/zeroship-worker/src/main.rs:67`) app isolates — they `enter`/`exit` around
+//! each dispatch (`crates/zeroship-worker/src/handler.rs:386-396`) rather than each
 //! owning a thread. So everything in here is shared by every app resident on
 //! the thread, and an unkeyed `HashMap<u32, _>` would be a cross-tenant
 //! channel: `readChunk(1)` from app B would hand back app A's object bytes,
@@ -14,7 +14,7 @@
 //! there is no secrecy to lean on.
 //!
 //! This is the same threat plugin-db documents as **SEC-1** on
-//! `ThreadDbContext::tx_conns` (`crates/plugin-db/src/context.rs:127-140`):
+//! `ThreadDbContext::tx_conns` (`crates/zeroship-plugin-db/src/context.rs:127-140`):
 //! a per-thread slot that parks one app's resource across an `await` is
 //! reachable by every co-resident app unless it is keyed by the owning
 //! `app_id`. We take the same remedy for the same reason.
@@ -38,11 +38,11 @@
 //! # Reclamation
 //!
 //! There is no runtime teardown hook to sweep this from: `NativePlugin`
-//! (`crates/runtime/src/core/plugin.rs:36-83`) has only `namespace` / `name`
+//! (`crates/zeroship-runtime/src/core/plugin.rs:36-83`) has only `namespace` / `name`
 //! / `register` / `build_instance`, all of which run once at isolate
 //! construction, and request completion
 //! (`RuntimeInner::clear_executing_request`,
-//! `crates/runtime/src/core/runtime.rs:3372-3376`) is a two-field assignment
+//! `crates/zeroship-runtime/src/core/runtime.rs:3372-3376`) is a two-field assignment
 //! that calls no plugin code.
 //!
 //! A request-scoped sweep would also be *wrong*, not merely absent: the
@@ -53,8 +53,8 @@
 //! request end would break the primary streaming-download path.
 //!
 //! So the bound is a cap at acquisition — the mechanism plugin-db uses for
-//! `MAX_SUBSCRIPTIONS_PER_APP` (`crates/plugin-db/src/broker.rs:153`) and the
-//! runtime uses for `MAX_PENDING_FETCHES` (`crates/runtime/src/core/state.rs:284`).
+//! `MAX_SUBSCRIPTIONS_PER_APP` (`crates/zeroship-data-core/src/broker.rs:153`) and the
+//! runtime uses for `MAX_PENDING_FETCHES` (`crates/zeroship-runtime/src/core/state.rs:284`).
 
 use std::cell::RefCell;
 use std::collections::HashMap;

@@ -257,7 +257,7 @@ export const deleteTodo = mutation(
 // operation.
 //
 // So a multi-step mutation() is NOT atomic unless it calls db.transaction()
-// itself. Note that crates/runtime/src/web/fetch/mod.rs:284 still tells
+// itself. Note that crates/zeroship-runtime/src/web/fetch/mod.rs:284 still tells
 // callers the opposite ("Mutations are transactional and must complete
 // quickly; holding a DB tx open across an outbound HTTP call would block
 // other writers") when it refuses fetch() inside a mutation -- the refusal is
@@ -303,7 +303,7 @@ export const shareToWebhook = action(
 // masking, replication) with failure modes unrelated to transactions; db-todos
 // is already proven end to end on BOTH tiers.
 //
-// Contract these exercise (crates/plugin-db/src/transaction/mod.rs):
+// Contract these exercise (crates/zeroship-data-engine/src/transaction/mod.rs):
 //   - `transaction(fn)` returns `Result<R>` -- resolve -> commit, throw ->
 //     rollback. There is no tx.commit()/tx.rollback().
 //   - Collections handed to the callback THROW instead of returning Result.
@@ -467,7 +467,7 @@ export const txIsolation = mutation(
         //                          to write "readCommitted" (default),
         //                          "repeatableRead" or "serializable".
         //   the runtime            normalize_isolation_level
-        //                          (crates/plugin-db/src/v8_classes/db.rs:295)
+        //                          (crates/zeroship-plugin-db/src/v8_classes/db.rs:295)
         //                          accepts camelCase, spaced and uppercase, all
         //                          four levels -- and its rejection message
         //                          recommends the camelCase spellings.
@@ -539,8 +539,8 @@ export const txDepth = mutation(
 // open at once. That is the whole point of `isolationLevel`, and
 // docs/reference/sqlite-divergences.md names it as unmeasured.
 //
-// The mechanism under test (crates/plugin-db/src/context.rs:146 and
-// crates/plugin-db/src/transaction/mod.rs:227):
+// The mechanism under test (crates/zeroship-plugin-db/src/context.rs:146 and
+// crates/zeroship-data-engine/src/transaction/mod.rs:227):
 //
 //   * the open tx connection lives in `tx_conns: HashMap<app_id, TxConnection>`
 //     -- ONE slot per app, per isolate.

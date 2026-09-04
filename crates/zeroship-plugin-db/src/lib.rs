@@ -32,7 +32,7 @@
 // is therefore invisible when each is checked on its own branch, which is how
 // it reached a merge before anything noticed.
 //
-// `crates/gateway/src/main.rs` carries this attribute for the same reason. It
+// `crates/zeroship-gateway/src/main.rs` carries this attribute for the same reason. It
 // is a compiler resource limit, not a correctness guard - raising it costs
 // compile time and nothing else.
 #![recursion_limit = "256"]

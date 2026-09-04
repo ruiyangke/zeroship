@@ -850,7 +850,7 @@ const CONSOLE_CLIENT_ID: &str = "zeroship-console";
 /// The platform auth provider verifies an access token against the issuer's
 /// published key over HTTP, so a fixture that hands out a platform bearer has
 /// to leave a reachable JWKS behind it. Shaped after
-/// `crates/control/tests/common/mod.rs`; deliberately a private copy rather
+/// `crates/zeroship-control/tests/common/mod.rs`; deliberately a private copy rather
 /// than a shared module, because that one is a `tests/common` of another crate.
 struct PlatformJwks {
     base: String,

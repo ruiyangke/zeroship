@@ -1,5 +1,5 @@
 //! Faithful PG integration tests for the billing G2 account-status state machine
-//! (`crates/control/src/account_status.rs`) — the payment-failure → dunning →
+//! (`crates/zeroship-control/src/account_status.rs`) — the payment-failure → dunning →
 //! suspension lifecycle that the gateway gates dispatch on.
 //!
 //! These run the REAL `AccountStatusStore` methods + the dunning `suspend_exhausted`

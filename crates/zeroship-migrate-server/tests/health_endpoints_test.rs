@@ -149,6 +149,6 @@ async fn readyz_is_200_when_postgres_answers() {
 //     tests/health_endpoints.sh.
 //   - The cache TTL. Each test builds a fresh state, so no test here observes
 //     a second probe hitting the cached answer; that is unit-tested in
-//     crates/core/src/readiness.rs.
+//     crates/zeroship-core/src/readiness.rs.
 //   - A HANGING Postgres (packets dropped rather than refused), which is what
 //     the gate's probe timeout exists for. DEAD_DSN gets a connection refused.

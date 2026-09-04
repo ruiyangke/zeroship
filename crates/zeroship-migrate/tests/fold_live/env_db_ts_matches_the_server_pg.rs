@@ -26,7 +26,7 @@
 //! REQUIRES `ZERO_MIGRATE_TEST_PG_URL`: without it these tests FAIL. A skipped run
 //! of this file proved nothing at all while reporting the same pass count as a real
 //! one, which is why it can no longer skip. The offline halves of these claims live in
-//! `tests/gen_types_authoring_tables_from_the_fold.rs` and always run.
+//! `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and always run.
 
 use crate::support;
 
@@ -573,7 +573,7 @@ async fn a_dropped_partition_is_gone_from_the_server_and_from_env_db_ts() {
 
 /// **The control that shapes the arm above.** A DETACHED partition survives as a
 /// standalone table under the same name - the rule
-/// `tests/partition_claims_the_relation_namespace_pg.rs` enforces offline - so the
+/// `crates/zeroship-migrate/tests/namespaces/partition_claims_the_relation_namespace_pg.rs` enforces offline - so the
 /// artifact must keep it. Without this, "a partition op removes the table" would look
 /// equally justified and would be wrong for the op next door.
 #[compio::test]

@@ -392,7 +392,7 @@ where
 /// row with no journal is not a half-provisioned tenant, it is the NORMAL state
 /// of every app that has never run a workflow: the journal tables are created
 /// lazily, by the worker on its first workflow dispatch for that app
-/// (`crates/worker/src/handler.rs`, `ensure_workflow_journal` behind the
+/// (`crates/zeroship-worker/src/handler.rs`, `ensure_workflow_journal` behind the
 /// `PROVISIONED_WORKFLOW_JOURNALS` cache) and by `claim.rs` on the claim path -
 /// never at app creation. Counting those apps here would make `apps_total`
 /// scale with the platform rather than with the workflow fleet, and would put a

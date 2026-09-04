@@ -119,7 +119,7 @@ DEV_PORT="${DEV_PORT:-3061}"
 #
 # 5062, NOT 5061. The other harnesses mirror DEV_PORT 30NN -> 50NN, and 3061
 # would give 5061 -- which is a BLOCKED PORT. The runtime's own fetch enforces
-# the WHATWG bad-ports list (crates/runtime/src/web/fetch/bad_ports.rs:30 lists
+# the WHATWG bad-ports list (crates/zeroship-runtime/src/web/fetch/bad_ports.rs:30 lists
 # 5060 and 5061, sip/sips), and the dev runtime fetches modules FROM vite, so
 # the app never loads. Measured, not guessed: with 5061 this harness failed
 #     FAIL dev app never came up

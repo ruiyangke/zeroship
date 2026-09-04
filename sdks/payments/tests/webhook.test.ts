@@ -6,7 +6,7 @@ const SECRET = "whsec_test_EXAMPLE";
 const NOW = 1_700_000_000;
 
 // Pinned cross-validation fixture — these MUST match the constants in
-// crates/control/src/stripe_handlers.rs (verification_tests). If
+// crates/zeroship-control/src/stripe_handlers.rs (verification_tests). If
 // either side's HMAC implementation drifts, both suites fail at once.
 const CROSS_SECRET = "whsec_cross_validation_FIXTURE_v1";
 const CROSS_BODY = '{"id":"evt_cross","type":"invoice.paid","created":1700000000}';
@@ -123,7 +123,7 @@ describe("verifyWebhook", () => {
 
   it("cross-validates with the Rust verification_tests fixture", async () => {
     // Same secret + body + timestamp as the Rust fixture in
-    // crates/control/src/stripe_handlers.rs::verification_tests. If the
+    // crates/zeroship-control/src/stripe_handlers.rs::verification_tests. If the
     // hex below diverges, EITHER the Rust HMAC or the TS HMAC has
     // drifted — investigate before changing the constant.
     const header = await signWebhookForTest(CROSS_BODY, CROSS_SECRET, CROSS_TIMESTAMP);

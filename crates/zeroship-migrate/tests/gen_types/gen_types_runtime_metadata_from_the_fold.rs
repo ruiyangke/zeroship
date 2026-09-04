@@ -511,7 +511,7 @@ fn a_dropped_table_leaves_no_runtime_metadata_behind() {
 // The corpus: both artifacts, whole, on real recorded streams
 // ---------------------------------------------------------------------------
 
-/// The recorded op fixtures, the same 27 `tests/op_fixture_goldens.rs` owns. These
+/// The recorded op fixtures, the same 27 `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` owns. These
 /// are real drained recorder envelopes, already policy-resolved, so they fold under
 /// the confined charter that produced them.
 const STEMS: [&str; 27] = [
@@ -786,7 +786,7 @@ fn measure_corpus() -> Vec<String> {
 /// The one row that had to be edited by hand when the walker was deleted is recorded
 /// in `docs/review-log.md` with the measurement that justified it. There is
 /// deliberately NO re-bless environment variable, matching
-/// `tests/op_fixture_goldens.rs`: an easy update affordance is what turns a corpus
+/// `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs`: an easy update affordance is what turns a corpus
 /// into a mirror of whatever the code emits today.
 #[test]
 fn the_recorded_corpus_renders_the_same_artifacts_through_the_fold() {

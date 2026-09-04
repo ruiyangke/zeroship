@@ -8,7 +8,7 @@
 //!
 //! These use a custom registry because the builtin one has no object-scoped ordered
 //! grant. The charter-side twin of this defect needs no custom registry and is pinned at
-//! the engine entry point in `crates/zeroship-migrate/tests/charter_root_bound.rs`.
+//! the engine entry point in `crates/zeroship-migrate/tests/policy_charter/charter_root_bound.rs`.
 
 use zeroship_migrate_policy::{
     admit, ComposeError, Enforcement, KnobDef, KnobKey, KnobKind, KnobValue, LoadContext,

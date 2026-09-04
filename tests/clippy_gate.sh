@@ -10,12 +10,12 @@
 # clippy, so CI was the only thing that did, and CI's clippy result is one tick
 # among many.
 #
-#   - crates/core/src/config/env.rs lost its `#[allow(clippy::disallowed_methods)]`
+#   - crates/zeroship-core/src/config/env.rs lost its `#[allow(clippy::disallowed_methods)]`
 #     and produced three deny-level errors. clippy.toml's own header names that
 #     file as one of exactly two sanctioned raw-environment boundaries, so the
 #     fix was a dropped attribute, not a design question.
-#   - a later break hit crates/core/src/config/test_overlay.rs,
-#     crates/auth/src/oidc/issuer.rs and crates/control/src/oauth_clients.rs.
+#   - a later break hit crates/zeroship-core/src/config/test_overlay.rs,
+#     crates/zeroship-auth/src/oidc/issuer.rs and crates/zeroship-control/src/oauth_clients.rs.
 #
 # THE SECOND ONE CARRIES THE LESSON THIS SCRIPT IS BUILT AROUND. The `core`
 # failure ABORTED `cargo clippy --workspace` before `auth` or `control` were
@@ -402,7 +402,7 @@ trap 'rm -rf "$TMP"' EXIT
 # Two whole build inputs of this workspace are GITIGNORED and produced by
 # commands cargo does not know about:
 #
-#   crates/runtime/tests/wpt/       ~1.1G, fetched by crates/runtime/tests/setup-wpt.sh
+#   crates/runtime/tests/wpt/       ~1.1G, fetched by crates/zeroship-runtime/tests/setup-wpt.sh
 #   sdks/*/dist/*.js                emitted by `pnpm build`
 #
 # crates/runtime `include_str!`s both. When either is absent the crate does not
@@ -426,7 +426,7 @@ trap 'rm -rf "$TMP"' EXIT
 # The list is DERIVED, not hardcoded. Every `include_str!` literal under the
 # scanned roots is resolved against its own file's directory and checked for
 # existence. A hardcoded pair of paths would have been wrong the day it was
-# written: the multi-line form at crates/runtime/src/core/init.rs:391 puts the
+# written: the multi-line form at crates/zeroship-runtime/src/core/init.rs:391 puts the
 # literal on the line AFTER `include_str!(`, and the first version of this scan
 # - single-line only - missed it and three others like it. It also misses,
 # still, the two `include_str!(concat!(...))` forms, which build their path from

@@ -715,7 +715,7 @@ impl MigrationEngine {
                 // `renameColumn` hands the declarative differ, and what the 12-step
                 // rebuild's `CREATE TABLE` - the table every row is copied into - is
                 // rendered from. It is a PROJECTION of the single fold;
-                // `tests/sqlite_rebuild_field_defs_live.rs` deploys through
+                // `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs` deploys through
                 // this function against a real SQLite file and reads the server's own
                 // `PRAGMA`s back across the rebuild.
                 live.sdk_schemas =

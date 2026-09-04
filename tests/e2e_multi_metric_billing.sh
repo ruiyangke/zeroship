@@ -8,7 +8,7 @@
 # padded body so `requests` AND `egress_bytes` both land in usage_aggregates with
 # different weights, then asserts the projected charge is the SUM:
 #
-#   pricing (crates/control/src/pricing.rs):
+#   pricing (crates/zeroship-control/src/pricing.rs):
 #     CU(metric) = floor(total * units_per_op / per_units)
 #     requests     weight 1 CU / 1 op    -> CU = R
 #     egress_bytes weight 1 CU / 100 b   -> CU = floor(EGR/100)

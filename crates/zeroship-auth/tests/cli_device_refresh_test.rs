@@ -1,6 +1,6 @@
 //! The first-party CLI's device grant, and the refresh family it hands back.
 //!
-//! `crates/auth/tests/oidc_refresh_token_test.rs` already covers the generic
+//! `crates/zeroship-auth/tests/oidc_refresh_token_test.rs` already covers the generic
 //! rotation and reuse machinery for an ordinary app client. What it cannot
 //! cover is the property that makes the CLI different: the token control
 //! accepts is a PLATFORM PRINCIPAL token (`sub` = the `zeroship.users` UUID,
@@ -66,7 +66,7 @@ const EXPECTED_ISSUABLE_SCOPES: [&str; 5] = [
 // the constant fails here even when the constant is right. The two fail for
 // different reasons and neither subsumes the other.
 
-/// See `crates/auth/src/oidc/issuer.rs`, `MAX_ACCESS_TOKEN_LIFETIME_SECS`, for
+/// See `crates/zeroship-auth/src/oidc/issuer.rs`, `MAX_ACCESS_TOKEN_LIFETIME_SECS`, for
 /// the argument. Restated as a literal rather than imported so the two are
 /// independent witnesses.
 const MAX_ACCESS_TOKEN_LIFETIME_SECS: i64 = 30 * 60;
@@ -139,7 +139,7 @@ impl Fixture {
 
         // The reserved first-party registration is what the whole flow hangs
         // off, and it is reconciled at auth boot in production
-        // (`crates/auth/src/main.rs`).
+        // (`crates/zeroship-auth/src/main.rs`).
         zeroship_auth::oidc::device_token::reconcile_platform_cli_client(db.as_ref())
             .await
             .expect("reconcile platform CLI client");
@@ -560,11 +560,11 @@ async fn the_refresh_family_and_its_replay_window_are_bounded() {
 ///   `db/migrations-ts/20260702000900_grants.ts:55` gives `zeroship_auth`
 ///   SELECT only on that table, and nothing in `crates/auth` may write it.
 /// * control then intersects that scope with the principal's LIVE grants on
-///   every bearer request (`crates/authn/src/lib.rs`,
+///   every bearer request (`crates/zeroship-authn/src/lib.rs`,
 ///   `platform_cli_entitlement`), which is where an operator's narrowing takes
 ///   effect. Pinned by
 ///   `an_operator_deleting_a_grant_row_narrows_the_next_cli_request` in
-///   `crates/control/tests/authz_guard_oauth_test.rs`.
+///   `crates/zeroship-control/tests/authz_guard_oauth_test.rs`.
 ///
 /// So a wide scope HERE is not authority. Asserting it stays wide is what
 /// stops someone "fixing" the gap in this function, which would mint

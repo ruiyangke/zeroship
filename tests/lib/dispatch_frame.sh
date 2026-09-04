@@ -3,7 +3,7 @@
 # tests/lib/dispatch_frame.sh — build the binary frame the worker's /dispatch
 # endpoint actually decodes.
 #
-# The wire format is crates/core/src/dispatch_frame.rs `encode_dispatch_frame`:
+# The wire format is crates/zeroship-core/src/dispatch_frame.rs `encode_dispatch_frame`:
 #
 #     [ 4 bytes: metadata length, little-endian ]
 #     [ metadata JSON: {method, url, headers}   ]

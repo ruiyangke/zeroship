@@ -43,7 +43,7 @@ describe("refreshSession — cookie/identity re-mint (GET /session?mint=1)", () 
     // This asserts what the STUB returns, not what the platform returns. The
     // comment here used to say "the gateway includes them in the user
     // projection" -- it does not, and says so at the top of the module that
-    // serves the endpoint: `crates/gateway/src/auth_token.rs:8`, "the browser
+    // serves the endpoint: `crates/zeroship-gateway/src/auth_token.rs:8`, "the browser
     // receives only an identity projection + HttpOnly cookies - NO
     // power/wrapper access token, NO scopes, NO JWT in any response body"
     // (design slice 2026-05-30-auth-bff-session-redesign §2.2). Measured on a

@@ -11,7 +11,7 @@
  *   - `POST /__zeroship/auth/session`         → `{ user, expires_at }`
  *   - `GET  /__zeroship/auth/session[?mint=1]` → `{ user, expires_at }`
  *   - error envelope                    → `{ error, error_description? }`
- * (see `crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`).
+ * (see `crates/zeroship-gateway/src/auth_token.rs`, `crates/zeroship-gateway/src/browser_auth.rs`).
  */
 
 /**

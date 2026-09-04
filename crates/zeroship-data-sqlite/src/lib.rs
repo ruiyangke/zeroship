@@ -81,7 +81,7 @@ pub mod reservation;
 // Unconditionally `pub` since the crate split: this module is now a crate
 // boundary rather than a private child, so `pub(crate)` would hide it from the
 // adapter that dispatches into it. The `test-helpers` arm existed to let
-// `tests/sqlite_integration.rs` name `session::TypedCell`; that need is now met
+// `crates/zeroship-plugin-db/tests/sqlite_integration.rs` name `session::TypedCell`; that need is now met
 // by the boundary itself.
 pub mod session;
 // Pure-Rust haversine + `(lat, lng)` BLOB round-trip. The

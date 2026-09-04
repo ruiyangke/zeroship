@@ -1,7 +1,7 @@
 import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 
 // The `jti` single-use cache behind the JWT service-assertion mechanism
-// (crates/core/src/service_assertion.rs, crates/authn/src/service_replay.rs).
+// (crates/zeroship-core/src/service_assertion.rs, crates/zeroship-authn/src/service_replay.rs).
 //
 // WHY A TABLE. OIDC Core section 9 makes a service assertion's `jti` REQUIRED
 // and single use a MUST; skipping it is CVE-2020-15222. Single use only holds
@@ -14,7 +14,9 @@ import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 // WHY ITS OWN SCHEMA, AND NOT `zeroship`. The `zeroship` schema holds platform
 // STATE -- apps, users, deploys, grants, billing -- and authority over it is
 // authority over the platform. That is why
-// crates/zeroship-migrate-adapter/tests/platform_migrate.rs asserts a BLANKET
+// crates/zeroship-migrate-adapter/tests/platform_migrate.rs (DELETED 2026-08-28
+// in ccda4bb42, with the platform-migrate binary; nothing asserts this today)
+// asserted a BLANKET
 // invariant: `zeroship_worker`, the login a process running creator code holds,
 // has no write privilege on ANY relation in `zeroship`.
 //
@@ -34,11 +36,12 @@ import { table, t, grant, revoke, schema } from "@zeroship/migrate";
 // statement against it is schema-qualified, which is deliberate.
 //
 // The schema is on the platform charter's namespace allowlist
-// (crates/zeroship-migrate-adapter/policies/platform.policy.toml) because
+// (crates/zeroship-migrate-server/policies/platform.policy.toml) because
 // lowering refuses a table outside it. That widening is bounded from the other
-// side: platform_migrate.rs asserts this schema holds EXACTLY this table and
-// that the worker holds no CREATE on it, so the second zone cannot grow into the
-// collision the first one hit.
+// side: platform_migrate.rs asserted this schema holds EXACTLY this table and
+// that the worker holds no CREATE on it, so the second zone could not grow into
+// the collision the first one hit. That bound is UNHELD since the file was
+// deleted; the widening above now rests on review alone.
 //
 // WHY THESE TWO COLUMNS AND NOTHING ELSE. The store answers one question --
 // "has this key been claimed, and is that claim still live" -- so it carries

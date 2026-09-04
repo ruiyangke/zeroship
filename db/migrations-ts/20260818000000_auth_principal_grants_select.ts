@@ -6,7 +6,9 @@ import { grant } from "@zeroship/migrate";
 // been applied to a deployed database, and the runner's checksum guard refuses
 // any file whose bytes changed after it was journalled
 // (crates/zeroship-migrate-adapter/src/platform.rs, PlatformMigrateError::
-// ChecksumMismatch). Re-landing the delta forward is what converges a fresh
+// ChecksumMismatch -- DELETED 2026-08-28 in ccda4bb42; the guard moved to the
+// zero-migrate CLI and no longer has a file in this repository).
+// Re-landing the delta forward is what converges a fresh
 // database and a deployed one on the same end state.
 //
 // This is a WIDENING of the same statement's name list, not a new privilege

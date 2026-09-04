@@ -2,7 +2,7 @@ import { grant } from "@zeroship/migrate";
 
 // `zeroship_control` could not provision a per-app OAuth client.
 //
-// crates/control/src/app_oauth_client.rs:591 (production; the file's
+// crates/zeroship-control/src/app_oauth_client.rs:591 (production; the file's
 // #[cfg(test)] starts at 646) upserts the per-app extension row:
 //   INSERT INTO zeroship.app_oauth_clients (app_id, client_id, sector_identifier)
 //   VALUES ($1,$2,$3)

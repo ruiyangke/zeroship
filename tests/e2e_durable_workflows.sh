@@ -293,7 +293,7 @@ async function commit(runId, stepName, key) {
   // re-entry would rewrite the surviving row's run_id and step_name, and
   // ordered_commit_steps reads both.
   //
-  // Only \`unique_violation\` is swallowed (crates/zeroship-plugin-db/src/error.rs:287,
+  // Only \`unique_violation\` is swallowed (crates/zeroship-data-core/src/error.rs:287,
   // :337-339); every other db error still fails the step, which is what a
   // silently-broken side effect must do to a test that counts side effects.
   try {

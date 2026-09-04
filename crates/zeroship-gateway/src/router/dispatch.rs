@@ -1342,7 +1342,7 @@ async fn execute_resource_tree(
     //    dispatch is a POST, so the method arm below catches it. A
     //    kind-less procedure reachable over GET would fall through, which
     //    is exactly the hole the vite emitter closed by always writing
-    //    `kind` (see `ProcedureKind` in crates/bundle/src/rule.rs). `None`
+    //    `kind` (see `ProcedureKind` in crates/zeroship-bundle/src/rule.rs). `None`
     //    now only reaches here from a hand-authored raw-JS manifest.
     if matches!(policy.kind, Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action))
         || req.method() == ntex::http::Method::POST
@@ -1704,7 +1704,7 @@ fn dispatch_path_wire_id(dispatch_path: &str) -> Option<&str> {
 /// This is deliberately NOT [`build_zs_error_response`]'s
 /// `application/zs-error+json` `{code,message,details,retryable}` shape. That one
 /// is the idempotency subsystem's; the shape here is what
-/// `crates/runtime/src/core/init.rs`'s `mkErr` and
+/// `crates/zeroship-runtime/src/core/init.rs`'s `mkErr` and
 /// `sdks/bootstrap/src/fetch-handler.ts`'s `errResponse` produce, and therefore
 /// what a client sees for every RPC error the gateway does NOT intercept. A
 /// gateway pre-dispatch rejection is the same event to a client as a worker

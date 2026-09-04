@@ -1,13 +1,13 @@
 //! Randomised pgoutput bodies, to generalise the hand-written hostile shapes.
 //!
-//! `tests/frame_fuzz.rs` does this for BACKEND FRAMES - the outer envelope the
+//! `libs/compio-postgres/tests/suite/frame_fuzz.rs` does this for BACKEND FRAMES - the outer envelope the
 //! connection reads. This file does it one layer down, for the logical
 //! replication payload inside `XLogData`, which is a different parser with far
 //! more structure: nested tuple data, per-column length prefixes, a format byte
 //! per column, in-chunk xid prefixes, and three protocol versions' worth of
 //! optional fields.
 //!
-//! `tests/pgoutput_allocation.rs` already covers the ALLOCATION half - a count
+//! `libs/compio-postgres/tests/suite/pgoutput_allocation.rs` already covers the ALLOCATION half - a count
 //! the peer chooses must not become a reservation it chooses. What was missing
 //! is the plain one: arbitrary bytes must not panic the decoder. A walsender is
 //! a peer like any other, and a panic in a parser is reachable by whoever is on
@@ -524,7 +524,7 @@ struct SequenceReach {
 /// reason this file bothers with sequences: an in-chunk xid that DIFFERS from
 /// the chunk's must be accepted. Commit 17c09e7ce added a check that the two
 /// must agree and shipped it; a transaction with a SAVEPOINT carries its
-/// subtransaction's xid and was rejected. `tests/pgoutput_subtransactions.rs`
+/// subtransaction's xid and was rejected. `libs/compio-postgres/tests/suite/pgoutput_subtransactions.rs`
 /// pins that against a live server. This pins it against a corpus.
 ///
 /// WHAT THIS DOES NOT CATCH: transaction lifecycle policy beyond the currently

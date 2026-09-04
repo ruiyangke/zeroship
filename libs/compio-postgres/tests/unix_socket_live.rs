@@ -1,6 +1,6 @@
 //! Connecting over a Unix domain socket, end to end against a live server.
 //!
-//! `tests/unix_socket_path_limit.rs` proves that a path past `sun_path` is
+//! `libs/compio-postgres/tests/suite/unix_socket_path_limit.rs` proves that a path past `sun_path` is
 //! REFUSED rather than truncated. That is the failure half. This is the
 //! success half, and until 2026-08-25 nothing covered it: the fixture the
 //! suite shipped mounted its socket 110 bytes deep, so it could not be

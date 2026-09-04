@@ -2,7 +2,7 @@
 //!
 //! One grammar shared by the multi-node worker and the single-tenant
 //! `zeroship serve` CLI, mirroring the deploy blob store's `StoreUrl`
-//! (`crates/bundle/src/blob_config.rs`):
+//! (`crates/zeroship-bundle/src/blob_config.rs`):
 //!
 //! - `s3://bucket/prefix?region=…` → an `S3` backend over the bespoke
 //!   compio-native S3 client (hand-rolled SigV4, cyper transport, zero

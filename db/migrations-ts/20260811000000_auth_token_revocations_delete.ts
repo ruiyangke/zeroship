@@ -2,7 +2,7 @@ import { grant } from "@zeroship/migrate";
 
 // `zeroship_auth` could never run its own retention sweep.
 //
-// crates/auth/src/cron/token_sweep.rs:125-128 DELETEs from
+// crates/zeroship-auth/src/cron/token_sweep.rs:125-128 DELETEs from
 // zeroship.token_revocations and surfaces the row count as
 // `token_revocations_deleted`. The role it runs as was granted only
 // select/insert/update on that table (20260702000900_grants.ts, the grant

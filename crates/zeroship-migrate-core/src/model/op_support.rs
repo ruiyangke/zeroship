@@ -86,8 +86,8 @@ pub fn support_for_target(
 /// without adding the matching arm hands the operator this string for an
 /// ordinary dialect limit - and that has happened: four rows shipped it on
 /// SQLite, three of them also on MySQL. Exporting the constant lets
-/// `tests/unsupported_reason_is_operator_facing.rs` (offline, all three
-/// dialects) and `tests/dialect_conformance_live.rs` (live, PostgreSQL +
+/// `crates/zeroship-migrate/tests/dialect_matrix/unsupported_reason_is_operator_facing.rs` (offline, all three
+/// dialects) and `crates/zeroship-migrate/tests/dialect_matrix/dialect_conformance_live.rs` (live, PostgreSQL +
 /// SQLite) both detect it WITHOUT re-typing the literal, so the check cannot
 /// drift from the thing it checks.
 ///
@@ -124,7 +124,7 @@ fn support_cell(
             // operators. Debug builds - which is every test run - refuse to
             // return it, so a cell flipped to `unsupported` without its reason
             // arm fails LOUDLY here instead of quietly reaching a user.
-            // `tests/unsupported_reason_is_operator_facing.rs` is the release-mode
+            // `crates/zeroship-migrate/tests/dialect_matrix/unsupported_reason_is_operator_facing.rs` is the release-mode
             // half of the same guard, and covers MySQL, which no live suite does.
             debug_assert_ne!(
                 reason,

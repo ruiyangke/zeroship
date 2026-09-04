@@ -14,7 +14,7 @@ import { appSlug, appUrl } from "../helpers";
 //   (b) a runtime stream-lifecycle bug (FIXED): the 2nd+ streamed response on an
 //       isolate stalled after its first frame because a streamed dispatch didn't
 //       wake the pump when it had gone idle after a prior request. A pure-runtime
-//       RED test pinned it (crates/runtime/tests/iss71_sequential_streams.rs);
+//       RED test pinned it (crates/zeroship-runtime/tests/iss71_sequential_streams.rs);
 //       fixed by `notify_pump()` on the Stream outcome path. Both specs now pass.
 test.describe("RPC streaming (csr-todo searchTodos)", () => {
   test.skip(!appSlug("csr"), "csr-todo not deployed (dist missing)");
@@ -38,7 +38,7 @@ test.describe("RPC streaming (csr-todo searchTodos)", () => {
   // a 2nd stream — which used to deliver only its first frame and hang, because a
   // streamed dispatch didn't wake the runtime pump if it had gone idle after the
   // prior request (the pump drives the response body's async read loop). Fixed by
-  // `notify_pump()` on the Stream outcome path (crates/runtime/src/core/runtime.rs),
+  // `notify_pump()` on the Stream outcome path (crates/zeroship-runtime/src/core/runtime.rs),
   // mirroring the Pending path. Asserts the <li>s climb incrementally to 3 and the
   // stream TERMINATES (status flips to "3 matches").
   test("typing a query streams matches into the DOM one frame at a time", async ({ page }) => {

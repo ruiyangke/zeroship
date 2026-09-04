@@ -38,7 +38,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// name something the operator can actually set.
 const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// Operator-facing spelling of the worker dispatch key. The shared identity in
-/// `crates/config-macros/src/shared.rs` (`canonical: "worker_key"`) projects to
+/// `crates/zeroship-config-macros/src/shared.rs` (`canonical: "worker_key"`) projects to
 /// this environment name; the flag comes from the same declaration.
 const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
 
@@ -105,7 +105,7 @@ fn worker_credentials(
     ]
 }
 
-/// Apply the boot gate, or exit. See `crates/gateway/src/main.rs` for the shape;
+/// Apply the boot gate, or exit. See `crates/zeroship-gateway/src/main.rs` for the shape;
 /// it is deliberately identical across services so an operator reads one banner.
 fn enforce_worker_credentials(
     settings: &zeroship_worker::config::WorkerSettings,

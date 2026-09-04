@@ -3,7 +3,7 @@
 //!
 //! # Why this exists next to the unit tests
 //!
-//! `crates/control/src/reserved_names.rs` unit-tests the PREDICATE:
+//! `crates/zeroship-control/src/reserved_names.rs` unit-tests the PREDICATE:
 //! `is_reserved_app_name("console")` is true. That is a different claim from
 //! the one the platform depends on, which is that the real create route
 //! refuses the name. A call site that stopped being reached - the `if` moved
@@ -38,8 +38,8 @@
 //! Only CREATION. `Registry::create_app` is the sole point a name is claimed -
 //! there is no rename or name-update route (no `UPDATE zeroship.apps SET name`
 //! exists anywhere in `crates/control/src`, and `/api/apps/{id}` carries GET
-//! and DELETE only, `crates/control/src/main.rs`). The only other production
-//! caller of `create_app` is `crates/control/src/bin/dev_provision.rs`, which
+//! and DELETE only, `crates/zeroship-control/src/main.rs`). The only other production
+//! caller of `create_app` is `crates/zeroship-control/src/bin/dev_provision.rs`, which
 //! goes through the same function; `registry_refuses_a_reserved_name_directly`
 //! below is that vector's coverage. Direct `INSERT INTO zeroship.apps` outside
 //! the registry exists only in test fixtures. Nothing here proves the GATEWAY
@@ -162,7 +162,7 @@ async fn build_test_state(label: &str) -> Fixture {
 }
 
 /// The production route table for `POST /api/apps`, mounted exactly as
-/// `crates/control/src/main.rs` mounts it.
+/// `crates/zeroship-control/src/main.rs` mounts it.
 macro_rules! init_control {
     ($fx:expr) => {{
         test::init_service(
@@ -371,7 +371,7 @@ async fn a_reserved_name_and_a_malformed_name_answer_differently() {
     );
 }
 
-/// The registry is the choke point, and `crates/control/src/bin/dev_provision.rs`
+/// The registry is the choke point, and `crates/zeroship-control/src/bin/dev_provision.rs`
 /// reaches it WITHOUT the HTTP handler. Driving `Registry::create_app` directly
 /// covers that vector and pins the typed error the HTTP layer maps.
 #[compio::test]

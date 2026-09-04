@@ -36,7 +36,7 @@
 //
 // Every procedure returns the RAW `env.auth.getUser()` value, unmapped. That is
 // deliberate: `getUser()` is a bare `JSON.parse` of the `ZeroShip-User` payload
-// (crates/runtime/src/auth.rs::get_user_callback), so the raw object IS the
+// (crates/zeroship-runtime/src/auth.rs::get_user_callback), so the raw object IS the
 // kernel contract surface - key names, key order, and which keys are present at
 // all. Passing it through `@zeroship/auth`'s camelCase `User` type here would
 // launder exactly the field-level divergence the comparison exists to find.

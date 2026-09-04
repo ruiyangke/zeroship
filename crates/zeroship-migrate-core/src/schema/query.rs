@@ -187,7 +187,7 @@ mod schema_renderer_tests {
     /// A SPELLING PIN, not an oracle, and the distinction matters: this compares one
     /// function in this repo against a literal in this repo, which proves nothing about
     /// what a server does. The SQLite line is adjudicated by a real database in
-    /// `tests/fold_live/sqlite_decimal_rebuild_live.rs` - where the un-faceted `REAL`
+    /// `crates/zeroship-migrate/tests/fold_live/sqlite_decimal_rebuild_live.rs` - where the un-faceted `REAL`
     /// answer was measured turning 12345678901234.5678 into 12345678901234.6 through a
     /// 12-step rebuild - and the PG line by the phantom-rebuild case in the same file.
     ///
@@ -3864,7 +3864,7 @@ columns = [
         );
         // The collation is part of the spelling, not decoration: MySQL runs enum
         // member LOOKUP under it, so an uncollated `ENUM` accepts 'ACTIVE' for a
-        // declared 'active'. Measured in `tests/mysql_engine/mysql_enum_collation.rs`.
+        // declared 'active'. Measured in `crates/zeroship-migrate/tests/mysql_engine/mysql_enum_collation.rs`.
         assert!(
             sql.contains(
                 "`status` ENUM(X'616374697665', X'706175736564') \

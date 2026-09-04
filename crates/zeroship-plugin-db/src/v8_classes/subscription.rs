@@ -295,7 +295,7 @@ mod mv_refusal_tests {
 /// still releases the broker slot when V8 collects.
 ///
 /// This mirrors the `mint_rpc_ctx` pattern in
-/// `crates/runtime/src/rpc/ctx_holder.rs`.
+/// `crates/zeroship-runtime/src/rpc/ctx_holder.rs`.
 pub fn mint_subscription<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,

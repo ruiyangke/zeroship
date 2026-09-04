@@ -82,7 +82,7 @@ pub fn mysql_pin_collation(rendered: &str, case_sensitive: Option<bool>) -> Stri
 /// `ENUM(...)`. MySQL stores an enum as an index into its
 /// member list but compares and LOOKS UP members as strings, so an uncollated `ENUM`
 /// silently accepts `'ACTIVE'` for a declared `'active'` - measured on a live server
-/// by `tests/mysql_engine/mysql_enum_collation.rs`. `SET(...)` is the same shape and
+/// by `crates/zeroship-migrate/tests/mysql_engine/mysql_enum_collation.rs`. `SET(...)` is the same shape and
 /// is named here for the same reason, though nothing in the engine emits one today.
 ///
 /// Deliberately NOT here: `JSON` (MySQL refuses a collation on it outright), the BLOB

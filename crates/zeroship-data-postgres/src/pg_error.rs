@@ -229,7 +229,7 @@ mod tests {
     // These drive `is_missing_per_app_session_role` directly rather than the
     // contextual converter because `compio_postgres::Error` has no public
     // constructor. The real converter path against a live server is covered by
-    // `tests/missing_role.rs`; these pin the discriminator's cheap edge cases.
+    // `crates/zeroship-plugin-db/tests/missing_role.rs`; these pin the discriminator's cheap edge cases.
     // -----------------------------------------------------------------
 
     #[test]

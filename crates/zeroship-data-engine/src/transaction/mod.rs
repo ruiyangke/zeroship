@@ -1044,7 +1044,7 @@ mod tests {
     ///
     /// The PostgreSQL arm of this property is
     /// `a_forced_cleanup_cancels_the_running_statement_and_keeps_the_connection`
-    /// in `tests/native_transaction.rs`; this is its dev-tier peer, and it is
+    /// in `crates/zeroship-plugin-db/tests/native_transaction.rs`; this is its dev-tier peer, and it is
     /// here rather than there because it needs no server.
     ///
     /// The two backends differ in how much a cancellation accomplishes, and this

@@ -183,8 +183,8 @@ echo "=== dev vs deployed (workflow-probe) ==="
 # `wf.run` mutation so both sides ran byte-identical logic; that version passed
 # in dev and returned `{"message":"request timed out"}` for every case deployed,
 # because `zeroship serve` leaves the per-request wall clock unbounded
-# (crates/runtime/src/core/serve.rs, `wall_timeout: None`) and a deployed app
-# inherits FREE_TIER_RUNTIME_LIMITS -- 5s wall (crates/core/src/types.rs:37).
+# (crates/zeroship-runtime/src/core/serve.rs, `wall_timeout: None`) and a deployed app
+# inherits FREE_TIER_RUNTIME_LIMITS -- 5s wall (crates/zeroship-core/src/types.rs:37).
 # The loop is identical for both URLs, so the two sides still see the same
 # sequence of operations at the same cadence.
 probe() {
@@ -281,7 +281,7 @@ authed=$(grep -oE '"rpc:[^"]+":\{[^}]*"auth":' "$d/manifest.json" | wc -l)
 
 # The manifest must DECLARE every workflow the app exports. The control plane
 # refuses `start` for a name the active deploy does not declare
-# (crates/control/src/workflow_instance_api.rs:732), so an app whose build
+# (crates/zeroship-control/src/workflow_instance_api.rs:732), so an app whose build
 # drops the declaration is deployable, reachable, and cannot run a workflow.
 # This assertion is the build-side half of the same failure the results diff
 # catches at run time; keeping both means a regression is attributed to the
@@ -343,10 +343,10 @@ sleep 4
 # --workflow-advance-unsigned is not a shortcut here; it is the ONLY way a
 # deployed run can advance today. The control workflow engine POSTs to the
 # gateway's `/__zeroship/internal/workflow-advance`
-# (crates/control/src/cron/workflow_engine.rs:209), the gateway forwards to the
+# (crates/zeroship-control/src/cron/workflow_engine.rs:209), the gateway forwards to the
 # worker's `/workflow-advance-unsigned/{app_id}`
-# (crates/gateway/src/proxy.rs:257), and that worker handler returns 403 unless
-# the flag is set (crates/worker/src/handler.rs:553). The handler's own doc says
+# (crates/zeroship-gateway/src/proxy.rs:257), and that worker handler returns 403 unless
+# the flag is set (crates/zeroship-worker/src/handler.rs:553). The handler's own doc says
 # signed advance "replaces it in a later durable-workflows task" and that
 # `deploy/` passes the flag nowhere -- confirmed: the only two matches in the
 # tree are this file's sibling e2e and its worktree copy. So a production
@@ -377,7 +377,7 @@ APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
 
 # Durable workflows are behind an operator rollout gate, not a creator switch:
 # `apps.workflows_enabled` AND `plans.workflows_allowed` must both be true
-# (crates/control/src/workflow_rollout.rs:12-34) or every start returns 403
+# (crates/zeroship-control/src/workflow_rollout.rs:12-34) or every start returns 403
 # "workflows are not enabled for this app or plan". `dev-provision` sets
 # neither, and nothing on the creator path can. Flipping them here is
 # provisioning, not a weakened assertion -- tests/e2e_durable_workflows.sh does
@@ -517,7 +517,7 @@ else
 fi
 
 # Known divergence 1 -- child workflows. The dev mini-engine refuses every
-# `child` checkpoint outright (crates/plugin-workflow/src/dev.rs
+# `child` checkpoint outright (crates/zeroship-plugin-workflow/src/dev.rs
 # reject_child_checkpoints_for_dev), so `step.call` cannot work locally at all.
 # Deployed it runs and journals the child's output into the parent.
 printf '%s' "$(line_for dev child)" \

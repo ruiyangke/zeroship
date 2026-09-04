@@ -3,7 +3,7 @@
 //! Bridges the spec-side `web::fetch` algorithm chain to the wire layer.
 //! The thread-local instance is shared across every `fetch()` call made on
 //! the same THREAD - which is many apps, not one. A worker thread hosts a
-//! whole LRU of isolates (`crates/worker/src/cache.rs`), so one app's warm
+//! whole LRU of isolates (`crates/zeroship-worker/src/cache.rs`), so one app's warm
 //! pooled connection is an entry another app can be served from. That is a
 //! real property of this client and the reason a per-app fetch policy has no
 //! slot here today; `fetch` is not gated, so nothing depends on it yet.

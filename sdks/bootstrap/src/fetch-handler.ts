@@ -9,7 +9,7 @@
  *
  * Stage 7 moved this out of the Vite plugin's `dev-bootstrap` so the
  * dev path shares the same fall-through logic the runtime crate emits
- * in production (`crates/runtime/src/core/init.rs` — the slow-path
+ * in production (`crates/zeroship-runtime/src/core/init.rs` — the slow-path
  * fetch handler that wraps `__zsDispatch` for stream encoding). Single
  * implementation; no drift between dev and prod.
  *
@@ -152,7 +152,7 @@ export function createFetchHandler(
       } else {
         // The message names the procedure, not just the rail. The deployed
         // tier answers this same case from the gateway's procedure-kind gate
-        // (`crates/gateway/src/router/dispatch.rs`), which knows the id and now
+        // (`crates/zeroship-gateway/src/router/dispatch.rs`), which knows the id and now
         // formats it identically, so the two tiers are byte-identical here.
         // Without the id the two could not agree without the gateway throwing
         // information away. Verified end to end by the dispatcher leg of

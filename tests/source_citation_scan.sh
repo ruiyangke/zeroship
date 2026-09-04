@@ -28,7 +28,7 @@
 #      4 of the 17 above. `tsx` precedes `ts`, and a trailing `(?![A-Za-z0-9])`
 #      closes the rest.
 #
-# Four categories are deliberately NOT defects, and a gate that flags them is
+# Five categories are deliberately NOT defects, and a gate that flags them is
 # wrong rather than strict:
 #
 #   * NEGATIVE citations, where the comment names a file precisely to say it
@@ -43,14 +43,20 @@
 #     Both are values the code reads, not places a reader is being sent. The
 #     tell: renaming the invented crate would satisfy the scan and change
 #     nothing real.
-#   * GENERATED build outputs, which resolve only after `pnpm build` and are
-#     never tracked. The scan reports these itself, as a warning at the end of
-#     a built run, and the warning is the reason they are here: a local green
-#     that came from a built tree is not the CI answer. Naming one is correct
-#     — it is where the artifact really lands — so the alternative would be to
-#     stop naming build outputs in comments, which is worse.
+#   * GENERATED build outputs, which exist only after `pnpm build` and are never
+#     tracked. Naming one is correct - it is where the artifact really lands -
+#     so the alternative would be to stop naming build outputs in comments,
+#     which is worse. They are UNRESOLVABLE by construction here as of
+#     2026-09-04 (see the resolution oracle below), which is the point: the gate
+#     now gives the same verdict on a built tree and a fresh checkout, and each
+#     such citation has to be ruled on once rather than silently passing
+#     locally.
+#   * DELETED SUBJECTS of claims that are still true history - a dated session
+#     note recording a measurement taken against a file that has since been
+#     removed. Repointing one does not fix a stale pointer; it says the
+#     measurement was taken somewhere it was not.
 #
-# All four are listed in ALLOW below, by "file:citation" pair rather than by
+# All five are listed in ALLOW below, by "file:citation" pair rather than by
 # citation alone, so the same path cited wrongly somewhere else is still caught.
 #
 # This file and its self-test are excluded from the scan. Both spell out paths
@@ -151,13 +157,66 @@ DOC_EXCLUDED="archive decisions proposals superpowers reviews research"
 # `crates/runtime/src/embed/websocket.js` inside a `git log --diff-filter=D`
 # recipe for a DELETED file, so it can never resolve, and a "corrected"
 # right-hand side simply stops matching and lets the citation be reported again.
+#
+# THE LIST GREW FROM 22 TO 43 PAIRS ON 2026-09-04, and the twenty-one are worth
+# naming as groups rather than leaving as a wall. All of them were reported for
+# the first time that day, when this gate was wired into CI - the crate-directory
+# rename of 2026-08-26 (`105a75131`) had left 696 unresolvable citations and
+# nothing ran the scan between the two dates. 663 of the 696 were repointed at
+# the file that MOVED. These are the rest, and the split is deliberate: a moved
+# file gets a new address, a DELETED one does not get a fake one.
+#
+#   * NEGATIVE, and the sentence needs the dead path. `id.rs` records that a
+#     promised `tests/core_id_parity.rs` guard cannot exist here;
+#     `migrate-sqlite/backend/mod.rs` says outright "there is no
+#     `tests/sqlite_journal.rs` and there never was"; `raw_env.rs` names the
+#     value a path CONSTANT held until it stopped matching - repointing that one
+#     makes the sentence contradict itself, and this sweep did exactly that
+#     before it was caught. The compose-gate and `cross_app_fk.rs` rows are the
+#     same shape: each names a file to say it was deleted and what went unheld
+#     with it.
+#   * DELETED SUBJECT of a claim that is still true history. `ccda4bb42`
+#     (2026-08-28) deleted the platform-migrate binary - `src/platform.rs`,
+#     `src/platform/cluster_lock.rs`, `tests/platform_migrate.rs`. Four files
+#     cite it for what it DID, and each was edited on 2026-09-04 to say the
+#     target is gone rather than to point somewhere plausible. The two
+#     `NOTES-s*.md` are dated session records: they measured against that file
+#     when it existed, so repointing would falsify a measurement.
+#   * FIXTURE DATA, not pointers. `ci_wiring_gate.sh` and `sync_claim_gate.sh`
+#     build synthetic trees in `$tmp` and assert on them; `tests/x_gate.sh` and
+#     `crates/zeroship-alpha/src/lib.rs` are inputs those gates WRITE. Renaming
+#     them would satisfy the scan and change nothing real - the same tell the
+#     `config-contract` rows below carry.
+#   * AN ELISION. `inject_policy_mirror_gate.sh` spells one path with `.../` in
+#     a two-column summary; the full form is in the same file, twice.
 ALLOW="
 crates/zeroship-auth/tests/common/mod.rs:tests/common.rs
 crates/zeroship-runtime/tests/call_fetch_handler.rs:tests/http.rs
 crates/zeroship-migrate-server/tests/typed_id_parity.rs:tests/core_id_parity.rs
 crates/zeroship-runtime/src/core/init.rs:crates/runtime/src/embed/websocket.js
-crates/zeroship-plugin-db/src/backend/sqlite/session.rs:examples/simple-rust/demo.rs
+crates/zeroship-data-sqlite/src/session.rs:examples/simple-rust/demo.rs
 tests/golden_path.sh:tests/m0_gate.sh
+crates/zeroship-migrate-ir/src/id.rs:tests/core_id_parity.rs
+crates/zeroship-migrate-sqlite/src/backend/mod.rs:tests/sqlite_journal.rs
+crates/zeroship-config-contract/src/raw_env.rs:crates/core/src/config/env.rs
+crates/zeroship-auth/src/headers.rs:tests/compose_port_exposure_gate.sh
+docs/runbooks/deploy-server.md:tests/compose_port_exposure_gate.sh
+tests/service_credential_boot_gate.sh:tests/compose_secret_strength_gate.sh
+tests/lib/scratch_db.sh:crates/zeroship-migrate-adapter/src/platform/cluster_lock.rs
+tests/run_doc_gate.sh:crates/plugin-db/src/cross_app_fk.rs
+docs/feature-map.md:crates/zeroship-plugin-db/src/cross_app_fk.rs
+docs/reference/db.md:crates/zeroship-plugin-db/src/cross_app_fk.rs
+crates/zeroship-testkit/src/fingerprint.rs:crates/zeroship-migrate-adapter/src/platform.rs
+db/migrations-ts/20260811000400_rate_limits_write_grants.ts:crates/auth/src/store/ratelimit.rs
+db/migrations-ts/20260816000100_service_assertion_replay.ts:crates/zeroship-migrate-adapter/tests/platform_migrate.rs
+db/migrations-ts/20260818000000_auth_principal_grants_select.ts:crates/zeroship-migrate-adapter/src/platform.rs
+NOTES-s31.md:crates/zeroship-migrate-adapter/tests/platform_migrate.rs
+NOTES-s40.md:crates/zeroship-migrate-adapter/src/platform.rs
+NOTES-s40.md:crates/zeroship-migrate-adapter/tests/platform_migrate.rs
+tests/ci_wiring_gate.sh:tests/other.sh
+tests/ci_wiring_gate.sh:tests/x_gate.sh
+tests/sync_claim_gate.sh:crates/zeroship-alpha/src/lib.rs
+tests/inject_policy_mirror_gate.sh:sdks/vite-plugin/.../confined-system-shape.generated.ts
 libs/compio-s3/tests/common/mod.rs:tests/common/env.rs
 crates/zeroship-config-contract/src/raw_env.rs:tests/common/env.rs
 crates/zeroship-config-contract/tests/raw_env_contract.rs:tests/common/env.rs
@@ -206,6 +265,51 @@ if [ ! -f AGENTS.md ]; then
   exit 1
 fi
 
+# THE RESOLUTION ORACLE IS `git ls-files`, NOT THE FILESYSTEM, and that is the
+# whole of the fix for the divergence described below. A citation resolves iff
+# its target is TRACKED. It is not asked whether the file happens to be on this
+# disk right now.
+#
+# Both are needed and they are different questions. `git ls-files` was already
+# the CORPUS (see the note further down): which files get SCANNED. It was never
+# the oracle for whether a scanned citation RESOLVES, and that half stayed on
+# `-e`, which reads the working tree. So the gate scanned the commit and judged
+# the disk, and the two disagree on exactly one thing - generated build output.
+#
+# MEASURED 2026-09-04: five targets resolved on a built tree that a fresh
+# checkout does not have (`sdks/{bootstrap,db}/dist/*`, `sdks/vite-plugin/
+# dist/*`). All five were already covered pair-by-pair in ALLOW, so the CI
+# verdict was the same as the local one this time - but only by the grace of
+# somebody having listed them. The SIXTH such citation, written tomorrow, would
+# have passed here and failed in CI, which is how this gate spent 2026-08-10
+# red in CI and green on every developer machine.
+#
+# Asking git closes that by construction rather than by allowlist: a build
+# output is untracked, so it is unresolvable HERE too, immediately, on the
+# machine of whoever wrote it. The gate can no longer pass locally and fail in
+# CI, because it no longer has access to the fact the two environments differ
+# on. The warning that used to report the divergence is gone with it - there is
+# nothing left for it to report.
+TRACKED_SET="$(mktemp)"
+trap 'rm -f "$TRACKED_SET"' EXIT
+git ls-files | LC_ALL=C sort -u > "$TRACKED_SET"
+if [ ! -s "$TRACKED_SET" ]; then
+  echo "::error::git ls-files returned nothing - every citation would report unresolvable"
+  exit 1
+fi
+
+resolves() {
+  # A leading ./ never appears in git's spelling; normalise before asking.
+  LC_ALL=C grep -qxF "${1#./}" "$TRACKED_SET"
+}
+
+# Told apart from "does not exist at all" because the two need different
+# actions: an untracked-but-present target is a build output or a scratch file,
+# and the citation has to move to ALLOW or point at the SOURCE that produces it.
+on_disk_but_untracked() {
+  [ -e "${1#./}" ]
+}
+
 pkg_root() {
   local d
   d="$(dirname "$1")"
@@ -236,45 +340,30 @@ missing=0
 # `tests/supabase_deploy_e2e.sh` flips this gate red with the filesystem as
 # corpus and has no effect once the corpus is `git ls-files`.)
 
-# WHY A RESOLVED CITATION IS ALSO WORTH RECORDING. This gate reads the WORKING
-# TREE, and a developer's working tree has been built. CI's has not: the `rust`
-# job is checkout + toolchain + `cargo check`, with no pnpm install and no pnpm
-# build, and `dist/` is not tracked. So a citation to a build output resolves
-# here and CANNOT resolve there - the gate reports green on every machine and
-# red in the only place it is enforced.
-#
-# That is not hypothetical. The gate was wired 2026-08-08 genuinely green (no
-# build-output citations existed at that commit). Around 2026-08-10 the first
-# `dist/` citations landed and it went red in CI, invisibly, because everyone
-# who ran it locally ran it after a build.
-#
-# So every path that RESOLVES is recorded here, and at the end the ones git does
-# not track are named. Tracked-ness is the exact question - a fresh checkout has
-# exactly the tracked files - so this asks git rather than guessing from the
-# path shape.
-RESOLVED_LIST="$(mktemp)"
-trap 'rm -f "$RESOLVED_LIST"' EXIT
-
 while IFS= read -r line; do
   src="${line%%:*}"
   cite="${line#*:}"
   [ -n "$cite" ] || continue
   found=$((found + 1))
 
-  if [ -e "$cite" ]; then printf '%s\n' "$cite" >> "$RESOLVED_LIST"; continue; fi
+  if resolves "$cite"; then continue; fi
   base="$(pkg_root "$src")"
-  # "$base/$cite" verbatim, matching the -e test on the line above. An earlier
+  # "$base/$cite" verbatim, matching the test on the line above. An earlier
   # draft wrote "${base#./}$cite" and silently dropped the separator, turning
   # crates/auth + tests/x.rs into crates/authtests/x.rs - 101 tracked files
   # reported as untracked. The join has to be the same string the test used.
-  if [ -e "$base/$cite" ]; then printf '%s\n' "$base/$cite" | sed 's|^\./||' >> "$RESOLVED_LIST"; continue; fi
+  if resolves "$base/$cite"; then continue; fi
 
   if printf '%s' "$ALLOW" | grep -qxF "$src:$cite"; then
     allowed=$((allowed + 1))
     continue
   fi
 
-  echo "::error::$src cites $cite, which resolves neither from the repo root nor from $base/"
+  if on_disk_but_untracked "$cite" || on_disk_but_untracked "$base/$cite"; then
+    echo "::error::$src cites $cite, which is in your working tree but NOT TRACKED - a fresh checkout, which is what CI has, does not have it. Cite the source that produces it, or add the pair to ALLOW."
+  else
+    echo "::error::$src cites $cite, which resolves neither from the repo root nor from $base/"
+  fi
   missing=$((missing + 1))
 done < <(git ls-files -- $ROOTS \
     | grep -E '\.(rs|ts|tsx|js|toml|sh)$' \
@@ -306,27 +395,29 @@ while IFS= read -r line; do
   # A `../` citation is resolved against the doc that wrote it, not the repo
   # root: that is what the prefix means, and it is what makes the link work.
   # A bare one is repo-relative - a doc has no package to be relative to.
-  # Same build-state recording as the source pass above, and for the same
-  # reason: AGENTS.md and CONTRIBUTING.md both cite sdks/db/dist/internal.js,
-  # which only a built tree has.
+  #
+  # realpath -m, because a doc-relative hit spells out as
+  # `docs/architecture/../../crates/x.rs` and `git ls-files` only ever lists
+  # NORMALISED paths - so the unnormalised form matches nothing and every one of
+  # the 79 doc hits would report unresolvable. Asking git means spelling the
+  # path the way git spells it. `-m` so a path whose target is absent still
+  # normalises rather than failing.
   case "$cite" in
-    # realpath -m, because a doc-relative hit is recorded as
-    # `docs/architecture/../../crates/x.rs` and `git ls-files` only ever lists
-    # NORMALISED paths - so the unnormalised form matches nothing and every one
-    # of the 79 doc hits reported as untracked. Comparing against git means
-    # spelling the path the way git spells it.
-    ../*) if [ -e "$(dirname "$src")/$cite" ]; then
-            realpath -m --relative-to=. "$(dirname "$src")/$cite" >> "$RESOLVED_LIST"; continue
-          fi ;;
-    *)    if [ -e "$cite" ]; then printf '%s\n' "$cite" >> "$RESOLVED_LIST"; continue; fi ;;
+    ../*) doc_target="$(realpath -m --relative-to=. "$(dirname "$src")/$cite")" ;;
+    *)    doc_target="$cite" ;;
   esac
+  if resolves "$doc_target"; then continue; fi
 
   if printf '%s' "$ALLOW" | grep -qxF "$src:$cite"; then
     doc_allowed=$((doc_allowed + 1))
     continue
   fi
 
-  echo "::error::$src cites $cite, which does not resolve"
+  if on_disk_but_untracked "$doc_target"; then
+    echo "::error::$src cites $cite, which is in your working tree but NOT TRACKED - a fresh checkout, which is what CI has, does not have it. Cite the source that produces it, or add the pair to ALLOW."
+  else
+    echo "::error::$src cites $cite, which does not resolve"
+  fi
   missing=$((missing + 1))
 done < <( {
     git ls-files -- docs \
@@ -341,26 +432,14 @@ done < <( {
   } | sort -u )
 
 echo "doc citations checked: $doc_found across docs/ + root *.md, excluding $DOC_EXCLUDED and dated records (allowed: $doc_allowed, unresolvable: $((missing - src_missing)))"
-# The build-state report. Still a WARNING and not a failure, but the contract
-# question it used to leave open is now ANSWERED: a citation to a build output
-# is correct as written and belongs in ALLOW (fourth category above), so the
-# named pairs no longer fail in either tree. The warning survives because it
-# reports something ALLOW cannot - that this run resolved a target CI would
-# not, so a green here is not evidence of a green there. Any target it lists
-# that is NOT in ALLOW is on its way to failing in CI.
-if [ -s "$RESOLVED_LIST" ] && git rev-parse --git-dir >/dev/null 2>&1; then
-  sort -u "$RESOLVED_LIST" > "$RESOLVED_LIST.s"
-  git ls-files | sort -u > "$RESOLVED_LIST.t"
-  untracked_hits="$(comm -23 "$RESOLVED_LIST.s" "$RESOLVED_LIST.t")"
-  rm -f "$RESOLVED_LIST.s" "$RESOLVED_LIST.t"
-  if [ -n "$untracked_hits" ]; then
-    n="$(printf '%s\n' "$untracked_hits" | wc -l | tr -d ' ')"
-    echo "::warning::$n citation target(s) resolved here ONLY because this tree is built."
-    echo "  git does not track them, so a fresh checkout - which is what CI has - reports"
-    echo "  them UNRESOLVABLE. This run is therefore NOT CI-representative:"
-    printf '%s\n' "$untracked_hits" | sed 's/^/    /'
-  fi
-fi
+# A "this run is not CI-representative" warning used to be printed here, listing
+# the citation targets that had resolved only because this working tree was
+# built. It is GONE, and its absence is the point: with `resolves()` asking git
+# instead of the filesystem, no such target can resolve any more, so the warning
+# could only ever print an empty list. A check that cannot fire is worse than no
+# check - it reads as coverage. The condition it warned about is now a plain
+# unresolvable citation, reported above with the message that says which of the
+# two fixes applies.
 
 # The degenerate-case guard, one per corpus. This step counts what is MISSING
 # and passes at zero, so a pattern that stopped matching, a wrong root list, or

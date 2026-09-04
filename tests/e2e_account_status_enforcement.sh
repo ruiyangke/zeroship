@@ -4,7 +4,7 @@
 # gateway gate (billing G2): Active/PastDue → served, Suspended → 402.
 #
 # This is the OTHER gateway enforcement gate (complements the spend-state one).
-# `check_account` (crates/gateway/src/enforce.rs) runs BEFORE `check_spend`, so a
+# `check_account` (crates/zeroship-gateway/src/enforce.rs) runs BEFORE `check_spend`, so a
 # Suspended creator's apps 402 `ACCOUNT_SUSPENDED` regardless of spend headroom.
 # State is CREATOR-keyed (`zeroship.creator_billing_status.state` ∈
 # active|past_due|suspended), surfaced per-app on the pulled `RouteEntry` via the

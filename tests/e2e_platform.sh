@@ -151,7 +151,7 @@ jget() { printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null || true; }
 # `Content-Type: application/x-zship`. Manifest is the first tar entry, the JS
 # payload lives at `blobs/<sha256>`.
 #
-# Manifest shape is v1 `resources` (`crates/bundle/src/manifest.rs`;
+# Manifest shape is v1 `resources` (`crates/zeroship-bundle/src/manifest.rs`;
 # `validate()` rejects any version but 1). The previous version of this file
 # emitted `{"version":2,"rules":[...]}` with `POST /_rpc/* → rpc`, a shape
 # that predates RPC v1 (fe571dc03, 2026-04-30) — both the version and the
@@ -444,7 +444,7 @@ fi
 # gateway called `auth::check_api_key` for `WorkerMode::Rpc` requests and
 # SSR was open by design. RPC v1 replaced the key check with the compiled
 # per-resource `EffectivePolicy` (`auth: anon|user|...`), and deleted the
-# only call site. `crates/gateway/src/auth.rs::check_api_key` and
+# only call site. `crates/zeroship-gateway/src/auth.rs::check_api_key` and
 # `RouteEntry.api_key_hash` are still there but nothing calls them
 # (grep: the sole match in non-test gateway code is the definition), so a
 # request carrying a wrong X-Api-Key is not rejected — there is no key gate
@@ -592,7 +592,7 @@ fi
 # ---------------------------------------------------------------------------
 # Test 9: Deploy edge cases (streaming early-rejection paths)
 # ---------------------------------------------------------------------------
-# Targets the streaming deploy handler in `crates/control/src/api.rs`
+# Targets the streaming deploy handler in `crates/zeroship-control/src/api.rs`
 # (`deploy()`): content-type, payload-cap and auth gates must fire
 # BEFORE the body is streamed to a tmp file. Companion to Test 2's
 # happy path.

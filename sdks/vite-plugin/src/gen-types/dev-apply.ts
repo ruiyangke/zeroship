@@ -16,7 +16,7 @@
  *                          `db_dir = path.parent()`        (backend/sqlite/mod.rs)
  *   per-app file           `<db_dir>/zs-<app_id>.sqlite`   (backend/sqlite/mod.rs)
  *   app_id in dev          `env_vars["APP_ID"]`, else the literal `"default"`
- *                          (crates/runtime/src/core/plugin.rs)
+ *                          (crates/zeroship-runtime/src/core/plugin.rs)
  *
  * so `.zeroship/zs-default.sqlite` + `.zeroship/zs-default.migrations.sqlite`.
  * Getting `app_id` wrong is the failure worth guarding against: `applyIrSqlite`
@@ -30,7 +30,7 @@ import { loadMigrateAddon, type ApplyReply } from "./addon.js";
 import { CONFINED_SYSTEM_SHAPE_INJECT_TOML } from "./confined-system-shape.generated.js";
 import { recordMigrationsDir } from "./recorder.js";
 
-/** The dev app_id, mirroring `crates/runtime/src/core/plugin.rs`'s fallback. */
+/** The dev app_id, mirroring `crates/zeroship-runtime/src/core/plugin.rs`'s fallback. */
 export const DEV_APP_ID = "default";
 
 /** `.zeroship`, the directory the dev DATABASE_URL's parent resolves to. */

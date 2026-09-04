@@ -11,7 +11,7 @@
  *
  * This declaration lets `import { env } from "zeroship"` resolve during
  * TypeScript build. At runtime, the module is provided by the V8 kernel
- * (see `crates/runtime/src/core/init.rs::ZEROSHIP_MODULE_JS`).
+ * (see `crates/zeroship-runtime/src/core/init.rs::ZEROSHIP_MODULE_JS`).
  *
  * The `env` type is deliberately loose: plugin namespaces are attached at
  * runtime based on which plugins the worker registered, and scalar secrets

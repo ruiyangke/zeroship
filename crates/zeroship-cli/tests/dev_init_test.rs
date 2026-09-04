@@ -113,7 +113,7 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
     // Does NOT cover: that the credential is correct for any real database, or
     // that the mode survives past the moment dev init writes it. It no longer
     // has to be the only protection, though: since the owner-only policy landed
-    // in crates/core/src/config/secrets.rs `read_secret_file`, a later chmod is
+    // in crates/zeroship-core/src/config/secrets.rs `read_secret_file`, a later chmod is
     // caught at the next read rather than passing silently, and
     // `zeroship-platform-migrate` reads this exact file through that function.
     let migrate_dsn =
@@ -481,7 +481,7 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
     // so compose must render without one rather than force a Stripe-less
     // deployment to carry a locally generated placeholder. Empty is not a
     // relaxation - control rejects every delivery with 500 when the secret is
-    // empty (crates/control/tests/stripe_webhook_test.rs).
+    // empty (crates/zeroship-control/tests/stripe_webhook_test.rs).
     assert!(
         control.contains("ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET: ${ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET:-}"),
         "ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET must be optional with an empty default"

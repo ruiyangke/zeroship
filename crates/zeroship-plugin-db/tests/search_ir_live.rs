@@ -33,7 +33,7 @@
 //! `zeroship-data-query-builder` depends on it - the dependency this target adds is a
 //! `[dev-dependencies]` one, declared for these tests. `env.db.<coll>.search()`
 //! still reaches `zeroship_schema::query::build_vector_search`
-//! (`crates/zeroship-plugin-db/src/backend/postgres.rs:456`).
+//! (`crates/zeroship-data-postgres/src/postgres.rs:456`).
 //!
 //! That is why `the_ir_and_the_shipped_builder_rank_identically` is here. It is
 //! the only arm that ties the two together, and it does it the one way that is
@@ -195,7 +195,7 @@ fn vector_text(values: &[f32]) -> String {
 ///
 /// Text format is used because it is the channel the shipped path uses
 /// (`query_text_params`, reached from
-/// `crates/zeroship-plugin-db/src/exec.rs`), so the differential arm below
+/// `crates/zeroship-data-engine/src/exec.rs`), so the differential arm below
 /// compares two statements over one execution mechanism rather than over two.
 fn bind_text(params: &[Literal]) -> Vec<String> {
     params
@@ -652,7 +652,7 @@ fn a_geo_search_finds_the_near_rows_and_the_coordinate_order_is_load_bearing() {
 /// Asserted by executing the **same SQL string** twice with different arguments
 /// and getting different row counts - which is the property the shipped SQLite
 /// arm does not have, formatting `k` into the statement
-/// (`crates/zeroship-plugin-db/src/backend/sqlite/vector.rs:117`) so every `k`
+/// (`crates/zeroship-data-sqlite/src/vector.rs:117`) so every `k`
 /// is a distinct statement and a distinct cache entry.
 #[test]
 fn one_statement_serves_every_k() {

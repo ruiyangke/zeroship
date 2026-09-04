@@ -935,7 +935,7 @@ mod ttl_tests {
     /// replaced. Anything expressing "a shift" or "a working day" is above it.
     const MAX_ACCESS_TOKEN_LIFETIME_SECS: i64 = 30 * 60;
 
-    /// The shortest it may live. Derived, not taste: `crates/cli/src/auth.rs`
+    /// The shortest it may live. Derived, not taste: `crates/zeroship-cli/src/auth.rs`
     /// treats a credential as expired at `expires_at <= now + 60`
     /// (`TOKEN_EXPIRY_SKEW_SECS`), so a lifetime at or under that skew makes
     /// every freshly minted token already stale to the CLI and turns each

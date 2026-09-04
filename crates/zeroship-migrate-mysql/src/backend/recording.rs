@@ -782,7 +782,7 @@ pub fn id_catalog_columns_with_generated_uuid_extra(
         //
         // `text`, NOT `varchar(191)`, because that is what the engine deploys for
         // a plain `ColType::Text` column - measured against a live MySQL server by
-        // `tests/drift_column_physical_type.rs`, whose `body` column authors `text`
+        // `crates/zeroship-migrate/tests/pg_drift/drift_column_physical_type.rs`, whose `body` column authors `text`
         // and introspects back as `Lob { tier: "text" }`. The `varchar(191)`
         // spelling belongs to the two columns ABOVE, which carry a `value_format`
         // and so need an indexable width. This row read `varchar(191)` until the

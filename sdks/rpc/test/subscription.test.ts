@@ -12,7 +12,7 @@
  *   handle.unsubscribe();   // or controller.abort()
  *
  * Wire — see `docs/proposals/rpc.md` §6 (Subscription wire) and
- * `crates/runtime/src/core/init.rs::_zsAcceptSubscription`.
+ * `crates/zeroship-runtime/src/core/init.rs::_zsAcceptSubscription`.
  */
 
 import { test, describe } from "node:test";
@@ -240,7 +240,7 @@ describe("subscribeCall — happy path", () => {
     // list, on the stated rationale that "the gateway adapts". No server
     // in this repo reads it: the gateway resolves identity from
     // `Authorization: Bearer`, the session cookie, then the IP
-    // (`crates/gateway/src/router/dispatch.rs`), and the subscription
+    // (`crates/zeroship-gateway/src/router/dispatch.rs`), and the subscription
     // path runs that same `resolve_auth`. So the token bought nothing
     // and rode in `Sec-WebSocket-Protocol`, a request header proxies and
     // CDNs log by default while `Authorization` is commonly redacted.

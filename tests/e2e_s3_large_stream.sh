@@ -23,7 +23,7 @@
 #
 # KNOWN RISK (the headline thing this harness measures): even on the
 # `unlimited` plan (wall_timeout_ms = None), the worker /dispatch path
-# (crates/worker/src/handler.rs::wall_limit) FALLS BACK to a hardcoded 30s
+# (crates/zeroship-worker/src/handler.rs::wall_limit) FALLS BACK to a hardcoded 30s
 # wall limit via `.unwrap_or(Duration::from_secs(30))`. recv_with_timeout
 # then trips the cancel flag and returns HTTP 504 "request timed out". A
 # multi-GB single-request upload may well exceed 30s and be CUT OFF. We use a
@@ -87,7 +87,7 @@ ST_ZSHIP="$ROOT/examples/storage-gallery/dist/app.zship"
 SIZE_BYTES="${SIZE_BYTES:-5368709120}"   # 5 GiB
 U32_MAX_PLUS1=4294967296                  # 4 GiB = u32::MAX+1
 # chunkBytes MUST stay <= the runtime's per-stream backpressure cap
-# (crates/runtime/src/core/channel.rs::DEFAULT_STREAM_BUFFER_CAP = 4 MiB):
+# (crates/zeroship-runtime/src/core/channel.rs::DEFAULT_STREAM_BUFFER_CAP = 4 MiB):
 # a SINGLE pull() chunk larger than that cap trips StreamPushResult::Full on
 # the first push and the upload fails instantly with HTTP 500 "upload stream
 # exceeded the buffer backpressure cap" — before any S3 part is sent and
@@ -303,7 +303,7 @@ note "putLarge HTTP $PUT_CODE in ${PUT_ELAPSED}s; worker peak RSS over $SAMPLES 
 
 # How much actually reached MinIO. The on-disk S3 key is NOT `storage/$SKEY`:
 # the S3 backend stores under `<config-prefix>/<app_id>/<bucket>/<key>` (see
-# crates/plugin-storage/src/backend/s3.rs::object_key + compio-s3 config
+# crates/zeroship-plugin-storage/src/backend/s3.rs::object_key + compio-s3 config
 # prefix), i.e. `storage/$ST_APP/gallery/$SKEY` here — the app-level bucket is
 # `gallery` (the BUCKET const in examples/storage-gallery/src/server.ts). A
 # bare `mc stat storage/$SKEY` therefore ALWAYS reports "object does not

@@ -5,8 +5,11 @@
 //! `env.db.transaction(fn)` has to decide, at call time, whether it is
 //! opening a **new** transaction (`BEGIN`) or **nesting** inside one that
 //! is already open (`SAVEPOINT`). Until 2026-08-10 that decision read
-//! [`crate::context::ThreadDbContext::has_tx_for`] — "does this app
-//! currently have a transaction open on this isolate?".
+//! `ThreadDbContext::has_tx_for` — "does this app currently have a
+//! transaction open on this isolate?". That accessor no longer exists on
+//! `ThreadDbContext`; the live reading of the same fact is
+//! `zeroship_data_engine::tx_lanes::TxLanes::has_tx_for`, and the point below
+//! is that neither one answers the question the decision needs answered.
 //!
 //! That is a *temporal* test standing in for a *structural* one, and the
 //! two come apart the moment two transactions for one app overlap in
@@ -33,7 +36,7 @@
 //! runs inside the enclosing callback's continuation chain. V8 v147 has
 //! the primitive for that — `Isolate::SetContinuationPreservedEmbedderData`,
 //! the same slot `node:async_hooks`' `AsyncLocalStorage` uses (see
-//! `crates/runtime/src/node/async_hooks/als.rs`). The slot holds a JS
+//! `crates/zeroship-runtime/src/node/async_hooks/als.rs`). The slot holds a JS
 //! `Map`, and V8 carries it across every async hop, restoring it when a
 //! promise reaction runs.
 //!

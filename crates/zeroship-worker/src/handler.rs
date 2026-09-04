@@ -2714,7 +2714,7 @@ mod tests {
     /// `KV_REQUIRE_REDIS=1` turned the skip into a failure, "in CI". Nothing in
     /// this repository ever set `KV_REQUIRE_REDIS` - not a workflow, not a
     /// script - so the panic was unreachable and the skip was the only
-    /// behaviour, matching `crates/plugin-kv/tests/redis_backend.rs`, which had
+    /// behaviour, matching `crates/zeroship-plugin-kv/tests/redis_backend.rs`, which had
     /// the same dead flag and the same untrue comment. Both are resolved the
     /// way `ZEROSHIP_REQUIRE_LIVE_BACKENDS` was: the flag is deleted and Redis
     /// is simply required, because the provisioner now supplies it.
@@ -3414,7 +3414,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     }
 
     // Postgres is not optional for this workspace's tests (see
-    // crates/test-support/src/lib.rs); the workflow-apply tests below cannot
+    // crates/zeroship-test-support/src/lib.rs); the workflow-apply tests below cannot
     // do without it, so this panics with the provisioning command rather than
     // let them report a pass for a check they never ran.
     fn workflow_test_db_url() -> String {

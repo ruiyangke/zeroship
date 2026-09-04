@@ -11,7 +11,7 @@
 #      `ZEROSHIP_BIN: "/home/ruiyang/Projects/appbase/target/release/zeroship"`.
 #      dev-server.ts uses ZEROSHIP_BIN directly with no existence check, so on
 #      any other checkout that suite spawned a binary that does not exist.
-#   3. crates/runtime/tests/codec.rs cited a doc by absolute home path.
+#   3. crates/zeroship-runtime/tests/codec.rs cited a doc by absolute home path.
 #
 # All three read correctly to their author and are broken for everyone else.
 # None was caught by a test, because each is correct on the machine that runs

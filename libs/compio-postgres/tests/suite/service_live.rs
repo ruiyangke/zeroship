@@ -3,7 +3,7 @@
 //! The service file's PATH comes from the caller here, never from the
 //! environment: this crate is a standalone, publishable driver and the
 //! workspace forbids a published library reading process configuration
-//! (`crates/core/tests/config_env_access_gate.rs`, exemption list empty). So
+//! (`crates/zeroship-core/tests/config_env_access_gate.rs`, exemption list empty). So
 //! these tests write a file and name it with `Config::service_file`, which is
 //! exactly what an application does.
 
@@ -38,7 +38,7 @@ fn service_file_contents() -> String {
         .expect("the suite DSN carries a password");
 
     format!(
-        "# written by tests/service_live.rs\n\
+        "# written by libs/compio-postgres/tests/suite/service_live.rs\n\
          [{SERVICE}]\n\
          host={host}\n\
          port={port}\n\

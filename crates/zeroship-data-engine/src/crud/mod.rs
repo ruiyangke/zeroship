@@ -48,7 +48,7 @@ use crate::tx_route::TxRoute;
 // around `query::build_*` and `exec_query` respectively.
 //
 // Visibility: crate-private in release builds; `pub` under
-// `test-helpers` so `tests/sqlite_integration.rs` can drive the
+// `test-helpers` so `crates/zeroship-plugin-db/tests/sqlite_integration.rs` can drive the
 // helpers directly for the end-to-end encrypted-column
 // CRUD round-trip test (the orchestrator's CRUD entry today is PG-only,
 // so the SQLite e2e gate composes the helpers itself).

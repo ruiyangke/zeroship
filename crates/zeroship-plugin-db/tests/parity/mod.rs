@@ -35,7 +35,7 @@ thread_local! {
     /// Measured on this matrix, not inferred: `seed` died on the 15s `pending
     /// timeout` with `pg_stat_activity` showing two
     /// connections sitting `idle`/`ClientRead` for the whole window - the runtime
-    /// never issued the INSERT. `crates/plugin-db/tests/native_transaction.rs`
+    /// never issued the INSERT. `crates/zeroship-plugin-db/tests/native_transaction.rs`
     /// hit the identical wall and carries the same thread-local; its header is
     /// the long-form account.
     ///
@@ -55,7 +55,7 @@ pub fn sqlite_url(root: &tempfile::TempDir) -> String {
 }
 
 /// The app id the runtime derives when `EnvSnapshot::empty()` carries no
-/// `APP_ID` (`crates/runtime/src/core/plugin.rs`). It is the DEV app id, so a
+/// `APP_ID` (`crates/zeroship-runtime/src/core/plugin.rs`). It is the DEV app id, so a
 /// SQLite matrix keyed on it runs against the same `<db_dir>/zs-default.sqlite`
 /// a `pnpm dev` app does - which is the property that leg is for.
 ///

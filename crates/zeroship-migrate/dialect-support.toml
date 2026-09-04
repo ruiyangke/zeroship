@@ -33,7 +33,7 @@
 #   Supported + Vendor -> vendor
 #   Unsupported        -> unsupported
 # WHICH TEST PROVES WHICH HALF. This comment used to say
-# `tests/dialect_table_faithfulness.rs` "proves the generated table agrees with
+# `crates/zeroship-migrate/tests/dialect_matrix/dialect_table_faithfulness.rs` "proves the generated table agrees with
 # `Op::support()` for every op-kind × variant × dialect". IT DOES NOT, and cannot:
 # `Op::support()` READS this table, so that comparison is TAUTOLOGICAL — the
 # faithfulness test says so in its own header. What it actually proves is
@@ -63,7 +63,7 @@
 # `DialectId::new("<key>")`. It used to be `pg` here while every artifact this file
 # fed said `postgres`, so `pg → postgres` was an ALIAS baked into the generator —
 # and `DialectId`'s own rule is "no aliases and no display names in the id". The
-# key is now `postgres`; `tests/dialect-table-drift.test.ts` pins that no alias
+# key is now `postgres`; `packages/zero-migrate/tests/dialect-table-drift.test.ts` pins that no alias
 # comes back.
 #
 # VARIANT keys: payload-independent ops carry a single `variant = "base"` row.
@@ -149,7 +149,7 @@ mysql = "portable"
 # than assumed. SQLite HAS a drop lane (`render/lower.rs`): when the live snapshot
 # carries the table and the named constraint is a FOREIGN KEY, the op lowers to a
 # 12-step rebuild and APPLIES end to end - proven through validate + lower + apply
-# by `tests/sqlite_declaration_flip_over_refusal_control.rs`. It refuses
+# by `crates/zeroship-migrate/tests/dialect_matrix/sqlite_declaration_flip_over_refusal_control.rs`. It refuses
 # `TableRebuildUnavailable` only for a missing snapshot or a NON-FK constraint.
 #
 # The live conformance suite recorded this row as a wrong declaration, but its

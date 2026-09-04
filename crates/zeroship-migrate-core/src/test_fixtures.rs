@@ -60,7 +60,7 @@ use crate::{effective_policy_from_charter_toml, EffectivePolicy};
 ///   would quietly make the engine's own tests unable to see a vendor regression.
 /// * It is a SECOND composition, and the workspace has a rule against those. It is the
 ///   one exception, it is `#[cfg(test)]`, and it must never disagree with
-///   `zeroship_migrate::shipping_vendors()` - `tests/dialect_matrix/the_registry_travels_as_a_value.rs`
+///   `zeroship_migrate::shipping_vendors()` - `crates/zeroship-migrate/tests/dialect_matrix/the_registry_travels_as_a_value.rs`
 ///   is where that is asserted, from the composing crate, where both are visible.
 ///
 /// One place, for the same reason the three ids above are one place: core's unit tests

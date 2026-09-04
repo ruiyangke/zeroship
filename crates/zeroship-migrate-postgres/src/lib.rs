@@ -69,7 +69,7 @@ mod vendor;
 // so with this re-export gone the function is UNREACHABLE from outside this crate:
 // core naming it again is an E0603 privacy error at the use site, not a review
 // comment and not a census finding. That is strictly stronger than the textual
-// census in `tests/dialect_matrix/core_names_no_vendor_crate.rs`, which stays as the
+// census in `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs`, which stays as the
 // backstop for the couplings a privacy rule cannot express across a crate boundary.
 //
 // The function itself did not move and did not change. `crate::vendor` is the same

@@ -404,7 +404,7 @@ mod tests {
 
     /// Test fixture: deterministic Ed25519 keypair + a [`JwksCache`]
     /// pre-loaded with the matching public key. Mirrors the pattern in
-    /// `crates/auth/tests/common/mock_provider.rs` but exposes a direct
+    /// `crates/zeroship-auth/tests/common/mock_provider.rs` but exposes a direct
     /// [`JwksCache`] constructor (no live HTTP server) — the cache
     /// already memoises the parsed keys, so feeding it from a test-only
     /// constructor short-circuits the network fetch entirely.

@@ -625,7 +625,7 @@ pub trait MigrationBackend {
     /// it existed, a MySQL rename DID reach this default and took the "nothing
     /// blocks it" answer on a question nobody had asked the server. Only the
     /// PostgreSQL impl consults a catalog, using the predicate
-    /// `tests/pg_column_drop_dependency_oracle.rs` measures against a live server.
+    /// `crates/zeroship-migrate/tests/pg_engine/pg_column_drop_dependency_oracle.rs` measures against a live server.
     async fn blocking_column_dependents(
         &self,
         _cfg: &ExecutorConfig,
@@ -655,7 +655,7 @@ pub trait MigrationBackend {
     /// predicate's default does: SQLite reconciles a type change by rebuilding the
     /// table rather than by altering a column, and the MySQL leg refuses
     /// `setColumnType` at the lower. Only the PostgreSQL impl consults a catalog,
-    /// using the predicate `tests/pg_column_retype_dependency_oracle.rs` measures
+    /// using the predicate `crates/zeroship-migrate/tests/column_shapes/pg_column_retype_dependency_oracle.rs` measures
     /// against a live server.
     async fn column_type_change_blockers(
         &self,

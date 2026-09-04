@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Keep the WebSocket-subscription STUB and the things that describe it in sync.
 #
-# WHY THIS EXISTS. `crates/gateway/src/router/dispatch.rs` carried a comment
+# WHY THIS EXISTS. `crates/zeroship-gateway/src/router/dispatch.rs` carried a comment
 # saying the transparent WS proxy "is wired in `proxy::forward_subscription`".
 # It is not. That function was in no file in this repo -- the `proxy` module is
 # real, the function never existed -- and the comment sat 760 lines from

@@ -65,7 +65,7 @@
 #                             email_verified:boolean,id:string,name:string] cookies=[3]
 #           identity.values   id=pws_<20> (a real pairwise subject from a real login)
 #
-# The defect: `crates/gateway/src/auth_token.rs` passed `Some(code)` as
+# The defect: `crates/zeroship-gateway/src/auth_token.rs` passed `Some(code)` as
 # `expected_c_hash_input`, requiring a `c_hash` claim the platform OP never
 # emits, so EVERY end-user login through `POST /__zeroship/auth/session` failed.
 # Nothing else in the tree could see it: `e2e_dev_vs_deployed_auth.sh` and
@@ -137,7 +137,7 @@ HOST="$APP_SLUG.$ZEROSHIP_CONTROL_APP_BASE_DOMAIN"
 #            "dev-" + the first 8 characters of the id after "pws_", so
 #            pws_probealpha0000000000 -> "dev-probealp" (12 chars). The dev
 #            provider then compares it verbatim; there is no policy at all.
-#   deployed `crates/auth/src/ui/signup.rs:110-116` REFUSES any password under
+#   deployed `crates/zeroship-auth/src/ui/signup.rs:110-116` REFUSES any password under
 #            15 characters, so the dev user's password cannot be registered on
 #            the platform OP.
 #
@@ -160,9 +160,9 @@ DEV_PASSWORD="$(printf 'dev-%.8s' "${LOGIN_ID#pws_}")"
 DEPLOYED_PASSWORD="probe-pw-platform-2026"
 WRONG_PASSWORD="definitely-not-the-password"
 # The scope an app that wants a profile asks for. The gateway force-appends
-# `offline_access` (crates/gateway/src/browser_auth.rs scope_with_offline_access);
+# `offline_access` (crates/zeroship-gateway/src/browser_auth.rs scope_with_offline_access);
 # without `profile` + `email` the OP scope-gates `name`/`email` out of the
-# id_token entirely (crates/auth/src/oidc/claims.rs:22-46), which would make the
+# id_token entirely (crates/zeroship-auth/src/oidc/claims.rs:22-46), which would make the
 # identity rows measure the SCOPE REQUEST rather than the two tiers.
 LOGIN_SCOPE="openid profile email"
 
@@ -253,7 +253,7 @@ json_get() { node -e 'const fs=require("fs");let o;try{o=JSON.parse(fs.readFileS
 # form_field <html-file> <name> -- the value of a hidden input, urldecoded by
 # curl on the way back out. Scraped from the SAME response that set the CSRF
 # cookie, because every error re-render mints a fresh token
-# (crates/auth/src/ui/login.rs:643).
+# (crates/zeroship-auth/src/ui/login.rs:643).
 form_field() {
   node -e '
 const fs=require("fs");

@@ -191,7 +191,7 @@ impl AuthLevel {
 /// So `None` does NOT mean "action". It means the manifest was authored
 /// by hand — a raw-JS deploy — and declared no capability. The emitter
 /// side is explicit that unknown and action are NOT gated alike.
-/// `crates/gateway/src/router/dispatch.rs` currently admits `None` into
+/// `crates/zeroship-gateway/src/router/dispatch.rs` currently admits `None` into
 /// the idempotency dedupe path as though it were `Action`, which
 /// contradicts that. Whether an undeclared capability should get response
 /// caching is an open call, tracked as task #202; nothing here should be

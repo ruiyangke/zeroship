@@ -20,7 +20,7 @@
 //! stitch matches children to parents by it; the unmask handle plucks `row_pk`
 //! from it; encrypted columns bind it into the AEAD tag, so without it the
 //! ciphertext is undecryptable; and change events correlate on it
-//! (`emit_for_rows` reads `row["id"]`, `crates/zeroship-plugin-db/src/exec.rs`).
+//! (`emit_for_rows` reads `row["id"]`, `crates/zeroship-data-engine/src/exec.rs`).
 //! A narrowing implementation could plausibly be written, reviewed and shipped
 //! against any one of those with the other three never exercised.
 //!

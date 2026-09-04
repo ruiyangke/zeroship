@@ -265,7 +265,7 @@ pub struct FieldDescriptor {
     /// tell a bounded column from an unbounded one. `render::fold::token_to_col_type`
     /// therefore reads this value on the way back in. It used to ignore it, and the
     /// cost was measured against a live PostgreSQL in
-    /// `tests/fold_live/pg_bounded_string_producer_live.rs`: a
+    /// `crates/zeroship-migrate/tests/fold_live/pg_bounded_string_producer_live.rs`: a
     /// `t.string({ maxLength: 64 })` column authored through the descriptor producer
     /// reached the server as an unbounded `text` that STORED a 200-character value,
     /// and re-importing an exported schema authored `ALTER COLUMN ... TYPE text`
@@ -320,7 +320,7 @@ pub struct FieldDescriptor {
     /// for both - re-declaring a `t.numeric(20, 4)` column REAL inside the 12-step
     /// rebuild and pushing every stored decimal string through a binary double on
     /// the way across. Measured against a live database in
-    /// `tests/fold_live/sqlite_decimal_rebuild_live.rs`.
+    /// `crates/zeroship-migrate/tests/fold_live/sqlite_decimal_rebuild_live.rs`.
     ///
     /// Carrying the parameters BESIDE the token is the same shape `charLen` and
     /// `maxLength` already use to narrow `char`/`string`: a consumer that ignores
@@ -8527,7 +8527,7 @@ mod inline_check_rename_tests {
     //! The quoted-run walk behind [`rename_column_in_inline_checks`], at the level the
     //! end-to-end SQLite suite cannot reach.
     //!
-    //! `tests/rename_column_inline_check_sqlite.rs` proves the behaviour against a real
+    //! `crates/zeroship-migrate/tests/rename/rename_column_inline_check_sqlite.rs` proves the behaviour against a real
     //! database on the one dialect that rebuilds. These pin the DISCRIMINATIONS that
     //! make text surgery admissible here at all - literal vs identifier, exact vs
     //! prefix, quoted vs bare - and the refusal that keeps a body it cannot read STALE

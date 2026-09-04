@@ -103,7 +103,7 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
         // existing PG-side unique-violation parser sees a uniform
         // wire payload across backends. The envelope mirrors the
         // `cic_failed` shape the PG IndexBuilder emits at
-        // `crates/plugin-db/src/backend/postgres.rs:442`.
+        // `crates/zeroship-data-postgres/src/postgres.rs:442`.
         rusqlite::Error::SqliteFailure(ffi_err, _)
             if ffi_err.extended_code == SQLITE_CONSTRAINT_UNIQUE =>
         {
@@ -172,7 +172,7 @@ pub(crate) fn from_sqlite(e: rusqlite::Error) -> DbError {
 
 /// Build the wire envelope for the four SchemaRefused constraint
 /// codes. Matches the PG IndexBuilder's `cic_failed` envelope shape
-/// at `crates/plugin-db/src/backend/postgres.rs:442` so the SDK's
+/// at `crates/zeroship-data-postgres/src/postgres.rs:442` so the SDK's
 /// existing PG-side parser handles the SQLite arm unchanged.
 fn build_constraint_envelope(code: &str, message: &str) -> String {
     serde_json::to_string(&serde_json::json!({

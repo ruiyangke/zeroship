@@ -1,6 +1,6 @@
 //! `Notification::process_id` must name the NOTIFYING backend.
 //!
-//! `tests/integration.rs` already proves a notification is DELIVERED to an idle
+//! `libs/compio-postgres/tests/suite/integration.rs` already proves a notification is DELIVERED to an idle
 //! listener, and asserts its channel and payload. It does not look at
 //! `process_id`, and nothing else in the suite does either -- the only
 //! `process_id()` calls elsewhere are `Client::process_id`, which is a

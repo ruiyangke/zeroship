@@ -30,7 +30,7 @@ pub enum RegistryError {
     /// caller can map it to a clear status instead of leaking a raw DB error.
     Conflict(String),
     /// The requested app name is a hostname label the platform edge already
-    /// claims (`crates/control/src/reserved_names.rs`). Typed separately from
+    /// claims (`crates/zeroship-control/src/reserved_names.rs`). Typed separately from
     /// [`Self::InvalidInput`] because the two are different outcomes with
     /// different fixes: a charset failure says the name is malformed, this says
     /// a well-formed name is unavailable. A caller that cannot tell them apart

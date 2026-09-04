@@ -886,7 +886,7 @@ mod tests {
     /// collapsing `default_wal_path` to a constant turns it red.
     ///
     /// WHAT IT DOES NOT CATCH, and this is the likelier fix: the per-boot UUID
-    /// is minted in `crates/worker/src/main.rs` and `crates/gateway/src/main.rs`,
+    /// is minted in `crates/zeroship-worker/src/main.rs` and `crates/zeroship-gateway/src/main.rs`,
     /// NOT here. Stop appending it there and the restart defect is fixed while
     /// this test stays green, because it hands `default_wal_path` two different
     /// source strings by hand and only ever observes the derivation. This crate
@@ -1014,7 +1014,7 @@ mod tests {
         // measured until now: redb is single-writer, so two LIVE producers
         // that resolved to one `WalIdentity` collide loudly rather than
         // interleaving or corrupting. The worker's fatal boot-refusal arm
-        // (crates/worker/src/main.rs) is built on it - if the second opener
+        // (crates/zeroship-worker/src/main.rs) is built on it - if the second opener
         // silently succeeded, two co-located workers would share one file and
         // the refusal that arm exists to trigger would never fire.
         //

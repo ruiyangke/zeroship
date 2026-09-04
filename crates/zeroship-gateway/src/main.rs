@@ -36,7 +36,7 @@ const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
 const STASH_SIGNING_KEY_LABEL: &str =
     "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY / --stash-signing-key-file";
 /// Operator-facing spelling of the shared pairwise salt, whose identity is
-/// declared in `crates/config-macros/src/shared.rs` as `canonical:
+/// declared in `crates/zeroship-config-macros/src/shared.rs` as `canonical:
 /// "pairwise_salt"`.
 const PAIRWISE_SALT_LABEL: &str = "ZEROSHIP_PAIRWISE_SALT / --pairwise-salt-file";
 /// Operator-facing spelling of the platform broker master secret file.
@@ -318,7 +318,7 @@ fn main() -> std::io::Result<()> {
         // a credential, so there is nothing to withhold; and the count could
         // not answer the question an operator actually asks of this report -
         // which origins does this gateway trust, and did my overlay reach it.
-        // `crates/gateway/tests/config_env_tier.rs` is the reader that needs
+        // `crates/zeroship-gateway/tests/config_env_tier.rs` is the reader that needs
         // the values: a count cannot tell a right-sized list from the wrong
         // configuration tier.
         report.field(
@@ -733,7 +733,7 @@ mod tests {
     use zeroship_core::config::{GeneratedConfig, SourceKind, SERVICE_CREDENTIAL_SENTINEL};
 
     // WHAT LEFT THIS MODULE. The two tests that drove the ENVIRONMENT tier of
-    // `GateSettings` moved to `crates/gateway/tests/config_env_tier.rs`. That
+    // `GateSettings` moved to `crates/zeroship-gateway/tests/config_env_tier.rs`. That
     // tier is clap's `env = "ZEROSHIP_..."` attribute, so the only way to
     // exercise it in-process was `std::env::set_var`, which mutates the
     // environment every other test in this binary parses in. They now run the

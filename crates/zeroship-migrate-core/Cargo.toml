@@ -40,7 +40,7 @@ description = "The zeroship-migrate ENGINE: authoring, validation, the single ca
 # and are still the only thing measuring those.
 #
 # THE ONE HOLE CARGO LEAVES is the `[dev-dependencies]` edge below. It is deliberate,
-# it is bounded to one file, and `tests/dialect_matrix/core_names_no_vendor_crate.rs`
+# it is bounded to one file, and `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs`
 # is what keeps it bounded.
 
 [dependencies]
@@ -124,7 +124,7 @@ toml = { workspace = true }
 # THEY ARE REACHABLE FROM `#[cfg(test)]` CODE ANYWHERE UNDER `src`, which is exactly
 # what Cargo cannot narrow. `src/test_fixtures.rs` is the single file allowed to name
 # them, it composes the set once, and
-# `tests/dialect_matrix/core_names_no_vendor_crate.rs` is the ratchet that keeps that
+# `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs` is the ratchet that keeps that
 # number at one file — the census that Cargo did NOT subsume, kept and re-aimed rather
 # than retired.
 #

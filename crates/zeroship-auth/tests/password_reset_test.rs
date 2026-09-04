@@ -674,7 +674,7 @@ async fn complete_rolls_back_token_consume_with_transaction() {
 /// route sector, so it cannot mint a gateway cookie. The FAITHFUL end-to-end —
 /// REAL `POST /__zeroship/auth/session` cookie mint (which must itself persist the
 /// identity row) → REAL `password_reset::complete` → family marker present —
-/// lives in `crates/gateway/tests/auth_token_anchors_test.rs::\
+/// lives in `crates/zeroship-gateway/tests/auth_token_anchors_test.rs::\
 /// cookie_mint_writes_identity_so_reset_evicts_cookie_session`, which pre-seeds
 /// NOTHING in `app_user_identities`. Pre-seeding it HERE is what masked F1, so
 /// the cross-crate faithful coverage is the gateway test, not this one.
@@ -936,8 +936,8 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 /// carry the SAME `(client_id, sub)` pair - `app_user_identities.pairwise_sub`
 /// and `oauth_refresh_tokens.sub` are both
 /// `Issuer::pairwise_subject(user_id, sector_identifier)`
-/// (`crates/auth/src/oidc/authorization_code.rs:1442` and
-/// `crates/auth/src/oidc/refresh.rs:376`). PostgreSQL refuses that:
+/// (`crates/zeroship-auth/src/oidc/authorization_code.rs:1442` and
+/// `crates/zeroship-auth/src/oidc/refresh.rs:376`). PostgreSQL refuses that:
 ///
 ///   ERROR:  ON CONFLICT DO UPDATE command cannot affect row a second time
 ///
@@ -948,8 +948,8 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 /// prevent.
 ///
 /// This is the DEFAULT path, not an exotic one: the gateway always requests
-/// `offline_access` (`crates/gateway/src/oidc_rp.rs:189`,
-/// `crates/gateway/src/browser_auth.rs:176`), so one BFF app login writes both
+/// `offline_access` (`crates/zeroship-gateway/src/oidc_rp.rs:189`,
+/// `crates/zeroship-gateway/src/browser_auth.rs:176`), so one BFF app login writes both
 /// rows.
 ///
 /// The assertion is the SECURITY property - the OLD PASSWORD STOPS WORKING -

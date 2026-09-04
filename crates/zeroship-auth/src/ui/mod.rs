@@ -2,7 +2,7 @@
 //!
 //! Template sources live under `crates/auth/src/ui/templates/` and are
 //! discovered through the `[package.metadata.askama] dirs = ["src/ui/templates"]`
-//! entry in `crates/auth/Cargo.toml`. Each `#[derive(Debug, Template)]` struct
+//! entry in `crates/zeroship-auth/Cargo.toml`. Each `#[derive(Debug, Template)]` struct
 //! is checked at compile time — a malformed template breaks the build.
 //!
 //! Handlers in P2-U4 / U5 / U6 render with `.render()` and stuff the

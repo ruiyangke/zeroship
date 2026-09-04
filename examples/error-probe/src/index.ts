@@ -60,13 +60,13 @@
 //   `target/release/zeroship`; the deploy runs `zeroship-worker`. So the parse
 //   and dispatch code is shared, and an unparseable body answers with the RUST
 //   parser's text on BOTH ("invalid JSON body", from
-//   crates/runtime/src/core/runtime.rs::parse_rpc_body) rather than the JS
+//   crates/zeroship-runtime/src/core/runtime.rs::parse_rpc_body) rather than the JS
 //   text, which would have appended the underlying parse error.
 //
 //   the DEPLOYED tier has one extra component in front: the gateway. Anything
 //   the gateway can answer without asking the worker - an unknown procedure id,
 //   a method the procedure kind forbids, a path with no id - it DOES answer,
-//   from crates/gateway/src/router/dispatch.rs. Those three were the only
+//   from crates/zeroship-gateway/src/router/dispatch.rs. Those three were the only
 //   divergences the leg found, and all three were the gateway speaking a
 //   different error envelope from the worker. Fixed in the same change.
 //
@@ -74,7 +74,7 @@
 //   having claimed otherwise until 2026-08-11: `__zsDispatch` from
 //   sdks/bootstrap/src/dispatcher.ts. The synthetic entry exports `default.rpc`
 //   as a plain dict, and the kernel wraps that dict in `USER_RPC`
-//   (crates/runtime/src/core/init.rs), which calls a SECOND copy of the
+//   (crates/zeroship-runtime/src/core/init.rs), which calls a SECOND copy of the
 //   dispatch body written inline in that same file as `__zsDispatchRpc`.
 //   dispatcher.ts serves the SLOW path only (streams, subscriptions).
 //
@@ -125,7 +125,7 @@ export const status4xxCodeThrow = query(
 
 /**
  * `err.publicCode5xx` - `err.plain` plus `code: "version_mismatch"`, which is on
- * `is_public_error_code` in `crates/runtime/src/core/dispatch.rs`. No `status`,
+ * `is_public_error_code` in `crates/zeroship-runtime/src/core/dispatch.rs`. No `status`,
  * so it lands at 500 and takes the sanitizer's EXEMPTION arm. The exemption was
  * written to keep the developer-facing `code` on the wire; this row measures
  * what ELSE rides along with it.

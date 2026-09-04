@@ -87,7 +87,7 @@ impl Scope {
         }
     }
 
-    /// The consent-screen copy for each scope (`crates/auth/src/ui/consent.rs`
+    /// The consent-screen copy for each scope (`crates/zeroship-auth/src/ui/consent.rs`
     /// and `device.rs` render exactly these strings).
     ///
     /// `env:*` covers everything that configures an app without redeploying

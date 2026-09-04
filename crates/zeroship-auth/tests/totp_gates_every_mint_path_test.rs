@@ -113,7 +113,7 @@ impl Fixture {
             "http://auth.test",
         ]);
         // Secrets carry no value flag; supply each in the shape an in-memory
-        // literal resolves to (see crates/auth/tests/common/mod.rs).
+        // literal resolves to (see crates/zeroship-auth/tests/common/mod.rs).
         cfg.settings.database_url = Secret::supplied(SourceKind::Env, Some(db_url.clone()));
         cfg.settings.stash_signing_key =
             Secret::supplied(SourceKind::Env, Some(STASH_KEY.to_owned()));

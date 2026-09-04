@@ -29,9 +29,9 @@ use crate::state::SharedState;
 /// isolate scope slot (see [`current_user`]), so a single shared instance
 /// is correct for every app on every worker thread. It is registered at
 /// both plugin-construction sites — the worker `create_plugins()`
-/// (`crates/worker/src/cache.rs`, the path every production end-user app
+/// (`crates/zeroship-worker/src/cache.rs`, the path every production end-user app
 /// runs on) and the CLI `zeroship serve` plugin vector
-/// (`crates/cli/src/main.rs`) — so `env.auth.getUser()` resolves on both.
+/// (`crates/zeroship-cli/src/main.rs`) — so `env.auth.getUser()` resolves on both.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct AuthPlugin;
 

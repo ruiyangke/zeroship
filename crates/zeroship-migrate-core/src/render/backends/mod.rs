@@ -37,7 +37,7 @@
 //! A backend module names its own dialect exactly ONCE, as its `DIALECT` const, and
 //! names no other dialect at all. Everything else reads `DIALECT`. That rule is what
 //! made this step mechanical, and it is still ENFORCED:
-//! `tests/dialect_matrix/backend_modules_name_one_dialect.rs` reads all nine vendor
+//! `crates/zeroship-migrate/tests/dialect_matrix/backend_modules_name_one_dialect.rs` reads all nine vendor
 //! modules with `include_str!` and asserts both halves - own dialect exactly once, as
 //! the `const DIALECT` line, and no other dialect at all. It was repointed at the new
 //! crate paths in the commit that moved them; a re-export shim at the old path would
@@ -73,7 +73,7 @@
 //! boundary `pub(in ...)` cannot say "these three crates and no other" - the vendor
 //! crates must reach it, so it is `pub`, so the engine can name it too. The compiler
 //! no longer enforces the rule. It is replaced by a textual census,
-//! `tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs`, which walks every
+//! `crates/zeroship-migrate/tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs`, which walks every
 //! crate `src` root and asserts the engine names neither spelling primitive. That is
 //! strictly weaker than a privacy error and it is recorded as a downgrade, not as an
 //! equal substitute.
@@ -89,7 +89,7 @@
 //! It sits BELOW the vendors rather than here because MySQL's drift path has to
 //! build that form itself, and it is now `pub` across a crate boundary rather than
 //! `pub(crate)`. That widening is what
-//! `tests/dialect_matrix/constraint_definition_is_comparison_text.rs` stands in for:
+//! `crates/zeroship-migrate/tests/dialect_matrix/constraint_definition_is_comparison_text.rs` stands in for:
 //! a vendor may READ the codec to normalize what it introspected, but its `ddl.rs` /
 //! `dml.rs` may not spell an EMITTED identifier with it. On PostgreSQL and SQLite
 //! the wrong call emits correct bytes, so only a census can see it.
@@ -128,7 +128,7 @@ use zeroship_migrate_ir::dialect::DialectId;
 // authors all carry it, so their methods pay no signature for it at all.
 //
 // `zeroship_migrate::shipping_vendors()` is how a host asks for the composed value, and
-// `tests/dialect_matrix/the_registry_travels_as_a_value.rs` is what keeps the list of
+// `crates/zeroship-migrate/tests/dialect_matrix/the_registry_travels_as_a_value.rs` is what keeps the list of
 // places that may name it from growing back - a rule Cargo now enforces for this crate
 // but not for the `#[cfg(test)]` modules that reach the vendors through dev edges.
 //

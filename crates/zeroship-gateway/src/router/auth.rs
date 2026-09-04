@@ -1331,7 +1331,7 @@ mod tests {
             // RFC 9068 sec. 2.2 requires `jti` on a JWT access token, and the
             // verifier's claim struct makes it mandatory, so a token without
             // one is rejected before any binding check runs. The OP stamps a
-            // fresh one per token (`crates/auth/src/oidc/issuer.rs`); mint one
+            // fresh one per token (`crates/zeroship-auth/src/oidc/issuer.rs`); mint one
             // here too, or this fixture signs a token no issuer would produce.
             "jti": uuid::Uuid::new_v4().to_string(),
         });
@@ -2309,7 +2309,7 @@ mod tests {
     // could never match the `pws_…` subject).
 
     // Postgres is not optional for this workspace's tests (see
-    // crates/test-support/src/lib.rs); `test_database_url()` panics with the
+    // crates/zeroship-test-support/src/lib.rs); `test_database_url()` panics with the
     // provisioning command rather than let these revocation tests report a
     // pass for a check they never ran.
     async fn connect_auth_db() -> crate::db::DbConfig {

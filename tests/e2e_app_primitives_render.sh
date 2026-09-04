@@ -346,7 +346,7 @@ echo "=== Scenario 5b: node-compat (openai-demo — node:buffer/Buffer/process) 
 # We set it as an app SECRET before deploy. NOTE: setting a secret is NOT
 # enough to surface it — secrets are opt-in, and only names put into the
 # expose list via `PUT /api/apps/:id/env/expose` reach the isolate
-# (crates/control/src/env_handlers.rs:265). This harness never calls that
+# (crates/zeroship-control/src/env_handlers.rs:265). This harness never calls that
 # endpoint, so the key is absent on the worker BY DESIGN, and the 503 below
 # is an app that cannot initialise without it rather than a delivery defect.
 # so the isolate would hydrate env with the key, the module

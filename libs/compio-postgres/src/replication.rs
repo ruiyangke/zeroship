@@ -3680,7 +3680,7 @@ mod tests {
         // for this command whatever it might mean for some other one.
         //
         // Nothing depended on the old shape: the sole caller in the workspace
-        // (`crates/plugin-db/src/wal_consumer.rs`) uses `identify_system` as a
+        // (`crates/zeroship-plugin-db/src/wal_consumer.rs`) uses `identify_system` as a
         // health check and discards the value, so this change only makes that
         // check harder to pass with a broken peer.
         let row = identify_row(&[]);

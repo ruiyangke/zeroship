@@ -15,7 +15,7 @@
 #
 # In-`src` `#[cfg(test)]` modules are NOT counted. A grep cannot tell which
 # lines of a src file are inside one, and the clippy gate plus
-# crates/core/tests/config_env_access_gate.rs already force every read there
+# crates/zeroship-core/tests/config_env_access_gate.rs already force every read there
 # through a declared key, so those names are enumerable by construction and are
 # not the sprawl this measures.
 #

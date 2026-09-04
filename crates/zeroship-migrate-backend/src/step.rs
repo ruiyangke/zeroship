@@ -75,7 +75,7 @@ pub struct AlterPrimaryKeyStep {
 ///
 /// MySQL has no `ALTER COLUMN ... TYPE`. It has `MODIFY COLUMN`, which takes the
 /// COMPLETE column definition and silently DISCARDS every facet the statement
-/// leaves out - measured in `tests/mysql_engine/mysql_setcolumntype_restate.rs`,
+/// leaves out - measured in `crates/zeroship-migrate/tests/mysql_engine/mysql_setcolumntype_restate.rs`,
 /// where a bare `MODIFY COLUMN label varchar(128)` destroys the column's
 /// `NOT NULL`, its `DEFAULT`, its `COLLATE` and its `COMMENT` in one statement,
 /// with no warning.

@@ -4,7 +4,7 @@
 # app->creator attribution at SCALE, against a REAL self-hosted Lago.
 #
 # The single-app lago e2e proves one app's usage reaches its owning creator.
-# THIS proves the CreatorResolver (crates/control/src/cron/event_forwarder.rs,
+# THIS proves the CreatorResolver (crates/zeroship-control/src/cron/event_forwarder.rs,
 # fix f561f2ad) is correct when MANY apps map to FEW creators:
 #
 #   creator C1  owns  app A1 (40 req) + app A2 (60 req)
@@ -386,7 +386,7 @@ FLEET=$((N1+N2+N3))
 #
 # So it is not silent LOSS, it is silent NON-BILLING: the data is retained and
 # the INVOICING read path - the one the shipped adapter uses at
-# crates/control/src/metering/provider/adapters/lago.rs:206 - 404s. The check
+# crates/zeroship-control/src/metering/provider/adapters/lago.rs:206 - 404s. The check
 # for that is below, and it is a different question from conservation.
 lago_sum_all(){ # sum of requests-event values across EVERY subject
   lago "$LAGO_URL/api/v1/events?per_page=1000" | node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const evs=(JSON.parse(s).events||[]).filter(e=>e.code==="requests");process.stdout.write(String(evs.reduce((a,e)=>a+Number((e.properties||{}).value||0),0))+"\n")}catch(e){process.stdout.write("0\n")}})'

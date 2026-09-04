@@ -37,7 +37,7 @@ export const ENV_DEV_AUTH_SECRET = "ZEROSHIP_DEV_AUTH_SECRET";
  *
  * So the reaping is delegated to the kernel, which is the only party still able
  * to act once we are gone (`PR_SET_PDEATHSIG`, armed by the child - see
- * `crates/cli/src/parent_death.rs`). The pid in the value is what lets the
+ * `crates/zeroship-cli/src/parent_death.rs`). The pid in the value is what lets the
  * child notice we died BEFORE it got as far as arming.
  *
  * OPT-IN BY CONSTRUCTION: unset means unchanged behaviour, so a `zeroship

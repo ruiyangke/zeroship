@@ -3,7 +3,7 @@
 // Algorithm shape mirrors Deno std/path/posix and Node's lib/path.js;
 // fresh implementation against the Node 22 spec
 // (https://nodejs.org/api/path.html). win32 is a stub-throw — see
-// `crates/runtime/src/node/path/mod.rs` for the rationale.
+// `crates/zeroship-runtime/src/node/path/mod.rs` for the rationale.
 (function() {
   const CHAR_FORWARD_SLASH = 47; // '/'
   const CHAR_DOT = 46;           // '.'

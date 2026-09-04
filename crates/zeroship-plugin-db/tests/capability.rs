@@ -8,7 +8,7 @@
 //!
 //! The capability gate fires inside the V8 callback (no async work
 //! spawned, no DB connection acquired), so these tests don't require a
-//! running PG. The check happens in `crates/plugin-db/src/v8_bridge.rs`
+//! running PG. The check happens in `crates/zeroship-plugin-db/src/v8_bridge.rs`
 //! via `refuse_if_query_capability`, reading
 //! `zeroship_runtime::rpc::current_kind()` which the synthetic SSR
 //! entry sets via `__zsEnterKind`.
@@ -25,7 +25,7 @@ use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestC
 fn dispatch_zs(source: &str, name: &str) -> (u16, serde_json::Value) {
     // The runtime redacts 5xx response bodies to
     // `{"message":"internal error",...}` (see
-    // `crates/runtime/src/core/dispatch.rs::build_error_body`). That rail
+    // `crates/zeroship-runtime/src/core/dispatch.rs::build_error_body`). That rail
     // is unconditional: there is no env escape hatch, so nothing is set
     // here. A `capability_violation` surfaces as a 500, and the structured
     // `code` / `details` envelope these assertions read survives only

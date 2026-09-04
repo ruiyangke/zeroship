@@ -12,7 +12,7 @@
 # every procedure anonymous -- and this script walks both sides.
 #
 # The seam this is pointed at: `pnpm dev` always runs env.storage on LocalFs
-# (crates/cli/src/main.rs, `file://.zeroship/storage` unless
+# (crates/zeroship-cli/src/main.rs, `file://.zeroship/storage` unless
 # ZEROSHIP_WORKER_STORAGE_URL says otherwise), while a deployed worker runs whatever
 # --storage-url names, which in production is S3/R2. So the default here
 # deploys against a MinIO container, making the comparison LocalFs-vs-S3 rather
@@ -347,7 +347,7 @@ e2e_export_database_urls "$DB_URL"
  > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # Without --storage-url the env.storage namespace is absent BY DESIGN
-# (crates/worker/src/main.rs:386) and every handler fails loudly. Omitting it
+# (crates/zeroship-worker/src/main.rs:386) and every handler fails loudly. Omitting it
 # would look like an app bug rather than a harness bug -- which is exactly the
 # MUTATE=no-storage-url case below.
 STORAGE_FLAG=(--storage-url "$STORAGE_ARG")

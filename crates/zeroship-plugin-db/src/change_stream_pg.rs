@@ -109,7 +109,11 @@ impl WalConsumerHandle {
 
 /// PG arm of the [`ChangeStream`] capability.
 ///
-/// Constructed via [`crate::backend::BackendHandle::as_change_stream_pg`].
+/// Constructed by [`Self::new`] at the caller's own
+/// [`crate::backend::BackendHandle::Postgres`] match arm. The
+/// `BackendHandle::as_change_stream_pg` accessor that used to mint it is
+/// deleted - it made the dispatch enum name this CDC module, which is what
+/// kept `backend_handle.rs` from moving into `zeroship-data-engine`.
 /// Owns an `Rc<PostgresBackend>` (Rc-cloned from the
 /// [`crate::backend::BackendHandle::Postgres`] arm) so the adapter
 /// satisfies the trait's `'static` bound — `async fn`-in-trait under
@@ -134,9 +138,11 @@ impl std::fmt::Debug for PgChangeStream {
 
 impl PgChangeStream {
     /// Construct an adapter holding an Rc-clone of `backend`.
-    /// Crate-private — the
-    /// [`crate::backend::BackendHandle::as_change_stream_pg`] accessor
-    /// is the public entry point.
+    ///
+    /// The only entry point. Reachable exactly as far as this module is -
+    /// crate-private in a shipped build, `pub` under `test-helpers` - because
+    /// the `BackendHandle::as_change_stream_pg` accessor that used to be the
+    /// public one is deleted.
     pub fn new(backend: Rc<PostgresBackend>) -> Self {
         Self { backend }
     }

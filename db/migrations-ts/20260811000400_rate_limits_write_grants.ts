@@ -5,13 +5,14 @@ import { grant } from "@zeroship/migrate";
 //
 // MEASURED 2026-08-11 on a live deploy: every `/api/*` route on the control
 // plane answered `503 {"error":"rate limit unavailable"}`. Each of those routes
-// calls `admin_rate_limit` FIRST (crates/control/src/env_handlers.rs), and when
+// calls `admin_rate_limit` FIRST (crates/zeroship-control/src/env_handlers.rs), and when
 // the limiter itself errors, `http_util::rate_limit` returns 503 rather than
 // letting the request through - correct behaviour, fatal input. The log line
 // was `control: shared rate-limit consume failed ... ratelimit consume
 // control:admin:ip:...: db error`.
 //
-// The store runs ONE statement (crates/auth/src/store/ratelimit.rs):
+// The store ran ONE statement (crates/auth/src/store/ratelimit.rs, since
+// DELETED -- no ratelimit.rs and no `bucket_key` SQL is in the tree today):
 //     INSERT INTO zeroship.rate_limits ... ON CONFLICT (bucket_key) DO UPDATE ...
 // which PostgreSQL requires BOTH insert AND update privileges for. It checks
 // the update privilege for the DO UPDATE clause at plan time, so the denial

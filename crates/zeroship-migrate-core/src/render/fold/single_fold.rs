@@ -70,7 +70,7 @@
 //! migration replaced, dropped or added, and kept `.autoIncrement()` on a column the
 //! same op stripped identity from. This traversal's `Op::AlterPrimaryKey` arm is what
 //! corrects it, and the correction is adjudicated against a live PostgreSQL in
-//! `tests/env_db_ts_matches_the_server_pg.rs` - applied for real, key read out of
+//! `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs` - applied for real, key read out of
 //! `pg_catalog` - rather than against this module's own opinion. The recorded corpus
 //! was blind to it for a measurable reason: its one `alterPrimaryKey` fixture is
 //! REFUSED on all three dialects (`table \`orders\` does not exist`), so no fixture in
@@ -97,7 +97,7 @@
 //! the `preserve_stored_shape` arm - which replays SQLite's own `CREATE TABLE` and never
 //! looks inside the map. Measured: corrupting every column in the map the engine builds
 //! fails NOTHING in the whole test suite; emptying it fails one test, on absence.
-//! `tests/sqlite_rebuild_field_defs_live.rs` pins both halves and covers the other arm.
+//! `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs` pins both halves and covers the other arm.
 //!
 //! # What the model carries, measured rather than promised
 //!
@@ -401,14 +401,14 @@ impl AuthoredState<'_> {
             // being allowed to stay unmeasured. It is now measured three ways:
             //
             // * against a live PostgreSQL, in
-            //   `tests/env_db_ts_matches_the_server_pg.rs`: the migration is applied
+            //   `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`: the migration is applied
             //   for real and `pg_class` no longer holds the child;
             // * against `Op::DetachPartition` as the CONTROL, which has no arm here
             //   because a detached partition survives as a standalone table under the
             //   same name - the rule
-            //   `tests/partition_claims_the_relation_namespace_pg.rs` enforces;
+            //   `crates/zeroship-migrate/tests/namespaces/partition_claims_the_relation_namespace_pg.rs` enforces;
             // * offline on all three dialects in
-            //   `tests/gen_types_authoring_tables_from_the_fold.rs`.
+            //   `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs`.
             //
             // Only PostgreSQL can actually run the stream: `attachPartition` is
             // PostgreSQL-only at lowering (`render/lower.rs`), so off Postgres the
@@ -921,7 +921,7 @@ impl FoldedSchema {
     /// arm, which replays SQLite's own `CREATE TABLE` text. The map's CONTENT reaches a
     /// rebuilt `CREATE TABLE` only on the SDK-value arm, which needs a live snapshot with
     /// no `stored_create_sql` - the shape `engine::refresh_historical_live` builds. Both
-    /// halves are measured in `tests/sqlite_rebuild_field_defs_live.rs`; do not read
+    /// halves are measured in `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs`; do not read
     /// "therefore the 12-step rebuild" into this without reading that file first.
     ///
     /// Every facet is DERIVED FROM THE MODEL, never recovered from a rendered

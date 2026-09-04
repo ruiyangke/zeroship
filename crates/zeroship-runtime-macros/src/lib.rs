@@ -31,7 +31,7 @@
 //! The class macro generates `Headers::install(scope) -> v8::Local<v8::FunctionTemplate>`
 //! that the runtime calls during `setup_globals` to wire the class onto
 //! `globalThis`. Free-function V8 callbacks are written by hand in the
-//! runtime crate (see `crates/runtime/src/core/init.rs` for the
+//! runtime crate (see `crates/zeroship-runtime/src/core/init.rs` for the
 //! patterns: extract `SharedState` via `scope.get_slot`, read JS args
 //! with `args.get(i)`, set the return via `rv.set(...)`).
 
@@ -111,7 +111,7 @@ pub fn v8_method(_attr: TokenStream, item: TokenStream) -> TokenStream {
 /// `&mut self` async methods are rejected — borrow across `.await` is
 /// unsound under V8 re-entry. The macro emits a `compile_error!` with
 /// the suggested fix (use `&self` + `Cell` / `RefCell`). See
-/// `crates/runtime/tests/v8_async_method_smoke.rs` for the positive
+/// `crates/zeroship-runtime/tests/v8_async_method_smoke.rs` for the positive
 /// shapes and the runtime-level doctests for the rejection rules.
 ///
 /// Non-`async` methods marked with the attribute are also rejected for
@@ -317,7 +317,7 @@ pub fn v8_state_marker(_attr: TokenStream, item: TokenStream) -> TokenStream {
 ///     nullable-AbortSignal contract is "MUST be a real AbortSignal
 ///     or absent — null is a TypeError".
 ///
-/// See `crates/runtime-macros/src/webidl_dict.rs` for codegen detail.
+/// See `crates/zeroship-runtime-macros/src/webidl_dict.rs` for codegen detail.
 #[proc_macro_derive(WebIdlDict, attributes(webidl_name, webidl_dict_member))]
 pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
     webidl_dict::expand(input)
@@ -355,7 +355,7 @@ pub fn webidl_dict_derive(input: TokenStream) -> TokenStream {
 ///
 /// Flags are combinable: `#[webidl_enum(silent_default, case_insensitive)]`.
 ///
-/// See `crates/runtime-macros/src/webidl_enum.rs` for codegen detail.
+/// See `crates/zeroship-runtime-macros/src/webidl_enum.rs` for codegen detail.
 #[proc_macro_derive(WebIdlEnum, attributes(webidl_name, webidl_enum))]
 pub fn webidl_enum_derive(input: TokenStream) -> TokenStream {
     webidl_enum::expand(input)

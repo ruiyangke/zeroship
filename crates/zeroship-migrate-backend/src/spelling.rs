@@ -16,7 +16,7 @@
 //! now name them too. THE COMPILER NO LONGER ENFORCES THE RULE.
 //!
 //! It is replaced, not dropped, by a textual census -
-//! `tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs` - which walks every
+//! `crates/zeroship-migrate/tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs` - which walks every
 //! crate `src` root and asserts that `zero-migrate` names neither function. That is
 //! strictly weaker than a visibility error (it can be deleted; a privacy violation
 //! cannot) and it is recorded here as a DOWNGRADE rather than presented as an equal

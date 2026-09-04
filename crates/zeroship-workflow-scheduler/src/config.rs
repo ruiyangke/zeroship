@@ -7,7 +7,7 @@
 //! This binary's `main` still fails closed - the dispatch loop lives in the
 //! control cron - and it was converted anyway. The reason is that its Cargo
 //! target is classified `platform`
-//! (`crates/workflow-scheduler/Cargo.toml`), which the design makes a
+//! (`crates/zeroship-workflow-scheduler/Cargo.toml`), which the design makes a
 //! REQUIREMENT to register rather than a judgement call: "Production platform
 //! one-shots ... require registration and cannot use an out-of-scope
 //! classification". Its `WORKFLOW_SCHEDULER_*` family was also the last

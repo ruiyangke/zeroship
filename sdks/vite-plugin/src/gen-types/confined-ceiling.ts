@@ -11,12 +11,12 @@
  * → `env.db.ts` + `schema.runtime.json`); it never touches a database and never runs
  * the migration guard. So the emit path needs ONLY the `[[inject]]` rule that drives
  * `resolve_create_table_policy` — NOT the destructive-op posture, timeout ceilings, or
- * `core.*` grants the full apply-side `crates/migrated/policies/confined.policy.toml`
+ * `core.*` grants the full apply-side `crates/zeroship-migrate-server/policies/confined.policy.toml`
  * ceiling carries (those govern the guarded apply, which the emitter never reaches).
  *
  * The injection shape here is NOT WRITTEN HERE. It is the platform-wide fragment
  * `policies/confined-system-shape.inject.toml`, which the deployed apply-side
- * ceiling (`crates/migrated/policies/confined.policy.toml`) also takes, so the
+ * ceiling (`crates/zeroship-migrate-server/policies/confined.policy.toml`) also takes, so the
  * emitted `schema.runtime.json` cannot describe a different table from the one the
  * migration apply produces. Rust `include_str!`s the fragment; TypeScript gets it
  * through `policies/codegen.mjs`, whose output this file imports.

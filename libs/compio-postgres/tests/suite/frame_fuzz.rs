@@ -1,6 +1,6 @@
 //! Randomised backend frames, to generalise the hand-written hostile shapes.
 //!
-//! `tests/hostile_peer.rs` pins eight specific violations - an unknown tag, a
+//! `libs/compio-postgres/tests/suite/hostile_peer.rs` pins eight specific violations - an unknown tag, a
 //! lying length, a message out of order. Each was chosen by a person, which
 //! means the set is exactly as imaginative as whoever wrote it. This file feeds
 //! the same client bytes nobody chose.
@@ -322,7 +322,7 @@ async fn generated_backend_frames_never_hang_or_panic_the_driver() {
 // Everything above fuzzes frames AFTER a clean startup, so it never reaches
 // `src/connect_raw.rs` - which holds 11 of the driver's 43
 // `unexpected_message()` sites, the largest single cluster, and which neither
-// `tests/hostile_peer.rs` nor the corpus above touches. The handshake is also
+// `libs/compio-postgres/tests/suite/hostile_peer.rs` nor the corpus above touches. The handshake is also
 // the part a client runs before it trusts anything, so a panic or a hang there
 // is reachable by any peer that can complete a TCP accept.
 //

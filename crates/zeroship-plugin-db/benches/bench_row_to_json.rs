@@ -46,7 +46,7 @@ use zeroship_plugin_db::row_to_json_for_bench;
 //
 // All Postgres binary wire encodings; column_to_json's branches consume
 // them as-is. Sourced from postgres-types' ToSql impls (verified against
-// crates/plugin-db/src/v8_bridge.rs::column_to_json:372-505).
+// crates/zeroship-plugin-db/src/v8_bridge.rs::column_to_json:372-505).
 
 fn enc_int4(v: i32) -> Vec<u8> {
     v.to_be_bytes().to_vec()

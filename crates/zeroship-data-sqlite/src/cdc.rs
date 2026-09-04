@@ -877,7 +877,7 @@ impl ChangeStream for SqliteChangeStream {
 mod tests {
     //! Unit-level checks for the static helpers, plus the delivery-window
     //! fences. End-to-end behaviour (hook → publisher → broker) is covered by
-    //! the `tests/sqlite_integration.rs` mirror; what lives here is the part
+    //! the `crates/zeroship-plugin-db/tests/sqlite_integration.rs` mirror; what lives here is the part
     //! that mirror CANNOT state deterministically — the interleaving of a guard
     //! drop with an undrained channel.
 

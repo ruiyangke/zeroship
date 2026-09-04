@@ -26,7 +26,7 @@
 //!
 //! The compile-fail rejections (String return, Vec<u8> return, &mut self)
 //! live as `compile_fail` doctests on the proc macro at module level —
-//! see `crates/runtime/src/lib.rs`.
+//! see `crates/zeroship-runtime/src/lib.rs`.
 
 #![allow(unsafe_code)]
 

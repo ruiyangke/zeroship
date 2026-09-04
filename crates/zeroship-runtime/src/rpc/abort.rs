@@ -125,7 +125,7 @@ pub fn register_in_flight(
 
 /// Fire `.abort()` on every in-flight `AbortController` for `app_id`.
 /// Called by the worker's LRU eviction path BEFORE removing the
-/// isolate from the cache (see `crates/worker/src/cache.rs::evict_lru`).
+/// isolate from the cache (see `crates/zeroship-worker/src/cache.rs::evict_lru`).
 ///
 /// Each registered Global is upgraded to a Local on `scope`, the
 /// `abort` property is looked up + called with no arguments. Failures

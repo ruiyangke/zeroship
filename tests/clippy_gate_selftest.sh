@@ -320,7 +320,7 @@ check "a missing include_str! input refuses before linting" 2 \
   "do not exist" "generated/absent.js"
 
 # The MULTI-LINE form is what the first draft of that scan missed, and it missed
-# it on a real file (crates/runtime/src/core/init.rs:391). Case 9's `absent.js`
+# it on a real file (crates/zeroship-runtime/src/core/init.rs:391). Case 9's `absent.js`
 # is written in exactly that form, so a single-line-only scanner passes case 9
 # by finding nothing - which is why case 10 asserts the count too.
 : > "$TMP/fixture_src/generated/absent.js"

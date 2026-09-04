@@ -193,7 +193,7 @@ pub trait ValueFormat {
     ///   **interpolates it into the statement as an `x'..'` literal**, binding
     ///   nothing at all, because the session actor's parameter surface is
     ///   `&[&str]` and has no binary channel
-    ///   (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:1453-1460`).
+    ///   (`crates/zeroship-data-sqlite/src/lib.rs:1453-1460`).
     ///
     /// With [`crate::QueryVector`] a typed parameter, the value is the numbers
     /// and this method is the only place a dialect's spelling of them lives.

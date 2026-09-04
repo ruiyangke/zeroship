@@ -658,7 +658,7 @@ return out.join("|");
 /// `ZEROSHIP_DEV` over `"0"` and `""` to prove neither spelling counts as dev.
 /// Dev mode is a cached process-level cell now, so no test in this process can
 /// ask the environment twice; the spelling half is
-/// `only_exactly_one_is_dev_mode` in `crates/runtime/src/transport/ssrf.rs`,
+/// `only_exactly_one_is_dev_mode` in `crates/zeroship-runtime/src/transport/ssrf.rs`,
 /// which asks it directly and without an environment. This half asks the other
 /// question - that an off mode really does leave the floor running - which the
 /// spelling test cannot reach.
@@ -1394,7 +1394,7 @@ return await new Promise((resolve) => {{
 /// WHAT THIS DOES NOT CATCH, and where that half went. This used to loop
 /// `ZEROSHIP_DEV` over `"0"` and `""` to prove neither spelling counts as dev.
 /// That question is `only_exactly_one_is_dev_mode` in
-/// `crates/runtime/src/transport/ssrf.rs` now; dev mode is a cached
+/// `crates/zeroship-runtime/src/transport/ssrf.rs` now; dev mode is a cached
 /// process-level cell, so no test in this process can ask the environment
 /// twice.
 #[test]

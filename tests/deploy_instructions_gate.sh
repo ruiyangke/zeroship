@@ -16,7 +16,7 @@
 # so they rotted in place across a flag rename.
 #
 # THE ALLOWED SET IS DERIVED, NOT HAND-WRITTEN. It is parsed out of the CLI's own
-# `deploy` help line in crates/cli/src/main.rs. A hand list here would be the
+# `deploy` help line in crates/zeroship-cli/src/main.rs. A hand list here would be the
 # shape this repo has been burned by twice: an assertion ABOUT a thing, sitting
 # beside the thing, satisfiable by editing the assertion. Add a flag to deploy and
 # update its help, and this gate follows; add one and skip the help, and the gate

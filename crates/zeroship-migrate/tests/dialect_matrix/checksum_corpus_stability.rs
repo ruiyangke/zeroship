@@ -7,7 +7,7 @@
 //! spelled on the wire silently invalidates deployed history and breaks
 //! drift/tamper detection against journals that are already in production.
 //!
-//! `tests/ir_checksum.rs` pins ONE golden over three hand-picked ops. That is a
+//! `crates/zeroship-migrate/tests/ir_contract/ir_checksum.rs` pins ONE golden over three hand-picked ops. That is a
 //! spot check. This file pins the checksum of EVERY `(op-kind, variant)` row of
 //! the shared dialect corpus — the same corpus `dialect_table_faithfulness.rs`
 //! and `dialect_conformance_live.rs` drive — so a rename anywhere in the op

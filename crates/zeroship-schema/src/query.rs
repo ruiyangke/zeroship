@@ -1142,8 +1142,8 @@ pub enum SqliteEmitScope {
 }
 
 // pub (not pub(crate)): the external consumer is
-// `crates/plugin-db/tests/integration.rs`, which reaches it through the glob
-// re-export in `crates/plugin-db/src/lib.rs`. The crate prefix is load-bearing -
+// `crates/zeroship-plugin-db/tests/integration.rs`, which reaches it through the glob
+// re-export in `crates/zeroship-plugin-db/src/lib.rs`. The crate prefix is load-bearing -
 // written crate-relative this reads as belonging to zeroship-schema, which has
 // no test by that name.
 //

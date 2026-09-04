@@ -15,16 +15,16 @@
 //! handlers compiled without strict type-checking (e.g. plain JS) still
 //! hit the rail. Consumers:
 //!
-//!   - `crates/plugin-db/src/v8_bridge.rs` — `refuse_if_query_capability`
+//!   - `crates/zeroship-plugin-db/src/v8_bridge.rs` — `refuse_if_query_capability`
 //!     makes write ops refuse when `current_kind() == Some(Query)`.
-//!   - `crates/runtime/src/web/fetch/mod.rs` — fetch callback refuses
+//!   - `crates/zeroship-runtime/src/web/fetch/mod.rs` — fetch callback refuses
 //!     when `current_kind() == Some(Mutation)`.
 //!
 //! ## Plumbing
 //!
 //! The `__zsDispatch` dispatcher (`sdks/bootstrap/src/dispatcher.ts`, whose
 //! compiled twin the runtime splices in via
-//! `crates/runtime/src/core/init.rs`) knows the procedure `kind`
+//! `crates/zeroship-runtime/src/core/init.rs`) knows the procedure `kind`
 //! synchronously from `fn.config.kind`.
 //! Around the user handler invocation it calls:
 //!

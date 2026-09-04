@@ -283,7 +283,7 @@ impl CapabilitySet {
 /// drop-side bound is enforced there and NOT on MySQL, whose 64 is a CHARACTER
 /// count. Collapsing them to one number would either refuse a MySQL name that
 /// legitimately exists or under-bound a PostgreSQL one. See
-/// `crates/zeroship-migrate/tests/authored_identifier_lengths.rs`.
+/// `crates/zeroship-migrate/tests/namespaces/authored_identifier_lengths.rs`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IdentifierLimit {
     /// The catalog imposes no identifier cap (`SQLite`).

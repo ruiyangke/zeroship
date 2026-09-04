@@ -156,7 +156,7 @@ describe("createFetchHandler — superjson wire", () => {
   // "internal error".
   //
   // The code here mirrors what `requireUser()` actually throws
-  // (`sdks/auth/src/server.ts`, `crates/runtime/src/auth.rs`); it used to say
+  // (`sdks/auth/src/server.ts`, `crates/zeroship-runtime/src/auth.rs`); it used to say
   // "unauthenticated", which encoded a producer spelling no consumer compares
   // against. `errorBodyFromThrown` copies `code` verbatim, so this handler is
   // the pipe that carries the divergence to the client. See

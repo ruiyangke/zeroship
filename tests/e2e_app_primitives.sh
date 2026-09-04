@@ -40,7 +40,7 @@
 #     resolved by the worker's module loader (not in the bundle's static
 #     graph, not a native module) => `Cannot find module`.
 #
-#     That resolution now exists. `crates/runtime/src/core/dynamic_import.rs`
+#     That resolution now exists. `crates/zeroship-runtime/src/core/dynamic_import.rs`
 #     carries "Path 2.5: runtime-provided module", which resolves exactly
 #     `@zeroship/bootstrap/install-schema`, `@zeroship/db/internal` and
 #     `zeroship` on the grounds that the runtime injects the code importing
@@ -52,7 +52,7 @@
 #       4 passed; 0 failed  (resolves_and_is_callable, resolves_during_module
 #       _evaluation, shares_instance_across_imports, transitive_db_internal)
 #     That target name stopped resolving on 2026-08-20: the file is a module of
-#     crates/runtime/tests/main.rs now. Rerun it with
+#     crates/zeroship-runtime/tests/main.rs now. Rerun it with
 #       cargo test -p zeroship-runtime --test main -- bootstrap_install_schema_resolve::
 #
 # So db-todos DOES run on the worker. It is the DEPLOYED vehicle of
@@ -281,7 +281,7 @@ echo "$DEP" | grep -q "deploy_hash" && pass "deployed db-todos .zship" || fail "
 
 # APP OWNERSHIP, and this row is NOT redundant with the platform-admin grant
 # above. The two services differ: control's deploy handler stops at the Cedar
-# decision (crates/control/src/authz_guard.rs), which `admin.cedar` satisfies on
+# decision (crates/zeroship-control/src/authz_guard.rs), which `admin.cedar` satisfies on
 # its own, while migrated ALSO requires a literal `role = 'owner'` row
 # (crates/zeroship-migrate-server/src/auth.rs, `requires_app_owner`). A platform admin with no
 # membership row can therefore deploy an app and be refused when migrating it.
@@ -447,7 +447,7 @@ echo "=== Stage 5c: db-todos RPC DIRECT to worker /dispatch (authenticated) ==="
 # zs_frame <out> <method> <url> <body> — write the dispatch frame the worker
 # actually decodes.
 #
-# /dispatch takes a BINARY frame (crates/core/src/dispatch_frame.rs
+# /dispatch takes a BINARY frame (crates/zeroship-core/src/dispatch_frame.rs
 # encode_dispatch_frame): a 4-byte little-endian metadata length, then the
 # {method,url,headers} JSON, then the raw body bytes. The body is NOT a field
 # of the metadata.

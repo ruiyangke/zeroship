@@ -11,7 +11,7 @@
 //! What control still owes a CLI holding no credential is the RFC 9728
 //! document naming the authorization server it trusts. That is the whole of
 //! the device story on this side now; the OP owns the grant itself
-//! (`crates/auth/src/oidc/device_token.rs`).
+//! (`crates/zeroship-auth/src/oidc/device_token.rs`).
 
 use std::sync::Arc;
 

@@ -62,14 +62,14 @@ billing at all.
 
 Metering is infrastructure, not a creator surface: there is no `env.meter` and no
 `plugin-meter`, because a signal app code can call is a signal app code can forge or
-suppress. `crates/metering/src/meter.rs` holds the per-`(app, metric)` atomic counters and
-`crates/metering/src/outbox.rs` the compio flush task; the worker emits the five platform
+suppress. `crates/zeroship-metering/src/meter.rs` holds the per-`(app, metric)` atomic counters and
+`crates/zeroship-metering/src/outbox.rs` the compio flush task; the worker emits the five platform
 counters per dispatch and the trusted data primitives (`env.db`/`env.kv`/`env.storage`) emit
 their usage metrics at the op boundary. Usage reaches control as `UsageEvent`s on the durable
 stream (`crates/stream`), not over an HTTP report endpoint - there is no `/internal/usage`
 and no `(worker_id, sequence)` dedup ledger. The control-side snapshot writer is
-`crates/control/src/cron/spend_recompute.rs`, which overwrites `zeroship.usage_aggregates`
-per `(app_id, billing period, metric)`; `crates/control/src/metering/mod.rs` carries that
+`crates/zeroship-control/src/cron/spend_recompute.rs`, which overwrites `zeroship.usage_aggregates`
+per `(app_id, billing period, metric)`; `crates/zeroship-control/src/metering/mod.rs` carries that
 table's types and the custom-metric cap. See `docs/reference/billing-metering.md`.
 
 ### ISS-29 · Platform fee (15%) not server-enforced
@@ -78,9 +78,9 @@ table's types and the custom-metric cap. See `docs/reference/billing-metering.md
 The fee used to be a client-side default in creator-controlled code (`applicationFeePercent ??
 15` in the old `@zeroship/payments` checkout), overridable to 0 and bypassable; the webhook
 only recorded what Stripe reported, with no floor and no creator-to-account binding. It is now
-server-authoritative: `crates/control/src/fee_policy.rs` holds the per-creator
+server-authoritative: `crates/zeroship-control/src/fee_policy.rs` holds the per-creator
 `FeePolicy { Fixed | Percent + cap + floor }` (default 15%) in `zeroship.creator_fee_policy`,
-with an operator-only write, and `crates/control/src/stripe_handlers.rs` stamps
+with an operator-only write, and `crates/zeroship-control/src/stripe_handlers.rs` stamps
 `application_fee_amount` on the Connect PaymentIntent. The SDK was rewritten as a thin client
 over those endpoints (`sdks/payments/src/connect.ts`): no method takes a fee parameter, and the
 stamped value comes back read-only as `applicationFeeCents`.
@@ -100,7 +100,7 @@ The dead tokio `crates/platform` engine has been **deleted** (PR7); its domain l
 salvaged into the live compio stack. A data-driven plan catalog + cents pricing
 (`crates/control/src/{plan_catalog,pricing}.rs`, fixing CT-A1's free-text `plan_id`) feed a
 spend engine (`spend.rs` + `cron/spend_reconcile.rs`) deriving `SpendState`
-{Allow,Warn,Degrade,Block}, enforced at the gateway edge (`crates/gateway/src/enforce.rs`:
+{Allow,Warn,Degrade,Block}, enforced at the gateway edge (`crates/zeroship-gateway/src/enforce.rs`:
 402 Block, throttle Degrade). Month-close Stripe invoice-item billing runs in
 `cron/billing_reconcile.rs` + `stripe_client.rs`. See `docs/reference/billing-metering.md`.
 This is Stream 1 (infra usage billing); Stream 2 (ISS-29/30) is the separate creator-payments
@@ -111,7 +111,7 @@ epic below.
 ### ISS-72 · env.storage multipart: in-flight parts overlap a slow producer (FIXED — select pipeline)
 **Status:** FIXED (`design/s3-object-storage`) · **Effort:** M · **Tier:** T3 · Surfaced by the fable S3 review (HIGH-2)
 
-The parallel multipart loop in `S3::put_stream` (`crates/plugin-storage/src/backend/s3.rs`) was
+The parallel multipart loop in `S3::put_stream` (`crates/zeroship-plugin-storage/src/backend/s3.rs`) was
 restructured from a gate-only-drain loop into a **select-based bounded-concurrency overlap
 pipeline**: one task drives the producer (`body.next_chunk()`) and the in-flight `UploadPart`
 `FuturesUnordered` CONCURRENTLY via `futures::select!`, so a PUT completing *while the next chunk
@@ -127,7 +127,7 @@ slowness: `CompleteMultipartUpload`/`AbortMultipartUpload` now REUSE the upload 
 pooled `cyper::Client` (`complete_multipart_on` / `abort_multipart_on` in `crates/compio-s3`), so
 finalization no longer opens a cold connection after a long upload. The per-part scaled timeout
 (`S3Timeouts::send_for_body`) is kept as defense-in-depth against a genuinely *stalled* part.
-**Regression test:** `run_s3_slow_producer_overlap` in `crates/plugin-storage/tests/backend_parity.rs`
+**Regression test:** `run_s3_slow_producer_overlap` in `crates/zeroship-plugin-storage/tests/backend_parity.rs`
 (MinIO-gated) drives `put_stream` with a real inter-chunk-delayed producer spanning several parts
 and asserts a byte-exact round-trip + finalized object. NB: this test proves the new loop COMPLETES
 correctly under a slow producer; it cannot be made to *fail* on the old loop against **local** MinIO,
@@ -155,7 +155,7 @@ workflow_advance_pinned_isolate_budget_lru_evicts_per_app
 workflow_advance_replays_journal_hit_without_rerunning_body
 ```
 
-Each panics identically at `crates/worker/src/handler.rs:1806`:
+Each panics identically at `crates/zeroship-worker/src/handler.rs:1806`:
 
 ```
 provision worker workflow test journal: Db("db error: ERROR: schema \"app_<uuid>\" does not exist")
@@ -164,7 +164,7 @@ provision worker workflow test journal: Db("db error: ERROR: schema \"app_<uuid>
 **Cause.** `seed_unclaimed_workflow_run` mints `app_id = Uuid::new_v4()` and calls
 `PgStore::provision`, whose DDL is `CREATE TABLE IF NOT EXISTS app_<uuid>.<table>` and deliberately
 contains no `CREATE SCHEMA` — that is asserted, in the same crate, at
-`crates/plugin-workflow/src/store/pg.rs:1961` ("worker workflow provisioning must not create roles
+`crates/zeroship-plugin-workflow/src/store/pg.rs:1961` ("worker workflow provisioning must not create roles
 or schemas"). Creating the per-app schema belongs to the standalone migration
 service (`crates/zeroship-migrate-server/src/apply.rs`). Nothing in the test path invokes it, and the id is
 fresh each run, so the schema can never pre-exist. The test is asking a component that is forbidden
@@ -189,8 +189,8 @@ untracked prerequisites: `third_party/zero-migrate` rsynced in, `sdks/{bootstrap
 in, `deploy/ops/zeroship.test.toml` copied in), `cargo test -p zeroship-worker --no-fail-fast`
 gives `67 passed; 7 failed` with the same seven names. The same command on
 `feat/egress-rules-control` gives `69 passed; 7 failed` — the +2 is that branch's own `cache.rs`
-tests, and the failing set is byte-identical. `crates/worker/src/handler.rs` and
-`crates/plugin-workflow/src/store/pg.rs` are byte-identical between the two trees.
+tests, and the failing set is byte-identical. `crates/zeroship-worker/src/handler.rs` and
+`crates/zeroship-plugin-workflow/src/store/pg.rs` are byte-identical between the two trees.
 
 **What this entry does NOT establish.** Only that the seven fail today on main for the reason
 above. It does not say when they last passed, whether they ever passed against a real database, or
@@ -528,7 +528,7 @@ The runtime's `runtime-entry.js` (`sdks/bootstrap/dist/runtime-entry.js:50`, emb
 `include_str!`) does `await import("@zeroship/bootstrap/install-schema")` to install the declared schema
 collections. On the **production worker** the module loader can't resolve it — it's inlined by the vite
 build under `noExternal` (so not separately addressable) and it's not a native module, so the
-dynamic-import host callback (`crates/runtime/src/core/dynamic_import.rs:158`) rejects with
+dynamic-import host callback (`crates/zeroship-runtime/src/core/dynamic_import.rs:158`) rejects with
 `TypeError: Cannot find module '@zeroship/bootstrap/install-schema'` → `Evaluate rejected: index.js` →
 HTTP 500. **Net: NO schema-bearing (env.db) app runs in production** — broken over both the gateway and
 the direct worker `/dispatch`. Reproduced with freshly rebuilt bootstrap dist + worker binary (not
@@ -576,10 +576,10 @@ honors), and align `docs/reference/auth.md`. Add a regression test (anon `requir
 The render E2E flagged that an app reading `process.env.OPENAI_API_KEY` got `undefined` on the multi-node
 worker path (→ HTTP 500 from `new OpenAI({apiKey})`), while the same app on `zeroship serve` returned 200.
 **Triaged: this is correct, documented behavior, not a bug.** Control returns app env as `{vars, secrets,
-expose}` (`crates/control/src/internal.rs`); the runtime puts **vars** in `process.env` always but keeps
+expose}` (`crates/zeroship-control/src/internal.rs`); the runtime puts **vars** in `process.env` always but keeps
 **secrets out unless the name is opted into the per-app `expose` list** — a deliberate leak-prevention so
 `Object.keys(process.env)`/`JSON.stringify(process.env)`/dotenv-debug can't dump secret values (see
-`crates/runtime/src/fetch_outcome.rs:93-98`, the LangChain/`process.env.OPENAI_API_KEY` case is called out
+`crates/zeroship-runtime/src/fetch_outcome.rs:93-98`, the LangChain/`process.env.OPENAI_API_KEY` case is called out
 by name). Worker hydration is correct end-to-end: `handler.rs:213` reads the `EnvSnapshot` from `SharedEnvs`
 per request and passes it into `call_fetch_handler_with_user(&env)`; **vars + exposed secrets reach
 `process.env`**. openai-demo failed only because its key was stored as a *secret* and never exposed; the
@@ -689,7 +689,7 @@ Hydra dev-auth session for headless E2E).
 
 When the gateway forwards a request to a worker it rebuilt the URL from the ntex
 `{tail*}` path extractor **without re-appending the query string**
-(`crates/gateway/src/router/dispatch.rs`, `let url = format!("{scheme}://{host}/{tail}")`).
+(`crates/zeroship-gateway/src/router/dispatch.rs`, `let url = format!("{scheme}://{host}/{tail}")`).
 The `{tail*}` capture is path-only, so `?...` was silently dropped before the worker's
 JS handler ever saw it. Impact — two classes, both invisible to the pre-existing tests:
 - **Every GET `query()` RPC loses its input.** The `@zeroship/rpc` transport sends a
@@ -713,13 +713,13 @@ re-appends the raw query. Regression tests: `forward_url_preserves_query_string`
 
 **Fix:** the streamed-dispatch outcome path didn't wake the runtime pump. The `Pending`
 (async non-stream) path called `self.notify_pump()` before returning, but the `Stream`
-path in `build_fetch_outcome` (`crates/runtime/src/core/runtime.rs`) did not. So after a
+path in `build_fetch_outcome` (`crates/zeroship-runtime/src/core/runtime.rs`) did not. So after a
 prior request left the pump idle (blocked on `notify_rx`), the next streamed response
 delivered its first (sync) frame and then stalled — its body's async generator advances
 only while the pump runs, and nothing woke it. The 1st stream worked because the pump was
 still active; the 2nd+ (and any stream after an aborted one — the browser search-as-you-type
 re-query) stalled. Added `self.notify_pump()` on the `Stream` path, mirroring `Pending`.
-A pure-runtime RED test (`crates/runtime/tests/iss71_sequential_streams.rs`) dispatches the
+A pure-runtime RED test (`crates/zeroship-runtime/tests/iss71_sequential_streams.rs`) dispatches the
 same async-generator stream 4× on one isolate and asserts every run yields all frames +
 `d:{}` — it stalled on attempt 2 pre-fix, passes post-fix. The browser multi-frame re-query
 spec now passes (12/12, was 11 + 1 fixme). `serve.rs:850`'s explicit `notify_pump` after a
@@ -753,7 +753,7 @@ EOF). But streams degrade with repetition / after an abort:
   frame**, with or without `force_close`. So an **aborted prior stream** is a strong trigger.
 
 **Root (hypothesis, well-supported):** the runtime's response-stream machinery
-(`crates/runtime/src/web/streams/response_forwarder.rs` — the `stream_id` registry +
+(`crates/zeroship-runtime/src/web/streams/response_forwarder.rs` — the `stream_id` registry +
 `schedule_next_read` JS-read chain + the per-isolate pump) does not cleanly tear down a
 **completed or aborted** stream, so a subsequent stream on the same isolate only gets its
 first frame pumped and then never re-arms. The `stream_id`/forwarder cleanup

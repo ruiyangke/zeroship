@@ -65,7 +65,7 @@ const CUSTOM_PREFIX = "\0zeroship-node:";
 
 /**
  * Specifiers the V8 runtime resolves itself (native synthetic modules
- * registered in `crates/runtime/src/core/native_modules.rs`). The
+ * registered in `crates/zeroship-runtime/src/core/native_modules.rs`). The
  * vite-plugin must NOT polyfill or rewrite these — the bundler keeps
  * the bare `import { X } from "node:foo"` and the runtime's module
  * loader produces a SyntheticModule with the real exports.
@@ -82,7 +82,7 @@ const RUNTIME_NATIVE_MODULES = new Set([
 const customPolyfills: Record<string, string> = {
   // node:crypto and node:async_hooks are now resolved as native V8
   // SyntheticModules by the runtime itself (see
-  // crates/runtime/src/core/native_modules.rs). The vite plugin used
+  // crates/zeroship-runtime/src/core/native_modules.rs). The vite plugin used
   // to ship a virtual module that re-exported `globalThis.__zsAsyncHooks`
   // / `globalThis.__zeroship_node_crypto`; the runtime owns those
   // specifiers directly now, so the shim entries are gone — the

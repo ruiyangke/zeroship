@@ -7,8 +7,8 @@
 # a hand-written list of secret files, and `control-signing.pem` was on it.
 # 8e365f478 (2026-08-17) deleted control's PAT signing key outright - nothing
 # but a PatIssuer read it - and removed the file from `secret_specs()` in
-# crates/cli/src/dev.rs, from both compose mounts, and from
-# crates/cli/tests/dev_init_test.rs. It did not remove it from here.
+# crates/zeroship-cli/src/dev.rs, from both compose mounts, and from
+# crates/zeroship-cli/tests/dev_init_test.rs. It did not remove it from here.
 #
 # `zeroship dev init` therefore stopped writing a file this function demanded,
 # so the function returned 1 on EVERY machine, ALWAYS, and `ensure_dev_secrets`

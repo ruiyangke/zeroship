@@ -18,7 +18,7 @@
 //!
 //! WHAT THIS DOES NOT COVER: the settings `--check-config` does not report.
 //! The report is the observation surface, so a tier bug in a field that is not
-//! in `CheckConfigReport` is invisible here. `crates/gateway/src/main.rs` is
+//! in `CheckConfigReport` is invisible here. `crates/zeroship-gateway/src/main.rs` is
 //! where that list lives.
 
 use std::path::{Path, PathBuf};
@@ -212,7 +212,7 @@ fn the_flag_outranks_both_the_environment_and_the_overlay() {
 #[test]
 fn the_obsolete_security_relaxation_variable_reaches_no_carrier() {
     // `--dev-insecure` was deleted. The flag half of that is asserted in
-    // `crates/gateway/src/main.rs` (clap rejects an unknown argument without
+    // `crates/zeroship-gateway/src/main.rs` (clap rejects an unknown argument without
     // consulting the environment at all); this is the tier the flag test
     // cannot see, because an env-only carrier would leave the flag surface
     // untouched and still relax the gateway.

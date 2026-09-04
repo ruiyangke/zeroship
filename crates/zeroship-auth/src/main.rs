@@ -18,7 +18,7 @@ use zeroship_core::oidc_verify::JwksCache;
 /// The gateway reads a DIFFERENT variable behind the same validator
 /// (`gateway.stash_signing_key`), which is why the validator takes the name as
 /// a parameter rather than spelling one itself. Derived from the declaration at
-/// `crates/auth/src/config.rs` (`#[config(name = "auth.stash_signing_key")]`).
+/// `crates/zeroship-auth/src/config.rs` (`#[config(name = "auth.stash_signing_key")]`).
 const STASH_SIGNING_KEY_LABEL: &str = "ZEROSHIP_AUTH_STASH_SIGNING_KEY / --stash-signing-key-file";
 
 use zeroship_auth::config::{AuthCli, AuthConfig, AuthSettings};

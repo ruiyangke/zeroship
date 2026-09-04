@@ -230,7 +230,7 @@ else
 fi
 
 # ONE fetch, deliberately. The projection is memoised for PROJECTED_CHARGE_TTL_SECS
-# (60s, crates/control/src/billing_read.rs:35), so a warm-up call would pin a
+# (60s, crates/zeroship-control/src/billing_read.rs:35), so a warm-up call would pin a
 # PRE-settlement value for the whole rest of the stage. Fetch after the meter has
 # settled, and read the period back out of the SAME response.
 PC_JSON="$(curl -s "$CONTROL_URL/api/apps/$APP/projected-charge" -H "Authorization: Bearer $ADMIN_TOKEN")"

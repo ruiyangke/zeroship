@@ -24,10 +24,20 @@
 # silently return to if the doc pattern, the exclusion filter or the root *.md
 # arm ever stopped matching. Each probe is planted in the corpus it controls.
 #
-# A THIRD PROBE for the build-state report (direction 5), which the two above
-# cannot reach: it is a WARNING, so it never moves the exit code that directions
-# 1-4 assert on. It could stop printing entirely and every assertion here would
-# still pass.
+# A THIRD PROBE for build-state divergence (direction 5), which the two above
+# cannot reach: their citations resolve nowhere, and this one resolves on THIS
+# machine and on no fresh checkout.
+#
+# IT USED TO ASSERT A WARNING, and could only ever assert a warning, because the
+# scan resolved citations with `[ -e ]` against the working tree - so a build
+# output was resolvable here and unresolvable in CI, and the gate could not call
+# that an error without failing on every developer's machine. On 2026-09-04 the
+# scan's resolution oracle became `git ls-files`, the same set a fresh checkout
+# has, and the divergence stopped existing: an untracked target is now
+# unresolvable EVERYWHERE, including here. So direction 5 asserts the exit code
+# like the other four, which is a strictly stronger claim than the warning it
+# replaces - a warning that stopped printing was indistinguishable from a tree
+# with nothing to warn about.
 #
 # Exits 0 when the gate behaves correctly, 1 otherwise.
 
@@ -137,57 +147,52 @@ if ! bash "$SCAN" > /dev/null 2>&1; then
   fail "the gate stayed red after the doc probe was removed; it is not tracking the doc tree"
 fi
 
-# --- Direction 5: the build-state report must name an UNTRACKED resolved target,
-# --- and must NOT name a tracked one. -----------------------------------------
-# The gate reads the working tree; CI reads a fresh checkout. A citation to a
-# build output therefore resolves on every developer's machine and on nobody
-# else's, which is how this gate spent two days green locally and red in CI
-# (2026-08-10). The report that separates those two states is a WARNING, so it
-# cannot be checked by exit code - which is exactly why it needs a self-test:
-# a warning that stopped printing looks identical to a tree with nothing to warn
-# about.
+# --- Direction 5: an UNTRACKED-but-existing target must FAIL the gate here, on
+# --- a built tree, and a tracked one cited identically must not. ---------------
+# This is the CI-divergence class, and it is the one defect this gate exists to
+# not have: it spent 2026-08-10 green on every developer's machine and red in
+# CI, because `dist/` is a build output that a fresh checkout does not have. The
+# fix was to stop asking the filesystem. The proof that the fix holds is below,
+# and it has to be run on a BUILT tree to mean anything - which is what every
+# machine that runs this has.
 #
-# TWO ARMS, and the second is the one that carries the meaning. "Names the
-# untracked path" alone is satisfied by a report that lists every path that
-# resolved. Only the tracked control separates that from a report that
-# discriminates - same probe, same syntax, same resolution arm, differing in one
-# variable: whether git tracks the target.
+# TWO ARMS, and the second is the one that carries the meaning. "The gate went
+# red" alone is satisfied by a gate that rejects every citation. Only the tracked
+# control separates that from a gate that discriminates - same probe file, same
+# syntax, same resolution arm, differing in ONE variable: whether git tracks the
+# target.
 mkdir -p "$BUILD_DIR" || fail "could not create $BUILD_DIR"
 printf '// self-test build output\n' > "$BUILD_TARGET"
 printf '\n// Self-test probe: %s and %s\n' "$BUILD_TARGET" "$TRACKED_CITATION" > "$BUILD_PROBE"
 # BUILD_PROBE is staged so the corpus scan reaches it; BUILD_TARGET is
 # deliberately left untracked - that gap is the exact thing this direction
-# tests for.
+# tests for. It EXISTS on disk, so a gate that resolved against the filesystem
+# would pass here; that is the mutation this arm is written to catch.
 stage "$BUILD_PROBE"
 
 build_out="$(bash "$SCAN" 2>&1)"
 build_rc=$?
 
-# Checked BEFORE the naming assertions, and they depend on it: on a non-zero
-# exit the planted paths would be named by an ::error:: line instead, and the
-# grep below could not tell the two apart.
-if [ "$build_rc" -ne 0 ]; then
-  fail "both planted citations resolve, so the gate should have exited 0; it exited $build_rc - the build-state arm cannot be read from a failing run"
+if [ "$build_rc" -eq 0 ]; then
+  fail "cited an existing but UNTRACKED file and the gate exited 0 - it is resolving against this built working tree, so a green here is not a green in CI"
 fi
 case "$build_out" in
   *"$BUILD_TARGET"*) : ;;
-  *) fail "cited an existing but UNTRACKED file and the build-state report never named it; a local run can no longer tell itself apart from a CI run" ;;
+  *) fail "the gate exited non-zero but never named $BUILD_TARGET; it may be failing for an unrelated reason" ;;
 esac
+# The one-variable control. The tracked citation sits in the SAME probe file, so
+# if it is named too the gate is refusing everything rather than discriminating
+# on tracked-ness.
 case "$build_out" in
-  *"$TRACKED_CITATION"*) fail "the build-state report named $TRACKED_CITATION, which git tracks - it is listing everything that resolved rather than what a fresh checkout would lose" ;;
+  *"$TRACKED_CITATION"*) fail "the gate also reported $TRACKED_CITATION, which git tracks - it is rejecting every citation rather than the untracked one" ;;
   *) : ;;
 esac
 
 rm -f "$BUILD_PROBE"
 rm -rf "${BUILD_DIR%/dist}"
 git reset -- "$BUILD_PROBE" > /dev/null 2>&1
-gone_out="$(bash "$SCAN" 2>&1)"
-if [ $? -ne 0 ]; then
+if ! bash "$SCAN" > /dev/null 2>&1; then
   fail "the gate stayed red after the build-state probe was removed; it is not tracking the tree"
 fi
-case "$gone_out" in
-  *"$BUILD_TARGET"*) fail "the build-state report still names $BUILD_TARGET after the probe was removed; it is not reading the current tree" ;;
-  *) : ;;
-esac
 
-echo "source-citation gate self-test: detects a planted citation in BOTH corpora (source and docs), exits non-zero on each, returns to green, and names an untracked-but-resolved target without naming a tracked one"
+echo "source-citation gate self-test: detects a planted citation in BOTH corpora (source and docs), exits non-zero on each, returns to green, and fails on an untracked-but-existing target while passing a tracked one cited beside it"

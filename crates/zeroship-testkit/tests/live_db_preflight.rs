@@ -65,7 +65,7 @@ use compio_postgres::NoTls;
 use zeroship_testkit::{admin, live_db, overlay};
 
 /// The schemas the control live-DB target requires, and what this file uses as
-/// its `Ready` input. Kept identical to `crates/control/tests/common/mod.rs`
+/// its `Ready` input. Kept identical to `crates/zeroship-control/tests/common/mod.rs`
 /// deliberately: if that list grows, this file should be asking for the same
 /// thing.
 const PLATFORM_SCHEMAS: [&str; 2] = ["zeroship", "zeroship_migrations"];

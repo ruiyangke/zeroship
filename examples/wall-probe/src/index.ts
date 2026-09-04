@@ -11,11 +11,11 @@
 // THE QUESTION. A creator writes a handler that takes longer than the deployed
 // wall budget. What do the two tiers do?
 //
-//   pnpm dev   unbounded  - crates/runtime/src/core/serve.rs sets
+//   pnpm dev   unbounded  - crates/zeroship-runtime/src/core/serve.rs sets
 //                           `wall_timeout: None`, so the request completes.
 //   deployed   5s         - the app inherits FREE_TIER_RUNTIME_LIMITS
-//                           (crates/core/src/types.rs: 5s wall, 50ms CPU), and
-//                           crates/worker/src/handler.rs answers
+//                           (crates/zeroship-core/src/types.rs: 5s wall, 50ms CPU), and
+//                           crates/zeroship-worker/src/handler.rs answers
 //                           `make_error_msg(504, "request timed out")`.
 //
 // So the same code passes locally and 504s in production, and dev gives the

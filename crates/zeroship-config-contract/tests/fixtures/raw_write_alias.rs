@@ -5,7 +5,7 @@
 //
 // Two violations, by construction: the import binds `std::env::set_var` under
 // another name, and the call site uses that name. `PLANTED_VIOLATIONS` in
-// `crates/config-contract/src/main.rs` counts both.
+// `crates/zeroship-config-contract/src/main.rs` counts both.
 #[cfg(any())]
 fn hidden_behind_disabled_cfg(key: &str, value: &str) {
     use std::env::set_var as hidden_write;

@@ -385,7 +385,7 @@ e2e_export_database_urls "$DBURL"
 # CONTROL_USAGE_OUTBOX_WAL_PATH, per run, for the same reason the worker and the
 # gateway below get `--metering-outbox-wal-path`: redb is single-writer. control
 # is a usage PRODUCER too and its WAL had no per-run path, so it fell back to
-# `DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH` (crates/control/src/lib.rs) - the
+# `DEFAULT_CONTROL_USAGE_OUTBOX_WAL_PATH` (crates/zeroship-control/src/lib.rs) - the
 # CWD-relative `.zeroship/usage-outbox-zeroship-control.redb`, i.e. one file in
 # the repo working tree shared by every run started from the checkout.
 #
@@ -593,18 +593,18 @@ echo "=== Stage 4: metering → aggregation (worker → redpanda → recompute �
 # where this harness's flakiness lived, and it is not a tolerance to widen:
 #
 #   * The worker's outbox interval is the CONSTANT
-#     `DEFAULT_OUTBOX_INTERVAL` (10s, crates/metering/src/outbox.rs). There is
+#     `DEFAULT_OUTBOX_INTERVAL` (10s, crates/zeroship-metering/src/outbox.rs). There is
 #     no flag, no flush endpoint and no signal - checked 2026-08-21 across
-#     crates/worker/src/config.rs (four --metering-* flags, none an interval)
+#     crates/zeroship-worker/src/config.rs (four --metering-* flags, none an interval)
 #     and the worker's HTTP surface. So a tick that lands mid-traffic is not
 #     something the harness can prevent; it can only decline to read while one
 #     is still outstanding.
-#   * `Meter::drain` is snapshot-AND-ZERO (crates/metering/src/meter.rs,
+#   * `Meter::drain` is snapshot-AND-ZERO (crates/zeroship-metering/src/meter.rs,
 #     `swap(0, ...)`), so that tick publishes the counters accumulated so far
 #     and the rest arrives in a LATER event with a different event_id.
 #   * control's recompute rewinds and re-scans the WHOLE retained stream every
 #     cycle and OVERWRITES the period
-#     (crates/control/src/cron/spend_recompute.rs ->
+#     (crates/zeroship-control/src/cron/spend_recompute.rs ->
 #     Metering::replace_period_snapshot, which DELETEs the period first). So
 #     /api/apps/:id/usage climbs from a partial toward the full count as later
 #     drains land - and can also fall, because a mid-scan fetch stall reads as

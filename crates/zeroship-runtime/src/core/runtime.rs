@@ -384,7 +384,7 @@ impl Runtime {
     /// need to invoke V8 APIs from outside `call_fetch_handler`.
     ///
     /// Used by the worker's eviction path (see
-    /// `crates/worker/src/cache.rs::evict_lru`) to walk the abort
+    /// `crates/zeroship-worker/src/cache.rs::evict_lru`) to walk the abort
     /// registry inside the about-to-be-disposed isolate's scope.
     ///
     /// The runtime borrows the inner `RefCell` for the duration of the

@@ -8,8 +8,8 @@ import { zeroship } from "@zeroship/vite-plugin";
 // Its whole job is the PER-REQUEST WALL CLOCK, which is the one runtime limit
 // the two tiers do not agree on:
 //
-//   pnpm dev   unbounded  (crates/runtime/src/core/serve.rs, `wall_timeout: None`)
-//   deployed   5s         (FREE_TIER_RUNTIME_LIMITS, crates/core/src/types.rs)
+//   pnpm dev   unbounded  (crates/zeroship-runtime/src/core/serve.rs, `wall_timeout: None`)
+//   deployed   5s         (FREE_TIER_RUNTIME_LIMITS, crates/zeroship-core/src/types.rs)
 //
 // A creator whose request takes longer than 5s therefore sees it WORK locally
 // and 504 in production, with no local signal. That divergence is recorded in

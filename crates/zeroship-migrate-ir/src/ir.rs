@@ -13,7 +13,7 @@
 //!   `"op"` key - a discriminated union schemars can express and the JS builder
 //!   emits directly. The serde attributes here ARE the contract; the generated
 //!   `ir-envelope.schema.json` is gated against them by
-//!   `crates/zeroship-migrate/tests/ir_envelope_schema.rs`, so a representation
+//!   `crates/zeroship-migrate/tests/ir_contract/ir_envelope_schema.rs`, so a representation
 //!   change cannot land without the schema moving with it.
 //! - **All identifier fields are plain `String`**: the IR carries NO
 //!   live-schema binding. Validation that those identifiers exist / are safe is

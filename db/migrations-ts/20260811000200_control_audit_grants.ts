@@ -5,7 +5,7 @@ import { grant } from "@zeroship/migrate";
 //
 // Two separate defects, one missing grant set.
 //
-// 1. THE WRITE. crates/authz/src/eval.rs:243 INSERTs into
+// 1. THE WRITE. crates/zeroship-authz/src/eval.rs:243 INSERTs into
 //    zeroship.authz_decisions on every authorization decision, from
 //    `enforce()`. Among the services in the compose stack, control is the only
 //    caller of `enforce()`. The role it runs as held NO privilege on that table
@@ -14,7 +14,7 @@ import { grant } from "@zeroship/migrate";
 //    returns unit, so under least privilege every decision would fail to record
 //    with no functional symptom whatsoever.
 //
-// 2. THE SWEEP. crates/control/src/cron/audit_retention.rs is the sanctioned
+// 2. THE SWEEP. crates/zeroship-control/src/cron/audit_retention.rs is the sanctioned
 //    deleter for both zeroship.app_audit and zeroship.authz_decisions
 //    (sweep_all, the two delete_older_than calls). It needs DELETE, and also
 //    SELECT: the statement is

@@ -84,7 +84,7 @@ use zeroship_data_core::error::{BeginIntent, DbError, OpenSessionError};
 pub mod cancel;
 
 // SQLite module — crate-private by default; under `test-helpers` it
-// becomes `pub` so the integration target (`tests/sqlite_integration.rs`)
+// becomes `pub` so the integration target (`crates/zeroship-plugin-db/tests/sqlite_integration.rs`)
 // can name `backend::sqlite::SqliteBackend` and the session-handle
 // accessor.
 // The PG-side test target reaches its backend through
@@ -119,7 +119,7 @@ impl Backend for SqliteBackend {}
 pub use zeroship_data_postgres::{PostgresBackend, pg_error, pg_row_json, postgres};
 // `pg_autocommit` and `pg_session_sql` lost their last UNGATED consumer in this
 // crate when the PostgreSQL tier left: what still names them is `exec.rs`'s test
-// module, `auth/bootstrap.rs` (itself gated) and `tests/integration.rs`. The
+// module, `auth/bootstrap.rs` (itself gated) and `crates/zeroship-plugin-db/tests/integration.rs`. The
 // gate keeps a default build warning-free without hiding them from the callers
 // that exist.
 #[cfg(any(test, feature = "test-helpers"))]
@@ -391,7 +391,7 @@ mod tests {
     //!
     //! The trait is `async fn`-in-trait and every method needs a real
     //! Postgres listener via [`PostgresBackend`]; we cannot exercise
-    //! method bodies from a `#[test]` without `tests/integration.rs`.
+    //! method bodies from a `#[test]` without `crates/zeroship-plugin-db/tests/integration.rs`.
     //! What we *can* do — and what catches the highest-leverage
     //! refactor mistakes — is pin the trait shape at compile time:
     //!
@@ -593,14 +593,14 @@ mod tests {
     fn backend_handle_postgres_arm_round_trip() {
         // We deliberately can't call `PostgresBackend::new` here
         // without a real `compio_postgres::Pool` (which only
-        // `Pool::connect` produces — covered by tests/integration.rs).
+        // `Pool::connect` produces — covered by crates/zeroship-plugin-db/tests/integration.rs).
         // What we *can* pin at unit-test time is the compile-time
         // shape: that `BackendHandle::Postgres` is constructible from
         // `Rc<PostgresBackend>` and that the two accessors return the
         // expected reference / closure-applied value.
         //
         // The runtime exercise of these accessors against a live
-        // PostgresBackend lives in tests/integration.rs (which spins
+        // PostgresBackend lives in crates/zeroship-plugin-db/tests/integration.rs (which spins
         // up Postgres). This test pins the *type* shape.
         fn _shape_check(handle: BackendHandle) -> bool {
             // The accessor returns `Option<…>` (the PG
@@ -627,7 +627,7 @@ mod tests {
     /// [`LockScope`] variants and dispatch through
     /// [`PostgresBackend::try_acquire`] to verify the typed
     /// keyed-mapping wires through. We can't actually issue SQL
-    /// without a live Pool (covered by tests/integration.rs), but we
+    /// without a live Pool (covered by crates/zeroship-plugin-db/tests/integration.rs), but we
     /// CAN exercise the key-derivation logic ([`LockScope::to_keys`])
     /// and confirm both variants produce the canonical
     /// `(format!("{app_id}:{name}"), name)` shape.

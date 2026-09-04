@@ -26,7 +26,7 @@
 //!    which is `cfg!(debug_assertions)`) and on nothing else. It is not a flag
 //!    and not an environment variable: `--dev-insecure` and
 //!    `ZEROSHIP_DEV_INSECURE` were both deleted from this tree, and
-//!    `crates/auth/src/config.rs` carries a test that refuses to let either
+//!    `crates/zeroship-auth/src/config.rs` carries a test that refuses to let either
 //!    come back. A production operator cannot set a build profile from a
 //!    deployment file, which is exactly the property "never a plain
 //!    environment variable a production operator might set" asks for.

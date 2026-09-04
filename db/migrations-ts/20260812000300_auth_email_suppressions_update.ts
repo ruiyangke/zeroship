@@ -2,12 +2,12 @@ import { grant } from "@zeroship/migrate";
 
 // Bounce and complaint suppression never recorded anything.
 //
-// crates/mailer/src/suppressions.rs:57 (the whole file is production -- it has
+// crates/zeroship-mailer/src/suppressions.rs:57 (the whole file is production -- it has
 // no #[cfg(test)] module) is
 //   INSERT INTO zeroship.email_suppressions (email, reason, provider_msg)
 //   VALUES ($1::citext,$2,$3)
 //   ON CONFLICT (email) DO UPDATE SET reason = ..., provider_msg = ...
-// and it is reached from crates/auth/src/ui/webhooks.rs:118 and :164, the
+// and it is reached from crates/zeroship-auth/src/ui/webhooks.rs:118 and :164, the
 // provider bounce/complaint webhook handlers, via suppressions::add(). Both call
 // sites swallow the error into a `tracing` line reading "suppression add
 // failed", so every webhook reported success while the suppression list stayed

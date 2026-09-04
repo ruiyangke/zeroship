@@ -325,7 +325,7 @@ SQL
 # That is the state a creator reaches by following the documented chain up to
 # `zeroship deploy`, and this arm pins the thing that is missing: the per-app
 # role. Every `env.db` call opens a transaction and issues
-# `SET LOCAL ROLE "app_<id>_role"` (crates/plugin-db/src/auth/bootstrap.rs), so
+# `SET LOCAL ROLE "app_<id>_role"` (crates/zeroship-data-engine/src/auth/bootstrap.rs), so
 # an absent role fails the first database call and reaches the end user as an
 # opaque `internal error`.
 #
@@ -450,7 +450,7 @@ done
 # that the ASSERTION discriminates.
 #
 # THE PRODUCT ARM IS PROVEN TOO, separately and by hand (2026-08-11, not
-# automated here because it needs a rebuild). `crates/plugin-db/src/exec.rs`
+# automated here because it needs a rebuild). `crates/zeroship-data-engine/src/exec.rs`
 # Postgres write path, `emit_db_metric(app_id, DB_WRITES, 1)` -> `2`, one line,
 # then `cargo build --release -p zeroship-worker` and this harness unmutated:
 #   db_writes=62 db_rows_written=31 rows=31   -> RED, "does not match Postgres"
@@ -523,9 +523,9 @@ psql_exec -tA -F' ' -c "SELECT metric, SUM(total) FROM zeroship.usage_aggregates
 # any assertion above it. In production those weights are not zero.
 #
 # ingress_bytes is EXCLUDED, and this is measured rather than assumed. It is
-# request BODY bytes (`crates/worker/src/handler.rs:336`,
+# request BODY bytes (`crates/zeroship-worker/src/handler.rs:336`,
 # `ingress_bytes = request_body.len()`), this harness drives only bodyless
-# GETs, and `crates/metering/src/meter.rs` `push_metric` skips a zero value, so
+# GETs, and `crates/zeroship-metering/src/meter.rs` `push_metric` skips a zero value, so
 # no row is ever written. Absent is CORRECT here, not a defect -- I checked
 # before filing it as one. `tests/e2e_metering_billing.sh:445` already asserts
 # it present and non-zero on traffic that carries a body.

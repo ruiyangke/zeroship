@@ -349,7 +349,7 @@ e2e_export_database_urls "$DB_URL"
  > "$WORK/control.log" 2>&1 & PIDS+=($!)
 sleep 4
 # Without ZEROSHIP_WORKER_KV_URL the env.kv namespace is absent BY DESIGN and every handler
-# fails loudly (crates/worker/src/main.rs). Omitting it here would look like an
+# fails loudly (crates/zeroship-worker/src/main.rs). Omitting it here would look like an
 # app bug, not a harness bug.
 ZEROSHIP_WORKER_KV_URL="redis://127.0.0.1:$REDIS_PORT" \
 "$BIN/zeroship-worker" --port "$ZEROSHIP_WORKER_PORT" --threads 2 --control-url "http://localhost:$ZEROSHIP_CONTROL_PORT" \

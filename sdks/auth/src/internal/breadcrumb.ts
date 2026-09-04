@@ -10,7 +10,7 @@
  * most add/remove one cheap network call.
  *
  * The cookie name is keyed on the app HOST exactly as the gateway emits it
- * (`crates/gateway/src/anchors.rs::breadcrumb_cookie_name` → `zs.{host}.is.authenticated`).
+ * (`crates/zeroship-gateway/src/anchors.rs::breadcrumb_cookie_name` → `zs.{host}.is.authenticated`).
  */
 
 import type { CookieJar } from "./env";

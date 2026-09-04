@@ -67,7 +67,7 @@
 # ip_local_port_range (32768-60999): a port in the ephemeral range can be
 # handed to an unrelated outgoing connection between our probe and our bind.
 # It is also above 10080, the highest entry in the WHATWG bad-ports list that
-# crates/runtime/src/web/fetch/bad_ports.rs enforces - a harness whose dev
+# crates/zeroship-runtime/src/web/fetch/bad_ports.rs enforces - a harness whose dev
 # server lands on a blocked port fails with a message about fetch, not about
 # ports (tests/lib/e2e_stack.sh stack_dev_diagnosis carries that measurement).
 #

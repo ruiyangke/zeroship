@@ -78,7 +78,7 @@
 //!
 //! The guard runs **out-of-band at deploy time** (not on the request hot path),
 //! so it is plain synchronous logic - no async runtime - and exhaustively
-//! unit-testable without a database (`tests/guard_security.rs`).
+//! unit-testable without a database (`crates/zeroship-migrate/tests/policy_charter/guard_security.rs`).
 
 // The NEUTRAL guard seam - `GuardConfig`, `GuardError`, `GuardOutcome`,
 // `MigrationGuard` and the structured-IR data-security walk. Re-exported under the
@@ -197,7 +197,7 @@ pub use apply::backend::{
 // It lives in `zeroship-migrate-postgres` with the rest of the PostgreSQL execution
 // half, and a `pub use zeroship_migrate_postgres::PostgresBackend` at this root would be
 // core naming a vendor CRATE outside the registry - the thing
-// `tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. Closing one
+// `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs` exists to forbid. Closing one
 // coupling by opening the other would have been a wash. A host that wants a
 // PostgreSQL backend names `zeroship_migrate_postgres::PostgresBackend`, exactly as it
 // already names `zeroship_migrate_sqlite::SqliteBackend` and
@@ -221,7 +221,7 @@ pub use apply::backend::{
 // The SQLite execution half is `zeroship_migrate_sqlite::backend` now, and a
 // `pub use zeroship_migrate_sqlite::SqliteBackend` here would be core naming a vendor
 // CRATE outside the registry, which is exactly what
-// `tests/dialect_matrix/core_names_no_vendor_crate.rs` forbids: closing one coupling
+// `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs` forbids: closing one coupling
 // by opening the other would have been a wash. MySQL went the same way one commit
 // earlier. A host that wants the SQLite backend names the vendor crate, as
 // `zeroship-migrate-node`'s bridge does.
@@ -305,7 +305,7 @@ pub use guard::{GuardConfig, GuardError, GuardOutcome, MigrationGuard};
 // with the lines - the tests assert on the same guards, selected through the
 // registry instead of constructed by name.
 //
-// The property is pinned by `tests/dialect_matrix/core_names_no_vendor_crate.rs`,
+// The property is pinned by `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs`,
 // which is a ratchet rather than prose: `lib.rs` is on its DENY side, so putting a
 // vendor crate back at the crate root is a red test, not a review question.
 

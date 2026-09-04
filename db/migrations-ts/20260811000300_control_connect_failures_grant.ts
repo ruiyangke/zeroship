@@ -10,14 +10,14 @@ import { grant } from "@zeroship/migrate";
 // The same binary, same flags, same database, with only the DSN changed to the
 // superuser logs no error at all. One variable, opposite outcomes.
 //
-// THE READ. crates/control/src/cron/billing_notify.rs:374 selects from this
+// THE READ. crates/zeroship-control/src/cron/billing_notify.rs:374 selects from this
 // table as one of seven sources it unions for notification transitions. The
 // SELECT is not optional or guarded, so the ENTIRE billing-notify tick fails
 // every time it runs: no billing notification of ANY kind is produced on a
 // least-privilege deployment, including the six kinds sourced from tables the
 // role can read perfectly well.
 //
-// THE WRITE. crates/control/src/stripe_store.rs:420 inserts into it. So a
+// THE WRITE. crates/zeroship-control/src/stripe_store.rs:420 inserts into it. So a
 // Connect checkout failure could never be recorded either.
 //
 // MEASURED 2026-08-11 against the live deployment, before this migration:

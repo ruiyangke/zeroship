@@ -1375,7 +1375,7 @@ fn render_mysql_trigger_stmt(stmt: &TriggerStmt, eff_schema: &str) -> Result<Str
         // triggers work - an `INSERT` / `UPDATE` / `DELETE` body applies and fires.
         // Declaring the whole `bodySimple` cell unsupported would refuse all of them
         // to reject this one statement. Pinned, with both over-refusal controls, by
-        // `tests/refusals/mysql_trigger_body_cannot_return_a_result_set.rs`.
+        // `crates/zeroship-migrate/tests/refusals/mysql_trigger_body_cannot_return_a_result_set.rs`.
         TriggerStmt::Select { .. } => Err(IrLowerError::TriggerUnsupported {
             kind: "selectStatement",
             dialect: DIALECT,

@@ -758,7 +758,7 @@ fn decide(current: Mode, ctx: &AuthContext<'_>) -> Authorization {
 /// The deny-matrix decision driven through the shared mode flag, exactly as the
 /// installed closure drives it (extracted so the matrix is unit-testable without a
 /// live connection, though every claim is ALSO proven against a real temp-file
-/// SQLite in `tests/sqlite_confinement.rs`).
+/// SQLite in `crates/zeroship-migrate/tests/policy_charter/sqlite_confinement.rs`).
 #[cfg(test)]
 fn authorize(mode: &AuthMode, ctx: &AuthContext<'_>) -> Authorization {
     decide(mode.load(), ctx)

@@ -8,7 +8,7 @@
 //! the result ends: a server error wins, while clean completion still returns
 //! the row-count error.
 //!
-//! `tests/query_claims.rs` already covers the COLUMN arity of
+//! `libs/compio-postgres/tests/suite/query_claims.rs` already covers the COLUMN arity of
 //! `query_opt_scalar`. Nothing covered the ROW count path or what the session
 //! looks like afterwards.
 //!

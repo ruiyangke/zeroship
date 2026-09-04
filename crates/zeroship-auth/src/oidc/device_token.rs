@@ -640,16 +640,16 @@ async fn exchange_device_code_locked(
             //
             // That is a coarse ceiling, not a hole. The entitlement check is
             // control's, at request time
-            // (`crates/authn/src/lib.rs`, `platform_cli_entitlement`), so an
+            // (`crates/zeroship-authn/src/lib.rs`, `platform_cli_entitlement`), so an
             // operator deleting a grant row narrows the token already in the
             // creator's hand rather than only the next login. Do not "fix"
             // this function by adding the intersection; the privilege model is
             // what puts it in control, and the split is deliberate.
             //
-            // Pinned at both ends: `crates/auth/tests/cli_device_refresh_test.rs`,
+            // Pinned at both ends: `crates/zeroship-auth/tests/cli_device_refresh_test.rs`,
             // `the_cli_device_grant_caps_scope_to_the_client_registration_only`
             // for the ceiling, and
-            // `crates/control/tests/authz_guard_oauth_test.rs`,
+            // `crates/zeroship-control/tests/authz_guard_oauth_test.rs`,
             // `an_operator_deleting_a_grant_row_narrows_the_next_cli_request`
             // for the narrowing.
             if platform_cli && !scope_subset(&granted_scopes, &platform_cli_scopes()) {

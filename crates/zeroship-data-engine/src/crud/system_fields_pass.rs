@@ -108,7 +108,7 @@ const fn fires_on_insert(event: AssignmentEvent) -> bool {
 }
 
 /// Maximum typed_id prefix length. Matches the convention used by
-/// `crates/core/src/typed_id.rs` for well-known prefixes
+/// `crates/zeroship-core/src/typed_id.rs` for well-known prefixes
 /// (`usr`, `app`, `ses` — all 3 chars; we cap at 4 to allow `post`-
 /// style collection-derived prefixes while keeping the typed_id
 /// "<prefix>_<22 base62 chars>" shape compact).
@@ -125,7 +125,7 @@ const MAX_AUTO_PREFIX_LEN: usize = 4;
 /// 2. Truncate to the first [`MAX_AUTO_PREFIX_LEN`] ASCII characters.
 /// 3. Lowercase (typed_id prefixes are conventionally lowercase
 ///    alphanumeric — matches the validator in
-///    `crates/core/src/typed_id.rs`).
+///    `crates/zeroship-core/src/typed_id.rs`).
 ///
 /// Empty / non-ASCII collection names fall back to `"row"`. The candidate is
 /// validated together with descriptor-declared prefixes by

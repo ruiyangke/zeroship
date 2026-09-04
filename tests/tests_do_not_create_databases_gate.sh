@@ -56,8 +56,9 @@
 # the population is what changed.
 #
 # The discriminator is the DRIVER the file names, not the directory it sits in
-# (`tests/pg_drift/drift_column_physical_type.rs` is a live-MySQL test) and not
-# the statement's spelling (`CREATE DATABASE {}` reads identically in both).
+# (crates/zeroship-migrate/tests/pg_drift/drift_column_physical_type.rs is a
+# live-MySQL test) and not the statement's spelling (`CREATE DATABASE {}` reads
+# identically in both).
 # MEASURED 2026-09-04 across all 26 matching files: the split is total - 21
 # name a MySQL session type and NO PostgreSQL driver, 5 name a PostgreSQL
 # driver and no MySQL one. Nothing is mixed, so nothing is being guessed at.
@@ -94,7 +95,7 @@ ALLOW=(
   # SCHEMA of the harness-provided database.
   # The path moved on 2026-08-26 in 6301e2c61 ("fold 74 test files into one
   # binary without changing a case") - a pure move, and the named test is still
-  # there, at tests/suite/integration.rs:4968. The row was repointed rather than
+  # there, at line 4968 of the path below. The row was repointed rather than
   # dropped for that reason: the ruling survived the move, only its address did
   # not. It went unnoticed for nine days because nothing ran this gate until it
   # was wired into CI.

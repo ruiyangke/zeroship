@@ -679,7 +679,7 @@ pub fn clear_pending_emits(app_id: &str) {
 /// **The dialect is DERIVED from that backend, not assumed.** The two test
 /// constructors below it stamped `SqlDialect::Postgres` unconditionally until
 /// 2026-09-03, which made every SQLite harness that reaches this helper -
-/// `test_support::unit_route` and `tests/sqlite_integration.rs` among them -
+/// `test_support::unit_route` and `crates/zeroship-plugin-db/tests/sqlite_integration.rs` among them -
 /// carry a route claiming a dialect its connection does not speak. Nothing read
 /// it, so nothing failed; that is luck, not containment. Production reads the
 /// configured dialect BEFORE a backend exists and must not re-derive it (see
@@ -830,14 +830,14 @@ mod tests {
     /// it minted until 2026-09-03, because that is what
     /// `CapturedRoute::pool_for_tests` hardcoded. Every SQLite harness that
     /// reaches this helper - `test_support::unit_route` and the whole of
-    /// `tests/sqlite_integration.rs` - therefore carried a route claiming
+    /// `crates/zeroship-plugin-db/tests/sqlite_integration.rs` - therefore carried a route claiming
     /// PostgreSQL over a rusqlite connection. It did no damage only because no
     /// path those fixtures take reads the dialect off the route; the 34
     /// `route.dialect()` reads in `crud/mod.rs` are one fixture away.
     ///
     /// **There is no PostgreSQL arm here and that is not an omission**: a
     /// `BackendHandle::Postgres` needs a live server, which no unit in this
-    /// module opens. `tests/unmask_tx_lane.rs` is the Postgres-side harness, and
+    /// module opens. `crates/zeroship-plugin-db/tests/unmask_tx_lane.rs` is the Postgres-side harness, and
     /// it now names its dialect at the two `CapturedRoute` constructors rather
     /// than inheriting one. What stands in for that arm below is a control that
     /// needs no server: the same SQLite handle, bound to a route captured with
@@ -982,7 +982,7 @@ mod tests {
     //
     // The in-tx queue branch is exercised by the integration suite
     // (gap_b_subscriber_does_not_observe_pre_commit_state in
-    // tests/integration.rs).
+    // crates/zeroship-plugin-db/tests/integration.rs).
 
     /// In autocommit mode (`has_tx() == false`), `queue_or_emit` must
     /// route the event directly to `broker::emit_local`, which

@@ -573,7 +573,7 @@ async fn raw_size_bytes_counts_field_data_and_not_the_frame() {
         // first case already checks on the identical query, and both 7 and 12
         // were hand-written. Nothing measured a frame, so a change to the
         // overhead could not have moved it. Pinning it needs a scripted peer
-        // whose bytes are known -- `tests/hostile_peer.rs` has that machinery
+        // whose bytes are known -- `libs/compio-postgres/tests/suite/hostile_peer.rs` has that machinery
         // and this file does not -- so the honest statement is that the four
         // cases above pin the FIELD accounting and nothing here pins the
         // frame's.
