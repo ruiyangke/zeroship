@@ -9,7 +9,7 @@
 //! (section I: "Step 4 touches SQLite rebuild DDL").
 //!
 //! This file is the OFFLINE half and always runs. The live half is
-//! `tests/sqlite_rebuild_field_defs_live.rs`, which deploys to a real SQLite file
+//! `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs`, which deploys to a real SQLite file
 //! through the shipped engine and reads the server's own `PRAGMA`s back.
 //!
 //! # What the move changes, measured rather than assumed
@@ -45,7 +45,7 @@
 //! decided by `fold_ops`, the structural catalog oracle the live PostgreSQL, SQLite and
 //! MySQL suites already run against real servers, which has removed the constraint at
 //! the prefix where the two answers differ. For `dropPartition` it was decided by a live
-//! PostgreSQL in consumer 2's `tests/env_db_ts_matches_the_server_pg.rs` - the relation
+//! PostgreSQL in consumer 2's `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs` - the relation
 //! is gone from `pg_class` and the parent survives - and this move brings the second
 //! artifact into line with the first.
 //!
@@ -61,7 +61,7 @@
 //! # No re-bless affordance
 //!
 //! There is deliberately no environment variable that rewrites the golden, matching
-//! `tests/op_fixture_goldens.rs` and both predecessors. The file was captured from the
+//! `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` and both predecessors. The file was captured from the
 //! OLD path by a SEPARATE, since-deleted binary before the consumer was switched, so the
 //! side that produced the expectation is not the side under test.
 
@@ -451,7 +451,7 @@ fn a_re_added_column_does_not_inherit_the_dropped_columns_constraints() {
 /// FAMILY 5. A dropped partition is a dropped RELATION, so it leaves the map.
 ///
 /// Adjudicated against a live PostgreSQL by consumer 2 in
-/// `tests/env_db_ts_matches_the_server_pg.rs`: after the drop, `pg_class` no longer
+/// `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`: after the drop, `pg_class` no longer
 /// holds the child and the parent survives. `env.db.ts` has agreed since that move; this
 /// is `schema.runtime.json` catching up, so the two halves of ONE `render_artifacts`
 /// call stop disagreeing about which relations exist.

@@ -420,7 +420,7 @@ database rather than against a projection built ahead of time.
 
 What it means in practice, measured rather than assumed
 (`a_rust_embedding_refuses_an_absent_view_drop_at_the_database` in
-`crates/zeroship-migrate/tests/drop_view_rollback_pg.rs`): a migration dropping a view
+`crates/zeroship-migrate/tests/rollback/drop_view_rollback_pg.rs`): a migration dropping a view
 nothing created is refused on both hosts. The Node host refuses it during
 lowering; a Rust host refuses it when PostgreSQL rejects the statement. **The
 refusal moves layers; it does not disappear.**

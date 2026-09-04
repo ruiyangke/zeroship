@@ -604,7 +604,7 @@ export type Actor = Record<string, unknown>;
  * masked-value wrapper, now a NATIVE v8_class.
  *
  * `MaskedValue` instances are minted Rust-side by the row serializer's
- * rehydration pass (`crates/plugin-db/src/v8_classes/masked_value.rs`)
+ * rehydration pass (`crates/zeroship-plugin-db/src/v8_classes/masked_value.rs`)
  * when a masked column flows back across the V8 boundary. The SDK no
  * longer constructs them — this is a TYPE-ONLY `declare class` that
  * describes the native instance's shape. There is no JS runtime body;
@@ -1893,7 +1893,7 @@ export const t = {
           { code: "ID_INVALID_PREFIX" as const },
         );
       }
-      // `usr` is the platform user-id prefix (`crates/core/src/typed_id.rs`);
+      // `usr` is the platform user-id prefix (`crates/zeroship-core/src/typed_id.rs`);
       // reserve it so a creator id can never collide with a platform user id.
       // The generated migration surface mirrors this fence.
       if (prefix === "usr") {

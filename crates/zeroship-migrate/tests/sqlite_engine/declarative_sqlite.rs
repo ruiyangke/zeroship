@@ -1363,7 +1363,7 @@ async fn golden_sqlite_drops() {
 ///
 /// Twin of the existence-guard probe's
 /// `add_column_ifnotexists_sqlite_ref_over_live_string_is_noop`
-/// (`tests/existence_guard_sqlite.rs`): the guard `SatisfiedNoop`'s a `ref` declared
+/// (`crates/zeroship-migrate/tests/sqlite_engine/existence_guard_sqlite.rs`): the guard `SatisfiedNoop`'s a `ref` declared
 /// over a live `string` column because both fold to the `SQLite` `text` affinity. This
 /// test pins the EXACT boundary of that consistency on the FAITHFUL introspected path,
 /// so the corrected report can state it honestly rather than over-claim:

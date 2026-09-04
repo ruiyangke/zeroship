@@ -24,7 +24,7 @@
 //!
 //! ## Harness
 //!
-//! Mirrors `crates/runtime/tests/call_fetch_handler.rs::async_response`:
+//! Mirrors `crates/zeroship-runtime/tests/call_fetch_handler.rs::async_response`:
 //! build a `Runtime` with the JS app + `KvPlugin::with_backend(...)` + an
 //! `APP_ID` env var, `start_pump()`, `call_fetch_handler(...)`, then drive
 //! the (likely Pending) outcome to a `SettledFetch::Response` via the
@@ -700,7 +700,7 @@ fn run_app(backend: Arc<dyn Backend>, app: &'static str) -> (u16, String) {
         init_v8();
 
         // APP_ID flows through env_vars → build_instance reads it to scope
-        // the per-app key namespace (see crates/runtime/src/core/plugin.rs).
+        // the per-app key namespace (see crates/zeroship-runtime/src/core/plugin.rs).
         let mut env_vars = HashMap::new();
         env_vars.insert("APP_ID".to_string(), "e2e_app".to_string());
 

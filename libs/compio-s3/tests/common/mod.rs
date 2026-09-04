@@ -14,7 +14,7 @@
 //! rather than lingering as an empty frame that the next name to come along
 //! would be dropped into unexamined. `libs/compio-s3` now reads no environment
 //! at all, in tests or in production, which is the strongest form of the rule
-//! that `crates/core/tests/config_env_access_gate.rs` enforces.
+//! that `crates/zeroship-core/tests/config_env_access_gate.rs` enforces.
 //!
 //! WHY THIS CRATE STILL SKIPS while `compio-postgres` and `compio-redis` no
 //! longer do. What `minio_smoke.rs` announces is a missing DOCKER DAEMON and a

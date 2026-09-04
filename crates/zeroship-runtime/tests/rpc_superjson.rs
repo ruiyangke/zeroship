@@ -1,7 +1,7 @@
 //! V8 ↔ superjson Envelope round-trip tests.
 //!
-//! `crates/core/src/superjson.rs` defines the wire envelope and its
-//! byte serializer; `crates/runtime/src/rpc/superjson.rs` is the V8
+//! `crates/zeroship-core/src/superjson.rs` defines the wire envelope and its
+//! byte serializer; `crates/zeroship-runtime/src/rpc/superjson.rs` is the V8
 //! half that encodes V8 values into envelopes and revives envelopes
 //! back to V8 values. These tests pin both directions plus the
 //! cross-side byte equality with the npm fixtures.

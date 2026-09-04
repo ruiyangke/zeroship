@@ -300,7 +300,7 @@ pub trait LockManager: SqlExecutor {
     /// backend may want to expose the indefinite-wait shape behind a
     /// feature gate, and (b) the integration test
     /// `b1_advisory_lock_prevents_concurrent_runs` at
-    /// `tests/integration.rs` still calls `pg_advisory_lock` SQL
+    /// `crates/zeroship-plugin-db/tests/integration.rs` still calls `pg_advisory_lock` SQL
     /// directly to exercise the contended branch. No production
     /// caller invokes it.
     ///

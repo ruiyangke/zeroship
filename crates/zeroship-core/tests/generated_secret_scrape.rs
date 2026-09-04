@@ -1,5 +1,5 @@
 //! `deploy/scripts/deploy-remote.sh` reads the generated-secret names out of
-//! `crates/core/src/config/secrets.rs` with sed. This asserts that the
+//! `crates/zeroship-core/src/config/secrets.rs` with sed. This asserts that the
 //! extraction still yields the table.
 //!
 //! WHY A SHELL SCRIPT IS STILL ALLOWED TO SCRAPE SOURCE. `deploy-remote.sh`
@@ -8,7 +8,7 @@
 //! read eight strings is a worse trade than this test.
 //!
 //! WHAT MAKES IT SAFE, which the pattern alone does not. The script's previous
-//! extraction read `crates/cli/src/dev.rs` for ANY `"NAME",` line. That
+//! extraction read `crates/zeroship-cli/src/dev.rs` for ANY `"NAME",` line. That
 //! matched `ENV_KEYS`, and it matched nothing at all the moment that const was
 //! deleted on 2026-08-20 in favour of the shared table - which would have set
 //! GENERATED to empty and sent every generated secret down the "operator must
@@ -22,7 +22,7 @@
 //!
 //! WHAT THIS TEST ITSELF MISSED, repaired 2026-08-28. It asserted the script
 //! contained the pattern *including the path* - as one literal, spelled
-//! `crates/core/src/config/secrets.rs`. When the reorg renamed every crate
+//! `crates/zeroship-core/src/config/secrets.rs`. When the reorg renamed every crate
 //! directory to `crates/zeroship-<name>/`, that made this test a PIN ON THE
 //! BROKEN SPELLING: it required the script to keep naming a file that no longer
 //! existed, and stayed green while the roll's guard read nothing. The pattern

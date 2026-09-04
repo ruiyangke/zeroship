@@ -9,7 +9,7 @@
 //! condition is false where it was written.
 //!
 //! The guard lives where the condition holds. zeroship vendors this crate alongside
-//! its own `crates/core/src/typed_id.rs`, so both copies coexist there, and its
+//! its own `crates/zeroship-core/src/typed_id.rs`, so both copies coexist there, and its
 //! `crates/zeroship-migrate-server/tests/typed_id_parity.rs` cross-decodes the two encodings.
 //! Reported agreeing across a sweep that includes the all-zero, all-ones and
 //! low-bit edges, with the harness proven to fail on a planted alphabet swap.

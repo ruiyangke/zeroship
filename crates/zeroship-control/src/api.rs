@@ -207,7 +207,7 @@ fn schema_precondition_response(
 ///
 /// The wire contract already chose. `sdks/rpc/src/error.ts` documents the
 /// envelope as `{ code, message, details?, retryable, trace_id? }` and lifts
-/// `trace_id`/`traceId`; `RpcCtx` (`crates/runtime/src/rpc/ctx_holder.rs`)
+/// `trace_id`/`traceId`; `RpcCtx` (`crates/zeroship-runtime/src/rpc/ctx_holder.rs`)
 /// carries a `trace_id` field. This tree already has more request-id
 /// concepts than it can join -- the gateway's `X-Request-Id`, the runtime's
 /// per-isolate `u64`, and `authz_guard::request_id` in this very crate --

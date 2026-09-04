@@ -17,7 +17,7 @@
 #   where signed = "<base64(userJson)>.<request_id>.<issued_at>" and the
 #   request_id MUST equal the `x-request-id` header on the dispatch POST
 #   (handler binds the header to one request id). The header has a 60s max age,
-#   so it is minted FRESH per dispatch. (Format: crates/core/src/auth/mod.rs
+#   so it is minted FRESH per dispatch. (Format: crates/zeroship-core/src/auth/mod.rs
 #   sign_zeroship_user_header_at / verify_zeroship_user_header_for_request_at.)
 #
 # What this does, end to end, against a CLEAN ephemeral stack:

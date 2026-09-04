@@ -38,7 +38,7 @@
 # copy is what broke this: `control-signing.pem` was on it until 2026-08-20,
 # five days after 8e365f478 deleted control's PAT signing key outright (nothing
 # but a PatIssuer read it) and dropped the file from `secret_specs()`, from both
-# compose mounts and from crates/cli/tests/dev_init_test.rs. `dev init` stopped
+# compose mounts and from crates/zeroship-cli/tests/dev_init_test.rs. `dev init` stopped
 # writing it, nothing here noticed, and this function returned 1 on every
 # machine, always -- failing both callers before they started. The same list was
 # ALSO missing `migrate-dsn`, which compose does mount, so it was wrong in both

@@ -2,7 +2,7 @@
 //!
 //! MySQL has no `ALTER COLUMN ... TYPE`. Its retype is `MODIFY COLUMN`, which takes
 //! the COMPLETE column definition and silently DISCARDS every facet the statement
-//! omits. `tests/mysql_engine/mysql_setcolumntype_restate.rs` measures that against
+//! omits. `crates/zeroship-migrate/tests/mysql_engine/mysql_setcolumntype_restate.rs` measures that against
 //! a live server: a bare `MODIFY COLUMN label varchar(128)` changes the type and
 //! destroys the column's `NOT NULL`, its `DEFAULT`, its `COLLATE` and its `COMMENT`
 //! in the same statement, without a warning or an error.

@@ -47,7 +47,7 @@ const PROBE: &str = "distributed-live-cross-isolate-probe";
 ///
 /// **Why the fixture carries one at all.** The data plane's sole schema
 /// authority is this document: `crate::descriptor::collection_schema`
-/// (`crates/zeroship-plugin-db/src/descriptor.rs:66-80`) resolves a collection
+/// (`crates/zeroship-data-engine/src/descriptor.rs:66-80`) resolves a collection
 /// out of the thread-local, app-and-deploy-keyed store or refuses it with
 /// `collection_not_declared`.
 /// The runtime validates the deployed descriptor and asks `DbPlugin` to plant
@@ -221,7 +221,7 @@ const APP_SCHEMA_SLOT: &str = "APP_SCHEMA";
 ///
 /// It used to fall back to `127.0.0.1:5440/zeroship` -- the SHARED platform
 /// database on the dev cluster, named here and nowhere the harness could see.
-/// `crates/core/src/config/test_overlay.rs` cited this file by name as the one
+/// `crates/zeroship-core/src/config/test_overlay.rs` cited this file by name as the one
 /// call site that "substitutes a default"; it no longer does.
 fn pg_url() -> String {
     // Single funnel for this binary: without a subscriber the runtime's

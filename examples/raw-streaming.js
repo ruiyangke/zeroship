@@ -49,7 +49,7 @@
 //   → {"json":{"status":200,"contentType":"text/html; charset=ISO-8859-1"}}
 //
 // Streaming smoke (WebSocket subscription — requires a WS client):
-//   See `dispatchSubscription` in `crates/runtime/src/core/init.rs` for
+//   See `dispatchSubscription` in `crates/zeroship-runtime/src/core/init.rs` for
 //   the frame protocol. The tick handler below is wire-compatible.
 
 // ── 1. `query` kind with an `input.parse()` validator (Zod-shape)

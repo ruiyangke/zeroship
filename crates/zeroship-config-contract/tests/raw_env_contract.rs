@@ -130,7 +130,7 @@ fn url() -> Option<String> {
     std::env::var("PG_TEST_URL").ok()
 }
 "#;
-    let role = FileRole::for_path("libs/compio-postgres/tests/integration.rs");
+    let role = FileRole::for_path("libs/compio-postgres/tests/suite/integration.rs");
     assert_eq!(role, FileRole::Ordinary, "only tests/common/env.rs is sealed");
 
     let errors = check_rust_source_with_role(source, role)
@@ -248,7 +248,7 @@ fn main() {
     println!("cargo:rerun-if-changed={out}");
 }
 "#;
-    let role = FileRole::for_path("crates/authz/build.rs");
+    let role = FileRole::for_path("crates/zeroship-authz/build.rs");
     assert_eq!(role, FileRole::BuildScript);
     let report = check_rust_source_with_role(allowed, role).expect("OUT_DIR is a build input");
     assert_eq!(report.permitted_raw.len(), 1);
@@ -272,7 +272,7 @@ fn a_raw_read_inside_a_macro_body_is_found() {
     // Regression for a REAL blind spot found on 2026-08-12: syn's default walk
     // stops at a macro's token stream, so
     // `assert!(std::env::var(NAME).is_err())` in
-    // crates/plugin-storage/src/limits.rs:198 was invisible, and the file's
+    // crates/zeroship-plugin-storage/src/limits.rs:198 was invisible, and the file's
     // other read made the omission look like a correct count.
     // Does not cover: an ALIASED read inside a macro body that does not parse
     // as an expression list. The text fallback matches literal spellings only.

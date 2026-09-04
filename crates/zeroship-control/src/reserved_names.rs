@@ -5,7 +5,7 @@
 //!
 //! An app's name IS its hostname label. The gateway derives the app from the
 //! FIRST label of the `Host` header (`extract_app_name` /
-//! `handle_subdomain`, `crates/gateway/src/router/dispatch.rs`), and the edge
+//! `handle_subdomain`, `crates/zeroship-gateway/src/router/dispatch.rs`), and the edge
 //! serves creator apps off the `*.{domain}` wildcard. So registering an app
 //! named `auth` is registering the hostname `auth.{domain}` — a name the
 //! platform's own edge already routes somewhere else.
@@ -25,11 +25,11 @@
 //!   which resolves them as ordinary creator apps. The platform paths on those
 //!   hosts are safe by route order (`/oidc/backchannel-logout` and every
 //!   `/__zeroship/*` resource are mounted BEFORE the app catch-all in
-//!   `crates/gateway/src/main.rs`), so nothing hijacks a platform endpoint.
+//!   `crates/zeroship-gateway/src/main.rs`), so nothing hijacks a platform endpoint.
 //!   What a creator gets instead is arbitrary content served from a platform
 //!   ORIGIN, and for `console` that origin carries a real privilege: the auth
 //!   service emits `frame-ancestors 'self' <console origin>` on `/login`,
-//!   `/signup` and `/consent` (`crates/auth/src/headers.rs`, fed by
+//!   `/signup` and `/consent` (`crates/zeroship-auth/src/headers.rs`, fed by
 //!   `[auth].frame_ancestor_origins` in `deploy/ops/zeroship.toml`). Holding
 //!   the `console` name means holding the one origin allowed to frame the
 //!   platform's real login page — the exact clickjacking the allowlist exists

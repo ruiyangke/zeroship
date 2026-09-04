@@ -385,7 +385,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     /// The blocking-dependency predicate, MEASURED against a live server by
-    /// `tests/pg_column_drop_dependency_oracle.rs`, which calls THIS function and
+    /// `crates/zeroship-migrate/tests/pg_engine/pg_column_drop_dependency_oracle.rs`, which calls THIS function and
     /// attempts a real drop per shape, asserting the two agree on every one.
     ///
     /// The oracle used to run its own SQL spelling of the same rule, which made an
@@ -501,7 +501,7 @@ impl<D: SqlSession> MigrationBackend for PostgresBackend<'_, D> {
     }
 
     /// The retype-blocking predicate, MEASURED against a live server by
-    /// `tests/pg_column_retype_dependency_oracle.rs`, which calls THIS function and
+    /// `crates/zeroship-migrate/tests/column_shapes/pg_column_retype_dependency_oracle.rs`, which calls THIS function and
     /// attempts a real `ALTER COLUMN ... TYPE` per shape.
     ///
     /// It is NOT the drop predicate with a filter bolted on, even though it reads

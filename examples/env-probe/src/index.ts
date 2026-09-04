@@ -15,7 +15,7 @@
 // WHY THIS MUST BE MEASURED AND NOT READ. There are three distinct surfaces,
 // and reading any one of them in isolation gives the wrong answer:
 //
-//   process.env   the Node-compat polyfill (crates/runtime/src/core/init.rs).
+//   process.env   the Node-compat polyfill (crates/zeroship-runtime/src/core/init.rs).
 //                 Built from `RuntimeState::env_vars` + opt-in exposed secrets
 //                 + app vars. WHO FILLS `env_vars` DIFFERS PER TIER, and that
 //                 is the whole question.
@@ -84,11 +84,11 @@ const HOST_VAR_NAMES = ["DATABASE_URL", "HOME", "PATH", "PWD"] as const;
 
 /**
  * Worker-INTERNAL variables. Unlike `HOST_VAR_NAMES`, these are supposed to be
- * present in a deployed app - `crates/worker/src/cache.rs` injects them - so
+ * present in a deployed app - `crates/zeroship-worker/src/cache.rs` injects them - so
  * they are reported, never asserted against.
  *
  * They are read by name because creator vars are layered OVER them
- * (`crates/runtime/src/core/init.rs`), which means a creator var called
+ * (`crates/zeroship-runtime/src/core/init.rs`), which means a creator var called
  * `APP_ID` should shadow the platform's own. Only reading the value says
  * whether the documented precedence is the real one.
  */
@@ -187,7 +187,7 @@ function indirectProcessEnv(): Surface {
  * Identity of the `process` global, reported so a surface that reads as EMPTY
  * can be told apart from a surface that reads as ABSENT-because-replaced.
  *
- * `crates/runtime/src/core/init.rs` sets `process.env` and `globalThis.__env__`
+ * `crates/zeroship-runtime/src/core/init.rs` sets `process.env` and `globalThis.__env__`
  * to THE SAME V8 object in one block, and that is the only write to `__env__`
  * in the runtime. So if a tier ever reports different contents for the two, the
  * `process` global it is reading is NOT the one the runtime installed --

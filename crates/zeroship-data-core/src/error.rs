@@ -470,7 +470,7 @@ impl SessionSetupError {
 
 /// Public error code for "this app's database was never provisioned".
 ///
-/// On the 5xx allow-list in `crates/runtime/src/core/dispatch.rs` in BOTH
+/// On the 5xx allow-list in `crates/zeroship-runtime/src/core/dispatch.rs` in BOTH
 /// spellings: `@zeroship/db` re-stamps every native code through
 /// `canonicalErrorCode` inside the isolate, so a creator using the SDK sees
 /// `SCHEMA_NOT_PROVISIONED` and a creator calling `env.db` directly sees this

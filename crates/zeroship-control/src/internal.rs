@@ -93,7 +93,7 @@ pub async fn readyz(
 /// call this on bundle load and cache the result per-thread.
 ///
 /// The split shape is the contract the runtime expects (see
-/// `crates/runtime/src/fetch_outcome.rs::EnvSnapshot`): vars are always
+/// `crates/zeroship-runtime/src/fetch_outcome.rs::EnvSnapshot`): vars are always
 /// in `process.env`, secrets are NOT in `process.env` unless their name
 /// is in the per-app `expose` list, and both are visible via
 /// `import { env } from "zeroship"` and `env.get(name)`.

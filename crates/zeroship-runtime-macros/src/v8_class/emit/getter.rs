@@ -70,7 +70,7 @@ use super::reentry_guard::gen_reentry_guard;
 /// We don't migrate existing classes to this attribute in this PR
 /// (Request.headers, Response.headers, URL.searchParams continue to
 /// hand-roll their own private-symbol stash for now). The smoke test
-/// in `crates/runtime/tests/v8_same_object_smoke.rs` proves the macro wiring
+/// in `crates/zeroship-runtime/tests/v8_same_object_smoke.rs` proves the macro wiring
 /// works. The crate prefix is load-bearing: this crate has no tests directory
 /// at all, so a bare `tests/...` path here resolves to nothing.
 pub(crate) fn gen_same_object_getter_callback(

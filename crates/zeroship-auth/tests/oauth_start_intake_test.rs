@@ -10,7 +10,7 @@ use zeroship_core::config::{Secret, SourceKind};
 
 fn test_config() -> Arc<AuthConfig> {
     // Secrets carry no value flag; supply each in the shape an in-memory
-    // literal resolves to (see crates/auth/tests/common/mod.rs).
+    // literal resolves to (see crates/zeroship-auth/tests/common/mod.rs).
     let mut cfg = AuthConfig::parse_from([
         "zeroship-auth",
         "--addr",

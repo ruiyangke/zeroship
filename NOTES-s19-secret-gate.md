@@ -21,7 +21,7 @@ cleanly (`control.master_key` IS a generated overlay path) and every check
 passes.
 
 Runtime side, confirmed by reading rather than by taking the amendment's word:
-`crates/core/src/config/secrets.rs:343-344` -- `parse_secret_ref` returns
+`crates/zeroship-core/src/config/secrets.rs:343-344` -- `parse_secret_ref` returns
 `SecretRef::Literal(raw)` for any value not prefixed `urn:`/`arn:`, from any
 source including the file overlay. There is no refusal left to lean on.
 
@@ -57,12 +57,12 @@ deleted there. Only one was protection:
   into "refuse at parse" loses no protection.
 - The flat `[secrets]` table. `#[serde(deny_unknown_fields)]` went WITH the
   fields into the component tables rather than being dropped: 21 occurrences in
-  `crates/core/src/config/file.rs` before, 20 after, and the one lost is the
+  `crates/zeroship-core/src/config/file.rs` before, 20 after, and the one lost is the
   deleted `[secrets]` struct's own attribute. The misspelled-key refusal is
   intact.
 
 The malformed-reference refusal (a `urn:`/`arn:` value that is not a
-recognized reference) also survives, at `crates/core/src/config/secrets.rs:326`
+recognized reference) also survives, at `crates/zeroship-core/src/config/secrets.rs:326`
 and `:481-489`.
 
 The other 2026-08-12 commit that reads like this pattern is `972798057`

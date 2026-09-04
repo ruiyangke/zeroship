@@ -15,7 +15,7 @@
 //! * **Today** a field added to [`crate::model::snapshot::ColumnSnapshot`] is SILENTLY
 //!   IGNORED by comparison, because `ColumnSnapshot::eq` is a hand-written inclusion
 //!   list of ten fields out of twenty-one. Nobody is told. The measurement is in
-//!   `tests/structural_equality_field_sensitivity.rs`, which points one property at both
+//!   `crates/zeroship-migrate/tests/fold_offline/structural_equality_field_sensitivity.rs`, which points one property at both
 //!   types: ELEVEN of `ColumnSnapshot`'s fields can differ while `==` reports equal.
 //! * **After** a field added to [`Column`] is COMPARED by default, so the same mistake
 //!   is noisy instead of invisible, and a consumer that wants it ignored has to say so
@@ -85,7 +85,7 @@
 //!
 //! The model below is bounded to TABLES, and to the catalog half of the proposal's
 //! section C. It is not yet richer than [`crate::model::snapshot::TableSnapshot`], and
-//! `tests/schema_model_god_object_bound.rs` measures precisely how much it would have to
+//! `crates/zeroship-migrate/tests/fold_offline/schema_model_god_object_bound.rs` measures precisely how much it would have to
 //! grow to also carry `render::declarative::FieldDescriptor`, rather than asserting that
 //! it could.
 
@@ -201,7 +201,7 @@ impl IndexElementKey {
 /// ONCE a backend registry exists to own the blob's type; until then a typed map keeps
 /// the round-trip in `SchemaModel::from_tables` / [`SchemaModel::to_tables`] provable and
 /// keeps this struct exhaustively destructurable, which is what
-/// `tests/schema_model_field_routing.rs` needs to prove nothing was dropped.
+/// `crates/zeroship-migrate/tests/fold_offline/schema_model_god_object_bound.rs` needs to prove nothing was dropped.
 ///
 /// ABSENT means the producer did not look, and absent-on-both-sides is the state every
 /// engine that does not have the concept is in - so two backends that never populate a
@@ -386,7 +386,7 @@ impl VendorFacts {
     /// recover it cheaply, and `nulls_not_distinct` because recovery is out of scope.
     ///
     /// It is a function rather than a constant so the site exists to be changed, and so
-    /// `tests/schema_model_field_routing.rs` has somewhere to route the three families.
+    /// `crates/zeroship-migrate/tests/fold_offline/schema_model_god_object_bound.rs` has somewhere to route the three families.
     #[must_use]
     pub fn index_identity(&self, _left: &IndexKey, _right: &IndexKey) -> bool {
         true
@@ -891,7 +891,7 @@ impl SchemaModel {
     /// neutral halves, each column recombined with its vendor facts, and the table's own
     /// vendor term.
     ///
-    /// This is the function `tests/schema_model_comparator_equivalence_pg.rs` proves
+    /// This is the function `crates/zeroship-migrate/tests/fold_live/schema_model_equivalence_pg.rs` proves
     /// equal to `TableSnapshot::eq` on live data, and therefore the one a consumer
     /// moves onto.
     #[must_use]
@@ -958,7 +958,7 @@ impl SchemaModel {
 /// The neutral half of `ColumnSnapshot::eq`. The vendor half is
 /// [`VendorFacts::column_shape_identity`]; combine them with
 /// [`SchemaModel::column_shape_identity`], which is what
-/// `tests/schema_model_comparator_equivalence_pg.rs` and its MySQL sibling prove answers
+/// `crates/zeroship-migrate/tests/fold_live/schema_model_equivalence_pg.rs` and its MySQL sibling prove answers
 /// identically to `ColumnSnapshot::eq` on snapshots taken from live servers through
 /// engine-emitted SQL.
 ///
@@ -1047,7 +1047,7 @@ pub fn column_shape_identity(left: &Column, right: &Column) -> bool {
 ///
 /// So `column_shape_identity(a, b) == true` does NOT imply the drift pass is quiet, and
 /// `drift_identity(a, b) => column_shape_identity(a, b)` is the implication that DOES
-/// hold. `tests/schema_model_comparator_equivalence_pg.rs` asserts the implication in
+/// hold. `crates/zeroship-migrate/tests/fold_live/schema_model_equivalence_pg.rs` asserts the implication in
 /// both directions: it must hold, AND there must exist a real column pair where the two
 /// disagree, so "these are two questions" is a measurement and not a claim.
 ///
@@ -1267,7 +1267,7 @@ pub fn table_shape_identity(left: &Table, right: &Table) -> bool {
 /// asks. Today it asks it through `TableSnapshot::eq`, so its answer is
 /// [`table_shape_identity`] and this function is defined as that - deliberately, because
 /// this step preserves behaviour exactly and
-/// `tests/schema_model_comparator_equivalence_pg.rs` proves it does.
+/// `crates/zeroship-migrate/tests/fold_live/schema_model_equivalence_pg.rs` proves it does.
 ///
 /// **Naming it is the deliverable, not changing it.** Section D of the proposal shows
 /// this is the comparator that has already BLOCKED A FIX: because

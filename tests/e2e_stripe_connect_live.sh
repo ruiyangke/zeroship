@@ -399,7 +399,7 @@ AUTH=(-H "Authorization: Bearer $ADMIN_TOKEN")
 echo ""
 echo "=== Stage 2: REAL Express connected account via control's onboard handler ==="
 # ===========================================================================
-# Drive the REAL control handler `onboard` (crates/control/src/stripe_handlers.rs
+# Drive the REAL control handler `onboard` (crates/zeroship-control/src/stripe_handlers.rs
 # :120) — it calls StripeClient::create_connect_account (stripe_client.rs:963,
 # POST /v1/accounts type=express, metadata[creator_id]=<creator>) then
 # create_account_link (:983, POST /v1/account_links type=account_onboarding).

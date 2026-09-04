@@ -530,7 +530,7 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "select to_regcl
 
 # A least-privilege role must hold every privilege its own cron actually uses.
 #
-# crates/auth/src/cron/token_sweep.rs:125-128 DELETEs from
+# crates/zeroship-auth/src/cron/token_sweep.rs:125-128 DELETEs from
 # zeroship.token_revocations. zeroship_auth was granted only select/insert/update
 # on it (the 20260702000900_grants.ts grant that also covers oauth_grants and
 # oauth_clients), so every sweep failed and the table grew without bound. Fixed
@@ -548,8 +548,8 @@ docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc "select to_regcl
 # SELECT is checked alongside DELETE for the reason the control-side sweep check
 # below states in full: the statement is
 #   DELETE FROM zeroship.token_revocations WHERE revoked_after < NOW() - ...
-# (crates/authz/src/wrapper_revocation.rs, reached from
-# crates/auth/src/cron/token_sweep.rs:125) and PostgreSQL requires SELECT on any
+# (crates/zeroship-authz/src/wrapper_revocation.rs, reached from
+# crates/zeroship-auth/src/cron/token_sweep.rs:125) and PostgreSQL requires SELECT on any
 # column named in the WHERE clause. This assertion tested DELETE ALONE until
 # 2026-08-12, so a migration granting DELETE without SELECT would have broken the
 # sweep exactly as #319 did and left this line green. Both privileges are granted
@@ -569,10 +569,10 @@ auth_del=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
 # why the assertion above could not see this one. #319 was auth needing DELETE;
 # this is the gateway needing UPDATE.
 #
-# crates/authz/src/wrapper_revocation.rs:41 revoke_family() is
+# crates/zeroship-authz/src/wrapper_revocation.rs:41 revoke_family() is
 #   INSERT INTO zeroship.token_revocations (...) VALUES (...)
 #   ON CONFLICT (client_id, sub) DO UPDATE SET revoked_after = EXCLUDED.revoked_after
-# called from crates/gateway/src/backchannel_logout.rs:508 and
+# called from crates/zeroship-gateway/src/backchannel_logout.rs:508 and
 # browser_auth.rs:421, both production (router/auth.rs's #[cfg(test)] starts at
 # 1071, and neither of these files is that one). PostgreSQL requires UPDATE to
 # PLAN an ON CONFLICT DO UPDATE, so a missing UPDATE fails EVERY call, not just
@@ -597,7 +597,7 @@ gw_revoke=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
 # stumbling on it: role/table pairs with INSERT but NOT UPDATE, cross-referenced
 # against statements that use ON CONFLICT DO UPDATE.
 #
-# crates/control/src/app_oauth_client.rs:591 (production; that file's
+# crates/zeroship-control/src/app_oauth_client.rs:591 (production; that file's
 # #[cfg(test)] starts at 646) upserts the per-app OAuth client extension row
 # with ON CONFLICT (app_id) DO UPDATE, and control held INSERT but not UPDATE.
 # Unlike #356 this one FAILS LOUDLY - the error is propagated with
@@ -626,12 +626,12 @@ ctl_oauth=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
 # The remaining two production upserts control could not execute, from the same
 # sweep. Grouped because they share one cause and one migration.
 #
-#   zeroship.app_vars          crates/control/src/env_store.rs:236
+#   zeroship.app_vars          crates/zeroship-control/src/env_store.rs:236
 #                              the env-var write behind `zeroship var set`; the
 #                              upsert is inside a CTE that then bumps
 #                              apps.env_version, so the whole creator-facing
 #                              operation failed.
-#   zeroship.token_revocations crates/control/src/oauth_grants_handlers.rs:223
+#   zeroship.token_revocations crates/zeroship-control/src/oauth_grants_handlers.rs:223
 #                              revokes a family when an OAuth grant is deleted.
 #
 # MEASURED 2026-08-12 as zeroship_control, each in its own transaction:
@@ -651,12 +651,12 @@ ctl_upsert=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
 # The last instance the sweep found, and the only one where the WRITING SERVICE
 # had to be established by elimination rather than read off the crate.
 #
-# crates/mailer/src/suppressions.rs:57 upserts zeroship.email_suppressions with
+# crates/zeroship-mailer/src/suppressions.rs:57 upserts zeroship.email_suppressions with
 # ON CONFLICT (email) DO UPDATE. The mailer is referenced from BOTH auth's and
 # control's main.rs, so the crate does not name its own role. The database did:
 # on the migrated schema only zeroship_auth holds INSERT on that table at all
 # (control/gateway/worker are ins=f), so auth is the only possible executor.
-# It is reached from crates/auth/src/ui/webhooks.rs:118 and :164 -- the provider
+# It is reached from crates/zeroship-auth/src/ui/webhooks.rs:118 and :164 -- the provider
 # bounce/complaint handlers -- and BOTH swallow the error into a log line
 # reading "suppression add failed", so every webhook reported success while the
 # suppression list stayed empty.
@@ -718,7 +718,7 @@ lp_pairs=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
 # The same class, on the control side, for an audit trail that is WRITTEN rather
 # than only swept.
 #
-# crates/authz/src/eval.rs:243 INSERTs into zeroship.authz_decisions from
+# crates/zeroship-authz/src/eval.rs:243 INSERTs into zeroship.authz_decisions from
 # enforce(), on every authorization decision. control is the only caller of
 # enforce() among the services in the compose stack. That table had NO grant to
 # any zeroship_* role, and the insert error is swallowed
@@ -737,7 +737,7 @@ authz_write=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   || fail "zeroship_control lacks INSERT on authz_decisions: the authorization audit trail is silently never written (#325)"
 
 # control's retention sweep reads occurred_at and deletes from BOTH audit tables
-# (crates/control/src/cron/audit_retention.rs, sweep_all -> delete_older_than).
+# (crates/zeroship-control/src/cron/audit_retention.rs, sweep_all -> delete_older_than).
 # PostgreSQL requires SELECT on any column named in the WHERE clause, so DELETE
 # alone is not enough; the working reference, zeroship_auth on audit_events,
 # holds select/insert/delete for exactly this reason.
@@ -797,7 +797,7 @@ tamper_allowed=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc
 # Platform tables must come from migrations, not from a service doing DDL.
 #
 # The workflow scheduler store was created at runtime by
-# crates/workflow-scheduler/src/store.rs provision_sql(), which control called on
+# crates/zeroship-workflow-scheduler/src/store.rs provision_sql(), which control called on
 # every tick. Its first statement is `CREATE SCHEMA IF NOT EXISTS`, and Postgres
 # checks database-level CREATE BEFORE the existence short-circuit, so it fails
 # under any least-privilege role even when the schema is already there. MEASURED
@@ -869,7 +869,7 @@ ddl_guard=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
   || fail "DDL privilege guard reads $ddl_guard of 3: control gained CREATE or CREATEROLE, or the probe stopped discriminating (#320/#321)"
 
 # Ephemeral Redis for `env.kv`. The worker leaves the namespace ABSENT when
-# empty (crates/worker/src/main.rs), by design -- so an app calling
+# empty (crates/zeroship-worker/src/main.rs), by design -- so an app calling
 # @zeroship/kv fails loudly rather than diverging silently. Step 10's app calls
 # it, so the harness has to supply one.
 docker rm -f "$REDIS_CONTAINER" >/dev/null 2>&1 || true
@@ -941,7 +941,7 @@ e2e_export_database_urls "$DB_URL"
 # in #327, not another flag.
 
 # `--workers` is NOT optional decoration, and its absence was invisible for as
-# long as this harness existed. crates/control/src/main.rs:81 declares it with
+# long as this harness existed. crates/zeroship-control/src/main.rs:81 declares it with
 # `default_value = "http://localhost:8080"`, and this harness runs its worker on
 # $ZEROSHIP_WORKER_PORT (8390). Every other path here goes gateway -> worker and the
 # GATEWAY is told the URL explicitly, so control's own worker list had never
@@ -994,7 +994,7 @@ GATE_BROKER_SECRET=/tmp/gp-gate-broker-secret
 openssl rand -base64 48 > "$GATE_BROKER_SECRET"
 chmod 600 "$GATE_BROKER_SECRET"
 # THIS GATEWAY HAS NO DATABASE, and that is a supported mode rather than an
-# omission: crates/gateway/src/main.rs:619-622 accepts an empty DSN "for dev /
+# omission: crates/zeroship-gateway/src/main.rs:619-622 accepts an empty DSN "for dev /
 # smoke modes that don't exercise the OIDC RP path", and its db-backed handlers
 # "gracefully return 401 when `db` is None instead of panicking".
 #
@@ -1244,7 +1244,7 @@ if [ "$GP_PROVISION" = "deploy" ]; then
   # Control accepts exactly ONE principal credential: an `at+jwt` access token
   # signed by the issuer it was booted against, with the registered claims and
   # an audience matching its own `--oauth-audience`
-  # (crates/core/src/auth_provider/platform.rs). This harness IS that issuer
+  # (crates/zeroship-core/src/auth_provider/platform.rs). This harness IS that issuer
   # already - step 2 called `e2e_platform_op_up "$GP_SIGNING_KEY"`, which
   # publishes the workspace ed25519 key as a one-key JWKS on a loopback port and
   # names that origin as ZEROSHIP_AUTH_PLATFORM_ISSUER before control starts. So
@@ -1544,7 +1544,7 @@ fi
 # until now. `docs/reference/runtime-limits.md` names 4 MiB
 # (`MAX_REQUEST_BODY_BYTES`, enforced by the gateway); the STANDALONE server
 # that `pnpm dev` runs enforces its own, smaller `MAX_BODY_BYTES` of 1 MiB
-# (`crates/runtime/src/core/serve.rs`) and answers 413.
+# (`crates/zeroship-runtime/src/core/serve.rs`) and answers 413.
 #
 # The only `413` anywhere else under tests/ is e2e_platform.sh checking the
 # DEPLOY endpoint against its 256 MiB COMPRESSED limit -- a different limit, on
@@ -1608,7 +1608,7 @@ echo "    body cap: dev(1MiB+1) -> $DEV_413   deployed(1MiB+1) -> $DEP_1MIB   de
 #
 #   the per-resource manifest cap  -> 413 + a JSON envelope, from the
 #                                     `execute_resource_tree` early-return arm
-#                                     (crates/gateway/src/router/dispatch.rs)
+#                                     (crates/zeroship-gateway/src/router/dispatch.rs)
 #   the transport cap, 4 MiB       -> ntex's own response to a PayloadConfig
 #                                     overflow, which gateway/src/main.rs calls
 #                                     "a bare framework 400"
@@ -1959,7 +1959,7 @@ fi
 # because the contended resource is the state dir and not the port.
 #
 # The fix is a kernel guard the CHILD arms (PR_SET_PDEATHSIG, gated on
-# ZEROSHIP_DIE_WITH_PARENT -- crates/cli/src/parent_death.rs), and it only works
+# ZEROSHIP_DIE_WITH_PARENT -- crates/zeroship-cli/src/parent_death.rs), and it only works
 # if the vite plugin actually sets that variable, spelled identically, on the
 # child it spawns. Those are two repos' worth of suites that cannot see each
 # other: the Rust test proves the kernel behaviour with a hand-written env var,
@@ -2017,10 +2017,10 @@ fi
 
 # --- 7e. The dev tier speaks WebSocket, and nothing else in this repo checks it -
 #
-# WHY THIS STEP EXISTS. `crates/gateway/src/router/dispatch.rs` says single-tenant
+# WHY THIS STEP EXISTS. `crates/zeroship-gateway/src/router/dispatch.rs` says single-tenant
 # `zeroship serve` is what speaks WebSocket, and it is right - but that was a
 # COMMENT, not a measurement, until 2026-08-12. The wiring function behind it,
-# `handle_websocket_upgrade` in crates/runtime/src/core/serve.rs, is called from
+# `handle_websocket_upgrade` in crates/zeroship-runtime/src/core/serve.rs, is called from
 # exactly two places, both production; no test in any crate invokes it. The
 # handshake ALGORITHM is covered (handshake.rs, 8 unit tests) and the serve loop
 # is covered (serve.rs, 26), but the two had never been driven together over a
@@ -2032,7 +2032,7 @@ fi
 # this step cannot drift from the RFC without openssl also being wrong.
 #
 # DEV TIER ONLY, and that is the finding rather than a gap in this step. The same
-# six-line app answers 500 on the deployed worker -- crates/worker/src/handler.rs
+# six-line app answers 500 on the deployed worker -- crates/zeroship-worker/src/handler.rs
 # asserts exactly that in `dispatch_meters_unsupported_upgrade_error_body` (and
 # its settled twin), which I ran and mutation-checked on 2026-08-12: flipping the
 # expected status reports `left: 500 right: 200`. So the tiers DIVERGE, the
@@ -3044,8 +3044,8 @@ else
   # `deployments:read` is here for the same reason, added BEFORE the step that
   # needs it rather than after a run misread its absence. GET /api/apps/{id}/logs
   # -- the only surface a creator has for reading a deployed app's output --
-  # requires Action::DeploymentsRead (crates/control/src/api.rs:2053), whose
-  # string is "deployments:read" (crates/authz/src/action.rs:44). NONE of this
+  # requires Action::DeploymentsRead (crates/zeroship-control/src/api.rs:2053), whose
+  # string is "deployments:read" (crates/zeroship-authz/src/action.rs:44). NONE of this
   # harness's earlier token policies granted it, so the logs endpoint would have
   # answered 403 for every token here and the obvious reading of that 403 is
   # "creators cannot read their own logs". They can; the token could not ask.
@@ -3296,10 +3296,10 @@ fi
 #
 # Two apps must not be able to correlate the same human. That rests on
 # `derive_pairwise(salt, user, sector)` being fed a per-app `sector`
-# (crates/core/src/auth/mod.rs:304). The derivation itself is unit-tested for
+# (crates/zeroship-core/src/auth/mod.rs:304). The derivation itself is unit-tested for
 # distinctness (`assert_ne!` on two sectors, same file), and the sector is
 # written once at registration as the app's apex origin
-# (crates/control/src/app_oauth_client.rs:150, inserted at :592, immutable
+# (crates/zeroship-control/src/app_oauth_client.rs:150, inserted at :592, immutable
 # afterwards by trigger).
 #
 # THE UNCOVERED LINK WAS REGISTRATION, and its failure is silent: make
@@ -3317,7 +3317,7 @@ fi
 # compare rather than one to characterise.
 #
 # Only the deploy API calls `ensure_app_client`; `dev-provision` never does
-# (crates/control/src/bin/dev_provision.rs:106, zero references to it), which is
+# (crates/zeroship-control/src/bin/dev_provision.rs:106, zero references to it), which is
 # why three of this harness's four apps have no client row at all and the
 # check below would otherwise have exactly one to look at. The bearer minted for
 # step 10's control already carries apps:write + apps:deploy on {"type":"any"},
@@ -3662,11 +3662,11 @@ gp_close_step
 # The per-request WALL CLOCK is the one runtime limit the two tiers do not
 # agree on, and until this step nothing executed it:
 #
-#   pnpm dev   unbounded  (crates/runtime/src/core/serve.rs, `wall_timeout: None`;
+#   pnpm dev   unbounded  (crates/zeroship-runtime/src/core/serve.rs, `wall_timeout: None`;
 #                          the vite dev server spawns `zeroship serve` WITHOUT
 #                          --wall-timeout, sdks/vite-plugin/src/dev-server.ts:958)
-#   deployed   5s         (FREE_TIER_RUNTIME_LIMITS, crates/core/src/types.rs;
-#                          crates/worker/src/handler.rs answers
+#   deployed   5s         (FREE_TIER_RUNTIME_LIMITS, crates/zeroship-core/src/types.rs;
+#                          crates/zeroship-worker/src/handler.rs answers
 #                          `make_error_msg(504, "request timed out")`)
 #
 # So a creator's slow handler WORKS locally and 504s in production with no local
@@ -3816,7 +3816,7 @@ SQL
   # The half of observability that matters most is the half you did not choose
   # to emit. sdks/bootstrap/src/fetch-handler.ts:381 logs
   # `console.error("[zeroship:rpc] sanitized error", ...)` on the RPC error
-  # path, and crates/runtime/src/core/init.rs:3214-3225 binds log/warn/error/
+  # path, and crates/zeroship-runtime/src/core/init.rs:3214-3225 binds log/warn/error/
   # info/debug to the SAME console_log_callback, which pushes into
   # `per_request_logs` -- so there is no stdout/stderr split in the runtime and
   # an error line should travel exactly the route the success line just did.
@@ -3967,7 +3967,7 @@ gp_close_step
 #     Secure cookie explicitly over loopback so the gateway exercises its
 #     production parser without weakening cookie construction.
 #   - SUBJECT must satisfy is_pairwise_subject: "pws_" + EXACTLY 20 ascii
-#     alphanumerics (PAIRWISE_SUB_BODY_LEN, crates/core/src/auth/mod.rs).
+#     alphanumerics (PAIRWISE_SUB_BODY_LEN, crates/zeroship-core/src/auth/mod.rs).
 #     router/auth.rs rejects anything else by returning CookieOutcome::None,
 #     which presents as anonymous -> 401, not as a parse error.
 #

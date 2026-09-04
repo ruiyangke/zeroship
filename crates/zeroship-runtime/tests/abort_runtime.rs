@@ -3,7 +3,7 @@
 //! neither drives the event loop that fires timers.
 //!
 //! `abort.rs` runs a bare V8 isolate with no `SharedState` slot, so
-//! `timeout_static` (`crates/runtime/src/web/dom/abort_signal.rs`)
+//! `timeout_static` (`crates/zeroship-runtime/src/web/dom/abort_signal.rs`)
 //! takes its early return ("no runtime pump -> no timer") and the
 //! signal it returns never aborts. `wpt_abort.rs` stubs `async_test`
 //! to a no-op for the same reason. Both files say the firing path is

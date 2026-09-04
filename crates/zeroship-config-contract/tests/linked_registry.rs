@@ -431,7 +431,7 @@ fn a_flag_control_accepts_the_workspace_boolean_grammar() {
 #[test]
 fn the_resolved_struct_redacts_its_secret_without_a_hand_written_debug() {
     // Direct replacement for the hand-maintained redaction lists in
-    // crates/control/src/main.rs and crates/worker/src/main.rs: the resolved
+    // crates/zeroship-control/src/main.rs and crates/zeroship-worker/src/main.rs: the resolved
     // struct uses a DERIVED Debug, and the wrapper supplies the redaction.
     // Does not cover: an explicit `expose_secret()` that the caller then prints;
     // the wrapper removes accidental formatting, not deliberate disclosure.

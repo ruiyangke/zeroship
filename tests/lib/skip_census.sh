@@ -30,7 +30,7 @@
 # `tests/lib_skip_census_selftest.sh` covers all three directions.
 
 # The token every announcement carries. Kept byte-identical to
-# `crates/test-support/src/lib.rs` and to the verbatim `SKIP_MARKER` consts in
+# `crates/zeroship-test-support/src/lib.rs` and to the verbatim `SKIP_MARKER` consts in
 # `libs/compio-s3` and `libs/compio-redis`; one search over a run log has to
 # find every skip in the workspace, whichever side of that line it came from.
 # `libs/compio-postgres` deliberately has neither -- it replaced its announcer

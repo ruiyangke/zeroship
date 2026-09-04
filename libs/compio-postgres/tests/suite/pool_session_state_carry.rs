@@ -1,6 +1,6 @@
 // `Pool::connect_with_pool_config` inside a `compio::time::timeout` makes rustc
 // compute the layout of one deep async query chain, and the default depth is
-// not enough. `tests/pool_transaction_isolation.rs` carries the same attribute
+// not enough. `libs/compio-postgres/tests/suite/pool_transaction_isolation.rs` carries the same attribute
 // for the same reason; without it this target fails to compile from a COLD
 // cache, which an incremental build hides.
 
@@ -21,7 +21,7 @@
 //! would surface far away -- a released advisory lock, or a cached statement
 //! that no longer exists -- rather than here.
 //!
-//! `tests/pool_transaction_isolation.rs` pins the other half: that an open
+//! `libs/compio-postgres/tests/suite/pool_transaction_isolation.rs` pins the other half: that an open
 //! transaction does NOT survive. This file pins the half that must.
 //!
 //! Every assertion checks `pg_backend_pid()` across the release. Without that,

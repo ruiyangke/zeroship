@@ -606,7 +606,7 @@ echo "=== Case 13: all five server binaries answer --check-config ==="
 # credential", and giving it back is the wrong repair. The shared overlay is
 # mounted into services that are not its only consumers (gateway and migrated
 # still load it), and the worker is the one process running untrusted creator
-# code in V8. `crates/worker/src/config.rs` states it - "the worker deliberately
+# code in V8. `crates/zeroship-worker/src/config.rs` states it - "the worker deliberately
 # has no TOML overlay source" - and the test at
 # `worker_cannot_select_or_discover_a_shared_overlay` pins both halves: no
 # `--config`, no `--no-config`, and `allow_discovery()` false. Every worker

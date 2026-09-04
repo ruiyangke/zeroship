@@ -49,8 +49,8 @@
 //       corrected, so both rows APPLY. There is no (C) entry left in this file and
 //       there should never be one for long: a (C) entry is a bug with a note on it.
 //       The refusals themselves are pinned by
-//       `tests/alter_sequence_needs_an_action.rs` and
-//       `tests/instead_of_trigger_needs_a_view.rs`, each with its over-refusal
+//       `crates/zeroship-migrate/tests/refusals/alter_sequence_needs_an_action.rs` and
+//       `crates/zeroship-migrate/tests/refusals/instead_of_trigger_needs_a_view.rs`, each with its over-refusal
 //       control.
 //
 // The full accounting is in `docs/review-log.md`.
@@ -153,7 +153,7 @@ const ALLOWANCES: &[Allowance] = &[
     //
     // So the observation was right and the classification was not: this is a
     // DEGENERATE REPRESENTATIVE, not a wrong declaration. Flipping the cell was
-    // tried and REVERTED - `tests/sqlite_declaration_flip_over_refusal_control.rs`
+    // tried and REVERTED - `crates/zeroship-migrate/tests/dialect_matrix/sqlite_declaration_flip_over_refusal_control.rs`
     // drives a foreign-key drop through validate + lower + apply, and the flip made
     // it fail with `UNSUPPORTED`, refusing a migration that works today. There is
     // one row for all constraint kinds, so `portable` is the only disposition that

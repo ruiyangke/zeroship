@@ -246,7 +246,7 @@ criterion = { workspace = true }
 # (`StreamExt::next`) and drive two pipelined queries concurrently
 # (`future::join`). Same version as the regular dependency above, so this
 # adds no new crate to the lock - it only makes the surface visible to the
-# `tests/integration.rs` target.
+# `libs/compio-postgres/tests/suite/integration.rs` target.
 futures-util = { version = "0.3", default-features = false, features = ["sink", "async-await"] }
 tempfile = { workspace = true }
 # Self-signed certificates for the in-memory TLS pair in `tls_sansio`'s unit

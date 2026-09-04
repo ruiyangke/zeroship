@@ -53,7 +53,7 @@
 #     `empty_and_sentinel_reach_the_same_verdict` in crates/core, and the
 #     production-boot arm is driven against a RELEASE binary by hand.
 #   - /readyz answering 503 under the escape. Driven by `is_ready` unit tests
-#     in crates/gateway/src/health.rs and crates/worker/src/health.rs.
+#     in crates/zeroship-gateway/src/health.rs and crates/zeroship-worker/src/health.rs.
 #   - control and auth. Neither is launched here; control's rows are asserted
 #     by its own unit tests. Adding them means standing up Postgres.
 #   - deploy/compose/docker-compose.yml, AS OF 2026-08-21. A `compose` arm

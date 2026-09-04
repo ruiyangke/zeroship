@@ -128,7 +128,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         .await
         .expect("seed builtin plans");
     // The DW-24 rollout gate is `apps.workflows_enabled AND plans.workflows_allowed`
-    // (crates/control/src/workflow_rollout.rs), and both columns default to
+    // (crates/zeroship-control/src/workflow_rollout.rs), and both columns default to
     // false. Without this the control instance API answers every
     // `env.workflows.*` call with 403 "workflows are not enabled for this app or
     // plan". `workflow_instance_api_test` enables the same two flags in its own

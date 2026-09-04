@@ -7,9 +7,9 @@
 # spend states and asserts both the control-derived state AND the gateway's
 # per-state behavior:
 #
-#   spend engine (crates/control/src/spend.rs derive_state):
+#   spend engine (crates/zeroship-control/src/spend.rs derive_state):
 #     pct = spend*100/limit ; Warn>=80, Degrade>=95, Block>=100
-#   gateway enforcement (crates/gateway/src/enforce.rs + router/dispatch.rs):
+#   gateway enforcement (crates/zeroship-gateway/src/enforce.rs + router/dispatch.rs):
 #     Allow   -> pass, no header
 #     Warn    -> pass + `x-zs-spend-warn: 1` response header
 #     Degrade -> pass (throttled 1/DEGRADE_FACTOR, NOT blocked)
@@ -286,7 +286,7 @@ echo "============================================"
 # is the case this catches (tasks #285/#286).
 #
 # It is not decorative here. Mutating the spend engine so the Block band cannot
-# be reached (`pct >= t.block_pct * 2` in crates/control/src/spend.rs) gave
+# be reached (`pct >= t.block_pct * 2` in crates/zeroship-control/src/spend.rs) gave
 # 25 passed / 1 failed = 26 RAN, not 27: the band's state check failed and its
 # TWO gateway-behaviour assertions never ran at all. So the denominator moves
 # when a band breaks, and a floor phrased on PASS alone would not have seen it.

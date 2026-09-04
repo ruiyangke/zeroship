@@ -1323,7 +1323,7 @@ fn bulk_args(row_pk: &str, columns: &[&str], actor: Option<Value>) -> BulkUnmask
 ///
 /// That second half is the property worth binding. The all-or-nothing decision
 /// is `if !unauthorized.is_empty()` at
-/// `crates/zeroship-plugin-db/src/crud/unmask.rs:1093`, which returns before
+/// `crates/zeroship-data-engine/src/crud/unmask.rs:1093`, which returns before
 /// the decrypt loop at `:1119` runs at all, and the reason is in that
 /// function's own doc: a partial grant leaks the authorisation verdict through
 /// which columns came back populated, which is a read oracle over the policy
@@ -1525,7 +1525,7 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
     // Every arm above carries exactly ONE unauthorized pair, and a fence that
     // broke out of the loop on the first denial would satisfy all of them: one
     // audit row, one refusal, same code. The loop at
-    // `crates/zeroship-plugin-db/src/crud/unmask.rs:1080-1089` has no `break`
+    // `crates/zeroship-data-engine/src/crud/unmask.rs:1080-1089` has no `break`
     // and no early return - it pushes every denied pair and refuses once at
     // `:1093` - and TWO observable things follow that a short-circuit would get
     // wrong. The refusal counts the pairs (`unauthorized.len()` at `:1107`), so
@@ -1613,9 +1613,9 @@ async fn a_bulk_unmask_batch_with_one_forbidden_column_is_refused_whole() {
 /// see - which would conceal the authorisation failure from the caller.
 ///
 /// The all-or-nothing decision is the same `if !unauthorized.is_empty()` shape
-/// as the batch, at `crates/zeroship-plugin-db/src/crud/unmask.rs:1289`.
+/// as the batch, at `crates/zeroship-data-engine/src/crud/unmask.rs:1289`.
 /// `dispatch_find` calls this at
-/// `crates/zeroship-plugin-db/src/crud/mod.rs:686`, before
+/// `crates/zeroship-data-engine/src/crud/mod.rs:686`, before
 /// `build_find_with_schema_and_unmask_and_soft_delete_with_dialect`, so a
 /// refusal here means the unmasking SELECT is never issued at all.
 ///

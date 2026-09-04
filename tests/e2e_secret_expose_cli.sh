@@ -7,7 +7,7 @@
 #   `PUT /api/apps/:id/env/expose` REPLACES the whole list, so the CLI's
 #   `expose` does a read-modify-write: GET the current names, merge, PUT the
 #   union. Sending one bare name would silently un-expose every other secret on
-#   the app. That merge is unit-tested in `crates/cli/tests/secrets_test.rs`,
+#   the app. That merge is unit-tested in `crates/zeroship-cli/tests/secrets_test.rs`,
 #   but those tests put a `curl` STUB on PATH: they prove the CLI ISSUES a GET
 #   and then a PUT carrying the union. They cannot prove the control plane
 #   PERSISTS that union (the PUT is answered by a shell script that prints
@@ -38,7 +38,7 @@
 #                    secret never reached the worker at all".
 #
 # CAN THIS FAIL? Mutate the CLI's merge, not this script:
-#   crates/cli/src/secrets.rs, the `ExposeChange::Add` arm of `merge_expose`,
+#   crates/zeroship-cli/src/secrets.rs, the `ExposeChange::Add` arm of `merge_expose`,
 #   `current.iter().cloned().chain([key.to_string()]).collect()`
 #     ->  `vec![key.to_string()]`
 #   then `cargo build --release -p zeroship-cli --bins`.
@@ -352,7 +352,7 @@ done
 
 # --- the delivery control: the withheld secrets DID reach the isolate ---
 # `env` carries every stored secret regardless of the expose list
-# (pinned by secret_visible_via_zeroship_env in crates/runtime/tests/call_fetch_handler.rs).
+# (pinned by secret_visible_via_zeroship_env in crates/zeroship-runtime/tests/call_fetch_handler.rs).
 # So a name present here and absent from process.env is the gate working; a
 # name absent from BOTH would mean it never arrived, and the verdict above
 # would be measuring the wrong thing.

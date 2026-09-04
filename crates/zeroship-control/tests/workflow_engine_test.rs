@@ -1,7 +1,7 @@
 // `target_session_attrs` grew from three variants to six and each connect path
 // now carries a recovery probe, which widened the async chain reaching this
 // test past rustc's default layout-query depth of 128. See
-// `crates/gateway/src/lib.rs` for why a structural fix does not apply.
+// `crates/zeroship-gateway/src/lib.rs` for why a structural fix does not apply.
 #![recursion_limit = "256"]
 
 //! Live-PG tests for the DW-04 workflow engine scheduler.

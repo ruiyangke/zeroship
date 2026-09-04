@@ -1,6 +1,6 @@
 //! `/logout` regression coverage.
 //!
-//! Pre-fix (bug #2): `crates/auth/src/server.rs` did not register a
+//! Pre-fix (bug #2): `crates/zeroship-auth/src/server.rs` did not register a
 //! handler for `/logout`, so any GET / POST returned 404.
 //!
 //! Post-fix: GET `/logout` is wired to the native confirmation form and POST

@@ -363,7 +363,7 @@ async fn revoke_one_idp_session_succeeds() {
 /// the request path never reads `gateway_sessions`. The security property,
 /// that a revoked session's request is REJECTED, is asserted end to end by
 /// `app_session_revoke_at_the_op_ends_the_gateway_session` in
-/// `crates/gateway/tests/oidc_rp_e2e.rs`, which runs both services. All this
+/// `crates/zeroship-gateway/tests/oidc_rp_e2e.rs`, which runs both services. All this
 /// file can rule on is that the caller is handed what it needs to get there.
 #[compio::test]
 async fn revoke_one_gateway_session_succeeds() {

@@ -175,7 +175,7 @@ pub async fn complete_callback(
     // carries no `c_hash` and we pass `None` (passing `Some(code)` would make
     // verify_id_token fail CHashClaimMissing on every real login). `at_hash`
     // binding to the paired access token still applies. (Mirrors the gateway
-    // RP fix in crates/gateway/src/oidc_rp.rs.)
+    // RP fix in crates/zeroship-gateway/src/oidc_rp.rs.)
     let _ = code;
     let claims: TokenClaims = verify_id_token(
         jwks,

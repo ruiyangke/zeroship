@@ -23,7 +23,7 @@
 //! `ROLLBACK` **first** and samples **after** it. The `ROLLBACK` succeeds from a
 //! poisoned block, and answering it resolves the status byte.
 //! `a_forced_cleanup_on_a_poisoned_block_keeps_a_healthy_connection` in
-//! `tests/native_transaction.rs` is the arm that fails if the two are ever
+//! `crates/zeroship-plugin-db/tests/native_transaction.rs` is the arm that fails if the two are ever
 //! reordered.
 //!
 //! **That rule is now enforced where the evidence is.** Both cleanup arms live

@@ -47,7 +47,7 @@
  * the `Classification` taxonomy. Anything else throws
  * `INVALID_MASK_CLASSIFICATION` at declare-time (and again at
  * Rust-time, belt-and-braces — see
- * `crates/zeroship-plugin-db/src/crud/mask_policy.rs::dispatch_set_mask_policy`).
+ * `crates/zeroship-data-engine/src/crud/mask_policy.rs::dispatch_set_mask_policy`).
  */
 import type { Classification } from "./types";
 

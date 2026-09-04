@@ -375,7 +375,7 @@ fn validate_accepts_exact_cors_origin_with_credentials() {
 
 /// A rewrite deploys cleanly and then does nothing. The gateway resolves the
 /// action and forwards the request under its ORIGINAL path, discarding `to`
-/// (`crates/gateway/src/router/dispatch.rs`, the `ResolvedAction::Rewrite`
+/// (`crates/zeroship-gateway/src/router/dispatch.rs`, the `ResolvedAction::Rewrite`
 /// arm). Implementing it needs re-entrant rule walking under a hop limit so a
 /// rewrite cycle cannot loop, and neither exists. Until it does, reject the
 /// action so a creator gets a deploy error instead of routing that silently

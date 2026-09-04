@@ -147,14 +147,14 @@ pub fn resolve_list_limit(limit: Option<f64>) -> usize {
 /// otherwise pin fds for the life of the worker thread, starving the up-to-200
 /// other apps' isolates resident on it (`--max-isolates`, default 200).
 ///
-/// 64 mirrors `MAX_PENDING_FETCHES` (64, `crates/runtime/src/core/state.rs:284`),
+/// 64 mirrors `MAX_PENDING_FETCHES` (64, `crates/zeroship-runtime/src/core/state.rs:284`),
 /// which bounds the same class of thing for the same reason: a per-app ceiling
 /// on a shared, per-thread, fd-backed resource, deliberately set low because
 /// "platform apps are expected to reach only a handful of upstreams at once"
 /// and a runaway loop should hit a clean error rather than an OOM. The same
 /// holds here — a handler streams one or a few objects at a time, and the
 /// legitimate working set is far below 64. Compare
-/// `MAX_SUBSCRIPTIONS_PER_APP` (`crates/plugin-db/src/broker.rs:153`), the
+/// `MAX_SUBSCRIPTIONS_PER_APP` (`crates/zeroship-data-core/src/broker.rs:153`), the
 /// house pattern for capping a per-app registry at acquisition.
 pub const DEFAULT_MAX_LIVE_GET_STREAMS_PER_APP: usize = 64;
 

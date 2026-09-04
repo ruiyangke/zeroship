@@ -1,7 +1,7 @@
 import { raw } from "@zeroship/migrate";
 
 // Control could not read ANY per-app workflow journal. `app_<uuid>` is created
-// AUTHORIZATION zeroship_workflow_owner (crates/migrated/src/provisioning.rs,
+// AUTHORIZATION zeroship_workflow_owner (crates/zeroship-migrate-server/src/provisioning.rs,
 // workflow_journal_schema_sql) and 20260818000200 granted that role to
 // zeroship_worker only, so every control cron that probes a journal with
 // `to_regclass('app_<uuid>.__zeroship_workflow_runs')` raised
@@ -15,7 +15,7 @@ import { raw } from "@zeroship/migrate";
 //   1. Control CREATES journal tables. workflow_instance_api.rs (start run) and
 //      cron/workflow_schedules.rs both call PgStore::provision, whose first
 //      statement is `SET ROLE zeroship_workflow_owner`
-//      (crates/plugin-workflow/src/store/pg.rs, set_workflow_journal_owner_role_sql).
+//      (crates/zeroship-plugin-workflow/src/store/pg.rs, set_workflow_journal_owner_role_sql).
 //      SET ROLE is gated on MEMBERSHIP; no combination of table privileges
 //      substitutes for it.
 //   2. The journal schemas are per-app and created after this file runs. A

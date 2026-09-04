@@ -1,7 +1,7 @@
 //! Eviction-time abort tests for RPC.
 //!
 //! Covers the per-isolate `AbortRegistry` from
-//! `crates/runtime/src/rpc/abort.rs`: register-on-dispatch, fire-on-
+//! `crates/zeroship-runtime/src/rpc/abort.rs`: register-on-dispatch, fire-on-
 //! eviction, automatic unregister via Drop, and the worker-style
 //! integration smoke (1-slot LRU evicting app A when app B loads).
 //!

@@ -21,7 +21,7 @@
 #   asserts the absolute property separately, against the RAW deployed bytes.
 #
 #   Symmetrically, a crate-local suite reads the envelope from ONE side only:
-#   `crates/plugin-db/tests/capability.rs` can read a verbose `code`/`details`
+#   `crates/zeroship-plugin-db/tests/capability.rs` can read a verbose `code`/`details`
 #   body because `CAPABILITY_VIOLATION` is on `is_public_error_code`'s
 #   allow-list, so it never exercises the blanking arm this harness measures.
 #
@@ -97,7 +97,7 @@
 #
 #   SHARED. Both tiers run the same Rust runtime -- `pnpm dev` is
 #   `target/release/zeroship`, the deploy is `zeroship-worker` -- so the input
-#   parser (`crates/runtime/src/core/runtime.rs::parse_rpc_input`) and the
+#   parser (`crates/zeroship-runtime/src/core/runtime.rs::parse_rpc_input`) and the
 #   dispatch body (`__zsDispatchRpc`, inline in `crates/runtime/src/core/
 #   init.rs`) are the same code on both. MEASURED, not assumed: d.badJson
 #   answers with the RUST parser's text ("invalid JSON body") on both, where
@@ -286,7 +286,7 @@ echo "  mutation: $MUTATE"
 # --- 0b. THE PRECONDITION THE WHOLE MEASUREMENT RESTS ON --------------------
 # The 5xx sanitization rail must have NO env escape hatch. It used to have one:
 # `AUTH_INSECURE_DEV`, read by
-# `crates/runtime/src/core/dispatch.rs::expose_internal_dispatch_errors` and
+# `crates/zeroship-runtime/src/core/dispatch.rs::expose_internal_dispatch_errors` and
 # `sdks/bootstrap/src/fetch-handler.ts::insecureDevErrorsEnabled`. Both readers
 # are deleted. While they existed, a stray value in the environment reached BOTH
 # tiers and every 5xx row below measured the hatch instead of the rail --

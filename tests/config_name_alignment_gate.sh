@@ -7,7 +7,7 @@
 #                        binary or an explicitly classified non-platform one
 #   2 compiled contract  the six linked ConfigSpec registries have no colliding
 #                        projection, no declared-but-unread source and no
-#                        undeclared reader (crates/config-contract/src/contract.rs)
+#                        undeclared reader (crates/zeroship-config-contract/src/contract.rs)
 #   3 THE AUDIT          the syn source extraction re-derives every projection
 #                        with its own parser and its own transforms, and the two
 #                        sets must be equal in BOTH directions
@@ -123,7 +123,7 @@ OPENAI_API_KEY   forwarded to creator apps; the platform itself does not read it
 # added to it when the check first ran. `[gateway] broker_secret` configured
 # nothing (the gateway reads a PATH) and `ZEROSHIP_CONTROL_URL` on the control
 # service was read by no code in crates/control/. Both were deleted; see
-# crates/core/src/config/file.rs and deploy/compose/docker-compose.yml.
+# crates/zeroship-core/src/config/file.rs and deploy/compose/docker-compose.yml.
 FILE_ONLY_OVERLAY_LEAVES="
 auth.trusted_oauth_clients  file-and-default only: no flag and no env by design (crates/zeroship-core/src/config/file.rs)
 "
@@ -611,7 +611,7 @@ compose_superuser_role() {
 # "zeroship_control" })`), a migration a deployed database has applied and which
 # is therefore frozen. Banning them here would not remove one byte of credential
 # from git; it would relocate five literals from this compose file into
-# `secret_specs()` in crates/cli/src/dev.rs, which would have to generate the
+# `secret_specs()` in crates/zeroship-cli/src/dev.rs, which would have to generate the
 # same five strings for `zeroship dev init` to keep working. That is the check-8
 # violation this gate exists to prevent, committed to buy a green here.
 #
@@ -770,7 +770,7 @@ check_ops_toml() {
 #
 #     THE REASON THIS PARAGRAPH GAVE FOR DEFERRING ALL SIX WAS FALSE WHEN
 #     WRITTEN. It said "`zeroship dev init` does not write a single DSN
-#     (crates/cli/src/dev.rs:36-43), so `docker compose up` would stop working
+#     (crates/zeroship-cli/src/dev.rs:36-43), so `docker compose up` would stop working
 #     for every local developer". Those lines are the doc comment of
 #     `env_keys()`, which enumerates the .env SECRETS; the DSN is written by the
 #     other producer in the same file, `secret_specs()`, whose FIRST entry is

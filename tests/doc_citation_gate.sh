@@ -74,7 +74,7 @@ FAILED=0
 is_generated_artifact() {
   case "$1" in
     sdks/ui/coverage/*|sdks/ui/coverage) return 0 ;;   # pnpm test-storybook:coverage
-    tests/data/live/tls_live.conf) return 0 ;;         # tests/tls_live_setup.sh
+    tests/data/live/tls_live.conf) return 0 ;;         # libs/compio-postgres/tests/tls_live_setup.sh
     *) return 1 ;;
   esac
 }

@@ -556,7 +556,7 @@ pub(crate) fn mint_masked_value<'s>(
 /// Walk the parsed-JSON V8 value and replace every `__zsmask__`-tagged
 /// sentinel object with a native `MaskedValue` v8_class instance. The
 /// runtime calls this from the `ResolveValue::JsonWithRehydration` arm
-/// of the spawned-op pump (see `crates/runtime/src/core/runtime.rs`).
+/// of the spawned-op pump (see `crates/zeroship-runtime/src/core/runtime.rs`).
 ///
 /// The function is the post-parse hook plugin-db registers; the runtime
 /// itself has no knowledge of the sentinel shape — that information

@@ -499,7 +499,7 @@ pub async fn fetch_app_version(url_base: &str, auth_key: &str, app_id: &Uuid) ->
 }
 
 /// Fetch the merged env for an app in the split `{vars, secrets, expose}`
-/// wire shape (see `crates/runtime/src/fetch_outcome.rs::EnvSnapshot`).
+/// wire shape (see `crates/zeroship-runtime/src/fetch_outcome.rs::EnvSnapshot`).
 /// The result is a JSON object string passed through verbatim to
 /// `EnvSnapshot::from_validated_json` at cache-insert time so the hot
 /// path skips the parse-then-reserialize round-trip.

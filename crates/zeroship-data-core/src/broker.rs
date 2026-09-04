@@ -211,7 +211,7 @@ impl Subscription {
     /// delivery is coarse-grained. The producer half is disconnected too:
     /// `read_set::Active::begin` has no caller outside its module, so nothing
     /// is ever recorded to pass here. See the header of
-    /// `crates/zeroship-plugin-db/src/read_set.rs` for the full measurement and
+    /// `crates/zeroship-data-core/src/read_set.rs` for the full measurement and
     /// what wiring it would take.
     pub fn set_read_set(&self, entries: Vec<ReadSetEntry>) {
         self.lock_inner().read_set = Some(entries);

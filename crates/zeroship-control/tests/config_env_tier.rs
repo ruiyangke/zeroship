@@ -7,7 +7,7 @@
 //! in-process version of these assertions therefore called
 //! `std::env::set_var` / `remove_var`, which mutates the environment of every
 //! OTHER test in the same binary and, since Rust 2024, is `unsafe` because it
-//! races with any concurrent `getenv`. `crates/control/src/main.rs` recorded
+//! races with any concurrent `getenv`. `crates/zeroship-control/src/main.rs` recorded
 //! that hazard as measured: 1 failure in 12 runs of that test binary before a
 //! mutex was added around the mutation.
 //!
@@ -175,7 +175,7 @@ fn the_shared_auth_provider_variable_reaches_control_from_the_environment() {
 #[test]
 fn the_retired_platform_spelling_is_rejected_by_the_overlay() {
     // `platform` was control's own word for the state now spelled `native`.
-    // The FLAG half of this refusal is in `crates/control/src/main.rs` - clap
+    // The FLAG half of this refusal is in `crates/zeroship-control/src/main.rs` - clap
     // rejects an explicit unknown value without consulting the environment, so
     // it needs no child process. The OVERLAY half does: the environment tier
     // outranks the overlay, so an ambient `ZEROSHIP_AUTH_PROVIDER` makes the

@@ -9,7 +9,7 @@ import { defineApp } from "@zeroship/server";
 // `probe.defaulted` is INTENTIONALLY MISSING from this map, and
 // `probe.requireGated` is here only to pair with it. Between them they hold the
 // #163 surface: the fail-closed default is enforced by the gateway
-// (`crates/gateway/src/router/dispatch.rs`), and `pnpm dev` has no gateway, so
+// (`crates/zeroship-gateway/src/router/dispatch.rs`), and `pnpm dev` has no gateway, so
 // the alarm the default's safety argument depends on is inaudible for the whole
 // local development cycle. Adding `probe.defaulted` here would delete the
 // measurement, not fix anything. See docs/pilot/e2e-scenarios.md scenario 6.

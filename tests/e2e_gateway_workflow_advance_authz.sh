@@ -124,7 +124,7 @@ gw_post() {
   LAST_BODY="$(cat "$WORK/resp.body")"
 }
 
-# Per-app workflow runs table (crates/plugin-workflow/src/store/pg.rs:
+# Per-app workflow runs table (crates/zeroship-plugin-workflow/src/store/pg.rs:
 # app_schema_for = "app_<uuid>", table "__zeroship_workflow_runs").
 runs_table() { echo "\"app_${APP_ID}\".\"__zeroship_workflow_runs\""; }
 

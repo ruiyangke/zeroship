@@ -8,7 +8,7 @@
  *
  *   DEPLOYED, an anonymous caller never reaches the worker - the gateway's
  *   auth gate answers 401 with `{"code":"UNAUTHENTICATED"}`
- *   (`crates/gateway/src/router/dispatch.rs`, `unauthenticated_response`), so
+ *   (`crates/zeroship-gateway/src/router/dispatch.rs`, `unauthenticated_response`), so
  *   `onAuthExpired` fires and the app re-authenticates.
  *
  *   IN DEV there is no gateway. `requireUser()` itself is the 401 source. Its

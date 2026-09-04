@@ -155,7 +155,7 @@ fi
 # target must carry a class (`zeroship-config-contract`'s
 # `validate_target_classifications`), and a `platform` class then obliges the
 # configuration checker to LINK that binary's generated registry
-# (`tests/real_registry.rs`, `every_platform_target_declares_its_configuration`,
+# (`crates/zeroship-config-contract/tests/real_registry.rs`, `every_platform_target_declares_its_configuration`,
 # which compares the manifest `platform` set against `DECLARING_BINARIES` for
 # exact equality with no exception list). Classifying the relay anything else
 # would leave a shipped service's configuration surface unaudited, which is the

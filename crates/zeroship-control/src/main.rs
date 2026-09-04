@@ -115,7 +115,7 @@ const MASTER_KEY_LABEL: &str = "ZEROSHIP_CONTROL_MASTER_KEY";
 /// Same, for the rotation list. The index is appended per entry.
 const LEGACY_MASTER_KEYS_LABEL: &str = "ZEROSHIP_CONTROL_LEGACY_MASTER_KEYS";
 /// Operator-facing spelling of the worker dispatch key. The shared identity in
-/// `crates/config-macros/src/shared.rs` (`canonical: "worker_key"`) projects to
+/// `crates/zeroship-config-macros/src/shared.rs` (`canonical: "worker_key"`) projects to
 /// this environment name. The bare `WORKER_KEY` the shared validator used to
 /// interpolate is not settable.
 const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
@@ -134,7 +134,7 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// webhook secret, the Stripe API key, the mailer credentials - are NOT rows
 /// here, because a deployment without Stripe is a supported deployment and the
 /// webhook handler already fails closed on an empty secret
-/// (`crates/control/src/stripe_handlers.rs`). Adding them would be exactly the
+/// (`crates/zeroship-control/src/stripe_handlers.rs`). Adding them would be exactly the
 /// "blocked on a credential for a service they never enabled" outage the
 /// per-subsystem rule forbids.
 fn control_credentials(settings: &ControlSettings) -> Vec<SubsystemCredential<'_>> {
@@ -433,7 +433,7 @@ fn main() -> std::io::Result<()> {
     //
     // THE BOOT GATE replaces three separate guards here, one of which failed
     // OPEN. `control_key` was checked with a bare `is_configured()`, and
-    // `crates/core/src/config/env.rs` resolves `ZEROSHIP_CONTROL_KEY=` to
+    // `crates/zeroship-core/src/config/env.rs` resolves `ZEROSHIP_CONTROL_KEY=` to
     // `Secret::supplied(Env, Some(""))` - configured, empty, accepted. That is
     // Gitaly's `if len(conf.GetToken()) == 0 { return ctx, nil }` in a different
     // language: the credential that is ABSENT gets a branch of its own and that
@@ -1266,7 +1266,7 @@ mod tests {
     use zeroship_core::config::GeneratedConfig;
 
     // WHAT LEFT THIS MODULE. Every test that drove the ENVIRONMENT tier of
-    // `ControlSettings` moved to `crates/control/tests/config_env_tier.rs`.
+    // `ControlSettings` moved to `crates/zeroship-control/tests/config_env_tier.rs`.
     // That tier is clap's `env = "ZEROSHIP_..."` attribute, so exercising it
     // in-process meant `std::env::set_var` / `remove_var` - which mutates the
     // environment every other test in this binary parses in, and was measured
@@ -1298,7 +1298,7 @@ mod tests {
         // half is not: the environment tier outranks the overlay, so an
         // ambient `ZEROSHIP_AUTH_PROVIDER` makes the retired overlay value
         // never get parsed and the refusal never fire. It lives in
-        // `crates/control/tests/config_env_tier.rs`, against a child process
+        // `crates/zeroship-control/tests/config_env_tier.rs`, against a child process
         // whose environment is cleared.
         let err = ControlSettingsSources::try_parse_from([
             "zeroship-control",

@@ -46,18 +46,18 @@
 //!
 //! It is worth being precise about why that was available here when it was NOT
 //! available for the spelling primitives (see
-//! `tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs`, which exists
+//! `crates/zeroship-migrate/tests/dialect_matrix/core_does_not_spell_a_vendors_bytes.rs`, which exists
 //! because a privacy invariant did NOT survive a crate boundary). The difference is
 //! direction. `ansi_double_quote_ident` has to be reachable BY the vendor crates, and
 //! `pub(in ...)` cannot say "these three crates and no other", so it had to become
 //! `pub`. `render_vendor_op` only ever needs to be reachable by PostgreSQL ITSELF -
 //! it is one crate's own item, and one crate's own privacy still works. A rule that
 //! can be a privacy should be one; the textual census in
-//! `tests/dialect_matrix/core_names_no_vendor_crate.rs` is the backstop for the rest.
+//! `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_crate.rs` is the backstop for the rest.
 //!
 //! # The behaviour test the census cannot be
 //!
-//! `tests/dialect_matrix/vendor_ops_dispatch_per_vendor.rs` asserts that exactly ONE
+//! `crates/zeroship-migrate/tests/dialect_matrix/vendor_ops_dispatch_per_vendor.rs` asserts that exactly ONE
 //! shipping vendor renders a vendor op and the other two refuse. A census proves core
 //! does not NAME `zeroship_migrate_postgres`; it cannot prove the dispatch is real, and a
 //! refactor that routed all three vendors to PostgreSQL's renderer would satisfy a

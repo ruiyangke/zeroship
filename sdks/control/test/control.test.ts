@@ -231,7 +231,7 @@ test("non-2xx responses throw ControlError with parsed body", async () => {
 // ---------------------------------------------------------------------
 // trace_id -- the correlation id on an otherwise contentless body.
 //
-// `infrastructure_error_response` (crates/control/src/api.rs) logs the
+// `infrastructure_error_response` (crates/zeroship-control/src/api.rs) logs the
 // real cause and returns `{"error":"internal error","trace_id":<uuid>}`.
 // The cause is deliberately absent, so the id is the ONLY thing that
 // makes the response reportable. The client used to drop it: it survived

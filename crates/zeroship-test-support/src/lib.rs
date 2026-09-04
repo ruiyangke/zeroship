@@ -54,7 +54,7 @@ pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 ///
 ///   - the call site, for a backend the test cannot do without. It panics with
 ///     the address it dialled and the command that provisions it, rather than
-///     calling this function at all. `libs/compio-postgres/tests/integration.rs`
+///     calling this function at all. `libs/compio-postgres/tests/suite/integration.rs`
 ///     and `libs/compio-redis/tests/integration.rs` are the worked examples.
 ///   - the suite gate, for everything else. `tests/lib/skip_census.sh` counts
 ///     these markers, and `tests/run_auth_suite.sh` /

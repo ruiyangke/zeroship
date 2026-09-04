@@ -62,7 +62,7 @@ const DEFAULT_URL: &str = "postgres://postgres:zeroship@127.0.0.1:5455/zeroship"
 /// recognises the sanctioned accessor BY PATH
 /// (`libs/<crate>/tests/common/env.rs`), so a local re-implementation of the
 /// same shape is an unsanctioned raw read plus an illicit `allow`, and
-/// `crates/core/tests/config_env_access_gate.rs` failed on exactly that.
+/// `crates/zeroship-core/tests/config_env_access_gate.rs` failed on exactly that.
 #[path = "../tests/common/env.rs"]
 mod env;
 

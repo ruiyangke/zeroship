@@ -216,7 +216,7 @@ fn gateway_signing() -> SigningKey {
 ///
 /// Publishing once removes the only operation that can fail. The row stays
 /// usable after a peer retires it, because the JWKS keeps `retiring` keys
-/// (`crates/auth/src/oidc/metadata.rs:71-84`) and every assertion here looks
+/// (`crates/zeroship-auth/src/oidc/metadata.rs:71-84`) and every assertion here looks
 /// its key up by kid rather than counting them.
 /// LOAD-THEN-STORE, NOT `swap`: the flag records that a publish SUCCEEDED, not
 /// that one was attempted. With `swap` the flag is already set when the
@@ -589,7 +589,7 @@ async fn browser_pkce_tokens(rp: &OidcRp, auth_base: &str, client_id: &str, emai
 ///
 /// The three secrets go through `-file` PATH flags because that is the only
 /// shape auth accepts: `--db-url`, `--stash-signing-key` and `--totp-enc-key`
-/// were value flags, and `crates/auth/src/config.rs` now asserts clap REJECTS
+/// were value flags, and `crates/zeroship-auth/src/config.rs` now asserts clap REJECTS
 /// all three. `parse_from` panics on an unknown argument, so this helper was a
 /// hard failure waiting for the first run with a database - it is skipped
 /// today only because `db_url()` returns `None` without a test database

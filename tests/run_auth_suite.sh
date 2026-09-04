@@ -295,7 +295,7 @@ echo "------------------------------------------------------------------"
 # The exclusion cost real coverage for a provisioning gap that did not exist.
 #
 # The two-variable `or_else` is gone: `db_url()` at
-# crates/gateway/tests/oidc_rp_e2e.rs:46 is now
+# crates/zeroship-gateway/tests/oidc_rp_e2e.rs:46 is now
 # `zeroship_core::config::test_database_url_opt()`, one source for every target
 # in the workspace. The measurement above is why the collapse is safe here - the
 # target was already satisfied by whichever name happened to be exported, which
@@ -318,12 +318,12 @@ echo "------------------------------------------------------------------"
 # carried `at_hash`, while `session_post` requests access-token binding, which
 # makes the claim mandatory. The gateway log named it exactly - "at_hash
 # missing while access token binding was requested". The REAL OP does mint it
-# (crates/auth/src/oidc/issuer.rs, unconditional in the single mint path), so
+# (crates/zeroship-auth/src/oidc/issuer.rs, unconditional in the single mint path), so
 # the handler was right and the fixture was wrong. Binding the mock's ID tokens
 # to the access token they ship with took it to 23 passed / 0 failed, and
 # surfaced a second, real defect on the way (the gateway declined to verify
 # at_hash on a ROTATED id_token while holding the access token; see
-# crates/gateway/src/auth_token.rs).
+# crates/zeroship-gateway/src/auth_token.rs).
 #
 # So both binaries are in the list. This is the SAME database the auth tests
 # use: these tests seed their own users and key off per-test UUIDs, and
@@ -333,7 +333,7 @@ echo "------------------------------------------------------------------"
 # there is nothing left to export - both now read the single test DSN above.
 # Their history is the argument for that collapse rather than a footnote to it:
 # GATEWAY_POOL_SMOKE_URL was set NOWHERE in this repository outside its own
-# test file and one docs line, so `crates/gateway/tests/db_pool_smoke.rs`
+# test file and one docs line, so `crates/zeroship-gateway/tests/db_pool_smoke.rs`
 # announced a skip on every run of `cargo test --workspace` and its one test had
 # never executed. A private name for a value that already exists is a test that
 # does not run, and it looks exactly like a test that passes.

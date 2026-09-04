@@ -90,7 +90,7 @@ pub enum Precondition {
     ///
     /// Evaluated by
     /// `MigrationBackend::column_type_change_blockers`, whose
-    /// PostgreSQL predicate `tests/pg_column_retype_dependency_oracle.rs` measures
+    /// PostgreSQL predicate `crates/zeroship-migrate/tests/column_shapes/pg_column_retype_dependency_oracle.rs` measures
     /// against the server's own verdict one shape at a time.
     ColumnTypeChangeHasNoBlockers {
         /// The bare table name (no schema qualifier).

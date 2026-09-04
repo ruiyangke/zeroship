@@ -3,7 +3,7 @@
  *
  * `createAuthClient(options)` returns an {@link AuthClient} (Auth0/Supabase-shaped,
  * BFF model) that drives the same-origin gateway endpoints
- * (`crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`):
+ * (`crates/zeroship-gateway/src/auth_token.rs`, `crates/zeroship-gateway/src/browser_auth.rs`):
  *
  *   signInWithOAuth → popup window (federated / non-same-site) OR an in-page
  *     iframe (the same-site console password UI, when `immersive`) →

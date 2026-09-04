@@ -17,7 +17,7 @@
 //! paired with a control differing only in the policy, which the in-src tests do
 //! not have.
 //!
-//! `tests/libpq_parameter_parity.rs` proves the DSN key is accepted, which is a
+//! `libs/compio-postgres/tests/suite/libpq_parameter_parity.rs` proves the DSN key is accepted, which is a
 //! different claim again from the policy being applied. For a security setting
 //! "accepted but not enforced" is the dangerous state: the connection string
 //! looks hardened, the driver reports success, and nothing was checked.

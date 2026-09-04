@@ -33,7 +33,7 @@ use zeroship_core::config::{Secret, SourceKind};
 /// Every integration test binary in this crate shares ONE suite database.
 /// `Issuer::publish_active_key` retires every other active row in
 /// `zeroship.signing_keys` and then refuses to reactivate a `retiring` row
-/// (`crates/auth/src/oidc/issuer.rs:388-408`), and the kid is a pure
+/// (`crates/zeroship-auth/src/oidc/issuer.rs:388-408`), and the kid is a pure
 /// thumbprint of the public key (`issuer.rs:273`). So two issuers built from
 /// the same seed publish the SAME kid, and whichever publishes second dies on
 /// a key something between them retired. That is production behaving
@@ -191,7 +191,7 @@ pub async fn dedicated_test_db(db_url: &str) -> compio_postgres::Client {
 /// affect each other.
 ///
 /// Every advisory lock the auth crate takes at RUNTIME is `hashtext(...)`
-/// derived (`crates/auth/src/advisory_lock.rs`), so production keys are spread
+/// derived (`crates/zeroship-auth/src/advisory_lock.rs`), so production keys are spread
 /// over the whole i64 range and no small literal is reserved. What matters is
 /// that these three differ from each other, and from the per-run rendezvous key
 /// `signing_key_retention_test` draws for its own trigger.
@@ -547,7 +547,7 @@ impl Fixture {
 ///
 /// WHY ONCE. `zeroship.signing_keys` holds at most one `active` row per
 /// DATABASE: `publish_active_key` retires every other active row
-/// (`crates/auth/src/oidc/issuer.rs:396-403`) and refuses to reactivate a
+/// (`crates/zeroship-auth/src/oidc/issuer.rs:396-403`) and refuses to reactivate a
 /// `retiring` one (`:380-392`). That is production behaving correctly - a
 /// retired signer must not come back - and it makes "the active OP key" a
 /// database-level singleton, which two concurrent suite runs on one shared
@@ -564,7 +564,7 @@ impl Fixture {
 ///
 /// Publishing once removes the republish, which is the only operation that can
 /// fail. A key another run has since retired stays usable here: `retiring` rows
-/// remain in the JWKS (`crates/auth/src/oidc/metadata.rs:71-84` selects
+/// remain in the JWKS (`crates/zeroship-auth/src/oidc/metadata.rs:71-84` selects
 /// `status IN ('active','next','retiring')`), and every JWKS assertion in this
 /// crate looks its key up BY KID rather than asserting how many there are, so a
 /// peer's key sitting beside this one changes nothing.

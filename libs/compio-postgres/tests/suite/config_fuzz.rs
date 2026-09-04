@@ -24,7 +24,7 @@
 //!    A parser carrying hidden state across calls would show up here and
 //!    nowhere else in the suite.
 //!
-//! DETERMINISTIC BY CONSTRUCTION, in the style of `tests/frame_fuzz.rs`: a
+//! DETERMINISTIC BY CONSTRUCTION, in the style of `libs/compio-postgres/tests/suite/frame_fuzz.rs`: a
 //! seeded xorshift written inline, no dependency added to any manifest, and a
 //! failure prints the exact input and seed that produced it.
 

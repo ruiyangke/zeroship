@@ -176,7 +176,7 @@ fn extract_rows(root: &Path) -> Vec<InventoryRow> {
 ///
 /// This is the proposal's "keep the extraction command as an audit that must
 /// equal the generated set". The two sides do not share a projection or a
-/// parser; see the header of `crates/config-contract/src/audit.rs`.
+/// parser; see the header of `crates/zeroship-config-contract/src/audit.rs`.
 fn audit(args: &[String]) {
     let (root, _) = parse_root_and_check(args, false);
     let specs = platform_specs();

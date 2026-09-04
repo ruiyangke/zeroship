@@ -38,12 +38,12 @@
 #   - Recovery. Nothing here brings a dependency BACK to prove /readyz returns
 #     to 200; that is a timing test against the cache TTL.
 #   - The single-flight bound on probe fan-out. That is unit-tested in
-#     crates/core/src/readiness.rs, not here - a shell loop cannot observe how
+#     crates/zeroship-core/src/readiness.rs, not here - a shell loop cannot observe how
 #     many Postgres round trips one probe burst caused.
 #   - The worker's blob-store arm failing on its own. Case (c) takes the
 #     worker's CONTROL dependency away, not its blob store; the blob-store
 #     probe's failing arm is covered by the LocalDiskBlobStore unit tests in
-#     crates/bundle/src/blob.rs.
+#     crates/zeroship-bundle/src/blob.rs.
 #   - Whether a 503 body leaks anything. The assertions read status codes
 #     only; the no-detail-leak property is a code review of the handlers.
 #

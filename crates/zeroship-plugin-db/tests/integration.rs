@@ -8,7 +8,7 @@
 //! Requires: the test PostgreSQL named by the overlay
 //! (`deploy/ops/zeroship.test.toml`, written by
 //! `tests/provision_test_backends.sh`) or by `PG_TEST_URL`. There is no
-//! compiled default; see `crates/core/src/config/test_overlay.rs`.
+//! compiled default; see `crates/zeroship-core/src/config/test_overlay.rs`.
 //! Run:
 //! ```text
 //! RUST_MIN_STACK=33554432 \

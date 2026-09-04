@@ -13,7 +13,7 @@
 # an index entry naming a command that does not exist resolves nothing and is
 # checked by nothing.
 #
-# This compares two sets: the match arms in crates/cli/src/main.rs, and the
+# This compares two sets: the match arms in crates/zeroship-cli/src/main.rs, and the
 # comma-separated list on the `cli/` row of the AGENTS.md crate index. A command
 # in either set and not the other fails the gate.
 #

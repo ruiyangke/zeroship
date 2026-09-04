@@ -75,7 +75,7 @@
 //! SQLite is an embedded temp file, so every test here always runs for real. There is
 //! no `ZERO_MIGRATE_*` gate to forget and no skip banner that could read as a pass -
 //! the one respect in which this file is stronger than consumer 2's
-//! `tests/env_db_ts_matches_the_server_pg.rs`.
+//! `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`.
 
 use crate::support;
 
@@ -252,7 +252,7 @@ async fn indexes(backend: &SqliteBackend, table: &str) -> Vec<(String, bool)> {
 /// `sdk_schemas`. A fixture carrying one of them would exercise a different arm and
 /// prove nothing about this leg. The charter is `no_inject` for the same reason: an
 /// injected table cannot reach the SDK-value arm at all, which
-/// `tests/rename_column_indexed_sqlite.rs` pins separately.
+/// `crates/zeroship-migrate/tests/rename/rename_column_indexed_sqlite.rs` pins separately.
 const CREATE: &str = r#"{"ir_version":1,"name":"create_orders","owner_app":"app_rebuild_field_defs","ops":[
   {"op":"createTable","name":"accounts","columns":[{"name":"id","type":"text","nullable":false},{"name":"label","type":"text"}],"primaryKey":["id"]},
   {"op":"createTable","name":"orders","columns":[{"name":"id","type":"text","nullable":false},{"name":"note","type":"text"},{"name":"code","type":"text","nullable":false,"unique":true},{"name":"qty","type":"int","nullable":false,"default":{"literal":{"value":1}}},{"name":"owner_id","type":"text","references":{"table":"accounts","column":"id","onDelete":"cascade"}}],"primaryKey":["id"]}
@@ -824,7 +824,7 @@ const DIVERGENCE_STREAMS: &[(&str, &str, &str)] = &[
 /// put its difference into a rebuilt `CREATE TABLE`.
 ///
 /// Read this as narrowly as it is written. It does NOT say the move changes nothing - it
-/// changes five things, and `tests/gen_types_field_defs_from_the_fold.rs` pins all of
+/// changes five things, and `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs` pins all of
 /// them offline. It says the changes are confined to `schema.runtime.json`, and that the
 /// leg which copies rows is not among the consumers whose answer moves.
 ///

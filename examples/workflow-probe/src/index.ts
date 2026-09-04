@@ -165,9 +165,9 @@ const CASES: Record<string, { workflow: string; input: unknown }> = {
 // polled to completion inside a single `wf.run` mutation, which worked under
 // `pnpm dev` and returned `{"message":"request timed out"}` on every case
 // deployed: `zeroship serve` leaves the per-request wall clock unbounded
-// (crates/runtime/src/core/serve.rs, `wall_timeout: None`) while a deployed app
+// (crates/zeroship-runtime/src/core/serve.rs, `wall_timeout: None`) while a deployed app
 // inherits FREE_TIER_RUNTIME_LIMITS -- 5s wall, 50ms CPU
-// (crates/core/src/types.rs). Driving the poll loop from the caller keeps every
+// (crates/zeroship-core/src/types.rs). Driving the poll loop from the caller keeps every
 // request short and keeps the two sides on the same sequence of operations.
 
 export const start = mutation(

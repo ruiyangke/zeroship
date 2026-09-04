@@ -3,8 +3,8 @@ import { table, t, now, grant } from "@zeroship/migrate";
 // The workflow scheduler store was created at RUNTIME, which no least-privilege
 // deployment can do.
 //
-// crates/workflow-scheduler/src/store.rs builds a provision_sql() that opens with
-// `CREATE SCHEMA IF NOT EXISTS`, and crates/control/src/cron/workflow_engine.rs
+// crates/zeroship-workflow-scheduler/src/store.rs builds a provision_sql() that opens with
+// `CREATE SCHEMA IF NOT EXISTS`, and crates/zeroship-control/src/cron/workflow_engine.rs
 // called it on every tick. Postgres checks the database-level CREATE privilege
 // BEFORE the IF NOT EXISTS existence short-circuit, so the statement fails even
 // when the schema already exists.

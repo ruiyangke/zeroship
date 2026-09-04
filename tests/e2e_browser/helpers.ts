@@ -36,7 +36,7 @@ export function appSlug(kind: AppKind): string | null {
  * Browser-facing URL for a deployed app. `<slug>.localhost` resolves to
  * 127.0.0.1 in every modern browser, and the gateway extracts the slug from
  * the first Host subdomain after stripping `:port`
- * (crates/gateway/src/router/dispatch.rs::extract_app_name).
+ * (crates/zeroship-gateway/src/router/dispatch.rs::extract_app_name).
  */
 export function appUrl(kind: AppKind, path = "/"): string {
   const s = stack();

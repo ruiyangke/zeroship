@@ -147,7 +147,7 @@ mod tests {
     //! release-on-unheld no-panic. The borrow-across-await discipline is
     //! not testable at unit level (it's a compile-time property of the
     //! consumer); the higher-level integration tests in
-    //! `tests/sqlite_integration.rs` exercise the actor-level borrow
+    //! `crates/zeroship-plugin-db/tests/sqlite_integration.rs` exercise the actor-level borrow
     //! discipline end-to-end.
 
     use super::*;

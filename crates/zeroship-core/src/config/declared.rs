@@ -27,7 +27,7 @@
 //! One class, [`EnvClass::Platform`], names exactly the settings that have not
 //! made that trip yet. It is the honest record of an incomplete conversion
 //! rather than a place to hide: read its documentation before using it, and
-//! `crates/config-contract/tests/declared_env.rs` holds its census to a ceiling
+//! `crates/zeroship-config-contract/tests/declared_env.rs` holds its census to a ceiling
 //! that only comes down.
 
 use std::ffi::OsString;
@@ -84,7 +84,7 @@ pub enum EnvClass {
     /// they would have been a lie about who owns them. Recorded here they are
     /// counted, located, and impossible to confuse with a converted setting.
     ///
-    /// `crates/config-contract/tests/declared_env.rs` asserts the count only
+    /// `crates/zeroship-config-contract/tests/declared_env.rs` asserts the count only
     /// shrinks. Do not add to it without saying why the generated declaration
     /// is not possible in the same change.
     Platform,

@@ -164,7 +164,7 @@ zeroship-metering = { workspace = true }
 
 # Insertion-ordered map — used by the rpc::superjson encoder to build
 # `Meta::values` and `WithChildren` child maps, matching the wire-order
-# contract Wave A pinned in `crates/core/src/superjson.rs`.
+# contract Wave A pinned in `crates/zeroship-core/src/superjson.rs`.
 indexmap = { workspace = true }
 
 # UUIDv7 keys for the rpc::abort registry — `(app_id, request_id)` keys

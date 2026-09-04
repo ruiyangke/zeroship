@@ -2,7 +2,7 @@
 //!
 //! The registry backing `getStream` / `readChunk` / `cancelStream` is a
 //! `thread_local!`, and the worker runs MANY apps' isolates on ONE OS thread
-//! (`crates/worker/src/cache.rs`; the invariant is stated in AGENTS.md under
+//! (`crates/zeroship-worker/src/cache.rs`; the invariant is stated in AGENTS.md under
 //! "V8 per thread"). So the registry — and the monotonic id counter that
 //! makes its ids enumerable from 1 — is shared by every app on that thread.
 //!
@@ -49,7 +49,7 @@ fn module(source: &str) -> Vec<ModuleEntry> {
 /// Build a real `Runtime` for `app_id` over `dir`, with the REAL
 /// `StoragePlugin` registered (same path the worker takes).
 ///
-/// The trailing `exit_isolate()` mirrors `crates/worker/src/cache.rs:405`
+/// The trailing `exit_isolate()` mirrors `crates/zeroship-worker/src/cache.rs:405`
 /// ("Exit isolate so other isolates can be created/entered on this thread") —
 /// it is what lets several isolates coexist on one OS thread, and therefore
 /// what makes a `thread_local!` registry shared across apps.
@@ -74,8 +74,8 @@ fn build_runtime(app_id: &str, dir: &Path, source: &str) -> Runtime {
 ///
 /// `enter_isolate` / `exit_isolate` around the dispatch is mandatory for
 /// multi-isolate-per-thread callers (`Runtime::enter_isolate` doc,
-/// `crates/runtime/src/core/runtime.rs:492`) and is exactly what
-/// `crates/worker/src/handler.rs:386-396` does per request.
+/// `crates/zeroship-runtime/src/core/runtime.rs:492`) and is exactly what
+/// `crates/zeroship-worker/src/handler.rs:386-396` does per request.
 async fn fetch(runtime: &Runtime, headers: &[(String, String)]) -> (u16, String) {
     let env = EnvSnapshot::empty();
     let ctx = RequestCtx::new(CancelFlag::new());

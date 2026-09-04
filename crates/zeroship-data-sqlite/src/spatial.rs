@@ -95,7 +95,7 @@ pub(crate) fn haversine_m(a: GeoPoint, b: GeoPoint) -> f64 {
 /// against any caller that passes a raw string.
 ///
 /// **No production caller.** The integration test in
-/// `tests/sqlite_integration.rs` constructs the DDL inline using the same
+/// `crates/zeroship-plugin-db/tests/sqlite_integration.rs` constructs the DDL inline using the same
 /// shape.
 #[allow(dead_code)]
 pub(crate) fn sqlite_geopoint_column_ddl(name: &str) -> String {

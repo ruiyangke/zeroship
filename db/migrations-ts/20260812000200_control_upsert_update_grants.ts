@@ -6,11 +6,11 @@ import { grant } from "@zeroship/migrate";
 // ON CONFLICT ... DO UPDATE, PostgreSQL requires UPDATE privilege to PLAN that,
 // and the role was granted only select/insert/delete.
 //
-// 1. zeroship.app_vars -- crates/control/src/env_store.rs:236, the env-var write
+// 1. zeroship.app_vars -- crates/zeroship-control/src/env_store.rs:236, the env-var write
 //    path behind `zeroship var set`. The upsert sits inside a CTE whose outer
 //    statement bumps apps.env_version, so the whole creator-facing operation
 //    failed under least privilege.
-// 2. zeroship.token_revocations -- crates/control/src/oauth_grants_handlers.rs:223,
+// 2. zeroship.token_revocations -- crates/zeroship-control/src/oauth_grants_handlers.rs:223,
 //    which revokes a token family when an OAuth grant is deleted.
 //
 // MEASURED 2026-08-12 as zeroship_control, each in its own transaction:

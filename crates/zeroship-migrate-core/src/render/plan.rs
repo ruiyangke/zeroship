@@ -135,7 +135,7 @@ pub struct AppliedPlan {
     /// This answers whether reversing SQL EXISTS, not whether the original state
     /// can be restored. A dropped column is structurally reversible and its values
     /// are gone for good, and this still reports `true` - see
-    /// `tests/plan_rollbackable.rs`, which pins both readings. A host presenting
+    /// `crates/zeroship-migrate/tests/fold_offline/plan_rollbackable.rs`, which pins both readings. A host presenting
     /// this to an operator as "safe to undo" is over-reading it.
     ///
     /// [`rollback_assessment`](Self::rollback_assessment) answers the question a

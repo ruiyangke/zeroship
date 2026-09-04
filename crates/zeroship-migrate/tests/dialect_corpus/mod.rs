@@ -510,7 +510,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     // shape could never apply on any dialect and the row measured nothing. The
     // increment makes the representative executable; the refusal that the
     // option-less shape now earns is pinned by
-    // `tests/alter_sequence_needs_an_action.rs`.
+    // `crates/zeroship-migrate/tests/refusals/alter_sequence_needs_an_action.rs`.
     c.push((
         "alterSequence",
         "base",
@@ -1139,7 +1139,7 @@ pub fn corpus() -> Vec<(&'static str, &'static str, Op)> {
     // representative aimed at a table could therefore never apply anywhere, so it
     // measured the engine's missing gate rather than the declaration. The gate now
     // exists (`IrLowerError::InsteadOfTriggerTargetIsATable`) and is pinned by
-    // `tests/instead_of_trigger_needs_a_view.rs`; this row measures the
+    // `crates/zeroship-migrate/tests/refusals/instead_of_trigger_needs_a_view.rs`; this row measures the
     // declaration, which is about the timing, not the target.
     c.push((
         "createTrigger",

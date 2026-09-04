@@ -12,7 +12,7 @@
 //! Instead they live behind a single `DbPlatform` handle that is set on
 //! the `Db` object under a **V8 private symbol** (`ZS_PLATFORM`, minted
 //! once per isolate by the runtime — see
-//! `crates/runtime/src/core/init.rs`). A `v8::Private` is a Rust-only
+//! `crates/zeroship-runtime/src/core/init.rs`). A `v8::Private` is a Rust-only
 //! construct: it is NOT a `v8::Symbol`, cannot be used as a property key
 //! from JS, and is invisible to `Object.keys` /
 //! `Object.getOwnPropertyNames` / `Object.getOwnPropertySymbols` /

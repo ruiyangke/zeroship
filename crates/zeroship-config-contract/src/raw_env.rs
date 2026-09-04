@@ -447,7 +447,7 @@ impl<'ast> Visit<'ast> for Reads<'_> {
     ///
     /// `syn`'s default walk stops at the token stream, so
     /// `assert!(std::env::var(NAME).is_err())` was invisible to this scanner
-    /// until 2026-08-12: `crates/plugin-storage/src/limits.rs:198` was a real
+    /// until 2026-08-12: `crates/zeroship-plugin-storage/src/limits.rs:198` was a real
     /// raw read that the file's other read shadowed in every count. A gate
     /// whose blind spot is "wrap it in `assert!`" is not a gate.
     ///

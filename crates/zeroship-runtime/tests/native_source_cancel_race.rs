@@ -1,5 +1,5 @@
 //! Diagnosis for the hypothesised pull/cancel double-borrow race in
-//! `crates/runtime/src/web/streams/readable_default_controller.rs`'s
+//! `crates/zeroship-runtime/src/web/streams/readable_default_controller.rs`'s
 //! `set_up_readable_stream_default_controller_native`.
 //!
 //! The hypothesis: both the `pull` and `cancel` `AlgorithmFn` closures

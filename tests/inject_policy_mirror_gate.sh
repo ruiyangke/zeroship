@@ -52,7 +52,7 @@
 #   lose their system columns. No text comparison of the remaining copies would
 #   have seen that either. Arm 2 counts the consumers.
 #
-#   Arm 2 is not hypothetical. crates/plugin-db/tests/parity/mod.rs was NEVER one
+#   Arm 2 is not hypothetical. crates/zeroship-plugin-db/tests/parity/mod.rs was NEVER one
 #   of the six copies, correctly - it include_str!s plugin-db's ceiling instead of
 #   restating the rule, which is why the old gate had nothing to compare and said
 #   nothing about it. Moving the rule out of that ceiling would have silently left
@@ -200,7 +200,7 @@ SELF="tests/inject_policy_mirror_gate.sh"
 #
 # THIS SAID FIVE UNTIL 2026-09-01, and had been wrong since 27f4d5f45 ("feat(db):
 # compile the operator charter into the worker") added
-# crates/zeroship-plugin-db/src/system_shape_charter.rs as the sixth. That is the
+# crates/zeroship-data-engine/src/system_shape_charter.rs as the sixth. That is the
 # failure mode the asserted counts exist to produce - a new consumer is supposed
 # to fail this gate until someone states it - so the red was the gate working.
 # What it also shows is that the count and the prose above it rot together: the

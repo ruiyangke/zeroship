@@ -26,7 +26,7 @@ struct SettingsGuard {
 }
 
 /// Mirrors `DEFAULT_GLOBAL_MAX_SOCKETS` in
-/// `crates/runtime/src/transport/net_policy.rs`. Tests passing `None` want the
+/// `crates/zeroship-runtime/src/transport/net_policy.rs`. Tests passing `None` want the
 /// cap out of the way, not a specific number.
 const DEFAULT_GLOBAL_MAX_SOCKETS: u32 = 4096;
 

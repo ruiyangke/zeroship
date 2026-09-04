@@ -24,7 +24,7 @@ import { env } from "zeroship";
  * method returns a Promise; validation failures (bad key/value/args)
  * throw synchronously as `TypeError`s before the Promise is created.
  *
- * Wire contract (verified against `crates/plugin-kv/src/dispatch.rs`):
+ * Wire contract (verified against `crates/zeroship-plugin-kv/src/dispatch.rs`):
  * - `get` resolves the raw stored string, or JS `null` if missing — it
  *   does NOT JSON-wrap, so a single `JSON.parse` round-trips a value the
  *   SDK stored via `JSON.stringify`.

@@ -255,7 +255,7 @@ pub enum AuxiliaryObject {
 /// a target that declares [`Capability::NonBtreeIndexMethod`] indexes the column in
 /// place and owns no extra object. Core resolving a backend by product name here would
 /// bake one backend's answer into the vocabulary every backend shares - the rule
-/// `tests/dialect_matrix/core_names_no_vendor_at_all.rs` exists to hold, and which the
+/// `crates/zeroship-migrate/tests/dialect_matrix/core_names_no_vendor_at_all.rs` exists to hold, and which the
 /// first draft of this function broke with a `dialect.as_str() != "sqlite"` compare.
 fn auxiliary_objects(
     vendors: VendorSet,
@@ -590,7 +590,7 @@ pub fn render_schema_export(
     // catalog rules, so the two refusal sets are equal - measured over every
     // prefix/dialect pair in the corpus, with none on which one refused and the other
     // did not. Pinned as a biconditional by
-    // `tests/gen_types_field_defs_from_the_fold.rs`.
+    // `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`.
     //
     // "By construction" no longer holds as the REASON, and the change that broke it is
     // worth naming here. The catalog rules used to run to completion inside

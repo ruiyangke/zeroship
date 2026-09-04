@@ -59,7 +59,7 @@
 #     numbers cannot supply it.
 #   - Whether a skip SHOULD be a skip. Most of the sixteen were converted to
 #     hard failures rather than given a marker, because Postgres and Redis are
-#     not optional for this workspace (crates/test-support/src/lib.rs states
+#     not optional for this workspace (crates/zeroship-test-support/src/lib.rs states
 #     that policy). This gate does not make that judgement; it only refuses the
 #     third option, of skipping without saying so.
 #   - Test code outside crates/ and libs/. sdks/ is TypeScript and has its own
@@ -189,7 +189,7 @@ STATUS=0
 # THE OTHER WAY A SKIP GOES UNCOUNTED, and the one arm here whose subject is
 # non-empty by construction. The census enumerates a run log by ONE token, and
 # that token is written out by hand in several places: the authority
-# (`crates/test-support/src/lib.rs`), a verbatim `SKIP_MARKER` const in each
+# (`crates/zeroship-test-support/src/lib.rs`), a verbatim `SKIP_MARKER` const in each
 # standalone driver that keeps its own announcer, an inlined copy in a
 # `format!`, and `ZS_SKIP_MARKER` in the census itself. One character wrong in
 # any of them and every skip announced through that copy leaves the census

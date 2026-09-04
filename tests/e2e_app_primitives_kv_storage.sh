@@ -9,7 +9,7 @@
 #   1. Stand up a fresh ephemeral Postgres + deploy/ops/postgres-init.sql + the FULL
 #      platform migration set. (Control still needs a DB for app CRUD + deploy.)
 #   2. Stand up a throwaway Redis (env.kv's multi-node backend is Redis, NOT
-#      embedded redb — see crates/worker/src/cache.rs create_plugins()).
+#      embedded redb — see crates/zeroship-worker/src/cache.rs create_plugins()).
 #   3. Boot control + worker + gateway with generated keys. The worker gets
 #      `ZEROSHIP_WORKER_KV_URL=redis://...` (enables env.kv) AND `--storage-url <path|s3://…>`
 #      (enables env.storage). Without those inputs the namespaces simply are

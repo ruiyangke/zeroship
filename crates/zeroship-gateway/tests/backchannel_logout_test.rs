@@ -28,7 +28,7 @@
 //!
 //! The handler-level path is exercised below with signed logout tokens and a
 //! test JWKS endpoint; for verifier-only checks see
-//! `crates/core/src/logout_token.rs::tests`.
+//! `crates/zeroship-core/src/logout_token.rs::tests`.
 
 use std::sync::Arc;
 

@@ -177,7 +177,7 @@ trap cleanup EXIT
 # Shared with the other dev-vs-deployed harnesses; see tests/lib/binary_freshness.sh
 # for the false finding that produced it. `zeroship` (the CLI) is in the list
 # because `pnpm dev` spawns `zeroship serve` as the dev runtime, and
-# crates/runtime/src/core/dev_auth.rs -- the dev half of THIS comparison -- ships
+# crates/zeroship-runtime/src/core/dev_auth.rs -- the dev half of THIS comparison -- ships
 # inside it.
 # shellcheck source=lib/binary_freshness.sh
 source "$ROOT/tests/lib/binary_freshness.sh"
@@ -213,7 +213,7 @@ probe() {
   # envelope carries a `stack` key AT ALL is a contract, and `<STACK>` keeps
   # exactly that in the diff -- present on one side only still diverges.
   #
-  # AS OF THE STACK STRIP in crates/runtime/src/core/dispatch.rs, no tier emits
+  # AS OF THE STACK STRIP in crates/zeroship-runtime/src/core/dispatch.rs, no tier emits
   # a `stack` in an RPC error body at all -- the strip is unconditional and the
   # `AUTH_INSECURE_DEV` escape hatch that used to lift it is deleted -- so this
   # substitution is now a TRIPWIRE rather than a normaliser.

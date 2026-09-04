@@ -1,7 +1,7 @@
 /**
  * Gateway transport — the wire calls the SDK makes against the SAME-ORIGIN
  * `/__zeroship/auth/*` endpoints. Every shape here matches the gateway contract
- * exactly (`crates/gateway/src/auth_token.rs`, `crates/gateway/src/browser_auth.rs`).
+ * exactly (`crates/zeroship-gateway/src/auth_token.rs`, `crates/zeroship-gateway/src/browser_auth.rs`).
  *
  *   - `GET  /__zeroship/auth/authorize`  — query params: code_challenge (S256),
  *     code_challenge_method=S256, state, nonce, scope, redirect_uri, prompt?,

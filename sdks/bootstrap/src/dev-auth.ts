@@ -6,8 +6,8 @@
  * ## Contract parity (dev mirrors prod exactly)
  *
  * In production the **gateway** serves the same-origin `/__zeroship/auth/*` endpoints
- * the `@zeroship/auth` browser client drives (`crates/gateway/src/browser_auth.rs`,
- * `crates/gateway/src/auth_token.rs`), owns the `__Host-zeroship_app_session` cookie,
+ * the `@zeroship/auth` browser client drives (`crates/zeroship-gateway/src/browser_auth.rs`,
+ * `crates/zeroship-gateway/src/auth_token.rs`), owns the `__Host-zeroship_app_session` cookie,
  * and HMAC-signs the resolved identity into the request-bound `ZeroShip-User`
  * header the worker decodes into server-side `env.auth.getUser()` /
  * `currentUser()`.
@@ -38,7 +38,7 @@
  * The `__zeroship_dev_session` cookie value is `base64url(user_json) "." hex-hmac`,
  * signed with the per-dev-server secret `ZEROSHIP_DEV_AUTH_SECRET` (the Vite
  * plugin generates it and passes it to the spawned `zeroship serve` child). The
- * runtime's dev serve path (`crates/runtime/src/core/dev_auth.rs`) reads that
+ * runtime's dev serve path (`crates/zeroship-runtime/src/core/dev_auth.rs`) reads that
  * cookie BEFORE dispatch, verifies the HMAC, and threads the decoded
  * `user_json` through the SAME `call_fetch_handler_with_user` path the worker
  * uses for the gateway header — so `env.auth.getUser()` and `currentUser()`
@@ -114,7 +114,7 @@ const DEV_SESSION_COOKIE = "__zeroship_dev_session";
 /**
  * Dev login CSRF cookie — the cookie half of a double-submit pair with the
  * hidden `csrf` form field. Same *contract* AND same mechanism as prod's
- * `__Host-zsidp_csrf` (`crates/auth/src/csrf.rs`): the GET renders the token
+ * `__Host-zsidp_csrf` (`crates/zeroship-auth/src/csrf.rs`): the GET renders the token
  * into BOTH the cookie and the field server-side, so no JS read is needed and
  * the cookie is `HttpOnly` on both tiers. The POST compares cookie vs field.
  *
@@ -140,7 +140,7 @@ const DEV_CSRF_COOKIE = "__zeroship_dev_csrf";
  *
  * ## Why the result MUST stay under 15 characters
  *
- * `crates/auth/src/ui/signup.rs` REFUSES any password shorter than 15
+ * `crates/zeroship-auth/src/ui/signup.rs` REFUSES any password shorter than 15
  * characters, so a dev password below that bound is a credential that works
  * locally and CANNOT EXIST in production. `tests/e2e_dev_vs_deployed_login.sh`
  * measures exactly that: its `policy.short_password` assertion submits the dev
@@ -282,7 +282,7 @@ function hexToBytes(hex: string): Uint8Array {
  * finds out at `pnpm dev` rather than after a deploy.
  *
  * `pws_` + EXACTLY 20 ascii-alphanumerics is `is_pairwise_subject`
- * (crates/core/src/auth/mod.rs:225, `PAIRWISE_SUB_BODY_LEN = 20`). A cookie
+ * (crates/zeroship-core/src/auth/mod.rs:225, `PAIRWISE_SUB_BODY_LEN = 20`). A cookie
  * whose `sub` fails it is hard-rejected at router/auth.rs:972 with
  * `return CookieOutcome::None` - the cookie is discarded, the caller is
  * anonymous, and every `auth: "user"` procedure answers 401 with nothing in the

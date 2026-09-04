@@ -21,7 +21,7 @@
  * The RUNTIME behaviour of the native `MaskedValue` (brand check,
  * `toString` / `toJSON` → masked string, `unmask` success / failure,
  * multi-column unmask, `canUnmask` probe) is exercised by the Rust
- * unit tests in `crates/plugin-db/src/v8_classes/masked_value.rs` and
+ * unit tests in `crates/zeroship-plugin-db/src/v8_classes/masked_value.rs` and
  * the SQLite integration target — they require the V8 + plugin-db
  * runtime, which this Node test harness does not host. The type-level
  * checks below pin the SDK's ambient `declare class MaskedValue` shape.

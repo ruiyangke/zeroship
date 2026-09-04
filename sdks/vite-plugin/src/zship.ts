@@ -36,7 +36,7 @@ import { resolvedPathContains } from "./project-config/index.js";
 const brotliCompressAsync = promisify(brotliCompress);
 const strictUtf8Decoder = new TextDecoder("utf-8", { fatal: true });
 
-// ── Types matching crates/core/src/types.rs ────────────────────────────────
+// ── Types matching crates/zeroship-core/src/types.rs ────────────────────────────────
 
 /** SHA-256 hex (lowercase, 64 chars). */
 type Sha256Hex = string;

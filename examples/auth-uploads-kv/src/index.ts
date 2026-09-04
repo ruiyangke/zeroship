@@ -48,7 +48,7 @@ const RATE_WINDOW_MS = 60_000;
  * not guessed.
  *
  * The runtime's HTTP server caps a REQUEST BODY at 1 MiB
- * (`MAX_BODY_BYTES`, crates/runtime/src/core/serve.rs), and base64 inflates
+ * (`MAX_BODY_BYTES`, crates/zeroship-runtime/src/core/serve.rs), and base64 inflates
  * bytes by 4/3. So the real ceiling on a buffered upload over the JSON RPC
  * wire is ~768 KiB of payload, NOT the 16 MiB the buffered `env.storage.put`
  * would allow. 512 KiB keeps the whole request (~683 KB of base64 plus the

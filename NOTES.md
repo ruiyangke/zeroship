@@ -14,13 +14,13 @@ Every claim below is labelled:
 
 The brief's account is accurate. Confirming each leg independently:
 
-- **VERIFIED** `crates/control/src/device_handlers.rs:665-690`,
+- **VERIFIED** `crates/zeroship-control/src/device_handlers.rs:665-690`,
   `deploy_scopes_for_principal` selects `grant_name` from
   `zeroship.principal_grants` for the principal and intersects it with the
-  requested scopes. `crates/control/src/device_handlers.rs:638-663` calls
+  requested scopes. `crates/zeroship-control/src/device_handlers.rs:638-663` calls
   `ensure_platform_creator_grants` first, so the intersection has something to
   intersect with.
-- **VERIFIED** `crates/auth/src/oidc/device_token.rs:680-706`, the OP device
+- **VERIFIED** `crates/zeroship-auth/src/oidc/device_token.rs:680-706`, the OP device
   redemption arm computes `granted_scopes` from the row's requested scope and
   caps it against `platform_cli_scopes()` - the CLIENT REGISTRATION - and
   nothing else. Its own comment at `:686-702` says so explicitly.
@@ -34,7 +34,7 @@ login-to-deploy path.
 
 ### 1a. It is worse than "narrowing is gone at login"
 
-**VERIFIED** `crates/authn/src/lib.rs:388-421`. Control's bearer verification
+**VERIFIED** `crates/zeroship-authn/src/lib.rs:388-421`. Control's bearer verification
 has two arms:
 
 - `ProviderAuthz::GoTrueRole` (`:409-419`) resolves the principal and calls
@@ -70,14 +70,14 @@ Two consequences the brief names one of:
 1. Auth cannot provision grants (the brief's point).
 2. **Control cannot observe principal creation.** It has SELECT on
    `zeroship.users` and nothing more, and principals are created only by auth
-   (**VERIFIED** `crates/auth/src/store/users.rs:127`,
-   `crates/auth/src/identity/linker.rs:436,503,560,613`,
-   `crates/auth/src/oidc/authorization_code.rs:1526`). This is what kills the
+   (**VERIFIED** `crates/zeroship-auth/src/store/users.rs:127`,
+   `crates/zeroship-auth/src/identity/linker.rs:436,503,560,613`,
+   `crates/zeroship-auth/src/oidc/authorization_code.rs:1526`). This is what kills the
    brief's second candidate outright, not just makes it awkward.
 
 **VERIFIED** there is no auth-to-control call path to hang provisioning on:
 `control_url` in auth is used only to render the Supabase approve URL into the
-device page (`crates/auth/src/ui/device.rs:475`). `ControlEvent` has no auth
+device page (`crates/zeroship-auth/src/ui/device.rs:475`). `ControlEvent` has no auth
 producer (`grep -rln ControlEvent crates/` returns only `core` and `control`).
 
 **VERIFIED** there is no operator API for grants at all. `grep principal_grants`
@@ -88,12 +88,12 @@ delete gives the operator no narrowing surface at all.
 
 ### 2a. The marker semantics that must survive any move
 
-**VERIFIED** `crates/control/src/identity_bridge.rs:63-71,89-107`.
+**VERIFIED** `crates/zeroship-control/src/identity_bridge.rs:63-71,89-107`.
 `ensure_platform_creator_grants` keys "already provisioned" off the existence
 of an `identity_links` row, NOT off the grant count, precisely so that
 "operator revoked everything" is distinguishable from "never provisioned" and a
 re-login does not resurrect revoked grants. Pinned by
-`crates/control/tests/device_handlers_test.rs:2440+`,
+`crates/zeroship-control/tests/device_handlers_test.rs:2440+`,
 `device_token_keeps_reduced_grants_when_identity_link_already_seeded`.
 
 This is load-bearing. Any relocation of provisioning that keys off the grant
@@ -180,7 +180,7 @@ Properties:
 
 - Needs no new privilege anywhere. `zeroship_control` already has SELECT on
   both tables and `authn` already reads `principal_grants` on the GoTrue arm
-  (`crates/authn/src/lib.rs:460`), so this is the same query on the other arm.
+  (`crates/zeroship-authn/src/lib.rs:460`), so this is the same query on the other arm.
 - Narrowing becomes IMMEDIATE, not next-login. An operator's DELETE narrows the
   token already in the creator's hand, not merely the next one. That is
   strictly stronger than what commit `5ae8c7f7d` removed.
@@ -199,7 +199,7 @@ depend on `migrated` being able to write. Under the fallback it does not.
 Keep `identity_bridge::ensure_platform_creator_grants` exactly as it is, marker
 semantics and all (section 2a). Move only its CALL SITE, from control's
 `/api/device/token` to control's single bearer convergence point,
-`crates/control/src/authz_guard.rs:173`.
+`crates/zeroship-control/src/authz_guard.rs:173`.
 
 Why that site: once login leaves control, a platform-native principal's first
 bearer request is the first and only moment control sees it. There is no
@@ -211,7 +211,7 @@ attempted once per principal and the steady state is pure SELECT.
 
 ### 4.3 The objection I am overriding, named
 
-`crates/control/src/identity_bridge.rs:3-4` says JIT provisioning "is
+`crates/zeroship-control/src/identity_bridge.rs:3-4` says JIT provisioning "is
 deliberately a device-approval write path, not a bearer authz read path". I am
 contradicting that sentence and must say why rather than quietly edit it:
 
@@ -289,7 +289,7 @@ Section 4.1 as written would have capped EVERY OAuth token to
 `PLATFORM_CLI_ISSUABLE_SCOPES` is five scopes, so once a principal is seeded,
 any token needing `env:write`, `billing:read`, `team:write` or `account:*` -
 the console's surface, not the CLI's - would be silently narrowed to nothing.
-The constant's own doc comment in `crates/core/src/device_grant.rs:55-58` says
+The constant's own doc comment in `crates/zeroship-core/src/device_grant.rs:55-58` says
 what it is: the ceiling registered for the FIRST-PARTY CLI CLIENT.
 
 So the intersection runs only when `client_id == PLATFORM_CLI_CLIENT_ID`. That
@@ -332,8 +332,8 @@ compose stack. Its assertions are stated in section 4.5.
 ### 6.2 The red proof, and why it nearly did not happen
 
 Both new tests were confirmed to FAIL without the fix, by reverting
-`crates/authn/src/lib.rs`, `crates/control/src/authz_guard.rs` and
-`crates/control/src/device_handlers.rs` and re-running the same binary:
+`crates/zeroship-authn/src/lib.rs`, `crates/zeroship-control/src/authz_guard.rs` and
+`crates/zeroship-control/src/device_handlers.rs` and re-running the same binary:
 
 ```
 17 passed; 2 failed        (fix reverted)

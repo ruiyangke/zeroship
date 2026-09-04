@@ -257,7 +257,7 @@ pub fn validate_pairwise_salt(label: &str, value: &str) -> Result<(), String> {
 ///
 /// `label` is the caller's operator-facing spelling, for the same reason as
 /// [`validate_stash_key`]. The bare `WORKER_KEY` it used to interpolate is not
-/// settable: the identity is declared in `crates/config-macros/src/shared.rs`
+/// settable: the identity is declared in `crates/zeroship-config-macros/src/shared.rs`
 /// and projects to `ZEROSHIP_WORKER_KEY`.
 ///
 /// # Errors
@@ -523,8 +523,8 @@ pub fn resolve_secret(raw: &str) -> Result<String, SecretError> {
 /// host modes silently downgraded every credential in the deployment with no
 /// signal at all. Refusing is what ssh does with a private key and what the
 /// four loaders in this tree that already check do
-/// (`crates/gateway/src/signing.rs`, `crates/auth/src/oidc/{refresh,signing}.rs`,
-/// `crates/authn/src/lib.rs`, all `mode & 0o077 != 0`); a warning in a boot log
+/// (`crates/zeroship-gateway/src/signing.rs`, `crates/auth/src/oidc/{refresh,signing}.rs`,
+/// `crates/zeroship-authn/src/lib.rs`, all `mode & 0o077 != 0`); a warning in a boot log
 /// is a signal nobody reads.
 ///
 /// The mode is taken from the OPEN HANDLE, not from the path. Stat-then-open
@@ -780,7 +780,7 @@ mod tests {
     /// THE DEFECT. Three validators interpolated a bare `STASH_SIGNING_KEY`,
     /// `PAIRWISE_SALT` and `WORKER_KEY` into their refusals. None of those is a
     /// variable any binary reads: the shared identities in
-    /// `crates/config-macros/src/shared.rs` project to `ZEROSHIP_WORKER_KEY`
+    /// `crates/zeroship-config-macros/src/shared.rs` project to `ZEROSHIP_WORKER_KEY`
     /// and `ZEROSHIP_PAIRWISE_SALT`, and the stash key is not shared at all -
     /// it is `gateway.stash_signing_key` and `auth.stash_signing_key`, two
     /// different variables behind one validator. An operator who followed any
@@ -1157,7 +1157,7 @@ mod tests {
     ///
     /// The policy is REFUSE, not warn. It is what ssh does with a private key,
     /// it is what the two loaders in this tree that already check
-    /// (`crates/gateway/src/signing.rs` and `crates/auth/src/oidc/refresh.rs`,
+    /// (`crates/zeroship-gateway/src/signing.rs` and `crates/zeroship-auth/src/oidc/refresh.rs`,
     /// both `mode & 0o077 != 0`) already do, and a warning in a boot log is a
     /// signal nobody reads.
     #[cfg(unix)]

@@ -8,12 +8,12 @@
 # Nothing in CI ran `cargo doc`, so an intra-doc link naming a deleted or
 # renamed item was invisible. Two that survived that way, both found 2026-08-07:
 #
-#   crates/control/src/refund.rs explained the native refund rail by pointing at
+#   crates/zeroship-control/src/refund.rs explained the native refund rail by pointing at
 #   `metering::provider::native::NativeProvider` - deleted in f975eae8b, whose
 #   own commit message records the successor ("reshape native into
 #   lite/openmeter/stripe_meters").
 #
-#   crates/control/src/billing_read.rs promised that a pricing failure maps to
+#   crates/zeroship-control/src/billing_read.rs promised that a pricing failure maps to
 #   `RegistryError::Pricing`. No such variant exists and none ever did; the
 #   function returns `FxUnresolved`.
 #
@@ -112,7 +112,7 @@
 # First, the decision was not open, it was already made HERE: this gate builds
 # both configurations and demands zero in each, so neither is privileged, and
 # a cfg-gated internal must be a code span because that is the only construct
-# correct in both. The note at crates/plugin-db/src/backend/mod.rs that framed
+# correct in both. The note at crates/zeroship-data-engine/src/backend/mod.rs that framed
 # it as undecided predates this file and said so explicitly ("zeroship has no
 # doc gate today, so nothing currently encodes either answer").
 #

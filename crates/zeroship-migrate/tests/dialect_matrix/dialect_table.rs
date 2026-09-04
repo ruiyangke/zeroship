@@ -8,7 +8,7 @@
 //! field per vendor. That keying is the point: a fourth backend adds a column to
 //! the sidecar and nothing here, in the generator, or in core changes shape.
 //!
-//! Which test proves what: `tests/dialect_table_faithfulness.rs` proves the
+//! Which test proves what: `crates/zeroship-migrate/tests/dialect_matrix/dialect_table_faithfulness.rs` proves the
 //! corpus ⟷ table bijection and the sidecar ⟷ table transcription. The integration
 //! test below compares all generated cells with the registered backends' required
 //! policies. `op_support_matrix.rs` is the behavioural gate;

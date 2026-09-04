@@ -7,7 +7,7 @@
 // Single-arg dispatch: the unwrapped `json` value is the handler's
 // argument (or `undefined` for no-arg procedures).
 //
-// Mirrors the scenarios in `crates/runtime/benches/scenarios.js` but
+// Mirrors the scenarios in `crates/zeroship-runtime/benches/scenarios.js` but
 // goes through the real vite-plugin transform → synthetic SSR entry,
 // so the dispatch path matches what real apps actually run.
 

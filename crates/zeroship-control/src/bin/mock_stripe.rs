@@ -2,7 +2,7 @@
 //! (`tests/e2e_metering_billing.sh`).
 //!
 //! This is the SHELL-harness peer of the in-process mock-Stripe used by
-//! `crates/control/tests/billing_reconcile_test.rs`. It reuses the SAME
+//! `crates/zeroship-control/tests/billing_reconcile_test.rs`. It reuses the SAME
 //! Stripe-wire idiom — a real `compio::net::TcpListener` speaking HTTP/1.1
 //! that parses Stripe's form/JSON create endpoints, RECORDS every request
 //! (method, path, Idempotency-Key, Authorization, body) and replays the

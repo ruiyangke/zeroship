@@ -23,7 +23,7 @@
 # SOURCED, not executed. Requires the caller's pass()/fail() helpers.
 # ============================================================================
 
-# The fixed phrase crates/metering/src/outbox.rs prints in the disabled arm
+# The fixed phrase crates/zeroship-metering/src/outbox.rs prints in the disabled arm
 # (`zeroship_metering::OUTBOX_DISABLED_LOG`). Spelled here once so a rename on
 # the Rust side is one grep away from every harness that depends on it.
 USAGE_OUTBOX_DISABLED_LOG="usage-event outbox DISABLED"

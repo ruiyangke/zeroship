@@ -48,7 +48,7 @@
 //!
 //! * a variant `SQLite` **refuses** is a typed error naming the metric, from
 //!   `SQLite`'s own module - which is what
-//!   `crates/zeroship-plugin-db/src/backend/sqlite/vector.rs:61`
+//!   `crates/zeroship-data-sqlite/src/vector.rs:61`
 //!   (`reject_inner_product`) already does, returning
 //!   `vector_unsupported_metric`;
 //! * a variant that **renders to nothing** would return the rows a cosine
@@ -69,14 +69,14 @@
 //!   (`crates/zeroship-schema/src/query.rs:597`, enforced at `:4964`);
 //! * the `SQLite` arm has **no cap at all** - `build_vector_search_sql` never
 //!   calls the validator and formats `k` straight into the statement
-//!   (`crates/zeroship-plugin-db/src/backend/sqlite/vector.rs:117`).
+//!   (`crates/zeroship-data-sqlite/src/vector.rs:117`).
 //!
 //! A `k` of 750 is therefore refused in production and served in dev. Here
 //! there is one bound, it is [`crate::RowLimit`] - the same type and the same
 //! ceiling of 500 the read family already carries, because `MAX_SEARCH_LIMIT`
 //! and `MAX_QUERY_LIMIT` are the same number - and it has **no absent value**,
 //! so the two different caller-side defaults (`k` defaults to 10 at
-//! `crates/zeroship-plugin-db/src/crud/mod.rs:2138`, `near.limit` defaults to
+//! `crates/zeroship-data-engine/src/crud/mod.rs:2138`, `near.limit` defaults to
 //! 100 at `crates/zeroship-schema/src/query.rs:5058`) have nowhere to live.
 
 use crate::ident::Ident;
@@ -286,7 +286,7 @@ impl SearchCriterion {
 /// them, rows at equal distance come back in whatever order the engine
 /// produced, and the two backends do not agree: `PostgreSQL` returns the
 /// index's order and `SQLite` returns the order the worker's sort left them in
-/// (`crates/zeroship-plugin-db/src/backend/sqlite/mod.rs:1524-1532` sorts in
+/// (`crates/zeroship-data-sqlite/src/lib.rs:1524-1532` sorts in
 /// Rust). Equal distances are not exotic - two rows holding the same embedding
 /// tie exactly - and the existing `PostgreSQL` test says so in its own comment,
 /// asserting set membership rather than order because "pgvector distance ties

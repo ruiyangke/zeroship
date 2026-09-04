@@ -16,7 +16,7 @@
 //! mistaken for a column reference - it was written for `ColumnSnapshot::inline_checks`
 //! and it solves the CHECK body identically. The RENAME CARRIER SWEEP applied it, so
 //! the fold now projects `CHECK (("amount_on_hand" > 0))` where it used to project
-//! `CHECK (("qty_on_hand" > 0))`, and `tests/rename_carrier_sweep_pg.rs` pins the
+//! `CHECK (("qty_on_hand" > 0))`, and `crates/zeroship-migrate/tests/rename/rename_carrier_sweep_pg.rs` pins the
 //! literal's survival beside the reference's move. This file's first assertion is
 //! INVERTED rather than relaxed: it now demands the follow it used to forbid.
 //!

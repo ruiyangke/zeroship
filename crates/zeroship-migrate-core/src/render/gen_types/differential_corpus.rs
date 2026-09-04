@@ -81,7 +81,7 @@
 //! # Blessing
 //!
 //! There is deliberately NO re-bless environment variable, matching
-//! `tests/op_fixture_goldens.rs`. A mismatch prints the full measurement so a
+//! `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs`. A mismatch prints the full measurement so a
 //! human can read it; updating [`ROWS`] or [`REACH`] is a hand edit that shows
 //! up in review as one. An easy update affordance is precisely what converts a
 //! corpus into a mirror of whatever the code emits today.
@@ -153,7 +153,7 @@ pub(super) fn read_golden(stem: &str) -> MigrationIr {
 /// drained envelopes, already policy-resolved, and between them they construct
 /// every one of the 56 `Op` variants - so the reach matrix is measured against
 /// production-shaped streams and not only against streams written to please it.
-/// The list is the same one `tests/op_fixture_goldens.rs` owns.
+/// The list is the same one `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` owns.
 pub(super) const STEMS: [&str; 27] = [
     "alter_primary_key",
     "comments_indexes",
@@ -1858,13 +1858,13 @@ fn the_corpus_has_the_shape_it_claims() {
          same in a diff, so the number is stated here. It went 8 -> 5 when the \
          MySQL retype stopped folding the pre-retype physical contract: three rows \
          on one defect, all re-measured to AGREED against a live MySQL oracle \
-         (tests/fold_retype_physical_type_mysql.rs). It went 5 -> 0 with the RENAME \
+         (crates/zeroship-migrate/tests/fold_live/fold_retype_physical_type_mysql.rs). It went 5 -> 0 with the RENAME \
          CARRIER SWEEP, which closed the corpus's last three defects at once rather \
          than one at a time: a CHECK ConstraintSnapshot::definition (the fifth \
          carrier this corpus itself found), IndexSnapshot::predicate and an \
          IndexElementSnapshot::Expr, five rows across two dialects, all re-measured \
-         to AGREED with live oracles in tests/rename_carrier_sweep_pg.rs \
-         (PostgreSQL 18.4) and tests/rename_carrier_sweep_sqlite.rs. \
+         to AGREED with live oracles in crates/zeroship-migrate/tests/rename/rename_carrier_sweep_pg.rs \
+         (PostgreSQL 18.4) and crates/zeroship-migrate/tests/rename/rename_carrier_sweep_sqlite.rs. \
          ZERO IS NOT A CLAIM THAT THE WALKERS ARE CORRECT. It says every \
          disagreement THIS corpus can see is now agreed or recorded as by-design, \
          and its sight is bounded by CASES - the sweep itself found a carrier no \

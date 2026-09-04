@@ -197,7 +197,7 @@ fn async_response() {
     // call_fetch_handler must return Pending for async handlers. The pump
     // then drives the promise to completion and delivers the final
     // SettledFetch via the receiver. This mirrors the idiom `dispatch_http`
-    // uses in crates/runtime/tests/common/mod.rs.
+    // uses in crates/zeroship-runtime/tests/common/mod.rs.
     compio::runtime::Runtime::new().unwrap().block_on(async move {
         init_v8();
         let runtime = Runtime::builder().modules(modules).build();
@@ -725,7 +725,7 @@ fn streaming_async_closes_cleanly() {
 //
 // These lock in the three exports of the user-facing `zeroship` module:
 // `env`, `waitUntil`, `getRequest`. The module is injected by the runtime
-// alongside the bootstrap (see crates/runtime/src/core/init.rs::ZEROSHIP_MODULE_JS).
+// alongside the bootstrap (see crates/zeroship-runtime/src/core/init.rs::ZEROSHIP_MODULE_JS).
 
 #[test]
 fn zeroship_module_env_import() {
@@ -861,7 +861,7 @@ fn zeroship_get_request_returns_request() {
 // function-shape `default.rpc` (the advanced / back-compat path). The
 // bootstrap's WS-subscription path and the kernel's HTTP path both call
 // into this shape. The dict-shape contract is exercised by
-// `crates/runtime/tests/rpc_dispatch.rs`.
+// `crates/zeroship-runtime/tests/rpc_dispatch.rs`.
 
 const SYNTHETIC_ENTRY_PROLOG: &str = r#"
 function _zsErrResponse(status, code, message) {

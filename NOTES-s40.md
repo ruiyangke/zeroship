@@ -2,6 +2,16 @@
 
 Scratch notes. Committed as findings land, before a conclusion exists.
 
+**Dated record, and one of its subjects is gone.** Every measurement below was
+taken against `crates/zeroship-migrate-adapter/`, which was renamed to
+`zeroship-migrate-server` on 2026-08-28 (`8f69c7e53`) - and both the adapter's
+`platform.rs` and its `platform_migrate.rs` test were DELETED the same day in
+`ccda4bb42`, when the platform-migrate binary was replaced by the
+zero-migrate CLI. Those two
+paths are left spelled as they were: repointing them would say a measurement
+was taken against a file that does not exist. `policies/platform.policy.toml`
+DID survive the rename and is cited at its current path below.
+
 ## The collision (restated from the brief, both halves re-verified here)
 
 - `crates/zeroship-migrate-adapter/tests/platform_migrate.rs:735-766` asserts
@@ -19,10 +29,10 @@ Grep over `crates/ libs/` for `ServiceAssertionVerifier` / `PostgresReplayStore`
 / `ReplayStore`:
 
 - `ServiceAssertionVerifier::new` is constructed ONLY in
-  `crates/core/tests/service_assertion_test.rs` and
-  `crates/authn/tests/service_replay_pg_test.rs`.
-- `PostgresReplayStore` is referenced ONLY in `crates/authn/src/service_replay.rs`
-  (its definition) and `crates/authn/tests/service_replay_pg_test.rs`.
+  `crates/zeroship-core/tests/service_assertion_test.rs` and
+  `crates/zeroship-authn/tests/service_replay_pg_test.rs`.
+- `PostgresReplayStore` is referenced ONLY in `crates/zeroship-authn/src/service_replay.rs`
+  (its definition) and `crates/zeroship-authn/tests/service_replay_pg_test.rs`.
 - No service binary (`crates/{worker,gateway,control,auth}`) constructs either.
 
 So the grant list is ANTICIPATORY. That alone does not settle it: the question
@@ -40,7 +50,7 @@ The worker is therefore a CALLEE of both gateway and control, and a callee is
 what verifies. The worker is also replicated by construction (`docker compose
 --scale worker=10`, and section 12 targets ~1000 replicas/service), so
 `InMemoryReplayStore` is explicitly insufficient for it -
-`crates/core/src/service_assertion.rs:51-55` says an in-memory store is NOT
+`crates/zeroship-core/src/service_assertion.rs:51-55` says an in-memory store is NOT
 sufficient for a replicated callee because "single use" degrades to "single use
 per replica".
 
@@ -137,7 +147,7 @@ against sources last edited 10:55:42, checked by mtime rather than assumed.
 - `cargo test --workspace --no-run` -> exit 101, and NOT from this change: every
   error is `couldn't read crates/runtime/tests/wpt/...: No such file or
   directory`, five of them, all under the WPT tree AGENTS.md documents as
-  gitignored and fetched on demand by `crates/runtime/tests/setup-wpt.sh`. This
+  gitignored and fetched on demand by `crates/zeroship-runtime/tests/setup-wpt.sh`. This
   worktree had never run it. Re-run after fetching.
 
 ## Control: the new zone bound DISCRIMINATES, it is not just a probe that ran
@@ -162,7 +172,7 @@ Recorded here as a correction to what this file said before it finished. The
 first run was `WSNORUN_EXIT=101`, and every one of its five errors was
 `couldn't read crates/runtime/tests/wpt/...: No such file or directory` - the
 tree AGENTS.md documents as gitignored and fetched on demand, which this
-worktree had never fetched. After `crates/runtime/tests/setup-wpt.sh` (exit 0)
+worktree had never fetched. After `crates/zeroship-runtime/tests/setup-wpt.sh` (exit 0)
 the same command gives `WSNORUN2_EXIT=0` with `grep -cE '^error'` = 0.
 
 So the 101 was the missing fixture tree, not this change, and it is now measured
@@ -242,7 +252,7 @@ a peer process before running a suite is not a habit I had.
   to `service_authn`, which the migration now creates, plus USAGE for the four
   verifying roles and an explicit REVOKE CREATE. The table grant keeps its exact
   privilege and role lists.
-- `crates/zeroship-migrate-adapter/policies/platform.policy.toml` - the three
+- `crates/zeroship-migrate-server/policies/platform.policy.toml` - the three
   namespace-scoped grants gain `service_authn`, without which lowering refuses
   the table.
 - `crates/zeroship-migrate-adapter/src/platform.rs` - the allowlist test is
@@ -250,7 +260,7 @@ a peer process before running a suite is not a habit I had.
 - `crates/zeroship-migrate-adapter/tests/platform_migrate.rs` - check (7) bounds
   the new zone; the stale `12` becomes the maintained constant; the append probe
   gets a name that sorts last plus a guard that says so when it stops.
-- `crates/authn/src/service_replay.rs`, `crates/authn/tests/service_replay_pg_
+- `crates/zeroship-authn/src/service_replay.rs`, `crates/authn/tests/service_replay_pg_
   test.rs` - the qualified names, and a grant parser that selects the TABLE grant
   by its `kind: "table"` target rather than by being first in the file (the
   migration now has two grants, and the schema one spells `privileges: ["usage"]`
@@ -260,7 +270,7 @@ a peer process before running a suite is not a habit I had.
 
 ## Finding 4: option (a) costs a charter widening, and that is the whole price
 
-`crates/zeroship-migrate-adapter/policies/platform.policy.toml` is the ceiling
+`crates/zeroship-migrate-server/policies/platform.policy.toml` is the ceiling
 the platform migrate path lowers under. Three of its grants -
 `schema.cross_schema` (:69), `schema.create_table` (:74), `schema.rename` (:79) -
 scope to `{ include = ["__ZEROSHIP_PROJECT_SCHEMA__", "public"] }`, and

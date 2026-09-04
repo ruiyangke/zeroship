@@ -1,7 +1,7 @@
 // Runtime-owned DB schema descriptor install (production path).
 //
 // Compiled to `dist/runtime-entry.js` and `include_str!`d by the
-// runtime crate's `crates/runtime/src/core/init.rs`, spliced into the
+// runtime crate's `crates/zeroship-runtime/src/core/init.rs`, spliced into the
 // bootstrap module so it runs INSIDE the module's top-level evaluation
 // — between `import * as user from "./__user__.js"` and the
 // `default.fetch` / `default.rpc` resolution. The post-build step
@@ -10,7 +10,7 @@
 //
 // Stage 7 of the @zeroship/db refactor moved `installSchema` into the
 // `@zeroship/bootstrap` package. This entry dynamic-imports that package
-// (runtime-provided — `crates/runtime/src/core/bootstrap_modules.rs`
+// (runtime-provided — `crates/zeroship-runtime/src/core/bootstrap_modules.rs`
 // satisfies the specifier, so the import resolves synchronously through
 // the microtask checkpoint `load_modules` invokes after
 // `module.evaluate()`).
@@ -61,7 +61,7 @@ declare const globalThis: {
   __zsSchemaReady?: Promise<unknown>;
   // **Migration-first cutover (P5 S3)** — the bundled RuntimeSchemaDescriptor
   // v2 `{ version, collections }`, resolved from `manifest.runtime_descriptor`
-  // and injected by the runtime (`crates/runtime/src/core/init.rs::setup_globals`).
+  // and injected by the runtime (`crates/zeroship-runtime/src/core/init.rs::setup_globals`).
   // Present → the source of truth for schema install; absent → schema-less app.
   __zsRuntimeDescriptor?: Record<string, unknown>;
   [key: string]: unknown;
@@ -121,7 +121,7 @@ const schema = hasDescriptor ? runtimeDescriptorFields(descriptor) : undefined;
 if (hasDescriptor && schema && typeof schema === "object") {
   // Resolve the live env.db handle off the runtime's composite env
   // object. `__zs_env()` is the bootstrap-visible helper
-  // (`crates/runtime/src/core/init.rs::zs_env_callback`) that returns
+  // (`crates/zeroship-runtime/src/core/init.rs::zs_env_callback`) that returns
   // the same v8::Global the request-path passes as the second arg of
   // `fetch(req, env, ctx)`. DbPlugin registration is observable here as
   // the presence of `env.db`; `__zsDbPlatform` is intentionally not a

@@ -20,7 +20,7 @@
 //! test isn't here — sending 256+ MiB through ntex test plumbing
 //! is too slow for unit-test speed. The same code path is
 //! exercised more cheaply by `stream_tmp_tests::cap_exceeded_removes_tmp_file`
-//! in `crates/control/src/api.rs`.
+//! in `crates/zeroship-control/src/api.rs`.
 
 use std::collections::HashMap;
 use std::io::Write;

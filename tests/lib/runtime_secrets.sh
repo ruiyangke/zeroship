@@ -71,12 +71,12 @@ _e2e_keep_or_generate_hex_key() {
 # The harness's own platform OP.
 #
 # Control accepts exactly ONE principal credential: a platform OAuth access
-# token. `crates/core/src/auth_provider/platform.rs` requires an `at+jwt` typ
+# token. `crates/zeroship-core/src/auth_provider/platform.rs` requires an `at+jwt` typ
 # header, an EdDSA signature under a `kid` published in the issuer's JWKS, an
 # `iss` equal to `ZEROSHIP_AUTH_PLATFORM_ISSUER`, and the registered claims
 # `exp iss aud sub iat jti client_id scope`; control then checks the audience
 # against its own `--oauth-audience` and turns `scope` into the token policy
-# (`crates/authn/src/lib.rs`, `oauth_guard_from_bearer`).
+# (`crates/zeroship-authn/src/lib.rs`, `oauth_guard_from_bearer`).
 #
 # The personal access token these harnesses used to sign for themselves is gone
 # along with `zeroship.permission_tokens`, so a harness that needs an authorized
@@ -332,7 +332,7 @@ ZS_PLATFORM_OWNER_APP="zeroship_platform"
 # by this function. `packages/zero-migrate-cli/src/config.ts` (`enforceOwnerOnly`)
 # refuses a config file that supplies a LITERAL `url` and has any bit set in
 # 0o077, naming the mode and the chmod - the same contract the deleted binary got
-# from `crates/core/src/config/secrets.rs`. Measured 2026-08-28 with one variable
+# from `crates/zeroship-core/src/config/secrets.rs`. Measured 2026-08-28 with one variable
 # between the arms: the same file at 0600 is accepted and the run proceeds to the
 # corpus; at 0644 the CLI exits 1 with
 #   config file ... supplies a literal database url and has mode 0644; group and

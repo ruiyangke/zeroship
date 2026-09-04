@@ -142,7 +142,7 @@ describe("devPasswordFor -- the derived dev credential", () => {
   });
 
   test("every derived password stays UNDER 15 characters", () => {
-    // Load-bearing, not cosmetic. crates/auth/src/ui/signup.rs refuses any
+    // Load-bearing, not cosmetic. crates/zeroship-auth/src/ui/signup.rs refuses any
     // password under 15 characters, and tests/e2e_dev_vs_deployed_login.sh's
     // `policy.short_password` row asserts the DEV password is REFUSED by the
     // platform OP -- i.e. that a dev credential works locally and cannot exist
@@ -620,7 +620,7 @@ describe("dev-auth provider — DEV-ONLY by construction (build artifact guard)"
 /**
  * A configured dev-user `id` must be a subject the DEPLOYED gateway will accept.
  *
- * The gateway's `is_pairwise_subject` (crates/core/src/auth/mod.rs:225) requires
+ * The gateway's `is_pairwise_subject` (crates/zeroship-core/src/auth/mod.rs:225) requires
  * `pws_` plus EXACTLY `PAIRWISE_SUB_BODY_LEN` = 20 ascii-alphanumeric chars, and
  * `router/auth.rs:972` HARD-REJECTS a session cookie whose `sub` fails it -
  * `return CookieOutcome::None`, so the caller is anonymous and every

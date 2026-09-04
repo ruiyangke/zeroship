@@ -66,7 +66,7 @@ futures = { workspace = true }
 # Phase 8 U1 — gateway-issued wrapper-token signing key. PKCS#8
 # PEM/DER loader for an Ed25519 private key (`openssl genpkey
 # -algorithm ed25519`). The `pkcs8` + `pem` features pull in the
-# `DecodePrivateKey` trait used by `crates/gateway/src/signing.rs`.
+# `DecodePrivateKey` trait used by `crates/zeroship-gateway/src/signing.rs`.
 ed25519-dalek = { workspace = true, features = ["pkcs8", "pem"] }
 # Phase 3 U4 — per-origin app session store (`auth.gateway_sessions`).
 compio-postgres = { workspace = true, features = ["with-chrono-0_4", "with-serde_json-1"] }

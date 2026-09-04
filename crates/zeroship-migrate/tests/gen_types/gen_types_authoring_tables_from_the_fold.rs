@@ -66,7 +66,7 @@
 //!   same op removed.
 //!
 //! Which side is right is NOT decided here by preference. It is decided by a live
-//! PostgreSQL server in `tests/env_db_ts_primary_key_matches_the_server_pg.rs`, which
+//! PostgreSQL server in `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`, which
 //! applies the migration for real, reads the key out of `pg_catalog`, and asserts
 //! `env.db.ts` declares THAT key. This file's offline arms pin the same answers so
 //! a DB-free run still fails when the artifact regresses.
@@ -81,8 +81,8 @@
 //! measures it, and `attachPartition is PostgreSQL-only` at lowering
 //! (`render/lower.rs`), so PostgreSQL is the only dialect on which the stream is
 //! applicable at all - and there `dropPartition` lowers to `DROP TABLE`, already
-//! live-anchored by `tests/pg_scenarios.rs` scenario 12 and by
-//! `tests/partition_claims_the_relation_namespace_pg.rs::dropping_a_partition_frees_its_name`.
+//! live-anchored by `crates/zeroship-migrate/tests/pg_engine/pg_scenarios.rs` scenario 12 and by
+//! `crates/zeroship-migrate/tests/namespaces/partition_claims_the_relation_namespace_pg.rs::dropping_a_partition_frees_its_name`.
 //! `detachPartition`, whose child survives as a standalone table under the same name,
 //! is the control that stops "remove it" from being applied to the wrong op.
 //!
@@ -548,8 +548,8 @@ fn attached_then(tail: &str) -> Vec<Op> {
 /// On PostgreSQL - the only dialect where `attachPartition` lowers at all
 /// (`render/lower.rs`: "attachPartition is PostgreSQL-only") - `dropPartition` lowers
 /// to `DROP TABLE`, and that the relation genuinely goes is already measured against
-/// a live server by `tests/pg_scenarios.rs` scenario 12 and by
-/// `tests/partition_claims_the_relation_namespace_pg.rs::dropping_a_partition_frees_its_name`.
+/// a live server by `crates/zeroship-migrate/tests/pg_engine/pg_scenarios.rs` scenario 12 and by
+/// `crates/zeroship-migrate/tests/namespaces/partition_claims_the_relation_namespace_pg.rs::dropping_a_partition_frees_its_name`.
 /// An artifact that kept the table would tell a regenerated app to recreate a
 /// relation the migration removed.
 #[test]
@@ -574,7 +574,7 @@ fn dropping_an_attached_partition_removes_it_from_env_db_ts() {
 
 /// **The control that shapes the arm above.** A DETACHED partition becomes a
 /// standalone table under the same name - the rule
-/// `tests/partition_claims_the_relation_namespace_pg.rs::detaching_a_partition_does_not_free_its_name`
+/// `crates/zeroship-migrate/tests/namespaces/partition_claims_the_relation_namespace_pg.rs::detaching_a_partition_does_not_free_its_name`
 /// states and enforces - so `detachPartition` must NOT remove it. Without this arm,
 /// "a partition op removes the table" would look equally justified and would be wrong.
 #[test]
@@ -711,7 +711,7 @@ fn every_other_field_of_the_authoring_map_reaches_env_db_ts_unchanged() {
 // The corpus: both artifacts, whole, on real recorded streams
 // ---------------------------------------------------------------------------
 
-/// The recorded op fixtures, the same 27 `tests/op_fixture_goldens.rs` owns and the
+/// The recorded op fixtures, the same 27 `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` owns and the
 /// same list consumer 1's gate drives. Real drained recorder envelopes, already
 /// policy-resolved, so they fold under the confined charter that produced them.
 const STEMS: [&str; 27] = [
@@ -1002,7 +1002,7 @@ fn measure_corpus() -> Vec<String> {
 /// not circular: the side that produced the expectation is not the side under test.
 ///
 /// There is deliberately NO re-bless environment variable, matching
-/// `tests/op_fixture_goldens.rs` and consumer 1's gate: an easy update affordance is
+/// `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` and consumer 1's gate: an easy update affordance is
 /// what turns a corpus into a mirror of whatever the code emits today.
 #[test]
 fn the_recorded_corpus_renders_the_same_artifacts_through_the_fold() {

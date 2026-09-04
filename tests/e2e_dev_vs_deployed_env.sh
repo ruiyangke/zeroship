@@ -98,7 +98,7 @@ MUTATE="${MUTATE:-none}"
 # leak assertion trivially green.
 # The opt-in secret layer. Secrets are NOT surfaced by being set: only names
 # placed in the expose list via `PUT /api/apps/:id/env/expose` reach the
-# isolate (crates/control/src/env_handlers.rs:265). Two secrets differing in
+# isolate (crates/zeroship-control/src/env_handlers.rs:265). Two secrets differing in
 # exactly that one respect turn "a secret did not arrive" from an assumption
 # into a measurement: EXPOSED must appear, HIDDEN must not. Before this, no
 # harness had populated the layer at all, so nothing was known either way.
@@ -352,8 +352,8 @@ xc="$(curl -s -o /dev/null -w '%{http_code}' -X PUT "http://localhost:$ZEROSHIP_
   || fail "could not set the expose list (HTTP $xc) -- cannot tell an unexposed secret from a broken expose call"
 
 if [ "$MUTATE" = "shadow-app-id" ]; then
-  # THE LAYERING QUESTION, not a red-before-green. `crates/worker/src/cache.rs`
-  # injects `APP_ID` as a worker-internal var; `crates/runtime/src/core/init.rs`
+  # THE LAYERING QUESTION, not a red-before-green. `crates/zeroship-worker/src/cache.rs`
+  # injects `APP_ID` as a worker-internal var; `crates/zeroship-runtime/src/core/init.rs`
   # layers creator vars OVER it. So a creator var literally named `APP_ID` should
   # win. Deploying one and reading it back is the only way to know whether the
   # documented precedence is the real precedence.
@@ -446,7 +446,7 @@ done
 # is the audited surface the creator's own code names explicitly, and an app
 # reading its own secrets there is the point of storing them. Pinned by
 # `secret_visible_via_zeroship_env` and `secret_does_not_appear_in_process_env`
-# in crates/runtime/tests/call_fetch_handler.rs.
+# in crates/zeroship-runtime/tests/call_fetch_handler.rs.
 #
 # So both directions are load-bearing here: a hidden secret appearing in
 # process.env means the opt-in is not a gate, and a hidden secret MISSING from
@@ -474,7 +474,7 @@ else
   fail "OPT-IN SECRET LAYER DOES NOT DELIVER: $SECRET_EXPOSED_KEY was stored AND opted into the expose list, yet reached no deployed surface. The hidden secret is correctly absent, so this is not the opt-in gate working -- it is the exposed half not arriving. docs/pilot/e2e-scenarios.md describes this as layer 2 of the deployed env; on this evidence that description is aspirational."
 fi
 
-# WHY A SURFACE CAN READ EMPTY. `crates/runtime/src/core/init.rs` sets
+# WHY A SURFACE CAN READ EMPTY. `crates/zeroship-runtime/src/core/init.rs` sets
 # `process.env` and `globalThis.__env__` to THE SAME V8 object, and that is the
 # only write to `__env__` in the runtime -- so the two MUST agree. If they do
 # not, `globalThis.process` is no longer the object the runtime installed, and

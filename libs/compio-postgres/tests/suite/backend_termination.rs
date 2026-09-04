@@ -2,9 +2,9 @@
 //! operation.
 //!
 //! Termination is already covered twice in this suite -- a backend that
-//! terminates ITSELF during a `simple_query` (`tests/integration.rs`), and one
+//! terminates ITSELF during a `simple_query` (`libs/compio-postgres/tests/suite/integration.rs`), and one
 //! terminated BETWEEN pool checkouts so the pool's alive-validation path runs
-//! (`tests/pool_transaction_isolation.rs`). Neither reaches a backend that dies
+//! (`libs/compio-postgres/tests/suite/pool_transaction_isolation.rs`). Neither reaches a backend that dies
 //! while an operation is mid-flight, and that is where this driver's bugs have
 //! actually lived: the COPY producer teardown, the paused read obligation, the
 //! split-reader accounting. Those states carry the most machinery and unwind

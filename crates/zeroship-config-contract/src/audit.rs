@@ -12,7 +12,7 @@
 //!             `crates/config-macros`, rustc compiles the `ConfigSpec`
 //!             constants into each server library, and this tool LINKS them.
 //!             Projections come from `CanonicalName::{env_name, flag_name,
-//!             toml_path}` in `crates/core/src/config/names.rs`.
+//!             toml_path}` in `crates/zeroship-core/src/config/names.rs`.
 //!   extracted `crate::inventory` parses the same `.rs` files as TEXT with syn
 //!             and re-implements the three projections itself
 //!             (`inventory.rs:704-720`, both marked "mirroring").
@@ -185,7 +185,7 @@ mod tests {
             toml: "control.port".to_owned(),
             toml_evidence: TomlEvidence::Projection,
             canonical: "control.port".to_owned(),
-            location: "crates/control/src/config.rs:1".to_owned(),
+            location: "crates/zeroship-control/src/config.rs:1".to_owned(),
         }
     }
 

@@ -407,7 +407,7 @@ mod tests {
     /// Every environment variable name `zeroship-migrate-server` actually reads.
     ///
     /// DERIVED, never listed - see the twin of this helper in
-    /// `crates/control/src/main.rs` for why a list would defeat the point.
+    /// `crates/zeroship-control/src/main.rs` for why a list would defeat the point.
     fn env_names_migrated_reads() -> std::collections::BTreeSet<String> {
         let mut names = std::collections::BTreeSet::new();
         let command = <MigrateServerSettingsSources as clap::CommandFactory>::command();

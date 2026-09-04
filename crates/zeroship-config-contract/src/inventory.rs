@@ -913,7 +913,7 @@ pub fn collect_rust_sources(root: &Path, subdirs: &[&str]) -> Result<Vec<(String
 /// Every TRACKED first-party Rust file, as `(repository-relative path, source)`.
 ///
 /// `git ls-files` rather than a directory walk, following the repository's
-/// existing source-gate pattern in `crates/core/tests/source_is_greppable_test.rs`.
+/// existing source-gate pattern in `crates/zeroship-core/tests/source_is_greppable_test.rs`.
 /// The difference matters twice: a build artefact under `target/` is not source
 /// and must not be scanned, and a file someone forgot to `git add` is not yet
 /// part of the repository, so a gate that walked the filesystem would fail on

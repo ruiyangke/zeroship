@@ -9,7 +9,7 @@
 //! grant, which was deleted once `zeroship login` moved onto the OP's
 //! endpoints. The spelling survives because `zeroship.identity_links` still
 //! uses it to mark a platform-native principal (see
-//! `crates/control/src/identity_bridge.rs`); nothing writes a
+//! `crates/zeroship-control/src/identity_bridge.rs`); nothing writes a
 //! `device_grants` row with it.
 //!
 //! The auth service also reconciles a first-party [`PLATFORM_CLI_CLIENT_ID`]
@@ -27,8 +27,8 @@
 //! kill.
 //!
 //! Both spellings used to be private constants in the crate that wrote them
-//! (`crates/auth/src/oidc/device_token.rs` and
-//! `crates/control/src/device_handlers.rs`), which is how the two flows drifted:
+//! (`crates/zeroship-auth/src/oidc/device_token.rs` and
+//! `crates/zeroship-control/src/device_handlers.rs`), which is how the two flows drifted:
 //! control wrote `provider = 'platform'` rows and the only page that could
 //! approve anything filtered on `provider = 'op'`, so the code the CLI printed
 //! was invisible to the page the CLI told the human to open. The producer and
@@ -59,7 +59,7 @@ pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 ///
 /// These are the scopes a CLI token may actually carry authority for. The
 /// bearer path intersects them with the principal's stored grants
-/// (`crates/authn/src/lib.rs`, `platform_cli_entitlement`).
+/// (`crates/zeroship-authn/src/lib.rs`, `platform_cli_entitlement`).
 ///
 /// This is deliberately NOT the same list as
 /// [`PLATFORM_CLI_REGISTERED_SCOPES`]: `offline_access` may be REQUESTED (it

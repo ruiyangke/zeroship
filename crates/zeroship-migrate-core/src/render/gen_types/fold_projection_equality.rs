@@ -53,8 +53,8 @@
 //! does not mean the gate sees more; it means the last walker whose answer could have
 //! contradicted the fold on a refused stream is gone, so there is nothing left here to
 //! contradict it. What replaces that evidence is an OVER-REFUSAL control at the
-//! artifact level, in `tests/gen_types_authoring_tables_from_the_fold.rs` and
-//! `tests/gen_types_field_defs_from_the_fold.rs`, because an equality gate is blind to a
+//! artifact level, in `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and
+//! `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`, because an equality gate is blind to a
 //! refusal change by construction.
 
 use std::collections::BTreeMap;
@@ -80,9 +80,9 @@ use zeroship_migrate_ir::dialect::DialectId;
 /// each of them there is no second answer left
 /// and keeping
 /// the leg would have compared the projection to itself. What replaces each is a gate at
-/// the ARTIFACT level - `tests/gen_types_runtime_metadata_from_the_fold.rs`,
-/// `tests/gen_types_authoring_tables_from_the_fold.rs` and
-/// `tests/gen_types_field_defs_from_the_fold.rs` - whose goldens were captured from the
+/// the ARTIFACT level - `crates/zeroship-migrate/tests/gen_types/gen_types_runtime_metadata_from_the_fold.rs`,
+/// `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and
+/// `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs` - whose goldens were captured from the
 /// walkers before they were deleted, so the evidence a walker used to provide outlives
 /// the walker. The last leg retires the same way when its walker goes.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -322,8 +322,8 @@ const DIVERGENCES: &[Divergence] = &[
     // `Op::AlterPrimaryKey` arm, so `env.db.ts` kept the primary key the migration
     // replaced. That walker is deleted. The defect it named is now pinned
     // FIVE ways at the artifact level in
-    // `tests/gen_types_authoring_tables_from_the_fold.rs` and adjudicated against a live
-    // PostgreSQL in `tests/env_db_ts_matches_the_server_pg.rs`.
+    // `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and adjudicated against a live
+    // PostgreSQL in `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`.
     //
     // `v_index_and_constraint|{Postgres,Sqlite,Mysql}|field_defs` recorded
     // `line 9: fold "\"required\": true" walker "\"required\": true,"` -
@@ -338,9 +338,9 @@ const DIVERGENCES: &[Divergence] = &[
     // It is not evidence that evaporated, and it did not shrink either: measured through
     // the artifact rather than through this gate's canonical text, the same walker was
     // wrong in FIVE families, not one. All five are pinned in
-    // `tests/gen_types_field_defs_from_the_fold.rs`, and the claim that none of them can
+    // `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`, and the claim that none of them can
     // reach a SQLite table rebuild is measured against a real database in
-    // `tests/sqlite_rebuild_field_defs_live.rs`. A recorded divergence traded for a live
+    // `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs`. A recorded divergence traded for a live
     // oracle is the trade this gate exists to make.
 ];
 
@@ -518,9 +518,9 @@ fn the_gate_has_the_shape_it_claims() {
 /// dialectal coverage change does not.
 ///
 /// What now covers the retired legs is
-/// `tests/gen_types_runtime_metadata_from_the_fold.rs`,
-/// `tests/gen_types_authoring_tables_from_the_fold.rs` and
-/// `tests/gen_types_field_defs_from_the_fold.rs`, whose goldens were captured from the
+/// `crates/zeroship-migrate/tests/gen_types/gen_types_runtime_metadata_from_the_fold.rs`,
+/// `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs` and
+/// `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`, whose goldens were captured from the
 /// walkers before they were deleted.
 const EQUAL_COMPARISONS: usize = 683;
 /// Comparisons whose two texts differ. Every one is attributed in [`DIVERGENCES`].
@@ -564,7 +564,7 @@ const FOLD_REFUSED: usize = 0;
 ///
 /// The destructuring is EXHAUSTIVE with no `..`: a field added to any of these four
 /// snapshot types is a compile error until it is routed, which is the same mechanism
-/// `tests/support/carriers.rs` uses to prove a carrier inventory complete.
+/// `crates/zeroship-migrate/tests/support/carriers.rs` uses to prove a carrier inventory complete.
 fn column_field_differences(mine: &ColumnSnapshot, theirs: &ColumnSnapshot) -> Vec<&'static str> {
     let ColumnSnapshot {
         name,
@@ -775,7 +775,7 @@ fn table_field_differences(mine: &TableSnapshot, theirs: &TableSnapshot) -> Vec<
 /// vendor split, so this asserts, per FIELD, that the split loses nothing on
 /// FOLD-PRODUCED shapes.
 ///
-/// The existing equivalence suites (`tests/schema_model_equivalence_pg.rs`,
+/// The existing equivalence suites (`crates/zeroship-migrate/tests/fold_live/schema_model_equivalence_pg.rs`,
 /// `..._mysql.rs`) only ever ran the split on LIVE-INTROSPECTED snapshots. An
 /// introspected snapshot populates a different set of vendor families from an authored
 /// one - `catalog_uuid_format_check` and `text_storage` are introspection-only,
@@ -863,7 +863,7 @@ const TABLES_PROBED_PER_FIELD: usize = 97;
 /// move could break and no equality gate can see.
 ///
 /// This is the leg-independent statement of what
-/// `tests/gen_types_authoring_tables_from_the_fold.rs`'s over-refusal control says at
+/// `crates/zeroship-migrate/tests/gen_types/gen_types_authoring_tables_from_the_fold.rs`'s over-refusal control says at
 /// the artifact level.
 #[test]
 fn the_folds_refusal_set_is_the_catalog_replays_refusal_set() {
@@ -1087,7 +1087,7 @@ fn the_catalog_and_the_runtime_artifact_agree_about_a_dropped_unique_constraint(
 /// AND of a carrier set written for the constraint lifecycle found FIVE divergence
 /// families where this gate had recorded ONE. The other four - the CHECK bound below,
 /// a CHECK membership, a re-added column inheriting a dropped column's facets, and
-/// `dropPartition` - are pinned in `tests/gen_types_field_defs_from_the_fold.rs`.
+/// `dropPartition` - are pinned in `crates/zeroship-migrate/tests/gen_types/gen_types_field_defs_from_the_fold.rs`.
 #[test]
 fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
     let ops: Vec<Op> = parse(
@@ -1165,7 +1165,7 @@ fn a_dropped_check_constraint_does_not_outlive_itself_in_the_field_def_map() {
 /// The anchor is `fold_ops`, the structural oracle the live PostgreSQL, SQLite and
 /// MySQL suites already run against a real server; the ADJUDICATION that the fold's
 /// answer is the server's answer is not made here but in
-/// `tests/env_db_ts_matches_the_server_pg.rs`, which applies this migration for real
+/// `crates/zeroship-migrate/tests/fold_live/env_db_ts_matches_the_server_pg.rs`, which applies this migration for real
 /// and reads `pg_catalog`.
 #[test]
 fn the_catalog_and_the_authoring_artifact_agree_about_an_altered_primary_key() {

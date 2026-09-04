@@ -1,7 +1,7 @@
 // Embedded RPC dispatcher (`__zsDispatch`).
 //
 // Compiled to `dist/dispatcher.js` and `include_str!`d by the runtime
-// crate's `crates/runtime/src/core/init.rs`, spliced into the bootstrap
+// crate's `crates/zeroship-runtime/src/core/init.rs`, spliced into the bootstrap
 // module so the IIFE evaluates BEFORE `runtime-entry.js`'s top-level
 // await and BEFORE the kernel resolves `default.fetch` / `default.rpc`
 // off the user namespace. Dispatcher install must survive a schema-load
@@ -33,7 +33,7 @@
 //  2. The UNARY RPC path never reaches this function, on either tier.
 //     The synthetic entry exports `default.rpc` as a plain dict; the
 //     bootstrap wraps that dict in `USER_RPC`
-//     (crates/runtime/src/core/init.rs, `dispatchRpc`), and the kernel's
+//     (crates/zeroship-runtime/src/core/init.rs, `dispatchRpc`), and the kernel's
 //     fast path calls it. `USER_RPC` delegates to `__zsDispatchRpc` -- a
 //     SECOND copy of the body below, written inline in init.rs. That
 //     copy is what answers `Method not found` and `Invalid input` for a
@@ -54,7 +54,7 @@
 // binary, so the same split applies there. Measured rather than reasoned
 // -- `tests/e2e_dev_vs_deployed_errors.sh` sends an unparseable body and
 // dev answers with the RUST parser's text ("invalid JSON body", from
-// `crates/runtime/src/core/runtime.rs::parse_rpc_body`) and not the JS
+// `crates/zeroship-runtime/src/core/runtime.rs::parse_rpc_body`) and not the JS
 // one, which would have appended the underlying parse error.
 
 // Build emits this file with `export {};` to mark it as a module. The

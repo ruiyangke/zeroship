@@ -1459,7 +1459,7 @@ async fn oauth_token_subset_of_user_two_call_enforcement() {
 /// has been provisioned once (so the marker exists) and some grant rows have
 /// since been deleted. Keying off the marker rather than the grant count is
 /// what makes "operator revoked everything" distinguishable from "never
-/// provisioned" - see `crates/control/src/identity_bridge.rs`.
+/// provisioned" - see `crates/zeroship-control/src/identity_bridge.rs`.
 async fn seed_grants(state: &AppState, principal_id: Uuid, grants: &[&str]) {
     state
         .control_pg

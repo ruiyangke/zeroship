@@ -105,7 +105,7 @@ impl core::hash::Hash for Finite {
 /// The same argument as [`Finite`] and the same hand-written impls, at the
 /// width the value actually has. An embedding is `f32` at every layer that
 /// carries it - `VectorIndex::vector_search` takes `&[f32]`
-/// (`crates/zeroship-plugin-db/src/backend/mod.rs:1023`) and `vec0` reads a
+/// (`crates/zeroship-data-engine/src/backend/mod.rs:1023`) and `vec0` reads a
 /// buffer of `f32` (`backend/sqlite/vector.rs:127`) - so widening to `f64` here
 /// and narrowing again at the driver would make the plan's value and the bound
 /// value different numbers for no gain.
@@ -185,7 +185,7 @@ pub const MAX_VECTOR_DIMS: usize = 16_000;
 /// binds that string, casting it `::vector` in the SQL
 /// (`crates/zeroship-schema/src/query.rs:4980-5013`), while the `SQLite` arm
 /// encodes the same values as a raw little-endian `f32` buffer and binds a BLOB
-/// (`crates/zeroship-plugin-db/src/backend/sqlite/vector.rs:127`).
+/// (`crates/zeroship-data-sqlite/src/vector.rs:127`).
 ///
 /// Neither encoding is the *value*; both are a dialect's spelling of it. So the
 /// plan carries the numbers, [`crate::render::ValueFormat::vector_placeholder`]

@@ -2,6 +2,13 @@
 
 Scratch notes. Committed as they land, not when a conclusion exists.
 
+**Dated record.** Crate directories were renamed on 2026-08-26 (`105a75131`) and
+`zeroship-migrate-adapter` again on 2026-08-28 (`8f69c7e53`). Citations here
+were repointed at the files that MOVED, because the file is still the evidence.
+`crates/zeroship-migrate-adapter/tests/platform_migrate.rs` was not moved but
+DELETED (`ccda4bb42`), so it keeps its old spelling: a measurement recorded
+against a deleted file cannot be repointed without falsifying it.
+
 ## Instrument
 
 - `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1` turned a self-skip into a hard failure.
@@ -58,9 +65,9 @@ run announces.
 
 Source: the `[[test]]` blocks in the three Cargo.toml files.
 
-- crates/control/Cargo.toml   -> 43 targets (lines 164-375)
-- crates/plugin-db/Cargo.toml -> 1 target (`distributed_live`, line 205)
-- crates/migrated/Cargo.toml  -> 1 target (`apply_api_test`, line 83)
+- crates/zeroship-control/Cargo.toml   -> 43 targets (lines 164-375)
+- crates/zeroship-plugin-db/Cargo.toml -> 1 target (`distributed_live`, line 205)
+- crates/zeroship-migrate-server/Cargo.toml  -> 1 target (`apply_api_test`, line 83)
 
 Note: ci.yml:519 and ci.yml:604 both say "44 zeroship-control integration
 binaries" and "45 targets". The measured control count today is 43, so the
@@ -139,10 +146,10 @@ Cross-referencing every workspace test file that reads a DSN through
 
 | binary | var | tests gated | who runs it with a DSN |
 | --- | --- | --- | --- |
-| crates/authn/tests/service_replay_pg_test.rs | AUTH_DB_URL | 6 of 6 | NOBODY |
-| crates/gateway/tests/db_pool_smoke.rs | GATEWAY_POOL_SMOKE_URL | 1 of 1 | NOBODY |
-| crates/zeroship-migrate-adapter/tests/smoke_apply_pg.rs | ZERO_MIGRATE_TEST_PG_URL | 1 of 1 | NOBODY |
-| crates/zeroship-migrate-adapter/tests/author_and_apply_pg.rs | ZERO_MIGRATE_TEST_PG_URL | 1 of 2 | NOBODY |
+| crates/zeroship-authn/tests/service_replay_pg_test.rs | AUTH_DB_URL | 6 of 6 | NOBODY |
+| crates/zeroship-gateway/tests/db_pool_smoke.rs | GATEWAY_POOL_SMOKE_URL | 1 of 1 | NOBODY |
+| crates/zeroship-migrate-server/tests/smoke_apply_pg.rs | ZERO_MIGRATE_TEST_PG_URL | 1 of 1 | NOBODY |
+| crates/zeroship-migrate-server/tests/author_and_apply_pg.rs | ZERO_MIGRATE_TEST_PG_URL | 1 of 2 | NOBODY |
 | crates/zeroship-migrate-adapter/tests/platform_migrate.rs | ZERO_MIGRATE_TEST_PG_URL | 4 | named by ci.yml but always skips (ci.yml:571 says so) |
 
 Evidence for "NOBODY", each an independent grep over tests/ .github/ deploy/:
@@ -193,7 +200,7 @@ CAUSE, by `git log -S`: commit 2a44ea8ef "fix(worker): constrain database
 authority" (2026-08-16, one day before this run) deleted
 `CREATE SCHEMA IF NOT EXISTS {schema}` from the workflow journal provisioning
 and added a unit test asserting it can never come back
-(crates/plugin-workflow/src/store/pg.rs:1955
+(crates/zeroship-plugin-workflow/src/store/pg.rs:1955
 `worker_provisioning_uses_a_precreated_narrow_owner_role`). That is a
 deliberate privilege decision. What it did not do is update the 44 tests that
 seed an app by INSERTing into `zeroship.apps` and then expect `provision` to
@@ -220,7 +227,7 @@ The engine rejects a policy that GRANTS `runtime.lock_timeout_ms`
 (third_party/zero-migrate/crates/zeroship-migrate-policy/src/document.rs:205).
 Two commits on 2026-08-10 removed exactly that grant elsewhere (4ea3c103b
 "drop the declared-only runtime timeout grants", d4d242a14). The fixtures at
-crates/migrated/tests/apply_api_test.rs:441 and :457 still carry it. Stale
+crates/zeroship-migrate-server/tests/apply_api_test.rs:441 and :457 still carry it. Stale
 fixtures, not a product defect - but still red, and still unfixed here.
 
 Neither red is explained by this machine: "schema does not exist" and a policy
@@ -327,7 +334,7 @@ tests/run_billing_suite.sh (commit 344c9db12)
 
     A  no DSN, no REQUIRE   6 x ZEROSHIP-TEST-SKIPPED
                             test result: ok. 6 passed ... in 0.00s
-    B  no DSN, REQUIRE=1    6 panics at crates/test-support/src/lib.rs:102
+    B  no DSN, REQUIRE=1    6 panics at crates/zeroship-test-support/src/lib.rs:102
     C  inside the gate      test result: ok. 6 passed ... in 1.12s, no skip line
 
 A and C differ ONLY in the clock and the announcement; B is what tells them

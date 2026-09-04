@@ -72,7 +72,7 @@ pub struct AliasTarget {
 ///   `None`, and NOTHING mints it afterwards. This arm
 ///   used to claim the gateway's "lazy-mint on read-through miss (main spec
 ///   §7.1)" covered it, "so the app-facing email is never spuriously null".
-///   That mint does not exist. `crates/gateway/src/identities.rs` has exactly
+///   That mint does not exist. `crates/zeroship-gateway/src/identities.rs` has exactly
 ///   three functions — `upsert`, `lookup_pairwise_sub`, `lookup_relay_email` —
 ///   and `upsert`'s own doc says `relay_email` is LEFT UNTOUCHED. So on a
 ///   first login the order is: consent runs, finds no row, returns `None`;

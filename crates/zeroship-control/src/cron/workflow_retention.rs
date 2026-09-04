@@ -145,7 +145,7 @@ pub async fn tick_with_config(
     //
     // `Registry::conn` is not a pool checkout: it runs `compio_postgres::connect`
     // and detaches a driver task, so it is a TCP connect plus a startup and auth
-    // round trip every time (crates/control/src/registry.rs `open_conn`). Taking
+    // round trip every time (crates/zeroship-control/src/registry.rs `open_conn`). Taking
     // one INSIDE the loop cost two fresh connections per app per tick - this one
     // and the one `delete_zero_ref_hashes_for_app` used to open for itself.
     // MEASURED as `pg_stat_database.sessions` over one tick: 2N + 1, so 25

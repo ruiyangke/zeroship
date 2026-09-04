@@ -185,7 +185,7 @@ pub fn db_url() -> Option<String> {
 
 /// Create plugins for a new Runtime — the kernel every deployed app boots
 /// against. This is the SINGLE source of truth for the multi-node `env.*`
-/// surface; the CLI `zeroship serve` vector (`crates/cli/src/main.rs`)
+/// surface; the CLI `zeroship serve` vector (`crates/zeroship-cli/src/main.rs`)
 /// mirrors it for the single-tenant dev path.
 ///
 /// Namespaces and their multi-node backend choices:

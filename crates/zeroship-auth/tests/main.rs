@@ -70,7 +70,7 @@
 //! socket and shuts it down from its `Drop`, a syscall that needs no
 //! executor, so a session ends with the client that opened it instead of
 //! with the process.
-//! `libs/compio-postgres/tests/integration.rs`'s
+//! `libs/compio-postgres/tests/suite/integration.rs`'s
 //! `a_connection_does_not_outlive_the_runtime_that_opened_it` holds that
 //! invariant, and holds it as a LIFETIME rather than a ceiling - it asserts
 //! the server-side count returns to zero after each runtime, which a merely

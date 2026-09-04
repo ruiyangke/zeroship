@@ -2,7 +2,7 @@
 #
 # The live-Postgres gate for zeroship-plugin-db.
 #
-# WHY THIS EXISTS. `crates/plugin-db/tests/integration.rs` holds 111 tests that
+# WHY THIS EXISTS. `crates/zeroship-plugin-db/tests/integration.rs` holds 111 tests that
 # dial a real Postgres, and until 2026-08-12 NOT ONE OF THEM RAN ANYWHERE.
 # Measured, three independent greps, all empty: no workflow sets PG_TEST_URL, no
 # workflow invokes `--test integration`, and no `pg-test` image exists in the

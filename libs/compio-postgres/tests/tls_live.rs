@@ -1287,7 +1287,7 @@ async fn notls_connect_still_works() {
 
 /// The COPY-1/IO-1 deadlock, over TLS.
 ///
-/// `copy_in_error_does_not_deadlock` in tests/integration.rs pins this, and it
+/// `copy_in_error_does_not_deadlock` in libs/compio-postgres/tests/suite/integration.rs pins this, and it
 /// connects with `NoTls`. A plaintext socket splits into owned halves and runs
 /// the multiplexed loop, which reads the server's ErrorResponse while the
 /// client is still streaming CopyData. TLS cannot split, so it runs the

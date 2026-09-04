@@ -55,7 +55,7 @@ use crate::v8_bridge::{runtime_state, setup_js_promise};
 /// string), if any.
 ///
 /// Reads the runtime's `per_request_user` slot using the request id
-/// currently bound by the pump (see `crates/runtime/src/auth.rs` for
+/// currently bound by the pump (see `crates/zeroship-runtime/src/auth.rs` for
 /// the wire contract). The user JSON shape is gateway-defined and
 /// carries at minimum `{ "id": "usr_..." }` for an authenticated
 /// user; we extract the `id` field and discard the rest (Q-SF-A:

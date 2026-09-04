@@ -22,7 +22,7 @@
 //!    [`compio_postgres::replication::connect_replication`]), issues
 //!    `START_REPLICATION SLOT ... LOGICAL ...`, decodes pgoutput
 //!    frames, and publishes [`ChangeEvent`]s into the broker.
-//! 2. [`emit_local`] consults a process-wide, per-app suppression
+//! 2. [`crate::broker::emit_local`] consults a process-wide, per-app suppression
 //!    count. While a consumer is active, WAL is the sole source of
 //!    truth in every isolate thread in the worker process.
 //! 3. A relation cache (`rel_id -> (namespace, table, columns)`)

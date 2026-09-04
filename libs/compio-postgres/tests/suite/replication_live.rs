@@ -1595,7 +1595,7 @@ async fn a_representable_start_lsn_still_starts_replication() {
 /// PostgreSQL numbers them from 1.
 ///
 /// A conforming server always sends all three as non-NULL, so reaching this
-/// needs a hostile or broken peer -- the threat model `tests/hostile_peer.rs`
+/// needs a hostile or broken peer -- the threat model `libs/compio-postgres/tests/suite/hostile_peer.rs`
 /// and the stubs in this file already work in. `dbname` is deliberately NOT in
 /// this test: it is genuinely NULL on a non-database-specific replication
 /// connection, which is why it alone is modelled as an `Option`.

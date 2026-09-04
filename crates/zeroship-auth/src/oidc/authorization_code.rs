@@ -1566,7 +1566,7 @@ mod access_identity_tests {
         //     L0N3gfnVojR3MCyMbPF6lMf6P9ywvEtOlQe2mLgT18c is terminally
         //     retired and cannot be reactivated")
         // naming the same kid in both logs. Same reasoning as
-        // `crates/auth/tests/common/mod.rs::op_signing_key`, which cannot be
+        // `crates/zeroship-auth/tests/common/mod.rs::op_signing_key`, which cannot be
         // reached from here because this is a lib test.
         let issuer = Issuer::from_signing_key(
             &ed25519_dalek::SigningKey::from_bytes(&mint_race_signing_seed()),

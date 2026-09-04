@@ -183,7 +183,7 @@ tracing-subscriber = { workspace = true }
 # that kept a stanza of their own for reasons that have nothing to do with the
 # gate - see the target block below. 43 files are gated and 6 are not, out of 49
 # in `tests/`; the count lives here once, and `git grep -c '^mod ' --
-# crates/control/tests/live_db.rs` recomputes it rather than trusting it.
+# crates/zeroship-control/tests/live_db.rs` recomputes it rather than trusting it.
 # `egress_rules_test` joined the gated set by CONSTRUCTION - it builds an
 # `AppState` against a live DSN and cannot reach its first assertion without one
 # - not by re-running the dead-port measurement.

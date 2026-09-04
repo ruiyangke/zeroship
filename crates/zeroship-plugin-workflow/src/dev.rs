@@ -902,7 +902,7 @@ impl DevWorkflowEngine {
         // `compensation_state = 'pending'`) and never RUNS one, so a failed saga
         // ends here looking exactly like a saga that had nothing to roll back.
         // Deployed, the same failure enters the compensating phase and undoes
-        // those steps (crates/plugin-workflow/src/apply.rs:233-243). Runs AFTER
+        // those steps (crates/zeroship-plugin-workflow/src/apply.rs:233-243). Runs AFTER
         // the stalled override above so a StalledError is never annotated --
         // deployed does not compensate that error either.
         let unsupported = match &result.run_update {
@@ -1712,7 +1712,7 @@ fn pending_compensator_steps(
 /// for two reasons. The creator's own failure is still why the run failed and
 /// must stay at the top level. And the deployed engine fills that same slot with
 /// its rollback summary (`compensation_progress_error`,
-/// crates/plugin-workflow/src/apply.rs:447-457), so an app that reads
+/// crates/zeroship-plugin-workflow/src/apply.rs:447-457), so an app that reads
 /// `error.compensation` gets an answer from BOTH backends -- and the answers
 /// differ in `outcome`, which is the fact worth surfacing.
 fn annotate_dev_compensation_unsupported(error: Value, pending: &[String]) -> Value {
@@ -2089,7 +2089,7 @@ mod tests {
             consumed_signal_id: None,
             topic: None,
             child_run_id: None,
-            // What `crates/plugin-workflow/src/engine.rs:847-848` writes for a
+            // What `crates/zeroship-plugin-workflow/src/engine.rs:847-848` writes for a
             // `step.run` that declared `config.compensate`.
             compensation_state: Some("pending".to_string()),
             compensation_max_attempts: 1,
@@ -2155,7 +2155,7 @@ mod tests {
 
         // The original business failure is preserved -- the dev tier annotates
         // the failure, it does not replace it. Deployed does the same
-        // (crates/plugin-workflow/src/apply.rs:435-457 keeps `base` and inserts
+        // (crates/zeroship-plugin-workflow/src/apply.rs:435-457 keeps `base` and inserts
         // its rollback summary under the same `compensation` key).
         assert_eq!(error["type"], "PermanentError");
         assert_eq!(error["message"], "probe-intentional-failure");
@@ -2255,7 +2255,7 @@ mod tests {
     }
 
     /// Deployed skips compensation for `NondeterministicError` and `StalledError`
-    /// (`should_enter_compensation_for_error`, crates/plugin-workflow/src/apply.rs
+    /// (`should_enter_compensation_for_error`, crates/zeroship-plugin-workflow/src/apply.rs
     /// :461-466). Dev must skip the REPORT on the same errors, or it would claim
     /// deployed would have rolled back when deployed would not.
     #[test]

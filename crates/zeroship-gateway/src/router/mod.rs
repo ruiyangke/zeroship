@@ -3,7 +3,7 @@
 //!
 //! This module was split out of a single 4,612-line `router.rs` in
 //! May 2026; the historical commit log for the pre-split file is
-//! available via `git log --follow crates/gateway/src/router/mod.rs`.
+//! available via `git log --follow crates/zeroship-gateway/src/router/mod.rs`.
 //! Files cut OUT into their own files (`dispatch.rs`, `static_serve.rs`,
 //! …) appear as new files in `git log`; for their pre-split history
 //! follow `mod.rs`.

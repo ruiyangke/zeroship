@@ -452,7 +452,7 @@ pub(crate) async fn mint_session_from_code(
     //    only for the AUTHORIZATION-endpoint id_token of the implicit/hybrid
     //    flows (OIDC Core 3.3.2.11); the TOKEN-endpoint id_token of the
     //    authorization-code flow carries none, and the platform OP does not
-    //    emit one: `crates/auth/src/oidc/issuer.rs` mints `at_hash` and no
+    //    emit one: `crates/zeroship-auth/src/oidc/issuer.rs` mints `at_hash` and no
     //    `c_hash` at all (measured: 0 occurrences in that file, against 3 for
     //    `at_hash`). `c_hash` DOES appear elsewhere under `crates/auth`, and
     //    every occurrence agrees with this — the test mock provider sets it to

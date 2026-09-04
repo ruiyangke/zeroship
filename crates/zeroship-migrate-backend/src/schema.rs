@@ -324,7 +324,7 @@ pub trait SchemaRenderer: std::fmt::Debug + Sync {
     /// [`identity_column_type_allowed`](Self::identity_column_type_allowed) produces.
     ///
     /// A refusal that says only "not that one" is not actionable, and
-    /// `tests/column_shapes/set_column_type_generation_contracts.rs` pins that the
+    /// `crates/zeroship-migrate/tests/column_shapes/set_column_type_generation_contracts.rs` pins that the
     /// message must name the legal set. That set is this backend's, so this backend
     /// spells it: the string used to be written into
     /// [`IrLowerError::IdentityColumnTypeUnsupported`](crate::error::IrLowerError)'s
@@ -788,7 +788,7 @@ pub fn max_length(def: &serde_json::Value) -> Option<u64> {
 /// The disagreement it closes was measured, not inferred: a SQLite rebuild reading the
 /// bare token re-declared a `t.numeric(20, 4)` column `REAL` and copied
 /// `12345678901234.5678` across as `12345678901234.6`
-/// (`tests/fold_live/sqlite_decimal_rebuild_live.rs`).
+/// (`crates/zeroship-migrate/tests/fold_live/sqlite_decimal_rebuild_live.rs`).
 ///
 /// A zero or absent `precision` is NOT a decimal: `DECIMAL(0, ...)` is not a type any
 /// dialect accepts, so a malformed facet falls back to the float spelling the column

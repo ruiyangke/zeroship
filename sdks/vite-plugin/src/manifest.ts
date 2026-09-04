@@ -825,7 +825,7 @@ function autoDeriveRpcEntry(proc: DiscoveredProcedure): WireResource {
  * The resource keys the gateway consults when resolving a `rpc:` key's
  * effective policy, in chain order.
  *
- * Mirrors `build_inheritance_chain` in `crates/gateway/src/compiled.rs`:
+ * Mirrors `build_inheritance_chain` in `crates/zeroship-gateway/src/compiled.rs`:
  * the root `*` sentinel, then each dot-segment ancestor (`rpc:a`,
  * `rpc:a.b`, ... but NOT the key itself), then the key. The Rust side
  * skips ancestors absent from the resource map; here the caller does the

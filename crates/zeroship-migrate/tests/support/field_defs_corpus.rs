@@ -46,7 +46,7 @@ pub const DIALECTS: [&DialectId; 3] = [
     &zeroship_migrate_mysql::DIALECT,
 ];
 
-/// The recorded op fixtures - the same 27 `tests/op_fixture_goldens.rs` owns and the
+/// The recorded op fixtures - the same 27 `crates/zeroship-migrate/tests/ir_contract/op_fixture_goldens.rs` owns and the
 /// same list consumers 1 and 2 drove. Real drained recorder envelopes, already
 /// policy-resolved, so they fold under the confined charter that produced them.
 pub const STEMS: [&str; 27] = [
@@ -217,7 +217,7 @@ pub const CARRIERS: &[(&str, &str)] = &[
     // `ir_column_to_field`, so it is the shape that must survive. It is also the shape
     // the deploy path accepts - a `ColType::Ref` column paired with a table-level FK to
     // a text key is refused by the load gate as a logical-type mismatch, which is why
-    // `tests/sqlite_rebuild_field_defs_live.rs` uses this spelling too.
+    // `crates/zeroship-migrate/tests/fold_live/sqlite_rebuild_field_defs_live.rs` uses this spelling too.
     (
         "column_level_reference_policy",
         r#"[

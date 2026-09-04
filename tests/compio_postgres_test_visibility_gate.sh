@@ -3,7 +3,7 @@
 # Every test declared in libs/compio-postgres/tests/suite/ must be compiled by
 # at least one of the feature resolutions this crate is actually verified under.
 #
-# THE FAILURE THIS EXISTS FOR, 2026-08-27. `tests/suite/temporal_edge_values.rs`
+# THE FAILURE THIS EXISTS FOR, 2026-08-27. `libs/compio-postgres/tests/suite/temporal_edge_values.rs`
 # declares 6 `#[compio::test]` cases. Three sit behind `with-chrono-0_4` /
 # `with-time-0_3`, which the then-documented feature set did not enable. A
 # `#[cfg(feature = ...)]` test is not reported as skipped or ignored -- it is

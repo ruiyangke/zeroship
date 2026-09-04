@@ -3493,7 +3493,7 @@ fn setup_globals_with_descriptor(
     // exfiltrate them.
     //
     // Worker-internal `env_vars` (e.g. `APP_ID` injected by
-    // `crates/worker/src/cache.rs`) is layered on first as a base; user
+    // `crates/zeroship-worker/src/cache.rs`) is layered on first as a base; user
     // `vars` override on collision because user config is the
     // authoritative surface. Exposed secrets are then layered last for
     // any names in the per-app expose list — but we deliberately let

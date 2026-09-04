@@ -18,14 +18,14 @@
 #
 #   clippy.toml `disallowed-methods`   denies std::env::{var,var_os,vars,
 #                                      vars_os,set_var,remove_var}
-#   crates/core/tests/config_env_access_gate.rs
+#   crates/zeroship-core/tests/config_env_access_gate.rs
 #                                      parses tracked Rust source for the same
 #                                      calls plus an illicit #[allow]
 #
 # BOTH BIND TO THE SPELLING OF THE ACCESSOR, not to the population of names.
 # `zeroship_core::test_env!("ANYTHING")` expands to `declared_env!(test, ...)`
 # -> `read_declared_env!` -> the one exempt boundary in
-# crates/core/src/config/env.rs, which carries the `#[allow]` those two checks
+# crates/zeroship-core/src/config/env.rs, which carries the `#[allow]` those two checks
 # require it to carry. So a test that adds a brand-new ambient read as
 # `test_env!("MY_NEW_KNOB")` is GREEN under clippy and GREEN under the source
 # gate. That is the whole hazard, and neither existing line sees it.
@@ -120,7 +120,7 @@ fail() { FAIL=$((FAIL + 1)); RAN=$((RAN + 1)); echo "  FAIL $1"; }
 # both take a string literal, so both are enumerable from source.
 #
 #   1. `zeroship_core::test_env!("X")` / `test_env_os!("X")`  - class `test`,
-#      consumer `TestHarness` (crates/core/src/config/declared.rs).
+#      consumer `TestHarness` (crates/zeroship-core/src/config/declared.rs).
 #   2. the sealed key enums at `libs/<crate>/tests/common/env.rs`, which the
 #      publishable zeroship-independent driver crates use instead because they
 #      cannot depend on zeroship-core.
@@ -168,7 +168,7 @@ ZEROSHIP_DW_E2E_GATEWAY_URL
 # with the reason it is not yet a command prefix. Arm 3 refuses a new one and
 # refuses a stale one, so this list can only shrink without a deliberate edit.
 #
-#   CONTROL_TEST_DB  crates/control/tests/workflow_engine_test.rs:59 still
+#   CONTROL_TEST_DB  crates/zeroship-control/tests/workflow_engine_test.rs:59 still
 #                    reads it. run_billing_suite.sh:166-180 records why the
 #                    export survives and what deletes it. NOTE: this name is
 #                    the one docs/reference/env-vars.md:620 claims is DELETED;
