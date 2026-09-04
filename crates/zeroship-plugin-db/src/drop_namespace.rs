@@ -206,19 +206,37 @@ pub async fn drop_namespace(
 /// Split out so the arm-matching lives in one place; the PG arm routes
 /// to `replication::drop_worker_slots`, the SQLite arm to its
 /// file-unlink teardown.
+///
+/// **Exhaustive, and it was not until 2026-09-04.** The old shape was
+/// `if let BackendHandle::Postgres(..)`, then `if let Some(..) =
+/// backend.as_change_stream_sqlite()`, then a bare `Ok(())` described as
+/// "should not happen". With two variants that tail was unreachable, so it was
+/// dead code AND the landing pad a third backend would have fallen into: step 3
+/// of the sequence above would report success having deprovisioned nothing, and
+/// step 4's `DROP SCHEMA ... CASCADE` would then run against a namespace whose
+/// change-stream resources were still live. Silent at compile time. A `match`
+/// forces the arm to be written instead.
+///
+/// The `Sqlite` arm composes its own change stream from the value it has already
+/// matched rather than going back through `as_change_stream_sqlite()`, for the
+/// reason recorded at `cdc_lifecycle::start_on_current_isolate`: the accessor
+/// hands back an `Option` that only this match can prove is `Some`, so using it
+/// costs an `.expect` that can fire only if the accessor and this match
+/// disagree about the same value.
 async fn deprovision_change_stream(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
     use crate::backend::ChangeStream;
-    if let BackendHandle::Postgres(pg) = backend {
-        return crate::change_stream_pg::PgChangeStream::new(pg.clone())
-            .deprovision(app_id)
-            .await;
+    match backend {
+        BackendHandle::Postgres(pg) => {
+            crate::change_stream_pg::PgChangeStream::new(pg.clone())
+                .deprovision(app_id)
+                .await
+        }
+        BackendHandle::Sqlite(sq) => {
+            crate::backend::sqlite::cdc::SqliteChangeStream::new(sq.clone())
+                .deprovision(app_id)
+                .await
+        }
     }
-    if let Some(sq) = backend.as_change_stream_sqlite() {
-        return sq.deprovision(app_id).await;
-    }
-    // No CDC arm (should not happen for a configured backend); nothing
-    // to deprovision.
-    Ok(())
 }
 
 #[cfg(test)]
