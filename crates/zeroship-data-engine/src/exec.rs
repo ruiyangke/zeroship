@@ -634,12 +634,27 @@ pub fn clear_pending_emits(app_id: &str) {
 /// moved to the adapter with it - `zeroship_plugin_db::exec_mutation_with_emit_for_tests`
 /// and `zeroship_plugin_db::exec_query_for_tests`, which resolve the backend
 /// through `tx_scope::ensure_backend()` where the thread context lives.
+///
+/// **The dialect is DERIVED from that backend, not assumed.** The two test
+/// constructors below it stamped `SqlDialect::Postgres` unconditionally until
+/// 2026-09-03, which made every SQLite harness that reaches this helper -
+/// `test_support::unit_route` and `tests/sqlite_integration.rs` among them -
+/// carry a route claiming a dialect its connection does not speak. Nothing read
+/// it, so nothing failed; that is luck, not containment. Production reads the
+/// configured dialect BEFORE a backend exists and must not re-derive it (see
+/// [`crate::tx_route::TxRoute::dialect`]), but this helper is handed the open
+/// backend up front, so here the handle is the best answer available and asking
+/// it is strictly better than picking one.
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn ambient_route_for_tests(app_id: &str, backend: crate::backend::BackendHandle) -> TxRoute {
+    let dialect = match &backend {
+        crate::backend::BackendHandle::Postgres(_) => crate::query::SqlDialect::Postgres,
+        crate::backend::BackendHandle::Sqlite(_) => crate::query::SqlDialect::Sqlite,
+    };
     let captured = if crate::tx_lanes::with(|l| l.has_tx_for(app_id)) {
-        crate::tx_route::CapturedRoute::tx_for_tests(app_id)
+        crate::tx_route::CapturedRoute::tx_for_tests(app_id, dialect)
     } else {
-        crate::tx_route::CapturedRoute::pool_for_tests(app_id)
+        crate::tx_route::CapturedRoute::pool_for_tests(app_id, dialect)
     };
     // Sync, and it can be: only the COLD path needs to await, and a harness
     // driving exec directly has already opened a backend. Production binds
@@ -766,6 +781,61 @@ mod tests {
         compio::runtime::Runtime::new()
             .expect("compio runtime build")
             .block_on(f)
+    }
+
+    /// A test route must speak the dialect of the connection it is bound to.
+    ///
+    /// [`ambient_route_for_tests`] stamped `SqlDialect::Postgres` on every route
+    /// it minted until 2026-09-03, because that is what
+    /// `CapturedRoute::pool_for_tests` hardcoded. Every SQLite harness that
+    /// reaches this helper - `test_support::unit_route` and the whole of
+    /// `tests/sqlite_integration.rs` - therefore carried a route claiming
+    /// PostgreSQL over a rusqlite connection. It did no damage only because no
+    /// path those fixtures take reads the dialect off the route; the 34
+    /// `route.dialect()` reads in `crud/mod.rs` are one fixture away.
+    ///
+    /// **There is no PostgreSQL arm here and that is not an omission**: a
+    /// `BackendHandle::Postgres` needs a live server, which no unit in this
+    /// module opens. `tests/unmask_tx_lane.rs` is the Postgres-side harness, and
+    /// it now names its dialect at the two `CapturedRoute` constructors rather
+    /// than inheriting one. What stands in for that arm below is a control that
+    /// needs no server: the same SQLite handle, bound to a route captured with
+    /// `Postgres` explicitly, must still answer `Postgres` - so the SQLite
+    /// answer above came from the derivation in [`ambient_route_for_tests`] and
+    /// not from `bind` quietly inspecting the handle.
+    #[test]
+    fn an_ambient_test_route_speaks_the_dialect_of_the_backend_it_was_handed() {
+        run(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let sqlite = Rc::new(
+                crate::backend_selection::new_sqlite_backend(
+                    PathBuf::from(dir.path()),
+                    crate::encryption::LocalKeySource::env_var(),
+                )
+                .expect("open sqlite backend"),
+            );
+            let handle = BackendHandle::Sqlite(Rc::clone(&sqlite));
+
+            let derived = ambient_route_for_tests("app_route_dialect", handle.clone());
+            assert_eq!(
+                derived.dialect(),
+                crate::query::SqlDialect::Sqlite,
+                "a route bound to a SQLite handle must not claim PostgreSQL: \
+                 every builder it reaches would emit the wrong SQL",
+            );
+
+            let stated = crate::tx_route::CapturedRoute::pool_for_tests(
+                "app_route_dialect",
+                crate::query::SqlDialect::Postgres,
+            )
+            .bind(handle);
+            assert_eq!(
+                stated.dialect(),
+                crate::query::SqlDialect::Postgres,
+                "the dialect is the constructor's input; `bind` must not \
+                 re-derive it from the handle",
+            );
+        });
     }
 
     /// One synthetic RETURNING row with the columns a real mutation

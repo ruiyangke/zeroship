@@ -55,12 +55,14 @@
 //! to the pool, which would be a WORSE defect than the one being fixed
 //! (a transactional write leaking out of its transaction).
 //!
-//! The one non-`scope` constructor, `CapturedRoute::pool_for_tests`, is
-//! `#[cfg(any(test, feature = "test-helpers"))]`: the `test-helpers`
-//! feature is declared in this crate's `[features]` and is enabled only by
-//! its own `[[test]]` targets, never by a binary that ships. It yields a
-//! `CapturedRoute`, so even a test still has to `bind` a backend to reach
-//! the type the exec helpers take.
+//! The two non-`scope` constructors, `CapturedRoute::{pool_for_tests,
+//! tx_for_tests}`, are `#[cfg(any(test, feature = "test-helpers"))]`: the
+//! `test-helpers` feature is declared in this crate's `[features]` and is
+//! enabled only by its own `[[test]]` targets, never by a binary that ships.
+//! They yield a `CapturedRoute`, so even a test still has to `bind` a backend
+//! to reach the type the exec helpers take, and they take the dialect as a
+//! parameter rather than assuming one - see `pool_for_tests` for why the
+//! constant they used to stamp was a latent SQLite bug.
 
 use crate::backend::BackendHandle;
 use crate::query::SqlDialect;
@@ -210,21 +212,28 @@ impl CapturedRoute {
     /// V8 isolate to capture from. Gated so it cannot appear in a shipped
     /// binary; see the module docs. Still has to be `bind`-ed.
     ///
-    /// **THE DIALECT IT STAMPS IS NOT THE CONFIGURED ONE, AND NOTHING READS
-    /// IT.** A capture without a V8 frame also has no adapter to ask, and this
-    /// module may not read `crate::context` to find out. The routes this mints
-    /// reach only `exec_query` / `exec_mutation_with_emit`, which route a
-    /// statement that is already built and never look at [`TxRoute::dialect`];
-    /// every builder call takes the dialect as a parameter from the caller that
-    /// resolved it. A test that needs a route whose dialect drives a builder has
-    /// to go through [`Self::capture`], which is handed the real answer.
+    /// **THE DIALECT IS A PARAMETER, and it was `SqlDialect::Postgres`
+    /// unconditionally until 2026-09-03.** A capture without a V8 frame has no
+    /// adapter to ask, and this module may not read `crate::context` to find
+    /// out - but "cannot derive it" is a reason to make the caller state it,
+    /// not a licence to guess. The old constant was wrong on every SQLite
+    /// harness in the tree and was contained by nothing reading it, which is
+    /// not containment but luck: `crud/mod.rs` alone spells `route.dialect()`
+    /// 34 times, counted 2026-09-03 - 17 of them on a `&CapturedRoute` in the
+    /// `plan_*` half, 17 on a `&TxRoute` in the `run_*` half - so the day a
+    /// SQLite fixture reached one it would have planned Postgres SQL and
+    /// blamed the builder.
+    ///
+    /// Callers that already hold the backend should not spell the answer at
+    /// all: `crate::exec::ambient_route_for_tests` derives it from the handle
+    /// it is given.
     #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
-    pub fn pool_for_tests(app_id: &str) -> Self {
+    pub fn pool_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
         Self {
             app_id: app_id.to_string(),
             in_tx: false,
-            dialect: SqlDialect::Postgres,
+            dialect,
         }
     }
 
@@ -232,14 +241,14 @@ impl CapturedRoute {
     ///
     /// Pairs with `crate::install_tx_marker_for_tests`, which parks a real
     /// connection in the per-isolate slot. Gated like [`Self::pool_for_tests`],
-    /// and carrying the same inert dialect for the same reason.
+    /// and taking the dialect as a parameter for the same reason.
     #[cfg(any(test, feature = "test-helpers"))]
     #[doc(hidden)]
-    pub fn tx_for_tests(app_id: &str) -> Self {
+    pub fn tx_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
         Self {
             app_id: app_id.to_string(),
             in_tx: true,
-            dialect: SqlDialect::Postgres,
+            dialect,
         }
     }
 }
