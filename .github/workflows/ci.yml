@@ -450,6 +450,21 @@ jobs:
         run: tests/sync_claim_gate.sh --self-test
       - name: Every cross-crate agreement claim is on the ledger
         run: tests/sync_claim_gate.sh
+      # Decision 4 of docs/proposals/2026-08-31-data-crate-shape.md - "no SQL and
+      # no dialect knowledge in the engine" - had NOTHING enforcing it, while
+      # decision 5 beside it had tests/vendor_embedding_gate.sh. The asymmetry
+      # showed: the decision's own statement inventory was wrong in both
+      # directions, billing five cfg-gated statement families in auth/bootstrap.rs
+      # as production while omitting the three always-compiled PL/pgSQL builders
+      # beside them, and undercounting backend_handle.rs by one. Operator
+      # decision 2026-09-04 was to keep the property and mechanise it. Shrink-only
+      # baseline: additions refused, removals accepted with a note. Self-test
+      # first, because a detector that matches nothing and an engine holding no
+      # new SQL print the same thing.
+      - name: Decision four gate self-test
+        run: tests/decision_four_gate.sh --self-test
+      - name: No new production SQL statement text in the data engine
+        run: tests/decision_four_gate.sh
       # THE META-GATE. The step above is one of four gates found vacuous on
       # 2026-08-20 - an arm watching a single identifier the fix had deleted,
       # examining 0 names and printing green. The other three were skip_marker

@@ -79,8 +79,9 @@ usage() {
 # THE ONLY NUMBER HERE, and it counts FILES, not findings.
 #
 # RE-MEASURED 2026-09-04 by `find tests -maxdepth 1 -name '*_gate.sh' | wc -l`:
-# 35 already present, + 1 for sync_claim_gate.sh added in the same commit = 36.
-# It read 34 + 1 = 35 earlier the same day, for noop_cfg_pair_gate.sh, and
+# 36 already present, + 1 for decision_four_gate.sh added in the same commit = 37.
+# It read 35 + 1 = 36 earlier the same day, for sync_claim_gate.sh, and
+# 34 + 1 = 35 before that, for noop_cfg_pair_gate.sh, and
 # 33 + 1 = 34 before that, for worker_replication_privilege_gate.sh;
 # before that it was 31, and two gates arrived without moving it, so it was two
 # behind the tree and would not have noticed the glob losing two files. THAT IS
@@ -94,7 +95,7 @@ usage() {
 # half-break unnoticed, which is the precise failure this script exists to catch
 # one level down. RAISE THIS WHEN YOU ADD A GATE - leaving it behind the real
 # count is how a floor stops meaning anything without ever going red.
-GATE_FILE_FLOOR=36
+GATE_FILE_FLOOR=37
 
 DIR=""
 RUN=()
