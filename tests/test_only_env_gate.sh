@@ -134,6 +134,17 @@ fail() { FAIL=$((FAIL + 1)); RAN=$((RAN + 1)); echo "  FAIL $1"; }
 # `ZEROSHIP_NET_TEST_DNS_HANG_HOST` and `ZEROSHIP_NET_TEST_DNS_HANG_MS` under
 # "The surviving test-only names". Nothing in the tree read either one. They
 # were deleted in the same commit as this file.
+#
+# IT CAUGHT A THIRD ONE, and only on 2026-09-04, because THIS GATE HAD NEVER RUN
+# IN CI. `ZEROSHIP_SESSION_SECRET` sat here with no reader anywhere in the tree:
+# the SQLite session minter it configured went with the HMAC session anchor the
+# operator deleted on 2026-08-27 (AGENTS.md, "Privilege follows the PROCESS").
+# Arm 2 had been red the whole time and nothing was looking. The entry is gone,
+# with `ZEROSHIP_SESSION_SECRET_PREV` and `ZEROSHIP_SESSION_NONCE_CAPACITY`
+# alongside it in docs/reference/env-vars.md, which listed all three as
+# surviving. One stale citation survives on purpose in
+# crates/zeroship-data-sqlite/src/lib.rs:1470, where a comment still calls the
+# deleted minter a pattern to mirror; this gate cannot see a comment.
 INVENTORY="
 AUTH_TEST_SMTP_SINK
 CONTROL_TEST_DB
@@ -151,7 +162,6 @@ ZEROSHIP_DW_E2E_BLOB_ROOT
 ZEROSHIP_DW_E2E_CONTROL_URL
 ZEROSHIP_DW_E2E_DEPLOY_ID
 ZEROSHIP_DW_E2E_GATEWAY_URL
-ZEROSHIP_SESSION_SECRET
 "
 
 # Test-class names a harness puts in its OWN environment with `export`, each
