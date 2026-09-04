@@ -1,10 +1,25 @@
 # The CDC relay service
 
-**Status.** PROPOSED, and nothing is built. `ls crates/ | grep -i cdc` returns
-nothing; `zeroship-cdc`, `zeroship-cdc-wire`, `DatastoreId`, `ClusterId`,
-`DatabaseEpoch`, `GrantGeneration`, `cdc_clusters` and
-`__zeroship_admin.database_heads` have zero occurrences in `crates/` or
-`db/migrations-ts/`. The consumption path it replaces lives in
+**Status.** PROPOSED. **This paragraph said "nothing is built" until 2026-09-03.
+One piece is now built and nothing else is: the leaf wire crate
+`crates/zeroship-cdc-wire`** - framing, the eleven frames, `SubscribeRequest` and
+its permit commitment, the closed enums, and the identity and generation
+vocabulary they carry. It performs no I/O and depends on `sha2`, `serde` and
+`serde_json` only. `zeroship-cdc`, `cdc_clusters` and
+`__zeroship_admin.database_heads` still have zero occurrences in `crates/` or
+`db/migrations-ts/`, and `DatastoreId`, `ClusterId`, `DatabaseEpoch` and
+`GrantGeneration` now exist ONLY as wire types in that crate: no entity, table or
+column defines one, and its `src/lib.rs` records why it minted them and what the
+decoupling work must do with them rather than mint a second set.
+
+**Open 4 below says the transport answer "gates the wire crate", and the crate
+was built ahead of it.** The reasoning, stated so it can be refuted: a
+length-prefixed frame over a byte stream is carrier-independent, so the
+`ntex`/`cyper` experiment can change WHO carries the frames but not their layout.
+If that is wrong the crate is premature rather than incorrect - no relay code
+depends on it yet.
+
+The consumption path it replaces lives in
 `crates/zeroship-plugin-db/` (`wal_consumer.rs`, `replication.rs`,
 `slot_reaper.rs`, `change_stream_pg.rs`), and the pieces that stay are
 `broker.rs`, `read_set.rs` and `cdc_lifecycle.rs`. It is **blocked twice**: on the
