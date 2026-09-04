@@ -9,8 +9,9 @@ description = "The CDC relay/worker wire contract: framing, the eleven frame typ
 # ---------------------------------------------------------------------------
 #
 # `docs/proposals/2026-08-28-cdc-service.md` ("The worker/relay wire contract")
-# calls for "a new leaf crate `zeroship-cdc-wire`, no I/O, no V8, depended on by
-# both `zeroship-cdc` and `zeroship-plugin-db`". LEAF is enforced HERE, the same
+# calls for "a new leaf crate `zeroship-cdc-wire`, no I/O, no V8, to be depended
+# on by both `zeroship-data-cdc-server` and `zeroship-plugin-db`". LEAF is
+# enforced HERE, the same
 # way `crates/zeroship-data-core/Cargo.toml` enforces its vendor fence: the names
 # that would break it are absent below, so spelling one is E0433 at compile time.
 #
@@ -21,10 +22,12 @@ description = "The CDC relay/worker wire contract: framing, the eleven frame typ
 #                              client; both hand this crate bytes.
 #   v8, zeroship-runtime       A wire type that can name a V8 value is a wire
 #                              type creator code can reach.
-#   zeroship-plugin-db         The proposal states it outright: "No
-#                              `zeroship-cdc -> zeroship-plugin-db` dependency is
-#                              allowed." The wire crate sits under both, so it
-#                              may not name either.
+#   zeroship-plugin-db         The proposal states it outright: "the relay does
+#                              not depend on `zeroship-plugin-db` either -
+#                              neither edge exists, and the manifest states why
+#                              for each absent one." The wire crate sits under
+#                              the relay (`zeroship-data-cdc-server`) and the
+#                              worker both, so it may not name either.
 #   zeroship-data-*            Same direction. `ChangeEvent` is the BROKER's
 #                              shape; this crate carries the RELAY's. Fusing them
 #                              would make the wire format change whenever the
