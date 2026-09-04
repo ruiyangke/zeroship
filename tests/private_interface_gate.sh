@@ -206,10 +206,53 @@ gate_arm fenced_pub_items "$fenced" 300
 # private_interfaces is a private type in a public signature, private_bounds a
 # private type in a public bound.
 # ---------------------------------------------------------------------------
-# Counted by LINE, not by a quoted-field regex: cargo emits one JSON object per
-# line, and `rendered` embeds escaped quotes, so `"[^"]*"` truncates mid-value
-# and miscounts. One diagnostic is one line.
-leaks=$(grep -c 'more private than the item' "$OUT")
+# SELECTED BY LINT CODE, AND SCOPED TO THE TWO PACKAGES THIS GATE NAMES.
+#
+# It was `grep -c 'more private than the item'` over the whole stream, which is
+# rustc's SENTENCE and not its promise. Three things were wrong with that, and
+# only the third was visible:
+#
+#   1. The wording is what rustc happens to write today. Measured 2026-09-04 on
+#      a four-diagnostic probe, the phrase and the two lint codes select the
+#      same set - so this change moves no number now, which is exactly when a
+#      prose key is cheapest to retire. `tests/run_doc_gate.sh` walked back the
+#      identical narrowing three days earlier after it turned out to be missing
+#      8 of 97 diagnostics carrying the same code with different wording.
+#   2. `$OUT` is every message from both `cargo check` runs, and a run emits
+#      diagnostics for the whole unit graph, not just `-p`. Measured: the engine
+#      run's compiler-messages name FIVE packages. A `private_interfaces`
+#      warning anywhere in the graph counted as a leak in the two crates this
+#      gate claims to rule on. `.package_id` is the field that says otherwise.
+#   3. The COUNT and the LISTING below disagreed. The listing requires the
+#      message to begin `type `, and rustc renders the item kind into that slot:
+#      `private_bounds` - which the comment above says this gate deliberately
+#      covers - renders `trait `. Measured on the same probe: 4 counted, 3
+#      printed. An operator would have been handed a number with fewer names
+#      than it claimed, for the lint the header calls out by name.
+#
+# One jq, one row per diagnostic, used by both the count and the listing.
+#
+# The package alternation is built from ALL of $PKGS, not from its first and
+# last word: slicing with ${PKGS%% *} / ${PKGS##* } reads correctly at two
+# packages and silently drops every middle one at three - a filter that starts
+# excusing the cases it was built to rule on the day the list grows.
+#
+# `package_id` is `path+file:///...<name>#<version>`, so the name is delimited
+# by `/` before and `#` after. The boundaries are load-bearing: an unanchored
+# match on `zeroship-data-engine` is fine today but `compio-postgres` would
+# match `compio-postgres-derive`, and this gate's whole subject is a crate
+# boundary.
+PKG_ALT="$(printf '%s' "$PKGS" | tr ' ' '\n' | grep -v '^$' | paste -sd'|' -)"
+leak_rows() {
+  jq -r --arg pkgs "$PKG_ALT" '
+    select(.reason == "compiler-message")
+    | select(.message.code.code == "private_interfaces"
+             or .message.code.code == "private_bounds")
+    | select(.package_id | test("(^|[/#])(" + $pkgs + ")([#@ ]|$)"))
+    | .message.message
+  ' "$OUT" 2>/dev/null
+}
+leaks=$(leak_rows | grep -c . || true)
 
 echo "== verdict =="
 if [ "$leaks" -eq 0 ]; then
@@ -237,10 +280,9 @@ fi
   echo "  obtains a return type by inference and never names it."
   echo
 } >&2
-# The `message` field is safe to slice on quotes - rustc renders these with
-# backticks around the type names, never quotes - unlike `rendered`.
-grep -oE '"message":"type [^"]*more private than the item[^"]*"' "$OUT" \
-  | sed -E 's/^"message":"//; s/"$//' | sort -u | sed 's/^/  /' >&2
+# The SAME selection the count used. Any divergence between the two is a number
+# the operator cannot reconcile with the names under it - see note 3 above.
+leak_rows | sort -u | sed 's/^/  /' >&2
 
 gate_arms_finish
 exit 1
