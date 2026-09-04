@@ -21,7 +21,7 @@ fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("crates/config-contract has a workspace root above it")
+        .expect("crates/zeroship-config-contract has a workspace root above it")
         .to_path_buf()
 }
 
