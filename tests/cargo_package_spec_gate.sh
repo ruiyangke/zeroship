@@ -106,13 +106,54 @@ cargo_logical_lines() {
   # which quotes `cargo build -p zeroship --bin zeroship` as the defect it
   # exists to prevent - a gate whose own explanation fails it is worse than no
   # gate, because the noise trains people to ignore the output.
+  #
+  # THE FOURTH NARROWING, 2026-09-04, AND THIS ONE WAS FOUND BY A RED GATE.
+  # In a workflow file the executable content is the `run:` scalar; every other
+  # YAML key holds prose or configuration. `#`, `//` and `>` are a shell and
+  # Dockerfile notion of "not code" that YAML does not share, so this scan read
+  #
+  #   .github/workflows/ci.yml:511
+  #     - name: Every cargo -p spec in the repo names a real package
+  #
+  # - the English TITLE of the step that runs this very gate - as a cargo
+  # invocation, extracted `-p spec` from it, and failed because no package is
+  # called `spec`. That title arrived in 035909a99 when every gate was wired
+  # into CI, and this gate has been red since.
+  #
+  # This is the same rule as dropping `docs/` from ROOTS above, restated for a
+  # format where prose and command share a file: a gate that reads prose
+  # measures prose. Keyed on the YAML KEY, which is structure, not on the words
+  # in it. `run:` survives, in both its inline and block-scalar forms, because a
+  # block scalar's body lines are not `key:` lines.
+  local yaml_filter=cat
+  case "$1" in *.yml|*.yaml) yaml_filter=drop_non_run_yaml_keys ;; esac
   awk '
     /\\$/ { sub(/\\$/, ""); buf = buf $0 " "; next }
           { print buf $0; buf = "" }
     END   { if (buf != "") print buf }
   ' "$1" \
     | grep -vE '^[[:space:]]*(#|//|>)' \
+    | "$yaml_filter" \
     | grep -E '(^|[^-[:alnum:]_])cargo([^-[:alnum:]_]|$)' || true
+}
+
+# Drop lines that are a YAML mapping key OTHER than `run:`. A body line inside
+# a `run: |` block does not match `^key:` and therefore survives, which is the
+# whole point - the commands are what this gate rules on.
+drop_non_run_yaml_keys() {
+  awk '
+    {
+      s = $0
+      sub(/^[ \t]+/, "", s)
+      sub(/^-[ \t]+/, "", s)
+      if (match(s, /^[A-Za-z_][A-Za-z0-9_-]*:([ \t]|$)/)) {
+        key = substr(s, 1, RSTART + RLENGTH - 1)
+        sub(/:[ \t]*$/, "", key); sub(/:$/, "", key)
+        if (key != "run") next
+      }
+      print
+    }
+  '
 }
 
 collect_specs() {
@@ -218,6 +259,27 @@ if [ "${1:-}" = "--self-test" ]; then
     ok "negative control: 'zeroship-cli' IS in the package set"
   else
     bad "negative control failed: zeroship-cli is not a package"
+  fi
+
+  # THE YAML PAIR. Both lines carry `cargo ... -p`; they differ in ONE variable,
+  # the YAML key. A filter that dropped both would still pass arm 1 on a clean
+  # tree, so an absence here has to be paired with a presence to mean anything.
+  cat > "$probe/w.yml" <<'YML'
+      - name: Every cargo -p spec in the repo names a real package
+        run: cargo build -p zeroship-cli --bin zeroship
+YML
+  probe_out="$(cargo_logical_lines "$probe/w.yml")"
+  if printf '%s\n' "$probe_out" | grep -q -- '-p zeroship-cli'; then
+    ok "yaml positive control: a 'run:' cargo command survives the key filter"
+  else
+    bad "yaml positive control FAILED: the key filter ate a run: command, so
+       every workflow spec is now invisible and arm 1 is measuring nothing"
+  fi
+  if printf '%s\n' "$probe_out" | grep -q -- '-p spec'; then
+    bad "yaml negative control FAILED: a 'name:' step title is still read as a
+       cargo invocation - the defect this filter exists for"
+  else
+    ok "yaml negative control: a 'name:' step title is not read as a command"
   fi
 fi
 
