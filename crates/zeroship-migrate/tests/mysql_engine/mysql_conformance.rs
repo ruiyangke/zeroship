@@ -23,16 +23,25 @@ use zeroship_migrate::driver::conformance::{self, SeamFixture};
 ///
 /// Every difference from the PostgreSQL fixture is a real grammar difference, not
 /// a preference: `TEMPORARY` rather than `TEMP`, `BIGINT` rather than `int8`,
-/// `?` rather than `$N`, `CAST(... AS SIGNED)` rather than `::int8`, a space
-/// rather than `T` in the timestamp literal and no trailing zone designator, and
-/// SQLSTATE `42S02` rather than `42P01` for a missing table.
+/// `?` rather than `$N`, `CAST(... AS SIGNED)` rather than `::int8`,
+/// `CAST(... AS CHAR)` rather than `::text`, a space rather than `T` in the
+/// timestamp literal and no trailing zone designator, and SQLSTATE `42S02` rather
+/// than `42P01` for a missing table.
+///
+/// `BOOLEAN` is the sharpest of them: MySQL accepts the keyword and stores a
+/// `TINYINT(1)`, so there is no boolean type here at all. The suite asserts only
+/// what survives that - a bound `Bind::Bool` selects the row whose flag equals it -
+/// which is true of a `TINYINT` and of PostgreSQL's real `boolean` alike.
 const MYSQL_FIXTURE: SeamFixture = SeamFixture {
     temp_keyword: "TEMPORARY",
     bigint_type: "BIGINT",
+    bool_type: "BOOLEAN",
+    decimal_type: "DECIMAL(40,10)",
     timestamp_type: "DATETIME(6)",
     timestamp_text_param: "2026-01-02 03:04:05",
     placeholder: mysql_placeholder,
     as_bigint: mysql_as_bigint,
+    as_text: mysql_as_text,
     ts_matches: mysql_ts_matches,
     undefined_table_sqlstate: "42S02",
 };
@@ -45,6 +54,10 @@ fn mysql_placeholder(_n: usize) -> String {
 
 fn mysql_as_bigint(expr: &str) -> String {
     format!("CAST({expr} AS SIGNED)")
+}
+
+fn mysql_as_text(expr: &str) -> String {
+    format!("CAST({expr} AS CHAR)")
 }
 
 fn mysql_ts_matches() -> String {
