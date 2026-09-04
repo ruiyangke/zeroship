@@ -5972,8 +5972,21 @@ fn configure_cold_sqlite_unmask_fixture(
 /// `installSchema`'s `setMaskPolicy` loudest, which is the case
 /// `tx_scope::ensure_backend`'s own rustdoc calls load-bearing.
 ///
-/// No test can drive those five lines (they take `&mut v8::PinScope` and return
-/// a `v8::Local<Promise>`), so what is bound here is the function all five call.
+/// **What is bound HERE is the function all five call, and not their CHOICE of
+/// it.** Swap those five lines for a plain `context::with(|c| c.backend())` read
+/// and this gate stays green, because it calls `ensure_backend` itself and goes
+/// through no dispatcher - measured 2026-09-03, along with its two siblings and
+/// the `tx_scope::tests` unit of the same shape: all four green under exactly
+/// that mutation.
+///
+/// The choice is bound by `v8_classes::cold_open`, an in-crate module that
+/// enters at `collection.unmaskField(..)` / `__platform.setMaskPolicy(..)` /
+/// `mv.unmask(..)`, drains the queued op and asserts the isolate came out of the
+/// dispatch WITH a backend. Its six arms all fail under the same mutation. That
+/// module is in the crate and not here because the three `mint_*` functions its
+/// entry points need are `pub(crate)`; the sentence this paragraph replaced said
+/// no test could drive those five lines at all, which was true of an integration
+/// target and false of the crate.
 ///
 /// # Why identity, and not a context read
 ///
