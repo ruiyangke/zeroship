@@ -1113,7 +1113,41 @@ impl DialectBuilder for SqliteBackend {
 // vec0 index already updated at COMMIT time.
 
 impl zeroship_data_core::storage::VectorIndex for SqliteBackend {
-    /// vec0-powered top-k vector search. Composes a SQL of the form
+    /// vec0-powered top-k vector search, on the AUTOCOMMIT lane.
+    ///
+    /// The trait method carries nothing that says which connection this
+    /// dispatch belongs to, so it can only ever mean `op_conn`. Callers that
+    /// know - the engine's routed entry point does, from `route.in_tx()` - go
+    /// to [`SqliteBackend::vector_search_on`] instead and hand it the session.
+    async fn vector_search(
+        &self,
+        binding: &zeroship_data_core::binding::DbBinding,
+        collection: &str,
+        column: &str,
+        query: &[f32],
+        k: usize,
+        metric: zeroship_schema::descriptors::VectorMetric,
+        filter: &serde_json::Value,
+        schema: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        self.vector_search_on(
+            &self.autocommit_client(),
+            binding,
+            collection,
+            column,
+            query,
+            k,
+            metric,
+            filter,
+            schema,
+        )
+        .await
+    }
+}
+
+impl SqliteBackend {
+    /// vec0-powered top-k vector search **on `session`**. Composes a SQL of the
+    /// form
     ///
     /// ```sql
     /// SELECT t.*, v.distance AS _distance
@@ -1130,8 +1164,22 @@ impl zeroship_data_core::storage::VectorIndex for SqliteBackend {
     /// `f32` — same as the `vec_f32` constructor's expected form.
     /// `k` is bound positionally; the trailing filter params (if
     /// any) follow.
-    async fn vector_search(
+    ///
+    /// **`session` is a parameter because SC-2 split the lanes.** A handle
+    /// carrying a transaction lease routes onto `tx_conn`; one without mints an
+    /// autocommit reservation on `op_conn`. Those are two connections, so a
+    /// scan issued inside `db.transaction(fn)` that took the autocommit handle
+    /// could not see the transaction's own uncommitted rows. Bound by
+    /// `plugin-db/tests/search_tx_lane.rs`.
+    ///
+    /// # Errors
+    ///
+    /// `vector_unsupported` for an inner-product metric, the query builder's
+    /// own refusals, and any error the statement raises.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn vector_search_on(
         &self,
+        session: &session::SqliteSessionHandle,
         binding: &zeroship_data_core::binding::DbBinding,
         collection: &str,
         column: &str,
@@ -1203,7 +1251,7 @@ impl zeroship_data_core::storage::VectorIndex for SqliteBackend {
             &schema_hint,
         )?;
         let param_refs: Vec<&str> = params.iter().map(String::as_str).collect();
-        let typed = self.session.query_typed(&sql, &param_refs).await?;
+        let typed = session.query_typed_internal(&sql, &param_refs).await?;
         Ok(crate::row_json::typed_rows_to_json_value(
             &typed,
         ))
@@ -1254,8 +1302,49 @@ fn build_spatial_near_base_query(
 //     field.
 
 impl zeroship_data_core::storage::SpatialIndex for SqliteBackend {
+    /// Haversine flat scan, on the AUTOCOMMIT lane. Same split as
+    /// [`zeroship_data_core::storage::VectorIndex::vector_search`]: callers
+    /// that know their lane call [`SqliteBackend::spatial_near_on`].
     async fn spatial_near(
         &self,
+        binding: &zeroship_data_core::binding::DbBinding,
+        collection: &str,
+        column: &str,
+        point: zeroship_schema::descriptors::GeoPoint,
+        radius_m: f64,
+        filter: &serde_json::Value,
+        limit: Option<usize>,
+        schema: &serde_json::Value,
+    ) -> Result<Vec<serde_json::Value>, DbError> {
+        self.spatial_near_on(
+            &self.autocommit_client(),
+            binding,
+            collection,
+            column,
+            point,
+            radius_m,
+            filter,
+            limit,
+            schema,
+        )
+        .await
+    }
+}
+
+impl SqliteBackend {
+    /// Haversine flat scan **on `session`**, the spatial twin of
+    /// [`Self::vector_search_on`]; see there for why the session is a
+    /// parameter.
+    ///
+    /// # Errors
+    ///
+    /// `invalid_geo_arg` when the named column is absent from the result row or
+    /// is not a BLOB, the query builder's own refusals, and any error the
+    /// statement raises.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn spatial_near_on(
+        &self,
+        session: &session::SqliteSessionHandle,
         binding: &zeroship_data_core::binding::DbBinding,
         collection: &str,
         column: &str,
@@ -1273,7 +1362,7 @@ impl zeroship_data_core::storage::SpatialIndex for SqliteBackend {
         let schema_hint = schema;
         let bq = build_spatial_near_base_query(app_id, collection, filter, &schema_hint)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        let typed = self.session.query_typed(&bq.sql, &param_refs).await?;
+        let typed = session.query_typed_internal(&bq.sql, &param_refs).await?;
 
         // Locate the BLOB column. Cache the index outside the row
         // loop so we don't scan `columns` per row.

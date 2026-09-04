@@ -867,6 +867,24 @@ haversine computed during the full-scan post-filter.
 rejects with `code: "POLYGON_OPS_PG_ONLY"`. Use PG for any
 production-scale geo workload.
 
+### Search inside a transaction
+
+`search()` and `near()` issued inside `db.transaction(fn)` run on that
+transaction's own connection, so they see rows the same transaction has
+already written and nobody else's uncommitted work:
+
+```ts
+await db.transaction(async (tx) => {
+  await tx.docs.insert({ embedding, title: "fresh" });
+  const { data } = await tx.docs.search({ vector: embedding, k: 5 });
+  // `fresh` is in `data` - it was written on this connection
+});
+```
+
+Roll the transaction back and the row is gone, exactly as an ordinary
+`find` would report. This is the same read-your-own-writes rule the rest
+of `env.db` follows; there is no separate snapshot for the search family.
+
 ### Where the search index comes from
 
 **Your migration builds it, not the first query.** Declaring

@@ -6304,7 +6304,15 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         1000.0,
         &Value::Null,
         Some(1),
-        &serde_json::Value::Null,
+        // The DESCRIPTOR slice, not `Value::Null`. `build_spatial_near` checks
+        // the column against it, so a null hint refuses `location` outright
+        // with `invalid_identifier` and the role fence below is never reached.
+        // This argument was `Value::Null` from the day the test was written
+        // until 2026-09-03; it never showed because the usual test container
+        // carries no PostGIS and the arm skips. Its vector twin above always
+        // passed the descriptor.
+        &zeroship_plugin_db::collection_schema(&DbBinding::cold_start(app), coll)
+            .expect("descriptor slice for the spatial fixture"),
     )
     .await
     .unwrap_or_else(|e| panic!("spatial_near failed: {e:?}"));
@@ -7442,7 +7450,16 @@ fn direct_connection_sites_do_not_grow() {
     //       They cannot share one pool: each fixture drops and recreates its own
     //       app schema, and a shared pool would let one test's DROP SCHEMA run
     //       against another's live rows.
-    const PINNED: usize = 128;
+    // Raised to 131 on 2026-09-03, and this time the arithmetic closes exactly:
+    //   +3  `tests/search_tx_lane.rs`, added the same day: one `require_pg`
+    //       probe plus one pool per test, and there are two tests (the vector
+    //       arm and the spatial arm). Measured by needle, not inferred - the
+    //       file holds 2 pool sites, 1 probe site and 2 `release_pg(pool)`
+    //       calls, so every pool it opens is released, which is the property
+    //       this pin exists to keep. They cannot share one pool for the same
+    //       reason `unmask_tx_lane.rs`'s cannot: each fixture drops and
+    //       recreates its own app schema.
+    const PINNED: usize = 131;
     // 10 files today, one of them nested. This floor alone does NOT catch a walk
     // that stops descending - measured: flattening it reads 9 and clears 9. That
     // is what the second assertion is for. This one catches the scan being

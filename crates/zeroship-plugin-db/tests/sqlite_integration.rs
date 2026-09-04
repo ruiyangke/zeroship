@@ -2529,6 +2529,157 @@ fn near_returns_within_radius() {
     });
 }
 
+/// A `near()` inside `db.transaction(fn)` must scan the transaction's own
+/// connection.
+///
+/// The SQLite half of what `tests/search_tx_lane.rs` rules on for PostgreSQL,
+/// and it is a separate question rather than the same one twice: SC-2 Decision 1
+/// gave this backend TWO connections, `op_conn` for autocommit reads and
+/// `tx_conn` for the creator's transaction, and `SpatialIndex::spatial_near`
+/// took `&self` - which can only ever mean `op_conn`. So a `near` issued inside
+/// a transaction scanned a connection that cannot see that transaction's own
+/// uncommitted rows.
+///
+/// **The control differs in one variable: `route.in_tx()`.** The same `near`,
+/// over the same row, at the same instant, on a route captured outside the
+/// transaction must return nothing - because on `op_conn` the row genuinely is
+/// not there. That is what makes the subject arm a statement about the lane
+/// rather than about the fixture.
+#[test]
+fn a_near_inside_a_transaction_sees_the_row_that_transaction_inserted() {
+    run(async {
+        let (backend, _dir) = fresh_backend();
+        let app = "near_tx_lane";
+        backend
+            .attach_app_file(app)
+            .await
+            .expect("attach the app database");
+        backend
+            .pool_exec(
+                &format!(
+                    "CREATE TABLE \"{app}\".\"places\" (\
+                       id INTEGER PRIMARY KEY AUTOINCREMENT, \
+                       location BLOB CHECK(length(location) = 16) NOT NULL, \
+                       {SYSTEM_COLUMNS_SQLITE_TAIL}\
+                     )"
+                ),
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE places");
+        zeroship_plugin_db::cache_schema_for_tests(
+            app,
+            "places",
+            serde_json::json!({ "location": { "type": "geoPoint" } }),
+        );
+
+        let london = GeoPoint {
+            lat: 51.5074,
+            lng: -0.1278,
+        };
+
+        // Park a real transaction connection in this app's lane, exactly as
+        // `exec_begin` does, and write the row on it.
+        let client = backend
+            .acquire_dedicated_client(app)
+            .await
+            .expect("acquire the transaction client");
+        backend
+            .client_exec(&client, "BEGIN", &[])
+            .await
+            .expect("BEGIN");
+        backend
+            .client_exec(
+                &client,
+                &format!(
+                    "INSERT INTO \"{app}\".\"places\" (location) VALUES ({})",
+                    point_to_hex_lit(london)
+                ),
+                &[],
+            )
+            .await
+            .expect("write inside the transaction");
+        zeroship_data_engine::tx_lanes::with_mut(|l| {
+            let previous = l.install_tx_client(
+                app,
+                zeroship_data_engine::tx_lanes::TxConnection::Sqlite(client),
+            );
+            assert!(previous.is_none(), "the tx slot must start empty");
+        });
+
+        let handle = BackendHandle::Sqlite(std::rc::Rc::new(backend));
+        let binding = DbBinding::cold_start(app);
+        let args = serde_json::json!({
+            "field": "location",
+            "point": { "lat": london.lat, "lng": london.lng },
+            "radius": 1000.0,
+        });
+        let near_on = async |route| {
+            let plan = zeroship_plugin_db::crud::plan_near(
+                &binding,
+                zeroship_plugin_db::query::SqlDialect::Sqlite,
+                "places",
+                &args,
+            )
+            .expect("plan_near");
+            zeroship_plugin_db::crud::run_near(&route, binding.clone(), "places".to_string(), plan)
+                .await
+                .expect("run_near")
+                .rows
+        };
+
+        // ---- CONTROL: a route captured OUTSIDE the transaction. `op_conn`
+        // cannot see the row, so an empty result here is what proves the
+        // subject arm below is about the lane.
+        let outside = near_on(
+            zeroship_plugin_db::tx_route::CapturedRoute::pool_for_tests(
+                app,
+                zeroship_plugin_db::query::SqlDialect::Sqlite,
+            )
+            .bind(handle.clone()),
+        )
+        .await;
+        assert!(
+            outside.is_empty(),
+            "the row must be invisible on the autocommit connection, or the \
+             subject arm below cannot distinguish the two lanes: {outside:?}",
+        );
+
+        // ---- SUBJECT: the same near on the transaction's own lane.
+        let inside = near_on(
+            zeroship_plugin_db::tx_route::CapturedRoute::tx_for_tests(
+                app,
+                zeroship_plugin_db::query::SqlDialect::Sqlite,
+            )
+            .bind(handle.clone()),
+        )
+        .await;
+        assert_eq!(
+            inside.len(),
+            1,
+            "a near inside a transaction must reach the row that transaction \
+             inserted; an empty result means the scan took `op_conn`: {inside:?}",
+        );
+        assert!(
+            inside[0]
+                .get("_distance_m")
+                .and_then(serde_json::Value::as_f64)
+                .is_some_and(|d| d < 1.0),
+            "the row must carry its synthetic distance: {inside:?}",
+        );
+
+        // Release the lane so the connection is not left mid-transaction.
+        if let Some(zeroship_data_engine::tx_lanes::TxConnection::Sqlite(client)) =
+            zeroship_data_engine::tx_lanes::with_mut(|l| l.take_tx_client_for(app))
+        {
+            let _ = client.exec("ROLLBACK", &[]).await;
+        } else {
+            panic!("the sqlite tx client must still be parked for cleanup");
+        }
+    });
+    zeroship_plugin_db::reset_context_for_tests();
+}
+
 // ===========================================================================
 // Column encryption on SqliteBackend
 // ===========================================================================
