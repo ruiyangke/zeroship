@@ -4,7 +4,7 @@
 //! The creator API is unchanged — `await env.db.transaction(async tx =>
 //! {...})` commits on resolve, rolls back on throw — but the begin /
 //! commit / rollback / nested-savepoint state machine moved out of the
-//! bootstrap's JS `transactionImpl` and into [`transaction_dispatch`].
+//! bootstrap's JS `transactionImpl` and into `transaction_dispatch`.
 //! `db.beginTransaction()` and the `Transaction` v8_class methods
 //! (`commit`/`rollback`/`collection`) no longer exist on the JS surface.
 //!
@@ -12,7 +12,7 @@
 //!
 //! **This module owns the protocol and NOT the V8 shape, which is the reverse
 //! of what this paragraph said until 2026-09-02.** The promises, continuations
-//! and `.then` handlers moved to [`crate::v8_classes::transaction`]; eleven
+//! and `.then` handlers moved to the adapter tier's `v8_classes::transaction`; eleven
 //! items went, picked by whether their signature names a `v8::` type. What
 //! stays here is the state machine and the I/O it drives: every transition is
 //! an event applied to [`reducer::TxReducer`], and every statement reaching the
@@ -27,38 +27,38 @@
 //! between them is an app id, a [`reducer::frames::FrameId`] and a
 //! [`SettleOutcome`] - never a scope, never a resolver.
 //!
-//! 1. [`transaction_dispatch`] (a sync v8_method body) mints the outer
-//!    [`v8::PromiseResolver`] and returns its promise to JS immediately.
+//! 1. `transaction_dispatch` (a sync v8_method body) mints the outer
+//!    `v8::PromiseResolver` and returns its promise to JS immediately.
 //! 2. It reads the calling frame's **async context**
-//!    ([`crate::tx_scope`]) to decide whether this is a **top-level**
+//!    (the adapter tier's `tx_scope`) to decide whether this is a **top-level**
 //!    transaction (not inside any transaction callback → admit a reducer and
 //!    emit `BEGIN`) or a **nested** one (inside this app's enclosing callback →
 //!    open a frame and emit `SAVEPOINT`). It is deliberately NOT "does this app
 //!    have a transaction open right now" — that test cannot tell a nested call
 //!    from an unrelated concurrent one, and reading it that way silently folded
-//!    one request's transaction into another's (see [`crate::tx_scope`] for the
+//!    one request's transaction into another's (see that module for the
 //!    measurement).
 //! 3. A spawned op takes the admission claim as an RAII [`TxAdmission`] guard
 //!    and runs the `BEGIN` / `SAVEPOINT` through the reducer. On success it
-//!    hands back a [`zeroship_runtime::state::ResolveValue::Continuation`]; on
+//!    hands back a `zeroship_runtime::state::ResolveValue::Continuation`; on
 //!    failure the guard's drop releases the claim, retires the reducer and
 //!    withdraws any session that was installed.
 //! 4. The continuation runs inside the pump's V8 scope:
-//!    [`mint_tx_view`](crate::v8_classes::transaction::mint_tx_view)
+//!    `v8_classes::transaction::mint_tx_view`
 //!    builds the tx-view object (collections-as-props, no
 //!    commit/rollback methods), then the creator callback is invoked
-//!    inside a [`v8::TryCatch`] to capture a synchronous throw.
+//!    inside a `v8::TryCatch` to capture a synchronous throw.
 //! 5. The callback's return is coerced to a Promise
-//!    ([`coerce_to_promise`]): an already-Promise is used as-is; a plain
+//!    (`coerce_to_promise`): an already-Promise is used as-is; a plain
 //!    value is wrapped resolved; a synchronous throw skips straight to
 //!    the rollback path.
 //! 6. `.then(resolve_handler, reject_handler)` is attached to that
-//!    Promise. The handlers are native [`v8::Function`]s whose `.data()`
-//!    carries a heap [`TxFinalizer`] (the outer resolver + the FRAME ID + the
+//!    Promise. The handlers are native `v8::Function`s whose `.data()`
+//!    carries a heap `TxFinalizer` (the outer resolver + the FRAME ID + the
 //!    request id — never a savepoint name).
-//! 7. On the creator promise **resolving**, [`tx_resolve_handler`] settles:
+//! 7. On the creator promise **resolving**, `tx_resolve_handler` settles:
 //!    `COMMIT` at the root, `RELEASE` for a frame.
-//! 8. On the creator promise **rejecting**, [`tx_reject_handler`] settles:
+//! 8. On the creator promise **rejecting**, `tx_reject_handler` settles:
 //!    `ROLLBACK` at the root, `ROLLBACK TO` + `RELEASE` for a frame.
 //!
 //! ## Two defects this shape removes, by name
@@ -127,7 +127,7 @@
 /// one deadline slot, one lifecycle classifier. It performs no I/O and owns no
 /// session, which is what makes SC-1's invariants checkable without a database.
 ///
-/// [`transaction_dispatch`] runs on it: every begin, frame open, frame close
+/// The adapter tier's `transaction_dispatch` runs on it: every begin, frame open, frame close
 /// and settlement below is an event applied to this machine, and the SQL that
 /// results is whatever [`driver`] was told to issue.
 pub mod reducer;

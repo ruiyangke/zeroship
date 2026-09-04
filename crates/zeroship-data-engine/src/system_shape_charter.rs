@@ -143,7 +143,7 @@ impl AssignmentPlan {
 
 /// This worker thread's projection of the operator charter.
 ///
-/// The plugin stamps it during [`crate::DbPlugin::register`], the same way it
+/// The plugin stamps it during the adapter tier's `DbPlugin::register`, the same way it
 /// stamps the meter and the resource key. A vector that never registered a
 /// plugin - the unit tests, and the `test-helpers` integration targets that
 /// drive the pass directly - derives it here on first use.

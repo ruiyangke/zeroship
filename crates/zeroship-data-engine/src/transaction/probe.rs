@@ -8,7 +8,8 @@
 //! **It performs no logic of its own.** Every function forwards to the driver or
 //! reads the reducer; anything that made a judgement here would be a second
 //! implementation for a test to agree with, which is how a test starts checking
-//! itself. The one exception is [`HeldSession`], which exists to reproduce a
+//! itself. The one exception is
+//! [`HeldSession`](crate::transaction::probe::HeldSession), which exists to reproduce a
 //! *timing* the production paths reach by scheduling rather than by request.
 
 use zeroship_data_core::error::DbError;

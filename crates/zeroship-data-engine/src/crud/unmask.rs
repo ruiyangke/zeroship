@@ -494,7 +494,7 @@ async fn prepare_unmask_backend(backend: &BackendHandle, app_id: &str) -> Result
 /// SELECT returned zero rows.
 /// Public under `test-helpers` so the integration suite can drive
 /// the dispatch flow without standing up V8; the production V8 glue
-/// in [`dispatch_unmask_field`] is the only crate-internal caller.
+/// in the adapter tier's `dispatch_unmask_field` is the only crate-internal caller.
 ///
 /// `route` is supplied by the caller because this function is ENGINE and the
 /// funnel that opens a backend is ADAPTER state; the V8 dispatcher captures the

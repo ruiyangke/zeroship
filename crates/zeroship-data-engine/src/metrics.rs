@@ -25,7 +25,7 @@
 //! # This module is ENGINE, and used to claim no tier at all
 //!
 //! It abstained until 2026-09-02 on the grounds that [`emit_db_metric`] pulled
-//! the meter handle from [`crate::context`], "whose own destination crate is
+//! the meter handle from the adapter tier's `context`, "whose own destination crate is
 //! unsettled". Both halves of that expired: the 2026-09-02 ownership decision
 //! settled the context as the adapter, and the meter no longer comes from it -
 //! it is stamped onto this module's own thread-local by `DbPlugin::register`.

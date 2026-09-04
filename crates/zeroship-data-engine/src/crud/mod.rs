@@ -17,13 +17,13 @@
 //!   halves of ONE capture, and a dispatcher that plans before it captures no
 //!   longer compiles. `plan_search` / `plan_near` take a bare dialect instead,
 //!   because their dispatches deliberately capture no route (they never reach
-//!   `crate::exec::run_sql`); see [`crate::v8_classes::dispatch`].
+//!   `crate::exec::run_sql`); see the adapter tier's `v8_classes::dispatch`.
 //! * `run_*` is the **async** half. It takes the plan plus a
 //!   [`crate::tx_route::TxRoute`] captured by the caller, drives the backend
 //!   through [`crate::exec`], and returns data.
 //!
 //! Neither half allocates a promise or resolves one. That is the adapter's
-//! job: [`crate::v8_classes::dispatch`] holds the 17 `dispatch_*` helpers
+//! job: the adapter tier's `v8_classes::dispatch` holds the 17 `dispatch_*` helpers
 //! that mint the promise, freeze the route while the V8 scope is live, and
 //! lower a `run_*` result into a `ResolveValue` via `settle` / `run_op`.
 //!
@@ -212,7 +212,7 @@ pub use write_pipeline::{
 /// run the read pipeline over the RETURNING rows.
 ///
 /// It takes `binding`, `coll` and `route` BY VALUE, which is the point rather
-/// than an accident: it is handed to [`run_op`] as
+/// than an accident: it is handed to the adapter tier's `run_op` as
 /// `move |bq| exec_mutation_then_read(binding, coll, route, bq, op)`, and
 /// `run_op`'s `EFut` cannot borrow from the closure it was produced by.
 ///
@@ -909,7 +909,7 @@ pub async fn run_find(
 /// on the pump turn that initiates the dispatch. This function awaits before it
 /// writes (the encryption pass's `resolve_key` round-trip), so resolving the
 /// actor in here would attribute the row to whichever request happens to be
-/// current at first poll. [`dispatch_insert`] reads it eagerly and passes it in.
+/// current at first poll. `v8_classes::dispatch::dispatch_insert` reads it eagerly and passes it in.
 pub async fn run_insert(
     binding: DbBinding,
     coll: String,
@@ -960,7 +960,7 @@ pub async fn run_insert(
 }
 
 
-/// Shared dispatch for `insertMany`. See [`dispatch_insert`] for the
+/// Shared dispatch for `insertMany`. See `v8_classes::dispatch::dispatch_insert` for the
 /// capability-gate contract.
 /// The ENGINE half of `insertMany`. `actor_id` is eager for the reason given on
 /// [`run_insert`]; it reaches the docs through
@@ -1391,7 +1391,7 @@ pub async fn run_update_many(
 // `deleted_at` on a soft-deleted row.
 // ---------------------------------------------------------------------------
 
-/// Shared dispatch for `deleteOne`. See [`dispatch_insert`] for the
+/// Shared dispatch for `deleteOne`. See `v8_classes::dispatch::dispatch_insert` for the
 /// capability-gate contract.
 /// The ENGINE half of `delete_one`. Peer of [`plan_count`] and [`plan_purge_one`],
 /// and the first that threads `actor_id`.
@@ -1854,7 +1854,7 @@ pub struct SearchPlan {
 ///
 /// Every refusal here used to be an eagerly-spawned rejection future with its
 /// own early `return promise`. They are plain `Err`s now, and the adapter feeds
-/// them to `settle`, whose error arm calls the SAME [`reject_op`] those
+/// them to `settle`, whose error arm calls the SAME `reject_op` those
 /// rejections did - it is literally
 /// `OpResult::JsValue { resolver, value: ResolveValue::RejectError(err.to_op_error()), request_id }`,
 /// and the old helper was a one-line push of exactly that. Verified by reading
@@ -2043,7 +2043,7 @@ pub struct NearPlan {
 
 /// The EAGER half of `near`. Same rejection-folding as [`plan_search`]: the five
 /// eagerly-spawned rejections are plain `Err`s, and `settle`'s error arm makes
-/// the same [`reject_op`] call they did.
+/// the same `reject_op` call they did.
 ///
 /// All four argument refusals share the `invalid_near_args` code; only the
 /// message distinguishes them. That is transcribed from the original, not

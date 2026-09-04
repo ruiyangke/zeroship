@@ -34,7 +34,7 @@
 //! ## The discriminator, and why it must be captured at dispatch
 //!
 //! Whether an op belongs to a transaction is a property of its **async
-//! context**, not of the app's wall-clock state — see [`crate::tx_scope`],
+//! context**, not of the app's wall-clock state — see the adapter tier's `tx_scope`,
 //! which reads V8's continuation-preserved embedder data (the slot
 //! `AsyncLocalStorage` uses). `crate::tx_scope::current_tx_app` answers it,
 //! but it needs a `&mut v8::PinScope`, and `crate::exec::run_sql` runs
@@ -44,7 +44,7 @@
 //!
 //! ## Why a missed dispatch site cannot compile
 //!
-//! `TxRoute` has exactly ONE production constructor, [`TxRoute::capture`],
+//! `TxRoute` has exactly ONE production constructor, [`CapturedRoute::capture`],
 //! and it takes the OBSERVED transaction frame - not an `app_id`, and not a
 //! `bool`. There is no `From<&str>`, no `Default`, no `new(app_id)`, and the
 //! fields are private, so a `TxRoute` cannot be conjured from an `app_id`.
@@ -138,7 +138,7 @@ impl CapturedRoute {
     /// itself, which made a routing decision - engine vocabulary - depend on
     /// the adapter that reads V8's context map. The comparison is the security
     /// property and stays here; only the READING of the context moved out, to
-    /// [`crate::tx_scope::capture_route`], which is the one place a V8 scope is
+    /// the adapter tier's `tx_scope::capture_route`, which is the one place a V8 scope is
     /// in hand. This module now names no `v8::` type.
     ///
     /// Deliberately not a `bool` parameter: a caller cannot assert "I am in a
@@ -147,7 +147,7 @@ impl CapturedRoute {
     ///
     /// `dialect` arrives the same way and for the same reason: it is read from
     /// the thread's database configuration, which is ADAPTER state this module
-    /// may not name. See [`crate::tx_scope::capture_route`] for the read, and
+    /// may not name. See the adapter tier's `tx_scope::capture_route` for the read, and
     /// [`Self::dialect`] for why the answer is stable for the whole dispatch.
     pub fn capture(
         current_tx_app: Option<&str>,
@@ -196,7 +196,7 @@ impl CapturedRoute {
     /// Consuming, and the ONLY way to build a [`TxRoute`]. The adapter calls
     /// it once per dispatch from the async body, because that is the first
     /// point at which a backend can be opened; see
-    /// [`crate::tx_scope::bind_route`].
+    /// the adapter tier's `tx_scope::bind_route`.
     pub fn bind(self, backend: BackendHandle) -> TxRoute {
         TxRoute {
             app_id: self.app_id,
@@ -315,7 +315,7 @@ impl TxRoute {
     ///
     /// This is deliberately a consuming conversion rather than another
     /// constructor: the app identity and the original async-scope decision
-    /// still have to come from [`Self::capture`]. Bulk write fan-out uses it
+    /// still have to come from [`CapturedRoute::capture`]. Bulk write fan-out uses it
     /// only after opening either a top-level transaction or a savepoint, so
     /// every statement and its deferred broker event share that frame.
     pub fn into_internal_transaction(mut self) -> Self {

@@ -42,7 +42,7 @@
 //!
 //! Every fallible helper here returns [`zeroship_data_core::error::DbError`] — the
 //! `dispatch_*` layer in `crate::crud` calls
-//! [`crate::op_error::ToOpError::to_op_error`] at the V8 boundary so each
+//! the adapter tier's `op_error::ToOpError::to_op_error` at the V8 boundary so each
 //! throw carries `.code` for the SDK to branch on (replacing the
 //! earlier `Result<_, String>` rail).
 //!

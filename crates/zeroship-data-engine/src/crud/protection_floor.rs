@@ -4,7 +4,7 @@
 //! # The defect this exists for
 //!
 //! Encryption and masking were decided from the creator-authored runtime
-//! descriptor alone: [`crate::crud::write_pipeline::WriteStages`] reads
+//! descriptor alone: `crud::write_pipeline`'s private `WriteStages` reads
 //! `def["mask"]` and `def["encrypted"]` off the descriptor's field map, and a
 //! field carrying neither is written verbatim. So DELETING ONE JSON KEY from a
 //! field turned a protected column into a plaintext one, with no refusal and no

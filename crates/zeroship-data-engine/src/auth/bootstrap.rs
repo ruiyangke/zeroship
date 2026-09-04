@@ -18,7 +18,7 @@
 //! schema authority and per-app roles are the privilege boundary.
 //!
 //! Every `CREATE ROLE` here is wrapped in an existence probe, so
-//! re-running [`ensure_per_app_role`] on a provisioned cluster is a
+//! re-running `ensure_per_app_role` on a provisioned cluster is a
 //! cheap no-op.
 
 #[cfg(any(test, feature = "test-helpers"))]
@@ -208,7 +208,8 @@ pub fn set_local_role_sql(app_id: &str) -> Result<String, DbError> {
 // assumed - despite its comment naming callers it was keeping alive. Call the
 // real paths.
 
-/// Result of [`ensure_per_app_role`] — distinguishes "created the role
+/// Result of `ensure_per_app_role` (which is behind `test-helpers`, so a
+/// default build has this type without its producer) — distinguishes "created the role
 /// now" from "role already existed" for idempotency telemetry.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PerAppRoleOutcome {

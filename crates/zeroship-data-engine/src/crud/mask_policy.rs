@@ -31,7 +31,7 @@
 //!
 //! **SQLite still carries one** (selected at runtime by a `sqlite://`
 //! url): a sidecar JSON file at `<db_dir>/mask_policies.json`, written
-//! and re-read through [`persist_sqlite`] / [`load_sqlite`] off-thread
+//! and re-read through `persist_sqlite` / `load_sqlite` off-thread
 //! via `compio::runtime::spawn_blocking`, with a per-file process-local
 //! mutex serialising writers. By the decision above that store is also
 //! surplus - the boot-time declaration already seeds the cache, so the

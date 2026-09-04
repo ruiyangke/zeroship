@@ -74,8 +74,8 @@ use zeroship_data_core::error::{BeginIntent, OpenSessionError};
 /// does not link the tier that changes schema.
 pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 
-/// Per-isolate backend handle — the typed enum stashed on
-/// [`crate::context::ThreadDbContext`].
+/// Per-isolate backend handle — the typed enum stashed on the adapter tier's
+/// `ThreadDbContext` (in `zeroship-plugin-db`, which this crate cannot name).
 ///
 /// **Why an enum, not `Box<dyn Backend>`** (closes
 /// `docs/archive/db-system-design.md` §5.5 and

@@ -40,7 +40,7 @@
 //! ## Wiring into the CRUD dispatch
 //!
 //! Called from `crud::dispatch_insert` / `dispatch_update_one`
-//! **AFTER** [`crate::crud::encryption_pass::encrypt_row_on_write`]
+//! **AFTER** `crud::encryption_pass::encrypt_row_on_write`
 //! and **BEFORE** the `query::build_*` call. The encryption pass
 //! populates a [`MaskPlaintextSidechannel`] (a
 //! `HashMap<String, Zeroizing<String>>`)
