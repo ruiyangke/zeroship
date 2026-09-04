@@ -305,7 +305,7 @@ echo "  discovery: $found_n inject rule(s) in tracked files; 1 fragment," \
 # Measured 2026-09-04: that returned 6 files, the bound regex returns 5, and the
 # extra was `crates/zeroship-plugin-db/tests/distributed_live.rs`, whose two
 # qualifying lines are a DOC COMMENT naming the policy (`:66`) and an
-# `include_str!` of `sdks/db/dist/internal.js` (`:488`). Nothing in that file
+# `include_str!` of the db SDK's generated bundle (`:488`). Nothing in that file
 # takes the fragment.
 #
 # It was wrong in both directions, and the silent one is the reason this arm

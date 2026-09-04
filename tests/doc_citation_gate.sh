@@ -81,10 +81,12 @@ FAILED=0
 # it does not track a path. That arm replaced nothing - it was simply missing,
 # and two citations were being ruled on by whether this machine had run a setup
 # script. Measured 2026-09-04, `crates/zeroship-runtime/tests/wpt/` (fetched by
-# setup-wpt.sh, .gitignore:43) and `sdks/db/dist/internal.js` (a pnpm build
-# output) were both on disk here and would have failed a clean checkout. The
-# second is ALREADY an ALLOW row in tests/source_citation_gate.sh for exactly
-# this reason, so the two gates were giving opposite verdicts on one citation.
+# setup-wpt.sh and gitignored) and the db SDK's generated `internal.js` bundle
+# (a pnpm build output) were both on disk here and would have failed a clean
+# checkout. The second is ALREADY an ALLOW row in tests/source_citation_gate.sh
+# for exactly this reason, so the two gates were giving opposite verdicts on one
+# citation - and writing its path out here made a third gate refuse this file,
+# which is the same rule working from the other side.
 is_generated_artifact() {
   case "$1" in
     sdks/ui/coverage/*|sdks/ui/coverage) return 0 ;;   # pnpm test-storybook:coverage
