@@ -1,34 +1,52 @@
 # The CDC relay service
 
-**Status.** PROPOSED. **This paragraph said "nothing is built" until 2026-09-03.
-One piece is now built and nothing else is: the leaf wire crate
-`crates/zeroship-cdc-wire`** - framing, the eleven frames, `SubscribeRequest` and
-its permit commitment, the closed enums, and the identity and generation
-vocabulary they carry. It performs no I/O and depends on `sha2`, `serde` and
-`serde_json` only. `zeroship-cdc`, `cdc_clusters` and
-`__zeroship_admin.database_heads` still have zero occurrences in `crates/` or
-`db/migrations-ts/`, and `DatastoreId`, `ClusterId`, `DatabaseEpoch` and
-`GrantGeneration` now exist ONLY as wire types in that crate: no entity, table or
-column defines one, and its `src/lib.rs` records why it minted them and what the
-decoupling work must do with them rather than mint a second set.
+**Status.** PROPOSED. **The relay is NOT BUILT, and no part of this document has
+been implemented.** Four pieces AROUND it have landed, each of which makes the
+relay cheaper to write and none of which is the relay:
 
-**Open 4 below says the transport answer "gates the wire crate", and the crate
-was built ahead of it.** The reasoning, stated so it can be refuted: a
-length-prefixed frame over a byte stream is carrier-independent, so the
-`ntex`/`cyper` experiment can change WHO carries the frames but not their layout.
-If that is wrong the crate is premature rather than incorrect - no relay code
-depends on it yet. **The experiment has since run and the reasoning held**: the
-carrier delivers opaque bytes with arbitrary chunk boundaries, so the frame
-layout was never at stake. See the transport paragraph below.
+| landed | what it is | commit |
+| --- | --- | --- |
+| `crates/zeroship-cdc-wire` | The leaf wire contract: framing, the eleven frames, `SubscribeRequest` and its permit commitment, the closed enums, and the identity and generation vocabulary. No I/O; `sha2`, `serde`, `serde_json` only, with `zeroship-core` a DEV dependency so the typed-id oracle runs without putting an HTTP client in a no-I/O crate's closure. 35 tests. | `05d9462c8` |
+| `crates/zeroship-cdc-transport-spike` | The ntex-plus-cyper streaming pair, proven as 12 tests. Answers most of Open 4. | `f7e043252` |
+| `crates/zeroship-data-cdc-server` | **The CRATE, not the SERVICE.** A manifest, a config module and a `main` that answers `--check-config` and then refuses to start. **ZERO files were moved into it**, which is the settled answer rather than a deferral. | `545ceff1e` |
+| SQLite commit-window suppression | The suppression sample point moved from drain to commit. Ships behaviour; INERT today. | `8672dd355` |
 
-The consumption path it replaces lives in
+**THE CRATE'S NAME IS `zeroship-data-cdc-server`, AND THIS DOCUMENT SAID
+`zeroship-cdc` IN FIVE PLACES UNTIL 2026-09-03.** Every one is corrected below.
+The old name was a working name, never a decision; the current one is an operator
+ruling and is what `crates/zeroship-data-cdc-server/Cargo.toml` declares.
+
+**It is a BINARY that nothing links.** Not a library the worker, the adapter or
+anything else depends on. That shape is not packaging preference - it is what
+makes the privilege boundary real, because a boundary any crate can link is the
+appearance of one. The enforceable form of the rule, and the reason it is not
+literally "no crate may depend on it", is in
+`crates/zeroship-data-cdc-server/Cargo.toml`; the mechanical check is
+`tests/data_crate_closure_gate.sh` arm 3.
+
+**Contracts do NOT live in the relay and are NOT re-exported from it.** They have
+two homes and the split is deliberate: the WIRE contract - anything the worker
+and the relay exchange - is `zeroship-cdc-wire`; DATA-PLANE contracts are
+`zeroship-data-core`. See "Where the contracts live" below for why routing the
+wire types into `data-core` would break both crates' stated properties at once.
+
+The consumption path the relay replaces still lives in
 `crates/zeroship-plugin-db/` (`wal_consumer.rs`, `replication.rs`,
-`slot_reaper.rs`, `change_stream_pg.rs`), and the pieces that stay are
-`broker.rs`, `read_set.rs` and `cdc_lifecycle.rs`. It is **blocked twice**: on the
-Datastore/Database/Grant entities of
+`slot_reaper.rs`, `change_stream_pg.rs`) - `git diff --name-only 8672dd355..HEAD
+-- crates/zeroship-plugin-db` returns zero files - and the pieces that stay are
+`crates/zeroship-data-core/src/broker.rs`, `read_set.rs` and
+`cdc_lifecycle.rs`. It is still **blocked twice**, and creating the crate
+unblocked neither: on the Datastore/Database/Grant entities of
 `docs/proposals/2026-08-28-app-database-decoupling.md`, none of which exist, and
 on a platform move to PostgreSQL 18.4 that the deployment does not make
 (`deploy/compose/docker-compose.yml:73` pins `postgres:16`).
+
+**`DatastoreId` remains a wire type with no entity behind it.** Measured:
+`grep -rl DatastoreId crates/ db/` returns six files, five in
+`crates/zeroship-cdc-wire` and one rustdoc mention in
+`crates/zeroship-data-cdc-server/src/lib.rs`. No table, column or control-plane
+record mints one. `cdc_clusters` and `__zeroship_admin.database_heads` still have
+zero occurrences in `crates/` or `db/migrations-ts/`.
 
 **The transport foundation is VALIDATED as of 2026-09-03, and the sentence that
 stood here was wrong on its facts.** It read: "`ntex` v3 response streaming
@@ -46,6 +64,11 @@ and `:375` return `SizedStream`. cyper's `stream` feature ships in the runtime's
 properties the relay actually rests on: that the worker sees frame N before the
 relay has produced frame N+1, and that a worker which stops reading cannot stall
 the ring writer.
+
+That premise error is worth keeping rather than deleting, because it is the shape
+this document is most exposed to: a true citation followed by a false claim about
+what the cited thing is used for. The gate rules on the path and the line, never
+on the sentence.
 
 `crates/zeroship-cdc-transport-spike/` is that evidence, as twelve tests anyone
 can re-run with `cargo test -p zeroship-cdc-transport-spike`. It is a spike, not
@@ -93,15 +116,108 @@ ConnectionCapacityExceeded` admission, the global egress byte semaphore, and
 every cost question at real fan-out. A multi-minute hold and a many-subscriber
 fan-out are both still unmeasured.
 
+**What the crate contains, so "the crate exists" is not read as "the relay
+exists".** `crates/zeroship-data-cdc-server/` is three source files -
+`src/lib.rs` (the crate rustdoc plus one exported refusal string), `src/config.rs`
+(`CdcServerSettings` and its tests), `src/main.rs` (bootstrap, `--check-config`,
+then refuse). There is no decode loop, no slot, no election, no listener and no
+frame. `main` fails closed rather than idling, which is the shape
+`zeroship-workflow-scheduler` already carries: a `platform` binary registered
+ahead of its loop, because the `platform` classification is a REQUIREMENT to
+register a configuration surface rather than a judgement call
+(`crates/zeroship-config-contract/src/registry.rs`).
+
+**SQLite CDC suppression now samples at COMMIT, and it is INERT.** `8672dd355`
+moved the suppression sample point from drain time into SQLite's `commit_hook`,
+so the window a guard covers is the set of commits made inside its scope and the
+publisher never re-samples: the answer rides the packet as a per-event stamp
+(`crates/zeroship-data-sqlite/src/change_sink.rs`,
+`crates/zeroship-data-sqlite/src/cdc.rs`). The decisive argument was not that
+dequeue-time sampling was racy but that it had **no defined answer for strictly
+sequential code** - the channel is `flume::unbounded`, so a guard engaged,
+written under, and dropped, with no concurrency anywhere, still produced a result
+that was a function of publisher scheduling. That matters here because it is the
+SQLite half of the same suppression handshake the relay's Postgres half will need.
+
+It ships behaviour and exercises none of it in production. `BrokerPauseGuard::new`
+and `SchemaPendingGuard::new` have no production callers: every non-test
+occurrence in `crates/` is a comment or rustdoc, and the only real call sites are
+in `crates/zeroship-plugin-db/tests/sqlite_integration.rs`. Read it as a
+correctness fix to a mechanism waiting for its caller, not as a shipped feature.
+
 ---
 
 ## What it is
 
-One binary, one process, executing no creator code. Working name `zeroship-cdc`.
-It consumes PostgreSQL logical replication on behalf of the whole fleet and
-pushes projected row changes to workers, so the worker process stops speaking
-the streaming replication protocol and stops needing `REPLICATION` or
+One binary, one process, executing no creator code. **The crate is
+`zeroship-data-cdc-server`; this section said "Working name `zeroship-cdc`" until
+2026-09-03.** It consumes PostgreSQL logical replication on behalf of the whole
+fleet and pushes projected row changes to workers, so the worker process stops
+speaking the streaming replication protocol and stops needing `REPLICATION` or
 `BYPASSRLS`.
+
+**Nothing links it.** The relay is a binary, not a library with a binary
+attached. Read the negative form carefully, because the literal wording collides
+with a live test and the collision is instructive: a workspace bin target must
+carry a `[[package.metadata.zeroship-config.targets]]` class
+(`crates/zeroship-config-contract/src/metadata.rs`), and a `platform` binary must
+then appear in `DECLARING_BINARIES`
+(`crates/zeroship-config-contract/src/registry.rs`), which
+`crates/zeroship-config-contract/tests/real_registry.rs` compares for exact
+equality against the class cargo metadata reports. Classifying the relay anything
+else to dodge that would leave a shipped service's configuration surface
+unaudited, which is the vacuity that test exists to prevent. So the property that
+is both true and enforceable is:
+
+> **No SHIPPED binary's normal-dependency closure may contain
+> `zeroship-data-cdc-server`.** `zeroship-config-contract` - itself
+> `class = "test-dev-tool"`, never shipped - is the single named exception.
+
+`tests/data_crate_closure_gate.sh` arm 3 enforces it by inverting `cargo tree -i`
+over the bin-package set derived from `cargo metadata`, rather than from a list in
+the file. It rules on the exception too rather than skipping it, because a
+mistyped package name, a bad flag and a genuinely absent edge all produce the
+same empty output - so the arm proves its own instrument on every run.
+
+**`cargo tree -e normal` cannot see dev-dependencies**, and that is the invisible
+way this rule gets breached. `zeroship-migrate-server`, the declared peer, already
+carries five of them. Nothing here catches a dev-dependency on the relay.
+
+### Where the contracts live
+
+Anything two processes must agree on is a CONTRACT, and no contract lives in the
+relay or is re-exported from it. There are two homes:
+
+- **`zeroship-cdc-wire`** owns the WIRE contract - framing, the eleven frames,
+  `SubscribeRequest` and its permit commitment, and the `DatastoreId` /
+  `ClusterId` / `DatabaseEpoch` / `GrantGeneration` vocabulary.
+- **`zeroship-data-core`** owns the DATA-PLANE contracts - `DbError`,
+  `DbBinding`, the broker, the read set, and the `ChangeStream` capability trait.
+
+The relay MAY depend on `zeroship-data-core`, and today does not need to. That is
+a permission, not a recommendation, and it is specifically **not** a licence to
+route the wire types there. Two measured reasons, both of which point the same
+way: `crates/zeroship-cdc-wire/Cargo.toml` refuses `zeroship-core` by name -
+"a crate whose stated property is no I/O cannot have an HTTP client in its normal
+closure and still mean it" - and `zeroship-data-core` reaches `cyper` through
+`zeroship-core` (measured with `cargo tree -p zeroship-data-core -e normal`:
+`cyper` 3 times, `tokio` 2 times). The other direction is worse: `data-core` is
+the floor of the WORKER's data plane, so putting the relay's wire types there
+would put the worker's whole data plane into the relay's closure - the exact
+coupling the binary shape exists to prevent.
+
+`ChangeEvent` and `ChangeOp` are in `crates/zeroship-core/src/change_event.rs`,
+one ring further out than `data-core`, beside `usage_event` and
+`replication_names`. Any plan that says "`ChangeEvent` is already in data-core"
+is planning against a tree that does not exist.
+
+### The relay's error handling is internal, by construction
+
+`crates/zeroship-data-postgres/src/pg_error.rs` owns `classify`, the translation
+from `compio_postgres::Error` into `DbError`. The relay does not share it and
+will not. **A binary that nothing links has no shared-vocabulary problem: there
+is no consumer to agree with.** That is the whole answer, and it dissolves a
+question rather than choosing among its options - see "Why it is this way".
 
 ### Cardinality
 
@@ -453,20 +569,47 @@ independent observable rather than being pure silence.
 
 ### What moves, is deleted, is retained
 
-New crate `crates/zeroship-cdc` (binary + lib), plus the leaf wire crate
-`zeroship-cdc-wire`. **No `zeroship-cdc -> zeroship-plugin-db` dependency is
-allowed.**
+The crate is `crates/zeroship-data-cdc-server` (binary; it also ships a lib, for
+the one reason `src/lib.rs` states - a `platform` binary must publish its
+configuration to a tool that LINKS it, so "ships no lib" is not available as an
+enforcement mechanism). Plus the leaf wire crate `zeroship-cdc-wire`. **Nothing
+depends on the relay**, and the relay does not depend on `zeroship-plugin-db`
+either - neither edge exists, and the manifest states why for each absent one.
 
-| file | verdict |
-| --- | --- |
-| `wal_consumer.rs` | Split and rewrite; do not move the file. It imports plugin-db's broker and `DbError`. Extract the pgoutput decode algorithm, `RelationEntry` and its primary-key index, the replication parameter check, backoff policy and fatal classification behind relay and wire-owned types. |
-| `replication.rs` | Split and rewrite. Extract exact-slot lifecycle and health-query algorithms behind relay errors. Replace app-keyed names with the two Datastore functions; delete `worker_slot_name` and per-worker drop entry points. `drop_datastore_slot` derives and verifies one exact name plus `database = current_database()` and is reachable only through the fenced reset handshake. Broad prefix enumeration stays forbidden. |
-| `slot_reaper.rs` | **Deleted.** With O(Datastores) service-owned slots and one owner per cluster there is no per-worker slot to abandon. |
-| `change_stream_pg.rs` | **Deleted.** `SharedExit` (`:31`) and `WalConsumerHandle` (`:72`) supervise a task that no longer exists in the worker; `spawn_consumer` (`:170`) and `deprovision` (`:162`) go with the per-worker slot. `pause_broker` / `engage_schema_pending` survive as the broker functions they already delegate to. |
-| `broker.rs` | **Stays** in `zeroship-plugin-db`. In-process routing table; consumers are V8 subscription wrappers on the same thread. Keep `message_to_json` (`:1020`) and `ws_frame` (`:1093`); both emit creator-visible names and no row values. |
-| `read_set.rs` | **Stays.** Capture happens inside `ctx.db.find` in the isolate and cannot leave the process. |
-| `cdc_lifecycle.rs` | **Stays**, reshaped. The refcounted per-app lease (`acquire` `:87`, `release` `:113`) still decides when this worker needs a stream. Add an atomic snapshot accessor returning `cluster_id`, `database_id`, `database_epoch` and `grant_generation` for every leased app; `acquire` currently mutates a private map one app at a time. `RunningConsumer::Postgres` (`:25`) becomes a handle on the relay subscription. |
-| `exec.rs` emit path | **Deleted outright, and it is the POSTGRES path.** |
+**THE CRATE EXISTS AND THE TABLE BELOW HAS NOT HAPPENED.** `545ceff1e` created
+it with ZERO files moved. Read every verdict here as END STATE, not as a
+description of the tree; the "today" column says what is true now. The two
+columns disagree for four of the eight rows, and that disagreement is the point -
+a reader who takes "Deleted" as an instruction will delete a file with a live
+production caller.
+
+| file | end-state verdict | today |
+| --- | --- | --- |
+| `wal_consumer.rs` | Split and rewrite; **do not move the file.** Extract the pgoutput decode algorithm, `RelationEntry` and its primary-key index, the replication parameter check, backoff policy and fatal classification behind relay and wire-owned types, with a `zeroship-cdc-wire` frame emit replacing `broker::publish`. | in `zeroship-plugin-db`, unchanged |
+| `replication.rs` | Split and rewrite. Extract exact-slot lifecycle and health-query algorithms behind relay errors. Replace app-keyed names with the two Datastore functions; delete `worker_slot_name` and per-worker drop entry points. `drop_datastore_slot` derives and verifies one exact name plus `database = current_database()` and is reachable only through the fenced reset handshake. Broad prefix enumeration stays forbidden. **The watchdog half and the drop family do NOT go**: `watchdog_query` has a live V8 caller (`crates/zeroship-plugin-db/src/v8_classes/replication.rs`, reached from JS as `env.db.__platform.replication`) and the drop family is called from `service.rs`'s `deprovision_app` as well as from CDC. | in `zeroship-plugin-db`, unchanged |
+| `slot_reaper.rs` | **Deleted.** With O(Datastores) service-owned slots and one owner per cluster there is no per-worker slot to abandon. Deleted WHOLE, not split - see "The reaper is a privilege change". | in `zeroship-plugin-db`, unchanged, and still the ONE CDC module that crate exports unconditionally (`crates/zeroship-plugin-db/src/lib.rs:375`) |
+| `change_stream_pg.rs` | **Deleted - and this is an END-STATE verdict that becomes reachable only after `RunningConsumer::Postgres` is a handle on a relay subscription.** `SharedExit` (`:31`) and `WalConsumerHandle` (`:72`) supervise a task that no longer exists in the worker; `spawn_consumer` (`:170`) and `deprovision` (`:162`) go with the per-worker slot. `pause_broker` / `engage_schema_pending` survive as the broker functions they already delegate to. | **STAYS in `zeroship-plugin-db`**, and it is not a relay candidate at any point: `impl ChangeStream for PgChangeStream` (`:145`) implements a data-core capability trait whose SQLite peer (`crates/zeroship-data-sqlite/src/cdc.rs:854`) lives in a vendor LIBRARY crate, and it holds `backend: Rc<PostgresBackend>` (`:123`) - an `Rc` is not `Send`, so the type is pinned to the isolate thread, never mind the process |
+| `broker.rs` | **Stays.** In-process routing table; consumers are V8 subscription wrappers on the same thread. Keep `message_to_json` (`:1020`) and `ws_frame` (`:1093`); both emit creator-visible names and no row values. | in `crates/zeroship-data-core/src/broker.rs`. **This row said "Stays in `zeroship-plugin-db`" until 2026-09-03**; the module sank into data-core with `read_set.rs` |
+| `read_set.rs` | **Stays.** Capture happens inside `ctx.db.find` in the isolate and cannot leave the process. | in `crates/zeroship-data-core/src/read_set.rs` |
+| `cdc_lifecycle.rs` | **Stays**, reshaped. The refcounted per-app lease (`acquire` `:87`, `release` `:113`) still decides when this worker needs a stream. Add an atomic snapshot accessor returning `cluster_id`, `database_id`, `database_epoch` and `grant_generation` for every leased app; `acquire` currently mutates a private map one app at a time. `RunningConsumer::Postgres` (`:25`) becomes a handle on the relay subscription. | in `zeroship-plugin-db`, declared `mod cdc_lifecycle;` - plain private, so its external consumer count is structurally zero |
+| `exec.rs` emit path | **Deleted outright, and it is the POSTGRES path.** | live in `crates/zeroship-data-engine/src/exec.rs` |
+
+**Why zero files moved, stated as the mechanism rather than as a preference.**
+`crates/zeroship-plugin-db/src/wal_consumer.rs` imports `SuppressGuard`,
+`has_subscribers` and `publish` from the broker, and all three target
+PROCESS-WIDE `LazyLock<Mutex<..>>` statics in
+`crates/zeroship-data-core/src/broker.rs`. Move that file into a binary that
+links data-core and every one of them resolves to a DIFFERENT process's static:
+`publish` reaches zero subscribers and the suppression guard suppresses nothing
+in the worker, so the worker's local-emit fast path keeps emitting while the
+relay believes it has taken authority. **Nothing fails to compile and no gate in
+this tree sees it.** That is why the verdict for the file is "split and rewrite",
+and why the crate that exists today contains no decode loop rather than a moved
+one.
+
+This deduction rests on `LazyLock` being per-linked-binary and has NOT been bound
+by a two-process harness - the harness cannot be written until the relay exists.
+Treat it as near-certain and unproven, in that order.
 
 The local-emit path serves Postgres, not SQLite:
 `backend_publishes_committed_changes()` is true on SQLite and `emit_for_rows`
@@ -494,13 +637,61 @@ cannot delete a shared relay ring or revoke a Grant.
 `zeroship-plugin-db` keeps the whole data plane, the in-process broker and its
 read-set narrowing, the CDC lease bookkeeping, and the SQLite CDC publisher. It
 loses every line that speaks the streaming replication protocol, and with it the
-reason its process needs `REPLICATION`. `db/migrations-ts/20260818000200_worker_database_authority.ts:35`
-currently grants `zeroship_worker` both `REPLICATION` and `BYPASSRLS`; the same
-migration that provisions the relay's streaming role drops both, and the worker
-posture check that today *requires* both
-(`crates/zeroship-worker/src/db_posture.rs:125`) inverts to require their
-absence. The relay's streaming login takes only `REPLICATION`, never
-`BYPASSRLS`, and never issues creator-table SQL.
+reason its process needs `REPLICATION`.
+
+### The reaper is a privilege change, and it gets its own commit
+
+**Extracting the crate moved no privilege, and that is the deliberate outcome
+rather than an omission.** `git diff --name-only 8672dd355..HEAD --
+crates/zeroship-worker crates/zeroship-plugin-db db/migrations-ts` returns zero
+files. The worker still holds `REPLICATION` and `BYPASSRLS`.
+
+`db/migrations-ts/20260818000200_worker_database_authority.ts:35` grants
+`zeroship_worker` both, and `crates/zeroship-worker/src/db_posture.rs:123`
+REFUSES TO BOOT on `if !posture.replication || !posture.bypass_rls`. **This
+document cited `:125` until 2026-09-03**; `:125` is inside the message, not the
+predicate. So deleting the worker's import without dropping the two role
+attributes leaves the worker holding `REPLICATION` with nothing using it - the
+code moves and the privilege does not, which is exactly the outcome AGENTS.md's
+"Privilege follows the PROCESS, not the function" warns this extraction can end
+in.
+
+Four edits land together, in ONE commit whose body says what privilege moved
+where. None of them is correct alone:
+
+1. The same migration that provisions the relay's streaming role DROPS
+   `REPLICATION` and `BYPASSRLS` from `zeroship_worker`. The relay's streaming
+   login takes only `REPLICATION`, never `BYPASSRLS`, and never issues
+   creator-table SQL.
+2. `crates/zeroship-worker/src/db_posture.rs:123` INVERTS: it must require the
+   ABSENCE of both, so a worker that somehow still has them refuses to boot.
+3. `crates/zeroship-worker/src/slot_reaper.rs` is deleted, with its module
+   declaration, its startup call and its supervision arm. `main.rs` carries a
+   test asserting production main supervises exactly one process-wide reaper; it
+   is deleted in the same change or it fails, and "delete the failing test" must
+   not be done ahead of the rest.
+4. `crates/zeroship-plugin-db/src/slot_reaper.rs` is deleted, with
+   `pub mod slot_reaper;` at `crates/zeroship-plugin-db/src/lib.rs:375`. That is
+   the ONE CDC module plugin-db exports unconditionally - `change_stream_pg`,
+   `replication` and `wal_consumer` are `pub(crate)` unless `test-helpers`, and
+   `cdc_lifecycle` is plain private - so deleting it takes plugin-db's external
+   CDC surface to zero.
+
+**The file is deleted WHOLE, not split.** Its two halves are welded: the sweep
+decision reads `worker_token == self.own_worker_token || slots.iter().any(|slot|
+slot.active)`, and every other worker's liveness is decided by
+`try_acquire_worker_lease`. The lease is the INPUT to the reap decision, not an
+adjacent concern that shares a file. Splitting it manufactures a cross-process
+lease-key agreement whose failure mode is "reap a live worker's slot", for a
+mechanism this design removes; moving both halves into the relay while per-worker
+slots still exist is a live-slot-loss regression, because a worker in replication
+reconnect backoff has an inactive slot and an unchanged fingerprint.
+
+**The entire call-site surface is one import**:
+`crates/zeroship-worker/src/slot_reaper.rs:7` takes `OperatorSlotReaper`,
+`ABANDONED_INACTIVITY_THRESHOLD` and `SWEEP_INTERVAL` from
+`zeroship_plugin_db::slot_reaper`. Every other cross-crate `zeroship_plugin_db::`
+reference outside the crate is `service::*`.
 
 ### The worker/relay wire contract
 
@@ -526,8 +717,14 @@ source, not taste:
 `zeroship-stream` remains right for the durable usage/billing outbox it exists
 for. Nothing here changes it.
 
-**Encoding.** A new leaf crate `zeroship-cdc-wire`, no I/O, no V8, depended on by
-both `zeroship-cdc` and `zeroship-plugin-db`. Each frame is
+**Encoding. SHIPPED at `05d9462c8`** as the leaf crate `zeroship-cdc-wire`, no
+I/O, no V8, to be depended on by both `zeroship-data-cdc-server` and
+`zeroship-plugin-db` (**this line named `zeroship-cdc` until 2026-09-03**).
+Neither consumer names it yet: 35 tests, zero dependents. Its normal dependencies
+are `sha2`, `serde` and `serde_json`; `zeroship-core` is a DEV dependency only, so
+a differential test proves this crate's base62 parser accepts exactly what
+`zeroship_core::typed_id` accepts without putting an HTTP client in a no-I/O
+crate's shipped closure. Each frame is
 `u32_be(frame_len) || u8(tag) || payload`, where `frame_len` counts the tag and
 payload. Integers are big-endian; byte and UTF-8 strings carry a `u32_be` length;
 enum discriminants are `u8`. A zero length, a length over `max_frame_bytes`,
@@ -610,6 +807,15 @@ which the worker reads frames until the body closes. Server is `ntex` v3 with
 an explicit relay-crate feature addition); client is `cyper` with its `stream`
 feature. Push rather than poll, because a poll interval is a latency floor chosen
 in advance.
+
+**That pair is PROVEN, at `f7e043252`**, as twelve tests in
+`crates/zeroship-cdc-transport-spike/` - incremental in both directions, on
+compio with no tokio reactor, ntex write backpressure reaching the response body,
+and "the relay sheds, it never blocks" expressible as written with a
+one-variable control. What is still unproven is TLS terminating in the relay
+process (the spike is plaintext loopback and the rustls feature is not enabled
+today) and any hold longer than seconds. See the Status block for the numbers and
+for what the spike deliberately does not establish.
 
 Authentication is a single-use service assertion with exact audience
 `spiffe://zeroship.ai/svc/cdc`
@@ -1572,6 +1778,30 @@ second `REPLICATION`-only login used by a dedicated thread is NOT a boundary
 under the `AGENTS.md` invariant, and this design argues against it. It is the
 cheap option and someone will propose it.
 
+**A binary that nothing links has no shared-vocabulary problem, and that is what
+dissolves a question rather than answering it.**
+`docs/proposals/2026-08-31-data-crate-shape.md` carried an open item asking how
+the relay would share `pg_error::classify` with `zeroship-data-postgres`, and
+offered three options: the relay depends on `data-postgres` (honest, but drags
+the worker's data plane into the relay's closure); extract the classifier lower
+(pushes a vendor translator toward `data-core`, which
+`tests/data_crate_closure_gate.sh` refuses outright); or the relay carries its
+own. All three answer "who must agree with whom about an error". Under the binary
+shape there is nobody to agree with: no crate links this one, so a classifier
+here answers only to this process. The third option is now correct by
+construction rather than by preference, and the first two are answering a
+question that no longer exists.
+
+**Do not record that as "the classifier went with the relay" - the arithmetic
+does not support it.** Measured across `crates/zeroship-plugin-db/src`: 13
+`pg_error::classify` sites, nine of them in `replication.rs`. Mapped to their
+enclosing functions, those nine split 3 / 1 / 5 - three in `ensure_worker_slot`
+(relay-only), one in `watchdog_query` (live V8 caller, stays), five in the drop
+family (called from both sides today, by `change_stream_pg.rs` and by
+`service.rs`'s `deprovision_app`). The adapter keeps `classify` either way, at no
+cost, because `zeroship-data-postgres` is already in the worker's closure. What
+changes is only that the relay writes its own for its three.
+
 **A consumer must never be able to reach the slot.** Everything in the
 slow-consumer, ring-sizing and quarantine rules is a consequence. Vitess issue
 11169 is the scar: a slow VStream client plus a capacity-1 buffer blocked
@@ -1664,16 +1894,50 @@ not an option, because PostgreSQL binds a logical slot to one Datastore.
 
 ---
 
+## Settled
+
+These are decisions, not questions. They are listed apart from Open so nobody
+reopens one by reading a stale option list.
+
+- **The service is `zeroship-data-cdc-server`, and it is a BINARY nothing links.**
+  Operator ruling, 2026-09-03. The enforceable form of "nothing links it" and the
+  one named exception are in "What it is"; `tests/data_crate_closure_gate.sh`
+  arm 3 checks it mechanically, and both directions were mutation-proved when the
+  arm landed.
+- **Contracts live outside the relay, in two homes, and are not re-exported from
+  it.** Wire contracts in `zeroship-cdc-wire`; data-plane contracts in
+  `zeroship-data-core`. The relay may depend on `data-core` and today does not.
+- **The relay's error handling is internal; it shares no classifier.** This
+  replaces the three-option question the crate-shape proposal carried. See "Why
+  it is this way" for the reason and for the 3 / 1 / 5 arithmetic that refutes
+  the tempting summary.
+- **Zero files move into the relay.** `wal_consumer.rs` is split and rewritten;
+  `replication.rs` splits with its watchdog and drop halves staying;
+  `slot_reaper.rs` is deleted whole in the privilege commit; `change_stream_pg.rs`
+  stays in `zeroship-plugin-db`. A verbatim move of `wal_consumer.rs` compiles,
+  passes every gate, and silently splits the process-wide broker.
+- **The transport pair is proven** (`f7e043252`), and the frame layout was never
+  at stake in it: a length-prefixed frame over a byte stream is
+  carrier-independent. What remains of the original transport question is TLS and
+  duration, carried as Open 4.
+
+---
+
 ## Open
 
 1. **NEEDS-DECISION: when do the Datastore/Database/Grant entities land?**
-   Nothing in this document can be implemented until they exist; `DatastoreId`,
-   `ClusterId`, `DatabaseEpoch` and `GrantGeneration` have zero occurrences in
-   `crates/`. The design is settled and the decision needed is scheduling: the
+   Nothing in this document can be implemented until they exist. **This item said
+   `DatastoreId`, `ClusterId`, `DatabaseEpoch` and `GrantGeneration` "have zero
+   occurrences in `crates/`" until 2026-09-03; they now occur only as WIRE TYPES
+   in `crates/zeroship-cdc-wire`**, which changes nothing about the blocker - no
+   table, column or control-plane record mints one, so there is still no entity to
+   key on. The design is settled and the decision needed is scheduling: the
    relay cannot be estimated, let alone started, until the decoupling work has a
    landing date. The Database rekey of the migration apply lock is inside that
    dependency, and shipping the bracket on the current app/project key would let
-   two apps sharing a Database interleave it.
+   two apps sharing a Database interleave it. **Creating
+   `crates/zeroship-data-cdc-server` did not unblock this and was not intended
+   to.**
 2. **NEEDS-DECISION: when does the platform move to PostgreSQL 18.4?** Relay startup
    and Datastore provisioning read `server_version_num` and refuse a major
    outside `[180000, 190000)`; there is no 16/17 branch, signature probe or
@@ -1728,6 +1992,47 @@ not an option, because PostgreSQL binds a logical slot to one Datastore.
     more frames plus a three-way cell that widen the same hole. Making the reset
     unignorable is a separate decision, and it is now more overdue than when
     there was one way to diverge instead of three.
+11. **NEEDS-DECISION: `Change.pk` is undecodable IN MEANING under wire v1.** The
+    encoding is committed and the semantics are not. This document defines `pk`
+    as the replica-identity vector, but `Relation` never says WHICH columns those
+    are: it carries the collection and the column list, and nothing marks the
+    identity subset. A decoder can therefore read the bytes and cannot say what
+    they identify without out-of-band schema knowledge. Either `Relation` gains
+    an identity marker, or `pk` becomes positionally defined against something the
+    frame carries, or the field's meaning is documented as
+    resolved-by-the-descriptor and the consequence for a raw subscriber is stated.
+    This is a v1 decision, not a v2 one: the frames shipped at `05d9462c8` and
+    have no consumer yet, which is exactly when the shape is cheapest to change.
+12. **NEEDS-DECISION: two wire id prefixes are unsettled, and one contradicts its
+    own source.** `zeroship-cdc-wire` mints `ds_` for `DatastoreId`, but
+    `docs/proposals/2026-08-28-app-database-decoupling.md:25` writes `ds_` in its
+    entity block while `:46` argues for `dbs` - the same document, two answers.
+    `clu_` for `ClusterId` is an invention pinned by neither document. **One
+    measured fact for that discussion, because the `dbs` argument rests on it and
+    it is false:** `:46` justifies three-letter uniformity by claiming
+    `crates/zeroship-core/src/typed_id.rs`'s "every prefix is three lowercase
+    letters". It is not - of the 27 prefix constants that file declares, 26 are
+    three letters and one is four, `WORKFLOW_CRON_PREFIX = "cron"` at
+    `crates/zeroship-core/src/typed_id.rs:504`. The convention is strong and it is
+    not a rule, so a length argument cannot decide this on its own.
+13. **NEEDS-DECISION: what happens to `crates/zeroship-cdc-transport-spike`?** It
+    is a permanent workspace member with "spike" in its name - one of the 45
+    packages `cargo metadata --no-deps` reports - and it carries the dev
+    dependency that took `PINNED_ENTRYPOINTS` in `tests/zero_tokio_gate.sh` from
+    nine names to ten. Three shapes are available and none has been chosen: keep
+    it as a named transport conformance suite (rename, and it stops reading as
+    scaffolding); fold its twelve tests into the relay crate when the listener
+    lands (and lose them until then); or delete it and keep the numbers in this
+    document (and lose the ability to re-run them). Deciding by not deciding
+    means the name ships.
+14. **NEEDS-DECISION, and it is a PRIVILEGE decision: when does the worker stop
+    holding `REPLICATION`?** Extracting the crate left this exactly where it was;
+    see "The reaper is a privilege change". The four edits must land in one
+    commit, and three of four leaves either a worker holding an unused
+    `REPLICATION` grant - the failure mode the `AGENTS.md` invariant names - or a
+    booting worker refusing a posture it now correctly lacks. The prerequisite is
+    Open 1: the relay cannot take slot ownership while slot provisioning has no
+    `DatastoreId` to key on.
 
 ---
 
@@ -1738,6 +2043,14 @@ Deliberation, prior-art survey and the decision to build a relay at all live in
 entity work is `docs/proposals/2026-08-28-app-database-decoupling.md`. The
 guarded-versus-unrepresentable vocabulary comes from
 `docs/reviews/2026-08-28-flip-write-path.md`.
+
+**Which document governs, so the next reader does not pick by which one they
+opened first.** `docs/proposals/2026-08-31-data-crate-shape.md` also assigns the
+four CDC modules, from the crate-split's point of view. **On those four files
+THIS document governs** - it is the more specific one and has been hardened
+against them twice - and the split proposal's placement table now says so and
+carries the corrected row. Where they still disagree, the disagreement is a
+defect in that table, not a choice.
 
 DO-NOT notes, each recording a mistake that would otherwise be remade:
 
@@ -1813,6 +2126,27 @@ DO-NOT notes, each recording a mistake that would otherwise be remade:
   shaped a decision. Their retention windows in particular are not targets: for
   those products retention *is* the product, whereas this ring is a fan-out
   buffer in front of a slot.
+- **Do not `git mv` `wal_consumer.rs` into the relay crate.** It compiles, every
+  gate in the tree stays green, and `broker::publish` then reaches a different
+  process's `LazyLock` static with zero subscribers while `SuppressGuard`
+  suppresses nothing in the worker. The worker keeps emitting locally and the
+  relay believes it holds authority. Nothing observes this. The verdict for that
+  file is "split and rewrite", and it is why the crate that exists contains no
+  decode loop rather than a moved one.
+- **Do not read "the crate exists" as "the relay exists".**
+  `crates/zeroship-data-cdc-server` is a manifest, a config module and a `main`
+  that refuses to start. Both blockers in Open 1 and Open 2 survive it untouched.
+  The pressure a shell creates is to make it do something, and the cheapest way
+  to do that is the move the note above forbids.
+- **Do not classify the relay `test-dev-tool` to avoid the config-contract
+  equality test.** It goes green and it leaves a shipped service's configuration
+  surface unaudited, which is precisely the vacuity
+  `crates/zeroship-config-contract/tests/real_registry.rs` exists to prevent.
+  Take the `platform` class and move the pin.
+- **Do not treat `zeroship-cdc-wire` as a settled foundation.** It has zero
+  dependents, so no producer has ever exercised its frames, and Open 11 and Open
+  12 are unresolved against it. Built, tested and unreferenced is the shape that
+  looks most finished.
 - **Do not trust a `file:line` in this document without re-deriving it.** The
   citation gate rules on paths and on a line existing in its file, never on
   symbols, so a rename or a sibling branch's refactor invalidates a citation
