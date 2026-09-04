@@ -465,9 +465,33 @@ jobs:
         run: tests/decision_four_gate.sh --self-test
       - name: No new production SQL statement text in the data engine
         run: tests/decision_four_gate.sh
-      # THE META-GATE. The step above is one of four gates found vacuous on
+      # DECISION 5's GATE HAD NEVER RUN HERE. It was written on 2026-09-01, it
+      # is named in the comment above as the thing decision 4 lacked, and the
+      # only occurrence of its filename in this workflow was that comment - so
+      # for three days the gate that refuses a vendor type in a non-vendor crate
+      # was enforced by whoever remembered to run it. That is the same failure
+      # the meta-gate below exists for, one level up: a gate nobody invokes and
+      # a clean tree produce identical CI output.
+      #
+      # Self-test first, and it is not ceremony. The gate SKIPS modules that are
+      # test-gated at their declaration, and a file it declines to rule on
+      # prints nothing at all - so a wrong skip predicate is invisible from the
+      # gate's own output. It was wrong until 2026-09-04: a comment quoting
+      # `#[cfg(test)]` above a `mod x;` read as a gate and removed two files
+      # from the scan. tests/lib/module_gating.sh now holds the one definition,
+      # and these two steps are where its controls run.
+      - name: Vendor embedding gate self-test
+        run: tests/vendor_embedding_gate.sh --self-test
+      - name: No non-vendor crate embeds a vendor type
+        run: tests/vendor_embedding_gate.sh
+      # THE META-GATE. `ws_subscription_stub_gate.sh`, run earlier in this job,
+      # is one of four gates found vacuous on
       # 2026-08-20 - an arm watching a single identifier the fix had deleted,
-      # examining 0 names and printing green. The other three were skip_marker
+      # examining 0 names and printing green. THIS SAID "the step above" until
+      # 2026-09-04, and by then two later gates had been inserted between the
+      # referent and the sentence, so it named decision_four_gate.sh - a gate
+      # that did not exist on 2026-08-20. A positional reference in a file
+      # people insert steps into decays on its own. The other three were skip_marker
       # (8 hits, 8 excused, 0 ruled on), deploy_scripts' argv scan (1 pre-filter
       # row, on the one service the filter excludes) and compose_secret_strength
       # (rule set regexed out of another file's message; the message improved).

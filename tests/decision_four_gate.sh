@@ -116,6 +116,8 @@ cd "$(dirname "$0")/.."
 
 # shellcheck source=tests/lib/gate_arms.sh
 . "$(dirname "$0")/lib/gate_arms.sh"
+# shellcheck source=tests/lib/module_gating.sh
+. "$(dirname "$0")/lib/module_gating.sh"
 gate_arms_init decision_four
 
 PASS=0
@@ -238,61 +240,30 @@ AWK
 # `#[cfg(test)] mod tests;` in the parent - and the in-file extractor above
 # cannot see that, because the attribute is in another file.
 #
-# THE BACKWARD WALK STOPS AT A PLAIN `//` COMMENT, and that is a CORRECTION to
-# the version of this helper in `tests/vendor_embedding_gate.sh`, which walks
-# back over any line containing `//` and therefore keeps going until it finds
-# some unrelated `#[cfg]` higher up the file. Measured 2026-09-04 with that
-# version: `crud/unmask.rs`, `backend/mod.rs` and two others were reported as
-# test-gated modules and dropped from the scan entirely, because a plain comment
-# block sat above their `pub mod x;` declaration. Attributes and doc comments
-# still continue the walk - those really are part of an item's attribute run.
+# THE CORRECTED WALK THAT LIVED HERE MOVED TO tests/lib/module_gating.sh ON
+# 2026-09-04, and three other copies were folded onto it. This gate's version
+# was the only one of four that stopped at a plain `//` comment; the other three
+# tested a `*"#[cfg("*` substring BEFORE the comment arm, so a COMMENT that
+# quoted `#[cfg(test)]` above a `mod x;` declaration read as a gate and removed
+# the module from the scan. The two gates therefore DISAGREED by two files about
+# which files exist to rule on - the shape a census fails in. The shared helper
+# keeps the correction and adds the controls that pin it; `--self-test` runs
+# them, and so does tests/vendor_embedding_gate.sh --self-test.
 #
 # The residual false NEGATIVE is `#[cfg(test)]`, then a plain comment, then
 # `mod x;`. That reads as production and gets scanned, which surfaces as a noisy
 # refusal rather than as silence - the safe direction for a gate.
-module_is_test_gated() {   # $1 = a path under $ROOT
-  local file="$1" name decls gated hit decl_file decl_line prev trimmed i
-  name=$(basename "$file" .rs)
-  if [ "$name" = "mod" ]; then
-    name=$(basename "$(dirname "$file")")
-  fi
-  [ -z "$name" ] && return 1
-
-  decls=0
-  gated=0
-  while IFS= read -r hit; do
-    decl_file="${hit%%:*}"
-    decl_line="${hit#*:}"
-    decl_line="${decl_line%%:*}"
-    decls=$((decls + 1))
-    i=$((decl_line - 1))
-    while [ "$i" -ge 1 ]; do
-      prev=$(sed -n "${i}p" "$decl_file")
-      trimmed="${prev#"${prev%%[![:space:]]*}"}"
-      case "$trimmed" in
-        "#[cfg("*)
-          case "$trimmed" in
-            *"not("*) break ;;
-            *test*) gated=$((gated + 1)); break ;;
-            *) break ;;
-          esac
-          ;;
-        "#["*|"///"*|"//!"*|"") i=$((i - 1)) ;;
-        *) break ;;
-      esac
-    done
-  done < <(grep -rn -E "^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${name}[[:space:]]*;" "$ROOT")
-
-  [ "$decls" -gt 0 ] && [ "$decls" -eq "$gated" ]
-}
 
 # production_files <root> - every .rs file whose production region this gate
 # rules on, one per line. A module gated at its declaration is skipped BEFORE it
 # is counted, so the arm's number reports what it decided and not what it saw.
+#
+# The root is passed THROUGH to the skip predicate rather than read from the
+# global `$ROOT`, so `--root <copy>` drives one tree end to end.
 production_files() {
   local f
   while IFS= read -r f; do
-    module_is_test_gated "$f" && continue
+    module_is_test_gated "$f" "$1" && continue
     printf '%s\n' "$f"
   done < <(find "$1" -name '*.rs' -type f | LC_ALL=C sort)
 }
@@ -529,6 +500,11 @@ RS
     echo "  FAIL an identifier was counted as a statement: [$got]"
     status=1
   fi
+
+  # The SKIP predicate has its own controls. A wrong answer there is invisible
+  # from here: a file `production_files` declines to enumerate contributes
+  # nothing to arm 2 and prints exactly what a clean file prints.
+  module_gating_self_test || status=1
 
   return "$status"
 }

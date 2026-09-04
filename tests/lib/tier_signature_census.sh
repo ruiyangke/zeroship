@@ -100,6 +100,9 @@
 #   tests/lib/tier_signature_census.sh --tests      # test-region marker use, violations only
 set -uo pipefail
 
+# shellcheck source=tests/lib/module_gating.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/module_gating.sh"
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 # TWO SOURCE ROOTS SINCE 2026-09-03, for the reason spelled out at the head of
 # tier_direction_census.sh: the ENGINE tier left `zeroship-plugin-db/src` for
@@ -197,44 +200,19 @@ label() { printf '%s/%s\n' "$(basename "$(dirname "$1")" | sed 's/^zeroship-//')
 # every laddered module was excluded, and the census went to ZERO rows. It
 # printed that as calmly as it prints a real number. A `not(` wrapper is the
 # production arm by construction and is skipped before the substring test.
-module_is_test_gated() {   # $1 = path like ./drop_namespace.rs
-  local file="$1" name decls gated
-  name=$(basename "$file" .rs)
-  # `foo/mod.rs` is declared as `mod foo;`, not `mod mod;`.
-  if [ "$name" = "mod" ]; then
-    name=$(basename "$(dirname "$file")")
-  fi
-  [ -z "$name" ] && return 1
-
-  decls=0
-  gated=0
-  while IFS= read -r hit; do
-    local decl_file decl_line prev i
-    decl_file="${hit%%:*}"
-    decl_line="${hit#*:}"
-    decl_line="${decl_line%%:*}"
-    decls=$((decls + 1))
-    # Walk back over attributes and comments to the nearest cfg; stop at the
-    # first line that is neither.
-    i=$((decl_line - 1))
-    while [ "$i" -ge 1 ]; do
-      prev=$(sed -n "${i}p" "$decl_file")
-      case "$prev" in
-        *"#[cfg("*)
-          case "$prev" in
-            *"not("*) break ;;
-            *test*) gated=$((gated + 1)); break ;;
-            *) break ;;
-          esac
-          ;;
-        "#["*|*"//"*|"") i=$((i - 1)) ;;
-        *) break ;;
-      esac
-    done
-  done < <(grep -rn -E "^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${name}[[:space:]]*;" . 2>/dev/null)
-
-  [ "$decls" -gt 0 ] && [ "$decls" -eq "$gated" ]
-}
+#
+# THE PREDICATE ITSELF MOVED TO tests/lib/module_gating.sh ON 2026-09-04, from
+# four hand-copies down to one. Three of the four - this one included - tested
+# the `#[cfg(` substring ANYWHERE in the line and tested it BEFORE the comment
+# arm, so a COMMENT that merely QUOTED `#[cfg(test)]` above a `mod x;`
+# declaration read as a gate and the module dropped out of the census entirely.
+# Two files were in that state here: `backend/mod.rs` and `crud/unmask.rs`, each
+# switched off by prose written to explain a visibility decision. Everything
+# above still describes the rule; only the implementation left.
+#
+# The search root is passed EXPLICITLY. This census `cd`s into each crate's src
+# before scanning, so its root is `.` - which is exactly why it could not share
+# a helper that hard-coded somebody else's.
 
 region_filter() {   # $1 = file, $2 = "prod" | "test"
   awk -v WANT="$2" '
@@ -308,7 +286,7 @@ region_filter() {   # $1 = file, $2 = "prod" | "test"
 # makes the tier question stop applying, exactly as it stops applying inside a
 # `#[cfg(test)] mod`.
 prod_lines() {
-  module_is_test_gated "$1" && return 0
+  module_is_test_gated "$1" . && return 0
   region_filter "$1" prod
 }
 test_lines() { region_filter "$1" test; }

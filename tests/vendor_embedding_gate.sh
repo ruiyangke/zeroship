@@ -51,6 +51,8 @@ cd "$(dirname "$0")/.."
 
 # shellcheck source=tests/lib/gate_arms.sh
 . "$(dirname "$0")/lib/gate_arms.sh"
+# shellcheck source=tests/lib/module_gating.sh
+. "$(dirname "$0")/lib/module_gating.sh"
 gate_arms_init vendor_embedding
 
 PASS=0
@@ -221,56 +223,23 @@ in_baseline() {
 #
 # `drop_namespace.rs` carries no cfg of its own, so this gate counted its
 # `use compio_postgres::Pool` and carried a baseline entry for a module that is
-# in no shipped binary. tests/lib/tier_signature_census.sh had the identical
-# blind spot and was fixed the same day; this is the same rule, so the two
-# instruments agree about which files exist to rule on.
+# in no shipped binary.
 #
-# TWO THINGS MAKE IT CORRECT, and both were learned by getting them wrong in the
-# census first:
+# `module_is_test_gated` LIVED HERE, AS ONE OF FOUR HAND-COPIES, UNTIL
+# 2026-09-04. This one and the two censuses shared a defect the fourth copy
+# (tests/decision_four_gate.sh) had already fixed: the walk's `#[cfg(` arm
+# matched ANYWHERE in the line and was tested BEFORE the comment arm, so a
+# COMMENT that merely QUOTED `#[cfg(test)]` above a `mod x;` declaration read as
+# a gate. It cost this gate two files - `zeroship-data-engine/backend/mod.rs`
+# and `crud/unmask.rs`, each disabled by prose written to explain a visibility
+# decision. Neither names a vendor, so nothing was concealed; the two gates
+# simply disagreed about which files exist to rule on, which is the shape a
+# census fails in. The one definition now lives in tests/lib/module_gating.sh
+# with its own positive/negative controls, and `--self-test` below runs them.
 #
-#   * EVERY declaration must be gated, not merely one. This crate declares most
-#     modules through a two-arm visibility ladder (`#[cfg(not(feature =
-#     "test-helpers"))] pub(crate) mod exec;` plus its `pub` twin), so "any
-#     gated declaration" would exclude nearly the whole crate.
-#   * A `not(...)` wrapper is the SHIPPED arm and must be skipped before the
-#     substring test - `"test-helpers"` CONTAINS `test`, and matching it
-#     naively took the census to zero rows while printing that as calmly as a
-#     real number.
-module_is_test_gated() {   # $1 = a path under one of $ROOTS
-  local file="$1" name decls gated
-  name=$(basename "$file" .rs)
-  if [ "$name" = "mod" ]; then
-    name=$(basename "$(dirname "$file")")
-  fi
-  [ -z "$name" ] && return 1
-
-  decls=0
-  gated=0
-  while IFS= read -r hit; do
-    local decl_file decl_line prev i
-    decl_file="${hit%%:*}"
-    decl_line="${hit#*:}"
-    decl_line="${decl_line%%:*}"
-    decls=$((decls + 1))
-    i=$((decl_line - 1))
-    while [ "$i" -ge 1 ]; do
-      prev=$(sed -n "${i}p" "$decl_file")
-      case "$prev" in
-        *"#[cfg("*)
-          case "$prev" in
-            *"not("*) break ;;
-            *test*) gated=$((gated + 1)); break ;;
-            *) break ;;
-          esac
-          ;;
-        "#["*|*"//"*|"") i=$((i - 1)) ;;
-        *) break ;;
-      esac
-    done
-  done < <(grep -rn -E "^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${name}[[:space:]]*;" $ROOTS 2>/dev/null)
-
-  [ "$decls" -gt 0 ] && [ "$decls" -eq "$gated" ]
-}
+# The roots are passed EXPLICITLY. The four copies each hard-coded a different
+# search root, so a shared helper that picked one would silently change what the
+# other three rule on.
 
 # --------------------------------------------------------------------------
 # Arm 1: no non-vendor production file names a vendor.
@@ -284,7 +253,7 @@ while IFS= read -r f; do
   # A module that is not compiled into any shipped binary cannot embed a vendor
   # into one. Skipped BEFORE n_ruled so the arm's count stays honest: it reports
   # what it decided, and it decided nothing about this file.
-  module_is_test_gated "$f" && continue
+  module_is_test_gated "$f" $ROOTS && continue
   rel="$(file_key "$f")"
   n_ruled=$((n_ruled + 1))
 
@@ -354,7 +323,7 @@ while IFS= read -r rel; do
   # not hypothetical - lock_guard.rs and drop_namespace.rs were both in that
   # state on 2026-09-02, and the gate was GREEN throughout, because each arm was
   # individually self-consistent. Keep the arms agreeing by construction.
-  if module_is_test_gated "$f"; then
+  if module_is_test_gated "$f" $ROOTS; then
     bad "baseline names $rel, but it is test-gated at its declaration so arm 1 never rules on it - delete the entry"
     continue
   fi
@@ -420,6 +389,15 @@ if [ "${1:-}" = "--self-test" ]; then
   ch=$(awk -v pat="$VENDORS" '$0 ~ pat && $0 !~ /^[[:space:]]*\/\// { n++ } END { print n+0 }' "$probe/comment.rs")
   if [ "$ch" -eq 0 ]; then ok "negative control: a mention in a comment is not an embedding"
   else bad "negative control FAILED: comment counted as production"; fi
+
+  # The SKIP predicate has its own controls, because a wrong answer here is
+  # invisible: a file this gate declines to rule on prints nothing at all.
+  # tests/decision_four_gate.sh runs the same set over the same helper.
+  if module_gating_self_test; then
+    ok "module-gating controls: the shared skip predicate discriminates"
+  else
+    bad "module-gating controls FAILED - arm 1's skip set is wrong, so its verdict says nothing"
+  fi
 fi
 
 echo
