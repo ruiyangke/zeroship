@@ -94,7 +94,14 @@ impl<D: VerbDispatch> NapiHostSession<D> {
         let req = JsRequest {
             kind: kind.to_string(),
             sql: sql.to_string(),
-            binds: binds.iter().map(bind_to_cell).collect(),
+            // Collected through `Result`, exactly as `rows_of` collects the
+            // opposite direction. A bind this fold cannot represent fails the
+            // call; it is never quietly replaced by NULL.
+            binds: binds
+                .iter()
+                .map(bind_to_cell)
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(DbError::message)?,
         };
         self.dispatch
             .dispatch(req)
