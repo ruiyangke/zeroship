@@ -146,11 +146,36 @@ fn require_pg() -> String {
          override. This suite is opt-in, so it fails rather than skipping: a \
          skipped run reports the same \"ok\" as a passing one."
     );
+    // Every test enters here before it touches the database, and
+    // `Once::call_once` blocks the rest until the first returns, so this is the
+    // barrier that makes an unbounded residue sweep safe.
+    support::sweep_prior_run_residue_once(&url);
     url
 }
 
-/// Tests run with the empty EnvSnapshot, so the runtime targets `default`.
-const APP_SCHEMA: &str = "default";
+// `APP_SCHEMA = "default"` lived here and is DELETED. Eleven of the fifteen
+// tests below reached for that one schema through `reset_schema`, which opens
+// with `DROP SCHEMA ... CASCADE`, so at the default thread count they raced to
+// destroy each other's `notes` table: measured 2026-09-04, 13 passed / 11 failed
+// parallel against 19 / 5 serial, with
+// `duplicate key value violates unique constraint "pg_namespace_nspname_index",
+// Key (nspname)=(default)` in the log.
+//
+// THE "19 / 5 SERIAL" HALF OF THAT IS NOT REPRODUCIBLE, and the correction is
+// worth more than the number. Re-measured 2026-09-04 at the pre-parallelism
+// commit, serially, this file scores 24 passed / 0 failed on a freshly created
+// database AND on the long-lived shared one - so those 5 were never a property
+// of the code, and nothing here "fixed" them. They were residue: objects an
+// earlier run left in whichever database the original measurement reused. Read
+// any count from this suite as a statement about a (code, database) pair, and
+// name the database when you record one.
+//
+// The name was also INHERITED rather than chosen: these tests booted with
+// `EnvSnapshot::empty()`, so the runtime's no-`APP_ID` fallback
+// (`crates/zeroship-runtime/src/core/plugin.rs`) picked `default` for them.
+// Each test now mints its own id with `test_app_id!()` and injects it, which
+// isolates the schema, the per-app role and the broker key at once - and stops
+// the fixture depending on a fallback continuing to exist.
 
 /// Drop the app schema, then PROVISION the `notes` table the way the engine /
 /// deploy-apply does.
@@ -175,8 +200,9 @@ async fn drain_open_connections() {
     }
 }
 
-fn reset_schema(url: &str) {
+fn reset_schema(url: &str, app: &str) {
     let url = url.to_string();
+    let app = app.to_string();
     block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
         compio::runtime::spawn(async move {
@@ -184,10 +210,7 @@ fn reset_schema(url: &str) {
         })
         .detach();
         client
-            .execute(
-                &format!("DROP SCHEMA IF EXISTS \"{APP_SCHEMA}\" CASCADE"),
-                &[],
-            )
+            .execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
             .await
             .unwrap();
         drop(client);
@@ -199,8 +222,8 @@ fn reset_schema(url: &str) {
         zeroship_plugin_db::set_db_url_for_tests(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
-            r#"CREATE SCHEMA IF NOT EXISTS "{APP_SCHEMA}";
-CREATE TABLE "{APP_SCHEMA}"."notes" (
+            r#"CREATE SCHEMA IF NOT EXISTS "{app}";
+CREATE TABLE "{app}"."notes" (
   id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -210,9 +233,9 @@ CREATE TABLE "{APP_SCHEMA}"."notes" (
   deleted_at TIMESTAMPTZ NULL,
   "title" TEXT NOT NULL
 );
-CREATE INDEX IF NOT EXISTS "notes_deleted_at_idx" ON "{APP_SCHEMA}"."notes" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "notes_updated_at_idx" ON "{APP_SCHEMA}"."notes" ("updated_at");
-CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{APP_SCHEMA}"."notes" ("created_by");"#
+CREATE INDEX IF NOT EXISTS "notes_deleted_at_idx" ON "{app}"."notes" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "notes_updated_at_idx" ON "{app}"."notes" ("updated_at");
+CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{app}"."notes" ("created_by");"#
         ))
         .await
         .expect("deploy stand-in must create the notes table");
@@ -231,24 +254,25 @@ CREATE INDEX IF NOT EXISTS "notes_created_by_idx" ON "{APP_SCHEMA}"."notes" ("cr
         // `DROP SCHEMA CASCADE` there destroys the per-app grants AND the
         // schema's `ALTER DEFAULT PRIVILEGES` entries, and `pg_restore
         // --no-privileges` puts none back.
-        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, APP_SCHEMA)
+        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, &app)
             .await
             .expect("per-app role must be re-established after the CASCADE");
-        support::grant_all_runtime_table_columns(&pool, APP_SCHEMA, "notes").await;
+        support::grant_all_runtime_table_columns(&pool, &app, "notes").await;
 
         drain_open_connections().await;
     });
 }
 
-fn count_notes(url: &str) -> i64 {
+fn count_notes(url: &str, app: &str) -> i64 {
     let url = url.to_string();
+    let app = app.to_string();
     block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
         compio::runtime::spawn(async move {
             let _ = connection.run().await;
         })
         .detach();
-        let sql = format!("SELECT COUNT(*)::bigint AS c FROM \"{APP_SCHEMA}\".\"notes\"");
+        let sql = format!("SELECT COUNT(*)::bigint AS c FROM \"{app}\".\"notes\"");
         let rows = client.query(&sql, &[]).await.unwrap();
         let count = rows[0].get::<_, i64>("c");
         drop(client);
@@ -287,14 +311,15 @@ fn exec_owner_sql(url: &str, sql: &str) {
 /// in these tests is installed from the RuntimeBuilder descriptor. `key_id` is
 /// still a parameter because the descriptor and supplied root key have to
 /// agree on it; nothing in the SQL below reads it any more.
-fn create_encrypted_users_table(url: &str, key_id: &str) {
+fn create_encrypted_users_table(url: &str, app: &str, key_id: &str) {
     let url = url.to_string();
+    let app = app.to_string();
     let _ = key_id;
     block_on(async move {
         zeroship_plugin_db::set_db_url_for_tests(&url);
         let pool = std::rc::Rc::new(compio_postgres::Pool::connect(&url, 2).await.unwrap());
         pool.batch_execute(&format!(
-            r#"CREATE TABLE "{APP_SCHEMA}"."users" (
+            r#"CREATE TABLE "{app}"."users" (
   id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -306,25 +331,26 @@ fn create_encrypted_users_table(url: &str, key_id: &str) {
   name TEXT NOT NULL,
   ssn BYTEA NULL
 );
-CREATE UNIQUE INDEX "users_email_key" ON "{APP_SCHEMA}"."users" (email);
-CREATE INDEX "users_deleted_at_idx" ON "{APP_SCHEMA}"."users" (deleted_at);
-CREATE INDEX "users_updated_at_idx" ON "{APP_SCHEMA}"."users" (updated_at);
-CREATE INDEX "users_created_by_idx" ON "{APP_SCHEMA}"."users" (created_by);"#
+CREATE UNIQUE INDEX "users_email_key" ON "{app}"."users" (email);
+CREATE INDEX "users_deleted_at_idx" ON "{app}"."users" (deleted_at);
+CREATE INDEX "users_updated_at_idx" ON "{app}"."users" (updated_at);
+CREATE INDEX "users_created_by_idx" ON "{app}"."users" (created_by);"#
         ))
         .await
         .expect("deploy stand-in must create encrypted users");
-        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, APP_SCHEMA)
+        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, &app)
             .await
             .expect("per-app role must exist for encrypted users");
-        support::grant_all_runtime_table_columns(&pool, APP_SCHEMA, "users").await;
+        support::grant_all_runtime_table_columns(&pool, &app, "users").await;
         pool.close().await;
         drop(pool);
         drain_open_connections().await;
     });
 }
 
-fn user_email_versions(url: &str) -> Vec<(String, i32)> {
+fn user_email_versions(url: &str, app: &str) -> Vec<(String, i32)> {
     let url = url.to_string();
+    let app = app.to_string();
     block_on(async move {
         let (client, connection) = compio_postgres::connect(&url, NoTls).await.unwrap();
         compio::runtime::spawn(async move {
@@ -334,7 +360,7 @@ fn user_email_versions(url: &str) -> Vec<(String, i32)> {
         let rows = client
             .query(
                 &format!(
-                    "SELECT email, version FROM \"{APP_SCHEMA}\".users \
+                    "SELECT email, version FROM \"{app}\".users \
                      WHERE name = 'Red Team' ORDER BY id"
                 ),
                 &[],
@@ -550,17 +576,18 @@ fn dispatch_zs_for_app(
     dispatch_zs_for_app_with_descriptor(url, source, name, app_id, notes_runtime_descriptor())
 }
 
-fn dispatch_zs(url: &str, source: &str, name: &str) -> (u16, serde_json::Value) {
-    dispatch_zs_for_app(url, source, name, None)
+fn dispatch_zs(url: &str, source: &str, name: &str, app: &str) -> (u16, serde_json::Value) {
+    dispatch_zs_for_app(url, source, name, Some(app))
 }
 
 fn dispatch_zs_with_descriptor(
     url: &str,
     source: &str,
     name: &str,
+    app: &str,
     descriptor: String,
 ) -> (u16, serde_json::Value) {
-    dispatch_zs_for_app_with_descriptor(url, source, name, None, descriptor)
+    dispatch_zs_for_app_with_descriptor(url, source, name, Some(app), descriptor)
 }
 
 /// Build a module around the per-test handlers in `body`.
@@ -903,7 +930,9 @@ export default { fetch: _fetch, rpc: _procedures };
 #[test]
 fn transaction_commits_on_resolve() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
 
     let src = build_src(
         r#"
@@ -919,7 +948,7 @@ const _procedures = { commitOne };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "commitOne");
+    let (status, body) = dispatch_zs(&url, &src, "commitOne", app);
     assert_eq!(status, 200, "commitOne failed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
@@ -930,7 +959,7 @@ const _procedures = { commitOne };
         Some("ok"),
         "transaction(fn) must resolve with the callback's return value; body={body}"
     );
-    assert_eq!(count_notes(&url), 1, "committed row must be visible");
+    assert_eq!(count_notes(&url, app), 1, "committed row must be visible");
 }
 
 /// Rollback on async reject: the callback inserts then throws; nothing
@@ -938,7 +967,9 @@ const _procedures = { commitOne };
 #[test]
 fn transaction_rolls_back_on_async_reject() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
 
     let src = build_src(
         r#"
@@ -963,7 +994,7 @@ const _procedures = { insertThenThrow };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "insertThenThrow");
+    let (status, body) = dispatch_zs(&url, &src, "insertThenThrow", app);
     assert_eq!(status, 200, "harness should succeed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
@@ -982,7 +1013,7 @@ const _procedures = { insertThenThrow };
     );
     // THE REAL PRODUCT CLAIM, and it had never executed: the old assertion
     // panicked on the envelope shape before reaching this line.
-    assert_eq!(count_notes(&url), 0, "rolled-back tx must not persist");
+    assert_eq!(count_notes(&url, app), 0, "rolled-back tx must not persist");
 }
 
 /// Rollback on a synchronous throw inside the callback (the callback is
@@ -991,7 +1022,9 @@ const _procedures = { insertThenThrow };
 #[test]
 fn transaction_sync_throw_in_callback_rolls_back() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
 
     let src = build_src(
         r#"
@@ -1007,7 +1040,7 @@ const _procedures = { syncThrow };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "syncThrow");
+    let (status, body) = dispatch_zs(&url, &src, "syncThrow", app);
     assert_eq!(status, 200, "harness should succeed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
@@ -1015,7 +1048,7 @@ const _procedures = { syncThrow };
         Some("sync boom"),
         "a synchronous throw inside the callback must land on result.error; body={body}"
     );
-    assert_eq!(count_notes(&url), 0);
+    assert_eq!(count_notes(&url, app), 0);
 }
 
 /// Nested transaction emits a SAVEPOINT: the inner `transaction()` fails,
@@ -1026,7 +1059,9 @@ const _procedures = { syncThrow };
 #[test]
 fn nested_inner_reject_rolls_back_to_savepoint_outer_continues() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
 
     let src = build_src(
         r#"
@@ -1053,7 +1088,7 @@ const _procedures = { nestedPartialFailure };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "nestedPartialFailure");
+    let (status, body) = dispatch_zs(&url, &src, "nestedPartialFailure", app);
     assert_eq!(status, 200, "nested handler should succeed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
@@ -1067,7 +1102,7 @@ const _procedures = { nestedPartialFailure };
     // Exactly the outer row persists — the inner one was rolled back to
     // the savepoint, the outer one committed.
     assert_eq!(
-        count_notes(&url),
+        count_notes(&url, app),
         1,
         "only the outer row must persist (inner rolled back to SAVEPOINT); body={body}"
     );
@@ -1092,11 +1127,13 @@ const _procedures = { nestedPartialFailure };
 #[test]
 fn savepoint_rollback_must_not_publish_its_change_event_at_outer_commit() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
 
     // Same thread as `block_on`'s runtime (`RT.with`), so this shares the
     // thread-local broker the dispatch path publishes into.
-    let sub = zeroship_plugin_db::broker::subscribe(APP_SCHEMA, "notes");
+    let sub = zeroship_plugin_db::broker::subscribe(app, "notes");
 
     let src = build_src(
         r#"
@@ -1120,12 +1157,12 @@ const _procedures = { savepointEmitLeak };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "savepointEmitLeak");
+    let (status, body) = dispatch_zs(&url, &src, "savepointEmitLeak", app);
     assert_eq!(status, 200, "handler should succeed: {body}");
 
     // Ground truth: exactly one row survived.
     assert_eq!(
-        count_notes(&url),
+        count_notes(&url, app),
         1,
         "precondition: only the outer row persists; body={body}"
     );
@@ -1152,7 +1189,9 @@ const _procedures = { savepointEmitLeak };
 #[test]
 fn nested_inner_resolve_releases_savepoint() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
 
     let src = build_src(
         r#"
@@ -1172,7 +1211,7 @@ const _procedures = { nestedBothCommit };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "nestedBothCommit");
+    let (status, body) = dispatch_zs(&url, &src, "nestedBothCommit", app);
     assert_eq!(status, 200, "nested handler should succeed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
@@ -1183,7 +1222,7 @@ const _procedures = { nestedBothCommit };
         Some("both-ok")
     );
     assert_eq!(
-        count_notes(&url),
+        count_notes(&url, app),
         2,
         "both inner (RELEASE SAVEPOINT) and outer (COMMIT) writes must persist; body={body}"
     );
@@ -1202,7 +1241,9 @@ const _procedures = { nestedBothCommit };
 #[test]
 fn savepoint_depth_cap_8_exceeded_is_refused() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
 
     // Recurse `transaction()` to depth `n`. The outermost is the BEGIN
     // (depth 0 savepoints); each nested call is one savepoint. The 9th
@@ -1235,7 +1276,7 @@ const _procedures = { deepNest };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "deepNest");
+    let (status, body) = dispatch_zs(&url, &src, "deepNest", app);
     assert_eq!(
         status, 200,
         "the wrapper returns the depth-cap refusal as data: {body}"
@@ -1273,7 +1314,9 @@ const _procedures = { deepNest };
 #[test]
 fn tx_view_has_no_lifecycle_methods() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
 
     let src = build_src(
         r#"
@@ -1292,7 +1335,7 @@ const _procedures = { probeTxView };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "probeTxView");
+    let (status, body) = dispatch_zs(&url, &src, "probeTxView", app);
     assert_eq!(status, 200, "probe should succeed: {body}");
     // `transaction()` resolves with the `{ data, error }` envelope documented at
     // `sdks/db/src/db-types.ts:39`, so the probe's own object sits under `data`.
@@ -1328,7 +1371,9 @@ const _procedures = { probeTxView };
 #[test]
 fn begin_transaction_not_on_env_db() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
 
     let src = build_src(
         r#"
@@ -1340,7 +1385,7 @@ const _procedures = { probeBegin };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "probeBegin");
+    let (status, body) = dispatch_zs(&url, &src, "probeBegin", app);
     assert_eq!(status, 200, "probe should succeed: {body}");
     let inner = body.get("json").cloned().unwrap_or(serde_json::Value::Null);
     assert_eq!(
@@ -1353,9 +1398,11 @@ const _procedures = { probeBegin };
 #[test]
 fn update_many_randomised_failure_is_atomic_postgres() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
     let key_id = "update_many_atomic_pg";
-    create_encrypted_users_table(&url, key_id);
+    create_encrypted_users_table(&url, app, key_id);
     let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[(key_id, &"b".repeat(64))]);
 
     let src = build_encrypted_users_src(
@@ -1410,13 +1457,18 @@ const _procedures = { seed, failBulk };
     );
 
     let (status, body) =
-        dispatch_zs_with_descriptor(&url, &src, "seed", users_runtime_descriptor(key_id));
+        dispatch_zs_with_descriptor(&url, &src, "seed", app, users_runtime_descriptor(key_id));
     assert_eq!(status, 200, "seed failed: {body}");
     assert!(body["json"]["failure"].is_null(), "seed failed: {body}");
 
     zeroship_plugin_db::crud::reset_write_path_counters_for_tests();
-    let (status, body) =
-        dispatch_zs_with_descriptor(&url, &src, "failBulk", users_runtime_descriptor(key_id));
+    let (status, body) = dispatch_zs_with_descriptor(
+        &url,
+        &src,
+        "failBulk",
+        app,
+        users_runtime_descriptor(key_id),
+    );
     assert_eq!(
         status, 200,
         "caught updateMany failure must remain inspectable: {body}"
@@ -1467,7 +1519,7 @@ const _procedures = { seed, failBulk };
         ]
     );
     assert_eq!(
-        user_email_versions(&url),
+        user_email_versions(&url, app),
         vec![
             ("alice@example.com".to_string(), 1),
             ("bob@example.com".to_string(), 1),
@@ -1528,16 +1580,16 @@ const _procedures = { seed, failBulk };
 #[test]
 fn commit_that_postgres_rolled_back_must_not_report_success_l8() {
     let url = require_pg();
-    reset_schema(&url);
+    let app = crate::test_app_id!();
+    let app = app.as_str();
+    reset_schema(&url, app);
 
     // The poison. `title` is creator data and survives the write path intact, so
     // a duplicate here is a real 23505 - unlike a duplicate `id`, which the
     // platform silently makes unique.
     exec_owner_sql(
         &url,
-        &format!(
-            "CREATE UNIQUE INDEX \"notes_title_l8_uniq\" ON \"{APP_SCHEMA}\".\"notes\" (\"title\")"
-        ),
+        &format!("CREATE UNIQUE INDEX \"notes_title_l8_uniq\" ON \"{app}\".\"notes\" (\"title\")"),
     );
 
     let src = build_src(
@@ -1563,8 +1615,8 @@ const _procedures = { poisonThenCommit };
 "#,
     );
 
-    let (status, body) = dispatch_zs(&url, &src, "poisonThenCommit");
-    let rows = count_notes(&url);
+    let (status, body) = dispatch_zs(&url, &src, "poisonThenCommit", app);
+    let rows = count_notes(&url, app);
 
     // SUCCESS MEANS DURABLE, in both directions. What must never happen is a
     // reported success whose writes are not there.
@@ -2077,7 +2129,9 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None, probe_backend().await).await.expect("BEGIN");
+            probe::begin(APP, None, probe_backend().await)
+                .await
+                .expect("BEGIN");
             probe::operation(APP, &format!("CREATE TABLE \"{APP}\".kept (id int)"))
                 .await
                 .expect("a statement inside the transaction");
@@ -2120,7 +2174,8 @@ mod sc1_driver {
             // The connection is back in the pool and reusable: the next checkout
             // is the SAME backend. With max_size = 1 there is nothing else it
             // could be handed.
-            let (idle, active, total) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+            let (idle, active, total) =
+                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle, active, total),
                 (1, 0, 1),
@@ -2185,8 +2240,11 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None, probe_backend().await).await.expect("BEGIN");
-            let (_, _, total_before) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+            probe::begin(APP, None, probe_backend().await)
+                .await
+                .expect("BEGIN");
+            let (_, _, total_before) =
+                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(total_before, 1, "one connection, checked out");
 
             // Another future owns the session, and NOTHING IS RUNNING ON IT.
@@ -2220,7 +2278,8 @@ mod sc1_driver {
             // does. THIS is the moment a withdrawal has to survive.
             held.restore();
 
-            let (idle, _, total_after) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+            let (idle, _, total_after) =
+                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 idle, 0,
                 "a withdrawn session must not be published as idle - a plain \
@@ -2235,7 +2294,9 @@ mod sc1_driver {
             // And the strongest form: whatever the pool opens next is a
             // DIFFERENT backend.
             probe::reset(APP);
-            probe::begin(APP, None, probe_backend().await).await.expect("a fresh BEGIN");
+            probe::begin(APP, None, probe_backend().await)
+                .await
+                .expect("a fresh BEGIN");
             let fresh_pid = probe::session_backend_pid(APP).expect("a pinned session");
             assert_ne!(
                 fresh_pid, withdrawn_pid,
@@ -2328,7 +2389,9 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None, probe_backend().await).await.expect("BEGIN");
+            probe::begin(APP, None, probe_backend().await)
+                .await
+                .expect("BEGIN");
             let pid = probe::session_backend_pid(APP).expect("a pinned session");
 
             // A statement that will not end on its own inside this arm. 60s is
@@ -2377,7 +2440,8 @@ mod sc1_driver {
                  because the grace expired; {elapsed:?} is the whole grace"
             );
 
-            let (idle, active, total) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+            let (idle, active, total) =
+                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle, active, total),
                 (1, 0, 1),
@@ -2449,7 +2513,9 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None, probe_backend().await).await.expect("BEGIN");
+            probe::begin(APP, None, probe_backend().await)
+                .await
+                .expect("BEGIN");
             let held = probe::HeldSession::take(APP).expect("hold the session");
             let pid = held.backend_pid().expect("a Postgres session");
             assert_eq!(
@@ -2514,7 +2580,9 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None, probe_backend().await).await.expect("BEGIN");
+            probe::begin(APP, None, probe_backend().await)
+                .await
+                .expect("BEGIN");
             probe::operation(APP, &format!("CREATE TABLE \"{APP}\".rows_ (tag text)"))
                 .await
                 .expect("create table");
@@ -2624,7 +2692,8 @@ mod sc1_driver {
                 Some(SessionOwnership::None),
                 "Preparing holds no session: the client is acquired by IssueBegin"
             );
-            let (idle_before, _, _) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+            let (idle_before, _, _) =
+                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
 
             let fired = probe::fire_execution_deadline(APP).await;
 
@@ -2646,7 +2715,8 @@ mod sc1_driver {
                 "ReleaseAdmission retires the transaction on every path to Settled"
             );
 
-            let (idle_after, active_after, _) = zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
+            let (idle_after, active_after, _) =
+                zeroship_plugin_db::pool_counts_for_tests().expect("a pool is installed");
             assert_eq!(
                 (idle_after, active_after),
                 (idle_before, 0),
