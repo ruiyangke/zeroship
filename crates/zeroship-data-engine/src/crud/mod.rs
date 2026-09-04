@@ -153,7 +153,7 @@ pub mod protection_floor;
 //
 // THAT TOOL IS NOW `protection_floor`, declared above, and building it corrected
 // one of the two facts recorded here. The mask KIND does NOT exist only in the
-// descriptor: PostgreSQL carries `__zsmask:kind=…,classification=…` in
+// descriptor: PostgreSQL carries `zero-migrate:mask:kind=…,classification=…` in
 // `pg_description` and SQLite carries it in `sqlite_master.sql`, and both
 // introspectors already parse it back into a `MaskMeta` (measured 2026-09-04 on
 // a live table built by the platform's own DDL emitter). `expected` was

@@ -11,7 +11,7 @@
 //!
 //! `crud::introspect_schema` read the LIVE PostgreSQL catalog through the
 //! reader now located at `backend::pg_introspect::read_live_schema` and re-derived
-//! `{ type, encrypted?, mask? }` from the `zsenc:` / `__zsmask:` column
+//! `{ type, encrypted?, mask? }` from the `zero-migrate:enc:` / `zero-migrate:mask:` column
 //! comments the migration engine had written. That was:
 //!
 //! * **a round trip, not an independent source.** The sentinels are emitted by
@@ -26,7 +26,7 @@
 //!   the disagreement is not "stale" - it is the untrusted side claiming a column
 //!   is unprotected. Measured 2026-09-04: deleting one `mask` key from a field
 //!   made the next write store `987-65-4321` under the field's own name while
-//!   `__zs_raw__ssn` sat NULL and the column's `__zsmask:` comment was still on
+//!   `__zs_raw__ssn` sat NULL and the column's `zero-migrate:mask:` comment was still on
 //!   it; deleting one `encrypted` key stored `hunter3-also-real` into the BYTEA
 //!   column. [`crate::crud::protection_floor`] is the fence, and it reads the
 //!   catalog for PRESENCE of a protection only. THE DESCRIPTOR REMAINS THE SOLE

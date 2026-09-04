@@ -72,7 +72,7 @@ pub(crate) async fn read_live_schema(pool: &Pool, app_id: &str) -> Result<LiveSc
     //
     // The LEFT JOIN against `pg_description` pulls the
     // per-column comment populated by the
-    // `COMMENT ON COLUMN <coll>.<sibling> IS '__zsmask:...'`
+    // `COMMENT ON COLUMN <coll>.<sibling> IS 'zero-migrate:mask:...'`
     // statements the DDL emitter writes alongside CREATE TABLE +
     // ALTER ADD COLUMN. We hand the raw description string back as
     // `pg_comment`; the second pass below parses sentinel-tagged
@@ -127,12 +127,12 @@ SELECT c.relname AS table_name,
             .and_then(|s| s.chars().next());
         let pg_comment: Option<String> = row.try_get::<_, String>("pg_comment").ok();
         // Column comments carry TWO sentinel families:
-        //   - `__zsmask:…` on a `<col>_masked` sibling → deferred to the second
+        //   - `zero-migrate:mask:…` on a `<col>_masked` sibling → deferred to the second
         //     pass (stamps `MaskMeta` on the PARENT);
-        //   - `zsenc:…` on the encrypted column itself → parsed inline here into
-        //     `EncryptionMeta`. On PG the inline `/* zsenc */` DDL comment is
+        //   - `zero-migrate:enc:…` on the encrypted column itself → parsed inline here into
+        //     `EncryptionMeta`. On PG the inline `/* zero-migrate:enc */` DDL comment is
         //     parse-discarded, so the migration emitter also writes a
-        //     `COMMENT ON COLUMN` carrying the `zsenc:` body; this is where the
+        //     `COMMENT ON COLUMN` carrying the `zero-migrate:enc:` body; this is where the
         //     data plane (and the diff) recover it.
         let mut encryption: Option<EncryptionMeta> = None;
         if let Some(comment) = &pg_comment {
@@ -141,13 +141,13 @@ SELECT c.relname AS table_name,
             // to test and no parent to resolve.
             //
             // The `&& column.ends_with("_masked")` conjunct that used to be
-            // here had no `else`: a `__zsmask:` comment on a column that did
+            // here had no `else`: a `zero-migrate:mask:` comment on a column that did
             // not match fell through both arms and was discarded in silence,
             // while the malformed-sentinel arm below warns loudly. After the
             // flip that arm would have matched EVERY sentinel.
-            if comment.starts_with("__zsmask:") {
+            if comment.starts_with(zeroship_schema::mask_codec::MASK_SENTINEL_PREFIX) {
                 sibling_sentinels.insert((table.clone(), column.clone()), comment.clone());
-            } else if comment.starts_with("zsenc:") {
+            } else if comment.starts_with(zeroship_schema::mask_codec::ENC_SENTINEL_PREFIX) {
                 match zeroship_schema::mask_codec::parse_encryption_sentinel(comment) {
                     Ok(meta) => encryption = Some(meta),
                     Err(e) => {
@@ -163,7 +163,7 @@ SELECT c.relname AS table_name,
                             column = %column,
                             comment = %comment,
                             error = %e,
-                            "diff: malformed zsenc sentinel on PG column; \
+                            "diff: malformed zero-migrate:enc sentinel on PG column; \
                              treating column as unencrypted"
                         );
                     }
@@ -184,7 +184,7 @@ SELECT c.relname AS table_name,
             },
         );
     }
-    // Second pass: for every column carrying a `__zsmask:…` sentinel, parse
+    // Second pass: for every column carrying a `zero-migrate:mask:…` sentinel, parse
     // the kind+classification and stamp `MaskMeta` on it. The column carrying
     // the sentinel IS the declared field - the mask lives under the field's own
     // name - so there is nothing to resolve. The diff classifier reads

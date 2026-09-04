@@ -2891,8 +2891,8 @@ fn users_encrypted_secret_schema(key_id: &str) -> serde_json::Value {
 // fails rather than the test agreeing with a wrong emitter.
 //
 // The seven system columns, the `["id"]` PK and the three system indexes are the
-// platform's confined table shape. `_masked` companions and the `zsenc:` /
-// `__zsmask:` comment sentinels preserve the migrated table shape exercised by
+// platform's confined table shape. `_masked` companions and the `zero-migrate:enc:` /
+// `zero-migrate:mask:` comment sentinels preserve the migrated table shape exercised by
 // these fixtures. Runtime field metadata comes from the deployed descriptor.
 // ---------------------------------------------------------------------------
 
@@ -2943,8 +2943,8 @@ fn users_encrypted_ssn_ddl(key_id: &str) -> String {
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
-  "{raw_ssn}" BLOB /* zsenc:randomised:{key_id}:string */,
-  "ssn" TEXT /* __zsmask:kind=last4,classification=spi */
+  "{raw_ssn}" BLOB /* zero-migrate:enc:randomised:{key_id}:string */,
+  "ssn" TEXT /* zero-migrate:mask:kind=last4,classification=spi */
 );
 {}
 CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
@@ -2959,7 +2959,7 @@ fn users_encrypted_secret_ddl(key_id: &str) -> String {
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
   "email" TEXT NOT NULL,
   "name" TEXT NOT NULL,
-  "secret" BLOB /* zsenc:randomised:{key_id}:string */
+  "secret" BLOB /* zero-migrate:enc:randomised:{key_id}:string */
 );
 {}
 CREATE UNIQUE INDEX IF NOT EXISTS "default"."users_email_key" ON "users" ("email");
@@ -2977,10 +2977,10 @@ fn users_deterministic_email_ddl(key_id: &str) -> String {
     let raw_ssn = raw_column_name("ssn");
     format!(
         r#"CREATE TABLE IF NOT EXISTS "default"."users" ({SYSTEM_COLUMNS_SQLITE},
-  "email" BLOB /* zsenc:deterministic:{key_id}:string */ NOT NULL,
+  "email" BLOB /* zero-migrate:enc:deterministic:{key_id}:string */ NOT NULL,
   "name" TEXT NOT NULL,
-  "{raw_ssn}" BLOB /* zsenc:randomised:{key_id}:string */,
-  "ssn" TEXT /* __zsmask:kind=last4,classification=spi */
+  "{raw_ssn}" BLOB /* zero-migrate:enc:randomised:{key_id}:string */,
+  "ssn" TEXT /* zero-migrate:mask:kind=last4,classification=spi */
 );
 {}
 CREATE INDEX IF NOT EXISTS "default"."users_email_idx" ON "users" ("email");
@@ -5265,7 +5265,7 @@ fn encrypted_column_e2e_crud_round_trip_sqlite() {
 
 /// **DDL shape on SQLite**: `build_create_table_with_fks`
 /// emits the field's own column as a bare `TEXT` mask holder (carrying the
-/// `__zsmask:...` sentinel) plus a RAW sibling - named via
+/// `zero-migrate:mask:...` sentinel) plus a RAW sibling - named via
 /// [`raw_column_name`], never spelled out here - that carries the declared
 /// type and constraints. The SQLite arm receives the SQL byte-identical to
 /// PG for this schema (no encryption, so no dialect-specific BYTEA/BLOB
@@ -5289,7 +5289,7 @@ fn a_raw_column_is_emitted_for_a_masked_field_sqlite() {
         "raw column must be emitted to carry the real value: {sql}"
     );
     assert!(
-        sql.contains("\"ssn\" TEXT /* __zsmask:kind=last4,classification=spi */"),
+        sql.contains("\"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */"),
         "the field's own column must be the masked sibling and carry the mask sentinel: {sql}"
     );
     // The sentinel rides the masked column only - the raw column is not
@@ -7083,7 +7083,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
 // integration-level coverage these tests provide:
 //
 // 1. The DDL emitter (`build_create_table_with_fks`) attaches the
-//    `/* __zsmask:... */` sentinel to the sibling column.
+//    `/* zero-migrate:mask:... */` sentinel to the sibling column.
 // 2. The SQLite introspector recovers the mask metadata from
 //    `sqlite_master.sql` on a subsequent `introspect_schema` call.
 // 3. The diff classifier sees the recovered metadata and emits no
@@ -7342,7 +7342,7 @@ fn mask_added_to_existing_column_is_refused_end_to_end_sqlite() {
                     "CREATE TABLE \"app_demo\".\"users\" (\
                          \"id\" INTEGER PRIMARY KEY, \
                          \"{raw_ssn}\" TEXT, \
-                         \"ssn\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi */\
+                         \"ssn\" TEXT NOT NULL /* zero-migrate:mask:kind=last4,classification=spi */\
                      )"
                 ),
                 &[],
@@ -7415,7 +7415,7 @@ fn mask_kind_change_rewrites_the_masked_column_end_to_end_sqlite() {
         // Set up a live table already in the post-storage-flip shape:
         // the raw column (named via `raw_column_name`, never spelled
         // out here) holds the real value; the field's own column holds
-        // the mask + the `__zsmask:...` sentinel the introspector reads.
+        // the mask + the `zero-migrate:mask:...` sentinel the introspector reads.
         let raw_ssn = raw_column_name("ssn");
         backend
             .pool_exec(
@@ -7423,7 +7423,7 @@ fn mask_kind_change_rewrites_the_masked_column_end_to_end_sqlite() {
                     "CREATE TABLE \"app_demo\".\"users\" (\
                          \"id\" INTEGER PRIMARY KEY, \
                          \"{raw_ssn}\" TEXT, \
-                         \"ssn\" TEXT NOT NULL /* __zsmask:kind=full,classification=pii */\
+                         \"ssn\" TEXT NOT NULL /* zero-migrate:mask:kind=full,classification=pii */\
                      )"
                 ),
                 &[],
@@ -7524,7 +7524,7 @@ fn mask_removal_classified_destructive_on_sqlite_diff() {
         // Post-storage-flip layout: the raw column (named via
         // `raw_column_name`, never spelled out here) holds the real
         // value; the field's own column holds the mask + the
-        // `__zsmask:...` sentinel the introspector reads.
+        // `zero-migrate:mask:...` sentinel the introspector reads.
         let raw_ssn = raw_column_name("ssn");
         backend
             .pool_exec(
@@ -7532,7 +7532,7 @@ fn mask_removal_classified_destructive_on_sqlite_diff() {
                     "CREATE TABLE \"app_demo\".\"users\" (\
                          \"id\" INTEGER PRIMARY KEY, \
                          \"{raw_ssn}\" TEXT, \
-                         \"ssn\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi */\
+                         \"ssn\" TEXT NOT NULL /* zero-migrate:mask:kind=last4,classification=spi */\
                      )"
                 ),
                 &[],
@@ -7612,7 +7612,7 @@ fn malformed_mask_sentinel_skipped_on_sqlite() {
                 "CREATE TABLE \"app_demo\".\"users\" (\
                      \"id\" INTEGER PRIMARY KEY, \
                      \"ssn\" TEXT, \
-                     \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=cosmic_radiation,classification=spi */\
+                     \"ssn_masked\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic_radiation,classification=spi */\
                  )",
                 &[],
             )

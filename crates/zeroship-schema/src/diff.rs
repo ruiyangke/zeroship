@@ -317,7 +317,7 @@ impl Default for ColumnInfo {
 /// Populated by schema introspection:
 /// - **PG**: from encryption metadata emitted alongside the table create.
 /// - **SQLite**: from a sentinel CHECK comment
-///   `/* zsenc:{mode}:{keyId}:{wraps} */` parsed out of
+///   `/* zero-migrate:enc:{mode}:{keyId}:{wraps} */` parsed out of
 ///   `sqlite_master.sql` (the same regex-on-DDL pattern used for
 ///   vector dims; a sidecar `__zs_schema_meta` table is the upgrade path).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1012,7 +1012,7 @@ pub fn compute_diff(
     // column the instant the schema says "encrypted" → corruption.
     //
     // Detect the transition by comparing the LIVE encryption state
-    // (introspected from the `zsenc:` sentinel into `ColumnInfo.encryption`)
+    // (introspected from the `zero-migrate:enc:` sentinel into `ColumnInfo.encryption`)
     // against the DECLARED encryption state (`def.encrypted`). When they
     // disagree we emit a `RewriteColumnType` op classified Destructive so
     // the transition is VISIBLE — refused by validation and routed to a
@@ -1893,7 +1893,7 @@ mod tests {
         assert_eq!(adds.len(), 1, "the new masked column is added: {ops:?}");
         let sql = adds[0].sql.as_deref().unwrap_or("");
         assert!(
-            sql.contains(&crate::query::raw_column_name("dob")) && sql.contains("__zsmask:"),
+            sql.contains(&crate::query::raw_column_name("dob")) && sql.contains("zero-migrate:mask:"),
             "a NEW masked column still gets its raw column and its sentinel: {sql}",
         );
     }

@@ -822,7 +822,7 @@ impl SchemaIntrospect for SqliteBackend {
 
             // Pull the original `CREATE TABLE` text from
             // `sqlite_master.sql` so we can recover per-column
-            // encryption metadata from the `/* zsenc:<mode>:<keyId>:
+            // encryption metadata from the `/* zero-migrate:enc:<mode>:<keyId>:
             // <wraps> */` sentinel the DDL emitter writes for every
             // `t.encrypted(...)`-declared column (see
             // `zeroship_schema::query::field_to_column`). PRAGMA `table_info`
@@ -849,7 +849,7 @@ impl SchemaIntrospect for SqliteBackend {
                 .and_then(|c| c.clone())
                 .unwrap_or_default();
             let encryption_by_col = parse_encryption_sentinels(&create_table_text);
-            // Mask sentinels (`/* __zsmask:kind=...,
+            // Mask sentinels (`/* zero-migrate:mask:kind=...,
             // classification=... */`) attached to `<col>_masked` sibling
             // column DDL. Same regex-on-DDL pattern used for
             // encryption sentinels.
@@ -1491,7 +1491,7 @@ impl SqliteBackend {
 }
 
 /// Recover per-column encryption metadata from the
-/// `/* zsenc:<mode>:<keyId>:<wraps> */` sentinel comments the DDL
+/// `/* zero-migrate:enc:<mode>:<keyId>:<wraps> */` sentinel comments the DDL
 /// emitter writes into the `CREATE TABLE` text (see
 /// `zeroship_schema::query::field_to_column`).
 ///
@@ -1505,11 +1505,11 @@ impl SqliteBackend {
 /// and the sentinel format is fixed enough that a few `.split` /
 /// `.find` calls cover every case the DDL emitter produces. The
 /// canonical regex equivalent is
-/// `/"([^"]+)"\s+\w+\s*\/\* zsenc:(randomised|deterministic):
+/// `/"([^"]+)"\s+\w+\s*\/\* zero-migrate:enc:(randomised|deterministic):
 /// ([A-Za-z0-9_]+):(string|number|bytes) \*\//` — every column DDL the
 /// emitter writes for an encrypted field is of the shape
-/// `"<col>" BYTEA /* zsenc:<mode>:<keyId>:<wraps> */ <constraints>`,
-/// so we walk the CREATE TABLE body finding `/* zsenc:...` markers and
+/// `"<col>" BYTEA /* zero-migrate:enc:<mode>:<keyId>:<wraps> */ <constraints>`,
+/// so we walk the CREATE TABLE body finding `/* zero-migrate:enc:...` markers and
 /// rewind to the preceding double-quoted identifier.
 ///
 /// **Sidecar upgrade path**: regex-on-DDL is fragile — a future SDK
@@ -1524,17 +1524,22 @@ fn parse_encryption_sentinels(
 ) -> std::collections::HashMap<String, zeroship_schema::diff::EncryptionMeta> {
     use zeroship_schema::diff::{EncryptionMeta, WrappedType};
     let mut out = std::collections::HashMap::new();
-    // Walk the body, finding each `/* zsenc:...` marker. For each one,
+    // Walk the body, finding each `/* zero-migrate:enc:...` marker. For each one,
     // rewind to the most recent double-quoted identifier to recover the
     // column name. The emitter always emits the column name as the
-    // first token in the column DDL (e.g. `"ssn" BYTEA /* zsenc:...`),
+    // first token in the column DDL (e.g. `"ssn" BYTEA /* zero-migrate:enc:...`),
     // so the rewind is unambiguous.
-    const MARKER: &str = "/* zsenc:";
+    // Composed from the shared prefix rather than spelled here: this walker
+    // DISPATCHES on the marker and only then hands the body to the codec, so a
+    // literal that drifts from the codec's prefix does not fail to parse - it
+    // finds nothing, and a column reads back unencrypted.
+    let marker = format!("/* {}", zeroship_schema::mask_codec::ENC_SENTINEL_PREFIX);
+    let marker = marker.as_str();
     let mut search_pos = 0usize;
-    while let Some(found) = create_table_text[search_pos..].find(MARKER) {
+    while let Some(found) = create_table_text[search_pos..].find(marker) {
         let abs_marker = search_pos + found;
         // Find the matching `*/` after the marker.
-        let body_start = abs_marker + MARKER.len();
+        let body_start = abs_marker + marker.len();
         let Some(end_rel) = create_table_text[body_start..].find("*/") else {
             break; // unterminated comment — bail out of the walk
         };
@@ -1589,7 +1594,7 @@ fn parse_encryption_sentinels(
 }
 
 /// Recover per-parent-column mask metadata from the
-/// `/* __zsmask:kind=…,classification=… */` sentinel comments the DDL
+/// `/* zero-migrate:mask:kind=…,classification=… */` sentinel comments the DDL
 /// emitter writes alongside every `<col>_masked` sibling column (see
 /// `zeroship_schema::query::build_create_table_with_fks`).
 ///
@@ -1615,12 +1620,15 @@ fn parse_mask_sentinels(
 ) -> std::collections::HashMap<String, zeroship_schema::diff::MaskMeta> {
     use zeroship_schema::diff::MaskMeta;
     let mut out = std::collections::HashMap::new();
-    const MARKER: &str = "/* __zsmask:";
+    // Composed from the shared prefix, for the reason
+    // [`parse_encryption_sentinels`] states at its own marker.
+    let marker = format!("/* {}", zeroship_schema::mask_codec::MASK_SENTINEL_PREFIX);
+    let marker = marker.as_str();
     let mut search_pos = 0usize;
-    while let Some(found) = create_table_text[search_pos..].find(MARKER) {
+    while let Some(found) = create_table_text[search_pos..].find(marker) {
         let abs_marker = search_pos + found;
         // The marker swallows the leading `/* ` so the comment body
-        // starts at `__zsmask:`. We find the matching `*/` to extract
+        // starts at `zero-migrate:mask:`. We find the matching `*/` to extract
         // the full sentinel payload.
         let body_start = abs_marker + "/* ".len();
         let Some(end_rel) = create_table_text[body_start..].find("*/") else {
@@ -2369,7 +2377,7 @@ mod tests {
     fn parse_encryption_sentinel_single_column() {
         let ddl = "CREATE TABLE \"app\".\"users\" (\n  \
             id SERIAL PRIMARY KEY,\n  \
-            \"ssn\" BYTEA /* zsenc:randomised:default:string */  NOT NULL,\n  \
+            \"ssn\" BYTEA /* zero-migrate:enc:randomised:default:string */  NOT NULL,\n  \
             \"name\" TEXT \n)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("ssn").expect("ssn must be parsed");
@@ -2387,7 +2395,7 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_deterministic_number_custom_key() {
         let ddl = "CREATE TABLE \"app\".\"events\" (\n  \
-            \"salary\" BYTEA /* zsenc:deterministic:payroll_v2:number */ NOT NULL\n)";
+            \"salary\" BYTEA /* zero-migrate:enc:deterministic:payroll_v2:number */ NOT NULL\n)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("salary").expect("salary must be parsed");
         assert!(matches!(
@@ -2403,7 +2411,7 @@ mod tests {
     /// the US form).
     #[test]
     fn parse_encryption_sentinel_accepts_us_spelling() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:randomized:default:bytes */)";
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomized:default:bytes */)";
         let got = parse_encryption_sentinels(ddl);
         let m = got.get("a").expect("a must be parsed");
         assert!(matches!(m.mode, zeroship_schema::descriptors::EncryptionMode::Randomised));
@@ -2415,8 +2423,8 @@ mod tests {
     #[test]
     fn parse_encryption_sentinel_multiple_columns() {
         let ddl = "CREATE TABLE \"app\".\"u\" (\n  \
-            \"ssn\" BYTEA /* zsenc:randomised:default:string */,\n  \
-            \"tin\" BYTEA /* zsenc:deterministic:tax:string */\n)";
+            \"ssn\" BYTEA /* zero-migrate:enc:randomised:default:string */,\n  \
+            \"tin\" BYTEA /* zero-migrate:enc:deterministic:tax:string */\n)";
         let got = parse_encryption_sentinels(ddl);
         assert_eq!(got.len(), 2);
         assert!(matches!(
@@ -2434,7 +2442,7 @@ mod tests {
     /// column ends up without metadata; no panic).
     #[test]
     fn parse_encryption_sentinel_rejects_malformed() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:only_one_part */)";
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:only_one_part */)";
         let got = parse_encryption_sentinels(ddl);
         assert!(got.is_empty());
     }
@@ -2442,7 +2450,7 @@ mod tests {
     /// Unknown mode / wraps → ignored.
     #[test]
     fn parse_encryption_sentinel_rejects_unknown_mode() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:hashed:default:string */)";
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:hashed:default:string */)";
         let got = parse_encryption_sentinels(ddl);
         assert!(got.is_empty());
     }
@@ -2450,7 +2458,7 @@ mod tests {
     /// Invalid key_id alphabet → ignored.
     #[test]
     fn parse_encryption_sentinel_rejects_invalid_key_id() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:randomised:bad key:string */)";
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised:bad key:string */)";
         let got = parse_encryption_sentinels(ddl);
         assert!(got.is_empty());
     }
@@ -2467,7 +2475,7 @@ mod tests {
     /// Unterminated comment doesn't loop forever; we bail out.
     #[test]
     fn parse_encryption_sentinel_handles_unterminated_comment() {
-        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zsenc:randomised:default:string";
+        let ddl = "CREATE TABLE t (\"a\" BYTEA /* zero-migrate:enc:randomised:default:string";
         let got = parse_encryption_sentinels(ddl);
         assert!(got.is_empty());
     }
@@ -2491,7 +2499,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     /// **SQLite introspection**: a CREATE TABLE body with an inline
-    /// `/* __zsmask:kind=…,classification=… */` comment attached to the MASKED
+    /// `/* zero-migrate:mask:kind=…,classification=… */` comment attached to the MASKED
     /// column - which after the storage flip is the field's own - gets parsed
     /// back as a `MaskMeta` on that field, naming the raw column as its
     /// sibling.
@@ -2507,7 +2515,7 @@ mod tests {
             "CREATE TABLE \"app\".\"users\" (\n  \
              \"id\" INTEGER PRIMARY KEY,\n  \
              \"{raw}\" TEXT,\n  \
-             \"ssn\" TEXT /* __zsmask:kind=last4,classification=spi */\n)"
+             \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */\n)"
         );
         let got = parse_mask_sentinels(&ddl);
         let meta = got.get("ssn").expect("mask meta on the declared field");
@@ -2528,9 +2536,9 @@ mod tests {
         let ddl = format!(
             "CREATE TABLE t (\n  \
              \"{}\" TEXT,\n  \
-             \"ssn\" TEXT /* __zsmask:kind=last4,classification=spi */,\n  \
+             \"ssn\" TEXT /* zero-migrate:mask:kind=last4,classification=spi */,\n  \
              \"{}\" TEXT,\n  \
-             \"email\" TEXT /* __zsmask:kind=email,classification=pii */\n)",
+             \"email\" TEXT /* zero-migrate:mask:kind=email,classification=pii */\n)",
             zeroship_schema::query::raw_column_name("ssn"),
             zeroship_schema::query::raw_column_name("email"),
         );
@@ -2554,7 +2562,7 @@ mod tests {
     /// must drop all mask metadata.
     #[test]
     fn sqlite_introspection_ignores_a_sentinel_with_no_column() {
-        let ddl = "CREATE TABLE t (\n  /* __zsmask:kind=last4,classification=spi */\n)";
+        let ddl = "CREATE TABLE t (\n  /* zero-migrate:mask:kind=last4,classification=spi */\n)";
         let got = parse_mask_sentinels(ddl);
         assert!(
             got.is_empty(),
@@ -2575,7 +2583,7 @@ mod tests {
     #[test]
     fn sqlite_introspection_malformed_sentinel_skipped() {
         let ddl = "CREATE TABLE t (\n  \"ssn\" TEXT,\n  \
-             \"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=cosmic,classification=pii */\n)";
+             \"ssn_masked\" TEXT NOT NULL /* zero-migrate:mask:kind=cosmic,classification=pii */\n)";
         let got = parse_mask_sentinels(ddl);
         assert!(
             got.is_empty(),
@@ -2586,7 +2594,7 @@ mod tests {
     /// Unterminated mask comment doesn't loop forever; we bail out.
     #[test]
     fn sqlite_introspection_unterminated_comment() {
-        let ddl = "CREATE TABLE t (\"ssn_masked\" TEXT NOT NULL /* __zsmask:kind=last4,classification=spi";
+        let ddl = "CREATE TABLE t (\"ssn_masked\" TEXT NOT NULL /* zero-migrate:mask:kind=last4,classification=spi";
         let got = parse_mask_sentinels(ddl);
         assert!(got.is_empty());
     }

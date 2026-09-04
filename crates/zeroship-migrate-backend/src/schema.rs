@@ -717,7 +717,10 @@ pub fn encryption_sentinel_body_for_field(def: &serde_json::Value) -> Option<Str
         .get("wraps")
         .and_then(|v| v.as_str())
         .unwrap_or("string");
-    Some(format!("zero-migrate:enc:{mode_norm}:{key_id}:{wraps}"))
+    Some(format!(
+        "{}{mode_norm}:{key_id}:{wraps}",
+        crate::mask_codec::ENC_SENTINEL_PREFIX
+    ))
 }
 
 /// The portable `caseSensitive` intent a field def carries, in the shape

@@ -346,7 +346,7 @@ operator class. Closed set: `cosine | l2 | innerProduct`. Declared-only (pgvecto
 stores dimensions, not the search metric).
 
 **`.mask({ kind, classification? })` — standalone column mask.** The field reads
-back as `MaskedValue<T>`; the op lower emits the `__zsmask` sentinel + `_masked`
+back as `MaskedValue<T>`; the op lower emits the `zero-migrate:mask` sentinel + `_masked`
 sibling (the same shape `t.encrypted()`'s auto-mask uses; an explicit `.mask()`
 on an encrypted column **overrides** the auto-mask). `kind` is **required**;
 `classification` is **optional and defaults to `"pii"`**.

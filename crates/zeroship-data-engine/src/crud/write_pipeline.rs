@@ -1352,9 +1352,19 @@ mod tests {
             let handle = crate::backend::BackendHandle::Sqlite(Rc::clone(&backend));
             let route = crate::exec::ambient_route_for_tests(app_id, handle);
 
-            // The REAL DDL emitter, so the `__zsmask:` sentinel and the
-            // `__zs_raw__ssn` sibling are the ones the platform writes rather
-            // than ones this test made up.
+            // `zeroship-schema`'s DDL emitter, so the `zero-migrate:mask:`
+            // sentinel and the `__zs_raw__ssn` sibling are built rather than
+            // spelled out here.
+            //
+            // It is NOT the emitter production runs - that is the migration
+            // engine's, and this one has no `src` call site anywhere. The two
+            // agreed about the raw column's name and disagreed about the
+            // sentinel's spelling until 2026-09-04, and this test was green
+            // throughout, which is exactly what a fixture sharing an emitter
+            // with its reader can be. The oracle that rules on the pair is
+            // `zeroship-plugin-db`'s `mask_flip.rs`, which builds with the
+            // ENGINE's emitter; this case still earns its place as the SQLITE
+            // arm of the fence, which that live-PostgreSQL suite cannot reach.
             let ddl = build_create_table_with_fks_for_dialect(
                 app_id,
                 collection,
