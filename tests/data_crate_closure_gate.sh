@@ -165,8 +165,9 @@ fi
 #   with the non-shipped `zeroship-config-contract` as the single exception.
 #
 # THIS ARM CARRIES ITS OWN INVERTED CONTROL, which is the point of ruling on
-# config-contract rather than skipping it. `cargo tree -p X -i Y` prints an
-# error to stderr and NOTHING to stdout when Y is absent from X's graph - and a
+# config-contract rather than skipping it. An inverted `cargo tree` prints an
+# error to stderr and NOTHING to stdout when the subject is absent from the
+# package's graph - and a
 # mistyped package name, a bad flag or a cargo failure produce exactly the same
 # empty stdout. An absence is therefore only evidence if the same command shape
 # is seen to FIND something. config-contract is the one package that must match,
@@ -207,7 +208,7 @@ else
       if [ "$hits" -gt 0 ]; then
         good "$pkg links $RELAY, as the single named exception requires (this is arm 3's inverted control)"
       else
-        bad "$pkg does NOT link $RELAY - either the exception was removed, or \`cargo tree -p X -i Y\` no longer finds a real edge and every absence below is meaningless"
+        bad "$pkg does NOT link $RELAY - either the exception was removed, or the inverted cargo tree no longer finds a real edge and every absence below is meaningless"
       fi
     elif [ "$hits" -gt 0 ]; then
       bad "$pkg reaches $RELAY in its normal closure - a shipped binary now links the process that exists to hold REPLICATION away from it"
