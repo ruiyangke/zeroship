@@ -1,11 +1,18 @@
 //! **The descriptor CARRIES the physical storage facts, it does not imply them.**
 //!
-//! One declared field can occupy more than one physical database object. Today the
-//! only consumer that needs those names re-derives them by string formatting -
-//! `format!("{col}_masked")` appears at eight independent sites listed in
-//! `docs/reviews/2026-08-27-descriptor-specification.md` section 1.4 - and a name
-//! derived at eight sites is eight chances to disagree with the one emitter that
-//! actually created the column.
+//! One declared field can occupy more than one physical database object. When this
+//! module was written, the only consumer that needed those names re-derived them by
+//! string formatting - `format!("{col}_masked")` appeared at eight independent sites
+//! listed in `docs/reviews/2026-08-27-descriptor-specification.md` section 1.4 - and
+//! a name derived at eight sites is eight chances to disagree with the one emitter
+//! that actually created the column.
+//!
+//! **The raw column's half of that is closed as of 2026-09-04.** The data plane's
+//! three CRUD consumers (the write relocation, the read strip and the unmask SELECT)
+//! read `storage.rawColumn` through `zeroship_schema::query::declared_raw_column`
+//! instead of formatting it. What still derives is the pair of backend
+//! introspectors, and no descriptor can serve them: introspection reports what a
+//! database contains, and the catalog records no mask-to-raw pairing to report.
 //!
 //! These arms pin the emitter side of that fix: every field of every rendered
 //! descriptor names the column a default projection reads, the column holding the
