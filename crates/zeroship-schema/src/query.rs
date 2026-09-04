@@ -15137,3 +15137,259 @@ mod reserved_id_prefix_parity {
         }
     }
 }
+
+/// The SQLite "now" expression, held across the migration-engine boundary.
+///
+/// # Three declarations, and a failure mode a one-sided edit cannot produce
+///
+/// [`SQLITE_NOW_EXPR`] is one of THREE spellings of the same expression, and the
+/// other two are in the vendor crate the composition root ships for SQLite:
+/// `SchemaRenderer::current_timestamp_expr`, which becomes the `DEFAULT` clause
+/// on `created_at` / `updated_at` when the migration engine CREATES a creator
+/// table, and `DmlRenderer::synth_now`, which the same engine renders for a
+/// migration-time assignment. This crate's copy is what the data plane assigns
+/// on every runtime write (`build_set_clauses_with_system_fields`, `now_expr`).
+///
+/// Each of the three was already pinned to its literal by its OWN crate's unit
+/// tests, so a ONE-SIDED edit was loud before this module existed. What was not
+/// covered is a COORDINATED edit: change all three and every suite in the tree
+/// stayed green, because nothing compared them.
+///
+/// # Why the agreement has to be BYTEWISE, and only on SQLite
+///
+/// The three system timestamp columns are `TEXT` on SQLite and carry no
+/// `COLLATE`, so ordering is a byte comparison over whatever string got stored.
+/// `' '` is 0x20 and `'T'` is 0x54, so a row defaulted by `CURRENT_TIMESTAMP`
+/// ("YYYY-MM-DD HH:MM:SS") sorts BEFORE a row the data plane stamped with the
+/// ISO-T form for the same instant - a same-day ordering inversion in a column
+/// creators sort by. Two spellings in one column is the whole hazard.
+///
+/// That reasoning does NOT generalise, and the tree proves it: PostgreSQL's two
+/// sides are `NOW()` here and `now()` in the engine's DML renderer. They differ
+/// BYTEWISE and it is harmless, because the column is `TIMESTAMPTZ` and the
+/// comparison is temporal rather than textual. So the obligation this module
+/// binds is "byte-identical on the dialect that stores these as TEXT, and equal
+/// up to case elsewhere", which is what
+/// [`the_byte_identity_obligation_is_scoped_to_the_dialect_that_stores_text`]
+/// states and derives rather than assumes.
+///
+/// # What each arm is bound by
+///
+/// - [`all_three_sqlite_now_spellings_are_the_one_this_module_states`] is the
+///   binding proper. It compares each side to [`SQLITE_NOW`], a fourth literal
+///   in this file, rather than to the other sides: comparing the three to each
+///   other alone would go green on the coordinated edit that is the whole
+///   reason for the module.
+/// - [`neither_side_may_fall_back_to_bare_current_timestamp`] is what keeps
+///   [`SQLITE_NOW`] itself honest. It is the only arm that fails if all FOUR
+///   spellings move together to the space-separated form, and it fails on the
+///   ordering fact rather than on a string.
+/// - the scope arm above is independently bound in the other direction: it
+///   fails if a shipping backend's engine and data-plane spellings diverge
+///   beyond case, which the SQLite-only arms cannot see.
+///
+/// It reaches the vendor through the existing test-only `zeroship-migrate`
+/// dev-dependency - the composition root, which is what a host really ships -
+/// so it costs no production dependency edge, the same route
+/// [`mod raw_column_parity`] takes for the raw column name.
+#[cfg(test)]
+mod sqlite_now_parity {
+    use super::*;
+
+    use zeroship_migrate_backend::registry::BackendVendor;
+    use zeroship_migrate_backend::renderer::DmlRenderer;
+    use zeroship_migrate_backend::schema::SchemaRenderer as EngineSchemaRenderer;
+
+    /// The one spelling, stated here as a literal.
+    ///
+    /// A fourth copy on purpose. It is what makes a coordinated three-file edit
+    /// fail, and
+    /// [`neither_side_may_fall_back_to_bare_current_timestamp`] is what keeps it
+    /// from becoming a fourth place the wrong answer can hide.
+    const SQLITE_NOW: &str = "(strftime('%Y-%m-%dT%H:%M:%fZ','now'))";
+
+    /// The dialect ids this crate's [`SqlDialect`] variants correspond to.
+    ///
+    /// Exhaustive over the enum by construction: the match below has no
+    /// wildcard, so a fourth variant fails to compile here rather than being
+    /// skipped by a census that never looked for it.
+    fn dialect_id(dialect: SqlDialect) -> &'static str {
+        match dialect {
+            SqlDialect::Postgres => "postgres",
+            SqlDialect::Sqlite => "sqlite",
+            SqlDialect::Mysql => "mysql",
+        }
+    }
+
+    /// Every dialect this crate renders, paired with the shipping vendor that
+    /// answers for it.
+    ///
+    /// `expect` rather than a skip: a dialect this crate emits SQL for and the
+    /// shipping set has no backend for is a finding, not a reason to examine
+    /// fewer rows.
+    fn pairs() -> Vec<(SqlDialect, &'static BackendVendor)> {
+        [SqlDialect::Postgres, SqlDialect::Sqlite, SqlDialect::Mysql]
+            .into_iter()
+            .map(|dialect| {
+                let id = dialect_id(dialect);
+                let vendor = zeroship_migrate::shipping_vendors()
+                    .as_slice()
+                    .iter()
+                    .copied()
+                    .find(|v| v.descriptor.id.as_str() == id)
+                    .unwrap_or_else(|| {
+                        panic!("the shipping set has no backend for the {id} dialect")
+                    });
+                (dialect, vendor)
+            })
+            .collect()
+    }
+
+    /// The SQLite vendor, which owns two of the three spellings.
+    fn sqlite_vendor() -> &'static BackendVendor {
+        pairs()
+            .into_iter()
+            .find(|(dialect, _)| matches!(dialect, SqlDialect::Sqlite))
+            .expect("the pair list covers SqlDialect::Sqlite")
+            .1
+    }
+
+    /// The binding this module exists for: three declarations, one spelling.
+    ///
+    /// Each is compared to [`SQLITE_NOW`], never to another side.
+    #[test]
+    fn all_three_sqlite_now_spellings_are_the_one_this_module_states() {
+        let vendor = sqlite_vendor();
+
+        assert_eq!(
+            renderer(SqlDialect::Sqlite).current_timestamp_expr(),
+            SQLITE_NOW,
+            "the data plane's SQLite now-expression moved; it is assigned to \
+             created_at/updated_at/deleted_at on every runtime write",
+        );
+        assert_eq!(
+            vendor.schema.current_timestamp_expr(),
+            SQLITE_NOW,
+            "the migration engine's SQLite DEFAULT clause moved; it is what every \
+             creator table's created_at/updated_at is defaulted with",
+        );
+        assert_eq!(
+            vendor.dml.synth_now(),
+            SQLITE_NOW,
+            "the migration engine's SQLite synth_now moved; it is what a \
+             migration-time assignment stores into the same TEXT column",
+        );
+    }
+
+    /// What [`SQLITE_NOW`] is held against, so the module's own literal cannot
+    /// drift with the sides it judges.
+    ///
+    /// The refusal is the ORDERING fact, not the string: two spellings of the
+    /// same instant must not be reachable in one TEXT column, and the
+    /// space-separated form SQLite's `CURRENT_TIMESTAMP` produces sorts before
+    /// the ISO-T form for the same second. This is the only arm that fails when
+    /// all four copies move together.
+    #[test]
+    fn neither_side_may_fall_back_to_bare_current_timestamp() {
+        let vendor = sqlite_vendor();
+        let spellings = [
+            ("data plane", renderer(SqlDialect::Sqlite).current_timestamp_expr().to_string()),
+            ("engine DDL default", vendor.schema.current_timestamp_expr().to_string()),
+            ("engine DML assignment", vendor.dml.synth_now()),
+            ("this module's literal", SQLITE_NOW.to_string()),
+        ];
+        for (who, expr) in &spellings {
+            assert!(
+                expr.contains("%Y-%m-%dT%H:%M:%fZ"),
+                "the {who} SQLite now-expression no longer renders the ISO-T form: {expr}",
+            );
+            assert!(
+                !expr.contains("CURRENT_TIMESTAMP"),
+                "the {who} SQLite now-expression fell back to CURRENT_TIMESTAMP, which \
+                 renders space-separated: {expr}",
+            );
+        }
+
+        // The reason the spelling is load-bearing, as a comparison rather than
+        // as prose. Same instant, two renderings, opposite order.
+        let space_form = "2026-09-04 23:59:59.000";
+        let iso_t_form = "2026-09-04T23:59:59.000Z";
+        assert!(
+            space_form < iso_t_form,
+            "the premise of this module is false: {space_form:?} no longer sorts \
+             before {iso_t_form:?}",
+        );
+
+        // ...and the column really is compared that way: TEXT, no COLLATE.
+        let columns = renderer(SqlDialect::Sqlite).system_field_columns();
+        for name in ["created_at", "updated_at", "deleted_at"] {
+            let decl = columns
+                .iter()
+                .find(|c| c.starts_with(name))
+                .unwrap_or_else(|| panic!("SQLite declares no {name} system column: {columns:?}"));
+            assert!(
+                decl.contains("TEXT") && !decl.contains("COLLATE"),
+                "{name} is no longer an uncollated TEXT column, so byte order is no \
+                 longer what this module's obligation rests on: {decl}",
+            );
+        }
+    }
+
+    /// The obligation is byte-identity where the column is TEXT, and case-blind
+    /// agreement everywhere else.
+    ///
+    /// Derived rather than assumed: which dialects need the strict rule is read
+    /// off each renderer's own `system_field_columns`, so a backend that started
+    /// storing timestamps as TEXT would be picked up here without this test
+    /// naming it.
+    ///
+    /// This is the arm that sees a PostgreSQL or MySQL divergence, which the
+    /// SQLite-only arms cannot. It tolerates ASCII case because PostgreSQL's
+    /// two sides already differ that way - `NOW()` here, `now()` in the engine -
+    /// and a `TIMESTAMPTZ` column compares temporally, not textually.
+    #[test]
+    fn the_byte_identity_obligation_is_scoped_to_the_dialect_that_stores_text() {
+        let mut text_dialects = 0usize;
+        let mut divergences = Vec::new();
+
+        for (dialect, vendor) in pairs() {
+            let ours = renderer(dialect).current_timestamp_expr();
+            let theirs = vendor.schema.current_timestamp_expr();
+            if !ours.eq_ignore_ascii_case(theirs) {
+                divergences.push(format!(
+                    "{dialect:?}: data-plane={ours:?}, engine={theirs:?} (differ beyond case)"
+                ));
+                continue;
+            }
+
+            let stores_text = renderer(dialect)
+                .system_field_columns()
+                .iter()
+                .any(|c| c.starts_with("created_at") && c.contains("TEXT"));
+            if !stores_text {
+                continue;
+            }
+            text_dialects += 1;
+            if ours != theirs || vendor.dml.synth_now() != ours {
+                divergences.push(format!(
+                    "{dialect:?} stores system timestamps as TEXT and its three \
+                     spellings are not byte-identical: data-plane={ours:?}, \
+                     engine-DDL={theirs:?}, engine-DML={:?}",
+                    vendor.dml.synth_now(),
+                ));
+            }
+        }
+
+        assert!(
+            divergences.is_empty(),
+            "{} now-expression divergence(s) across the migration-engine boundary:\n{}",
+            divergences.len(),
+            divergences.join("\n"),
+        );
+        assert_eq!(
+            text_dialects, 1,
+            "exactly one shipping dialect is expected to store the system timestamps \
+             as TEXT (SQLite); the strict arms above cover that one and no other",
+        );
+    }
+}

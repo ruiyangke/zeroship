@@ -28,6 +28,13 @@ zeroship-data-query-builder = { workspace = true }
 # or vendor crate to zeroship-schema's production graph.
 zeroship-migrate = { workspace = true }
 zeroship-migrate-core = { workspace = true }
+# The backend CONTRACT crate, for its two renderer traits alone. A vendor's
+# `synth_now` / `current_timestamp_expr` are trait methods on
+# `BackendVendor::{dml, schema}`, and the composition root hands those out as
+# `&'static dyn`, so calling either needs the trait in scope. `zeroship-migrate`
+# already links it transitively; this line adds a NAME, not a build edge, and it
+# is dev-only for the same reason the two above are.
+zeroship-migrate-backend = { workspace = true }
 
 [lints]
 workspace = true
