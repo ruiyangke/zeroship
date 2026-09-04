@@ -104,6 +104,14 @@ pub mod mask_policy;
 // module nothing calls, which is exactly how one gets copied back into a live
 // path". Deleting is that reasoning carried to the module.
 
+// The live catalog as a FLOOR on a column's protections: the fence that refuses
+// a write whose descriptor dropped a mask or an encryption block the database
+// still records. Same visibility pattern as the sibling passes.
+#[cfg(not(feature = "test-helpers"))]
+pub mod protection_floor;
+#[cfg(feature = "test-helpers")]
+pub mod protection_floor;
+
 // `mask_drift` WAS DECLARED HERE and is deleted (2026-09-03), by the same
 // reasoning as `mask_backfill` above. It sampled masked-column siblings against
 // the recomputed mask of decrypt(parent). 1287 lines, every caller a test.
@@ -142,6 +150,16 @@ pub mod mask_policy;
 // the descriptor no longer declares `<col>` masked - and it needs no sampling,
 // no decryption, no key store and no `MaskKind`. That is a different tool; it
 // would have shared only the word "drift".
+//
+// THAT TOOL IS NOW `protection_floor`, declared above, and building it corrected
+// one of the two facts recorded here. The mask KIND does NOT exist only in the
+// descriptor: PostgreSQL carries `__zsmask:kind=…,classification=…` in
+// `pg_description` and SQLite carries it in `sqlite_master.sql`, and both
+// introspectors already parse it back into a `MaskMeta` (measured 2026-09-04 on
+// a live table built by the platform's own DDL emitter). `expected` was
+// therefore computable all along. The check built here still does not use it -
+// PRESENCE is what a downgrade changes - but the reason is that presence is
+// sufficient, not that the kind is unavailable.
 //
 // Deleted rather than kept as scaffolding because the module carried three
 // re-derivations of live logic (`parse_mask_kind_str`, documented as a
@@ -895,6 +913,7 @@ pub async fn run_insert(
     write_pipeline::apply(
         route.backend().key_store(),
         route.dialect(),
+        &route,
         &binding,
         &coll,
         &mut doc,
@@ -945,6 +964,7 @@ pub async fn run_insert_many(
     prepare_insert_many_docs_for_binding(
         route.backend().key_store(),
         route.dialect(),
+        &route,
         &mut docs,
         &binding,
         &coll,
@@ -1060,6 +1080,7 @@ pub async fn run_update_one(
     write_pipeline::apply(
         route.backend().key_store(),
         route.dialect(),
+        &route,
         &binding,
         &coll,
         &mut update,
@@ -1234,6 +1255,7 @@ pub async fn run_update_many(
                 write_pipeline::apply(
                     frame.route().backend().key_store(),
                     dialect,
+                    frame.route(),
                     &binding,
                     &coll,
                     &mut row_update,
@@ -1301,6 +1323,7 @@ pub async fn run_update_many(
     write_pipeline::apply(
         route.backend().key_store(),
         dialect,
+        &route,
         &binding,
         &coll,
         &mut update,
@@ -2160,6 +2183,7 @@ pub async fn run_near(
 pub async fn prepare_insert_many_docs_for_binding(
     keys: &crate::encryption::KeyStore,
     dialect: query::SqlDialect,
+    route: &TxRoute,
     docs: &mut Value,
     binding: &DbBinding,
     collection: &str,
@@ -2168,6 +2192,7 @@ pub async fn prepare_insert_many_docs_for_binding(
     write_pipeline::apply(
         keys,
         dialect,
+        route,
         binding,
         collection,
         docs,
@@ -2225,13 +2250,13 @@ async fn prepare_upsert_doc_for_write(
     write_pipeline::apply(
         route.backend().key_store(),
         route.dialect(),
+        route,
         binding,
         collection,
         doc,
         write_pipeline::ApplyMode::Upsert {
             actor_id,
             conflict_fields,
-            route,
         },
     )
     .await

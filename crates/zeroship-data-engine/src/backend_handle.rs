@@ -595,6 +595,47 @@ impl BackendHandle {
         }
     }
 
+    /// What the LIVE database says this app's tables are, columns included.
+    ///
+    /// Both arms recover the protection sentinels the migration engine wrote -
+    /// `PostgreSQL` from `pg_description`, `SQLite` from `sqlite_master.sql` - so
+    /// `ColumnInfo::mask` and `ColumnInfo::encryption` come back populated on
+    /// either backend. That is the only part [`crate::crud::protection_floor`]
+    /// reads, and it is why this is on the handle rather than downcast at the
+    /// call site: selecting an impl by vendor is what this tier is for.
+    ///
+    /// **This is not a second schema authority.** `crate::descriptor` remains
+    /// the sole source of a collection's SHAPE. What the catalog supplies is a
+    /// FLOOR on its protections, which the descriptor may raise and may not
+    /// lower.
+    ///
+    /// The `SQLite` arm attaches the app's file first. Its catalog query is
+    /// `SELECT … FROM "<app>".sqlite_master`, which fails with a "no such table"
+    /// error naming `<app>.sqlite_master` until the file is attached under that
+    /// alias - and a
+    /// caller reaching this before any statement has run for the app is the
+    /// normal case, not an edge one, because this fence runs BEFORE the write it
+    /// guards. [`Self::prepare_for_app`] is the existing no-op-on-PostgreSQL
+    /// seam for exactly that prerequisite. An app with no file yet attaches an
+    /// empty one and introspects to an empty schema, which imposes no floor -
+    /// correct, since nothing has been protected yet.
+    ///
+    /// # Errors
+    ///
+    /// The `SQLite` attach failure, and either vendor's catalog-read failures.
+    pub async fn introspect_schema(
+        &self,
+        app_id: &str,
+    ) -> Result<zeroship_schema::diff::LiveSchema, DbError> {
+        use crate::backend::SchemaIntrospect;
+        match self {
+            Self::Postgres(pg) => pg.introspect_schema(app_id).await,
+            Self::Sqlite(sq) => {
+                sq.attach_app_file(app_id).await?;
+                sq.introspect_schema(app_id).await
+            }
+        }
+    }
 
     /// Borrow the inner [`PostgresBackend`] as a `&PostgresBackend`
     /// reference — the async-friendly companion to `BackendHandle::with_postgres`.
