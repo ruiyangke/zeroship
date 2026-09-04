@@ -12,47 +12,24 @@ rust-version = "1.85"
 [lib]
 test = true
 
+# Every entry here routes onto `postgres-types`, the VENDORED fork in
+# `vendor/postgres-types` that this crate actually ships against. NOTHING here
+# routes onto `tokio-postgres`, and that is load-bearing rather than tidy - see
+# the comment above the tokio-postgres declaration in [dev-dependencies].
 [features]
 default = []
-array-impls = [
-    "postgres-types/array-impls",
-    "tokio-postgres/array-impls",
-]
+array-impls = ["postgres-types/array-impls"]
 with-chrono-0_4 = ["postgres-types/with-chrono-0_4"]
-with-serde_json-1 = [
-    "postgres-types/with-serde_json-1",
-    "tokio-postgres/with-serde_json-1",
-]
-with-uuid-1 = [
-    "postgres-types/with-uuid-1",
-    "tokio-postgres/with-uuid-1",
-]
+with-serde_json-1 = ["postgres-types/with-serde_json-1"]
+with-uuid-1 = ["postgres-types/with-uuid-1"]
 with-time-0_3 = ["postgres-types/with-time-0_3"]
 with-bit-vec-0_8 = ["postgres-types/with-bit-vec-0_8"]
-with-bit-vec-0_9 = [
-    "postgres-types/with-bit-vec-0_9",
-    "tokio-postgres/with-bit-vec-0_9",
-]
-with-eui48-1 = [
-    "postgres-types/with-eui48-1",
-    "tokio-postgres/with-eui48-1",
-]
-with-geo-types-0_7 = [
-    "postgres-types/with-geo-types-0_7",
-    "tokio-postgres/with-geo-types-0_7",
-]
-with-jiff-0_2 = [
-    "postgres-types/with-jiff-0_2",
-    "tokio-postgres/with-jiff-0_2",
-]
-with-smol_str-01 = [
-    "postgres-types/with-smol_str-01",
-    "tokio-postgres/with-smol_str-01",
-]
-with-cidr-0_3 = [
-    "postgres-types/with-cidr-0_3",
-    "tokio-postgres/with-cidr-0_3",
-]
+with-bit-vec-0_9 = ["postgres-types/with-bit-vec-0_9"]
+with-eui48-1 = ["postgres-types/with-eui48-1"]
+with-geo-types-0_7 = ["postgres-types/with-geo-types-0_7"]
+with-jiff-0_2 = ["postgres-types/with-jiff-0_2"]
+with-smol_str-01 = ["postgres-types/with-smol_str-01"]
+with-cidr-0_3 = ["postgres-types/with-cidr-0_3"]
 # rustls-backed TLS: `MakeRustlsConnect` (src/tls_rustls.rs) plus the pool's
 # ability to open encrypted connections. rustls is pinned to `aws-lc-rs`, the
 # workspace's single crypto provider (see the root Cargo.toml comment on
@@ -218,10 +195,39 @@ optional = true
 # src/row.rs and their tests). So the suite was comparing a fixed driver
 # against an unfixed one, and would have read OUR correct behaviour as the
 # divergence. Move this deliberately when the port moves, never by resolution.
+#
+# THE CODEC FEATURES ARE DECLARED HERE, UNCONDITIONALLY, AND MUST NOT BE MOVED
+# BACK INTO [features] AS `tokio-postgres/with-*` ROUTES. That shape made
+# `cargo check --workspace --all-targets` impossible to run at all.
+#
+# Cargo 1.94.0 mishandles a `dep/feat` feature entry whose `dep` is a
+# DEV-dependency, once a DIFFERENT package turns that feature on across a normal
+# dependency edge. It propagates the feature NAME down the chain but not the
+# optional-dependency activation the feature carries, so postgres-types was
+# built with `--cfg feature="with-serde_json-1"` and no `--extern serde_json_1`,
+# and compiled a module against crates that were never linked: 8 errors, none of
+# them ours, aborting every workspace-wide build and lint. Measured in all three
+# resolver versions, and reproduced in five files with no zeroship code in them;
+# moving the same dependency from [dev-dependencies] to [dependencies] and
+# changing nothing else makes it green, which is the one-variable control.
+#
+# Declaring the features here sidesteps it entirely and costs no capability: the
+# oracle goes from conditionally-built codecs to always-built ones. compio-postgres's
+# OWN codec support is unaffected - it flows through the `postgres-types/...`
+# entries in [features] onto the vendored fork, and none of those moved.
 tokio-postgres = { version = "=0.7.18", default-features = false, features = [
     "runtime",
+    "array-impls",
     "with-chrono-0_4",
     "with-time-0_3",
+    "with-serde_json-1",
+    "with-uuid-1",
+    "with-bit-vec-0_9",
+    "with-eui48-1",
+    "with-geo-types-0_7",
+    "with-jiff-0_2",
+    "with-smol_str-01",
+    "with-cidr-0_3",
 ] }
 tokio = { version = "1", features = ["rt", "macros"] }
 chrono = { version = "0.4.33", default-features = false, features = ["clock"] }
