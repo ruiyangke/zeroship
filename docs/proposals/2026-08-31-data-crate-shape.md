@@ -135,10 +135,17 @@ current list rather than trusting this sentence.
 
 `test_support/` is test-only and follows whatever it supports.
 
-`backend/mod.rs` splits into nothing new: what is left of it is the adapter's re-export ladder and
-`Backend`, which is `plugin-db`'s own `pub(crate)` conformance marker and is pinned there by the
-orphan rule. `backend/cancel.rs` holds `TxCanceller`, a two-arm enum over both vendors, so it travels
-with the engine.
+`backend/mod.rs` splits into nothing new: what is left of it is the re-export ladder and `Backend`,
+the conformance marker the orphan rule pins beside its own `impl`. **That marker belongs to
+`zeroship-data-engine` and it is `pub`; this line called it "`plugin-db`'s own `pub(crate)`" marker
+until 2026-09-04.** The sentence was true before the extraction at `92e7615be` and is wrong on both
+counts after it: `crates/zeroship-data-engine/src/backend/mod.rs` declares `pub trait Backend` under
+`#[cfg(any(test, feature = "test-helpers"))]`, and `crates/zeroship-plugin-db/src/lib.rs` reaches it
+only by re-exporting the whole `backend` module - which is how the claim kept resolving under a grep
+while being false about ownership. It is the ninth trait in the dispatch landscape and the only
+test-only one; the eight listed under "The dispatch surface" are the production contract.
+`backend/cancel.rs` holds `TxCanceller`, a two-arm enum over both vendors, so it travels with the
+engine.
 
 **The `data-cdc-server` row said `wal_consumer.rs, replication.rs, slot_reaper.rs,
 change_stream_pg.rs` until 2026-09-03, and it read as a four-file `git mv`. All four verdicts were
@@ -258,17 +265,59 @@ and paying the BUILD are separable: `zeroship-migrate` declares no `[features]`,
 compiles for every dependant while nothing selects it.
 
 **4. NO SQL AND NO DIALECT KNOWLEDGE IN THE ENGINE.** Adding a database must require a new crate, a
-new variant in the three dispatch enums (`BackendHandle`, `TxConnection`, `TxCanceller`), and nothing
-else: no statement text, no `match` on dialect to choose SQL, no vendor error handling. If supporting
-a new vendor means writing a statement or reading a SQLSTATE inside `data-engine`, decision 1 has not
-landed. (The wording is not yet ratified - see Open 4.)
+new variant in the three dispatch enums (`BackendHandle`, `TxConnection`, `TxCanceller`) together with
+the arms that variant forces, and nothing else: no statement text, no `match` on dialect to choose
+SQL, no vendor error handling. If supporting a new vendor means writing a statement or reading a
+SQLSTATE inside `data-engine`, decision 1 has not landed. (Ratification is the operator's - Open 4.)
 
-The remaining surface is three logical operations, each written twice because each carries its own
-dialect, all in `crates/zeroship-data-engine/src/backend_handle.rs`: read an encrypted raw column, read
-a plaintext raw column, append an unmask audit row. Everything else has gone: `crud/unmask.rs` holds
+**This sentence budgeted "a new variant in the three dispatch enums" and stopped there until
+2026-09-04. The arms are the rest of the bill.** A closed sum gains a variant at its definition and an
+arm at every exhaustive site that destructures it, and in this crate those sites are spread across
+`backend_handle.rs`, `exec.rs`, `tx_lanes.rs`, `backend/cancel.rs` and `transaction/probe.rs`.
+Enumerate them rather than trusting a figure written here:
+
+```
+grep -rnE '(BackendHandle|TxConnection|TxCanceller|Self)::Sqlite\(' crates/zeroship-data-engine/src
+```
+
+That is an upper bound - it also matches constructors and `#[cfg(test)]` modules - and it is still
+the right instrument, because most of what it finds is an exhaustive `match` the compiler will name
+for you the moment a third variant exists. **Four sites are not exhaustive and the compiler names
+none of them.** `exec_query`, `exec_count` and `exec_mutation` each open with
+`if let BackendHandle::Sqlite(..) { ...; return }` and fall through to the PostgreSQL path; those
+three are caught downstream, because the fall-through reaches the exhaustive `match` in
+`exec_postgres_autocommit_with_role`, so the build breaks at a function whose name does not mention
+the branch you actually had to write. The fourth is caught nowhere:
+`backend_publishes_committed_changes` (`crates/zeroship-data-engine/src/exec.rs`) is a bare `matches!`
+against the SQLite arm, so a third backend reads `false`, the engine emits change events locally on
+its behalf, and a backend that publishes its own commits delivers every change to every subscriber
+twice. Silent at compile time, silent in the test suite. Closing it into an exhaustive `match` is a
+correctness fix that does not wait on any wording decision.
+
+The remaining per-vendor statement text is three logical operations, each written twice because each
+carries its own dialect, in `crates/zeroship-data-engine/src/backend_handle.rs`: read an encrypted raw
+column (`read_raw_column_bytes`), read a plaintext raw column (`read_raw_column_text`), append an
+unmask audit row (`append_unmask_audit`). **That was billed as "the remaining surface" until
+2026-09-04, and it was an undercount in two places.**
+`crates/zeroship-data-engine/src/transaction/driver.rs` issues `SAVEPOINT`, `ROLLBACK TO SAVEPOINT`
+and `RELEASE SAVEPOINT` from the reducer's `IssueSavepoint` family. That is statement text under this
+decision's literal wording, but it is ANSI, written once rather than per-vendor, and costs a new
+backend nothing - which is the distinction option (b) in Open 4 would make load-bearing.
+`crates/zeroship-data-engine/src/auth/bootstrap.rs` is the larger omission: eleven production
+statements that are PostgreSQL-only by construction (`pg_roles`, `CREATE ROLE`, `SET LOCAL ROLE`,
+`GRANT ... ON ALL SEQUENCES`, `ALTER DEFAULT PRIVILEGES`, `REVOKE`), in an always-compiled module.
+It is the largest live violation of this decision's own heading and it is covered by the DELETE row in
+the placement table rather than by this one (Open 7). Everything else has gone: `crud/unmask.rs` holds
 no SQL text, `transaction/mod.rs`'s `BEGIN ISOLATION LEVEL` is gone, the `DROP SCHEMA` in
 `drop_namespace.rs` is `#[cfg]`-gated out of every shipped binary, and `crud/mask_drift.rs` - which
 held the largest remaining block of hand-written SQL - is deleted (Open 10).
+
+**Nothing mechanises this decision, which is why its inventory is a reading rather than a check.**
+`tests/vendor_embedding_gate.sh` rules on vendor TYPE NAMES; its own header records SQL-shaped string
+literals as a false-POSITIVE source, the opposite direction from what decision 4 needs. No gate in
+`tests/` greps `data-engine` for statement text. Decision 5 is enforced and decision 4 is not, and the
+asymmetry is the reason both undercounts above survived in a document that is otherwise re-measured
+constantly.
 
 **5. THE CORE AND EVERY OTHER NON-VENDOR CRATE NEVER EMBED A VENDOR DIRECTLY.** Not "should avoid" -
 never. Enforced by `tests/vendor_embedding_gate.sh` (source) and `tests/data_crate_closure_gate.sh`
@@ -424,10 +473,45 @@ nobody runs is a census with a stricter name.
    decode algorithm being REWRITTEN in the relay with a `zeroship-cdc-wire` frame emit where
    `broker::publish` is today, and that is blocked on the entities, not on these edges.
 
-4. **Decision 4's wording.** As written ("adding a database must require ZERO changes to
-   `data-engine`") it is unsatisfiable under the enum dispatch the same document mandates: a closed
-   sum necessarily gains an arm per backend. The body above states the intended property; ratify it
-   or state a different one. NEEDS-DECISION.
+4. **Decision 4's wording. THE CONTRADICTION THIS ITEM REPORTED IS REFUTED, AND THE WORDING IT
+   ATTACKED WAS NEVER IN DECISION 4.** Until 2026-09-04 this item read: *As written ("adding a
+   database must require ZERO changes to `data-engine`") it is unsatisfiable under the enum dispatch
+   the same document mandates: a closed sum necessarily gains an arm per backend.* That quoted
+   sentence occurs nowhere else in this file. Decision 4 says "a new crate, a new variant in the three
+   dispatch enums ... and nothing else", which BUDGETS the variant that the enum mandate under "The
+   dispatch surface" requires. The decision and the mandate agree; there was nothing to reconcile.
+   This item was quoting a superseded draft back at a decision that had already been corrected, and a
+   reader who trusted the quotation would have gone looking for a conflict that is not there.
+
+   What is genuinely open is smaller and different in kind. Decision 4 is not *unsatisfiable*, it is
+   *unmet*, and the distance is measurable - see the two corrections under decision 4 for the arm
+   sites the old wording billed as three edits, the one non-exhaustive site that is silent, and the
+   two statement-text surfaces the body omitted. Both remaining gaps already have a landing path
+   written down: `render/sqlite.rs` for the three unmask operations (Open 5), and deleting `auth/`
+   (Open 7). What still needs an operator is which property to ratify:
+
+   (a) **Ratify the property as it now stands** - no statement text in the engine at all - and treat
+       the residue as debt Opens 5 and 7 clear. Costs nothing today: it is a wording ratification,
+       moves no tier-census edge, and touches no crate.
+   (b) **Weaken it to portability** - the engine may hold statement text so long as that text is
+       dialect-neutral and a new backend has to write none of it. The `SAVEPOINT` family in
+       `crates/zeroship-data-engine/src/transaction/driver.rs` becomes compliant as written, and the
+       six statements in `crates/zeroship-data-engine/src/backend_handle.rs` still are not. This is
+       recorded, not recommended: it permanently legitimises the surface the split exists to remove,
+       and the pre-launch stance in `AGENTS.md` says to build the end state rather than an
+       intermediate one.
+   (c) **Mechanise whichever is ratified**, because nothing does today. A gate over
+       `crates/zeroship-data-engine/src` for production statement literals, baselined the way
+       `tests/vendor_embedding_gate.sh` baselines decision 5, with the `auth/bootstrap.rs` entry
+       carrying Open 7 as the task that deletes it. Orthogonal to (a) vs (b) - the ratified wording is
+       simply what the gate reads.
+
+   Recommended: **(a) plus (c)**. The property is right and only its cost model was wrong, and an
+   unmechanised decision in this document has now been re-derived by hand at least twice. Independent
+   of all three, close `backend_publishes_committed_changes` in
+   `crates/zeroship-data-engine/src/exec.rs` into an exhaustive `match`: that is the single site where
+   a third backend compiles clean and behaves wrong, and it is a correctness fix rather than a wording
+   question. NEEDS-DECISION on (a) versus (b), and on paying for (c).
 
 5. **A SQLite lowering for the query builder.** `render/postgres.rs` is the only lowering, and its
    own header refuses to add a second in passing because that means deciding whether `ILIKE` is
