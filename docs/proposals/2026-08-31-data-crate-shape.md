@@ -1,11 +1,20 @@
 # The data-plane crate shape
 
-**Status.** PARTIAL. Four of the six target crates exist and are load-bearing:
+**Status.** PARTIAL. **All six target crates now exist, and the last sentence of this block said
+two of them did not until 2026-09-03.** Five are load-bearing:
 `crates/zeroship-data-query-builder`, `crates/zeroship-data-core`,
-`crates/zeroship-data-postgres`, `crates/zeroship-data-sqlite`. Both vendor cuts are done -
+`crates/zeroship-data-postgres`, `crates/zeroship-data-sqlite`, and
+`crates/zeroship-data-engine` (extracted at `92e7615be`). Both vendor cuts are done -
 `crates/zeroship-data-engine/src/backend/mod.rs` is now a re-export ladder plus the `Backend`
-conformance marker and `backend/cancel.rs`. `zeroship-data-engine` and `zeroship-data-cdc-server` do
-not exist; their modules still sit in `crates/zeroship-plugin-db`.
+conformance marker and `backend/cancel.rs`.
+
+The sixth is `crates/zeroship-data-cdc-server`, created at `545ceff1e`, and it is a CRATE rather
+than a SERVICE: a manifest, a config module and a `main` that answers `--check-config` and then
+refuses to start. **ZERO files moved into it**, which is the settled answer rather than a deferral -
+see `docs/proposals/2026-08-28-cdc-service.md`, which governs the four CDC modules. They still sit
+in `crates/zeroship-plugin-db`, and the relay stays blocked on entities that do not exist and on a
+PostgreSQL 18.4 move the deployment has not made. So "six of six crates" is a true statement about
+the crate graph and a misleading one about the work.
 
 ---
 
@@ -41,14 +50,15 @@ zeroship-data-core              the contract every backend implements, PLUS the 
                                 layer both share: encryption, MaskKind, TypedCell/TypedRows.
 zeroship-data-postgres          impl of the core contract.   -> data-core, compio-postgres
 zeroship-data-sqlite            impl of the core contract.   -> data-core, rusqlite
-zeroship-data-cdc-server        service tier: WAL stream, slot authority, reaper. Peer of
-                                zeroship-migrate-server.
-                                -> compio-postgres, zeroship-core. NOT data-core, NOT data-postgres.
-zeroship-data-engine            the data plane's logic: crud pipeline, transactions, exec, broker.
+zeroship-data-cdc-server        service tier: WAL stream, slot authority. A BINARY, peer of
+                                zeroship-migrate-server. NOTHING DEPENDS ON IT.
+                                -> compio-postgres, zeroship-cdc-wire, zeroship-core, and MAY ->
+                                data-core. NOT data-postgres.
+zeroship-data-engine            the data plane's logic: crud pipeline, transactions, exec.
                                 -> data-core, AND -> data-postgres + data-sqlite, because it owns
                                 BackendHandle.
 zeroship-plugin-db              THIN. The worker/runtime plugin ADAPTER ONLY. -> data-engine.
-                                NOT -> data-cdc-server; the worker must not link the relay.
+                                NOT -> data-cdc-server - but that is too narrow: nothing links it.
 
 zeroship-core::change_event     the cross-process event type, beside usage_event and
                                 replication_names.
@@ -62,6 +72,39 @@ block in the crate, and it is pipeline and reducer - not a contract, not a drive
 not the relay. Putting it in `data-core` makes the core the big crate again with drivers attached,
 which is what the split exists to undo.
 
+**Two lines in that block were corrected on 2026-09-03, and both were wrong in the direction that
+reads as safety.**
+
+The relay's line said "NOT data-core, NOT data-postgres". The `NOT data-core` half is
+**superseded**: the relay's CONTRACTS live outside it, and `zeroship-data-core` is one of the two
+homes they live in, so the relay may depend on it. The permission is not a recommendation -
+`cargo tree -p zeroship-data-core -e normal` reaches `cyper` 3 times and `tokio` 2 times through
+`zeroship-core` - and it is specifically **not** a licence to route the WIRE contract there.
+`crates/zeroship-cdc-wire/Cargo.toml` refuses `zeroship-core` by name for exactly that closure, and
+`data-core` is the floor of the WORKER's data plane, so relocating the relay's wire types into it
+would put the worker's whole data plane in the relay's closure - the coupling the binary shape
+exists to prevent. `NOT data-postgres` survives on its own merits.
+
+`plugin-db`'s line said "NOT -> data-cdc-server; the worker must not link the relay". True, and too
+narrow: the rule is that NOTHING depends on the relay. It is also not literally enforceable as
+worded, and the collision is worth stating rather than hiding, because the tempting fix is the wrong
+one. A workspace bin target must declare a class (`crates/zeroship-config-contract/src/metadata.rs`)
+and a `platform` binary must then appear in `DECLARING_BINARIES`
+(`crates/zeroship-config-contract/src/registry.rs`), which
+`crates/zeroship-config-contract/tests/real_registry.rs` compares for exact equality against cargo
+metadata - so config-contract takes a normal dependency on the relay. Classifying the relay
+`test-dev-tool` to dodge that leaves a shipped service's configuration surface unaudited, which is
+the vacuity that test exists to prevent. The property that is true AND enforceable:
+
+> **No SHIPPED binary's normal-dependency closure may contain `zeroship-data-cdc-server`**, with
+> `zeroship-config-contract` - itself `class = "test-dev-tool"` - the single named exception.
+
+`tests/data_crate_closure_gate.sh` arm 3 enforces it by inverting `cargo tree -i` over the
+bin-package set `cargo metadata` reports, and rules on the exception rather than skipping it, so the
+arm proves its own instrument. **`cargo tree -e normal` cannot see dev-dependencies**, and
+`zeroship-migrate-server` already carries five of them - a dev-dependency on the relay is the
+invisible breach and nothing here catches it.
+
 ### What exists today
 
 | crate | holds |
@@ -70,17 +113,22 @@ which is what the split exists to undo.
 | `zeroship-data-core` | `error.rs` (`DbError`), `binding.rs` (`DbBinding`), `budgets.rs`, `capability.rs`, `storage.rs` (the dispatch traits), `encryption/`, `lock_policy.rs`, `schema_cache.rs` |
 | `zeroship-data-postgres` | `postgres.rs`, `pg_error.rs`, `pg_introspect.rs`, `pg_session_sql.rs`, `pg_row_json.rs`, `pg_autocommit.rs`, `lock_guard.rs` |
 | `zeroship-data-sqlite` | the whole SQLite backend: `session.rs`, `cdc.rs`, `change_sink.rs`, `dialect.rs`, `lock.rs`, `reservation.rs`, `row_json.rs`, `spatial.rs`, `vector.rs`, `mask_policy_store.rs`, `error.rs` |
+| `zeroship-data-engine` | `crud/`, `transaction/`, `exec.rs`, `backend/`, `backend_handle.rs`, `backend_selection.rs`, `tx_route.rs`, `tx_lanes.rs`, `descriptor.rs`, `metrics.rs`, `system_shape_charter.rs`, `auth/`, `test_support/` |
+| `zeroship-data-cdc-server` | `Cargo.toml`, `src/lib.rs`, `src/config.rs`, `src/main.rs`. No decode loop, no slot, no election, no listener, no frame |
 
-`zeroship-plugin-db` is still one crate holding three future ones: the thin adapter, the engine and
-the CDC service.
+`zeroship-plugin-db` is no longer one crate holding three future ones. It holds the thin adapter
+(`v8_classes/`, `v8_bridge.rs`, `lib.rs`, `tx_scope.rs`, `op_error.rs`, `service.rs`, `context.rs`),
+the four CDC modules, and `drop_namespace.rs`. Run `ls crates/zeroship-plugin-db/src/` for the
+current list rather than trusting this sentence.
 
 ### Where every module lands
 
 | destination | modules |
 | --- | --- |
 | `plugin-db` (thin) | `v8_classes/`, `v8_bridge.rs`, `lib.rs` (the `DbPlugin` part), `tx_scope.rs`, `op_error.rs`, `service.rs`, `context.rs` |
-| `data-engine` | `crud/`, `transaction/`, `exec.rs`, `broker.rs`, `read_set.rs`, `tx_route.rs`, `tx_lanes.rs`, `backend_handle.rs`, `descriptor.rs`, `metrics.rs`, `system_shape_charter.rs`, `backend_selection.rs`, `cdc_lifecycle.rs` |
-| `data-cdc-server` | `wal_consumer.rs`, `replication.rs`, `slot_reaper.rs`, `change_stream_pg.rs` |
+| `data-engine` | `crud/`, `transaction/`, `exec.rs`, `tx_route.rs`, `tx_lanes.rs`, `backend_handle.rs`, `descriptor.rs`, `metrics.rs`, `system_shape_charter.rs`, `backend_selection.rs` |
+| `data-core` | `broker.rs`, `read_set.rs` - **this row is new on 2026-09-03; the `data-engine` row listed both until then**, and both actually sank one ring further in, which is where they belong: the broker is the routing vocabulary, not the pipeline |
+| `data-cdc-server` | **NOTHING.** See below - this row listed four files and every one of the four verdicts was wrong |
 | migrate-server (teardown coordinator) | `drop_namespace.rs` |
 | DELETE | `auth/` |
 | already moved | `encryption/`, the dispatch traits, `budgets`, `lock_policy` -> `data-core`; `backend/postgres.rs` + `pg_*` -> `data-postgres`; `backend/sqlite/` -> `data-sqlite` |
@@ -91,6 +139,37 @@ the CDC service.
 `Backend`, which is `plugin-db`'s own `pub(crate)` conformance marker and is pinned there by the
 orphan rule. `backend/cancel.rs` holds `TxCanceller`, a two-arm enum over both vendors, so it travels
 with the engine.
+
+**The `data-cdc-server` row said `wal_consumer.rs, replication.rs, slot_reaper.rs,
+change_stream_pg.rs` until 2026-09-03, and it read as a four-file `git mv`. All four verdicts were
+wrong,** and `docs/proposals/2026-08-28-cdc-service.md` - which is more specific, governs these four
+files, and has been hardened against them twice - already gave the right ones:
+
+- `wal_consumer.rs`: **split and rewrite, do not move the file.** A verbatim move compiles, passes
+  every gate in this tree, and silently splits the process-wide broker: the file's
+  `broker::publish` / `has_subscribers` / `SuppressGuard` calls all target `LazyLock` statics in
+  `crates/zeroship-data-core/src/broker.rs`, so in a second process `publish` reaches zero
+  subscribers while the worker keeps emitting locally. This document's own history section says
+  exactly why that shape is dangerous: "the build goes GREEN having made the violation permanent".
+- `replication.rs`: **split**, with the watchdog half and the drop family STAYING. `watchdog_query`
+  has a live V8 caller (`crates/zeroship-plugin-db/src/v8_classes/replication.rs`) and the drop
+  family is reached from `service.rs`'s `deprovision_app` as well as from CDC.
+- `slot_reaper.rs`: **deleted**, whole, in the privilege commit that drops the worker's
+  `REPLICATION`. Not moved and not split - its lease half is the INPUT to its sweep decision.
+- `change_stream_pg.rs`: **STAYS in `plugin-db`.** It implements `ChangeStream`, a `data-core`
+  capability trait whose SQLite peer is in the vendor LIBRARY crate `zeroship-data-sqlite`
+  (`crates/zeroship-data-sqlite/src/cdc.rs:854`), and it holds an `Rc<PostgresBackend>` - not
+  `Send`, so pinned to the isolate thread, never mind the process. The CDC spec's verdict for it is
+  "Deleted", which is an END-STATE verdict reachable only once `RunningConsumer::Postgres` is a
+  relay subscription handle. **The one answer no document supports is "moves to data-cdc-server".**
+
+**The `data-engine` row listed `cdc_lifecycle.rs` until the same date, and the tree refutes it.**
+`zeroship-data-engine` was extracted at `92e7615be` and `cdc_lifecycle.rs` is still in
+`crates/zeroship-plugin-db/src/`. It could not have gone: it constructs `PgChangeStream` and its
+lease is owned by a V8 wrapper (`crates/zeroship-plugin-db/src/v8_classes/subscription.rs`). It is
+ADAPTER. A THIRD answer is live in the tree - `tests/lib/tier_direction_census.sh:264` and `:355`
+tier it CDC, the same tier as the relay - so three sources gave three destinations for one file.
+Settle it as ADAPTER in all three.
 
 ### `plugin-db` is a very thin layer joining Rust to V8
 
@@ -169,6 +248,9 @@ written to replace. Not "leave both and revisit". The IR is built and tested; it
 crates/zeroship-plugin-db/src/` returns zero. No shipped binary links it.
 
 **2. CDC gets its own crate AND its own service** - a process that does not execute creator code.
+The crate landed at `545ceff1e` as `zeroship-data-cdc-server`, a BINARY nothing links; the SERVICE
+has not, and the crate contains no decode loop, no slot and no listener. The two halves of this
+decision are not the same milestone and this line should not be read as though they were.
 
 **3. Keep `zeroship-migrate-mysql`.** The in-sourced engine stays dialect-complete so it does not
 diverge from upstream, accepting that zeroship targets only PostgreSQL and SQLite. Keeping the CODE
@@ -252,10 +334,21 @@ privileged operations belong to a separate service that does not execute creator
 `crates/zeroship-migrate-server/src/provisioning.rs` and `apply.rs`, and the live `SET LOCAL ROLE`
 batch is `crates/zeroship-data-postgres/src/pg_session_sql.rs`, not `auth/bootstrap.rs`.
 
-**The relay must not be linked by the worker.** `zeroship-plugin-db` may not depend on
-`zeroship-data-cdc-server`. Extracting the CDC modules is necessary but not sufficient for that:
-`crates/zeroship-worker/src/slot_reaper.rs` imports `zeroship_plugin_db::slot_reaper` directly, so the
-worker keeps its REPLICATION privilege until that call site is re-pointed too.
+**Nothing links the relay - not just the worker.** This paragraph said "`zeroship-plugin-db` may not
+depend on `zeroship-data-cdc-server`" until 2026-09-03, which is true and too narrow. The rule and
+its one named exception are stated above with the reason the literal wording is unenforceable;
+`tests/data_crate_closure_gate.sh` arm 3 checks it, and both directions were mutation-proved when
+the arm landed - planting an edge in an unrelated crate turns it red, and removing the permitted
+edge turns its control arm red.
+
+**Extracting the CDC modules is necessary and NOT sufficient, and the extraction that happened
+proves it.** `crates/zeroship-data-cdc-server` exists and the worker's privilege did not move:
+`crates/zeroship-worker/src/slot_reaper.rs:7` still imports `zeroship_plugin_db::slot_reaper`, and
+`db/migrations-ts/20260818000200_worker_database_authority.ts` still grants `zeroship_worker`
+REPLICATION and BYPASSRLS. Deleting the import alone would leave the worker holding REPLICATION with
+nothing using it - the code moves and the privilege does not. The four coordinated edits are in
+`docs/proposals/2026-08-28-cdc-service.md` under "The reaper is a privilege change"; they land in one
+commit or not at all.
 
 **Dead code does not get a crate.** Giving unreferenced modules a home is how the current clusters
 formed. Decide delete-or-wire BEFORE assigning. Applied so far: `cross_app_fk.rs` and
@@ -289,19 +382,37 @@ nobody runs is a census with a stricter name.
    `pub(crate) fn` needing the dialect in the V8 prelude before any bind exists. BUILDABLE, 6-10
    hours for the two edges plus the extraction they unblock.
 
-2. **The CDC crate's dependency on `pg_error`.** `replication.rs` and `slot_reaper.rs` both
-   `use crate::backend::pg_error`, and `change_stream_pg.rs` names `backend::postgres`, so
-   `data-cdc-server` is not dependency-free. Three answers, none free: (a) CDC depends on
-   `data-postgres`, honest since CDC is Postgres-only, but it drags `data-core` behind it and the
-   point of a separate relay is that it does not link the worker's data plane; (b) extract the
-   classifier lower, which fights the settled error design that places the vendor translator in
-   `data-postgres` precisely because it is vendor-bound; (c) CDC carries its own error handling and
-   shares no classifier. NEEDS-DECISION.
+2. **SETTLED 2026-09-03, as (c), BY THE BINARY SHAPE - and the question dissolved rather than being
+   chosen between.** This item asked how `data-cdc-server` would share `pg_error::classify` and
+   offered three answers, none free: (a) CDC depends on `data-postgres`, honest since CDC is
+   Postgres-only, but it drags the worker's data plane into the relay's closure; (b) extract the
+   classifier lower, which fights the settled error design AND pushes a vendor translator toward
+   `data-core`, which `tests/data_crate_closure_gate.sh` refuses outright; (c) CDC carries its own
+   error handling and shares no classifier.
 
-3. **The CDC modules' upward edges to `broker`.** `cdc_lifecycle.rs` and `wal_consumer.rs` reach
-   `crate::broker`, and `cdc_lifecycle.rs` also reaches `crate::context::with`. The
-   suppression handshake is the hard one - three brackets with an overlap invariant. BUILDABLE once
-   Open 2 is answered, 4-8 hours.
+   All three answer "who must agree with whom about an error". The relay is a BINARY THAT NOTHING
+   LINKS, so there is no consumer to agree with and its error handling is internal by construction.
+   (c) is now correct structurally rather than by preference, and (a) and (b) are answering a
+   question that no longer exists. (b) is explicitly REJECTED, not merely unchosen.
+
+   **Do NOT record this as "the classifier went with the relay" - that arithmetic is wrong.**
+   Measured across `crates/zeroship-plugin-db/src`: 13 `pg_error::classify` sites, nine in
+   `replication.rs`, splitting 3 / 1 / 5 by enclosing function - three in `ensure_worker_slot`
+   (relay-only), one in `watchdog_query` (live V8 caller, stays), five in the drop family (called
+   from both sides today). The adapter keeps `classify` either way at no cost, since
+   `zeroship-data-postgres` is already in the worker's closure. The relay writes its own for its
+   three.
+
+3. **RESTATED 2026-09-03: the CDC modules' edges to `broker` are not a refactor to schedule, they
+   are the reason the file does not move.** `cdc_lifecycle.rs` and `wal_consumer.rs` reach the
+   broker, and `cdc_lifecycle.rs` also reaches `crate::context::with`. This item read "BUILDABLE
+   once Open 2 is answered, 4-8 hours", as though breaking the edges would let the files travel.
+   They must not travel: the broker's state is process-wide `LazyLock` statics in
+   `crates/zeroship-data-core/src/broker.rs`, so a `wal_consumer.rs` in a second process publishes
+   into a broker with no subscribers and suppresses nothing in the worker - and it COMPILES.
+   `cdc_lifecycle.rs` is ADAPTER and stays put. What is actually buildable here is the pgoutput
+   decode algorithm being REWRITTEN in the relay with a `zeroship-cdc-wire` frame emit where
+   `broker::publish` is today, and that is blocked on the entities, not on these edges.
 
 4. **Decision 4's wording.** As written ("adding a database must require ZERO changes to
    `data-engine`") it is unsatisfiable under the enum dispatch the same document mandates: a closed
