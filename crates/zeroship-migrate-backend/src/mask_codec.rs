@@ -256,9 +256,19 @@ mod tests {
     /// peer that must agree is `zeroship_schema::mask_codec`'s pair of the same
     /// names, which the data plane reads the live catalog with. Nothing in the
     /// type system relates them (their `MaskKind`/`Classification` types are
-    /// separate), so the binding is behavioural and lives in
-    /// `zeroship-plugin-db`'s `mask_flip.rs`: it builds a table with THIS
-    /// emitter and reads it back with that codec.
+    /// separate), so the binding is behavioural, and it lives in the peer rather
+    /// than here: `cross_codec_parity`, at the bottom of
+    /// `crates/zeroship-schema/src/mask_codec.rs`, builds with THIS emitter and
+    /// parses with that codec and vice versa, over both sentinel families and
+    /// both backends' dispatch sites. It sits on that side because
+    /// `zeroship-schema` already carries the test-only `zeroship-migrate-core`
+    /// dev-dependency; this crate has no edge back and must not grow one.
+    ///
+    /// **This doc named `zeroship-plugin-db`'s `mask_flip.rs` until
+    /// 2026-09-04.** That test does drive this emitter against a real catalog,
+    /// but it needs a live `PostgreSQL` and `--features test-helpers`, so it never
+    /// runs in `cargo test -p zeroship-migrate-backend` and could not have
+    /// caught the divergence this constant's doc describes.
     #[test]
     fn the_persisted_sentinel_prefixes_are_the_zero_migrate_brand() {
         assert_eq!(ENC_SENTINEL_PREFIX, "zero-migrate:enc:");
