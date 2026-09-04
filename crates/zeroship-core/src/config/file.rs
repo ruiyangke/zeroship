@@ -101,6 +101,9 @@ pub struct FileConfig {
     /// Standalone workflow-scheduler settings.
     #[serde(default)]
     pub workflow_scheduler: SchedulerSection,
+    /// CDC relay settings.
+    #[serde(default)]
+    pub data_cdc_server: CdcServerSection,
 }
 
 /// Control-plane operational values supplied by the overlay.
@@ -329,6 +332,26 @@ pub struct SchedulerSection {
     pub max_due_per_tick: Option<usize>,
     /// Inflight-lease time-to-live in milliseconds.
     pub inflight_ttl_ms: Option<i64>,
+}
+
+/// CDC relay values supplied by the overlay.
+///
+/// Like [`SchedulerSection`], this exists so `deny_unknown_fields` still ACCEPTS
+/// a `[data_cdc_server]` table and still rejects a typo inside it. The value the
+/// binary uses comes from its generated declaration, which walks the same
+/// overlay by canonical path.
+///
+/// ONE KEY, and that is the whole relay surface today: it serves no endpoint, so
+/// there is no listener to configure. `zeroship-config-contract audit` is what
+/// makes this section obligatory rather than optional - a declared overlay path
+/// with no field here is accepted by the generator and then REJECTED by
+/// `deny_unknown_fields` at parse time, so the operator's TOML would fail on a
+/// key the reference documents.
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct CdcServerSection {
+    /// `PostgreSQL` DSN the relay streams logical replication from.
+    pub database_url: Option<String>,
 }
 
 /// Usage-metering stream configuration supplied by the shared file overlay.
@@ -1079,6 +1102,9 @@ mutation_rate_limit_per_minute = 3
 [workflow_scheduler]
 tick_secs = 1
 
+[data_cdc_server]
+database_url = "postgres://relay@db/zeroship"
+
 [auth]
 addr = "0.0.0.0:9092"
 provider = "native"
@@ -1097,6 +1123,10 @@ relay_smtp_tls = "starttls"
             Some(3)
         );
         assert_eq!(config.workflow_scheduler.tick_secs, Some(1));
+        assert_eq!(
+            config.data_cdc_server.database_url.as_deref(),
+            Some("postgres://relay@db/zeroship")
+        );
         assert_eq!(config.auth.addr.as_deref(), Some("0.0.0.0:9092"));
         assert_eq!(config.auth.provider.as_deref(), Some("native"));
         assert_eq!(config.auth.smtp_port, Some(587));
