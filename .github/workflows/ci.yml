@@ -437,6 +437,19 @@ jobs:
         run: tests/ws_subscription_stub_gate.sh
       - name: Deleted database full-text search stays deleted
         run: tests/db_fts_deletion_gate.sh
+      # The same shape as the WS stub above, one layer up: a comment ASSERTING
+      # that two crates stay in agreement, with nothing enforcing it. Found ten
+      # times in the data plane and migration engine; two were fixed in the week
+      # this gate landed (`cross_codec_parity`, `raw_column_parity`), and one of
+      # those had cited a guard that needed `--features test-helpers` plus a live
+      # PostgreSQL and could not have caught the divergence that had already
+      # shipped. The gate is a ratchet over a ledger of every such claim, not a
+      # semantic judge. Self-test first: an extractor that matches nothing and a
+      # tree whose every claim is ledgered print the same thing.
+      - name: Sync claim gate self-test
+        run: tests/sync_claim_gate.sh --self-test
+      - name: Every cross-crate agreement claim is on the ledger
+        run: tests/sync_claim_gate.sh
       # THE META-GATE. The step above is one of four gates found vacuous on
       # 2026-08-20 - an arm watching a single identifier the fix had deleted,
       # examining 0 names and printing green. The other three were skip_marker
