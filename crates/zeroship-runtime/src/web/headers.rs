@@ -757,7 +757,7 @@ pub struct HeadersTemplateSlot {
 
 /// Install `Headers` on the given global. The macro's
 /// `#[v8_iterable(mode = live)]` attribute on the impl block emits
-/// keys / values / entries / forEach / [@@iterator] onto the prototype
+/// keys / values / entries / forEach / `[@@iterator]` onto the prototype
 /// automatically — no hand-rolled iterator factory left in this file.
 /// Earlier versions had to capture `args.this()` manually into a
 /// `Global<Object>`; the macro now does that internally per WebIDL

@@ -934,11 +934,11 @@ pub fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError>
 /// `crates/zeroship-core/src/typed_id.rs`), so the prefix is rejected.
 ///
 /// `usr` is the whole list. Two other copies of it exist:
-/// `zeroship_migrate_core::schema::query::RESERVED_ID_PREFIXES`, which
-/// [`reserved_id_prefix_parity`] holds this one against, and
-/// `ID_RESERVED_PREFIX` in `sdks/db/src/types.ts`. THE SDK PAIR IS UNBOUND -
-/// this doc claimed a match with it and nothing checks one; see
-/// [`reserved_id_prefix_parity`]'s header for what binding it would take.
+/// `zeroship_migrate_core::schema::query::RESERVED_ID_PREFIXES`, which the
+/// `#[cfg(test)] mod reserved_id_prefix_parity` below holds this one against,
+/// and `ID_RESERVED_PREFIX` in `sdks/db/src/types.ts`. THE SDK PAIR IS UNBOUND -
+/// this doc claimed a match with it and nothing checks one; see that module's
+/// header for what binding it would take.
 pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 
 /// Validate a creator-declared typed-id prefix (`t.id("blog")`).
@@ -3351,7 +3351,8 @@ pub fn build_conflict_probe_with_dialect(
 
 /// Schema-aware SELECT builder.
 ///
-/// Same shape as [`build_find`], plus an optional `schema` (the cached
+/// Same shape as the deleted `build_find` (see the test-local stand-in of that
+/// name), plus an optional `schema` (the cached
 /// `serde_json::Value` from `ThreadDbContext::schema_for`). When the
 /// schema is `Some(_)` and declares masked columns (`def.mask = Some({...})`
 /// with `kind != "none"`), the SELECT clause emits

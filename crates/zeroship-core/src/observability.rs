@@ -110,7 +110,7 @@ impl<'de> Deserialize<'de> for LogFormat {
 /// Resolve a tracing filter candidate, silently falling back to the default on parse error.
 ///
 /// Silent by design: the invalid-filter fallback is surfaced as a STRUCTURED
-/// `tracing::warn!` by [`crate::config::bootstrap`] *after* the subscriber is
+/// `tracing::warn!` by [`fn@crate::config::bootstrap`] *after* the subscriber is
 /// initialized, so the warning honors the configured log format (e.g. JSON)
 /// instead of being a pre-tracing `eprintln!` a log pipeline would miss (O3).
 #[must_use]
@@ -131,7 +131,7 @@ crate::declare_env_consumer!(
     ///
     /// WHY A CONSUMER AND NOT THE CALLER. The obvious shape for Step 4 is to
     /// delete the reads here and have each caller pass resolved values in -
-    /// that is exactly what [`crate::config::bootstrap`] already does for the
+    /// that is exactly what [`fn@crate::config::bootstrap`] already does for the
     /// five server binaries, which resolve the GENERATED
     /// `observability.log_filter` / `observability.log_format` and call
     /// [`init_tracing_with`]. It is not available here: `init_tracing`'s only
