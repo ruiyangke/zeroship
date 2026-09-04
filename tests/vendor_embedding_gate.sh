@@ -32,17 +32,32 @@
 # this gate deliberately does not duplicate. Run it too; it is a FLOOR, not a
 # verdict.
 #
-# KNOWN LIMIT, and it bit this gate on its first run. A vendor token inside a
-# STRING LITERAL is counted as an embedding. `exec.rs:76` is a `hint:` message
-# reading "The SQLite backend does not expose a compio_postgres::Pool...", which
-# is prose, not a type reference. The comment filter below strips `//` lines but
-# nothing strips string contents, and telling the two apart needs a parser rather
-# than a regex. The same class produced two false hits when the engine's raw-SQL
-# surface was first measured (`crud/system_fields_pass.rs:399`, `:428` are error
-# messages beginning "UPDATE patch attempted to overwrite..."). So the per-file
-# COUNTS here are an upper bound; the file LIST is exact, because every file
-# named also has at least one real mention. Open the lines before acting on a
-# count.
+# STRING LITERALS ARE BLANKED BEFORE MATCHING, since 2026-09-04. A vendor token
+# inside a string is prose, not a type reference: `exec.rs:90` is a `hint:`
+# message reading "The SQLite backend does not expose a compio_postgres::Pool...",
+# and `crud/system_fields_pass.rs:399`/`:428` are error messages beginning
+# "UPDATE patch attempted to overwrite...". Each line is stripped of `"..."`
+# spans before the vendor pattern is applied.
+#
+# THIS PARAGRAPH USED TO SAY THE OPPOSITE - that counting them was an accepted
+# limit, that "the per-file COUNTS here are an upper bound" but "the file LIST is
+# exact, because every file named also has at least one real mention". The second
+# half had stopped being true. Measured 2026-09-04 across all 78 files under
+# ROOTS, blanking strings changes exactly ONE file's count, `exec.rs` 1 -> 0, and
+# that was the whole of its production evidence: a baseline entry was being held
+# alive by an error message, and arm 2 - whose entire job is to refuse an excuse
+# that has outlived its defect - was printing "entry earns its place" about it.
+# A caveat about counts turned out to be a caveat about the verdict.
+#
+# WHAT THE BLANKING STILL CANNOT DO. It is per-line and quote-counting, so a
+# string spanning several lines, a raw string written `r#"..."#`, and an escaped
+# `\"` inside a literal are all beyond it. Those need a lexer. Measured under
+# ROOTS on 2026-09-04: 208 raw-string lines, 0 of them naming a vendor; 0 lines
+# naming a vendor and carrying `\"`; and exactly ONE vendor-naming line with an
+# odd quote count, `zeroship-plugin-db/service.rs:122`, which is a `///` doc
+# comment and is dropped by the comment arm before the blanking is reached. So
+# none of the three is live. If one lands this UNDERCOUNTS, which is the
+# direction arm 1 must not have, so open the lines before trusting a zero.
 #
 # Run the detector's own positive/control pair: this script --self-test.
 
@@ -61,6 +76,34 @@ ok()  { printf '  ok   %s\n' "$1"; PASS=$((PASS + 1)); }
 bad() { printf '  FAIL %s\n' "$1"; FAIL=$((FAIL + 1)); }
 
 VENDORS='compio_postgres|rusqlite'
+
+# vendor_hits <file> <test-boundary>   -> count of production lines naming a vendor
+# vendor_hit_lines <file> <boundary>   -> those lines, numbered, for the diagnosis
+#
+# ONE definition, called by arm 1, arm 2 and the self-test alike. It was four
+# inline copies of the same awk until 2026-09-04, and the self-test's three were
+# already a DIFFERENT predicate from the two arms' by the time the string
+# blanking landed - controls proving a rule the gate does not apply. That is the
+# shape tests/lib/module_gating.sh exists to end: of the four copies of the
+# module-gating helper, three carried the bug and the fourth did not.
+#
+# A line is production when it is before the test boundary and is not a `//`
+# comment; `"..."` spans are blanked first, so a vendor named in prose inside a
+# string is not a type reference. See the header for what that blanking misses.
+vendor_hits() {
+  awk -v b="$2" -v pat="$VENDORS" '
+    NR < b && $0 !~ /^[[:space:]]*\/\// {
+      s = $0; gsub(/"[^"]*"/, "", s); if (s ~ pat) n++
+    }
+    END { print n+0 }' "$1"
+}
+vendor_hit_lines() {
+  awk -v b="$2" -v pat="$VENDORS" '
+    NR < b && $0 !~ /^[[:space:]]*\/\// {
+      s = $0; gsub(/"[^"]*"/, "", s)
+      if (s ~ pat) printf "       %d: %s\n", NR, $0
+    }' "$1"
+}
 
 # ROOTS. Decision 5 says "the core and every OTHER non-vendor crate", and the
 # first version of this gate scanned exactly one crate - which reported green
@@ -151,15 +194,26 @@ key_to_path() {
 # note below describes, and the first where four moved at once. `lib.rs` and
 # `service.rs` are the adapter's and stayed.
 BASELINE_FILES="
-zeroship-data-engine/exec.rs
 zeroship-data-engine/backend/cancel.rs
 zeroship-data-engine/auth/bootstrap.rs
 zeroship-data-engine/tx_lanes.rs
 zeroship-plugin-db/lib.rs
 zeroship-plugin-db/service.rs
 "
-# exec.rs                 Pool + Vec<Row> - the unsettled row vocabulary. Blocked on
-#                         the neutral-row decision; see roled_rows in pg_autocommit.
+# exec.rs                 ENTRY RETIRED 2026-09-04, and it had already been dead
+#                         for a day. It read "Pool + Vec<Row> - the unsettled row
+#                         vocabulary, blocked on the neutral-row decision", and
+#                         the 2026-09-03 engine cut moved every driver-facing
+#                         line out. What kept the entry alive was this gate's own
+#                         string-literal blind spot: the ONLY production hit left
+#                         was the hint message at exec.rs:90, so arm 2 printed
+#                         "still violates (1 occurrence)" about a file that no
+#                         longer does. Measured 2026-09-04: nothing before the
+#                         test boundary names `Pool` or `Row` as a type; the four
+#                         surviving mentions are comments and that one message.
+#                         The value-flow question - who HOLDS a vendor value
+#                         without naming it - is a different gate's, as the
+#                         header says; this list is about naming.
 # backend/mod.rs          ENTRY RETIRED 2026-09-02, the second way described
 #                         below and exactly as predicted: `zeroship-data-postgres`
 #                         now exists, the six PostgreSQL files and the two PG
@@ -277,8 +331,7 @@ while IFS= read -r f; do
     }
   ' "$f")
   [ -n "$boundary" ] || boundary=999999
-  hits=$(awk -v b="$boundary" -v pat="$VENDORS" \
-           'NR < b && $0 ~ pat && $0 !~ /^[[:space:]]*\/\// { n++ } END { print n+0 }' "$f")
+  hits=$(vendor_hits "$f" "$boundary")
   [ "$hits" -eq 0 ] && continue
 
   if in_baseline "$rel"; then
@@ -287,9 +340,7 @@ while IFS= read -r f; do
   fi
   n_new=$((n_new + 1))
   bad "$rel names a vendor $hits time(s) in production and is NOT in the baseline"
-  awk -v b="$boundary" -v pat="$VENDORS" \
-      'NR < b && $0 ~ pat && $0 !~ /^[[:space:]]*\/\// { printf "       %d: %s\n", NR, $0 }' "$f" \
-    | head -5
+  vendor_hit_lines "$f" "$boundary" | head -5
 done < <(find $ROOTS -name '*.rs' 2>/dev/null | LC_ALL=C sort)
 
 [ "$n_new" -eq 0 ] && ok "no new vendor embedding across $n_ruled non-vendor file(s)"
@@ -345,8 +396,7 @@ while IFS= read -r rel; do
     }
   ' "$f")
   [ -n "$boundary" ] || boundary=999999
-  hits=$(awk -v b="$boundary" -v pat="$VENDORS" \
-           'NR < b && $0 ~ pat && $0 !~ /^[[:space:]]*\/\// { n++ } END { print n+0 }' "$f")
+  hits=$(vendor_hits "$f" "$boundary")
   if [ "$hits" -eq 0 ]; then
     bad "baseline still excuses $rel, but it names no vendor any more - DELETE the entry"
   else
@@ -371,8 +421,7 @@ if [ "${1:-}" = "--self-test" ]; then
 
   # POSITIVE: a non-vendor-shaped file naming a vendor in production.
   printf 'fn f(e: &compio_postgres::Error) {}\n' > "$probe/positive.rs"
-  b=$(grep -c '^#\[cfg(test)\]' "$probe/positive.rs")
-  h=$(awk -v pat="$VENDORS" '$0 ~ pat && $0 !~ /^[[:space:]]*\/\// { n++ } END { print n+0 }' "$probe/positive.rs")
+  h=$(vendor_hits "$probe/positive.rs" 999999)
   if [ "$h" -ge 1 ]; then ok "positive control: detector sees a production vendor mention"
   else bad "positive control FAILED: detector blind to an obvious mention"; fi
 
@@ -380,15 +429,28 @@ if [ "${1:-}" = "--self-test" ]; then
   # variable changed at a time is the whole point of a control.
   printf '#[cfg(test)]\nmod t { fn f(e: &compio_postgres::Error) {} }\n' > "$probe/negative.rs"
   nb=$(grep -n '^#\[cfg(test)\]' "$probe/negative.rs" | head -1 | cut -d: -f1)
-  nh=$(awk -v b="$nb" -v pat="$VENDORS" \
-         'NR < b && $0 ~ pat && $0 !~ /^[[:space:]]*\/\// { n++ } END { print n+0 }' "$probe/negative.rs")
+  nh=$(vendor_hits "$probe/negative.rs" "$nb")
   if [ "$nh" -eq 0 ]; then ok "negative control: a mention inside a test region is not an embedding"
   else bad "negative control FAILED: test-region mention counted as production"; fi
 
   printf '// compio_postgres::Error in a comment\n' > "$probe/comment.rs"
-  ch=$(awk -v pat="$VENDORS" '$0 ~ pat && $0 !~ /^[[:space:]]*\/\// { n++ } END { print n+0 }' "$probe/comment.rs")
+  ch=$(vendor_hits "$probe/comment.rs" 999999)
   if [ "$ch" -eq 0 ]; then ok "negative control: a mention in a comment is not an embedding"
   else bad "negative control FAILED: comment counted as production"; fi
+
+  # THE STRING-LITERAL PAIR. Both lines are production code, neither is a
+  # comment, and they differ in ONE variable: whether the vendor token is inside
+  # a `"..."` span. A blanking that ate the whole line would pass the negative
+  # and fail the positive, so the two have to be read together.
+  printf 'fn f() { panic!("no compio_postgres::Pool here"); }\n' > "$probe/instring.rs"
+  sh=$(vendor_hits "$probe/instring.rs" 999999)
+  if [ "$sh" -eq 0 ]; then ok "negative control: a vendor named inside a string is prose, not a type"
+  else bad "negative control FAILED: a string literal is still counted as an embedding"; fi
+
+  printf 'fn f() -> compio_postgres::Pool { panic!("unrelated message"); }\n' > "$probe/besidestring.rs"
+  bh=$(vendor_hits "$probe/besidestring.rs" 999999)
+  if [ "$bh" -ge 1 ]; then ok "positive control: a real type survives a string on the same line"
+  else bad "positive control FAILED: blanking ate code outside the string span"; fi
 
   # The SKIP predicate has its own controls, because a wrong answer here is
   # invisible: a file this gate declines to rule on prints nothing at all.
