@@ -40,8 +40,8 @@ use zeroship_plugin_db::backend::{
 };
 use zeroship_plugin_db::backend_selection::new_sqlite_backend;
 // The bounded-retry surface is the policy extension trait, not `LockManager`.
-use zeroship_plugin_db::lock_policy::BoundedLockAcquire;
 use zeroship_plugin_db::broker::{Subscription, SubscriptionMessage, subscribe};
+use zeroship_plugin_db::lock_policy::BoundedLockAcquire;
 use zeroship_plugin_db::query::{IndexKind, IndexSpec, raw_column_name};
 
 /// Spin up a fresh `SqliteBackend` rooted at a per-test temp dir.
@@ -52,7 +52,11 @@ use zeroship_plugin_db::query::{IndexKind, IndexSpec, raw_column_name};
 /// connection on drop, which writes the final WAL checkpoint).
 fn fresh_backend() -> (SqliteBackend, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
-    let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open SqliteBackend");
+    let backend = new_sqlite_backend(
+        PathBuf::from(dir.path()),
+        zeroship_plugin_db::isolate_key_source(),
+    )
+    .expect("open SqliteBackend");
     (backend, dir)
 }
 
@@ -100,7 +104,7 @@ fn run<F: std::future::Future>(f: F) -> F::Output {
 fn parity_matrix_sqlite_seed_projection_matches_contract() {
     run(async {
         let dir = tempfile::tempdir().expect("create parity dir");
-        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir), parity::DEV_APP_ID);
         assert_eq!(snapshot.seed, parity::expected_seed_projection());
     });
 }
@@ -109,7 +113,7 @@ fn parity_matrix_sqlite_seed_projection_matches_contract() {
 fn parity_matrix_sqlite_transaction_projection_matches_contract() {
     run(async {
         let dir = tempfile::tempdir().expect("create parity dir");
-        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir), parity::DEV_APP_ID);
         assert_eq!(snapshot.tx, parity::expected_tx_projection());
     });
 }
@@ -118,7 +122,7 @@ fn parity_matrix_sqlite_transaction_projection_matches_contract() {
 fn parity_matrix_sqlite_typed_projection_matches_contract() {
     run(async {
         let dir = tempfile::tempdir().expect("create parity dir");
-        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir), parity::DEV_APP_ID);
         assert_eq!(snapshot.typed, parity::expected_typed_projection());
     });
 }
@@ -139,13 +143,16 @@ fn parity_matrix_sqlite_typed_projection_matches_contract() {
 fn bytes_column_stores_a_raw_blob_on_sqlite() {
     run(async {
         let dir = tempfile::tempdir().expect("create parity dir");
-        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir));
+        let snapshot = parity::run_matrix(&parity::sqlite_url(&dir), parity::DEV_APP_ID);
 
         // A fresh backend has attached nothing: the matrix's app database is a
         // separate file (`<dir>/zs-default.sqlite`) reached through an ATTACH
         // alias, so re-attach it before the schema-qualified name resolves.
-        let backend =
-            new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open the parity backend");
+        let backend = new_sqlite_backend(
+            PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("open the parity backend");
         backend
             .attach_app_file("default")
             .await
@@ -2093,10 +2100,10 @@ fn vector_search_returns_k_nearest_sqlite() {
                 VectorMetric::Cosine,
                 &serde_json::Value::Null,
                 &zeroship_plugin_db::collection_schema(
-                        &DbBinding::cold_start("vector_topk"),
-                        "docs",
-                    )
-                    .expect("descriptor slice for the search fixture"),
+                    &DbBinding::cold_start("vector_topk"),
+                    "docs",
+                )
+                .expect("descriptor slice for the search fixture"),
             )
             .await
             .expect("vector_search");
@@ -2266,10 +2273,10 @@ fn vector_search_respects_filter_sqlite() {
                 VectorMetric::Cosine,
                 &filter,
                 &zeroship_plugin_db::collection_schema(
-                        &DbBinding::cold_start("vector_filter"),
-                        "docs",
-                    )
-                    .expect("descriptor slice for the search fixture"),
+                    &DbBinding::cold_start("vector_filter"),
+                    "docs",
+                )
+                .expect("descriptor slice for the search fixture"),
             )
             .await
             .expect("vector_search with filter");
@@ -2370,10 +2377,10 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 VectorMetric::Cosine,
                 &serde_json::Value::Null,
                 &zeroship_plugin_db::collection_schema(
-                        &DbBinding::cold_start("vector_math"),
-                        "docs",
-                    )
-                    .expect("descriptor slice for the search fixture"),
+                    &DbBinding::cold_start("vector_math"),
+                    "docs",
+                )
+                .expect("descriptor slice for the search fixture"),
             )
             .await
             .expect("cosine search");
@@ -2387,10 +2394,10 @@ fn vector_l2_distance_matches_cosine_for_unit_vectors_sqlite() {
                 VectorMetric::L2,
                 &serde_json::Value::Null,
                 &zeroship_plugin_db::collection_schema(
-                        &DbBinding::cold_start("vector_math"),
-                        "docs",
-                    )
-                    .expect("descriptor slice for the search fixture"),
+                    &DbBinding::cold_start("vector_math"),
+                    "docs",
+                )
+                .expect("descriptor slice for the search fixture"),
             )
             .await
             .expect("l2 search");
@@ -2528,10 +2535,10 @@ fn near_returns_within_radius() {
                 &serde_json::Value::Null,
                 None,
                 &zeroship_plugin_db::collection_schema(
-                        &DbBinding::cold_start("near_radius"),
-                        "places",
-                    )
-                    .expect("descriptor slice for the search fixture"),
+                    &DbBinding::cold_start("near_radius"),
+                    "places",
+                )
+                .expect("descriptor slice for the search fixture"),
             )
             .await
             .expect("spatial_near");
@@ -3024,8 +3031,13 @@ fn dispatch_sqlite_runtime(
     name: &str,
 ) -> serde_json::Value {
     let url = parity::sqlite_url(dir);
-    let (status, body) =
-        parity::dispatch_zs_with_descriptor(&url, &source.source, name, &source.descriptor);
+    let (status, body) = parity::dispatch_zs_with_descriptor(
+        &url,
+        &source.source,
+        name,
+        parity::DEV_APP_ID,
+        &source.descriptor,
+    );
     assert_eq!(status, 200, "{name} failed: {body}");
     body
 }
@@ -3256,7 +3268,11 @@ const _procedures = { upsertInsert };
             "freshly inserted upsert row should start at version 1: {row}"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
+        let backend = new_sqlite_backend(
+            PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3384,7 +3400,11 @@ const _procedures = { upsertConflict };
             "conflict update must auto-bump version"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
+        let backend = new_sqlite_backend(
+            PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3526,7 +3546,11 @@ const _procedures = { upsertConflict };
             "deterministic conflict probe must rewrite to the existing row id"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
+        let backend = new_sqlite_backend(
+            PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3654,7 +3678,11 @@ const _procedures = { seed, updateByEmail };
             "update by non-id filter should still target the seeded row"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
+        let backend = new_sqlite_backend(
+            PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3804,7 +3832,11 @@ const _procedures = { seed, updateManyByName };
             );
         }
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
+        let backend = new_sqlite_backend(
+            PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -3942,7 +3974,11 @@ const _procedures = { overflow };
             "the overflow probe must fetch at most one row beyond the write cap: {counters:?}"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
+        let backend = new_sqlite_backend(
+            PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -4112,7 +4148,11 @@ const _procedures = { seed, failBulk, failBulkInsideTransaction };
             "after rejection, the caller must observe that no prefix committed"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
+        let backend = new_sqlite_backend(
+            PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -4429,6 +4469,7 @@ const _procedures = { seed, nestedCasUpdate };
             &parity::sqlite_url(&dir),
             &source.source,
             "nestedCasUpdate",
+            parity::DEV_APP_ID,
             &source.descriptor,
         );
         assert_ne!(status, 200, "nested version CAS must reject, got {body}");
@@ -4438,7 +4479,11 @@ const _procedures = { seed, nestedCasUpdate };
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
+        let backend = new_sqlite_backend(
+            PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -4517,6 +4562,7 @@ const _procedures = { seed, nestedCasUpdateMany };
             &parity::sqlite_url(&dir),
             &source.source,
             "nestedCasUpdateMany",
+            parity::DEV_APP_ID,
             &source.descriptor,
         );
         assert_ne!(status, 200, "nested version CAS must reject, got {body}");
@@ -4526,7 +4572,11 @@ const _procedures = { seed, nestedCasUpdateMany };
             "nested CAS rejection must carry the canonical code: {body}"
         );
 
-        let backend = new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend");
+        let backend = new_sqlite_backend(
+            PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("open backend");
         backend
             .attach_app_file("default")
             .await
@@ -6105,7 +6155,11 @@ async fn unmask_setup_with_schema(
 ) -> (Rc<SqliteBackend>, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("tempdir");
     let backend = Rc::new(
-        new_sqlite_backend(std::path::PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("SqliteBackend::new"),
+        new_sqlite_backend(
+            std::path::PathBuf::from(dir.path()),
+            zeroship_plugin_db::isolate_key_source(),
+        )
+        .expect("SqliteBackend::new"),
     );
     backend
         .attach_app_file(app_id)
@@ -6197,12 +6251,10 @@ fn configure_cold_sqlite_unmask_fixture(
 /// for exactly that reason - a dropped `SqliteBackend` could be reallocated at
 /// the same address and make the first assertion pass on a coincidence.
 async fn assert_cold_open_installs_a_fresh_backend(fixture: &SqliteBackend) {
-    let opened = zeroship_plugin_db::tx_scope::ensure_backend()
-        .await
-        .expect(
-            "a cold isolate must be OPENED by ensure_backend: a plain context read answers \
+    let opened = zeroship_plugin_db::tx_scope::ensure_backend().await.expect(
+        "a cold isolate must be OPENED by ensure_backend: a plain context read answers \
              not_configured here, which is what every fresh isolate would get",
-        );
+    );
     let opened = opened.as_sqlite().expect("the SQLite arm");
     assert!(
         !std::ptr::eq(opened, fixture),
@@ -6394,9 +6446,13 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             reason: Some("integration test".to_string()),
             rejected_claim: None,
         };
-        let result = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
-            .await
-            .expect("dispatch_unmask must succeed for auto actor");
+        let result = unmask::dispatch_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect("dispatch_unmask must succeed for auto actor");
         assert_eq!(
             result.plaintext, plaintext,
             "plaintext must recover via decrypt path"
@@ -6483,9 +6539,13 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
-            .await
-            .expect_err("dispatch_unmask must refuse user actor under PR 4 stub");
+        let err = unmask::dispatch_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect_err("dispatch_unmask must refuse user actor under PR 4 stub");
         match err {
             zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
@@ -6529,9 +6589,13 @@ fn unmask_column_not_masked_returns_typed_error() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
-            .await
-            .expect_err("unmask of non-masked column must refuse");
+        let err = unmask::dispatch_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect_err("unmask of non-masked column must refuse");
         match err {
             zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "unmask_column_not_masked");
@@ -6571,9 +6635,13 @@ fn unmask_writes_audit_row_with_correct_classification() {
             reason: Some("chart review".to_string()),
             rejected_claim: None,
         };
-        let _err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
-            .await
-            .expect_err("user actor denied");
+        let _err = unmask::dispatch_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect_err("user actor denied");
 
         let audit = read_audit_rows(backend.as_ref(), app_id).await;
         assert_eq!(audit.len(), 1);
@@ -6735,9 +6803,13 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             reason: Some("user requested own data".to_string()),
             rejected_claim: None,
         };
-        let result = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
-            .await
-            .expect("policy grants user → pii; unmask must succeed");
+        let result = unmask::dispatch_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect("policy grants user → pii; unmask must succeed");
         assert_eq!(result.plaintext, plaintext);
 
         let audit = read_audit_rows(backend.as_ref(), app_id).await;
@@ -6803,9 +6875,13 @@ fn unmask_with_user_role_not_in_policy_denied() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
-            .await
-            .expect_err("policy does not allow user → pii; must refuse");
+        let err = unmask::dispatch_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect_err("policy does not allow user → pii; must refuse");
         match err {
             zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
@@ -6849,9 +6925,13 @@ fn unmask_default_deny_when_no_policy() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
-            .await
-            .expect_err("no policy + non-auto actor → default-deny");
+        let err = unmask::dispatch_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect_err("no policy + non-auto actor → default-deny");
         match err {
             zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "unmask_not_permitted");
@@ -6882,9 +6962,10 @@ fn unmask_invalid_classification_rejected_at_dispatch_time() {
         let bad_policy = serde_json::json!({
             "admin": ["public", "badclass"],
         });
-        let err = mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, bad_policy)
-            .await
-            .expect_err("rust validator must refuse unknown classification");
+        let err =
+            mask_policy::dispatch_set_mask_policy(&unmask_backend().await, app_id, bad_policy)
+                .await
+                .expect_err("rust validator must refuse unknown classification");
         match err {
             zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "invalid_mask_classification");
@@ -6964,9 +7045,13 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
         // We still get `unmask_not_found` because no row exists, but
         // that's the path AFTER the auth check — the absence of
         // `unmask_not_permitted` is the pin.
-        let err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args1)
-            .await
-            .expect_err("auth passes; SELECT misses");
+        let err = unmask::dispatch_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args1,
+        )
+        .await
+        .expect_err("auth passes; SELECT misses");
         match err {
             zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(
@@ -7700,9 +7785,13 @@ fn cold_bulk_unmask_attaches_before_read() {
             reason: Some("ops dashboard".into()),
             rejected_claim: None,
         };
-        let result = dispatch_bulk_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
-            .await
-            .expect("bulk unmask");
+        let result = dispatch_bulk_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect("bulk unmask");
         // Plaintext recovered for every pair.
         let u1 = result.results.get("u1").expect("u1 row");
         assert_eq!(
@@ -7794,9 +7883,13 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             reason: None,
             rejected_claim: None,
         };
-        let err = dispatch_bulk_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
-            .await
-            .expect_err("bulk must refuse atomically");
+        let err = dispatch_bulk_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect_err("bulk must refuse atomically");
         match err {
             zeroship_data_core::error::DbError::Coded { code, .. } => {
                 assert_eq!(code, "bulk_unmask_partial_unauthorized");
@@ -7842,9 +7935,13 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
             reason: None,
             rejected_claim: None,
         };
-        let err = dispatch_bulk_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
-            .await
-            .expect_err("unknown column must refuse");
+        let err = dispatch_bulk_unmask(
+            &unmask_route(app_id).await,
+            &DbBinding::cold_start(app_id),
+            args,
+        )
+        .await
+        .expect_err("unknown column must refuse");
         match err {
             zeroship_data_core::error::DbError::ValidationFailed { code, .. } => {
                 assert_eq!(code, "unmask_column_not_masked");
@@ -9818,7 +9915,13 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
             ),
         );
 
-        let backend = Rc::new(new_sqlite_backend(PathBuf::from(dir.path()), zeroship_plugin_db::isolate_key_source()).expect("open backend"));
+        let backend = Rc::new(
+            new_sqlite_backend(
+                PathBuf::from(dir.path()),
+                zeroship_plugin_db::isolate_key_source(),
+            )
+            .expect("open backend"),
+        );
         zeroship_plugin_db::set_sqlite_backend_for_tests(backend.clone());
 
         // Both statements go through `exec::exec_*_for_tests`, which is the

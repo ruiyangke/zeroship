@@ -12,11 +12,8 @@
 //! Run:
 //! ```text
 //! RUST_MIN_STACK=33554432 \
-//! cargo test -p zeroship-plugin-db --test integration --features test-helpers \
-//!   -- --test-threads=1
+//! cargo test -p zeroship-plugin-db --test integration --features test-helpers
 //! ```
-//!
-//! **All three are required and each fails differently when omitted.**
 //!
 //! `--features test-helpers` is this target's `required-features`. Without it
 //! cargo does not build the target at all - it FILTERS IT OUT, printing
@@ -27,11 +24,38 @@
 //! were compiled. This line omitted the flag until 2026-08-27, so the command
 //! documented here did not run.
 //!
-//! `--test-threads=1` is required because every test in this file builds the
-//! same schema, `SCHEMA = "plugin_db_test"` below. Run in parallel they race
-//! `CREATE SCHEMA` against one server and fail with
-//! `duplicate key value violates unique constraint "pg_namespace_nspname_index"`.
-//! Measured 2026-08-27: 32 of 99 failed that way at default parallelism.
+//! # This suite runs at the default thread count, and that took three fixes
+//!
+//! It did not until 2026-09-04, and the command above carried
+//! `-- --test-threads=1` for the whole time. Parallel it scored 62 passed / 21
+//! failed against 80 / 3 serial, and the failures read like data-plane
+//! regressions (`aggregate_having`, `update_one_inc`, `mixed_update`) rather
+//! than like a broken harness, which is the expensive part. Three independent
+//! mechanisms produced them, and fixing any one alone left the suite red:
+//!
+//! STATE THE DATABASE WITH ANY COUNT FROM THIS SUITE. The two numbers above
+//! were recorded without one, and they are not reproducible: re-measured
+//! 2026-09-04 against a FRESHLY CREATED database, this file at its
+//! pre-parallelism commit scores **83 passed / 0 failed / 3 ignored** serially,
+//! not 80 / 3. The gap is residue, not product. Every "pre-existing failure"
+//! this suite was believed to carry was an artifact of a database some earlier
+//! run had already scribbled on - which is the same defect the fix below is
+//! about, showing up one level higher, in the measurement rather than the run.
+//! A count from a reused database describes that database's history as much as
+//! it describes the code.
+//!
+//! 1. **One shared schema constant.** `SCHEMA = "plugin_db_test"` here and
+//!    `APP_SCHEMA = "default"` in `native_transaction.rs`, each with a setup
+//!    that opens `DROP SCHEMA ... CASCADE`. Fixed by deriving a per-test app id
+//!    from the test's own name - see `support::test_app_id_from`.
+//! 2. **A database-wide destructive sweep.** `c1_cleanup` ended with two
+//!    unbounded `LIKE '__zs_%'` sweeps that wiped every sibling's CDC fixture.
+//!    Moved to `support::sweep_prior_run_residue_once`, which runs as a barrier
+//!    before any test starts - the only moment a sweep is correct.
+//! 3. **Genuinely cluster-scoped resources.** `max_replication_slots` and
+//!    `max_wal_senders` are both 10 on the test server, cluster-wide, and the
+//!    slot reaper's fleet-leader lock and all-apps enumeration are exclusive by
+//!    design. No naming scheme partitions those; see [`cdc_budget`].
 
 use compio_postgres::{NoTls, Pool};
 use serde_json::{Value, json};
@@ -83,6 +107,11 @@ async fn require_pg() -> String {
             })
             .detach();
             drop(client);
+            // Every test enters here before it touches the database, and
+            // `Once::call_once` blocks the rest until the first returns, so this
+            // is the barrier that makes an unbounded residue sweep safe. See
+            // `support::sweep_prior_run_residue_once`.
+            support::sweep_prior_run_residue_once(&url);
             // The transaction orchestrator opens a
             // dedicated client via the Backend trait's
             // `acquire_dedicated_client`, which reads the URL from the
@@ -111,84 +140,132 @@ async fn require_pg() -> String {
     }
 }
 
-/// THIS SUITE MUST RUN WITH `--test-threads=1`. It is not a preference.
+/// Bound the CDC family's concurrency, because nothing else can.
 ///
-/// `SCHEMA` is one name shared by 156 references across this file, and
-/// [`setup`] below opens with `DROP SCHEMA ... CASCADE`. Twenty tests call it,
-/// so under default parallelism they race to destroy each other's fixture.
+/// This is NOT the thing the fix was forbidden to do. Pinning
+/// `--test-threads=1` in a config file serialises all 86 tests invisibly and
+/// forever; this bounds 14 named tests at their own call sites - 5 exclusive
+/// and 9 shared, counted by call site rather than estimated - leaves the other
+/// 72 fully parallel, and states the server limits it is sized against.
 ///
-/// Measured 2026-09-01 against a live server: **18 failed in parallel, 83 passed
-/// with `--test-threads=1`**, and `filter_comparison_operators` failed in the
-/// parallel run and passed when run alone. Every failure sampled touches
-/// `SCHEMA`; the tests that do not touch it (`vector_search_returns_k_nearest`,
-/// 0 references) passed either way. That is the control.
+/// # Why naming cannot solve this half
 ///
-/// **A parallel run looks exactly like 18 real regressions**, which is the
-/// expensive part: the names are all data-path tests (`aggregate_having`,
-/// `update_one_inc`, `mixed_update`), so it reads as a broken data plane rather
-/// than a broken harness.
+/// Three resources here are not partitioned by any app id:
 ///
-/// The structural fix is a per-test schema name, or a guard returned by `setup`
-/// that serialises only the sharing tests and leaves the other ~60 parallel.
-/// Neither is done; until one is, run:
+/// * `max_replication_slots` and `max_wal_senders`, both **10** on the test
+///   server (measured 2026-09-04 on PG 18.6), both CLUSTER-wide, against
+///   `nproc` = 16. A slot-creating test that finds the budget exhausted fails
+///   with a wal-consumer error, not with anything that names the cause.
+/// * `slot_reaper::OperatorSlotReaper`'s enumeration, which filters on
+///   `database = current_database()` and the `__zs_slot_` prefix and nothing
+///   else. It is a FLEET sweeper by design: a sibling's slot appears in its
+///   `inspected`/`dropped` sets, so `c1_abandoned_reaper_*`'s equalities fail.
+/// * The reaper's fleet-leader advisory lock, one per database. A sibling
+///   holding it makes `is_leader` false, which
+///   `c1_abandoned_reaper_elects_one_leader_across_concurrent_workers` asserts
+///   against directly.
 ///
-/// ```text
-/// PG_TEST_URL=... cargo test -p zeroship-plugin-db --features live-db-tests \
-///   --test integration -- --test-threads=1
-/// ```
-const SCHEMA: &str = "plugin_db_test";
+/// # The shape
+///
+/// [`exclusive`] admits one test and excludes every other CDC test; the four
+/// reaper tests and the cross-database sweep guard take it. [`shared`] admits
+/// [`SHARED_LIMIT`] at once and is excluded by an exclusive holder; everything
+/// else that creates a publication or a slot takes it.
+mod cdc_budget {
+    use std::sync::{Condvar, Mutex};
 
-/// Tripwire for a parallel run, so the harness failure cannot masquerade as a
-/// data-plane one.
-///
-/// The structural fix (per-test schema, or a guard that serialises only the
-/// sharing tests) is still undone - see [`SCHEMA`]. Until then this at least
-/// makes the diagnosis free. Without it a parallel run prints 18 failures with
-/// names like `aggregate_having` and `update_one_inc`, which reads as a broken
-/// data plane; the note on [`SCHEMA`] records how expensive that misreading is.
-///
-/// Not a fix and not a substitute for one: it detects the race rather than
-/// removing it, and a run that happens not to overlap still passes.
-static SETUP_IN_FLIGHT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    /// How many slot-holding CDC tests may run at once.
+    ///
+    /// `max_replication_slots` is 10 on the test server. The heaviest shared
+    /// test holds two slots at a time
+    /// (`c1_setup_resumes_at_existing_lsn_across_restart` re-runs
+    /// `ensure_worker_slot` on a second pool), so 4 x 2 = 8 leaves two slots of
+    /// headroom for a reconnecting consumer. Raising this above 5 would put the
+    /// suite back on the cluster ceiling.
+    const SHARED_LIMIT: usize = 4;
 
-/// Guard that decrements [`SETUP_IN_FLIGHT`] however `setup` ends, panic
-/// included - otherwise the first failing test would poison every later one
-/// with a false parallelism report.
-struct SetupInFlight;
+    struct Budget {
+        exclusive: bool,
+        shared: usize,
+        /// Exclusive callers parked in [`exclusive`], counted so [`shared`] can
+        /// stand aside for them. See the starvation note on `shared`.
+        waiting_exclusive: usize,
+    }
 
-impl Drop for SetupInFlight {
-    fn drop(&mut self) {
-        SETUP_IN_FLIGHT.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    static STATE: Mutex<Budget> = Mutex::new(Budget {
+        exclusive: false,
+        shared: 0,
+        waiting_exclusive: 0,
+    });
+    static CHANGED: Condvar = Condvar::new();
+
+    /// Released on drop, so a panicking test hands its budget back during unwind
+    /// rather than wedging every CDC test behind it.
+    pub struct Permit {
+        exclusive: bool,
+    }
+
+    impl Drop for Permit {
+        fn drop(&mut self) {
+            let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+            if self.exclusive {
+                state.exclusive = false;
+            } else {
+                state.shared -= 1;
+            }
+            drop(state);
+            CHANGED.notify_all();
+        }
+    }
+
+    /// A permit for a CDC test that only touches its own app's objects.
+    ///
+    /// Waits while an exclusive holder is admitted, while the shared population
+    /// is at [`SHARED_LIMIT`], or while an exclusive caller is PARKED. That last
+    /// clause is what stops a stream of shared arrivals from starving a waiting
+    /// exclusive test forever: without it a reaper test waits for `shared == 0`,
+    /// a moment fourteen shared CDC tests on sixteen threads need not ever
+    /// produce. It cannot deadlock in return, because no test holds one permit
+    /// while asking for another - every call site takes exactly one, at the top
+    /// of the test, and holds it to the end.
+    pub fn shared() -> Permit {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        while state.exclusive || state.waiting_exclusive > 0 || state.shared >= SHARED_LIMIT {
+            state = CHANGED.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        state.shared += 1;
+        Permit { exclusive: false }
+    }
+
+    /// A permit for a CDC test that reads or writes every app's objects.
+    ///
+    /// Waits for the CDC family to drain completely - no other exclusive holder
+    /// and no shared holder - because the resources this fences (the reaper's
+    /// fleet-wide enumeration and its one-per-database leader lock) are not
+    /// partitioned by app id at all.
+    pub fn exclusive() -> Permit {
+        let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
+        state.waiting_exclusive += 1;
+        while state.exclusive || state.shared > 0 {
+            state = CHANGED.wait(state).unwrap_or_else(|e| e.into_inner());
+        }
+        state.waiting_exclusive -= 1;
+        state.exclusive = true;
+        Permit { exclusive: true }
     }
 }
 
-/// Set up the test schema and table. Drops and recreates on every call.
+/// Set up a test's own schema and `notes` table. Drops and recreates on every
+/// call, which is what makes a rerun idempotent.
 ///
-/// The `DROP ... CASCADE` is why this suite cannot run in parallel - see the
-/// note on [`SCHEMA`].
-async fn setup(pool: &Pool) {
-    let concurrent = SETUP_IN_FLIGHT.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-    let _in_flight = SetupInFlight;
-    assert!(
-        concurrent == 1,
-        "THIS SUITE IS RUNNING IN PARALLEL AND ITS RESULTS ARE MEANINGLESS.\n\
-         \n\
-         {concurrent} tests entered `setup()` at once. `setup` opens with\n\
-         `DROP SCHEMA \"{SCHEMA}\" CASCADE`, and twenty tests share that one\n\
-         name, so they are destroying each other's fixture right now. Any\n\
-         failures reported alongside this one are harness artefacts, not\n\
-         defects - measured 2026-09-01, 18 failed in parallel and 83 passed\n\
-         serially on the same tree.\n\
-         \n\
-         Re-run with:\n\
-         \n\
-         \x20 PG_TEST_URL=... cargo test -p zeroship-plugin-db \\\n\
-         \x20   --features live-db-tests --test integration -- --test-threads=1",
-    );
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
+/// `schema` is the caller's per-test app id (`test_app_id!()`). It was one
+/// shared `const SCHEMA = "plugin_db_test"` until 2026-09-04, and the
+/// `DROP ... CASCADE` below is why twenty tests then had to run serially.
+async fn setup(pool: &Pool, schema: &str) {
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
         .await
         .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{SCHEMA}\""), &[])
+    pool.execute(&format!("CREATE SCHEMA \"{schema}\""), &[])
         .await
         .unwrap();
     pool.execute(
@@ -217,7 +294,7 @@ async fn setup(pool: &Pool) {
             // stored the silent-wrong value instead - the harder failure to
             // notice. A fixture that claims to match production must match its
             // CONSTRAINTS, not only its column names.
-            r#"CREATE TABLE "{SCHEMA}"."notes" (
+            r#"CREATE TABLE "{schema}"."notes" (
                 id SERIAL PRIMARY KEY,
                 title TEXT NOT NULL,
                 body TEXT,
@@ -466,8 +543,14 @@ async fn parity_matrix_pg_matches_sqlite_projection() {
     let pg_url = require_pg().await;
     let sqlite_dir = tempfile::tempdir().expect("create sqlite parity dir");
 
-    let sqlite = parity::run_matrix(&parity::sqlite_url(&sqlite_dir));
-    let pg = parity::run_matrix(&pg_url);
+    let app = crate::test_app_id!();
+
+    // The SQLite leg keeps the dev app id on purpose - its tempdir isolates it,
+    // and the matrix is meant to write the file a `pnpm dev` app writes. The
+    // Postgres leg gets this test's own id: the two matrix tests here shared
+    // schema `default` and dropped it out from under each other in parallel.
+    let sqlite = parity::run_matrix(&parity::sqlite_url(&sqlite_dir), parity::DEV_APP_ID);
+    let pg = parity::run_matrix(&pg_url, &app);
 
     assert_eq!(pg.seed, sqlite.seed);
     assert_eq!(pg.tx, sqlite.tx);
@@ -513,7 +596,8 @@ async fn parity_matrix_pg_matches_sqlite_projection() {
 #[compio::test]
 async fn bytes_column_stores_raw_bytes_on_postgres() {
     let pg_url = require_pg().await;
-    let pg = parity::run_matrix(&pg_url);
+    let app = crate::test_app_id!();
+    let pg = parity::run_matrix(&pg_url, &app);
 
     // The expectation is DERIVED, not copied from a run: `TYPED_BYTES_RAW` is
     // what the caller handed `env.db` (base64-encoded, per the `t.bytes()` wire
@@ -529,8 +613,8 @@ async fn bytes_column_stores_raw_bytes_on_postgres() {
     .detach();
 
     let sql = format!(
-        "SELECT payload_bytes FROM \"default\".\"{}\" WHERE title = $1",
-        pg.collection
+        "SELECT payload_bytes FROM \"{}\".\"{}\" WHERE title = $1",
+        app, pg.collection
     );
     let rows = client
         .query(&sql, &[&"typed-roundtrip"])
@@ -595,11 +679,13 @@ fn hex_of(bytes: &[u8]) -> String {
 async fn insert_and_find() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     // Insert
     let bq = build_insert(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Hello", "body": "World", "category": "tech"}),
@@ -613,7 +699,7 @@ async fn insert_and_find() {
 
     // Find
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({}),
         None,
@@ -637,19 +723,21 @@ async fn insert_and_find() {
 async fn insert_many_round_trip() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "A", "body": "one", "category": "tech"},
         {"title": "B", "body": "two", "category": "food"},
         {"title": "C", "body": "three", "category": "tech"}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     let inserted = exec_mutation(&pool, bq).await;
     assert_eq!(inserted.len(), 3);
 
     // Verify all in DB
-    let bq = build_count(SCHEMA, "notes", &notes_schema(), &json!({})).unwrap();
+    let bq = build_count(schema, "notes", &notes_schema(), &json!({})).unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     let count: i64 = rows[0].get("count");
@@ -665,11 +753,13 @@ async fn insert_many_round_trip() {
 async fn update_one_inc() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     // Insert
     let bq = build_insert(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Counter", "category": "tech", "views": 0}),
@@ -679,7 +769,7 @@ async fn update_one_inc() {
 
     // $inc views by 5
     let bq = build_update_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Counter"}),
@@ -692,7 +782,7 @@ async fn update_one_inc() {
 
     // $inc again
     let bq = build_update_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Counter"}),
@@ -712,10 +802,12 @@ async fn update_one_inc() {
 async fn update_one_dec_mul() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let bq = build_insert(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Math", "category": "tech", "views": 10}),
@@ -725,7 +817,7 @@ async fn update_one_dec_mul() {
 
     // $dec
     let bq = build_update_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Math"}),
@@ -737,7 +829,7 @@ async fn update_one_dec_mul() {
 
     // $mul
     let bq = build_update_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Math"}),
@@ -757,10 +849,12 @@ async fn update_one_dec_mul() {
 async fn update_one_jsonb_array_ops() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let bq = build_insert(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Tags", "category": "tech"}),
@@ -770,7 +864,7 @@ async fn update_one_jsonb_array_ops() {
 
     // $push "rust"
     let bq = build_update_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Tags"}),
@@ -783,7 +877,7 @@ async fn update_one_jsonb_array_ops() {
 
     // $push "go"
     let bq = build_update_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Tags"}),
@@ -798,7 +892,7 @@ async fn update_one_jsonb_array_ops() {
 
     // $addToSet "rust" (duplicate — should NOT add)
     let bq = build_update_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Tags"}),
@@ -811,7 +905,7 @@ async fn update_one_jsonb_array_ops() {
 
     // $addToSet "python" (new — should add)
     let bq = build_update_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Tags"}),
@@ -824,7 +918,7 @@ async fn update_one_jsonb_array_ops() {
 
     // $pull "go"
     let bq = build_update_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Tags"}),
@@ -846,7 +940,9 @@ async fn update_one_jsonb_array_ops() {
 async fn update_many_round_trip() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     // Insert 3 tech, 1 food
     let docs = json!([
@@ -855,12 +951,12 @@ async fn update_many_round_trip() {
         {"title": "C", "category": "tech", "views": 0},
         {"title": "D", "category": "food", "views": 0}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Update all tech views +1
     let bq = build_update_many(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"category": "tech"}),
@@ -872,7 +968,7 @@ async fn update_many_round_trip() {
 
     // Verify food unchanged
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"category": "food"}),
         None,
@@ -887,7 +983,7 @@ async fn update_many_round_trip() {
 
     // Verify tech updated
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"category": "tech"}),
         None,
@@ -912,7 +1008,9 @@ async fn update_many_round_trip() {
 async fn delete_operations() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "Keep1", "category": "tech"},
@@ -921,12 +1019,12 @@ async fn delete_operations() {
         {"title": "Del2", "category": "food"},
         {"title": "Del3", "category": "food"}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Delete one food
     let bq = build_delete_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"category": "food"}),
@@ -936,14 +1034,14 @@ async fn delete_operations() {
     assert_eq!(deleted.len(), 1);
 
     // 4 remaining
-    let bq = build_count(SCHEMA, "notes", &notes_schema(), &json!({})).unwrap();
+    let bq = build_count(schema, "notes", &notes_schema(), &json!({})).unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 4);
 
     // Delete many remaining food
     let bq = build_delete_many(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"category": "food"}),
@@ -954,7 +1052,7 @@ async fn delete_operations() {
     assert_eq!(deleted.len(), 2);
 
     // 2 tech remaining
-    let bq = build_count(SCHEMA, "notes", &notes_schema(), &json!({})).unwrap();
+    let bq = build_count(schema, "notes", &notes_schema(), &json!({})).unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 2);
@@ -969,7 +1067,9 @@ async fn delete_operations() {
 async fn filter_comparison_operators() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "A", "category": "tech", "views": 10},
@@ -977,12 +1077,12 @@ async fn filter_comparison_operators() {
         {"title": "C", "category": "food", "views": 30},
         {"title": "D", "category": "food", "views": 40}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // $gt 25
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"views": {"$gt": 25}}),
         None,
@@ -997,7 +1097,7 @@ async fn filter_comparison_operators() {
 
     // $lte 20
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"views": {"$lte": 20}}),
         None,
@@ -1012,7 +1112,7 @@ async fn filter_comparison_operators() {
 
     // $in
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"category": {"$in": ["tech", "food"]}}),
         None,
@@ -1027,7 +1127,7 @@ async fn filter_comparison_operators() {
 
     // $nin
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"category": {"$nin": ["food"]}}),
         None,
@@ -1042,7 +1142,7 @@ async fn filter_comparison_operators() {
 
     // $ne
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"category": {"$ne": "food"}}),
         None,
@@ -1065,19 +1165,21 @@ async fn filter_comparison_operators() {
 async fn filter_logical_operators() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "A", "category": "tech", "views": 10},
         {"title": "B", "category": "tech", "views": 50},
         {"title": "C", "category": "food", "views": 10}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // $and: tech AND views > 20
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"$and": [{"category": "tech"}, {"views": {"$gt": 20}}]}),
         None,
@@ -1093,7 +1195,7 @@ async fn filter_logical_operators() {
 
     // $or: tech OR views > 20
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"$or": [{"category": "tech"}, {"views": {"$gt": 20}}]}),
         None,
@@ -1108,7 +1210,7 @@ async fn filter_logical_operators() {
 
     // $not: NOT food
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"$not": {"category": "food"}}),
         None,
@@ -1131,19 +1233,21 @@ async fn filter_logical_operators() {
 async fn filter_pattern_operators() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "Hello World", "category": "tech"},
         {"title": "hello rust", "category": "tech"},
         {"title": "Goodbye", "category": "food"}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // $like (case sensitive)
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"title": {"$like": "Hello%"}}),
         None,
@@ -1158,7 +1262,7 @@ async fn filter_pattern_operators() {
 
     // $ilike (case insensitive)
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"title": {"$ilike": "%hello%"}}),
         None,
@@ -1181,19 +1285,21 @@ async fn filter_pattern_operators() {
 async fn find_with_options() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "C", "category": "tech", "views": 30},
         {"title": "A", "category": "tech", "views": 10},
         {"title": "B", "category": "tech", "views": 20}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Order by views ASC, limit 2
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({}),
         Some(2),
@@ -1210,7 +1316,7 @@ async fn find_with_options() {
 
     // Order by views DESC, limit 1, offset 1
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({}),
         Some(1),
@@ -1234,10 +1340,12 @@ async fn find_with_options() {
 async fn find_with_projection() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let bq = build_insert(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Proj", "body": "secret", "category": "tech"}),
@@ -1246,7 +1354,7 @@ async fn find_with_projection() {
     exec_mutation(&pool, bq).await;
 
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({}),
         None,
@@ -1274,7 +1382,9 @@ async fn find_with_projection() {
 async fn distinct_values() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "A", "category": "tech"},
@@ -1282,10 +1392,10 @@ async fn distinct_values() {
         {"title": "C", "category": "food"},
         {"title": "D", "category": "science"}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
-    let bq = build_distinct(SCHEMA, "notes", "category", &json!({}), &notes_schema()).unwrap();
+    let bq = build_distinct(schema, "notes", "category", &json!({}), &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     let values: Vec<&str> = rows
         .iter()
@@ -1298,7 +1408,7 @@ async fn distinct_values() {
 
     // Distinct with filter
     let bq = build_distinct(
-        SCHEMA,
+        schema,
         "notes",
         "category",
         &json!({"category": {"$ne": "science"}}),
@@ -1318,25 +1428,27 @@ async fn distinct_values() {
 async fn count_with_filter() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "A", "category": "tech"},
         {"title": "B", "category": "tech"},
         {"title": "C", "category": "food"}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Count all
-    let bq = build_count(SCHEMA, "notes", &notes_schema(), &json!({})).unwrap();
+    let bq = build_count(schema, "notes", &notes_schema(), &json!({})).unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 3);
 
     // Count with filter
     let bq = build_count(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"category": "tech"}),
@@ -1356,7 +1468,9 @@ async fn count_with_filter() {
 async fn aggregate_full() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "A", "category": "tech", "views": 10},
@@ -1364,7 +1478,7 @@ async fn aggregate_full() {
         {"title": "C", "category": "tech", "views": 30},
         {"title": "D", "category": "food", "views": 100}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     let pipeline = json!([
@@ -1379,7 +1493,7 @@ async fn aggregate_full() {
         }},
         {"$sort": {"cnt": -1}}
     ]);
-    let bq = build_aggregate(SCHEMA, "notes", &pipeline, &notes_schema()).unwrap();
+    let bq = build_aggregate(schema, "notes", &pipeline, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["category"], "tech");
@@ -1398,7 +1512,9 @@ async fn aggregate_full() {
 async fn aggregate_multi_group() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "A", "category": "tech", "body": "rust", "views": 10},
@@ -1406,7 +1522,7 @@ async fn aggregate_multi_group() {
         {"title": "C", "category": "tech", "body": "go", "views": 5},
         {"title": "D", "category": "food", "body": "pasta", "views": 50}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     let pipeline = json!([
@@ -1416,7 +1532,7 @@ async fn aggregate_multi_group() {
         }},
         {"$sort": {"cnt": -1}}
     ]);
-    let bq = build_aggregate(SCHEMA, "notes", &pipeline, &notes_schema()).unwrap();
+    let bq = build_aggregate(schema, "notes", &pipeline, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     // tech/rust=2, tech/go=1, food/pasta=1
     assert_eq!(rows.len(), 3);
@@ -1432,7 +1548,9 @@ async fn aggregate_multi_group() {
 async fn aggregate_having() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let docs = json!([
         {"title": "A", "category": "tech", "views": 10},
@@ -1440,7 +1558,7 @@ async fn aggregate_having() {
         {"title": "C", "category": "tech", "views": 30},
         {"title": "D", "category": "food", "views": 5}
     ]);
-    let bq = build_insert_many(SCHEMA, "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "notes", &notes_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // HAVING with alias → resolved to aggregate expression
@@ -1452,7 +1570,7 @@ async fn aggregate_having() {
         {"$having": {"cnt": {"$gt": 1}}},
         {"$sort": {"cnt": -1}}
     ]);
-    let bq = build_aggregate(SCHEMA, "notes", &pipeline, &notes_schema()).unwrap();
+    let bq = build_aggregate(schema, "notes", &pipeline, &notes_schema()).unwrap();
     let rows = exec_query(&pool, bq).await;
     // Only tech has count > 1
     assert_eq!(rows.len(), 1);
@@ -1469,11 +1587,13 @@ async fn aggregate_having() {
 async fn null_handling() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     // Insert with body
     let bq = build_insert(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "WithBody", "body": "has content", "category": "tech"}),
@@ -1482,7 +1602,7 @@ async fn null_handling() {
     exec_mutation(&pool, bq).await;
     // Insert without body (column defaults to NULL)
     let bq = build_insert(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "NoBody", "category": "tech"}),
@@ -1492,7 +1612,7 @@ async fn null_handling() {
 
     // Find where body IS NULL
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"body": null}),
         None,
@@ -1508,7 +1628,7 @@ async fn null_handling() {
 
     // Find where body IS NOT NULL
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"body": {"$ne": null}}),
         None,
@@ -1524,7 +1644,7 @@ async fn null_handling() {
 
     // $exists: true
     let bq = build_find_with_schema(
-        SCHEMA,
+        schema,
         "notes",
         &json!({"body": {"$exists": true}}),
         None,
@@ -1548,10 +1668,12 @@ async fn null_handling() {
 async fn mixed_update() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let bq = build_insert(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Mix", "category": "tech", "views": 10}),
@@ -1561,7 +1683,7 @@ async fn mixed_update() {
 
     // Update: set category + inc views + push tag
     let bq = build_update_one(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Mix"}),
@@ -1584,10 +1706,12 @@ async fn mixed_update() {
 async fn timestamps_as_numbers() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    setup(&pool).await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
+    setup(&pool, schema).await;
 
     let bq = build_insert(
-        SCHEMA,
+        schema,
         "notes",
         &notes_schema(),
         &json!({"title": "Time", "category": "tech"}),
@@ -1609,7 +1733,20 @@ async fn timestamps_as_numbers() {
 #[compio::test]
 async fn aggregate_having_postgres_docs_example() {
     let url = require_pg().await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
+
+    // The schema is this test's own. It used to be the shared `plugin_db_test`,
+    // which this test never created - it inherited whichever sibling had run
+    // `setup` most recently, so running it alone failed with `3F000 schema does
+    // not exist`.
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
+        .await
+        .unwrap();
+    pool.execute(&format!("CREATE SCHEMA \"{schema}\""), &[])
+        .await
+        .unwrap();
 
     // Set up weather table. The seven platform system columns are here for the
     // same reason `notes` carries them: a write's `RETURNING` is now an
@@ -1618,14 +1755,8 @@ async fn aggregate_having_postgres_docs_example() {
     // the statement fail with `42703 column does not exist` - loudly, which is
     // the whole point of naming columns instead of starring them.
     pool.execute(
-        &format!("DROP TABLE IF EXISTS \"{SCHEMA}\".\"weather\""),
-        &[],
-    )
-    .await
-    .unwrap();
-    pool.execute(
         &format!(
-            r#"CREATE TABLE "{SCHEMA}"."weather" (
+            r#"CREATE TABLE "{schema}"."weather" (
                 id SERIAL PRIMARY KEY,
                 city TEXT,
                 temp_lo INTEGER,
@@ -1651,7 +1782,7 @@ async fn aggregate_having_postgres_docs_example() {
         {"city": "Hayward", "temp_lo": 38, "temp_hi": 52},
         {"city": "Hayward", "temp_lo": 41, "temp_hi": 55}
     ]);
-    let bq = build_insert_many(SCHEMA, "weather", &weather_schema(), &docs).unwrap();
+    let bq = build_insert_many(schema, "weather", &weather_schema(), &docs).unwrap();
     exec_mutation(&pool, bq).await;
 
     // Equivalent of: SELECT city, count(*), max(temp_lo)
@@ -1664,7 +1795,7 @@ async fn aggregate_having_postgres_docs_example() {
         }},
         {"$having": {"max_temp": {"$lt": 42}}}
     ]);
-    let bq = build_aggregate(SCHEMA, "weather", &pipeline, &weather_schema()).unwrap();
+    let bq = build_aggregate(schema, "weather", &pipeline, &weather_schema()).unwrap();
 
     // Verify SQL has the resolved expression, not the alias
     assert!(
@@ -1699,7 +1830,8 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
     // Fresh schema + table — `build_create_table` is the production path.
-    let app = "a1_test";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let collection = "users";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
@@ -1914,7 +2046,9 @@ async fn b2_ref_creates_foreign_key() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
-    let app = "b2_fk_basic";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     b2_setup_users_posts(&pool, app).await;
 
     // Inspect pg_constraint for the FK on "posts.authorId".
@@ -1970,7 +2104,9 @@ async fn b2_ref_blocks_orphan_insert() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
-    let app = "b2_orphan_insert";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     b2_setup_users_posts(&pool, app).await;
 
     // Insert into posts with non-existent authorId; must fail with FK violation.
@@ -1999,7 +2135,9 @@ async fn b2_ref_on_delete_restrict_blocks_parent_delete() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
-    let app = "b2_restrict_delete";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     b2_setup_users_posts(&pool, app).await;
 
     // Insert one user + one post that references it. `id`
@@ -2047,7 +2185,9 @@ async fn b2_ref_on_delete_cascade_deletes_children() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
-    let app = "b2_cascade_delete";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -2123,7 +2263,9 @@ async fn b2_circular_refs_via_deferrable() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
-    let app = "b2_circular";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -2292,80 +2434,66 @@ async fn pg_has_logical_wal(pool: &Pool) -> bool {
     v == "logical"
 }
 
-/// Drop any leftover slot / publication for the given app, so tests
-/// can re-run from a clean state. Tolerates "does not exist".
+/// Drop the leftover slot, publication and schema OF ONE APP, so a test can
+/// re-run from a clean state. Tolerates "does not exist".
 ///
-/// Replication-slot accumulation under different app names was the root
-/// cause of the p8a2 ordering hang: each test created a slot under a
-/// distinct name and only dropped its OWN slot at the start, so over a
-/// long suite run `max_replication_slots` (default 10) would exhaust.
-/// We now drop the app-specific resources AND sweep every `__zs_*` slot
-/// and publication left over from prior tests in the same suite. Integration
-/// tests run with `--test-threads=1` so the global sweep is safe.
+/// # It used to sweep the whole database, and that is why the suite was serial
+///
+/// Two unbounded `LIKE '__zs_%'` sweeps ended this function until 2026-09-04,
+/// with the note "Integration tests run with `--test-threads=1` so the global
+/// sweep is safe". Nineteen tests call this, so at the default thread count
+/// each one destroyed every sibling's CDC fixture:
+/// `drop_namespace_idempotent_steps_3_to_5` failed on
+/// `assert!(publication_exists(&pool, app))` for a publication it had just
+/// created, and it already used a per-test app name - so per-test NAMING alone
+/// could not have fixed this half.
+///
+/// The sweeps existed for a real reason (slot accumulation exhausting
+/// `max_replication_slots`), and that reason is served instead by
+/// `support::sweep_prior_run_residue_once`, which runs before any test starts.
 async fn c1_cleanup(pool: &Pool, app: &str) {
     let pub_name = zeroship_plugin_db::replication::publication_name(app).unwrap();
     let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
     let _ = pool
         .execute(&format!(r#"DROP PUBLICATION IF EXISTS "{pub_name}""#), &[])
         .await;
+    // EVERY worker's slot for this app, not just `CDC_TEST_WORKER_ID`'s.
+    //
+    // A slot name is `__zs_slot_<28 hex of app>__<20 hex of worker>`
+    // (`replication::worker_slot_name`), so everything up to and including the
+    // final `__` belongs to the app whatever worker minted it. This dropped
+    // exactly one worker's slot until 2026-09-04, and
+    // `c1_abandoned_reaper_preserves_inactive_slot_owned_by_live_worker` mints
+    // its own `live-worker-with-reconnecting-consumer` slot - so that slot
+    // survived the whole run. Serially it was harmless: the alphabetical order
+    // puts `..._measures_elapsed_inactivity...` BEFORE it, so the reaper test
+    // never saw the orphan. In parallel the order is arbitrary, and when the
+    // leak ran first the reaper's due sweep dropped two slots and its
+    // `assert_eq!(due.dropped, vec![slot])` failed naming both.
+    //
+    // `left(slot_name, length($1)) = $1` is the production comparison shape
+    // (`replication::worker_slot_name_prefix`): the prefix is derived, so no
+    // app-controlled wildcard can broaden it. `database = current_database()`
+    // is here for the same reason it is in `support::sweep_prior_run_residue`.
+    let slot_prefix = {
+        let cut = slot
+            .rfind("__")
+            .expect("a worker slot name separates its app and worker tokens with `__`");
+        slot[..cut + 2].to_string()
+    };
     let _ = pool
         .query_text_params(
-            "SELECT pg_drop_replication_slot($1) FROM pg_replication_slots WHERE slot_name = $1",
-            &[&slot],
+            "SELECT pg_drop_replication_slot(slot_name) \
+             FROM pg_replication_slots \
+             WHERE left(slot_name, length($1)) = $1 \
+               AND active = false \
+               AND database = current_database()",
+            &[&slot_prefix],
         )
         .await;
     let _ = pool
         .execute(&format!(r#"DROP SCHEMA IF EXISTS "{app}" CASCADE"#), &[])
         .await;
-
-    // Defensive sweep: drop every leftover `__zs_*` slot + publication from
-    // prior tests under different app names. Without this, replication slots
-    // accumulate across tests and exhaust `max_replication_slots` (default 10)
-    // on long suite runs.
-    //
-    // `AND database = current_database()` is load-bearing, not decoration.
-    // `pg_replication_slots` is a CLUSTER-WIDE view and PostgreSQL does NOT
-    // confine `pg_drop_replication_slot` to the slot's own database when the
-    // slot is inactive. Measured 2026-08-27 on PG 16.14 and confirmed on
-    // 18.4: a session on database `probe_b` ran this statement without the
-    // predicate and dropped an inactive `__zs_%` slot belonging to `probe_a` -
-    // the count went 1 to 0, no error. Every suite sharing the server lost its
-    // CDC slots to whichever
-    // one called cleanup first, which is what made two of these tests fail
-    // only when another suite ran beside them. Giving each suite its own
-    // DATABASE bought nothing against it; only a separate server did.
-    //
-    // The `active = false` guard is not a substitute: a slot is inactive in
-    // the window between `ensure_worker_slot` creating it and the consumer
-    // attaching, and again across a consumer reconnect.
-    //
-    // The publication half below needs no such predicate - `pg_publication`
-    // is per-database and a session sees only its own (probe_b saw 0 of
-    // probe_a's in the same measurement).
-    let _ = pool
-        .query_text_params(
-            "SELECT pg_drop_replication_slot(slot_name) \
-             FROM pg_replication_slots \
-             WHERE slot_name LIKE '__zs_%' \
-               AND active = false \
-               AND database = current_database()",
-            &[],
-        )
-        .await;
-    if let Ok(rows) = pool
-        .query_text_params(
-            "SELECT pubname FROM pg_publication WHERE pubname LIKE '__zs_%'",
-            &[],
-        )
-        .await
-    {
-        for row in rows {
-            let name: String = row.get(0);
-            let _ = pool
-                .execute(&format!(r#"DROP PUBLICATION IF EXISTS "{name}""#), &[])
-                .await;
-        }
-    }
 }
 
 /// Rewrite the database component of a Postgres DSN, preserving any query
@@ -2379,7 +2507,7 @@ fn url_with_database(url: &str, database: &str) -> String {
     format!("{}/{}{}", &base[..cut], database, query)
 }
 
-/// `c1_cleanup`'s sweep must not reach another database's replication slots.
+/// The residue sweep must not reach another database's replication slots.
 ///
 /// This is a regression guard for a cleanup that dropped slots CLUSTER-WIDE.
 /// `pg_replication_slots` is a cluster-wide view and PostgreSQL lets any
@@ -2387,11 +2515,21 @@ fn url_with_database(url: &str, database: &str) -> String {
 /// unscoped sweep destroyed the CDC slots of every suite sharing the server -
 /// including suites deliberately given their own database for isolation.
 ///
-/// Remove `AND database = current_database()` from `c1_cleanup` and this test
-/// fails: the foreign slot is gone.
+/// Remove `AND database = current_database()` from
+/// `support::sweep_prior_run_replication_objects` and this test fails: the
+/// foreign slot is gone. It guarded `c1_cleanup` until 2026-09-04, when the
+/// sweep moved out of that function; the guard followed the code rather than
+/// staying pointed at the address the code used to have.
+///
+/// It takes [`cdc_budget::exclusive`] because it CALLS the sweep, which drops
+/// every inactive `__zs_%` slot in this database - including a sibling's. It
+/// calls the REPLICATION half only: `sweep_prior_run_residue` also drops the
+/// suite's schemas and roles, and `cdc_budget` does not fence the 60-odd tests
+/// that hold those.
 #[compio::test]
 async fn c1_cleanup_sweep_does_not_cross_database_boundaries() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::exclusive();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
@@ -2439,8 +2577,8 @@ async fn c1_cleanup_sweep_does_not_cross_database_boundaries() {
         "the slot must be INACTIVE, or the sweep's active=false guard hides the defect"
     );
 
-    // Now run cleanup from OUR database.
-    c1_cleanup(&pool, "c1_cleanup_blast_radius_app").await;
+    // Now run the sweep from OUR database.
+    support::sweep_prior_run_replication_objects(&pool).await;
 
     let survivors = pool
         .query_text_params(
@@ -2452,7 +2590,7 @@ async fn c1_cleanup_sweep_does_not_cross_database_boundaries() {
     assert_eq!(
         survivors.len(),
         1,
-        "c1_cleanup dropped a slot owned by database {NEIGHBOUR_DB}; the sweep is not \
+        "the residue sweep dropped a slot owned by database {NEIGHBOUR_DB}; it is not \
          scoped to current_database() and will corrupt every suite on this server"
     );
 
@@ -2492,13 +2630,16 @@ async fn c1_create_publication_for_tables(pool: &Pool, app: &str, tables: &[&str
 #[compio::test]
 async fn c1_setup_requires_publication_and_creates_slot_idempotently() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
-    let app = "c1_setup_app";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
@@ -2534,8 +2675,10 @@ async fn c1_setup_requires_publication_and_creates_slot_idempotently() {
 #[compio::test]
 async fn c1_setup_refuses_to_create_a_missing_publication() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "c1_missing_pub_app";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
@@ -2559,13 +2702,16 @@ async fn c1_setup_refuses_to_create_a_missing_publication() {
 #[compio::test]
 async fn c1_watchdog_reports_new_slot() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
-    let app = "c1_watchdog_app";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
@@ -2600,13 +2746,16 @@ async fn c1_watchdog_reports_new_slot() {
 #[compio::test]
 async fn c1_abandoned_reaper_measures_elapsed_inactivity_not_wal_bytes() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::exclusive();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
-    let app = "c1_abandoned_app";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
@@ -2694,13 +2843,16 @@ async fn c1_abandoned_reaper_measures_elapsed_inactivity_not_wal_bytes() {
 #[compio::test]
 async fn c1_abandoned_reaper_preserves_inactive_slot_owned_by_live_worker() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::exclusive();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
-    let app = "c1_live_worker_lease";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let worker_id = "live-worker-with-reconnecting-consumer";
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
@@ -2784,13 +2936,16 @@ async fn c1_abandoned_reaper_preserves_inactive_slot_owned_by_live_worker() {
 #[compio::test]
 async fn c1_abandoned_reaper_preserves_a_connected_idle_consumer() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::exclusive();
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
-    let app = "c1_idle_live_consumer";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let worker_id = "idle-live-consumer-worker";
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
@@ -2806,15 +2961,21 @@ async fn c1_abandoned_reaper_preserves_a_connected_idle_consumer() {
 
     let threshold = std::time::Duration::from_secs(3600);
     let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
-        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source()),
+        zeroship_plugin_db::backend::PostgresBackend::new(
+            pool.clone(),
+            url.clone(),
+            zeroship_plugin_db::isolate_key_source(),
+        ),
     ));
     let consumer = zeroship_plugin_db::change_stream_pg::PgChangeStream::new(match &backend {
         zeroship_plugin_db::backend::BackendHandle::Postgres(pg) => pg.clone(),
-        zeroship_plugin_db::backend::BackendHandle::Sqlite(_) => panic!("fixture builds a Postgres handle"),
+        zeroship_plugin_db::backend::BackendHandle::Sqlite(_) => {
+            panic!("fixture builds a Postgres handle")
+        }
     })
-        .spawn_consumer(app, worker_id)
-        .await
-        .expect("idle consumer must reach START_REPLICATION");
+    .spawn_consumer(app, worker_id)
+    .await
+    .expect("idle consumer must reach START_REPLICATION");
     let slot = zeroship_plugin_db::replication::worker_slot_name(app, worker_id).unwrap();
     let active = pool
         .query_text_params(
@@ -2879,13 +3040,16 @@ async fn c1_abandoned_reaper_preserves_a_connected_idle_consumer() {
 #[compio::test]
 async fn c1_abandoned_reaper_elects_one_leader_across_concurrent_workers() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::exclusive();
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
-    let app = "c1_concurrent_reapers";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let worker_id = "crashed-worker-for-concurrent-reapers";
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
@@ -2981,13 +3145,16 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     // re-running `ensure_worker_slot`. The slot survives
     // and reports the same `confirmed_flush_lsn`.
     let url = require_pg().await;
+    let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
-    let app = "c1_restart_app";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
@@ -3038,7 +3205,8 @@ async fn c1_broker_event_delivered_for_insert_via_emit() {
 
     // Clean slate.
     zeroship_plugin_db::broker::drop_app(None);
-    let app = "c1_emit_app";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let sub = zeroship_plugin_db::broker::subscribe(app, "messages");
 
     zeroship_plugin_db::broker::emit_local(
@@ -3092,7 +3260,8 @@ async fn gap_b_commit_drains_pending_emits_to_broker() {
     // Subscribe BEFORE pushing events, mid-"transaction" push two,
     // then drain — the broker should receive both.
     zeroship_plugin_db::broker::drop_app(None);
-    let app = "gap_b_commit";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let sub = zeroship_plugin_db::broker::subscribe(app, "users");
 
     zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 1));
@@ -3117,7 +3286,8 @@ async fn gap_b_rollback_clears_pending_emits_silently() {
     // Push events, then `clear` (rollback path). The broker must
     // never see them.
     zeroship_plugin_db::broker::drop_app(None);
-    let app = "gap_b_rollback";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let sub = zeroship_plugin_db::broker::subscribe(app, "users");
 
     zeroship_plugin_db::push_pending_emit_for_tests(gapb_ev(app, "users", 42));
@@ -3142,7 +3312,9 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     zeroship_plugin_db::set_db_url_for_tests(&url);
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
 
-    let app = "gap_b_e2e";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     // Fresh schema with one collection table.
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
@@ -3242,13 +3414,16 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
 #[compio::test]
 async fn p8a2_consumer_publishes_wal_event_to_broker() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
-    let app = "p8a2_app";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
 
     // Schema + table the publication will scope.
@@ -3276,15 +3451,21 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     // The production adapter provisions, spawns, and returns only
     // after Postgres accepts START_REPLICATION.
     let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
-        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source()),
+        zeroship_plugin_db::backend::PostgresBackend::new(
+            pool.clone(),
+            url.clone(),
+            zeroship_plugin_db::isolate_key_source(),
+        ),
     ));
     let consumer = zeroship_plugin_db::change_stream_pg::PgChangeStream::new(match &backend {
         zeroship_plugin_db::backend::BackendHandle::Postgres(pg) => pg.clone(),
-        zeroship_plugin_db::backend::BackendHandle::Sqlite(_) => panic!("fixture builds a Postgres handle"),
+        zeroship_plugin_db::backend::BackendHandle::Sqlite(_) => {
+            panic!("fixture builds a Postgres handle")
+        }
     })
-        .spawn_consumer(app, CDC_TEST_WORKER_ID)
-        .await
-        .expect("CDC must reach START_REPLICATION");
+    .spawn_consumer(app, CDC_TEST_WORKER_ID)
+    .await
+    .expect("CDC must reach START_REPLICATION");
 
     // Write a row via the regular pool. This represents "worker A".
     pool.execute(
@@ -3461,13 +3642,16 @@ async fn b8c_per_app_role_cannot_create_slot_directly() {
 #[compio::test]
 async fn p8a2_supervised_consumer_reconnects_after_kill() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
         return release_pg(pool).await;
     }
 
-    let app = "p8a2_sup_recon";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
 
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
@@ -3490,15 +3674,21 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     let sub = zeroship_plugin_db::broker::subscribe(app, "events");
 
     let backend = zeroship_plugin_db::backend::BackendHandle::Postgres(std::rc::Rc::new(
-        zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source()),
+        zeroship_plugin_db::backend::PostgresBackend::new(
+            pool.clone(),
+            url.clone(),
+            zeroship_plugin_db::isolate_key_source(),
+        ),
     ));
     let consumer = zeroship_plugin_db::change_stream_pg::PgChangeStream::new(match &backend {
         zeroship_plugin_db::backend::BackendHandle::Postgres(pg) => pg.clone(),
-        zeroship_plugin_db::backend::BackendHandle::Sqlite(_) => panic!("fixture builds a Postgres handle"),
+        zeroship_plugin_db::backend::BackendHandle::Sqlite(_) => {
+            panic!("fixture builds a Postgres handle")
+        }
     })
-        .spawn_consumer(app, CDC_TEST_WORKER_ID)
-        .await
-        .expect("CDC must reach START_REPLICATION");
+    .spawn_consumer(app, CDC_TEST_WORKER_ID)
+    .await
+    .expect("CDC must reach START_REPLICATION");
     let slot = zeroship_plugin_db::replication::worker_slot_name(app, CDC_TEST_WORKER_ID).unwrap();
 
     // First insert reaches the broker.
@@ -3797,7 +3987,9 @@ async fn vector_search_returns_k_nearest() {
         return release_pg(pool).await;
     }
 
-    let app = "vector_topk";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let coll = "docs";
     // Provision the per-app ROLE, not just the schema. `vector_search` resolves
     // the binding before it plans, and a schema without its role fails closed
@@ -3878,7 +4070,11 @@ async fn vector_search_returns_k_nearest() {
     // top-10. We assert MEMBERSHIP (not strict order) because pgvector
     // distance ties between FP-close vectors can re-order across builds.
     let query = mk_unit(0, dims);
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
     // The search's projection is the descriptor's field list; install the entry
     // this deploy's runtime descriptor would have planted at boot.
     zeroship_plugin_db::cache_schema_for_tests(
@@ -3969,7 +4165,11 @@ async fn pgvector_extension_missing_reports_typed_error() {
         return release_pg(pool).await;
     }
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
 
     // No descriptor entry is installed for `vector_missing`, and that is
     // deliberate: `ensure_pgvector_available` runs BEFORE the schema resolve,
@@ -4050,7 +4250,9 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
         return release_pg(pool).await;
     }
 
-    let app = "vector_dim_mismatch";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let coll = "docs";
     // Same provisioning gap as `vector_search_returns_k_nearest`: a schema
     // without its per-app role fails closed before the insert is ever attempted.
@@ -4149,7 +4351,9 @@ async fn near_returns_within_radius() {
         return release_pg(pool).await;
     }
 
-    let app = "near_radius";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let coll = "places";
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
@@ -4217,7 +4421,11 @@ async fn near_returns_within_radius() {
         }
     }
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
     let rows = SpatialIndex::spatial_near(
         &backend,
         &DbBinding::cold_start(app),
@@ -4284,7 +4492,11 @@ async fn postgis_extension_missing_reports_typed_error() {
         return release_pg(pool).await;
     }
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
 
     // No descriptor entry, deliberately: the extension probe runs BEFORE the
     // schema resolve, so this must still surface `postgis_extension_missing`.
@@ -4387,21 +4599,23 @@ fn with_root_key(key_id: &str, root_hex: &str) -> zeroship_plugin_db::SuppliedRo
 #[compio::test]
 async fn encrypted_column_round_trip_randomised() {
     let url = require_pg().await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     // Synthetic 32-byte root key.
     let _keys = with_root_key("default", &"a".repeat(64));
 
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
         .await
         .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{SCHEMA}\""), &[])
+    pool.execute(&format!("CREATE SCHEMA \"{schema}\""), &[])
         .await
         .unwrap();
     // Manually create the table; the encryption pass operates on generic
     // BYTEA columns regardless of which migration emitted them.
     pool.execute(
         &format!(
-            r#"CREATE TABLE "{SCHEMA}"."enc_notes" (
+            r#"CREATE TABLE "{schema}"."enc_notes" (
                 id   TEXT PRIMARY KEY,
                 ssn  BYTEA
             )"#
@@ -4411,7 +4625,11 @@ async fn encrypted_column_round_trip_randomised() {
     .await
     .unwrap();
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
     let key = backend
         .key_store()
         .resolve("app1", "default")
@@ -4431,7 +4649,7 @@ async fn encrypted_column_round_trip_randomised() {
     let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct);
     pool.execute(
         &format!(
-            "INSERT INTO \"{SCHEMA}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
+            "INSERT INTO \"{schema}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
         ),
         &[&"row_a", &b64.as_str()],
     )
@@ -4445,7 +4663,7 @@ async fn encrypted_column_round_trip_randomised() {
     let rows = pool
         .query_text_params(
             &format!(
-                "SELECT encode(ssn, 'hex') AS ssn_hex FROM \"{SCHEMA}\".\"enc_notes\" WHERE id = $1"
+                "SELECT encode(ssn, 'hex') AS ssn_hex FROM \"{schema}\".\"enc_notes\" WHERE id = $1"
             ),
             &["row_a"],
         )
@@ -4473,18 +4691,20 @@ async fn encrypted_column_round_trip_randomised() {
 #[compio::test]
 async fn encrypted_randomised_row_swap_rejected() {
     let url = require_pg().await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let _keys = with_root_key("default", &"b".repeat(64));
 
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
         .await
         .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{SCHEMA}\""), &[])
+    pool.execute(&format!("CREATE SCHEMA \"{schema}\""), &[])
         .await
         .unwrap();
     pool.execute(
         &format!(
-            r#"CREATE TABLE "{SCHEMA}"."enc_notes" (
+            r#"CREATE TABLE "{schema}"."enc_notes" (
                 id   TEXT PRIMARY KEY,
                 ssn  BYTEA
             )"#
@@ -4494,7 +4714,11 @@ async fn encrypted_randomised_row_swap_rejected() {
     .await
     .unwrap();
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
     let key = backend
         .key_store()
         .resolve("app1", "default")
@@ -4519,7 +4743,7 @@ async fn encrypted_randomised_row_swap_rejected() {
         let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, ct);
         pool.execute(
             &format!(
-                "INSERT INTO \"{SCHEMA}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
+                "INSERT INTO \"{schema}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
             ),
             &[&id, &b64.as_str()],
         )
@@ -4531,7 +4755,7 @@ async fn encrypted_randomised_row_swap_rejected() {
     let b64_a = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct_a);
     pool.execute(
         &format!(
-            "UPDATE \"{SCHEMA}\".\"enc_notes\" SET ssn = decode($1, 'base64')::bytea WHERE id = $2"
+            "UPDATE \"{schema}\".\"enc_notes\" SET ssn = decode($1, 'base64')::bytea WHERE id = $2"
         ),
         &[&b64_a.as_str(), &"row_b"],
     )
@@ -4543,7 +4767,7 @@ async fn encrypted_randomised_row_swap_rejected() {
     let rows = pool
         .query_text_params(
             &format!(
-                "SELECT encode(ssn, 'hex') AS ssn_hex FROM \"{SCHEMA}\".\"enc_notes\" WHERE id = $1"
+                "SELECT encode(ssn, 'hex') AS ssn_hex FROM \"{schema}\".\"enc_notes\" WHERE id = $1"
             ),
             &["row_b"],
         )
@@ -4579,18 +4803,20 @@ async fn encrypted_randomised_row_swap_rejected() {
 #[compio::test]
 async fn encrypted_deterministic_equality_lookup() {
     let url = require_pg().await;
+    let schema = crate::test_app_id!();
+    let schema = schema.as_str();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let _keys = with_root_key("default", &"c".repeat(64));
 
-    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{SCHEMA}\" CASCADE"), &[])
+    pool.execute(&format!("DROP SCHEMA IF EXISTS \"{schema}\" CASCADE"), &[])
         .await
         .unwrap();
-    pool.execute(&format!("CREATE SCHEMA \"{SCHEMA}\""), &[])
+    pool.execute(&format!("CREATE SCHEMA \"{schema}\""), &[])
         .await
         .unwrap();
     pool.execute(
         &format!(
-            r#"CREATE TABLE "{SCHEMA}"."enc_notes" (
+            r#"CREATE TABLE "{schema}"."enc_notes" (
                 id   TEXT PRIMARY KEY,
                 ssn  BYTEA
             )"#
@@ -4600,13 +4826,17 @@ async fn encrypted_deterministic_equality_lookup() {
     .await
     .unwrap();
     pool.execute(
-        &format!(r#"CREATE INDEX ON "{SCHEMA}"."enc_notes" (ssn)"#),
+        &format!(r#"CREATE INDEX ON "{schema}"."enc_notes" (ssn)"#),
         &[],
     )
     .await
     .unwrap();
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
     let key = backend
         .key_store()
         .resolve("app1", "default")
@@ -4629,7 +4859,7 @@ async fn encrypted_deterministic_equality_lookup() {
     for i in 0..5 {
         pool.execute(
             &format!(
-                "INSERT INTO \"{SCHEMA}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
+                "INSERT INTO \"{schema}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
             ),
             &[&format!("row_{i}").as_str(), &b64_shared.as_str()],
         )
@@ -4647,7 +4877,7 @@ async fn encrypted_deterministic_equality_lookup() {
     let b64_other = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &ct_other);
     pool.execute(
         &format!(
-            "INSERT INTO \"{SCHEMA}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
+            "INSERT INTO \"{schema}\".\"enc_notes\" (id, ssn) VALUES ($1, decode($2, 'base64')::bytea)"
         ),
         &[&"row_other", &b64_other.as_str()],
     )
@@ -4661,7 +4891,7 @@ async fn encrypted_deterministic_equality_lookup() {
     let rows = pool
         .query_text_params(
             &format!(
-                "SELECT id FROM \"{SCHEMA}\".\"enc_notes\" WHERE ssn = decode($1, 'base64')::bytea"
+                "SELECT id FROM \"{schema}\".\"enc_notes\" WHERE ssn = decode($1, 'base64')::bytea"
             ),
             &[b64_shared.as_str()],
         )
@@ -4703,7 +4933,9 @@ async fn p4_round_trip_encrypted_masked_vector_via_descriptor_metadata() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     let _keys = with_root_key("default", &"d".repeat(64));
 
-    let app = "p4_round_trip";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -4879,10 +5111,9 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         "phone": raw[0].get::<_, String>("phone"),
     });
 
-    let finalized =
-        zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![row])
-            .await
-            .expect("read pipeline");
+    let finalized = zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![row])
+        .await
+        .expect("read pipeline");
     let out = &finalized[0];
 
     // Encrypted column decrypted back to plaintext (driven by introspected meta).
@@ -4968,7 +5199,9 @@ async fn p5_pg_crud_works_via_engine_created_schema_without_runtime_ddl() {
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
     let _keys = with_root_key("default", &"e".repeat(64));
 
-    let app = "p5_engine_created";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -5109,10 +5342,9 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         "ssn": raw[0].get::<_, String>("ssn"),
         "phone": raw[0].get::<_, String>("phone"),
     });
-    let finalized =
-        zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![row])
-            .await
-            .expect("read pipeline");
+    let finalized = zeroship_plugin_db::finalize_rows_on_read_for_tests(app, "people", vec![row])
+        .await
+        .expect("read pipeline");
     let out = &finalized[0];
     assert_eq!(
         out["ssn"],
@@ -5162,7 +5394,11 @@ async fn encrypted_column_missing_key_typed_error() {
     // set cannot.
     let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[]);
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
     let err = backend
         .key_store()
         .resolve("app1", "missing_test")
@@ -5262,8 +5498,13 @@ fn pg_dump_on_path() -> bool {
 async fn snapshot_during_migration_returns_typed_error() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
-    let app_id = "p5_pr4_miglock_app";
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
+    let app_id = crate::test_app_id!();
+    let app_id = app_id.as_str();
 
     // Acquire the snapshot_restore lock on a dedicated standalone
     // connection (not a pooled client) so the lock is held for the
@@ -5349,7 +5590,8 @@ async fn snapshot_restore_round_trip_pg() {
     }
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     // Per-app schema fresh every run.
-    let app_id = "p5_pr4_roundtrip_app";
+    let app_id = crate::test_app_id!();
+    let app_id = app_id.as_str();
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -5383,7 +5625,11 @@ async fn snapshot_restore_round_trip_pg() {
         .unwrap();
     }
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
 
     // Snapshot to a tempdir-backed file:// URI.
     let dir = tempfile::tempdir().unwrap();
@@ -5468,7 +5714,8 @@ async fn snapshot_uri_content_hash_round_trip() {
         return;
     }
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app_id = "p5_pr4_hash_app";
+    let app_id = crate::test_app_id!();
+    let app_id = app_id.as_str();
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -5488,7 +5735,11 @@ async fn snapshot_uri_content_hash_round_trip() {
     .await
     .unwrap();
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
     let dir = tempfile::tempdir().unwrap();
     let dest_path = dir.path().join("hash_check.dump");
     let dest_uri = format!("file://{}", dest_path.to_string_lossy());
@@ -5673,7 +5924,8 @@ async fn postgis_available(pool: &Pool) -> bool {
 async fn per_app_role_created_at_provision() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "p6a_role_create";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
 
     // First provision creates the role.
@@ -5866,7 +6118,8 @@ async fn workflow_journal_redeploy_grants_do_not_reopen_without_reprovision() {
 async fn per_app_role_has_no_replication_attr() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "p6a_role_norepl";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
@@ -5900,7 +6153,8 @@ async fn per_app_role_has_no_replication_attr() {
 async fn per_app_role_grant_scoped_to_schema() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "p6a_role_scoped";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
@@ -5957,8 +6211,10 @@ async fn per_app_role_grant_scoped_to_schema() {
 async fn per_app_role_cannot_read_sibling_schema_or_touch_slots() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app_a = "p6a_fence_a";
-    let app_b = "p6a_fence_b";
+    let app_a = crate::test_app_id!("a");
+    let app_a = app_a.as_str();
+    let app_b = crate::test_app_id!("b");
+    let app_b = app_b.as_str();
     let role_a = provision_app_with_role(&pool, app_a).await;
     // Provision a sibling schema B (and its role) with a table.
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app_b}\" CASCADE"), &[])
@@ -6062,7 +6318,8 @@ async fn client_sql_runs_under_per_app_role() {
     // and reverts at COMMIT/ROLLBACK.
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "p6a_setlocal";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
@@ -6120,7 +6377,8 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
     // per-app role before running the statement, not just explicit/auto tx.
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "p6a_exec_autocommit_role";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
@@ -6175,7 +6433,9 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
         return release_pg(admin_pool).await;
     }
 
-    let app = "p6a_vector_role_fence";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let coll = "docs";
     let role = provision_app_with_role(&admin_pool, app).await;
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
@@ -6226,7 +6486,11 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
         "login role must be blocked by FORCE RLS before vector_search proves the role fence"
     );
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(login_pool.clone(), login_url, zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        login_pool.clone(),
+        login_url,
+        zeroship_plugin_db::isolate_key_source(),
+    );
     let rows = VectorIndex::vector_search(
         &backend,
         &DbBinding::cold_start(app),
@@ -6269,7 +6533,9 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         return release_pg(admin_pool).await;
     }
 
-    let app = "p6a_spatial_role_fence";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let coll = "places";
     let role = provision_app_with_role(&admin_pool, app).await;
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
@@ -6323,7 +6589,11 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         "login role must be blocked by FORCE RLS before spatial_near proves the role fence"
     );
 
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(login_pool.clone(), login_url, zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        login_pool.clone(),
+        login_url,
+        zeroship_plugin_db::isolate_key_source(),
+    );
     let rows = SpatialIndex::spatial_near(
         &backend,
         &DbBinding::cold_start(app),
@@ -6372,7 +6642,9 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
-    let app = "p6a_unmask_role_fence";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let coll = "users";
     let role = provision_app_with_role(&admin_pool, app).await;
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
@@ -6496,7 +6768,9 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     // Synthetic 32-byte root key, same shape as the encrypted round-trip gate.
     let _keys = with_root_key("default", &"b".repeat(64));
 
-    let app = "p6a_unmask_encrypted";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let coll = "users";
     let role = provision_app_with_role(&admin_pool, app).await;
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
@@ -6520,7 +6794,11 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     // Real ciphertext from the platform's own encryptor, under the AAD the read
     // path recomputes: canonical_aad(collection, column, Some(row_pk)) for the
     // randomised mode (crud/unmask.rs:503-510).
-    let backend = zeroship_plugin_db::backend::PostgresBackend::new(admin_pool.clone(), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        admin_pool.clone(),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
     let key = backend
         .key_store()
         .resolve(app, "default")
@@ -6619,7 +6897,9 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
-    let app = "p6a_unmask_audit_fence";
+    let app = crate::test_app_id!();
+
+    let app = app.as_str();
     let coll = "patients";
     let role = provision_app_with_role(&admin_pool, app).await;
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&admin_pool, app)
@@ -6772,7 +7052,8 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "p6a_pg_policy_cache";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let coll = "patients";
 
     // Drops the schema and the cluster-scoped per-app role, then
@@ -6895,9 +7176,13 @@ async fn wal_connection_stays_platform_role() {
     // The runtime half: provision a role, then run a replication-side
     // operation on the pool and confirm it executes as the platform
     // login role (current_user unchanged), NOT the per-app role.
+    // No `cdc_budget` permit: despite the name, this test creates no slot and
+    // no publication. It provisions a role and reads `current_user` off the
+    // pool, so it contends for nothing the CDC budget is sized against.
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "p6a_walrole";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     let role = provision_app_with_role(&pool, app).await;
     zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app)
         .await
@@ -6945,11 +7230,13 @@ use zeroship_plugin_db::drop_namespace::{DropNamespaceOpts, DropNamespaceOutcome
 /// the drop-namespace tests. (`PostgresBackend` is already imported at
 /// module scope earlier in this file — referenced unqualified here.)
 fn pg_backend_handle(pool: &std::rc::Rc<Pool>, url: &str) -> BackendHandle {
-    BackendHandle::Postgres(std::rc::Rc::new(zeroship_plugin_db::backend::PostgresBackend::new(
-        std::rc::Rc::clone(pool),
-        url.to_string(),
-        zeroship_plugin_db::isolate_key_source(),
-    )))
+    BackendHandle::Postgres(std::rc::Rc::new(
+        zeroship_plugin_db::backend::PostgresBackend::new(
+            std::rc::Rc::clone(pool),
+            url.to_string(),
+            zeroship_plugin_db::isolate_key_source(),
+        ),
+    ))
 }
 
 async fn slot_exists(pool: &Pool, app: &str) -> bool {
@@ -7001,7 +7288,8 @@ async fn role_exists(pool: &Pool, app: &str) -> bool {
 async fn drop_namespace_defers_on_active_subscription() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "p6a_drop_defer";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
@@ -7043,7 +7331,8 @@ async fn drop_namespace_defers_on_active_subscription() {
 async fn drop_namespace_force_fires_subscription_app_dropped() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "p6a_drop_force";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
@@ -7102,12 +7391,14 @@ async fn drop_namespace_force_fires_subscription_app_dropped() {
 #[compio::test]
 async fn drop_namespace_pg_drops_slots_but_retains_migration_publication() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping drop_namespace_pg_ordering — wal_level != logical");
         return release_pg(pool).await;
     }
-    let app = "p6a_drop_order";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
@@ -7156,7 +7447,8 @@ async fn drop_namespace_pg_drops_slots_but_retains_migration_publication() {
 async fn drop_namespace_drops_per_app_role_last() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    let app = "p6a_drop_role";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     let role = zeroship_core::database_role::per_app_role_name(app)
         .expect("drop-role fixture app id must produce a valid PostgreSQL role name");
@@ -7207,12 +7499,14 @@ async fn drop_namespace_drops_per_app_role_last() {
 #[compio::test]
 async fn drop_namespace_idempotent_steps_3_to_5() {
     let url = require_pg().await;
+    let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping drop_namespace_idempotent — wal_level != logical");
         return release_pg(pool).await;
     }
-    let app = "p6a_drop_idem";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     let role = zeroship_core::database_role::per_app_role_name(app)
         .expect("idempotent-drop fixture app id must produce a valid PostgreSQL role name");
@@ -7271,12 +7565,14 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     // 4-5 finish the teardown. This proves a re-run after a crash that
     // got partway through completes cleanly.
     let url = require_pg().await;
+    let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     if !pg_has_logical_wal(&pool).await {
         zeroship_test_support::skip("Skipping drop_namespace_retries — wal_level != logical");
         return release_pg(pool).await;
     }
-    let app = "p6a_drop_retry";
+    let app = crate::test_app_id!();
+    let app = app.as_str();
     c1_cleanup(&pool, app).await;
     let role = zeroship_core::database_role::per_app_role_name(app)
         .expect("drop-retry fixture app id must produce a valid PostgreSQL role name");
@@ -7491,7 +7787,17 @@ fn direct_connection_sites_do_not_grow() {
     //       this pin exists to keep. They cannot share one pool for the same
     //       reason `unmask_tx_lane.rs`'s cannot: each fixture drops and
     //       recreates its own app schema.
-    const PINNED: usize = 131;
+    // Raised to 132 on 2026-09-04, and the arithmetic closes exactly:
+    //   +1  `tests/support/mod.rs::sweep_prior_run_residue_once`, added the same
+    //       day. It is the once-per-binary residue sweep, and it opens its own
+    //       pool because it runs BEFORE any test has one - it is the barrier
+    //       every `require_pg` passes through. It drops the pool and awaits
+    //       `drain_connections` inside the runtime that opened it, which is the
+    //       pairing this pin exists to keep.
+    //   0   nothing else moved: the parallel-isolation change that landed with
+    //       it rewrote app ids and added permits, neither of which is a
+    //       constructor spelling. Measured at 132 against 131 before it.
+    const PINNED: usize = 132;
     // 10 files today, one of them nested. This floor alone does NOT catch a walk
     // that stops descending - measured: flattening it reads 9 and clears 9. That
     // is what the second assertion is for. This one catches the scan being
@@ -7537,8 +7843,11 @@ fn direct_connection_sites_do_not_grow() {
 async fn a_dedicated_client_is_a_pool_checkout_and_returns_on_drop() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let backend =
-        zeroship_plugin_db::backend::PostgresBackend::new(std::rc::Rc::clone(&pool), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        std::rc::Rc::clone(&pool),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
 
     let active_before = pool.active_count();
     let created_before = pool.metrics.connections_created.get();
@@ -7592,8 +7901,11 @@ async fn concurrent_dedicated_clients_are_bounded_by_the_pool() {
             .await
             .expect("pool"),
     );
-    let backend =
-        zeroship_plugin_db::backend::PostgresBackend::new(std::rc::Rc::clone(&pool), url.clone(), zeroship_plugin_db::isolate_key_source());
+    let backend = zeroship_plugin_db::backend::PostgresBackend::new(
+        std::rc::Rc::clone(&pool),
+        url.clone(),
+        zeroship_plugin_db::isolate_key_source(),
+    );
 
     use zeroship_plugin_db::backend::SqlExecutor as _;
     let first = backend

@@ -55,10 +55,17 @@ pub fn sqlite_url(root: &tempfile::TempDir) -> String {
 }
 
 /// The app id the runtime derives when `EnvSnapshot::empty()` carries no
-/// `APP_ID` (`crates/runtime/src/core/plugin.rs`), which is what `dispatch_zs`
-/// boots with. It is also the dev app id, so the matrix runs on the same
-/// `<db_dir>/zs-default.sqlite` a `pnpm dev` app does.
-const MATRIX_APP_ID: &str = "default";
+/// `APP_ID` (`crates/runtime/src/core/plugin.rs`). It is the DEV app id, so a
+/// SQLite matrix keyed on it runs against the same `<db_dir>/zs-default.sqlite`
+/// a `pnpm dev` app does - which is the property that leg is for.
+///
+/// The Postgres leg must NOT use it. `apply_matrix_schema_ahead_of_postgres`
+/// opens with `DROP SCHEMA ... CASCADE`, and a shared server has exactly one
+/// `default` schema, so two Postgres matrix runs on one server destroy each
+/// other's table. That is what they did until 2026-09-04. Postgres callers pass
+/// their own per-test app id; the SQLite leg keeps this one, and its per-run
+/// `tempfile::tempdir` is what isolates it.
+pub const DEV_APP_ID: &str = "default";
 
 /// The matrix's deployed field shape. Kept beside the JS so the pre-apply, the
 /// runtime descriptor, and the procedures cannot drift.
@@ -81,12 +88,12 @@ fn matrix_schema() -> Value {
 /// A migration process must have run first - on the dev tier the Vite
 /// dev-server's apply-ahead, on Postgres the migration service at deploy.
 /// Without this every dispatch fails with a missing-table error.
-fn apply_matrix_schema_ahead_of_runtime(url: &str, collection: &str) {
+fn apply_matrix_schema_ahead_of_runtime(url: &str, app_id: &str, collection: &str) {
     let Some(path) = url.strip_prefix("sqlite:") else {
         // The Postgres leg. Same engine, same confined ceiling, same declared
         // shape - only the dialect and the driver differ, which is the whole
         // point of a parity matrix. See `apply_matrix_schema_ahead_of_postgres`.
-        apply_matrix_schema_ahead_of_postgres(url, collection);
+        apply_matrix_schema_ahead_of_postgres(url, app_id, collection);
         return;
     };
     let db_dir = std::path::Path::new(path)
@@ -95,8 +102,8 @@ fn apply_matrix_schema_ahead_of_runtime(url: &str, collection: &str) {
         .to_path_buf();
     crate::support::tables::create_sqlite_table(
         &db_dir,
-        MATRIX_APP_ID,
-        &matrix_ddl_sqlite(collection),
+        app_id,
+        &matrix_ddl_sqlite(app_id, collection),
     );
 }
 
@@ -108,9 +115,9 @@ fn apply_matrix_schema_ahead_of_runtime(url: &str, collection: &str) {
 /// [`matrix_ddl_postgres`]; the two must describe the SAME declared shape in
 /// each dialect's spelling, because that equivalence IS what this matrix
 /// asserts.
-fn matrix_ddl_sqlite(collection: &str) -> String {
+fn matrix_ddl_sqlite(app_id: &str, collection: &str) -> String {
     format!(
-        r#"CREATE TABLE IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}" (
+        r#"CREATE TABLE IF NOT EXISTS "{app_id}"."{collection}" (
   id TEXT PRIMARY KEY,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -127,9 +134,9 @@ fn matrix_ddl_sqlite(collection: &str) -> String {
   "payload_bytes" TEXT,
   "payload_json" TEXT DEFAULT '{{}}'
 );
-CREATE INDEX IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}_deleted_at_idx" ON "{collection}" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}_updated_at_idx" ON "{collection}" ("updated_at");
-CREATE INDEX IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}_created_by_idx" ON "{collection}" ("created_by");
+CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_deleted_at_idx" ON "{collection}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_updated_at_idx" ON "{collection}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{app_id}"."{collection}_created_by_idx" ON "{collection}" ("created_by");
 "#
     )
 }
@@ -141,9 +148,9 @@ CREATE INDEX IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}_created_by_idx" ON "{
 /// `BOOLEAN` for `INTEGER`, `JSONB` for `TEXT`. Note the index targets flip -
 /// PostgreSQL qualifies the TABLE, SQLite qualifies the INDEX NAME, because on
 /// SQLite the app file is an ATTACHed database rather than a schema.
-fn matrix_ddl_postgres(collection: &str) -> String {
+fn matrix_ddl_postgres(app_id: &str, collection: &str) -> String {
     format!(
-        r#"CREATE TABLE IF NOT EXISTS "{MATRIX_APP_ID}"."{collection}" (
+        r#"CREATE TABLE IF NOT EXISTS "{app_id}"."{collection}" (
   id TEXT PRIMARY KEY,
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -160,9 +167,9 @@ fn matrix_ddl_postgres(collection: &str) -> String {
   "payload_bytes" BYTEA,
   "payload_json" JSONB DEFAULT '{{}}'::jsonb
 );
-CREATE INDEX IF NOT EXISTS "{collection}_deleted_at_idx" ON "{MATRIX_APP_ID}"."{collection}" ("deleted_at");
-CREATE INDEX IF NOT EXISTS "{collection}_updated_at_idx" ON "{MATRIX_APP_ID}"."{collection}" ("updated_at");
-CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{MATRIX_APP_ID}"."{collection}" ("created_by");
+CREATE INDEX IF NOT EXISTS "{collection}_deleted_at_idx" ON "{app_id}"."{collection}" ("deleted_at");
+CREATE INDEX IF NOT EXISTS "{collection}_updated_at_idx" ON "{app_id}"."{collection}" ("updated_at");
+CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{app_id}"."{collection}" ("created_by");
 "#
     )
 }
@@ -182,12 +189,12 @@ CREATE INDEX IF NOT EXISTS "{collection}_created_by_idx" ON "{MATRIX_APP_ID}"."{
 /// against a single-copy SQLite side. Dropping the app schema makes the leg
 /// repeatable without leaving a unique-name-per-run trail on a shared server.
 /// It no longer drops a journal schema: nothing here writes one now.
-fn apply_matrix_schema_ahead_of_postgres(url: &str, collection: &str) {
+fn apply_matrix_schema_ahead_of_postgres(url: &str, app_id: &str, collection: &str) {
     // project_schema == app_id: plugin-db's PG data plane resolves a collection
     // to `"<app_id>"."<collection>"` (the PG data plane's own qualification),
     // and this DDL qualifies into that same schema, so the runtime reads the
     // table this created rather than a different one.
-    let ddl = matrix_ddl_postgres(collection);
+    let ddl = matrix_ddl_postgres(app_id, collection);
 
     block_on(async move {
         let pool = compio_postgres::Pool::connect(url, 2)
@@ -195,8 +202,8 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, collection: &str) {
             .expect("admin pool for the parity schema");
 
         pool.batch_execute(&format!(
-            "DROP SCHEMA IF EXISTS \"{MATRIX_APP_ID}\" CASCADE; \
-             CREATE SCHEMA \"{MATRIX_APP_ID}\""
+            "DROP SCHEMA IF EXISTS \"{app_id}\" CASCADE; \
+             CREATE SCHEMA \"{app_id}\""
         ))
         .await
         .expect("reset the parity app schema");
@@ -213,10 +220,10 @@ fn apply_matrix_schema_ahead_of_postgres(url: &str, collection: &str) {
         // Provisioning that role is part of the deploy-time apply, not an
         // afterthought. The role recipe supplies schema and sequence reach; the
         // binding supplies explicit column grants.
-        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, MATRIX_APP_ID)
+        zeroship_plugin_db::auth::bootstrap::ensure_per_app_role(&pool, app_id)
             .await
             .expect("provision the matrix app's runtime role");
-        super::support::grant_all_runtime_table_columns(&pool, MATRIX_APP_ID, collection).await;
+        super::support::grant_all_runtime_table_columns(&pool, app_id, collection).await;
     });
 }
 
@@ -485,10 +492,17 @@ pub fn runtime_descriptor(collection: &str, schema: &Value) -> String {
     .expect("runtime descriptor serializes")
 }
 
+/// Drive one RPC through a real runtime against `url`, as app `app_id`.
+///
+/// `app_id` is INJECTED, not inherited. It used to be absent, so the runtime
+/// fell back to `default` (`crates/zeroship-runtime/src/core/plugin.rs`) and
+/// every Postgres matrix run addressed the same schema. Passing it explicitly
+/// also stops the fixture from depending on that fallback continuing to exist.
 pub fn dispatch_zs_with_descriptor(
     url: &str,
     source: &str,
     name: &str,
+    app_id: &str,
     descriptor: &str,
 ) -> (u16, Value) {
     init_v8();
@@ -505,8 +519,10 @@ pub fn dispatch_zs_with_descriptor(
         .expect("db service")
         .plugin(),
     ];
+    let env_vars = std::collections::HashMap::from([("APP_ID".to_string(), app_id.to_string())]);
     let runtime = Runtime::builder()
         .modules(modules)
+        .env_vars(env_vars)
         .plugins(plugins)
         .runtime_descriptor(Some(descriptor.to_string()))
         .build();
@@ -541,7 +557,12 @@ pub fn dispatch_zs_with_descriptor(
     (status, json)
 }
 
-pub fn run_matrix(url: &str) -> MatrixSnapshot {
+/// Run the whole matrix against `url` as `app_id`.
+///
+/// `app_id` is the caller's, not a constant. On PostgreSQL it names the schema
+/// this run drops and rebuilds, so a shared server needs it to be per-test;
+/// SQLite callers pass [`DEV_APP_ID`] on purpose (see its note).
+pub fn run_matrix(url: &str, app_id: &str) -> MatrixSnapshot {
     // Keep each matrix run isolated even when the backend URL is reused
     // across tests or legs.
     let collection = format!(
@@ -551,18 +572,19 @@ pub fn run_matrix(url: &str) -> MatrixSnapshot {
     let source = matrix_source(&collection);
     let descriptor = runtime_descriptor(&collection, &matrix_schema());
 
-    apply_matrix_schema_ahead_of_runtime(url, &collection);
+    apply_matrix_schema_ahead_of_runtime(url, app_id, &collection);
 
-    let (status, body) = dispatch_zs_with_descriptor(url, &source, "seed", &descriptor);
+    let (status, body) = dispatch_zs_with_descriptor(url, &source, "seed", app_id, &descriptor);
     assert_eq!(status, 200, "seed failed: {body}");
     let seed = extract_json(&body);
 
     let (status, body) =
-        dispatch_zs_with_descriptor(url, &source, "transactionMatrix", &descriptor);
+        dispatch_zs_with_descriptor(url, &source, "transactionMatrix", app_id, &descriptor);
     assert_eq!(status, 200, "transactionMatrix failed: {body}");
     let tx = extract_json(&body);
 
-    let (status, body) = dispatch_zs_with_descriptor(url, &source, "typedRoundTrip", &descriptor);
+    let (status, body) =
+        dispatch_zs_with_descriptor(url, &source, "typedRoundTrip", app_id, &descriptor);
     assert_eq!(status, 200, "typedRoundTrip failed: {body}");
     let typed = extract_json(&body);
 
