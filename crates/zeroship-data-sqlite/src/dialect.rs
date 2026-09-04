@@ -26,7 +26,10 @@ use zeroship_data_core::storage::DialectBuilder;
 pub(crate) struct SqliteDialect;
 
 impl DialectBuilder for SqliteDialect {
-    #[cfg(feature = "test-helpers")]
+    // UNGATED since 2026-09-04, with the trait member in data-core. Gated, this
+    // impl and the one on `SqliteBackend` were `error[E0046]: not all trait
+    // items implemented, missing: sql_dialect` in any build that turned on
+    // `zeroship-data-core/test-helpers` without this crate's own feature.
     fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
         zeroship_schema::query::SqlDialect::Sqlite
     }

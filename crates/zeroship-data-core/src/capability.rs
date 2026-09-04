@@ -19,6 +19,37 @@
 //!   so both are `pub` here. This is the Phase 0.5 audit-1 promotion the split
 //!   requires, applied at the moment it becomes load-bearing rather than in a
 //!   sweep - the compiler is the oracle for it in this direction.
+//!
+//! # NO `cfg(feature)` IN THIS FILE
+//!
+//! Four types here - `SnapshotOpts`, `BusyPolicy`, `SnapshotHandle`,
+//! `PitrTarget` - carried `#[cfg(feature = "test-helpers")]` until 2026-09-04,
+//! because their only consumer, [`crate::storage::Backup`], carried it too.
+//! Both gates are gone. Every one of the four appears in a `Backup` method
+//! SIGNATURE, so they are not vocabulary the contract happens to use, they are
+//! part of it: a build that cannot name `SnapshotOpts` cannot state the
+//! contract, and gating them made a whole capability's shape depend on a
+//! DEV-dependency feature that `--all-targets` and `--all-features` silently
+//! turn on. See `storage.rs`'s module header for the three breakages that came
+//! out of exactly that.
+//!
+//! They cost nothing to ship: a `String`, a `[u8; 32]`, two `u64`s and two
+//! fieldless enums, no dependency of any kind, and no code at all until
+//! something constructs one. The gate that DOES still apply here is the one on
+//! the vendor impls, which is where the `pg_dump` shell-out and the `sha2` it
+//! hashes with live.
+//!
+//! Ungating cost three DEAD DOC LINKS their invisibility, and that is the
+//! second-order effect to expect from any ungating here. The three
+//! `[`Backup::snapshot`]` / `[`Backup::pitr_replay`]` links below were bare and
+//! resolved to nothing - `Backup` lives in [`crate::storage`] and is not
+//! imported into this module - but a DEFAULT `cargo doc` never rendered items
+//! that were `cfg`-gated out of it, so `tests/run_doc_gate.sh` never saw them.
+//! They are qualified paths now. The same thing happened to `SchemaIntrospect`'s
+//! two `crate::diff::` links in `storage.rs` the day before, for the same
+//! reason. Measured over `cargo doc -p zeroship-data-core --no-deps`: 20
+//! unresolved links under `--all-features` before, 16 after; 16 either way on
+//! default features.
 
 
 
@@ -124,12 +155,11 @@ impl LockScope {
 /// Name of the per-app lock shared by snapshot and restore.
 pub const SNAPSHOT_RESTORE_LOCK_TAG: &str = "snapshot_restore";
 
-/// Options for [`Backup::snapshot`].
+/// Options for [`Backup::snapshot`](crate::storage::Backup::snapshot).
 ///
 /// Today carries only [`Self::if_busy`]; reserved so future work can
 /// add compression / encryption-at-rest knobs without changing the
 /// trait method signature.
-#[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone)]
 pub struct SnapshotOpts {
     pub if_busy: BusyPolicy,
@@ -137,7 +167,6 @@ pub struct SnapshotOpts {
 
 /// Policy when a snapshot can't be taken immediately (e.g. SQLite
 /// `VACUUM INTO` hitting `SQLITE_BUSY` on a schema-change race).
-#[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BusyPolicy {
     /// Surface a typed `Configuration { code: "backup_busy" }` error
@@ -147,9 +176,8 @@ pub enum BusyPolicy {
     Retry,
 }
 
-/// Handle returned by [`Backup::snapshot`] — the address + integrity
-/// metadata needed to restore.
-#[cfg(feature = "test-helpers")]
+/// Handle returned by [`Backup::snapshot`](crate::storage::Backup::snapshot) -
+/// the address + integrity metadata needed to restore.
 #[derive(Debug, Clone)]
 pub struct SnapshotHandle {
     /// Where the snapshot lives. Convention:
@@ -165,12 +193,11 @@ pub struct SnapshotHandle {
     pub created_at_ms: u64,
 }
 
-/// Target for [`Backup::pitr_replay`].
+/// Target for [`Backup::pitr_replay`](crate::storage::Backup::pitr_replay).
 ///
 /// PG accepts both forms; SQLite refuses both with `pitr_pg_only`
 /// (the SQLite arm has no WAL-archive PITR story — the placeholder
 /// exists so the trait surface is uniform).
-#[cfg(feature = "test-helpers")]
 #[derive(Debug, Clone)]
 pub enum PitrTarget {
     /// PG log-sequence-number, e.g. `"0/16B6300"`.

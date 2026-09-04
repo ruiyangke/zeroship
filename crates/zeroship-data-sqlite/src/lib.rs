@@ -1036,7 +1036,6 @@ impl DialectBuilder for SqliteBackend {
     // per call — rustc inlines the value away because every method on
     // `SqliteDialect` is `&self` and side-effect-free.
 
-    #[cfg(feature = "test-helpers")]
     fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
         SqliteDialect.sql_dialect()
     }
