@@ -150,13 +150,24 @@ gate_arms_init zero_tokio
 PINNED_CARRIERS="cyper cyper-core hyper hyper-util"
 #
 # Our crates that name a carrier directly. Measured from `cargo metadata`
-# `.packages[].dependencies[].name`, so it includes dev- and build-dependencies;
-# all nine are plain normal dependencies on cyper today. NOTE that
-# zeroship-core is here AND is reached a second way, through zeroship-bundle ->
-# compio-s3 -> cyper; both were still live at the re-measurement.
-PINNED_ENTRYPOINTS="compio-s3 zeroship-auth zeroship-control zeroship-core \
-zeroship-gateway zeroship-mailer zeroship-plugin-workflow zeroship-runtime \
-zeroship-worker"
+# `.packages[].dependencies[].name`, so it includes dev- and build-dependencies.
+# NOTE that zeroship-core is here AND is reached a second way, through
+# zeroship-bundle -> compio-s3 -> cyper; both were still live at the
+# re-measurement.
+#
+# NINE OF THE TEN are plain normal dependencies on cyper. The tenth,
+# zeroship-cdc-transport-spike, joined on 2026-09-03 with a DEV dependency, and
+# it is the first entry that is not a normal one. That distinction changes
+# nothing here on purpose: this arm reads every dependency kind, precisely so a
+# new crate cannot reach the tokio-carrying HTTP client through the
+# dev-dependency exemption that arm 1 grants. The gate went red on the addition
+# and this pin and the AGENTS.md sentence moved in the same commit, which is the
+# whole mechanism working. The spike exists to validate the CDC relay transport
+# (`docs/proposals/2026-08-28-cdc-service.md`); DELETE ITS NAME FROM THIS LIST
+# when the spike crate is deleted.
+PINNED_ENTRYPOINTS="compio-s3 zeroship-auth zeroship-cdc-transport-spike \
+zeroship-control zeroship-core zeroship-gateway zeroship-mailer \
+zeroship-plugin-workflow zeroship-runtime zeroship-worker"
 
 fail=0
 TMP="$(mktemp -d)"
