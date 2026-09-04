@@ -254,7 +254,7 @@ jobs:
               --include='*.toml' --include='*.sh' \
               --exclude-dir=wpt --exclude-dir=dist \
               --exclude-dir=node_modules --exclude-dir=target \
-              --exclude=source_citation_scan.sh \
+              --exclude=source_citation_gate.sh \
               --exclude=source_citation_selftest.sh \
               $ROOTS 2>/dev/null \
             | sed 's|^\(\.\./\)*||' | sort -u); do
@@ -341,7 +341,7 @@ jobs:
       # to", not "does this exist". Deleting the citation is almost always the
       # wrong repair.
       - name: Source citations resolve
-        run: tests/source_citation_scan.sh
+        run: tests/source_citation_gate.sh
       # And the control for the step above, for the same reason the
       # measurement-integrity self-test exists: that gate passes at zero
       # unresolvable citations, which is also what a gate that has quietly
@@ -353,6 +353,20 @@ jobs:
       # always passes.
       - name: Source-citation gate self-test
         run: tests/source_citation_selftest.sh
+      # SEC-8. The private registry must not allow open self-registration or
+      # $authenticated publish, and its compose port must stay loopback-bound.
+      #
+      # WIRED 2026-09-04, AND IT HAD NEVER RUN. It was named
+      # `verdaccio_config_guard.sh`, so both meta-gates - which take their
+      # population from `tests/*_gate.sh` - could not see it, and nothing else
+      # asked. The only thing enforcing SEC-8 statically was whoever remembered
+      # the script existed. The rename is what turned that from a sentence in a
+      # comment into a failure.
+      #
+      # It parses committed files and needs no registry, which is why it belongs
+      # in this job rather than behind a service container.
+      - name: Verdaccio registry config is closed
+        run: tests/verdaccio_config_gate.sh
       # Three instances in one day (2026-08-10) of a tracked file hardcoding a
       # home directory: a `file:/home/...` dependency that shipped in a
       # published package (#265), a ZEROSHIP_BIN pointing into one home dir, and
@@ -1851,7 +1865,7 @@ jobs:
         if: always()
         run: |
           set -o pipefail
-          tests/zship_artifact_contract.sh 2>&1 | tee "$RUNNER_TEMP/zship-contract.log"
+          tests/zship_artifact_gate.sh 2>&1 | tee "$RUNNER_TEMP/zship-contract.log"
       # The service logs the harness leaves in /tmp are where a failure is
       # actually diagnosable; without them a red run reports only which assertion
       # went red. `if: failure()` so a green run stays quiet.

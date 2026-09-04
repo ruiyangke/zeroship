@@ -102,7 +102,7 @@ usage() {
 # adding a gate moves one number and not two - the second of two pins is the
 # one that gets forgotten, and a forgotten pin is the stale census both scripts
 # warn about.
-GATE_FILE_FLOOR=38
+GATE_FILE_FLOOR=41
 
 DIR=""
 RUN=()

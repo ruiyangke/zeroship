@@ -57,7 +57,7 @@
 #                   BESIDE the thing it tests, so its wiring is that thing's
 #                   wiring, not an independent obligation.
 #   bench_*.sh      benchmarks. Not verdicts.
-#   RESIDUE         12 named files that match no family, each with a one-line
+#   RESIDUE         9 named files that match no family, each with a one-line
 #                   classification below. Kept short on purpose: a long list
 #                   here is the census that goes stale.
 #
@@ -178,12 +178,13 @@ platform_migration_corpus_gate.sh	brings up its OWN postgres:17 container and ne
 # introducing it is worse than none; the JOB a step lives in is stable and is
 # what a reader needs anyway.
 #
-# THREE OF THESE ARE GATES IN SUBSTANCE, and the population rule cannot see
-# them because it reads names: source_citation_scan.sh (wired, in the rust
-# job), zship_artifact_contract.sh (wired, in the golden-path job) and
-# verdaccio_config_guard.sh (WIRED NOWHERE - a real finding this gate must not
-# be read as covering). Renaming them to `*_gate.sh` would pull all three into
-# both meta-gates; that is the right fix and it is a separate change.
+# THREE OF THESE WERE GATES IN SUBSTANCE, invisible to the population rule
+# because it reads names, and they are gone from this list as of 2026-09-04:
+# `source_citation_scan.sh`, `zship_artifact_contract.sh` and
+# `verdaccio_config_guard.sh` were renamed to `*_gate.sh` and are now ruled on
+# by this gate and by `gate_arm_census.sh` like every other. Two were already
+# wired; the third, verdaccio, was WIRED NOWHERE, and the rename is what made
+# that a failure here rather than a note in a comment nobody runs.
 # ---------------------------------------------------------------------------
 RESIDUE='
 config_check_e2e.sh	e2e harness whose name puts the suffix at the wrong end; wired in the rust job
@@ -194,10 +195,7 @@ golden_path.sh	the build-locally-then-deploy e2e harness; owns the golden-path j
 health_endpoints.sh	manual liveness probe against a running stack
 metering_rowlock_pgbench.sh	pgbench load generator; a measurement, not a verdict
 provision_test_backends.sh	brings the test backends up; setup, not a check
-source_citation_scan.sh	a gate in substance, named as a scan; wired in the rust job
 sweep_test_databases.sh	drops leftover scratch databases; teardown, not a check
-verdaccio_config_guard.sh	a gate in substance, named as a guard; WIRED NOWHERE, and out of this population by name alone
-zship_artifact_contract.sh	the .zship format check; wired in the golden-path job
 '
 
 # ---------------------------------------------------------------------------
@@ -249,7 +247,7 @@ run_commands() {
 # prefixes and interpreter words are stripped until the command word is bare.
 # A token that is not a path (no slash) or not a `.sh` is dropped, which is the
 # same shape tests/ci_invocable_gate.sh needed after its first draft reported
-# `--exclude=source_citation_scan.sh` as an invocation.
+# `--exclude=source_citation_gate.sh` as an invocation.
 #
 # THE ARGUMENTS ARE KEPT because `--self-test` is not wiring. Every gate here
 # with a self-test is wired as two steps - the self-test proves the instrument

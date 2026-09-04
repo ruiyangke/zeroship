@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# source_citation_scan.sh — resolve in-comment citations that name a SOURCE path.
+# source_citation_gate.sh - resolve in-comment citations that name a SOURCE path.
 #
 # The sibling check in CI resolves citations that name a `docs/**.md` file. This
 # one covers the other half: a comment that points at `crates/foo/src/bar.rs` or
@@ -384,7 +384,7 @@ while IFS= read -r line; do
 done < <(git ls-files -- $ROOTS \
     | grep -E '\.(rs|ts|tsx|js|toml|sh)$' \
     | grep -v -e '/wpt/' -e '/dist/' -e '/node_modules/' -e '/target/' \
-    | grep -vx -e 'tests/source_citation_scan.sh' -e 'tests/source_citation_selftest.sh' \
+    | grep -vx -e 'tests/source_citation_gate.sh' -e 'tests/source_citation_selftest.sh' \
     | xargs -d '\n' -r grep -oP "$PAT" -- 2>/dev/null | sort -u)
 
 # Printed on success too. A number nobody sees until the gate has already failed
