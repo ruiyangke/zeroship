@@ -78,16 +78,20 @@ usage() {
 
 # THE ONLY NUMBER HERE, and it counts FILES, not findings.
 #
-# MEASURED 2026-08-31 by `find tests -maxdepth 1 -name '*_gate.sh'`: 26. It was
-# 25 before compose_db_posture_gate.sh was added. Gates
-# are added and deleted by hand, so a drop is a decision somebody made and must
-# be recorded here in the same commit, not an accident to be absorbed. Set at
-# the observed count on purpose: a slack floor here would let the glob
-# half-break unnoticed, which is the precise failure this script exists to catch
-# one level down. RAISE THIS WHEN YOU ADD A GATE - leaving it behind the real
-# count is how a floor stops meaning anything without ever going red. It sat at
-# 24 against 25 real files for exactly that reason.
-GATE_FILE_FLOOR=26
+# MEASURED 2026-09-04 by `find tests -maxdepth 1 -name '*_gate.sh'`: 30 already
+# present, + 1 for dev_dep_feature_route_gate.sh added in the same commit = 31.
+# It read 26 until then, which was the count on 2026-08-31 when
+# compose_db_posture_gate.sh landed; four gates were added afterwards without
+# moving it, so it had drifted four behind the tree and would not have noticed
+# the glob losing four files. Gates are added and deleted by hand, so a drop is
+# a decision somebody made and must be recorded here in the same commit, not an
+# accident to be absorbed. Set at the observed count on purpose: a slack floor
+# here would let the glob half-break unnoticed, which is the precise failure
+# this script exists to catch one level down. RAISE THIS WHEN YOU ADD A GATE -
+# leaving it behind the real count is how a floor stops meaning anything without
+# ever going red. It sat at 24 against 25 real files for exactly that reason,
+# and then at 26 against 30.
+GATE_FILE_FLOOR=31
 
 DIR=""
 RUN=()
