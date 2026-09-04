@@ -78,20 +78,22 @@ usage() {
 
 # THE ONLY NUMBER HERE, and it counts FILES, not findings.
 #
-# MEASURED 2026-09-04 by `find tests -maxdepth 1 -name '*_gate.sh'`: 30 already
-# present, + 1 for dev_dep_feature_route_gate.sh added in the same commit = 31.
-# It read 26 until then, which was the count on 2026-08-31 when
-# compose_db_posture_gate.sh landed; four gates were added afterwards without
-# moving it, so it had drifted four behind the tree and would not have noticed
-# the glob losing four files. Gates are added and deleted by hand, so a drop is
-# a decision somebody made and must be recorded here in the same commit, not an
-# accident to be absorbed. Set at the observed count on purpose: a slack floor
-# here would let the glob half-break unnoticed, which is the precise failure
-# this script exists to catch one level down. RAISE THIS WHEN YOU ADD A GATE -
-# leaving it behind the real count is how a floor stops meaning anything without
-# ever going red. It sat at 24 against 25 real files for exactly that reason,
-# and then at 26 against 30.
-GATE_FILE_FLOOR=31
+# RE-MEASURED 2026-09-04 by `find tests -maxdepth 1 -name '*_gate.sh' | wc -l`:
+# 33 already present, + 1 for worker_replication_privilege_gate.sh added in the
+# same commit = 34. It read 31 until then, which was the count earlier the same
+# day when dev_dep_feature_route_gate.sh landed; two gates arrived afterwards
+# without moving it, so it was two behind the tree and would not have noticed
+# the glob losing two files. THAT IS THE THIRD TIME THIS NUMBER HAS DRIFTED
+# BEHIND (24 against 25, then 26 against 30, now 31 against 33), which says the
+# instruction below is read less often than gates are added.
+#
+# Gates are added and deleted by hand, so a drop is a decision somebody made and
+# must be recorded here in the same commit, not an accident to be absorbed. Set
+# at the observed count on purpose: a slack floor here would let the glob
+# half-break unnoticed, which is the precise failure this script exists to catch
+# one level down. RAISE THIS WHEN YOU ADD A GATE - leaving it behind the real
+# count is how a floor stops meaning anything without ever going red.
+GATE_FILE_FLOOR=34
 
 DIR=""
 RUN=()

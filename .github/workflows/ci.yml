@@ -558,6 +558,16 @@ jobs:
       # compiled. This step sits in the rust job for the toolchain, not a build.
       - name: zero-tokio invariant
         run: tests/zero_tokio_gate.sh
+      # AGENTS.md's "privilege follows the PROCESS, not the function" applied to
+      # the one attribute the worker holds that creator code can reach:
+      # PostgreSQL REPLICATION. The grant lives in db/migrations-ts, the boot
+      # check that demands it lives in the worker, and the statements that need
+      # it live in plugin-db - three files that must agree, and did not have to.
+      # The gate joins them and is self-inverting, so it refuses both a premature
+      # deletion of the reaper and a grant left behind after the CDC relay takes
+      # the streaming path. Runs cargo tree and greps; nothing is compiled.
+      - name: worker replication privilege coupling
+        run: tests/worker_replication_privilege_gate.sh
       # THE INSTRUMENTS' OWN SELF-TESTS. Every e2e harness in tests/ sources one
       # or more of tests/lib/*.sh for its run accounting: whether a binary is
       # stale against its sources, whether a Rust test skipped and still counted
