@@ -1955,8 +1955,31 @@ run_deploy "$SB_FRESH" ZS_GATE_JOURNAL_EXISTS='f'
 # NON-COMMENT LINES ONLY. The prose above the pre-roll check names the deleted
 # snapshot on purpose - that is the record of why it is gone - and a grep over
 # the whole file would refuse the very explanation it is protecting.
-grep -v '^[[:space:]]*#' "$REMOTE" | grep -q 'released_migrations\|released_ledger' \
-  && fail "deploy-remote.sh still reads or writes the released-migrations snapshot; the pre-roll check is supposed to be the only thing that consults a deployment's journal" \
+#
+# `grep -c`, NOT `| grep -q`, and this file is the one place in this gate where
+# the difference can bite: every other piped `grep -q` here filters a shell
+# variable a few hundred bytes long, while this one filters a SHIPPED SCRIPT
+# that grows.
+#
+# THE HAZARD. `grep -q` exits on its FIRST match. If the upstream `grep -v` is
+# still writing at that moment it takes SIGPIPE (141), `set -o pipefail`
+# promotes 141 to the pipeline's status, the `&&` arm is skipped and `pass`
+# runs - EXACTLY WHEN THE VIOLATION IS PRESENT. Whether the upstream is still
+# writing depends only on input size, so the check is fail-open above some
+# threshold and correct below it.
+#
+# MEASURED 2026-09-04, same pipeline, the match planted on line 2, only the
+# non-comment body size varying:
+#     8 KB -> FAIL    61 KB -> FAIL    91 KB -> FAIL    112 KB -> FAIL
+#    31 KB -> FAIL    71 KB -> FAIL   101 KB -> pass    119 KB -> pass
+#                                     131 KB -> pass    198 KB -> pass
+# It is not a clean threshold, it is a RACE: 101 KB inverted while 112 KB did
+# not, in the same run. deploy-remote.sh's non-comment body is 31 KB today, so
+# this was latent and roughly 3x from live. `grep -c` reads to EOF and cannot
+# race; the same corpus reports FAIL at every size.
+ledger_hits="$(grep -v '^[[:space:]]*#' "$REMOTE" | grep -c 'released_migrations\|released_ledger')"
+[ "${ledger_hits:-0}" -gt 0 ] \
+  && fail "deploy-remote.sh still reads or writes the released-migrations snapshot ($ledger_hits non-comment line(s)); the pre-roll check is supposed to be the only thing that consults a deployment's journal" \
   || pass "the deploy script keeps no copy of the journal and writes none back"
 
 CAP="$CAP_HAPPY"
