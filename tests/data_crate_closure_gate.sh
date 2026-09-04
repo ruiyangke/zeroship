@@ -143,6 +143,92 @@ if ! gate_arm guarded_list "$n_members" 2; then
   FAIL=$((FAIL + 1))
 fi
 
+# --------------------------------------------------------------------------
+# Arm 3: NOTHING SHIPPED LINKS THE CDC RELAY.
+#
+# `zeroship-data-cdc-server` is a BINARY, and the reason it is a binary is a
+# privilege boundary: it holds REPLICATION so the worker does not. A boundary
+# any crate can link is not a boundary, it is the appearance of one
+# (AGENTS.md, "Privilege follows the PROCESS, not the function").
+#
+# WHY THE RULE IS NOT LITERALLY "NO CRATE MAY DEPEND ON IT". A workspace bin
+# target must carry a class (`zeroship-config-contract`'s
+# `validate_target_classifications`), and a `platform` class then obliges the
+# configuration checker to LINK that binary's generated registry
+# (`tests/real_registry.rs`, `every_platform_target_declares_its_configuration`,
+# which compares the manifest `platform` set against `DECLARING_BINARIES` for
+# exact equality with no exception list). Classifying the relay anything else
+# would leave a shipped service's configuration surface unaudited, which is the
+# vacuity that test exists to prevent. So the enforceable property is:
+#
+#   no SHIPPED binary's normal-dependency closure contains the relay,
+#   with the non-shipped `zeroship-config-contract` as the single exception.
+#
+# THIS ARM CARRIES ITS OWN INVERTED CONTROL, which is the point of ruling on
+# config-contract rather than skipping it. `cargo tree -p X -i Y` prints an
+# error to stderr and NOTHING to stdout when Y is absent from X's graph - and a
+# mistyped package name, a bad flag or a cargo failure produce exactly the same
+# empty stdout. An absence is therefore only evidence if the same command shape
+# is seen to FIND something. config-contract is the one package that must match,
+# so the arm proves its own instrument on every run.
+#
+# NORMAL-ONLY, deliberately, and it is the known hole: `cargo tree -e normal`
+# cannot see dev-dependencies, so a dev-dependency on the relay would pass here.
+# `zeroship-migrate-server`, the relay's declared peer, already carries five of
+# them. Both manifests say so in prose; this is the half a machine can check.
+# --------------------------------------------------------------------------
+echo
+echo "== nothing shipped links the CDC relay =="
+
+RELAY="zeroship-data-cdc-server"
+# The ONE package allowed to reach it, and the one that must.
+RELAY_LINKER="zeroship-config-contract"
+
+# Derived from cargo metadata, never from a list in this file: a hard-coded set
+# of binaries is satisfiable by deleting a name from it, and a new platform
+# service would be checked by nobody.
+bin_packages=$(cargo metadata --format-version 1 --no-deps 2>/dev/null |
+  jq -r '.packages[] | select(.targets[]?.kind[]? == "bin") | .name' | sort -u)
+
+n_bins=0
+relay_linker_seen=0
+if [ -z "$bin_packages" ]; then
+  bad "cargo metadata produced no bin packages - arm 3 would rule on nothing"
+else
+  for pkg in $bin_packages; do
+    # The relay's own tree trivially contains the relay; ruling on it would be
+    # a free pass padding the count.
+    [ "$pkg" = "$RELAY" ] && continue
+    n_bins=$((n_bins + 1))
+    hits=$(cargo tree -p "$pkg" -i "$RELAY" -e normal 2>/dev/null |
+      grep -cE "(^|[^a-zA-Z0-9_-])${RELAY} v[0-9]" || true)
+    if [ "$pkg" = "$RELAY_LINKER" ]; then
+      relay_linker_seen=1
+      if [ "$hits" -gt 0 ]; then
+        good "$pkg links $RELAY, as the single named exception requires (this is arm 3's inverted control)"
+      else
+        bad "$pkg does NOT link $RELAY - either the exception was removed, or \`cargo tree -p X -i Y\` no longer finds a real edge and every absence below is meaningless"
+      fi
+    elif [ "$hits" -gt 0 ]; then
+      bad "$pkg reaches $RELAY in its normal closure - a shipped binary now links the process that exists to hold REPLICATION away from it"
+      cargo tree -p "$pkg" -i "$RELAY" -e normal 2>/dev/null | head -5 | sed 's/^/       /'
+    else
+      good "$pkg does not reach $RELAY"
+    fi
+  done
+fi
+
+if [ "$relay_linker_seen" -eq 0 ]; then
+  bad "$RELAY_LINKER is not a bin package in cargo metadata - arm 3 ran without its control"
+fi
+
+# 11 bin packages today, minus the relay itself = 10 ruled on. Floor 7, three
+# below: it must go red if the metadata query stops finding binaries or a filter
+# starts excluding them, without going red because a tool binary is retired.
+if ! gate_arm relay_is_unlinked "$n_bins" 7; then
+  FAIL=$((FAIL + 1))
+fi
+
 echo
 gate_arms_finish || FAIL=$((FAIL + 1))
 
