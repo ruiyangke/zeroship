@@ -1593,6 +1593,27 @@ re-run the rewrite cron for the affected slice.
 Both tables live in the per-app schema; standard isolation rules
 apply (`SELECT * FROM "<app>".__zeroship_audit_unmask`).
 
+**The unmask audit row is written OUTSIDE your transaction, on purpose.**
+An `unmask()` or `find({ unmask })` issued inside `db.transaction(fn)`
+reads its plaintext on the transaction's own connection - so it sees
+rows the same transaction has just written - but the audit row commits
+independently. Roll the transaction back and the audit row stays:
+
+```ts
+await db.transaction(async (tx) => {
+  const u = await tx.users.insert({ ssn: "123-45-6789" });
+  await u.ssn.unmask({ actor });   // reads the row the tx just wrote
+  throw new Error("abort");        // the row is gone; the audit row is not
+});
+```
+
+That is the contract, not an artefact. A denied attempt must not be
+erasable by rolling back the transaction it was made in, and a granted
+one records that plaintext left the database - which a rollback does
+not undo. Treat `__zeroship_audit_unmask` as append-only evidence with
+no transactional relationship to the rows it names; it stores their ids
+as text and holds no foreign key into them.
+
 ## Encrypted and Masked Fields (Shipped Reference)
 
 This section resolves `docs/archive/sensitive-field-masking.md` against the shipped implementation in `sdks/db/src/types.ts`, `crates/zeroship-schema/src/query.rs`, `crates/zeroship-data-engine/src/crud/mask_pass.rs`, `crates/zeroship-plugin-db/src/v8_classes/masked_value.rs`, `crates/zeroship-data-engine/src/crud/unmask.rs`, `sdks/db/src/collection/masking.ts`, `sdks/db/src/policy.ts`.

@@ -314,21 +314,26 @@ impl MaskedValue {
             rejected_claim: sanitized.rejected_claim,
         };
         let binding = self.binding.clone();
+        // The route is captured HERE, on the adapter side, while the V8 frame
+        // is live, and handed to the engine. `crud::unmask` resolved its own
+        // backend through `exec::ensure_backend_for_shared_sql` until
+        // 2026-09-03, which put an ENGINE file's hands on `crate::context`.
+        //
+        // **This captured no route until 2026-09-03**, on the claim that "a
+        // `MaskedValue` unmask carries no route - it is not a routed
+        // statement". The ciphertext read IS a statement, and
+        // `row.ssn.unmask()` inside a `db.transaction(fn)` callback over a row
+        // that transaction just wrote has to issue it on the transaction's
+        // connection.
+        let route = crate::tx_scope::capture_route(scope, binding.app_id());
 
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            // The backend is opened HERE, on the adapter side, and handed to
-            // the engine. `crud::unmask` resolved its own through
-            // `exec::ensure_backend_for_shared_sql` until 2026-09-03, which put
-            // an ENGINE file's hands on `crate::context`. A `MaskedValue`
-            // unmask carries no route - it is not a routed statement - so this
-            // dispatch is the frame that owns the resolution.
-            //
             // A failure here folds into the SAME error arm below rather than
             // returning early, so the `probe` branch keeps deciding what a
             // rejection means: `not_configured` is not `unmask_not_permitted`,
             // so `canUnmask()` still re-throws it instead of answering `false`.
-            let outcome = match crate::tx_scope::ensure_backend().await {
-                Ok(backend) => dispatch_unmask(&backend, &binding, args).await,
+            let outcome = match crate::tx_scope::bind_route(route).await {
+                Ok(route) => dispatch_unmask(&route, &binding, args).await,
                 Err(e) => Err(e),
             };
             match outcome {
@@ -440,12 +445,15 @@ impl MaskedValue {
         };
         let binding = self.binding.clone();
         let row_pk = self.row_pk.clone();
+        // Captured adapter-side, exactly as in
+        // [`MaskedValue::dispatch_unmask_single`] above.
+        let route = crate::tx_scope::capture_route(scope, binding.app_id());
 
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
-            // Resolved adapter-side and folded into the error arm, exactly as
+            // Bound adapter-side and folded into the error arm, exactly as
             // in [`MaskedValue::dispatch_unmask_single`] above.
-            let outcome = match crate::tx_scope::ensure_backend().await {
-                Ok(backend) => dispatch_bulk_unmask(&backend, &binding, args).await,
+            let outcome = match crate::tx_scope::bind_route(route).await {
+                Ok(route) => dispatch_bulk_unmask(&route, &binding, args).await,
                 Err(e) => Err(e),
             };
             match outcome {

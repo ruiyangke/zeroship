@@ -954,8 +954,13 @@ pub async fn finalize_rows_on_read_for_tests(
 ) -> Result<Vec<serde_json::Value>, DbError> {
     let binding = zeroship_data_core::binding::DbBinding::cold_start(app_id);
     let backend = tx_scope::ensure_backend().await?;
+    // The route comes from the ambient parked-tx slot rather than from a V8
+    // scope, because there is no isolate here - the same trade
+    // `exec_mutation_with_emit_for_tests` below documents. `apply` needs a
+    // route, not a handle: its unmask stage issues SELECTs of its own and they
+    // must land on the lane the read that produced these rows ran on.
     let result = crud::read_pipeline::apply(
-        &backend,
+        &exec::ambient_route_for_tests(app_id, backend),
         &binding,
         collection,
         rows,

@@ -312,5 +312,15 @@ name = "column_grants"
 path = "tests/column_grants.rs"
 required-features = ["test-helpers"]
 
+# Which CONNECTION a `find({ unmask })` uses inside `db.transaction(fn)`. Its
+# own target rather than another section of `mask_flip.rs` because every fixture
+# in it has to park a real transaction connection in the per-isolate slot, and
+# the question it rules on is about lanes rather than about masking storage.
+# Guarded like its siblings, and it FAILS rather than skips without a database.
+[[test]]
+name = "unmask_tx_lane"
+path = "tests/unmask_tx_lane.rs"
+required-features = ["test-helpers"]
+
 [lints]
 workspace = true

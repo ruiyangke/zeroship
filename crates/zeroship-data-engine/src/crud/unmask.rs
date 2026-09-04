@@ -462,16 +462,23 @@ async fn prepare_unmask_backend(backend: &BackendHandle, app_id: &str) -> Result
 /// the dispatch flow without standing up V8; the production V8 glue
 /// in [`dispatch_unmask_field`] is the only crate-internal caller.
 ///
-/// `backend` is supplied by the caller because this function is ENGINE and the
-/// funnel that opens a backend is ADAPTER state; the V8 dispatcher resolves it
-/// with `tx_scope::ensure_backend` and hands the value down. See
+/// `route` is supplied by the caller because this function is ENGINE and the
+/// funnel that opens a backend is ADAPTER state; the V8 dispatcher captures the
+/// route at its own frame and hands the value down. See
 /// `prepare_unmask_backend`.
+///
+/// **It is a `TxRoute` and not a bare `BackendHandle`.** A `MaskedValue.unmask()`
+/// issued inside a `db.transaction(fn)` callback has to read the ciphertext on
+/// that transaction's connection - a pooled read cannot see a row the same
+/// transaction has just written. The audit row deliberately does NOT follow the
+/// lane; see [`write_audit_unmask_row`].
 pub async fn dispatch_unmask(
-    backend: &BackendHandle,
+    route: &crate::tx_route::TxRoute,
     binding: &DbBinding,
     mut args: UnmaskFieldArgs,
 ) -> Result<UnmaskFieldResult, DbError> {
     let app_id = binding.app_id();
+    let backend = route.backend();
     // Step 0 — the descriptor entry. Resolved once for the whole dispatch: the
     // mask metadata, the column-spelling alias and the encryption metadata all
     // read it, and a collection this deploy does not declare is refused here
@@ -523,8 +530,8 @@ pub async fn dispatch_unmask(
 
     // Step 3 — fetch + decrypt (or fetch-plaintext).
     let plaintext = match lookup_encryption_meta(&schema, &args.column)? {
-        Some(enc_meta) => fetch_and_decrypt(backend, app_id, &args, &enc_meta).await?,
-        None => fetch_plaintext_parent(backend, app_id, &args).await?,
+        Some(enc_meta) => fetch_and_decrypt(route, &args, &enc_meta).await?,
+        None => fetch_plaintext_parent(route, &args).await?,
     };
     // Both arms ran exactly one SELECT and both `?`, so reaching here means it
     // succeeded. Neither goes through `exec::run_sql`, so neither was billed
@@ -566,16 +573,20 @@ fn meter_audit_write(app_id: &str) {
 /// surfaces the f64's `to_string()` form.
 #[allow(unused_variables)]
 async fn fetch_and_decrypt(
-    backend: &BackendHandle,
-    app_id: &str,
+    route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
     enc_meta: &ColumnEncryptionMeta,
 ) -> Result<String, DbError> {
-    // The prepared backend arrives as an argument. This re-resolved it through
-    // the funnel until 2026-09-03, which was idempotent but pointless: every
-    // reaching path runs `prepare_unmask_backend` first, so the second lookup
-    // could only ever return what the caller already held. Taking it as a
-    // parameter makes that ordering a data dependency rather than a comment.
+    // The prepared route arrives as an argument. This re-resolved a BACKEND
+    // through the funnel until 2026-09-03, which was idempotent but pointless:
+    // every reaching path runs `prepare_unmask_backend` first, so the second
+    // lookup could only ever return what the caller already held. Taking it as
+    // a parameter makes that ordering a data dependency rather than a comment.
+    //
+    // It became a ROUTE the same day, because a handle answers "which backend"
+    // and this read also has to answer "which connection" - see
+    // `crate::backend_handle::read_raw_column_bytes`.
+    let app_id = route.app_id();
 
     let aad = crate::encryption::aad::canonical_aad(
         &args.collection,
@@ -625,14 +636,13 @@ async fn fetch_and_decrypt(
         // masked but UNENCRYPTED column, and the SQLite twin below reads
         // `TypedCell::Blob` and was always correct. The regression test is
         // `unmask_encrypted_column_on_pg_reads_bytea_raw_sibling`.
-        let bytes = match backend
-            .read_raw_column_bytes(
-                app_id,
-                &args.collection,
-                &crate::query::raw_column_name(&args.column),
-                &args.row_pk,
-            )
-            .await?
+        let bytes = match crate::backend_handle::read_raw_column_bytes(
+            route,
+            &args.collection,
+            &crate::query::raw_column_name(&args.column),
+            &args.row_pk,
+        )
+        .await?
         {
             ScalarRead::NoRow => {
                 return Err(DbError::ValidationFailed {
@@ -657,8 +667,9 @@ async fn fetch_and_decrypt(
             ScalarRead::Value(bytes) => bytes,
         };
         // Key sourcing and AEAD are vendor-neutral; only the read above was
-        // not, and it now dispatches inside `BackendHandle`.
-        let key = backend
+        // not, and it now dispatches inside `crate::backend_handle`.
+        let key = route
+            .backend()
             .key_store()
             .resolve(app_id, &enc_meta.key_id)
             .await?;
@@ -672,12 +683,12 @@ async fn fetch_and_decrypt(
 /// the parent slot holds the plaintext on disk; the sibling
 /// `<col>_masked` carries the safe display form.
 async fn fetch_plaintext_parent(
-    backend: &BackendHandle,
-    app_id: &str,
+    route: &crate::tx_route::TxRoute,
     args: &UnmaskFieldArgs,
 ) -> Result<String, DbError> {
-    // The prepared backend arrives as an argument, for the reason spelled out
+    // The prepared route arrives as an argument, for the reason spelled out
     // on `fetch_and_decrypt`.
+    let app_id = route.app_id();
 
     // The real value lives in the RAW column - the field's own column holds
     // the mask. This read and its encrypted sibling are the only readers of
@@ -687,18 +698,17 @@ async fn fetch_plaintext_parent(
     // Text, not bytes: this is the PLAINTEXT-storage path, so the raw sibling
     // is the column's own declared type. The encrypted path above reads bytes.
     //
-    // The vendor split moved into `BackendHandle::read_raw_column_text` on
+    // The vendor split moved into `backend_handle::read_raw_column_text` on
     // 2026-09-02 (#119); the two error codes below are engine-tier policy and
     // stay here, which is why the backend returns a tri-state rather than
     // minting them itself.
-    match backend
-        .read_raw_column_text(
-            app_id,
-            &args.collection,
-            &crate::query::raw_column_name(&args.column),
-            &args.row_pk,
-        )
-        .await?
+    match crate::backend_handle::read_raw_column_text(
+        route,
+        &args.collection,
+        &crate::query::raw_column_name(&args.column),
+        &args.row_pk,
+    )
+    .await?
     {
         ScalarRead::NoRow => Err(DbError::ValidationFailed {
             code: "unmask_not_found",
@@ -800,6 +810,36 @@ fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbError
 /// granted-path caller sequences this before it hands the value back.
 /// There is no create-on-demand fallback, because a fallback is a second
 /// schema authority.
+///
+/// # This write is deliberately NOT on the caller's transaction lane
+///
+/// It takes a `BackendHandle` while the raw-column READ beside it takes a
+/// `TxRoute`, and the asymmetry is the decision, not an oversight. `append_unmask_audit`
+/// goes through the autocommit funnel on both vendors, so an audit row written
+/// inside `db.transaction(fn)` COMMITS even when that transaction rolls back.
+/// That is the behaviour we want in both directions:
+///
+/// * a DENIED row records an attempt that really happened. Letting the
+///   attempt's own transaction erase it would hand any caller a one-line way to
+///   try and leave no trace.
+/// * a GRANTED row records that plaintext left the database. It did leave;
+///   rolling the surrounding work back does not un-read it.
+///
+/// The audit table is append-only and operator-read-only, so nothing about the
+/// creator's transaction is inconsistent afterwards - it holds no foreign key
+/// into the rows the transaction touched, only their ids as text.
+///
+/// **This interacts with the DB-3 strip.** `sanitize_app_actor` zeroes the
+/// actor on exactly the rows most likely to be denied, so a surviving denied
+/// row can carry `actor_id = ''` and `actor_role = ''`. That is why
+/// `claimed_actor` exists: the refused claim is preserved verbatim in its own
+/// UNTRUSTED column rather than being erased with the identity it failed to
+/// establish. A denied row with an empty actor and a populated `claimed_actor`
+/// is an impersonation attempt; one with both empty is an anonymous call.
+///
+/// Bound by `plugin-db/tests/unmask_tx_lane.rs`, whose control writes an
+/// ordinary row in the same transaction and asserts the ROLLBACK destroys THAT
+/// and not this.
 async fn write_audit_unmask_row(
     backend: &BackendHandle,
     app_id: &str,
@@ -935,11 +975,12 @@ pub struct BulkUnmaskResult {
 /// collections fail the call up-front before any audit row is written
 /// — the error surface is unchanged from the single-cell path.
 ///
-/// `backend` is supplied by the caller for the reason
-/// `prepare_unmask_backend` gives: opening one reads ADAPTER state, and this
-/// is ENGINE. The V8 glue resolves it before it enters here.
+/// `route` is supplied by the caller for the reason `prepare_unmask_backend`
+/// gives: opening a backend reads ADAPTER state, and this is ENGINE. The V8
+/// glue captures the route before it enters here. It is a route rather than a
+/// bare handle for the reason [`dispatch_unmask`] gives.
 pub async fn dispatch_bulk_unmask(
-    backend: &BackendHandle,
+    route: &crate::tx_route::TxRoute,
     binding: &DbBinding,
     args: BulkUnmaskArgs,
 ) -> Result<BulkUnmaskResult, DbError> {
@@ -947,6 +988,7 @@ pub async fn dispatch_bulk_unmask(
         return Ok(BulkUnmaskResult::default());
     }
     let app_id = binding.app_id();
+    let backend = route.backend();
 
     // ---- Step 0 — the descriptor entry, resolved once for every pair.
     let schema = crate::descriptor::collection_schema(binding, &args.collection)?;
@@ -1074,8 +1116,8 @@ pub async fn dispatch_bulk_unmask(
             // which would re-audit per pair). This is the
             // "wrap-over-many" pattern the proposal describes.
             let plaintext = match lookup_encryption_meta(&schema, canonical_col)? {
-                Some(enc_meta) => fetch_and_decrypt(backend, app_id, &single_args, &enc_meta).await?,
-                None => fetch_plaintext_parent(backend, app_id, &single_args).await?,
+                Some(enc_meta) => fetch_and_decrypt(route, &single_args, &enc_meta).await?,
+                None => fetch_plaintext_parent(route, &single_args).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1337,13 +1379,21 @@ pub async fn audit_query_hint_granted(
 /// (the implicit primary key; aligns with `wrap_row_on_read`'s
 /// expectation).
 ///
-/// `backend` arrives from `crate::crud::read_pipeline::apply`, which is the
-/// stage this promotion belongs to and which takes it off the read's own route.
-/// It resolved one through the engine funnel until 2026-09-03; the handle it
-/// found was the route's anyway, so the parameter costs nothing and stops an
-/// ENGINE file reading ADAPTER state. See `prepare_unmask_backend`.
+/// `route` arrives from `crate::crud::read_pipeline::apply`, which is the stage
+/// this promotion belongs to and which takes it off the read's own dispatch.
+/// The stage resolved a backend through the engine funnel until 2026-09-03; the
+/// handle it found was the route's anyway, so the parameter costs nothing and
+/// stops an ENGINE file reading ADAPTER state. See `prepare_unmask_backend`.
+///
+/// **The whole route, not the handle it carries.** These SELECTs unmask the
+/// rows `exec_query` just returned, and `exec_query` honours `route.in_tx()`.
+/// Reading only the handle sent them to the autocommit lane, so a
+/// `find({ unmask })` inside `db.transaction(fn)` failed `unmask_not_found`
+/// over a row the same transaction had inserted - the rows were there, the
+/// connection sent to fetch their plaintext was not the one that could see
+/// them. Bound by `plugin-db/tests/unmask_tx_lane.rs`.
 pub async fn dispatch_unmask_for_query(
-    backend: &BackendHandle,
+    route: &crate::tx_route::TxRoute,
     binding: &DbBinding,
     collection: &str,
     unmask_columns: &[String],
@@ -1354,7 +1404,7 @@ pub async fn dispatch_unmask_for_query(
     }
     let app_id = binding.app_id();
     let schema = crate::descriptor::collection_schema(binding, collection)?;
-    prepare_unmask_backend(backend, app_id).await?;
+    prepare_unmask_backend(route.backend(), app_id).await?;
     for row in rows.iter_mut() {
         let Some(row_pk) = row.get("id").map(|v| match v {
             Value::String(s) => s.clone(),
@@ -1399,8 +1449,8 @@ pub async fn dispatch_unmask_for_query(
                 rejected_claim: None,
             };
             let plaintext = match lookup_encryption_meta(&schema, &canonical)? {
-                Some(enc_meta) => fetch_and_decrypt(backend, app_id, &single_args, &enc_meta).await?,
-                None => fetch_plaintext_parent(backend, app_id, &single_args).await?,
+                Some(enc_meta) => fetch_and_decrypt(route, &single_args, &enc_meta).await?,
+                None => fetch_plaintext_parent(route, &single_args).await?,
             };
             // One SELECT per (row, column) pair. The bulk call writes a single
             // audit row for the whole request, but it reads once per cell, and
@@ -1666,7 +1716,7 @@ mod tests {
     // and before any SQL - but the entry points take the backend as a
     // parameter now, so each still has to hand one over. See the helper's own
     // doc for why that is the right trade.
-    use crate::test_support::unit_backend;
+    use crate::test_support::{unit_backend, unit_route};
 
     #[test]
     fn sanitize_app_actor_strips_reserved_auto_db3() {
@@ -2083,8 +2133,8 @@ mod tests {
         };
         let result = runtime
             .block_on(async {
-                let (backend, _dir) = unit_backend();
-                dispatch_bulk_unmask(&backend, &binding, args).await
+                let (route, _dir) = unit_route(binding.app_id());
+                dispatch_bulk_unmask(&route, &binding, args).await
             })
             .unwrap();
         assert!(result.results.is_empty());
@@ -2120,8 +2170,8 @@ mod tests {
         };
         let err = runtime
             .block_on(async {
-                let (backend, _dir) = unit_backend();
-                dispatch_bulk_unmask(&backend, &binding, args).await
+                let (route, _dir) = unit_route(binding.app_id());
+                dispatch_bulk_unmask(&route, &binding, args).await
             })
             .unwrap_err();
         match err {
@@ -2153,8 +2203,8 @@ mod tests {
         };
         let err = runtime
             .block_on(async {
-                let (backend, _dir) = unit_backend();
-                dispatch_bulk_unmask(&backend, &binding, args).await
+                let (route, _dir) = unit_route(binding.app_id());
+                dispatch_bulk_unmask(&route, &binding, args).await
             })
             .unwrap_err();
         assert!(
@@ -2231,8 +2281,8 @@ mod tests {
         let original = rows.clone();
         runtime
             .block_on(async {
-                let (backend, _dir) = unit_backend();
-                dispatch_unmask_for_query(&backend, &binding, "users", &[], &mut rows).await
+                let (route, _dir) = unit_route(binding.app_id());
+                dispatch_unmask_for_query(&route, &binding, "users", &[], &mut rows).await
             })
             .unwrap();
         assert_eq!(rows, original, "empty unmask columns must be a no-op");

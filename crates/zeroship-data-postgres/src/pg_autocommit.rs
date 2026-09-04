@@ -148,7 +148,24 @@ pub(crate) async fn roled_scalar_bytes(
     sql: &str,
     params: &[&str],
 ) -> Result<ScalarRead<Vec<u8>>, DbError> {
-    let rows = roled_rows(pool, app_id, sql, params).await?;
+    scalar_bytes(&roled_rows(pool, app_id, sql, params).await?)
+}
+
+/// Decode column 0 of the first row as raw bytes.
+///
+/// Split out of [`roled_scalar_bytes`] because the AUTOCOMMIT lane is not the
+/// only lane a scalar read can run on. An unmask issued inside
+/// `db.transaction(fn)` has to read the ciphertext on the app's parked
+/// transaction connection - a pooled checkout cannot see a row that
+/// transaction has not committed - and that lane's rows come back from
+/// `Client::query_text_params` rather than from [`roled_rows`]. The decode is
+/// the same either way and must stay the same, so it lives here once instead of
+/// being written a second time at the routed call site.
+///
+/// # Errors
+///
+/// Reports a decode failure if column 0 is not a byte-typed column.
+pub fn scalar_bytes(rows: &[compio_postgres::Row]) -> Result<ScalarRead<Vec<u8>>, DbError> {
     let Some(row) = rows.first() else {
         return Ok(ScalarRead::NoRow);
     };
@@ -177,7 +194,18 @@ pub(crate) async fn roled_scalar_text(
     sql: &str,
     params: &[&str],
 ) -> Result<ScalarRead<String>, DbError> {
-    let rows = roled_rows(pool, app_id, sql, params).await?;
+    scalar_text(&roled_rows(pool, app_id, sql, params).await?)
+}
+
+/// Decode column 0 of the first row as text.
+///
+/// The text twin of [`scalar_bytes`], split out for the same reason and used by
+/// the same routed reader.
+///
+/// # Errors
+///
+/// Reports a decode failure if column 0 is not a text-typed column.
+pub fn scalar_text(rows: &[compio_postgres::Row]) -> Result<ScalarRead<String>, DbError> {
     let Some(row) = rows.first() else {
         return Ok(ScalarRead::NoRow);
     };

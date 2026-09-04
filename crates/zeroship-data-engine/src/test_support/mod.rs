@@ -288,6 +288,28 @@ where
 /// `compio::runtime::spawn`, which panics `not in a compio runtime` off-thread
 /// of one. Building the runtime first and calling this outside its `block_on`
 /// is the shape that fails, and it fails on the OPEN, before any assertion.
+/// [`unit_backend`], wrapped in the pool-lane route the row-facing entry points
+/// now take.
+///
+/// `crud::read_pipeline::apply` and the three `crud::unmask` dispatchers took a
+/// `&BackendHandle` until 2026-09-03 and take a `&TxRoute` now, because a
+/// handle names a BACKEND and their raw-column SELECT also has to name a
+/// CONNECTION. `ambient_route_for_tests` reads the parked-tx slot, which is
+/// empty in every unit here, so the route binds `in_tx = false` and the reads
+/// take the autocommit lane exactly as they did before.
+///
+/// The `TempDir` comes back for the reason [`unit_backend`] gives, and with the
+/// same drop-order caveat: the route owns the handle, so a call site that needs
+/// the directory to outlive the backend must drop the ROUTE explicitly first.
+///
+/// # Panics
+///
+/// As [`unit_backend`] - call it inside a compio runtime.
+pub(crate) fn unit_route(app_id: &str) -> (crate::tx_route::TxRoute, tempfile::TempDir) {
+    let (backend, dir) = unit_backend();
+    (crate::exec::ambient_route_for_tests(app_id, backend), dir)
+}
+
 pub(crate) fn unit_backend() -> (crate::backend::BackendHandle, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("create tempdir");
     // `LocalKeySource::env_var()` and not the adapter's per-isolate lookup: the

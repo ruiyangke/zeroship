@@ -78,6 +78,15 @@ async fn unmask_backend() -> zeroship_plugin_db::backend::BackendHandle {
         .expect("the backend the V8 dispatcher would have opened")
 }
 
+/// The route the unmask dispatchers now take, in place of a bare handle.
+///
+/// See the twin in `mask_flip.rs` for why. No fixture that reaches it here
+/// parks a transaction, so every call binds `in_tx = false` and takes the lane
+/// it took before - `op_conn`, on this tier.
+async fn unmask_route(app: &str) -> zeroship_plugin_db::tx_route::TxRoute {
+    zeroship_plugin_db::exec::ambient_route_for_tests(app, unmask_backend().await)
+}
+
 /// Drive a future to completion on a fresh compio runtime. The
 /// integration target has no global runtime — each `#[test]` builds
 /// its own so tests stay isolated.
@@ -6173,7 +6182,7 @@ fn cold_unmask_with_auto_actor_attaches_before_read() {
             reason: Some("integration test".to_string()),
             rejected_claim: None,
         };
-        let result = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
+        let result = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
             .await
             .expect("dispatch_unmask must succeed for auto actor");
         assert_eq!(
@@ -6262,7 +6271,7 @@ fn unmask_with_user_actor_returns_forbidden_audit_logged() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
+        let err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("dispatch_unmask must refuse user actor under PR 4 stub");
         match err {
@@ -6308,7 +6317,7 @@ fn unmask_column_not_masked_returns_typed_error() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
+        let err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("unmask of non-masked column must refuse");
         match err {
@@ -6350,7 +6359,7 @@ fn unmask_writes_audit_row_with_correct_classification() {
             reason: Some("chart review".to_string()),
             rejected_claim: None,
         };
-        let _err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
+        let _err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("user actor denied");
 
@@ -6514,7 +6523,7 @@ fn unmask_with_user_role_in_policy_returns_plaintext() {
             reason: Some("user requested own data".to_string()),
             rejected_claim: None,
         };
-        let result = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
+        let result = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
             .await
             .expect("policy grants user → pii; unmask must succeed");
         assert_eq!(result.plaintext, plaintext);
@@ -6582,7 +6591,7 @@ fn unmask_with_user_role_not_in_policy_denied() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
+        let err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("policy does not allow user → pii; must refuse");
         match err {
@@ -6628,7 +6637,7 @@ fn unmask_default_deny_when_no_policy() {
             reason: None,
             rejected_claim: None,
         };
-        let err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
+        let err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("no policy + non-auto actor → default-deny");
         match err {
@@ -6718,7 +6727,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
             rejected_claim: None,
         };
         let err = unmask::dispatch_unmask(
-            &unmask_backend().await,
+            &unmask_route(app_id).await,
             &DbBinding::cold_start(app_id),
             args1.clone(),
         )
@@ -6743,7 +6752,7 @@ fn policy_refresh_after_set_mask_policy_op_takes_effect() {
         // We still get `unmask_not_found` because no row exists, but
         // that's the path AFTER the auth check — the absence of
         // `unmask_not_permitted` is the pin.
-        let err = unmask::dispatch_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args1)
+        let err = unmask::dispatch_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args1)
             .await
             .expect_err("auth passes; SELECT misses");
         match err {
@@ -7851,7 +7860,7 @@ fn cold_bulk_unmask_attaches_before_read() {
             reason: Some("ops dashboard".into()),
             rejected_claim: None,
         };
-        let result = dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
+        let result = dispatch_bulk_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
             .await
             .expect("bulk unmask");
         // Plaintext recovered for every pair.
@@ -7945,7 +7954,7 @@ fn bulk_unmask_authorization_atomic_one_unauthorized_fails_all() {
             reason: None,
             rejected_claim: None,
         };
-        let err = dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
+        let err = dispatch_bulk_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("bulk must refuse atomically");
         match err {
@@ -7993,7 +8002,7 @@ fn bulk_unmask_unknown_column_returns_typed_error_e2e() {
             reason: None,
             rejected_claim: None,
         };
-        let err = dispatch_bulk_unmask(&unmask_backend().await, &DbBinding::cold_start(app_id), args)
+        let err = dispatch_bulk_unmask(&unmask_route(app_id).await, &DbBinding::cold_start(app_id), args)
             .await
             .expect_err("unknown column must refuse");
         match err {
@@ -8158,7 +8167,7 @@ fn cold_query_unmask_hint_attaches_before_read() {
             },
         })];
         dispatch_unmask_for_query(
-            &unmask_backend().await,
+            &unmask_route(app_id).await,
             &DbBinding::cold_start(app_id),
             collection,
             &["ssn".to_string()],
