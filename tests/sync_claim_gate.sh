@@ -49,10 +49,20 @@
 #     agreement. Arm 3 checks the guard is still THERE (a named module or
 #     function in a named file), not that it is correct or that it still covers
 #     the same corpus. A guard emptied of its assertions passes arm 3.
-#   - It does not find agreement claims that name no crate. The `PgSession`
-#     phantom at crates/zeroship-migrate-server/src/session.rs is on the ledger
-#     only because a NEIGHBOURING line names `compio_postgres`; a claim whose
-#     counterpart is spelled with no crate token at all is invisible here.
+#   - It does not find agreement claims that name no crate, and the worked
+#     example of that is now HISTORY rather than a live row. Until 2026-09-04
+#     crates/zeroship-migrate-server/src/session.rs claimed parity with a
+#     `PgSession` impl, and with `SeamBind` / `SeamRow` / `SeamError` beside it.
+#     All four names occurred nowhere else in the tree - they were never written.
+#     That claim reached this ledger only because a NEIGHBOURING line happened to
+#     say `compio_postgres`; had it not, the gate would have been blind to a
+#     comment asserting agreement with four symbols that did not exist. The
+#     comment is rewritten and its row is gone, so the blind spot no longer has a
+#     live illustration - which is the point of writing it down here.
+#
+#     Note also what a SUBSTRING grep does to that class: `PgSession` survives
+#     inside `CompioPgSession`, so `grep PgSession` reports hits and the phantom
+#     reads as real. It took `grep -P '(?<!Compio)PgSession'` to see it.
 #   - It reads the data-plane and migration roots ONLY (see ROOTS). The same
 #     shape exists elsewhere in the workspace and is not measured.
 #   - `prose` rows are a judgement a human made once, by reading. A claim
@@ -206,14 +216,14 @@ crates/zeroship-migrate-postgres/src/backend/journal_sql.rs	zeroship_migrate_bac
 crates/zeroship-migrate-postgres/src/backend/session.rs	zeroship_migrate_backend	prose
 crates/zeroship-migrate-postgres/src/role.rs	zeroship_migrate_backend	prose
 crates/zeroship-migrate-postgres/src/role.rs	zeroship_migrate_ir	prose
-crates/zeroship-migrate-server/src/session.rs	compio_postgres	unbound
 crates/zeroship-migrate-sqlite/src/backend/actor.rs	zeroship_migrate_backend	bound=crates/zeroship-migrate-sqlite/src/backend/actor.rs#step::BindValue::Bytes
 crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_migrate_server	unbound
 crates/zeroship-migrate-sqlite/src/backend/audit_unmask_sql.rs	zeroship_plugin_db	unbound
 crates/zeroship-migrate-sqlite/src/dml.rs	zeroship_migrate_backend	prose
 crates/zeroship-migrate-sqlite/src/schema.rs	zeroship_schema	unbound
 crates/zeroship-plugin-db/src/drop_namespace.rs	zeroship_migrate_server	prose
-crates/zeroship-schema/src/ident.rs	zeroship_migrate	unbound
+crates/zeroship-schema/src/ident.rs	zeroship_migrate	bound=crates/zeroship-schema/src/ident.rs#mod engine_parity
+crates/zeroship-schema/src/ident.rs	zeroship_migrate_core	bound=crates/zeroship-schema/src/ident.rs#mod engine_parity
 crates/zeroship-schema/src/mask_codec.rs	zeroship_migrate_backend	bound=crates/zeroship-schema/src/mask_codec.rs#mod cross_codec_parity
 crates/zeroship-schema/src/query.rs	zeroship_migrate	bound=crates/zeroship-schema/src/query.rs#mod raw_column_parity
 crates/zeroship-schema/src/query.rs	zeroship_migrate_backend	bound=crates/zeroship-schema/src/query.rs#mod raw_column_parity
