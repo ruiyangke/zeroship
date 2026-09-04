@@ -42,7 +42,7 @@
 #
 # A gate is the answer to that, not another reading.
 #
-# WHAT IT RULES ON. Three arms, three different questions:
+# WHAT IT RULES ON. Four arms, four different questions:
 #
 #   1. production_files - how many files the production-region extractor could
 #      read at all. The anti-vacuity anchor: this number can never legitimately
@@ -52,6 +52,12 @@
 #   3. baseline_rows   - every baseline row still describes a live site. A gate
 #      whose excuse list outlives the thing it excuses is how a census goes
 #      stale, and this repository has four recorded instances.
+#   4. dispatch_shape  - every destructuring of `BackendHandle`, `TxConnection`
+#      or `TxCanceller` is an EXHAUSTIVE `match`, or carries an allowlist row
+#      with a reason. Added 2026-09-04. Arms 1-3 ask what the engine WRITES;
+#      this one asks whether the compiler can still bill a new backend for the
+#      branches it has to answer, which is the other half of decision 4's
+#      "a new variant in the three dispatch enums, and nothing else".
 #
 # A SHRINK-ONLY BASELINE, NOT A FREEZE. The residue is known debt with named
 # owners (proposal Opens 5 and 7). Additions are refused; REMOVALS ARE ACCEPTED
@@ -104,12 +110,19 @@
 #     is deliberate (`"test-helpers"` CONTAINS `test`, and matching that naively
 #     is how a sibling census went to zero rows while printing that as calmly as
 #     a real number).
-#   - It rules on `crates/zeroship-data-engine/src` and nothing else. The
+#   - ARMS 1-3 rule on `crates/zeroship-data-engine/src` and nothing else. The
 #     adapter, the vendor tiers and the migration engine are all SUPPOSED to
-#     hold statement text and are not scanned.
+#     hold statement text and are not scanned. ARM 4 also reads
+#     `crates/zeroship-plugin-db/src`, because the three dispatch enums are
+#     destructured on both sides of the adapter seam and a collapse over there
+#     costs a new backend exactly as much.
+#   - ARM 4 IS A SOURCE-SHAPE CHECK. It rules on how a dispatch is SPELLED and
+#     can no more tell a correct arm from a wrong one than arm 2 can tell SQL
+#     from prose. Its own limits are listed above `AWK_DISPATCH` below.
 #
 # Run the detector's own positive/control set: this script --self-test.
-# Point it at a copied tree to watch it fail: this script --root <dir>.
+# Point it at a copied tree to watch it fail:
+#   this script --root <dir> [--adapter-root <dir>]
 # ============================================================================
 set -uo pipefail
 cd "$(dirname "$0")/.."
@@ -131,6 +144,13 @@ fail() { FAIL=$((FAIL + 1)); echo "  FAIL $1"; }
 # driven over a COPY of the tree - which is how the RED demonstration is done
 # without editing `crates/`.
 ROOT="crates/zeroship-data-engine/src"
+# The dispatch-shape arm alone spans TWO roots. Decision 4's three enums are
+# DEFINED in the engine and DESTRUCTURED on both sides of the adapter seam, and
+# an arm that watched only the engine would report a clean shape while
+# `zeroship-plugin-db` collapsed a dispatch. Arms 1-3 stay engine-only: their
+# question is "does the ENGINE hold statement text", and the adapter is supposed
+# to.
+ADAPTER_ROOT="crates/zeroship-plugin-db/src"
 SELF_TEST=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -138,8 +158,12 @@ while [ "$#" -gt 0 ]; do
       shift
       [ "$#" -ge 1 ] || { echo "  x REFUSED: --root needs a directory" >&2; exit 1; }
       ROOT="$1"; shift ;;
+    --adapter-root)
+      shift
+      [ "$#" -ge 1 ] || { echo "  x REFUSED: --adapter-root needs a directory" >&2; exit 1; }
+      ADAPTER_ROOT="$1"; shift ;;
     --self-test) SELF_TEST=1; shift ;;
-    *) echo "usage: $0 [--root <dir>] [--self-test]" >&2; exit 1 ;;
+    *) echo "usage: $0 [--root <dir>] [--adapter-root <dir>] [--self-test]" >&2; exit 1 ;;
   esac
 done
 
@@ -279,6 +303,200 @@ sql_sites() {
   done < <(production_files "$root")
 }
 
+# ===========================================================================
+# THE DISPATCH-SHAPE EXTRACTOR (arm 4). A DIFFERENT QUESTION FROM ARMS 1-3.
+# ===========================================================================
+# Decision 4 says a new database costs "a new variant in the three dispatch
+# enums (`BackendHandle`, `TxConnection`, `TxCanceller`), and nothing else".
+# That is only true where the compiler can BILL the author for the new variant,
+# and it can do that at an exhaustive `match` and nowhere else. `matches!`, an
+# `if let`, a `let ... else` and a `_ =>` arm all answer for a variant nobody has
+# written yet, silently, and their answer is whatever the existing code assumed.
+#
+# WHY THIS CANNOT BE A RUNTIME TEST, which is why it is here. `9905acca1` fixed
+# six such sites, one of them live: `backend_publishes_committed_changes` was
+# `matches!(backend, BackendHandle::Sqlite(_))`, so a third backend would read
+# `false`, the engine would publish on its behalf, and a backend that publishes
+# its own commits would deliver every change TWICE. No test can exercise that: a
+# third variant does not exist, and `BackendHandle::Postgres` needs a live pool.
+# The compile error a new variant produces at an exhaustive `match` IS the
+# regression test - and nothing stopped a later edit collapsing one back. This
+# arm is that guard.
+#
+# WHAT IT CANNOT DO, and the first item is the important one:
+#
+#   - IT IS A SOURCE-SHAPE CHECK. It rules on how a dispatch is SPELLED, never
+#     on whether the arm is right. A `match` with two arms that both do the
+#     wrong thing passes here, exactly as `9905acca1`'s own doc comment says:
+#     "it cannot check that the answer is CORRECT".
+#   - It is blind to a dispatch that never names a variant: a helper taking
+#     `&BackendHandle` and returning a bool, a trait object, a `dyn` port. Those
+#     move the decision somewhere this extractor does not look.
+#   - It reads ALL regions, production and test alike, because the shape
+#     question does not stop at the test boundary and because the one
+#     `matches!` in the tree is itself `#[cfg(test)]`. That is deliberate and it
+#     is why the allowlist below has test-region rows.
+#   - `Enum::Variant(..)` in EXPRESSION position - a construction, or the same
+#     text inside a string literal - is not a destructuring and is not ruled on.
+#     The count of those is printed on every run so the residue is visible
+#     rather than merely excluded; 25 of them today, all verified by reading.
+#   - It assumes rustfmt's layout: one match arm per line, arms of one `match`
+#     sharing an indentation column. A `_ =>` written ABOVE the enum arms of its
+#     own `match` reads as belonging to no match and is missed.
+#
+# THE ACCESSOR FORM IS INCLUDED, and that was a decision. `if let Some(sq) =
+# backend.as_sqlite() { .. } else { .. }` is a two-way dispatch wearing an
+# `Option` as a disguise: the `else` silently becomes "every other backend".
+# Measured 2026-09-04, it is ABSENT from production - the only two `.as_sqlite()`
+# / `.as_postgres()` call sites in either root are a type-shape check in
+# `backend/mod.rs` and an assertion in `tx_scope.rs`, both inside `#[cfg(test)]`
+# modules. Fencing a form while it has two uses costs two allowlist rows;
+# fencing it after it spreads costs an argument about each one. The definitions
+# (`pub fn as_postgres`) are not call sites and do not match.
+
+AWK_DISPATCH=$(cat <<'AWK'
+BEGIN { ENUMS = "BackendHandle|TxConnection|TxCanceller"
+        PATHRE = "(" ENUMS ")::[A-Z]"
+        SELFRE = "Self::[A-Z]"
+        fnname = "<file scope>" }
+{
+  line = $0
+  ind = line; sub(/[^ \t].*$/, "", ind); indent = length(ind)
+  t = line; sub(/^[ \t]+/, "", t); sub(/[ \t]+$/, "", t)
+
+  if (t ~ /^\/\//) next                        # a comment dispatches on nothing
+  # Leaving a block forgets the match arms recorded inside it, so a `_ =>` in a
+  # LATER match at the same column is not attributed to an earlier one.
+  if (t ~ /^\}/) { for (k in armind) if (k + 0 > indent) delete armind[k] }
+
+  # The nearest preceding `fn` names the site. Line numbers are the wrong key
+  # for an allowlist - they move whenever anything above them is edited, and
+  # this file is edited constantly - so the allowlist is keyed on the function.
+  if (t ~ /^(pub([ \t]*\([^)]*\))?[ \t]+)?(default[ \t]+)?(const[ \t]+)?(async[ \t]+)?(unsafe[ \t]+)?(extern[ \t]+"[^"]*"[ \t]+)?fn[ \t]+[A-Za-z0-9_]+/) {
+    fnname = t
+    sub(/^.*[^A-Za-z0-9_]fn[ \t]+/, "", fnname); sub(/^fn[ \t]+/, "", fnname)
+    sub(/[^A-Za-z0-9_].*$/, "", fnname)
+  }
+
+  # Inside `impl <Enum>` the arms are spelled `Self::`, which is the majority
+  # form in backend_handle.rs and cancel.rs. An extractor keyed only on the type
+  # name would have reported those files as holding no dispatch at all.
+  if (t ~ ("^impl([ \t]+[A-Za-z0-9_:<>, ]+[ \t]+for)?[ \t]+(" ENUMS ")[ \t]*(\\{|$)")) {
+    selfenum = 1; implind = indent; next
+  }
+  if (selfenum && t ~ /^\}/ && indent <= implind) selfenum = 0
+
+  has = (line ~ PATHRE) || (selfenum && line ~ SELFRE)
+
+  # A pattern is on the LEFT of `=` (a binding) or of `=>` (an arm). The same
+  # text on the RIGHT is a CONSTRUCTION: `let handle = BackendHandle::Sqlite(x)`
+  # destructures nothing, and counting it would bury the real sites in noise.
+  lhs = t; sub(/=[^>].*$/, "", lhs); sub(/=$/, "", lhs)
+  arml = t; sub(/=>.*$/, "", arml)
+  lhs_has  = (lhs  ~ PATHRE) || (selfenum && lhs  ~ SELFRE)
+  arml_has = (arml ~ PATHRE) || (selfenum && arml ~ SELFRE)
+
+  # AN `if let` PATTERN IS NOT BOUNDED BY THE FIRST `=` ON THE LINE, and reusing
+  # `lhs` for it was a live hole: `let rows = if let BackendHandle::Sqlite(sq) =
+  # route.backend() {` binds at the FIRST `=`, so `lhs` was `let rows` and the
+  # dispatch fell through to `construct-or-prose` and was never ruled on. Found
+  # by mutating a real `match` into exactly that line and watching this gate stay
+  # green. The pattern is what lies between the `let` and ITS OWN `=`.
+  iflet = ""
+  if (t ~ /(^|[^A-Za-z0-9_])(if|while)[ \t]+let[ \t]/) {
+    iflet = t
+    sub(/^.*(if|while)[ \t]+let[ \t]+/, "", iflet)
+    sub(/=[^>].*$/, "", iflet); sub(/=$/, "", iflet)
+  }
+  iflet_has = (iflet != "") && ((iflet ~ PATHRE) || (selfenum && iflet ~ SELFRE))
+
+  emitted = 0
+  if (has) {
+    if (line ~ /matches!/) { print NR "\t" fnname "\tmatches!\t" t; emitted = 1 }
+    else if (iflet_has) {
+      print NR "\t" fnname "\tif-let\t" t; emitted = 1 }
+    # A refutable `let` REQUIRES an `else`, so the compiler guarantees this is a
+    # `let ... else` without the extractor having to find the keyword - which
+    # matters because rustfmt moves `else {` to the next line when it does not
+    # fit.
+    else if (t ~ /^let[ \t]/ && lhs_has) { print NR "\t" fnname "\tlet-else\t" t; emitted = 1 }
+    else if (t ~ /=>/ && arml_has) {
+      # One SITE per match, not per arm: the first enum arm at a column opens
+      # it, the rest belong to it. Counting arms would make a two-variant enum
+      # score double a one-variant one for the same single decision.
+      if (!(indent in armind)) { print NR "\t" fnname "\tmatch\t" t }
+      armind[indent] = 1
+      emitted = 1
+    }
+    else { print NR "\t" fnname "\tconstruct-or-prose\t" t; emitted = 1 }
+  }
+  else if (t ~ /^_[ \t]*(if[^=]*)?=>/ && (indent in armind)) {
+    print NR "\t" fnname "\twildcard\t" t; emitted = 1
+  }
+  if (line ~ /\.as_sqlite\(\)|\.as_postgres\(\)/ && !emitted) {
+    print NR "\t" fnname "\taccessor\t" t
+  }
+}
+AWK
+)
+
+# dispatch_sites - `<tag>/<rel><TAB><line><TAB><fn><TAB><class><TAB><text>`.
+#
+# The `engine/` and `adapter/` tags qualify the key. Both roots hold a `lib.rs`
+# and a `context.rs`-shaped file, and an unqualified key would let one crate's
+# allowlist row excuse the other crate's collapse - the same defect
+# tests/vendor_embedding_gate.sh's `file_key` exists to prevent.
+dispatch_sites() {
+  local tag root f rel
+  for spec in "engine|$ROOT" "adapter|$ADAPTER_ROOT"; do
+    tag="${spec%%|*}"; root="${spec#*|}"
+    [ -d "$root" ] || continue
+    while IFS= read -r f; do
+      rel="${f#"$root"/}"
+      awk "$AWK_DISPATCH" "$f" | sed "s|^|$tag/$rel\t|"
+    done < <(find "$root" -name '*.rs' -type f | LC_ALL=C sort)
+  done
+}
+
+# ---------------------------------------------------------------------------
+# THE DISPATCH ALLOWLIST. One row per NON-`match` destructuring that is allowed:
+#
+#     <tag>/<path under that root>  <enclosing fn>  <class>  <one-line reason>
+#
+# A row must carry a reason, and the reason must be about THIS site. "It is
+# fine" is not one. Arm 4 also refuses a row that matches nothing, so the list
+# cannot outlive what it excuses.
+#
+# Measured 2026-09-04: 48 sites, 39 of them exhaustive `match` and 9 here.
+#
+# THE BRIEF FOR THIS ARM PREDICTED ONE ROW - `pool_initialised` - AND THE
+# EXTRACTOR FOUND NINE. The eight it did not predict are not new defects; they
+# are forms the hand inventory did not look for. Three are `let ... else`, which
+# nobody had named as a dispatch shape at all, and THOSE THREE ARE THE ONLY
+# NON-`match` DESTRUCTURINGS IN PRODUCTION CODE in either root.
+# ---------------------------------------------------------------------------
+DISPATCH_ALLOW='
+adapter/context.rs	pool_initialised	matches!	predicate about ONE named variant, and #[cfg(test)] besides
+engine/backend_handle.rs	run_planned_postgres_read	let-else	inside a fn that already took &PostgresBackend; else = lane_vendor_mismatch
+engine/backend_handle.rs	read_raw_column_bytes	let-else	inside the Postgres arm of an exhaustive match; else = lane_vendor_mismatch
+engine/backend_handle.rs	read_raw_column_text	let-else	inside the Postgres arm of an exhaustive match; else = lane_vendor_mismatch
+engine/exec.rs	sqlite_exec_helpers_use_tx_connection_when_present	if-let	test asserting the SQLite lane specifically
+engine/exec.rs	sec1_app_b_query_must_not_route_through_app_a_parked_tx	if-let	test asserting the SQLite lane specifically
+engine/exec.rs	dropping_in_flight_sqlite_query_restores_tx_slot	if-let	test asserting the SQLite lane specifically
+engine/backend/mod.rs	_shape_check	accessor	compile-time type-shape check, #[cfg(test)]
+adapter/tx_scope.rs	set_mask_policy_installs_through_an_adapter_opened_cold_backend	accessor	test assertion that the opened backend is the sqlite one
+'
+# THE THREE `let ... else` ROWS ARE THE ONES TO RE-READ, because they are the
+# only production entries and they are excused by CONTEXT rather than by shape.
+# Each sits where the backend has already been decided - two inside the
+# `BackendHandle::Postgres(pg)` arm of an exhaustive `match`, one inside a
+# function whose signature is `pg: &PostgresBackend` - and asks the narrower
+# question "is the lane's session the Postgres one", whose `else` is a genuine
+# vendor mismatch rather than an unwritten backend. That reasoning is exactly
+# `pool_initialised`'s and exactly NOT
+# `backend_publishes_committed_changes`'s. If one of them is ever hoisted out of
+# its arm, the row stops being true and nothing here will say so.
+
 # ---------------------------------------------------------------------------
 # THE BASELINE. One row per (file, verb) that production code holds today:
 #
@@ -371,12 +589,14 @@ BACKEND_COST_CEILING=33
 # --------------------------------------------------------------------------
 self_test() {
   echo "decision four gate self-test"
-  local tmp status=0 got saved_root
+  local tmp status=0 got saved_root saved_adapter
   tmp="$(mktemp -d)"
   saved_root="$ROOT"
-  trap 'rm -rf "$tmp"; ROOT="$saved_root"' RETURN
-  mkdir -p "$tmp/src"
+  saved_adapter="$ADAPTER_ROOT"
+  trap 'rm -rf "$tmp"; ROOT="$saved_root"; ADAPTER_ROOT="$saved_adapter"' RETURN
+  mkdir -p "$tmp/src" "$tmp/adapter"
   ROOT="$tmp/src"
+  ADAPTER_ROOT="$tmp/adapter"
 
   # POSITIVE: a plain production statement.
   cat > "$tmp/src/lib.rs" <<'RS'
@@ -506,6 +726,143 @@ RS
   # nothing to arm 2 and prints exactly what a clean file prints.
   module_gating_self_test || status=1
 
+  # -------------------------------------------------------------------------
+  # ARM 4's extractor. Every case here is a shape that either MUST be a site or
+  # MUST NOT be one, and the pair matters: a classifier that called everything a
+  # site and one that called nothing a site both pass a positive-only set.
+  # -------------------------------------------------------------------------
+  _d4_dispatch() {   # <rust source on stdin> -> `<line>\t<fn>\t<class>` rows
+    cat > "$tmp/src/lib.rs"
+    dispatch_sites | cut -f2,3,4
+  }
+  _d4_case() {       # <label> <expected rows, newline separated>
+    local label="$1" want="$2" have
+    have="$(_d4_dispatch)"
+    if [ "$have" = "$want" ]; then
+      echo "  ok   dispatch: $label"
+    else
+      echo "  FAIL dispatch: $label"
+      echo "       want [$want]"
+      echo "       have [$have]"
+      status=1
+    fi
+  }
+
+  _d4_case "an exhaustive match is ONE site, not one per arm" \
+    "$(printf '3\tf\tmatch')" <<'RS'
+fn f(b: &BackendHandle) -> bool {
+    match b {
+        BackendHandle::Sqlite(_) => true,
+        BackendHandle::Postgres(_) => false,
+    }
+}
+RS
+
+  _d4_case "a matches! is a site" \
+    "$(printf '2\tf\tmatches!')" <<'RS'
+fn f(b: &BackendHandle) -> bool {
+    matches!(b, BackendHandle::Sqlite(_))
+}
+RS
+
+  # THE REGRESSION. `let rows = if let <Pattern> = ...` binds at the FIRST `=`
+  # on the line, so a classifier that bounds the pattern there sees `let rows`
+  # and drops the dispatch into the residue. This gate did exactly that until
+  # 2026-09-04, and stayed GREEN when a real `match` was mutated into this line.
+  _d4_case "if let behind a let-binding is still an if-let site" \
+    "$(printf '2\tf\tif-let')" <<'RS'
+fn f(b: &BackendHandle) -> u8 {
+    let rows = if let BackendHandle::Sqlite(sq) = b { one(sq) } else { two() };
+    rows
+}
+RS
+
+  _d4_case "a let ... else destructuring is a site" \
+    "$(printf '2\tf\tlet-else')" <<'RS'
+fn f(c: TxConnection) {
+    let TxConnection::Postgres(client) = c else {
+        return;
+    };
+}
+RS
+
+  _d4_case "a _ => arm in a match that has enum arms is a site" \
+    "$(printf '3\tf\tmatch\n4\tf\twildcard')" <<'RS'
+fn f(b: &BackendHandle) -> u8 {
+    match b {
+        BackendHandle::Sqlite(_) => 1,
+        _ => 2,
+    }
+}
+RS
+
+  # THE CONTROL FOR THE CASE ABOVE, one variable changed: a `_ =>` in a match
+  # that dispatches on something else is not this gate's business. Without it,
+  # the wildcard rule would fire on every `_ =>` in the workspace.
+  _d4_case "a _ => arm in an unrelated match is NOT a site" \
+    "" <<'RS'
+fn f(n: u8) -> u8 {
+    match n {
+        1 => 1,
+        _ => 2,
+    }
+}
+RS
+
+  # A construction is not a destructuring. This is the largest residue class -
+  # 25 lines in the real tree - and counting it would bury the nine real
+  # exceptions in noise.
+  _d4_case "constructing a variant is residue, not a site" \
+    "$(printf '2\tf\tconstruct-or-prose')" <<'RS'
+fn f(x: Rc<SqliteBackend>) -> BackendHandle {
+    let handle = BackendHandle::Sqlite(x);
+    handle
+}
+RS
+
+  # `Self::` inside `impl <Enum>` is the MAJORITY arm spelling in
+  # backend_handle.rs and cancel.rs. An extractor keyed only on the type name
+  # reports those files as holding no dispatch at all.
+  _d4_case "Self:: arms inside impl <Enum> are recognised" \
+    "$(printf '4\tf\tmatch')" <<'RS'
+impl BackendHandle {
+    fn f(&self) -> u8 {
+        match self {
+            Self::Sqlite(_) => 1,
+            Self::Postgres(_) => 2,
+        }
+    }
+}
+RS
+
+  # ... and the control: the same spelling OUTSIDE such an impl belongs to some
+  # other enum and must not be claimed.
+  _d4_case "Self:: outside an impl <Enum> is not claimed" \
+    "" <<'RS'
+impl SomethingElse {
+    fn f(&self) -> u8 {
+        match self {
+            Self::Sqlite(_) => 1,
+            Self::Postgres(_) => 2,
+        }
+    }
+}
+RS
+
+  _d4_case "an .as_sqlite() call site is an accessor dispatch" \
+    "$(printf '2\tf\taccessor')" <<'RS'
+fn f(b: &BackendHandle) -> bool {
+    b.as_sqlite().is_some()
+}
+RS
+
+  _d4_case "a comment describing a matches! is not a site" \
+    "" <<'RS'
+// It was `matches!(backend, BackendHandle::Sqlite(_))` until 2026-09-04.
+fn f() {}
+RS
+
+  unset -f _d4_dispatch _d4_case
   return "$status"
 }
 
@@ -663,6 +1020,95 @@ elif [ -n "$stale$bad_class" ]; then
        in which case arm 2's clean result above means nothing."
 else
   pass "all $n_rows baseline row(s) still describe live statement text"
+fi
+
+# --- Arm 4: every dispatch on the three enums is an exhaustive `match` -----
+#
+# THE FLOOR IS ON SITES EXAMINED, NOT ON THE ALLOWLIST. A floor on the allowlist
+# would be a floor on the EXCEPTIONS: it would go red when somebody removed one,
+# and stay green while the extractor stopped finding dispatches at all. 48 sites
+# today (39 `match`, 9 allowlisted); floor 20, far enough below that ordinary
+# refactoring does not reach it and close enough that a broken regex does.
+DSITES="$(dispatch_sites)"
+
+d_examined=0
+d_prose=0
+d_match=0
+d_bad=""
+d_seen=""
+while IFS= read -r row; do
+  [ -n "$row" ] || continue
+  dkey="$(printf '%s' "$row" | cut -f1)"
+  dline="$(printf '%s' "$row" | cut -f2)"
+  dfn="$(printf '%s' "$row" | cut -f3)"
+  dclass="$(printf '%s' "$row" | cut -f4)"
+  case "$dclass" in
+    construct-or-prose) d_prose=$((d_prose + 1)); continue ;;
+    match) d_examined=$((d_examined + 1)); d_match=$((d_match + 1)); continue ;;
+  esac
+  d_examined=$((d_examined + 1))
+  if printf '%s\n' "$DISPATCH_ALLOW" | grep -qF "$dkey	$dfn	$dclass	"; then
+    d_seen="$d_seen
+$dkey	$dfn	$dclass"
+    continue
+  fi
+  d_bad="$d_bad
+    $dkey:$dline  $dfn  is a '$dclass', not an exhaustive match"
+done <<EOF
+$DSITES
+EOF
+
+# The reverse direction, and it doubles as the arm's positive control: a row
+# matching nothing is either an exemption nobody remembers granting or proof the
+# extractor stopped matching, which the floor alone would only catch once the
+# collapse was near-total.
+d_stale=""
+d_rows=0
+while IFS= read -r row; do
+  [ -n "$row" ] || continue
+  d_rows=$((d_rows + 1))
+  akey="$(printf '%s' "$row" | cut -f1)"
+  afn="$(printf '%s' "$row" | cut -f2)"
+  acl="$(printf '%s' "$row" | cut -f3)"
+  printf '%s\n' "$d_seen" | grep -qxF "$akey	$afn	$acl" || d_stale="$d_stale
+    $akey  $afn  $acl"
+done <<EOF
+$(printf '%s\n' "$DISPATCH_ALLOW" | grep -v '^[[:space:]]*$')
+EOF
+
+if ! gate_arm dispatch_shape "$d_examined" 20; then
+  fail "the dispatch extractor ruled on $d_examined site(s), under its floor of
+       20. Whatever it reports about dispatch shape says nothing: fix the
+       extractor, do not lower the floor."
+elif [ -n "$d_bad" ]; then
+  fail "dispatch on BackendHandle / TxConnection / TxCanceller that is not an
+       exhaustive match and is not allowlisted:$d_bad
+
+       A non-match form answers for a variant nobody has written yet, and
+       answers silently. \`backend_publishes_committed_changes\` was
+       \`matches!(backend, BackendHandle::Sqlite(_))\` until 2026-09-04: a third
+       backend would have read false and every change event would have been
+       delivered twice. Do ONE of these:
+         * spell it as a \`match\` with one arm per variant and NO wildcard, so
+           the compile error a new variant produces lands where the routing is
+           decided;
+         * if the question really is about ONE named variant - and \`false\` for
+           an unwritten backend is therefore correct rather than assumed - add
+           the row to DISPATCH_ALLOW in this file with the reason on the line.
+       Do not add a \`_ =>\` arm to silence a compiler that is trying to bill
+       you: that is the defect, spelled deliberately."
+elif [ -n "$d_stale" ]; then
+  fail "allowlist rows that match no site in the tree:$d_stale
+       Either the site went - delete the row in the same commit - or the
+       extractor stopped matching it, in which case the clean result above means
+       nothing. Note the key is <tag>/<path> plus the ENCLOSING FN, so renaming
+       the function is enough to strand a row."
+else
+  pass "all $d_examined dispatch site(s) accounted for \
+($d_match exhaustive match, $d_rows allowlisted)"
+  echo "  note $d_prose further \`Enum::Variant(..)\` occurrence(s) are"
+  echo "       constructions or string literals, which destructure nothing and"
+  echo "       are not ruled on. Read them if that number moves sharply."
 fi
 
 echo
