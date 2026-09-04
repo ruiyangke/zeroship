@@ -39,3 +39,6 @@ test-helpers = ["zeroship-data-core/test-helpers", "dep:sha2"]
 [dev-dependencies]
 # Live-PostgreSQL fixtures provision through the migration service.
 zeroship-migrate-server = { workspace = true }
+
+[lints]
+workspace = true

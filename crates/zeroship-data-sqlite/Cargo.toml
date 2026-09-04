@@ -49,3 +49,6 @@ uuid = { workspace = true }
 # data-core, and a `cfg(test)` here names THIS crate's test build, never
 # data-core's feature. Impl and trait must agree on the feature alone.
 test-helpers = ["zeroship-data-core/test-helpers", "dep:sha2"]
+
+[lints]
+workspace = true
