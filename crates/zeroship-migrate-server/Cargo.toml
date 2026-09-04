@@ -110,5 +110,17 @@ name = "apply_api_test"
 path = "tests/apply_api_test.rs"
 required-features = ["live-db-tests"]
 
+# The driver conformance target for `CompioPgSession`, the seam producer this
+# service SHIPS. It carries the same contract as `apply_api_test`: it cannot run
+# without a reachable PostgreSQL, and it PANICS naming the provisioning fixture
+# rather than skipping when the feature is on and no DSN is configured. A skipped
+# live suite reports exactly like a passing one, which is how this driver went
+# unconformed while `driver::conformance` was run only against the `PgDevSession`
+# and `MysqlDevSession` TEST harnesses in `crates/zeroship-migrate/tests/`.
+[[test]]
+name = "compio_pg_conformance"
+path = "tests/compio_pg_conformance.rs"
+required-features = ["live-db-tests"]
+
 [lints]
 workspace = true

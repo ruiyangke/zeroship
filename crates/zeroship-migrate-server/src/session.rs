@@ -340,6 +340,13 @@ fn to_holder(bind: &Bind) -> Result<ToSqlHolder, DbError> {
     // and an inferred parameter, separately and mixed, against a live server. A
     // driver that adds a variant here without running it is back to a green build
     // over a broken bind path.
+    //
+    // That suite is now pointed at THIS driver, from
+    // `tests/compio_pg_conformance.rs`. Measured 2026-09-04 against PostgreSQL
+    // 18.6: deleting the `Bind::Inferred` arm below reproduces the historic bug
+    // exactly, and the target reports it as
+    //   check "bind-inference-semantics": all-inferred INSERT with a
+    //   text-to-timestamp coercion failed: unsupported bind variant
     match bind {
         Bind::Null => Ok(ToSqlHolder::Null),
         Bind::Bool(b) => Ok(ToSqlHolder::Bool(*b)),
@@ -475,13 +482,24 @@ fn row_to_neutral(row: &PgRow) -> Result<Row, DbError> {
 /// (`crates/zeroship-migrate-node/src/session.rs`), which answers the same four
 /// verbs over the JS `pg` host. One body of engine code runs over either, so the
 /// SQL issued, the transaction boundaries and the decoded [`Value`] cells have
-/// to come out the same. NOTHING IN THE TREE HOLDS THAT.
-/// `zeroship_migrate_backend::driver::conformance` is the suite built for it,
-/// and it is driven only from `crates/zeroship-migrate/tests/pg_engine/`
-/// `pg_conformance.rs` against the test harness `PgDevSession`; this crate's
-/// `tests/` directory has no conformance target at all. That is precisely the
-/// gap `to_holder`'s comment above names when it says the compiler cannot hold
-/// this seam and the conformance suite has to.
+/// to come out the same.
+///
+/// THIS DOC SAID "NOTHING IN THE TREE HOLDS THAT" UNTIL 2026-09-04, and for the
+/// half about THIS driver it is no longer true.
+/// `zeroship_migrate_backend::driver::conformance` is the suite built for it, and
+/// it was driven only from `crates/zeroship-migrate/tests/` - `pg_engine/`
+/// `pg_conformance.rs` against the harness `PgDevSession`, `mysql_engine/`
+/// `mysql_conformance.rs` against `MysqlDevSession`. Both are TEST drivers, so the
+/// one that ships was the one nothing conformed. `tests/compio_pg_conformance.rs`
+/// now runs the full suite against `CompioPgSession` on a live server, and proves
+/// it reached THIS session rather than some other: `pg_my_temp_schema()` is 0
+/// before the run and non-zero after, on the same backend pid the borrowed
+/// `compio_postgres::Client` reports. That closes the gap `to_holder`'s comment
+/// above names when it says the compiler cannot hold this seam and the conformance
+/// suite has to.
+///
+/// The OTHER half stands: `NapiHostSession` still has no conformance target, so
+/// nothing holds the two producers to the same behaviour.
 ///
 /// This doc said "identical to the platform's in-tree `PgSession` impl" until
 /// 2026-09-04. No such type exists or has existed; see the module header.
