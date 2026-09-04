@@ -37,6 +37,34 @@
 # crate was created in the same commit as this note and leaving it out would be
 # a NEW blind spot rather than an inherited one.
 #
+# THE BLOCKER NAMED ABOVE IS NO LONGER THE ONE IN THE WAY. Re-measured 2026-09-04
+# at 598e53848: `postgres-types` resolves, and `cargo test --workspace --no-run`
+# now fails on ONE package - `zeroship-migrate-node`, whose nine integration
+# targets fail at LINK with `undefined reference to napi_create_function`. That is
+# not a regression and not fixable here: `napi` is a DEFAULT feature and Node ABI
+# symbols resolve only at `.node` dlopen time, which that crate's own Cargo.toml
+# has documented since `79b339aa7`. `required-features` cannot express it either,
+# since it can only require a feature ON, never OFF.
+#
+# THE CONSEQUENCE IS THAT THIS GATE HAS NOT RUN IN CI. `ci.yml` ("Test-target and
+# test-name census") runs that exact command and exits at its own build-failure
+# guard - correctly, since a short count from a partial build would measure the
+# build and not the coverage - so the staleness below has never been REPORTED by
+# CI, only recorded here by hand.
+#
+# Measured with the one package excluded (`--exclude zeroship-migrate-node`,
+# build exit 0): 44 members, 43 built test binaries, 192 test binaries, 9425 test
+# names against the floor of 5413, and the gate refuses on 3 rows naming
+# non-packages plus 16 unlisted members.
+#
+# STILL NOT REGENERATED HERE, and now for a sharper reason than "the build does
+# not run": it does run, and the census it would produce bakes in an answer to a
+# question nobody has decided. `zeroship-migrate-node` DECLARES test targets, so
+# listing it makes arm 1 red ("built NO test binary") and omitting it makes arm 1
+# red the day anything builds it. The census cannot be made correct until either
+# the CI command excludes that package on purpose or the addon stops defaulting to
+# `napi`. Decide that first; the paste is mechanical afterwards.
+#
 # To regenerate after a deliberate change:
 #   cargo test --workspace --no-run --message-format=json > /tmp/t.json
 #   tests/test_target_census_gate.sh /tmp/t.json --print-census
