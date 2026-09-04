@@ -22,7 +22,7 @@
 #                 crates/zeroship-migrate-server/tests/smoke_apply_pg.rs
 #                 crates/zeroship-migrate-server/tests/author_and_apply_pg.rs
 #                 crates/zeroship-migrate/tests/column_shapes/injected_column_collation.rs
-#                 crates/zeroship-plugin-db/tests/distributed_live.rs
+#                 crates/zeroship-data-engine/src/system_shape_charter.rs
 #   TypeScript  policies/codegen.mjs emits TWO views, because the two consumers
 #               ask different questions of the same bytes:
 #                 sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts
@@ -192,21 +192,25 @@ SELF="tests/inject_policy_mirror_gate.sh"
 # that adapts to whatever it finds cannot tell "nothing was added" from
 # "something was added and I adjusted".
 #
-# The six Rust consumers are the deployed ceiling, two adapter PG tests, the
-# production-charter collation integration test, plugin-db's distributed live
-# test, and plugin-db's own compiled-in charter. Three of those are tests, but
-# consuming the shared fragment is the point: none is an inert copy of the
-# platform shape.
+# The five Rust consumers are the deployed ceiling
+# (crates/zeroship-migrate-server/src/policy.rs), two adapter PG tests, the
+# production-charter collation integration test, and the worker's own compiled-in
+# charter (crates/zeroship-data-engine/src/system_shape_charter.rs). Three of
+# those are tests, but consuming the shared fragment is the point: none is an
+# inert copy of the platform shape.
 #
-# THIS SAID FIVE UNTIL 2026-09-01, and had been wrong since 27f4d5f45 ("feat(db):
-# compile the operator charter into the worker") added
-# crates/zeroship-data-engine/src/system_shape_charter.rs as the sixth. That is the
-# failure mode the asserted counts exist to produce - a new consumer is supposed
-# to fail this gate until someone states it - so the red was the gate working.
-# What it also shows is that the count and the prose above it rot together: the
-# sentence naming the five was not re-read when the sixth landed.
+# THIS SAID FIVE UNTIL 2026-09-01, then SIX, and is five again as of 2026-09-04.
+# The six was never real. `system_shape_charter.rs` landed in 27f4d5f45
+# ("feat(db): compile the operator charter into the worker") and IS a consumer,
+# so the count went up correctly - but the file it displaced was never checked,
+# and `crates/zeroship-plugin-db/tests/distributed_live.rs` was only ever matched
+# because the scan ANDed two unrelated file-level greps (see arm 2). It names the
+# policy in a doc comment and `include_str!`s something else entirely. The count
+# and the prose above it rotted together in the same direction twice: the
+# sentence naming the five was not re-read when the sixth landed, and the sixth
+# was not opened when it was written down.
 EXPECTED_INERT=19
-EXPECTED_RUST_CONSUMERS=6
+EXPECTED_RUST_CONSUMERS=5
 EXPECTED_TS_CONSUMERS=2
 
 # ---------------------------------------------------------------------------
@@ -294,10 +298,26 @@ echo "  discovery: $found_n inject rule(s) in tracked files; 1 fragment," \
 # consumer's charter simply stops injecting, and every creator table it governs
 # comes out without its system columns.
 # ---------------------------------------------------------------------------
+# ONE REGEX BINDING THE MACRO TO THE PATH, not two file-level greps ANDed.
+#
+# This was `grep -lF 'include_str!("'` piped into `grep -lF '<the path>'`, which
+# asks whether a file contains BOTH somewhere - a relation neither grep can see.
+# Measured 2026-09-04: that returned 6 files, the bound regex returns 5, and the
+# extra was `crates/zeroship-plugin-db/tests/distributed_live.rs`, whose two
+# qualifying lines are a DOC COMMENT naming the policy (`:66`) and an
+# `include_str!` of `sdks/db/dist/internal.js` (`:488`). Nothing in that file
+# takes the fragment.
+#
+# It was wrong in both directions, and the silent one is the reason this arm
+# exists: deleting that doc comment - a pure prose edit - would have taken the
+# count to 5 and failed the gate with "a consumer stopped taking the fragment";
+# and a real consumer dropping its include while any `.rs` file gained a prose
+# mention of the path would have held the count at 6 and said nothing.
 rust_consumers="$(
     cd "$ROOT" && git ls-files -z '*.rs' \
-        | xargs -0 -r grep -lF "include_str!(\"" -- 2>/dev/null \
-        | xargs -r grep -lF "policies/confined-system-shape.inject.toml" -- 2>/dev/null \
+        | xargs -0 -r grep -lE \
+            'include_str!\([[:space:]]*"[^"]*policies/confined-system-shape\.inject\.toml"' \
+            -- 2>/dev/null \
         | LC_ALL=C sort
 )"
 rust_n=$(printf '%s\n' "$rust_consumers" | grep -c . || true)
