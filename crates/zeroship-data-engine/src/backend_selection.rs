@@ -46,7 +46,7 @@ pub async fn open_sqlite_backend(
     path: impl AsRef<Path>,
     key_source: LocalKeySource,
 ) -> Result<SqliteBackend, DbError> {
-    SqliteBackend::open(path, BrokerChangeSink, key_source).await
+    SqliteBackend::open(path, std::sync::Arc::new(BrokerChangeSink), key_source).await
 }
 
 // There is deliberately NO `open_postgres_backend` composer here.
@@ -74,5 +74,5 @@ pub fn new_sqlite_backend(
     db_dir: PathBuf,
     key_source: LocalKeySource,
 ) -> Result<SqliteBackend, DbError> {
-    SqliteBackend::new(db_dir, BrokerChangeSink, key_source)
+    SqliteBackend::new(db_dir, std::sync::Arc::new(BrokerChangeSink), key_source)
 }

@@ -194,7 +194,7 @@ mod tests {
                 let backend =
                     crate::SqliteBackend::new(
                         dir.path().to_path_buf(),
-                        crate::NullChangeSink,
+                        std::sync::Arc::new(crate::NullChangeSink),
                         zeroship_data_core::encryption::LocalKeySource::env_var(),
                     )
                         .expect("open sqlite backend");

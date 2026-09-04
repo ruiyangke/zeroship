@@ -24,7 +24,14 @@
 //!   sqlite3_commit_hook fires
 //!       │
 //!       ▼ commit_callback
+//!   sink.disposition(app_id)  ← stamped HERE, per event
+//!       │
+//!       ▼
 //!   try_send(CommitPacket { events, commit_id })  ─────────►  publisher_task
+//!                                                                  │
+//!                                                                  ▼ (per event)
+//!                                                            read the stamp; drop
+//!                                                            anything not Deliver
 //!                                                                  │
 //!                                                                  ▼ (per event)
 //!                                                            resolve column names via
@@ -36,12 +43,37 @@
 //!
 //! ## Delivery-window semantics
 //!
-//! Suppression and schema-pending state are sampled after
-//! `recv_async().await`, once the publisher dequeues each packet. A guard that
-//! drops after the writer enqueues a `CommitPacket` but before the publisher
-//! dequeues it clears the state, so that queued event is delivered. The packet
-//! carries no enqueue-time disposition or epoch: this is dequeue-time
-//! filtering, not commit-window filtering.
+//! **The window a suppression guard covers is the set of commits made inside
+//! its scope — not the set of packets the publisher happens not to have drained
+//! yet.** [`ChangeSink::disposition`] is sampled in the `commit_hook`, on the
+//! writer thread, and the answer rides the packet as
+//! [`DispositionedEvent::disposition`]. The publisher reads that stamp; it never
+//! re-samples.
+//!
+//! It sampled at DEQUEUE time until 2026-09-03, and the difference is not
+//! academic. The channel is `flume::unbounded`, so `try_send` never applies
+//! backpressure and a packet can sit in it arbitrarily long. A guard dropped
+//! between enqueue and dequeue therefore cleared the state before the publisher
+//! looked, and the commit the guard was supposed to swallow was delivered. That
+//! made the outcome a function of publisher scheduling, so even a strictly
+//! sequential caller — engage the guard, write, drop the guard — had no defined
+//! answer. The three integration fences in
+//! `zeroship-plugin-db/tests/sqlite_integration.rs` papered over it by sleeping
+//! 100 ms to drain the publisher BEFORE dropping the guard, which is exactly the
+//! order that cannot expose the bug; their assertions (`Resync` and zero
+//! `Change`) always described the commit-window contract this file now
+//! implements.
+//!
+//! The converse ordering is not a gap under this contract but a consequence of
+//! it: a commit that lands BEFORE a guard is engaged is outside the window, so
+//! delivering it late — after the guard has come and gone — is correct. That is
+//! why the publisher's `.await` on the column-name PRAGMA needs no fence.
+//!
+//! The cost is two uncontended global-mutex acquisitions per commit that
+//! produces events, on the writer thread. That is far below the WAL write the
+//! same commit is already paying for, and it is only paid when a transaction
+//! actually changed a CDC-relevant row (`commit_callback` returns before
+//! sampling when the buffer is empty).
 //!
 //! ## Cross-thread invariants
 //!
@@ -166,9 +198,49 @@ pub(crate) struct PendingEvent {
 /// the collision above.
 #[derive(Debug)]
 pub(crate) struct CommitPacket {
-    pub(crate) events: Vec<PendingEvent>,
+    pub(crate) events: Vec<DispositionedEvent>,
     #[allow(dead_code)] // Stamped but no downstream consumer yet.
     pub(crate) commit_id: u64,
+}
+
+/// One buffered event plus the delivery decision taken for it at COMMIT time.
+///
+/// The pairing is the whole point: carrying the disposition on the packet is
+/// what makes a suppression guard cover a *commit window* rather than a drain
+/// window. See the module rustdoc.
+#[derive(Debug)]
+pub(crate) struct DispositionedEvent {
+    pub(crate) event: PendingEvent,
+    pub(crate) disposition: DeliveryDisposition,
+}
+
+/// Writer-thread half of the CDC wire: the packet channel plus the delivery
+/// policy the `commit_hook` samples before enqueueing.
+///
+/// The two travel together deliberately. They were a bare
+/// `flume::Sender<CommitPacket>` threaded through the session actor until
+/// 2026-09-03; pairing them means every place that can enqueue a packet can
+/// also stamp it, so there is no path that ships an unstamped commit.
+#[derive(Clone)]
+pub(crate) struct CommitSender {
+    tx: flume::Sender<CommitPacket>,
+    sink: Arc<dyn ChangeSink>,
+}
+
+impl std::fmt::Debug for CommitSender {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `dyn ChangeSink` is not `Debug` — the port stays minimal, and the
+        // channel's disconnected/len state is the only thing worth printing.
+        f.debug_struct("CommitSender")
+            .field("disconnected", &self.tx.is_disconnected())
+            .finish_non_exhaustive()
+    }
+}
+
+impl CommitSender {
+    pub(crate) fn new(tx: flume::Sender<CommitPacket>, sink: Arc<dyn ChangeSink>) -> Self {
+        Self { tx, sink }
+    }
 }
 
 /// Hook-captured dispatcher state. **Not exported across crate
@@ -182,8 +254,9 @@ pub(crate) struct SqliteCdcDispatcher {
     buffer: Arc<Mutex<CdcTxBuffer>>,
     /// Monotonic commit-id source — stamped on each `CommitPacket`.
     commit_id: Arc<AtomicU64>,
-    /// Sender half of the worker→compio channel.
-    packet_tx: flume::Sender<CommitPacket>,
+    /// Sender half of the worker→compio channel, paired with the delivery
+    /// policy the commit hook samples.
+    packet_tx: CommitSender,
 }
 
 /// Install the CDC hook triplet on a freshly opened `rusqlite::Connection`.
@@ -203,7 +276,7 @@ pub(crate) struct SqliteCdcDispatcher {
 pub(crate) fn install(
     conn: &Connection,
     _app_id: Option<String>,
-    packet_tx: flume::Sender<CommitPacket>,
+    packet_tx: CommitSender,
 ) -> Result<SqliteCdcDispatcher, DbError> {
     let buffer = Arc::new(Mutex::new(CdcTxBuffer::new()));
     let commit_id = Arc::new(AtomicU64::new(0));
@@ -345,7 +418,7 @@ fn preupdate_callback(
 fn commit_callback(
     buffer: &Arc<Mutex<CdcTxBuffer>>,
     commit_id: &Arc<AtomicU64>,
-    packet_tx: &flume::Sender<CommitPacket>,
+    packet_tx: &CommitSender,
 ) -> bool {
     // `mem::take` swaps in a fresh empty Vec so subsequent hook fires
     // (in a new transaction) start with a clean buffer.
@@ -370,6 +443,28 @@ fn commit_callback(
         return false;
     }
 
+    // Sample the delivery disposition HERE — this is the commit boundary, and
+    // sampling it here is what makes a suppression guard cover the commits made
+    // in its scope rather than the packets the publisher has yet to drain (see
+    // the module rustdoc's "Delivery-window semantics"). Memoised by app id:
+    // the writer is single-threaded and a commit is one app in practice, so
+    // this is one `disposition` call per commit, not per row.
+    let mut sampled: HashMap<String, DeliveryDisposition> = HashMap::new();
+    let events: Vec<DispositionedEvent> = events
+        .into_iter()
+        .map(|event| {
+            let disposition = match sampled.get(&event.db_name) {
+                Some(d) => *d,
+                None => {
+                    let d = packet_tx.sink.disposition(&event.db_name);
+                    sampled.insert(event.db_name.clone(), d);
+                    d
+                }
+            };
+            DispositionedEvent { event, disposition }
+        })
+        .collect();
+
     // Stamp the commit id BEFORE the channel send so a recipient that
     // sees the packet observes the commit_id the dispatcher would
     // observe next.
@@ -383,7 +478,7 @@ fn commit_callback(
     // to `send` — it never fails unless the receiver has dropped (a
     // disconnect at shutdown). We log + drop the packet on disconnect;
     // there's no useful recovery from inside a commit hook.
-    match packet_tx.try_send(packet) {
+    match packet_tx.tx.try_send(packet) {
         Ok(()) => {}
         Err(flume::TrySendError::Disconnected(_)) => {
             tracing::warn!(
@@ -506,20 +601,20 @@ fn is_filtered_relation(table: &str) -> bool {
 /// runtime is sound. The task never holds a borrow across `.await`
 /// other than through the session actor's mpsc reply channel, which is
 /// thread-safe by construction.
-pub(crate) fn spawn_publisher<S: ChangeSink>(
+pub(crate) fn spawn_publisher(
     session: Rc<SqliteSession>,
     invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     rx: flume::Receiver<CommitPacket>,
-    sink: S,
+    sink: Arc<dyn ChangeSink>,
 ) -> compio::runtime::JoinHandle<()> {
     compio::runtime::spawn(publisher_loop(session, invalidations, rx, sink))
 }
 
-async fn publisher_loop<S: ChangeSink>(
+async fn publisher_loop(
     session: Rc<SqliteSession>,
     invalidations: Rc<RefCell<HashSet<(String, String)>>>,
     rx: flume::Receiver<CommitPacket>,
-    sink: S,
+    sink: Arc<dyn ChangeSink>,
 ) {
     // Per-task local cache: `(db_name, table) → Arc<Vec<String>>`. The
     // dispatcher's `column_cache` field is reserved for a future
@@ -530,34 +625,30 @@ async fn publisher_loop<S: ChangeSink>(
     let mut name_cache: HashMap<(String, String), Vec<String>> = HashMap::new();
 
     while let Ok(packet) = rx.recv_async().await {
-        // Backfill pause + schema-pending decoder fence
-        // (plan §5 + §7). The publisher runs on the compio thread and
-        // owns the broker-side; it is THE chokepoint where suppression
-        // applies for the SQLite arm (the PG arm uses the legacy
-        // `broker::is_app_suppressed` rail inside `emit_local`).
+        // Backfill pause + schema-pending decoder fence (plan §5 + §7). The
+        // decision itself was taken in the commit hook and rides the packet;
+        // this loop only ACTS on it. Re-sampling `sink.disposition` here is the
+        // bug this shape replaced — see the module rustdoc.
         //
-        // Suppression is keyed by `app_id` and the dispatcher derives
-        // the per-event `app_id` from the preupdate hook's `db_name`
-        // parameter (the ATTACH alias by convention equals the app
-        // id; see `cdc::install` + `preupdate_callback` for the
-        // contract). A single packet may carry events for one app_id
-        // — the writer is single-threaded and the buffer flushes
-        // per-commit — but we group by `app_id` defensively so a
-        // future multi-app commit (unlikely under the current actor
-        // shape) still pulls the right flag set.
+        // Suppression is keyed by `app_id` and the dispatcher derives the
+        // per-event `app_id` from the preupdate hook's `db_name` parameter (the
+        // ATTACH alias by convention equals the app id; see `cdc::install` +
+        // `preupdate_callback` for the contract). A single packet carries one
+        // app_id in practice — the writer is single-threaded and the buffer
+        // flushes per-commit — but the stamp is per-event so a future multi-app
+        // commit still carries the right answer for each.
         //
-        // The check is debug-only (NOT warn): both the backfill
-        // window and the schema-pending window are normal lifecycle
-        // events (`migrations.run` is the dominant caller of the
-        // former; `bundle_invalidated` of the latter), and a stream
-        // of warns during a deploy would spam operators.
+        // The counting is debug-only (NOT warn): both the backfill window and
+        // the schema-pending window are normal lifecycle events
+        // (`migrations.run` is the dominant caller of the former;
+        // `bundle_invalidated` of the latter), and a stream of warns during a
+        // deploy would spam operators.
         let mut suppressed_count: usize = 0;
         let mut schema_pending_count: usize = 0;
         let mut delivered: Vec<PendingEvent> = Vec::with_capacity(packet.events.len());
         for ev in packet.events {
-            let app_id = ev.db_name.as_str();
-            match sink.disposition(app_id) {
-                DeliveryDisposition::Deliver => delivered.push(ev),
+            match ev.disposition {
+                DeliveryDisposition::Deliver => delivered.push(ev.event),
                 DeliveryDisposition::Suppressed => suppressed_count += 1,
                 DeliveryDisposition::SchemaPending => schema_pending_count += 1,
             }
@@ -657,8 +748,9 @@ async fn publisher_loop<S: ChangeSink>(
             };
 
             // Suppression / schema-pending filtering already ran over the
-            // packet's events above (plan §9). The engine-provided sink owns
-            // the thread-affine broker call.
+            // packet's events above, on the stamp the commit hook wrote
+            // (plan §9). The engine-provided sink owns the thread-affine
+            // broker call.
             sink.publish(&event);
         }
     }
@@ -783,11 +875,202 @@ impl ChangeStream for SqliteChangeStream {
 
 #[cfg(test)]
 mod tests {
-    //! Unit-level checks for the static helpers. End-to-end behaviour
-    //! (hook → publisher → broker) is covered by the
-    //! `tests/sqlite_integration.rs` mirror.
+    //! Unit-level checks for the static helpers, plus the delivery-window
+    //! fences. End-to-end behaviour (hook → publisher → broker) is covered by
+    //! the `tests/sqlite_integration.rs` mirror; what lives here is the part
+    //! that mirror CANNOT state deterministically — the interleaving of a guard
+    //! drop with an undrained channel.
 
     use super::*;
+    use std::sync::atomic::AtomicUsize;
+
+    /// A [`ChangeSink`] whose answer the test flips, standing in for engaging
+    /// and dropping a `BrokerPauseGuard` / `SchemaPendingGuard`.
+    ///
+    /// `Mutex`, not `Cell`: the commit hook samples `disposition` from the
+    /// SQLite writer thread while the test drives the publisher on the compio
+    /// thread, which is the whole reason [`ChangeSink`] is `Send + Sync`.
+    struct GuardSink {
+        disposition: Mutex<DeliveryDisposition>,
+        published: AtomicUsize,
+    }
+
+    impl GuardSink {
+        fn new(initial: DeliveryDisposition) -> Self {
+            Self {
+                disposition: Mutex::new(initial),
+                published: AtomicUsize::new(0),
+            }
+        }
+
+        fn set(&self, next: DeliveryDisposition) {
+            *self.disposition.lock().expect("GuardSink mutex") = next;
+        }
+
+        fn published(&self) -> usize {
+            self.published.load(Ordering::SeqCst)
+        }
+    }
+
+    impl ChangeSink for GuardSink {
+        fn disposition(&self, _app_id: &str) -> DeliveryDisposition {
+            *self.disposition.lock().expect("GuardSink mutex")
+        }
+
+        fn publish(&self, _event: &ChangeEvent) {
+            self.published.fetch_add(1, Ordering::SeqCst);
+        }
+    }
+
+    /// Drive one commit through the real hooks with `at_commit` in force, then
+    /// switch to `at_drain` BEFORE the publisher exists, then drain. Returns
+    /// how many events reached [`ChangeSink::publish`].
+    ///
+    /// **The determinism is structural, not a sleep.** `publisher_loop` is not
+    /// called until after the disposition has been switched, so the packet is
+    /// provably still in the channel when the switch happens — the assertion
+    /// below checks exactly that with `rx.len()`. There is no ordering left for
+    /// a scheduler to decide.
+    async fn drive_window(at_commit: DeliveryDisposition, at_drain: DeliveryDisposition) -> usize {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("cdc-window.sqlite");
+        // The preupdate hook drops writes to `main` (that is the control
+        // session's own file), so the fixture writes through an ATTACHed alias
+        // exactly as an app does — the alias IS the app id.
+        let app_path = dir.path().join("zs-app_window.sqlite");
+        let app_path = app_path.to_string_lossy().into_owned();
+
+        let (tx, rx) = flume::unbounded::<CommitPacket>();
+        let sink = Arc::new(GuardSink::new(at_commit));
+
+        // Writer session: the real hook triplet, the real `commit_callback`.
+        let writer = SqliteSession::open(
+            &db_path,
+            None,
+            Some(CommitSender::new(tx, sink.clone() as Arc<dyn ChangeSink>)),
+        )
+        .expect("open writer session");
+        writer
+            .attach("app_window", &app_path)
+            .await
+            .expect("ATTACH app file");
+        writer
+            .exec(
+                "CREATE TABLE \"app_window\".\"items\" \
+                 (id INTEGER PRIMARY KEY, name TEXT NOT NULL)",
+                &[],
+            )
+            .await
+            .expect("CREATE TABLE");
+        writer
+            .exec(
+                "INSERT INTO \"app_window\".\"items\" (id, name) VALUES (1, 'in-window')",
+                &[],
+            )
+            .await
+            .expect("INSERT");
+
+        // The commit has happened and NOTHING has drained it: no publisher task
+        // exists yet. The DDL above contributes no packet (`sqlite_master` is a
+        // filtered relation), so this is the INSERT's packet and only it.
+        assert_eq!(
+            rx.len(),
+            1,
+            "the fixture is only meaningful while the packet is still queued"
+        );
+
+        // The guard's scope ends here — after the commit, before any drainage.
+        sink.set(at_drain);
+
+        // A second session serves the publisher's `PRAGMA table_info` lookups,
+        // so dropping the writer can disconnect the channel and let
+        // `publisher_loop` return. One session cannot do both: the publisher
+        // borrows it for the lifetime of the loop.
+        let reader = SqliteSession::open(&db_path, None, None).expect("open reader");
+        reader
+            .attach("app_window", &app_path)
+            .await
+            .expect("ATTACH on the reader");
+        let reader = Rc::new(reader);
+        drop(writer);
+
+        publisher_loop(
+            reader,
+            Rc::new(RefCell::new(HashSet::new())),
+            rx,
+            sink.clone() as Arc<dyn ChangeSink>,
+        )
+        .await;
+
+        sink.published()
+    }
+
+    #[compio::test]
+    async fn a_backfill_guard_dropped_before_drainage_still_suppresses_its_commit() {
+        // The fence for the whole "Delivery-window semantics" section. Sampling
+        // at dequeue time -- what shipped until 2026-09-03 -- publishes this
+        // event, because by the time the publisher looks the guard is gone.
+        assert_eq!(
+            drive_window(
+                DeliveryDisposition::Suppressed,
+                DeliveryDisposition::Deliver
+            )
+            .await,
+            0,
+            "a commit made inside a backfill window must stay suppressed even when \
+             the guard drops before the publisher drains the channel"
+        );
+    }
+
+    #[compio::test]
+    async fn a_schema_pending_guard_dropped_before_drainage_still_drops_its_commit() {
+        // Same fence on the other rail. This one is not merely noise-control:
+        // the positional values were captured against the pre-DDL column order,
+        // and the publisher re-resolves names AFTER the invalidation lands, so
+        // delivering it would decode an old tuple against a new schema.
+        assert_eq!(
+            drive_window(
+                DeliveryDisposition::SchemaPending,
+                DeliveryDisposition::Deliver
+            )
+            .await,
+            0,
+            "a commit made inside a schema-pending window must stay dropped even when \
+             the guard drops before the publisher drains the channel"
+        );
+    }
+
+    #[compio::test]
+    async fn an_unguarded_commit_is_delivered() {
+        // The control, differing from the two cases above in exactly one
+        // variable: the disposition in force AT COMMIT. Without it, "0
+        // published" would also be satisfied by a fixture that never publishes
+        // anything at all.
+        assert_eq!(
+            drive_window(DeliveryDisposition::Deliver, DeliveryDisposition::Deliver).await,
+            1,
+            "the fixture must be able to observe a publish"
+        );
+    }
+
+    #[compio::test]
+    async fn a_commit_made_before_a_guard_is_engaged_is_still_delivered() {
+        // The converse direction, and it is a consequence of the contract
+        // rather than a gap in it: a commit that landed before the guard was
+        // engaged is outside the window, so a guard engaged while it sits in
+        // the channel must not swallow it. This is also why the publisher's
+        // `.await` on the column-name PRAGMA needs no re-check.
+        assert_eq!(
+            drive_window(
+                DeliveryDisposition::Deliver,
+                DeliveryDisposition::Suppressed
+            )
+            .await,
+            1,
+            "a commit made outside any window must be delivered even if a guard is \
+             engaged before the publisher drains it"
+        );
+    }
 
     #[test]
     fn is_filtered_relation_excludes_system_tables() {
