@@ -33,6 +33,12 @@
 //!   the slot.
 
 pub mod collection;
+/// The cold-open witness for the five V8 sites that resolve a backend, plus
+/// the `find` dispatch that carries the per-query unmask hint. It is in the
+/// crate rather than in an integration target because it enters through the
+/// JS methods, and the three `mint_*` functions those need are `pub(crate)`.
+#[cfg(test)]
+mod cold_open;
 pub mod db;
 pub mod db_platform;
 pub mod dispatch;
