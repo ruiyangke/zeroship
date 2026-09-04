@@ -7348,6 +7348,7 @@ dependencies = [
  "zeroship-auth",
  "zeroship-control",
  "zeroship-core",
+ "zeroship-data-cdc-server",
  "zeroship-gateway",
  "zeroship-migrate-server",
  "zeroship-worker",
@@ -7460,6 +7461,17 @@ dependencies = [
  "zeroship-config-contract",
  "zeroship-config-macros",
  "zeroship-test-support",
+]
+
+[[package]]
+name = "zeroship-data-cdc-server"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "compio",
+ "toml 0.8.23",
+ "tracing",
+ "zeroship-core",
 ]
 
 [[package]]
