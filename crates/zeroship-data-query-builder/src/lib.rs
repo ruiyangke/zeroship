@@ -71,7 +71,7 @@
 //! `"version" = "version" + 1` on every dispatched update. Both are closed
 //! shapes confined to the SET/VALUES position; neither is a general expression
 //! node, because a general one would fix the shared grammar for search, unmask
-//! and effects too. See [`write`] for the full argument, including what it
+//! and effects too. See [`mod@write`] for the full argument, including what it
 //! costs to leave the `jsonb` update operators out.
 //!
 //! Nothing here emits DDL. The runtime executes none, so `CREATE TABLE`,

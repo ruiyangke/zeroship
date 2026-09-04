@@ -16,7 +16,7 @@
 //!   with ESCALATION-REJECT (a draft grant looser than the ceiling permits is
 //!   rejected, never clamped). This is the direct replacement for `meet_ceiling_draft`.
 //! - the SEAL is the `zeroship-migrate-policy` HMAC over the composed [`EffectivePolicy`]
-//!   ([`zeroship_migrate::seal`] / [`SealedPolicy::verify`]).
+//!   ([`fn@zeroship_migrate::seal`] / [`SealedPolicy::verify`]).
 //!
 //! The composed engine [`EffectivePolicy`] drives table-shape injection
 //! (`resolve_create_table_policy`) and escalation-reject. The rendered-DDL guard uses

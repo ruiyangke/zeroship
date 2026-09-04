@@ -2,16 +2,16 @@
 //!
 //! Split into focused submodules:
 //! - [`auth_kind`] - the one auth-provider vocabulary (`AuthProviderKind`).
-//! - [`file`] — the TOML schema (`FileConfig`, sections, `ConfigError`).
+//! - [`mod@file`] — the TOML schema (`FileConfig`, sections, `ConfigError`).
 //! - [`source`] — overlay discovery (`ConfigSource`, `LoadedOverlay`, resolve/load).
-//! - [`env`] - the sole raw process-environment boundary, plus pure truthiness.
+//! - [`mod@env`] - the sole raw process-environment boundary, plus pure truthiness.
 //! - [`declared`] - typed keys for reads the config contract does not generate.
 //! - [`secrets`] — secret-strength validation + literal loopback checks.
 //! - [`credential_gate`] - the named sentinel, the boot refusal and its banner,
 //!   the per-subsystem audit, and the build-profile dev escape.
 //! - [`diagnostics`] - the shared env-name scanner every binary's
 //!   "this refusal names something settable" test drives.
-//! - [`bootstrap`] — the shared boot dance + structured `--check-config` emitter.
+//! - [`mod@bootstrap`] — the shared boot dance + structured `--check-config` emitter.
 //!
 //! - [`names`] — canonical identities, source-policy wrappers, and the
 //!   `zeroship_config` attribute that generates every spelling from one
