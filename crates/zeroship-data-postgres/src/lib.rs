@@ -22,7 +22,8 @@
 //!
 //! [`postgres::PostgresBackend`] and the five files it leans on - catalog
 //! introspection, row-to-JSON decoding, SQLSTATE classification, per-app session
-//! SQL, and the roled autocommit funnel - plus [`lock_guard::LockGuard`], which
+//! SQL, and the roled autocommit funnel - plus `lock_guard::LockGuard` (gated
+//! behind `test-helpers`, so it is absent from a default-feature build), which
 //! travels with the backend because its `acquire` is bound to
 //! `LockManager<Client = compio_postgres::OwnedPooledClient>`.
 //!

@@ -1,8 +1,9 @@
 //! Typed error classification for `plugin-db`.
 //!
 //! Every fallible internal helper returns `Result<_, DbError>`. At the
-//! V8 boundary the dispatcher calls [`DbError::to_op_error`] to
-//! materialise an [`OpError`] whose `.code` is stamped from the variant
+//! V8 boundary the dispatcher calls `ToOpError::to_op_error` (the adapter
+//! tier's, in `zeroship-plugin-db`) to materialise a `zeroship_runtime`
+//! `OpError` whose `.code` is stamped from the variant
 //! — the SDK can then branch on `err.code` instead of substring-matching
 //! opaque messages.
 //!

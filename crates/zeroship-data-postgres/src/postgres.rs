@@ -41,7 +41,8 @@ use super::{pg_autocommit, pg_error};
 /// Single concrete impl of `Backend` backed by `compio_postgres`.
 ///
 /// Holds the `Rc<Pool>` for the configured URL. The pool itself is
-/// created by [`crate::init_pool_async`] and stashed in the per-isolate
+/// created by `zeroship_plugin_db::init_pool_async` (the adapter tier, which
+/// this crate must not name as a dependency) and stashed in the per-isolate
 /// context; this wrapper just provides the trait facade.
 pub struct PostgresBackend {
     pool: Rc<compio_postgres::Pool>,

@@ -95,7 +95,8 @@ use crate::error::DbError;
 /// instead of the omnibus `Backend` super-trait. That carve is
 /// finished: nothing takes `dyn Backend`, and the `&PostgresBackend`
 /// parameters that remain are the deliberate Postgres-only accessors
-/// on [`BackendHandle`] (`as_postgres`, `as_encrypted_column_pg`)
+/// on `BackendHandle` (the engine tier's dispatch enum, in
+/// `zeroship-data-engine`) (`as_postgres`, `as_encrypted_column_pg`)
 /// plus their private callers. Those sit
 /// outside the capability traits by design - replication and WAL
 /// consumption are Postgres-specific - rather than being a migration
@@ -256,7 +257,8 @@ pub trait LockManager: SqlExecutor {
     /// [`LockScope`]; `Ok(false)` if another holder already owns it.
     /// Typed wrapper over [`Self::try_acquire_advisory_lock`].
     ///
-    /// Takes `&LockScope` — see [`Self::acquire`].
+    /// Takes `&LockScope` — see
+    /// [`BoundedLockAcquire::acquire`](crate::lock_policy::BoundedLockAcquire::acquire).
     #[allow(async_fn_in_trait)]
     async fn try_acquire(&self, client: &Self::Client, scope: &LockScope) -> Result<bool, DbError> {
         let (k1, k2) = scope.to_keys();
@@ -264,7 +266,8 @@ pub trait LockManager: SqlExecutor {
     }
 
     /// Release a session-scoped advisory lock previously acquired via
-    /// [`Self::acquire`] / [`Self::try_acquire`]. Typed wrapper over
+    /// [`BoundedLockAcquire::acquire`](crate::lock_policy::BoundedLockAcquire::acquire)
+    /// / [`Self::try_acquire`]. Typed wrapper over
     /// [`Self::release_advisory_lock`].
     ///
     /// Takes `&LockScope` so the release site can reuse the same
@@ -438,7 +441,7 @@ pub trait SchemaIntrospect: 'static {
 ///
 /// **Why on the backend, not on `SqlExecutor`**: dialect choice is a
 /// property of the *engine*, not the connection — a future PG-replica
-/// backend would re-use [`crate::backend::PostgresBackend`]'s pool +
+/// backend would re-use `zeroship_data_postgres::postgres::PostgresBackend`'s pool +
 /// `SqlExecutor` impl but share a single `PgDialect`. Pinning
 /// `DialectBuilder` as its own trait (and composing into the
 /// per-backend struct) is the canonical shape.
@@ -531,7 +534,7 @@ pub trait DialectBuilder: 'static {
 /// **Why not on `Backend` super-bound** (plan §2.1): consumers route
 /// via `BackendHandle::as_change_stream_pg(...)` /
 /// `as_change_stream_sqlite(...)` accessors that mirror
-/// [`BackendHandle::as_postgres`] / [`BackendHandle::as_sqlite`]. The
+/// `BackendHandle::as_postgres` / `BackendHandle::as_sqlite`. The
 /// associated `ConsumerHandle` type (concrete `WalConsumerHandle` for
 /// PG, `SqliteConsumerHandle` for SQLite) is the load-bearing reason
 /// not to dyn-erase — `async fn` + an associated type is not object-safe
@@ -592,7 +595,7 @@ pub trait ChangeStream: 'static {
 ///
 /// Same rationale as [`ChangeStream`] (plan §2):
 /// consumers route via concrete-backend accessors —
-/// [`BackendHandle::as_postgres`] / [`BackendHandle::as_sqlite`] —
+/// `BackendHandle::as_postgres` / `BackendHandle::as_sqlite` —
 /// because `async fn` in trait position is dyn-incompatible. Adding
 /// `VectorIndex` to the omnibus `Backend` super-trait would force
 /// every backend to implement it (including hypothetical future

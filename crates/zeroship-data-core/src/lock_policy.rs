@@ -79,7 +79,7 @@ pub trait BoundedLockAcquire: LockManager {
     /// loop over `try_acquire_advisory_lock` - never the indefinitely-waiting
     /// `acquire_advisory_lock`.
     ///
-    /// **Security [I43]**: the shape this replaced called
+    /// **Security \[I43\]**: the shape this replaced called
     /// `acquire_advisory_lock`, which on PostgreSQL issues `pg_advisory_lock` -
     /// a server-side wait with no timeout. An app holding its own session lock
     /// indefinitely could stall every subsequent operation using that scope
