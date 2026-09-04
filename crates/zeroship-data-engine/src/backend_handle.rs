@@ -19,8 +19,11 @@
 //! The enum has a `Postgres(Rc<PostgresBackend>)` arm and a `Sqlite(..)` arm,
 //! which is a vendor-embedding violation everywhere except the tier that
 //! dispatches. `data-engine` sits ABOVE both vendor crates and is exactly that
-//! tier. The two trait impls below are the point: vendor selection for vector
-//! and spatial search lives HERE so the engine's call sites never downcast.
+//! tier. The routed entry points below are the point: vendor selection for
+//! vector and spatial search lives HERE so the engine's call sites never
+//! downcast. They are free functions taking a `TxRoute` rather than trait impls
+//! on the handle, because the lane a statement runs on is part of the dispatch
+//! and a handle cannot carry it - see [`routed_vector_search`].
 //!
 //! See #164 for why decision 4's "adding a database must require ZERO changes
 //! to data-engine" overstates the rule this enum has to satisfy - a closed sum
@@ -34,9 +37,14 @@ use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
 use zeroship_schema::descriptors::{GeoPoint, VectorMetric};
 
+// `VectorIndex` and `SpatialIndex` are NOT imported here any more: the two
+// `impl ... for BackendHandle` blocks that named them became the routed free
+// functions below, which call the vendors' inherent methods instead. The traits
+// still exist and both vendor backends still implement them - that impl is what
+// an autocommit caller reaches - but this file no longer names either.
 use crate::backend::{
-    ChangeStream, DialectBuilder, LockManager, PostgresBackend, ScalarRead,
-    SpatialIndex, SqlExecutor, SqliteBackend, UnmaskAuditRow, VectorIndex, postgres, sqlite,
+    ChangeStream, DialectBuilder, LockManager, PostgresBackend, ScalarRead, SqlExecutor,
+    SqliteBackend, UnmaskAuditRow, postgres, sqlite,
 };
 use crate::tx_lanes::TxConnection;
 use zeroship_data_core::error::{BeginIntent, OpenSessionError};
@@ -88,71 +96,136 @@ pub enum BackendHandle {
 /// Until 2026-09-02 the engine wrote
 /// `if let Some(sq) = backend.as_sqlite() { .. } else { backend.as_postgres().ok_or(..)? }`.
 /// That is the downcast the crate split forbids: it puts the names of both
-/// concrete backends into engine code. Both arms already called this same trait
-/// method with identical arguments, so the branch was only ever SELECTING an
-/// impl - and selecting an impl by vendor is precisely what this tier is for.
+/// concrete backends into engine code. Both arms already called the vendor's
+/// trait method with identical arguments, so the branch was only ever SELECTING
+/// an impl - and selecting an impl by vendor is precisely what this tier is for.
 ///
 /// The `backend_unsupported("vector_search")` arm the old shape carried is not
 /// reproduced, because it was unreachable: [`BackendHandle`] has exactly two
 /// variants and neither is `#[cfg]`-gated, so the `else` of `as_sqlite()` was
 /// always `Postgres`. Verified by reading the enum, not by test.
-impl VectorIndex for BackendHandle {
-    #[allow(clippy::too_many_arguments)]
-    async fn vector_search(
-        &self,
-        binding: &DbBinding,
-        collection: &str,
-        column: &str,
-        query: &[f32],
-        k: usize,
-        metric: VectorMetric,
-        filter: &serde_json::Value,
-        schema: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
-        match self {
-            // The SQLite arm has to ATTACH the app's database file before it
-            // can scan it. That prelude sat at the engine call site; it belongs
-            // to the arm that needs it, and nothing else has to know.
-            Self::Sqlite(sq) => {
-                sq.attach_app_file(binding.app_id()).await?;
-                sq.vector_search(binding, collection, column, query, k, metric, filter, schema)
-                    .await
-            }
-            Self::Postgres(pg) => {
-                pg.vector_search(binding, collection, column, query, k, metric, filter, schema)
-                    .await
-            }
+///
+/// **Why this is a free function taking a `TxRoute`, and not
+/// `impl VectorIndex for BackendHandle`.** It was that impl until 2026-09-03,
+/// and a handle does not say which CONNECTION. Both arms reached the autocommit
+/// lane - a fresh pooled checkout on PostgreSQL, `op_conn` on SQLite - while
+/// every ordinary read in the same `db.transaction(fn)` callback went through
+/// `exec_query`, which honours `route.in_tx()`. So a `search` over a row the
+/// SAME transaction had just written returned nothing: the row existed, and the
+/// connection sent to scan for it could not see it. This is the search family's
+/// half of the defect `read_raw_column_bytes` documents for unmask, and the two
+/// are independent - neither fix is evidence about the other. The route carries
+/// both halves (the handle picks the vendor, `in_tx` picks the connection), so
+/// they cannot come apart again. Bound by
+/// `plugin-db/tests/search_tx_lane.rs`.
+///
+/// # Errors
+///
+/// The vendor's own refusals (`vector_extension_missing`, `vector_unsupported`,
+/// a descriptor-driven builder error), the statement's database error, and
+/// `transaction_scope_expired` / `transaction_connection_busy` when the route
+/// claims a transaction whose session is not reachable.
+#[allow(clippy::too_many_arguments)]
+pub async fn routed_vector_search(
+    route: &crate::tx_route::TxRoute,
+    binding: &DbBinding,
+    collection: &str,
+    column: &str,
+    query: &[f32],
+    k: usize,
+    metric: VectorMetric,
+    filter: &serde_json::Value,
+    schema: &serde_json::Value,
+) -> Result<Vec<serde_json::Value>, DbError> {
+    match route.backend() {
+        // The SQLite arm has to ATTACH the app's database file before it
+        // can scan it. That prelude sat at the engine call site; it belongs
+        // to the arm that needs it, and nothing else has to know.
+        BackendHandle::Sqlite(sq) => {
+            sq.attach_app_file(binding.app_id()).await?;
+            let (_lane_claim, lane) = sqlite_lane(route, sq)?;
+            sq.vector_search_on(
+                &lane, binding, collection, column, query, k, metric, filter, schema,
+            )
+            .await
+        }
+        BackendHandle::Postgres(pg) => {
+            let bq = pg
+                .plan_vector_search(binding, collection, column, query, k, metric, filter, schema)
+                .await?;
+            run_planned_postgres_read(route, pg, &bq).await
         }
     }
 }
 
-/// Vendor selection for spatial search. Same rationale as the [`VectorIndex`]
-/// impl directly above, including the ATTACH prelude on the SQLite arm.
-impl SpatialIndex for BackendHandle {
-    #[allow(clippy::too_many_arguments)]
-    async fn spatial_near(
-        &self,
-        binding: &DbBinding,
-        collection: &str,
-        column: &str,
-        point: GeoPoint,
-        radius_m: f64,
-        filter: &serde_json::Value,
-        limit: Option<usize>,
-        schema: &serde_json::Value,
-    ) -> Result<Vec<serde_json::Value>, DbError> {
-        match self {
-            Self::Sqlite(sq) => {
-                sq.attach_app_file(binding.app_id()).await?;
-                sq.spatial_near(binding, collection, column, point, radius_m, filter, limit, schema)
-                    .await
-            }
-            Self::Postgres(pg) => {
-                pg.spatial_near(binding, collection, column, point, radius_m, filter, limit, schema)
-                    .await
-            }
+/// Vendor selection for spatial search. Same rationale as
+/// [`routed_vector_search`] directly above, including the ATTACH prelude on the
+/// SQLite arm and the lane the scan runs on.
+///
+/// # Errors
+///
+/// As [`routed_vector_search`], with `postgis_extension_missing` /
+/// `invalid_geo_arg` in place of the vector refusals.
+#[allow(clippy::too_many_arguments)]
+pub async fn routed_spatial_near(
+    route: &crate::tx_route::TxRoute,
+    binding: &DbBinding,
+    collection: &str,
+    column: &str,
+    point: GeoPoint,
+    radius_m: f64,
+    filter: &serde_json::Value,
+    limit: Option<usize>,
+    schema: &serde_json::Value,
+) -> Result<Vec<serde_json::Value>, DbError> {
+    match route.backend() {
+        BackendHandle::Sqlite(sq) => {
+            sq.attach_app_file(binding.app_id()).await?;
+            let (_lane_claim, lane) = sqlite_lane(route, sq)?;
+            sq.spatial_near_on(
+                &lane, binding, collection, column, point, radius_m, filter, limit, schema,
+            )
+            .await
+        }
+        BackendHandle::Postgres(pg) => {
+            let bq = pg
+                .plan_spatial_near(
+                    binding, collection, column, point, radius_m, filter, limit, schema,
+                )
+                .await?;
+            run_planned_postgres_read(route, pg, &bq).await
         }
     }
+}
+
+/// Issue a planned PostgreSQL read on this dispatch's lane.
+///
+/// The transaction arm is the parked client, raw: it is already inside the
+/// creator's `BEGIN`, whose `SET LOCAL ROLE` and DB-1 timeouts
+/// `tx_session_setup_sql` installed when the transaction opened. The autocommit
+/// arm goes through `query_roled_json`, which mints that same session state for
+/// its own single-statement transaction. Both therefore run under the app's
+/// role; what differs is which connection, which is the whole question.
+async fn run_planned_postgres_read(
+    route: &crate::tx_route::TxRoute,
+    pg: &PostgresBackend,
+    bq: &crate::query::BuiltQuery,
+) -> Result<Vec<serde_json::Value>, DbError> {
+    let params: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+    if route.in_tx() {
+        let lane = crate::exec::take_tx_lane(route)?;
+        let TxConnection::Postgres(client) = lane.client() else {
+            return Err(lane_vendor_mismatch());
+        };
+        let rows = client
+            .query_text_params(&bq.sql, &params)
+            .await
+            .map_err(|e| crate::backend::pg_error::classify(&e))?;
+        return Ok(zeroship_data_postgres::pg_row_json::rows_to_json_value(
+            &rows,
+        ));
+    }
+    pg.query_roled_json(route.app_id(), &bq.sql, &params).await
 }
 
 /// The unmask fetch's lane vendor disagreed with the bound backend's.

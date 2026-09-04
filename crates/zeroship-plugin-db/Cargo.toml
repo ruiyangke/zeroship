@@ -322,5 +322,16 @@ name = "unmask_tx_lane"
 path = "tests/unmask_tx_lane.rs"
 required-features = ["test-helpers"]
 
+# Which CONNECTION the SEARCH FAMILY uses inside `db.transaction(fn)` - the
+# sibling question to `unmask_tx_lane`, asked of `run_search` / `run_near`. Its
+# own target because it needs a server carrying BOTH `vector` and `postgis`,
+# which the unmask fixtures do not, and because it parks a real transaction
+# connection the masking targets never open. Guarded like its siblings, and it
+# FAILS rather than skips without a database or without an extension.
+[[test]]
+name = "search_tx_lane"
+path = "tests/search_tx_lane.rs"
+required-features = ["test-helpers"]
+
 [lints]
 workspace = true

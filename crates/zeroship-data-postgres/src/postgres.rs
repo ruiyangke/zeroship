@@ -202,10 +202,15 @@ impl PostgresBackend {
 impl PostgresBackend {
     /// Run `sql` under this app's role and render the rows as JSON objects.
     ///
+    /// `pub` rather than `pub(crate)`: it is the AUTOCOMMIT arm of the engine's
+    /// routed search entry points, whose transaction arm issues the same
+    /// statement on the parked lane instead. Both arms have to be written where
+    /// the routing decision is, and that is `zeroship-data-engine`.
+    ///
     /// # Errors
     ///
     /// Propagates pool checkout, session setup, statement and COMMIT failures.
-    pub(crate) async fn query_roled_json(
+    pub async fn query_roled_json(
         &self,
         app_id: &str,
         sql: &str,
@@ -585,6 +590,57 @@ impl PostgresBackend {
     }
 }
 
+impl PostgresBackend {
+    /// Probe the extension and render the statement, WITHOUT running it.
+    ///
+    /// Split out of [`VectorIndex::vector_search`] on 2026-09-03 so the caller
+    /// chooses the CONNECTION. The trait method can only reach the pool: it
+    /// takes `&self` and nothing that says which lane this dispatch belongs to,
+    /// so a `search` issued inside `db.transaction(fn)` scanned a pooled
+    /// checkout and could not see the transaction's own uncommitted rows. The
+    /// engine's routed entry point plans here and then executes on the lane
+    /// `route.in_tx()` names. Bound by `plugin-db/tests/search_tx_lane.rs`.
+    ///
+    /// # Errors
+    ///
+    /// `vector_extension_missing` when pgvector is absent; a query-builder
+    /// error when the collection, column or filter is not one the descriptor
+    /// declares.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn plan_vector_search(
+        &self,
+        binding: &zeroship_data_core::binding::DbBinding,
+        collection: &str,
+        column: &str,
+        query: &[f32],
+        k: usize,
+        metric: VectorMetric,
+        filter: &serde_json::Value,
+        schema: &serde_json::Value,
+    ) -> Result<zeroship_schema::query::BuiltQuery, DbError> {
+        // Probe so a missing extension surfaces with the same typed
+        // error shape the capability probe produces — the SDK branches
+        // on `e.code === "vector_extension_missing"` regardless of
+        // which entry point fired.
+        self.ensure_pgvector_available().await?;
+
+        // The projection allowlist and the `column` identifier check both come
+        // off the descriptor. A collection this deploy does not declare is
+        // refused here rather than searched with an unbounded projection.
+        zeroship_schema::query::build_vector_search(
+            binding.app_id(),
+            collection,
+            column,
+            query,
+            k,
+            metric,
+            filter,
+            schema,
+        )
+        .map_err(DbError::from)
+    }
+}
+
 impl VectorIndex for PostgresBackend {
     async fn vector_search(
         &self,
@@ -597,31 +653,12 @@ impl VectorIndex for PostgresBackend {
         filter: &serde_json::Value,
         schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
-        // Probe so a missing extension surfaces with the same typed
-        // error shape the capability probe produces — the SDK branches
-        // on `e.code === "vector_extension_missing"` regardless of
-        // which entry point fired.
-        self.ensure_pgvector_available().await?;
-
-        let app_id = binding.app_id();
-        // The projection allowlist and the `column` identifier check both come
-        // off the descriptor. A collection this deploy does not declare is
-        // refused here rather than searched with an unbounded projection.
-        let schema_hint = schema;
-        let bq = zeroship_schema::query::build_vector_search(
-            app_id,
-            collection,
-            column,
-            query,
-            k,
-            metric,
-            filter,
-            &schema_hint,
-        )
-        .map_err(DbError::from)?;
-
+        let bq = self
+            .plan_vector_search(binding, collection, column, query, k, metric, filter, schema)
+            .await?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        self.query_roled_json(app_id, &bq.sql, &param_refs).await
+        self.query_roled_json(binding.app_id(), &bq.sql, &param_refs)
+            .await
     }
 }
 
@@ -683,6 +720,44 @@ impl PostgresBackend {
     }
 }
 
+impl PostgresBackend {
+    /// Probe PostGIS and render the statement, WITHOUT running it. The spatial
+    /// twin of [`Self::plan_vector_search`]; see there for why the execution
+    /// is the caller's decision.
+    ///
+    /// # Errors
+    ///
+    /// `postgis_extension_missing` when PostGIS is absent; a query-builder
+    /// error when the collection, column or filter is not one the descriptor
+    /// declares.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn plan_spatial_near(
+        &self,
+        binding: &zeroship_data_core::binding::DbBinding,
+        collection: &str,
+        column: &str,
+        point: GeoPoint,
+        radius_m: f64,
+        filter: &serde_json::Value,
+        limit: Option<usize>,
+        schema: &serde_json::Value,
+    ) -> Result<zeroship_schema::query::BuiltQuery, DbError> {
+        self.ensure_postgis_available().await?;
+
+        zeroship_schema::query::build_spatial_near(
+            binding.app_id(),
+            collection,
+            column,
+            point,
+            radius_m,
+            filter,
+            limit,
+            schema,
+        )
+        .map_err(DbError::from)
+    }
+}
+
 impl SpatialIndex for PostgresBackend {
     async fn spatial_near(
         &self,
@@ -695,23 +770,14 @@ impl SpatialIndex for PostgresBackend {
         limit: Option<usize>,
         schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
-        self.ensure_postgis_available().await?;
-
-        let app_id = binding.app_id();
-        let schema_hint = schema;
-        let bq = zeroship_schema::query::build_spatial_near(
-            app_id,
-            collection,
-            column,
-            point,
-            radius_m,
-            filter,
-            limit,
-            &schema_hint,
-        )
-        .map_err(DbError::from)?;
+        let bq = self
+            .plan_spatial_near(
+                binding, collection, column, point, radius_m, filter, limit, schema,
+            )
+            .await?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        self.query_roled_json(app_id, &bq.sql, &param_refs).await
+        self.query_roled_json(binding.app_id(), &bq.sql, &param_refs)
+            .await
     }
 }
 

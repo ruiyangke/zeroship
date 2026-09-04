@@ -1752,9 +1752,10 @@ pub async fn run_upsert(
 
 /// Shared dispatch for `collection.search(args)`.
 ///
-/// - `{ vector, k?, metric?, column?, filter? }` -> `VectorIndex::vector_search`,
-///   routed to pgvector on PG or the pure-Rust flat-scan implementation
-///   on SQLite.
+/// - `{ vector, k?, metric?, column?, filter? }` ->
+///   [`crate::backend_handle::routed_vector_search`], routed to pgvector on PG
+///   or the pure-Rust flat-scan implementation on SQLite, on the lane this
+///   dispatch belongs to.
 ///
 /// Resolves with a JSON array of rows; each row carries the
 /// `_distance` synthetic column from pgvector. Errors are coded
@@ -1890,28 +1891,27 @@ pub async fn run_search(
         filter,
     } = plan;
 
-    // `BackendHandle` implements `VectorIndex`, so the vendor branch lives in
-    // `backend/mod.rs` where naming a vendor is legitimate, and this function
-    // still does not know either backend exists.
+    // The vendor branch lives in `crate::backend_handle`, where naming a vendor
+    // is legitimate, and this function still does not know either backend
+    // exists.
     //
     // **This took a bare `&BackendHandle` until 2026-09-03**, on the argument
     // that `impl VectorIndex for BackendHandle` never reads `in_tx`, so a route
-    // would carry a promise the scan discards. The scan still discards it -
-    // that part was accurate, and it means a vector search inside
-    // `db.transaction(fn)` does not see the transaction's own uncommitted rows.
-    // What the argument missed is `read_pipeline::apply` below, which needs the
-    // LANE for its unmask stage and cannot get it from a handle. Carrying the
-    // route puts the discarded bit where a fix could read it instead of hiding
-    // it behind a type that never had it.
+    // would carry a promise the scan discards. The scan really did discard it,
+    // and that made a vector search inside `db.transaction(fn)` blind to the
+    // transaction's own uncommitted rows. `routed_vector_search` reads the bit
+    // this parameter was already carrying; the trait impl on `BackendHandle` is
+    // gone, because a type that cannot name a connection cannot answer the
+    // question. Bound by `plugin-db/tests/search_tx_lane.rs`.
+    //
     // The descriptor slice is resolved HERE and handed down. The vendor used to
     // fetch it from `crate::context` itself, which is the backend tier reaching
     // into engine state - an edge that cannot survive the crate split.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    use crate::backend::VectorIndex as _;
-    let rows = route
-        .backend()
-        .vector_search(&binding, &coll, &column, &vector, k, metric, &filter, &schema)
-        .await?;
+    let rows = crate::backend_handle::routed_vector_search(
+        route, &binding, &coll, &column, &vector, k, metric, &filter, &schema,
+    )
+    .await?;
 
     // Metering, success arm only. The search family is a read op on
     // either backend and reaches the database WITHOUT passing
@@ -1949,10 +1949,10 @@ pub async fn run_search(
 ///   limit?: 100 }
 /// ```
 ///
-/// Routes to `SpatialIndex::spatial_near`, dispatching to PG's
-/// `geography(POINT, 4326)` support or SQLite's pure-Rust haversine
-/// flat-scan implementation. Each returned row carries a synthetic
-/// `_distance_m` (`f64`) column.
+/// Routes to [`crate::backend_handle::routed_spatial_near`], dispatching to
+/// PG's `geography(POINT, 4326)` support or SQLite's pure-Rust haversine
+/// flat-scan implementation, on the lane this dispatch belongs to. Each
+/// returned row carries a synthetic `_distance_m` (`f64`) column.
 /// The eagerly-decoded inputs of a spatial `near`, produced by [`plan_near`] and
 /// consumed by [`run_near`].
 pub struct NearPlan {
@@ -2060,17 +2060,16 @@ pub async fn run_near(
         filter,
     } = plan;
 
-    // As in `run_search`: `BackendHandle` implements `SpatialIndex`, so the
-    // vendor branch and the SQLite ATTACH prelude live in the vendor tier, and
-    // the scan itself still discards `route.in_tx()` - the route is here
-    // because the read pipeline below needs the lane.
+    // As in `run_search`: the vendor branch and the SQLite ATTACH prelude live
+    // in `crate::backend_handle`, and the scan runs on the lane `route.in_tx()`
+    // names - which it did not until 2026-09-03, with the same consequence the
+    // vector half carried.
     // Resolved here for the same reason as `run_search` above.
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
-    use crate::backend::SpatialIndex as _;
-    let rows = route
-        .backend()
-        .spatial_near(&binding, &coll, &field, point, radius_m, &filter, limit, &schema)
-        .await?;
+    let rows = crate::backend_handle::routed_spatial_near(
+        route, &binding, &coll, &field, point, radius_m, &filter, limit, &schema,
+    )
+    .await?;
 
     // Metering, success arm only. The search family is a read op on
     // either backend and reaches the database WITHOUT passing
