@@ -16,12 +16,35 @@
 //! that DDL and neither does any other data-plane path** — schema
 //! belongs to `zeroship-migrate`. The runtime descriptor NAMES the
 //! shadow relation and its triggers (`AuxiliaryObject::ShadowTable`,
-//! `zeroship-migrate-core/src/render/gen_types.rs:219`), which is what
+//! built by `auxiliary_objects` in
+//! `zeroship-migrate-core/src/render/gen_types.rs`), which is what
 //! [`vec_table_name`] must agree with; whether it EXISTS is the
 //! migration's business. The builders that used to live here
 //! (`build_create_vec0_sql`, `build_initial_population_sql`, the three
 //! `build_*_trigger_sql`) were `#[cfg(any(test, feature =
 //! "test-helpers"))]`, so no shipped binary ever ran them.
+//!
+//! BOUND, as of 2026-09-04, by the vector fixtures in
+//! `crates/zeroship-plugin-db/tests/sqlite_integration.rs`. They used to
+//! `format!` the shadow-relation name themselves - a THIRD spelling that
+//! agreed with this one by luck while claiming to come from the
+//! descriptor - and now render the descriptor through the migration
+//! engine and create the relation under the name it records. A
+//! divergence therefore makes the JOIN below name a relation that does
+//! not exist, and every vector case fails.
+//! `the_search_really_depends_on_the_name_the_engine_records` is the
+//! control: it builds the relation ONE BYTE off the recorded name and
+//! asserts the search refuses, so the passing cases are not passing for
+//! any name at all.
+//!
+//! WHAT THAT DOES NOT COVER, measured: a COORDINATED rename of both
+//! sides passes every arm of it, because the fixture follows the engine.
+//! That case is caught instead by each crate's own literal pin -
+//! `vec_table_name_pattern` here and `auxiliary_physical_objects_round_trip`
+//! there - both of which a coordinated rename would also have to edit.
+//! The residue is deliberate: unlike a timestamp spelling, this name
+//! records no stored value, so two sides moving together is a rename
+//! rather than a corruption.
 //!
 //! The base table carries the canonical `BLOB` column for the vector
 //! (the SDK's `t.vector()` payload lands there via the regular
