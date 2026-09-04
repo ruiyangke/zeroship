@@ -1,7 +1,11 @@
 //! The CDC relay/worker wire contract.
 //!
-//! This crate is the types both `zeroship-cdc` (the relay) and
-//! `zeroship-plugin-db` (the worker) name, and nothing else. It encodes and
+//! This crate is the types both `zeroship-data-cdc-server` (the relay) and
+//! `zeroship-plugin-db` (the worker) name, and nothing else (**this line said
+//! `zeroship-cdc`, a crate that has never existed, until 2026-09-04**; the
+//! relay's name was settled by operator decision and
+//! `docs/proposals/2026-08-28-cdc-service.md` records the same correction in
+//! five places). It encodes and
 //! decodes; it performs no I/O, opens no connection, and holds no state.
 //! `docs/proposals/2026-08-28-cdc-service.md`, section "The worker/relay wire
 //! contract", is the authority for every constant, tag and layout rule below.
