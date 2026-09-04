@@ -91,7 +91,7 @@ use std::sync::{Arc, Mutex, Once, Weak};
 
 use rusqlite::Connection;
 
-use crate::cdc::CommitPacket;
+use crate::cdc::CommitSender;
 use crate::error::from_sqlite;
 use crate::reservation::{
     self, CancelCleanup, CancelIntent, Lane, Reservation, ReservationKind, TerminalOutcome,
@@ -606,7 +606,7 @@ impl SqliteSession {
     pub(crate) fn open(
         db_path: &Path,
         app_id: Option<&str>,
-        packet_tx: Option<flume::Sender<CommitPacket>>,
+        packet_tx: Option<CommitSender>,
     ) -> Result<Self, DbError> {
         // Bound the queue at 64 in-flight commands. The single actor loop
         // means there is no parallelism downstream; a bigger queue just delays
@@ -1453,7 +1453,7 @@ struct Actor {
     op_bound: Option<u64>,
     db_path: PathBuf,
     app_id: Option<String>,
-    packet_tx: Option<flume::Sender<CommitPacket>>,
+    packet_tx: Option<CommitSender>,
     /// Monotonic command sequence. `0` is the not-running sentinel, so this
     /// starts at 1.
     seq: u64,
@@ -1471,7 +1471,7 @@ const BOOT_PRAGMAS: &str = "\
 fn open_lane_connection(
     db_path: &Path,
     app_id: Option<&str>,
-    packet_tx: Option<&flume::Sender<CommitPacket>>,
+    packet_tx: Option<&CommitSender>,
 ) -> Result<(Connection, Option<crate::cdc::SqliteCdcDispatcher>), DbError> {
     register_sqlite_vec_once();
     let conn = Connection::open(db_path).map_err(from_sqlite)?;
@@ -1491,7 +1491,7 @@ impl Actor {
     fn open(
         db_path: PathBuf,
         app_id: Option<String>,
-        packet_tx: Option<flume::Sender<CommitPacket>>,
+        packet_tx: Option<CommitSender>,
     ) -> Result<Self, DbError> {
         let (op_conn, op_dispatcher) =
             open_lane_connection(&db_path, app_id.as_deref(), packet_tx.as_ref())?;

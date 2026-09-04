@@ -907,8 +907,9 @@ fn lock_schema_pending() -> MutexGuard<'static, HashSet<String>> {
 
 /// Mark `app_id` as schema-pending in this process. While engaged,
 /// [`Broker::try_subscribe`] returns `DbError::Coded { code:
-/// "schema_pending" }` for the app, and the SQLite CDC publisher
-/// drops every packet whose `app_id` matches.
+/// "schema_pending" }` for the app, and the SQLite CDC dispatcher's
+/// `commit_hook` stamps every event it enqueues for that app as
+/// schema-pending, which the publisher then drops.
 ///
 /// Internal — called from
 /// `zeroship_plugin_db::backend::SchemaPendingGuard::new`; production code should
@@ -1167,11 +1168,19 @@ pub fn ws_frame(handle: &str, msg: &SubscriptionMessage) -> String {
 ///
 /// 1. `::new(app_id)` — calls [`self::suppress_app`], which
 ///    INCREMENTS this app's entry in `SUPPRESSED_APPS`. While the count is
-///    non-zero, the SQLite CDC publisher
-///    (`backend/sqlite/cdc.rs::publisher_loop`) drops every packet whose
-///    `app_id` matches before the broker fan-out, AND the legacy local-emit
-///    shim (`self::emit_local`) short-circuits to a no-op so the PG
-///    arm sees the same contract.
+///    non-zero, the SQLite CDC dispatcher's `commit_hook`
+///    (`zeroship-data-sqlite/src/cdc.rs::commit_callback`) stamps every event
+///    it enqueues as suppressed, and the publisher honours that stamp before
+///    the broker fan-out; AND the legacy local-emit shim
+///    (`self::emit_local`) short-circuits to a no-op so the PG arm sees the
+///    same contract.
+///
+/// **The window is the set of commits made inside the guard's scope**, not the
+/// set of CDC packets that happen to be undrained when it drops. The SQLite
+/// publisher sampled this flag at DEQUEUE time until 2026-09-03, which made the
+/// answer depend on publisher scheduling rather than on the guard's scope; the
+/// sample point moved to the commit hook. `zeroship-data-sqlite/src/cdc.rs`
+/// carries the full argument under "Delivery-window semantics".
 /// 2. `::drop` — calls [`self::unsuppress_app`], which DECREMENTS
 ///    that count and removes the entry only at zero, then
 ///    [`self::Broker::resume_app_with_resync`] which pushes
@@ -1257,11 +1266,21 @@ impl Drop for BrokerPauseGuard {
 ///
 /// 1. `::new(app_id)` — calls
 ///    [`self::engage_schema_pending`] which inserts the app
-///    id into the thread-local `SCHEMA_PENDING_APPS` set. While
+///    id into the process-wide `SCHEMA_PENDING_APPS` set (it said
+///    "thread-local" until 2026-09-03; it is a `LazyLock<Mutex<HashSet<_>>>`,
+///    and has to be, for the reason that static's own doc gives). While
 ///    engaged: (a) [`self::Broker::try_subscribe`] returns
 ///    `DbError::Coded { code: "schema_pending" }`; (b) the SQLite CDC
-///    publisher (`backend/sqlite/cdc.rs::publisher_loop`) drops every
-///    packet whose `app_id` matches.
+///    dispatcher's `commit_hook` stamps every event it enqueues for that app
+///    as schema-pending, and the publisher drops it.
+///
+/// The window is the set of commits made inside the guard's scope — see
+/// [`BrokerPauseGuard`] and `zeroship-data-sqlite/src/cdc.rs`. That matters
+/// more here than on the backfill rail: an event's positional values were
+/// captured against the schema in force at COMMIT, and the publisher
+/// re-resolves column names after the guard's cache invalidation lands, so
+/// delivering a deferred in-window event would decode an old tuple against a
+/// new column order.
 /// 2. `::drop` — calls [`self::disengage_schema_pending`] to
 ///    clear the flag, then
 ///    [`self::Broker::resume_app_with_resync`] which pushes

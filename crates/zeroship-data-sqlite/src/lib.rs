@@ -26,6 +26,7 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use serde_json::Value;
 use tempfile::TempDir;
@@ -210,7 +211,10 @@ impl SqliteBackend {
     /// plan §11 - lock-free, structurally bounded by COMMIT cadence.
     /// Switching to a bounded + overflow-to-resync channel is a
     /// possible future concern if production traffic surfaces the
-    /// need (plan §10 Q-P2-A).
+    /// need (plan §10 Q-P2-A). Because it is unbounded, a packet can sit in it
+    /// arbitrarily long, which is why the delivery decision is taken in the
+    /// commit hook and rides the packet rather than being sampled on drainage
+    /// (`cdc.rs`, "Delivery-window semantics").
     /// Accessor for the backend's filesystem root.
     /// The mask-policy sidecar file (`mask_policies.json`) lives at
     /// `<db_dir>/mask_policies.json`; the file's path is constructed
@@ -257,17 +261,25 @@ impl SqliteBackend {
     /// control session in SQLite's in-memory mode and keeps a
     /// `tempfile::TempDir` alive for the lifetime of the backend so
     /// the per-app ATTACH files stay ephemeral too.
-    pub async fn open<S: ChangeSink>(
+    ///
+    /// `sink` is an `Arc<dyn ChangeSink>` rather than a generic because it is
+    /// held on BOTH sides of the CDC channel: the commit hook on the writer
+    /// thread samples `disposition`, the publisher task on the compio thread
+    /// calls `publish`. One shared owner is the honest shape for that, and it
+    /// keeps the generic off six signatures in this file.
+    pub async fn open(
         path: impl AsRef<Path>,
-        sink: S,
+        sink: Arc<dyn ChangeSink>,
         key_source: zeroship_data_core::encryption::LocalKeySource,
     ) -> Result<Self, DbError> {
         let path = path.as_ref().to_path_buf();
-        let opened = compio::runtime::spawn_blocking(move || Self::open_blocking(path))
-            .await
-            .map_err(|_| {
-                DbError::internal("SqliteBackend::open: spawn_blocking task panicked")
-            })??;
+        let sink_for_session = Arc::clone(&sink);
+        let opened =
+            compio::runtime::spawn_blocking(move || Self::open_blocking(path, sink_for_session))
+                .await
+                .map_err(|_| {
+                    DbError::internal("SqliteBackend::open: spawn_blocking task panicked")
+                })??;
         Ok(Self::finish_open(opened, sink, key_source))
     }
 
@@ -278,16 +290,16 @@ impl SqliteBackend {
     // `broker::SchemaPendingGuard::new(app_id)` directly - there was never a
     // backend to dispatch on.
     #[allow(dead_code)]
-    pub fn new<S: ChangeSink>(
+    pub fn new(
         db_dir: PathBuf,
-        sink: S,
+        sink: Arc<dyn ChangeSink>,
         key_source: zeroship_data_core::encryption::LocalKeySource,
     ) -> Result<Self, DbError> {
         let session_path = db_dir.join("zs-control.sqlite");
         Self::open_with_session_path(db_dir, session_path, sink, key_source)
     }
 
-    fn open_blocking(path: PathBuf) -> Result<OpenedBackend, DbError> {
+    fn open_blocking(path: PathBuf, sink: Arc<dyn ChangeSink>) -> Result<OpenedBackend, DbError> {
         let (db_dir, session_path, memory_db_dir) = if path == Path::new(":memory:") {
             let memory_db_dir = tempfile::tempdir().map_err(|e| {
                 DbError::internal(format!(
@@ -329,16 +341,16 @@ impl SqliteBackend {
             ))
         })?;
 
-        Self::open_session(db_dir, session_path, memory_db_dir)
+        Self::open_session(db_dir, session_path, memory_db_dir, sink)
     }
 
-    fn open_with_session_path<S: ChangeSink>(
+    fn open_with_session_path(
         db_dir: PathBuf,
         session_path: PathBuf,
-        sink: S,
+        sink: Arc<dyn ChangeSink>,
         key_source: zeroship_data_core::encryption::LocalKeySource,
     ) -> Result<Self, DbError> {
-        let opened = Self::open_session(db_dir, session_path, None)?;
+        let opened = Self::open_session(db_dir, session_path, None, Arc::clone(&sink))?;
         Ok(Self::finish_open(opened, sink, key_source))
     }
 
@@ -346,18 +358,26 @@ impl SqliteBackend {
         db_dir: PathBuf,
         session_path: PathBuf,
         memory_db_dir: Option<TempDir>,
+        sink: Arc<dyn ChangeSink>,
     ) -> Result<OpenedBackend, DbError> {
         // CDC packet channel — worker thread (producer, via commit
         // hook) → compio publisher task (consumer, calls its ChangeSink on
         // this thread).
         let (packet_tx, packet_rx) = flume::unbounded::<CommitPacket>();
 
-        // Open the session WITH the packet sender so the worker
-        // thread arms the hook triplet during PRAGMA bootstrap. The
-        // `app_id` argument is currently unused inside the dispatcher
+        // Open the session WITH the `CommitSender` so the worker thread arms
+        // the hook triplet during PRAGMA bootstrap. The sender carries the sink
+        // as well as the channel because the commit hook samples
+        // `ChangeSink::disposition` before it enqueues — the commit boundary is
+        // where a suppression window is decided (see `cdc`'s module rustdoc).
+        // The `app_id` argument is currently unused inside the dispatcher
         // (per-event app_id derives from the hook's `db_name`
         // parameter — see `cdc::install` rustdoc), so we pass `None`.
-        let session = SqliteSession::open(&session_path, None, Some(packet_tx))?;
+        let session = SqliteSession::open(
+            &session_path,
+            None,
+            Some(cdc::CommitSender::new(packet_tx, sink)),
+        )?;
 
         Ok(OpenedBackend {
             session,
@@ -372,9 +392,9 @@ impl SqliteBackend {
     /// the Postgres constructor takes one: the context is ENGINE state, and
     /// once this subtree is `zeroship-data-sqlite` the vendor cannot name the
     /// crate that depends on it. `crate::backend_selection` does the lookup.
-    fn finish_open<S: ChangeSink>(
+    fn finish_open(
         opened: OpenedBackend,
-        sink: S,
+        sink: Arc<dyn ChangeSink>,
         key_source: zeroship_data_core::encryption::LocalKeySource,
     ) -> Self {
         let OpenedBackend {
@@ -2209,7 +2229,7 @@ mod tests {
         let temp_dir_path = runtime.block_on(async {
             let backend = SqliteBackend::open(
                 ":memory:",
-                crate::NullChangeSink,
+                std::sync::Arc::new(crate::NullChangeSink),
                 zeroship_data_core::encryption::LocalKeySource::env_var(),
             )
                 .await

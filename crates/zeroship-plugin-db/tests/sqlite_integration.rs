@@ -1441,6 +1441,20 @@ fn audit_table_writes_do_not_emit_events() {
 // above the in-process upper bound on dev hardware. See
 // `drain_publisher()` for the existing 50 ms baseline used by the
 // earlier subscription tests.
+//
+// WHAT THESE THREE DO NOT BIND. They drop the guard before draining, which is
+// the order that COULD expose a delivery-window regression - but they cannot
+// force it. The publisher is a compio task on this same thread, so it wakes
+// during each `pool_exec().await` and in practice drains the queue as the
+// writes land; by `drop(guard)` there is usually nothing left in flight.
+// Measured 2026-09-03: reverting the commit-time stamp in
+// `zeroship-data-sqlite/src/cdc.rs` (publisher re-samples `sink.disposition`)
+// leaves all three GREEN. The deterministic fences for that contract are the
+// four `cdc::tests::*_window` / `*_drainage` unit tests in that crate, which
+// hold the packet in the channel by not spawning the publisher at all; under
+// the same revert, three of them fail and the control still passes. What these
+// three bind is the end-to-end shape: real hooks, real broker, one Resync, and
+// a FIFO sentinel proving the publisher actually ran.
 // ---------------------------------------------------------------------------
 
 /// Longer drain — the new fences move ~100 events through the
@@ -1513,47 +1527,70 @@ fn backfill_run_pauses_broker_and_emits_one_resync() {
                 .expect("INSERT under backfill pause");
         }
 
-        // Give the publisher time to drain the 100 dropped packets BEFORE we
-        // drop the guard. Suppression is sampled at dequeue time, so a packet
-        // still queued when the guard drops would be delivered. Draining first
-        // makes the intended window deterministic and leaves the closing
-        // Resync as the subscriber's only message.
-        drain_publisher_long().await;
-
-        // Drop the guard — calls unsuppress_app + emits one Resync
-        // onto every active subscription on `app_backfill`.
+        // Drop the guard WITHOUT draining first. This is the exposing order:
+        // the 100 packets are still queued, and the guard that covered their
+        // commits is already gone by the time the publisher dequeues them.
+        //
+        // This test drained first until 2026-09-03, which made the window a
+        // function of publisher scheduling rather than of the guard's scope.
+        // Suppression is stamped in the commit hook now, so the queued packets
+        // stay suppressed and the order below is the one worth pinning.
         drop(guard);
 
-        // The Resync push is synchronous (broker::resume_app_with_resync
-        // pushes onto the subscription's queue inside the guard's
-        // Drop), so no further sleep is needed before draining.
+        // Sentinel: one INSERT *after* the window. The channel is FIFO, so
+        // observing its Change proves the publisher ran past all 100 queued
+        // packets — without it, "no Change events" would also be satisfied by
+        // a publisher that never woke at all.
+        backend
+            .pool_exec(
+                "INSERT INTO \"app_backfill\".\"items\" (id, name) VALUES (1000, 'after')",
+                &[],
+            )
+            .await
+            .expect("INSERT after the backfill window");
+
+        drain_publisher_long().await;
+
         let msgs = drain(&sub);
 
-        // Exactly one message; it must be Resync.
+        // Expected shape: [Resync, Change(1000, 'after')].
         assert_eq!(
             msgs.len(),
-            1,
-            "expected exactly one Resync after backfill pause + drop; \
+            2,
+            "expected exactly [Resync, Change(sentinel)] after backfill pause + drop; \
              got {} messages: {msgs:?}",
             msgs.len()
         );
         assert!(
             matches!(msgs[0], SubscriptionMessage::Resync),
-            "the single message must be Resync; got {:?}",
+            "the first message must be Resync; got {:?}",
             msgs[0]
         );
-        // Defensive: NO Change events leaked past the publisher
-        // suppression check. (Covered by the len==1 assert above —
-        // restated here so a future change that emits an
-        // out-of-order Resync alongside Change events surfaces the
-        // intent explicitly.)
-        let change_count = msgs
+        match &msgs[1] {
+            SubscriptionMessage::Change(ev) => {
+                assert_eq!(
+                    ev.new_tuple.get("name").map(String::as_str),
+                    Some("after"),
+                    "the only Change must be the post-window sentinel; got {ev:?}"
+                );
+            }
+            other => panic!("expected the sentinel Change; got {other:?}"),
+        }
+        // Defensive: NO in-window Change leaked past the suppression stamp.
+        // (Implied by len==2 plus the sentinel match, restated so a future
+        // change that interleaves window events surfaces the intent.)
+        let in_window_changes = msgs
             .iter()
-            .filter(|m| matches!(m, SubscriptionMessage::Change(_)))
+            .filter_map(|m| match m {
+                SubscriptionMessage::Change(ev) => Some(ev),
+                _ => None,
+            })
+            .filter(|ev| ev.new_tuple.get("name").map(String::as_str) != Some("after"))
             .count();
         assert_eq!(
-            change_count, 0,
-            "no Change events must reach the subscriber during a backfill window; got {change_count}"
+            in_window_changes, 0,
+            "no Change events must reach the subscriber for commits made during a \
+             backfill window; got {in_window_changes}"
         );
     });
 }
@@ -1634,13 +1671,13 @@ fn schema_pending_decoder_drops_then_resyncs() {
             other => panic!("expected Err(Coded {{ code: schema_pending }}); got {other:?}"),
         }
 
-        // Let the publisher drain the 50 dropped packets so the
-        // sequence "Resync, then post-disengage Change" stays
-        // deterministic.
-        drain_publisher_long().await;
-
-        // Drop the guard — clears schema_pending flag + pushes one
-        // Resync per active subscription.
+        // Drop the guard WITHOUT draining first — the exposing order. The 50
+        // packets are still queued and the guard that covered their commits is
+        // gone before the publisher dequeues them. The post-disengage INSERT
+        // below is the FIFO sentinel that proves the publisher ran past them.
+        //
+        // This test drained first until 2026-09-03, which hid the window
+        // behind publisher scheduling.
         drop(guard);
 
         // Post-disengage: a fresh INSERT must publish normally.
@@ -1652,9 +1689,10 @@ fn schema_pending_decoder_drops_then_resyncs() {
             .await
             .expect("INSERT after disengage");
 
-        // Give the publisher time to drain the single post-disengage
-        // packet onto the broker.
-        drain_publisher().await;
+        // Give the publisher time to drain the 50 in-window packets AND the
+        // post-disengage one. The long budget (not `drain_publisher`) because
+        // the guard now drops before any of them are dequeued.
+        drain_publisher_long().await;
 
         let msgs = drain(&sub);
 
@@ -1802,41 +1840,51 @@ fn backfill_pauses_broker_via_orchestrator_api_and_emits_one_resync() {
                 .expect("INSERT under orchestrator-driven backfill pause");
         }
 
-        // Give the publisher time to drain the 100 dropped packets BEFORE the
-        // guard drops. The publisher samples suppression at dequeue time, so
-        // dropping first would allow still-queued packets through after the
-        // Resync. The drain pins the intended suppression window and `len ==
-        // 1` ordering.
-        drain_publisher_long().await;
-
-        // Drop the guard — calls `unsuppress_app` + emits one Resync
-        // onto every active subscription on `app_orch`. This is the
-        // broker-pause-window lifecycle: the guard binding drops at the
-        // end of the DDL/bulk-write window → `BrokerPauseGuard::drop`.
+        // Drop the guard WITHOUT draining first — the exposing order, same as
+        // the two fences above. `unsuppress_app` runs and one Resync lands on
+        // every active subscription on `app_orch` while all 100 packets are
+        // still queued. This is the broker-pause-window lifecycle: the guard
+        // binding drops at the end of the DDL/bulk-write window.
         drop(guard);
+
+        // FIFO sentinel: observing this Change proves the publisher ran past
+        // the 100 queued packets rather than never waking.
+        backend_ref
+            .pool_exec(
+                "INSERT INTO \"app_orch\".\"items\" (id, name) VALUES (1000, 'after')",
+                &[],
+            )
+            .await
+            .expect("INSERT after the orchestrator-driven backfill window");
+
+        drain_publisher_long().await;
 
         let msgs = drain(&sub);
 
         assert_eq!(
             msgs.len(),
-            1,
-            "expected exactly one Resync after orchestrator-driven pause + drop; \
-             got {} messages: {msgs:?}",
+            2,
+            "expected exactly [Resync, Change(sentinel)] after orchestrator-driven \
+             pause + drop; got {} messages: {msgs:?}",
             msgs.len()
         );
         assert!(
             matches!(msgs[0], SubscriptionMessage::Resync),
-            "the single message must be Resync; got {:?}",
+            "the first message must be Resync; got {:?}",
             msgs[0]
         );
-        let change_count = msgs
+        let in_window_changes = msgs
             .iter()
-            .filter(|m| matches!(m, SubscriptionMessage::Change(_)))
+            .filter_map(|m| match m {
+                SubscriptionMessage::Change(ev) => Some(ev),
+                _ => None,
+            })
+            .filter(|ev| ev.new_tuple.get("name").map(String::as_str) != Some("after"))
             .count();
         assert_eq!(
-            change_count, 0,
-            "no Change events must reach the subscriber during an \
-             orchestrator-driven backfill window; got {change_count}"
+            in_window_changes, 0,
+            "no Change events must reach the subscriber for commits made during an \
+             orchestrator-driven backfill window; got {in_window_changes}"
         );
     });
 }
