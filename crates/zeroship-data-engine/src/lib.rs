@@ -190,6 +190,7 @@ mod test_support;
 pub fn reset_engine_for_tests() {
     tx_lanes::reset_for_tests();
     crud::mask_policy::reset_for_tests();
+    crud::protection_floor::reset_for_tests();
     metrics::reset_for_tests();
     system_shape_charter::reset_for_tests();
     zeroship_data_core::schema_cache::reset_for_tests();

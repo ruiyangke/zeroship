@@ -2421,3 +2421,244 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
 
     release_pg(pool).await;
 }
+
+// ---------------------------------------------------------------------------
+// 8. Protection removed from the descriptor alone
+// ---------------------------------------------------------------------------
+
+/// [`flip_schema`] with the `mask` key DELETED from `ssn` and nothing else
+/// changed. The control column stays, so a fixture that stopped storing
+/// anything at all cannot pass.
+fn flip_schema_without_the_mask_key() -> Value {
+    json!({
+        "ssn": { "type": "string" },
+        "nickname": { "type": "string" },
+    })
+}
+
+fn encrypted_schema() -> Value {
+    json!({
+        "secret": {
+            "type": "string",
+            "encrypted": { "mode": "randomised", "keyId": "k1", "wraps": "string" }
+        },
+        "nickname": { "type": "string" },
+    })
+}
+
+/// [`encrypted_schema`] with the `encrypted` key DELETED from `secret`.
+fn encrypted_schema_without_the_encrypted_key() -> Value {
+    json!({
+        "secret": { "type": "string" },
+        "nickname": { "type": "string" },
+    })
+}
+
+/// Every physical row named by `ids`, keyed by id, with `columns` projected.
+async fn physical_rows(
+    pool: &Rc<Pool>,
+    app: &str,
+    columns: &str,
+    ids: [&str; 2],
+) -> BTreeMap<String, Value> {
+    let rows = pool
+        .query_text_params(
+            &format!(
+                "SELECT \"id\", {columns} FROM \"{app}\".\"people\" \
+                 WHERE \"id\" IN ($1, $2) ORDER BY \"id\""
+            ),
+            &ids,
+        )
+        .await
+        .unwrap();
+    rows.iter()
+        .map(row_to_json)
+        .map(|r| (r["id"].as_str().unwrap_or_default().to_string(), r))
+        .collect()
+}
+
+/// **The descriptor is not the protection authority.**
+///
+/// A creator deletes the `mask` key from one field and redeploys. No migration
+/// runs, so the physical table is untouched: `__zs_raw__ssn` is still there and
+/// the column still carries its `__zsmask:` sentinel. The database therefore
+/// still declares the column masked while the descriptor no longer does.
+///
+/// A write under that descriptor must not store the plaintext under the field's
+/// own name. Doing so is a silent downgrade of a protection: no refusal, no
+/// signal, and the next read hands app JS a bare string where every earlier row
+/// yields a `MaskedValue`.
+#[compio::test]
+async fn deleting_the_mask_key_from_the_descriptor_must_not_write_plaintext() {
+    let url = require_pg().await;
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app = "flip_mask_key_deleted";
+    let masked = flip_schema();
+    fixture(&pool, &url, app, "people", &masked).await;
+
+    // Deploy 1: the descriptor declares the mask, and the table was built for
+    // exactly that.
+    let first = insert_through_the_pipeline(
+        &pool,
+        app,
+        "people",
+        &masked,
+        json!({ "ssn": "123-45-6789", "nickname": "alice" }),
+    )
+    .await;
+
+    // Control, differing in one variable: the FIRST write, under the
+    // mask-declaring descriptor, put the mask in the field's own column and the
+    // real value in the raw sibling. Without this the test would pass against an
+    // implementation that refused every write, masked or not.
+    let raw = raw_column_name("ssn");
+    let before = physical_rows(
+        &pool,
+        app,
+        &format!("\"ssn\", \"{raw}\""),
+        [first.id.as_str(), first.id.as_str()],
+    )
+    .await;
+    assert_eq!(
+        before[&first.id]["ssn"].as_str(),
+        Some("***"),
+        "control: the mask-declaring deploy stores the mask under the field's \
+         own name: {before:?}",
+    );
+    assert_eq!(
+        before[&first.id][&raw].as_str(),
+        Some("123-45-6789"),
+        "control: and the real value in the raw sibling: {before:?}",
+    );
+
+    // Deploy 2: same table, same physical shape, one JSON key gone.
+    let unmasked = flip_schema_without_the_mask_key();
+    // The floor cache is deliberately NOT reset. Both writes run under one
+    // binding, so the second reuses the floor the first resolved - which is
+    // right, because the CATALOG did not change, only the descriptor did. A test
+    // that reset it here would prove the fence works on a cold cache and say
+    // nothing about the warm one production actually runs.
+    zeroship_plugin_db::cache_schema_for_tests(app, "people", unmasked.clone());
+    let mut docs = json!([{ "ssn": "987-65-4321", "nickname": "bob" }]);
+    let err = zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+        .await
+        .expect_err(
+            "a descriptor that dropped the mask must not be able to write the \
+             plaintext this table still protects",
+        );
+    assert!(
+        format!("{err:?}").contains("protection_removed_from_descriptor"),
+        "the refusal must carry the typed code a creator branches on, got {err:?}",
+    );
+    assert!(
+        format!("{err:?}").contains("ssn"),
+        "and must name the column whose protection went missing, got {err:?}",
+    );
+
+    // The refusal is a refusal: nothing landed, and the row that was already
+    // there is untouched.
+    let count = pool
+        .query_text_params(
+            &format!("SELECT count(*)::text AS n FROM \"{app}\".\"people\""),
+            &[],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        count[0].get::<_, String>("n"),
+        "1",
+        "the refused write must not have stored a row",
+    );
+
+    // And the plaintext is nowhere in the field's own column.
+    let leaked = pool
+        .query_text_params(
+            &format!(
+                "SELECT count(*)::text AS n FROM \"{app}\".\"people\" WHERE \"ssn\" = $1"
+            ),
+            &["987-65-4321"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(leaked[0].get::<_, String>("n"), "0");
+
+    release_pg(pool).await;
+}
+
+/// The same shape for ENCRYPTION, measured separately.
+///
+/// The two passes read different descriptor keys (`encrypted` vs `mask`) and
+/// place their output in different physical columns, so one answer says nothing
+/// about the other.
+#[compio::test]
+async fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext() {
+    let url = require_pg().await;
+    let _keys = zeroship_plugin_db::supply_root_keys_for_tests(&[(
+        "k1",
+        "0101010101010101010101010101010101010101010101010101010101010101",
+    )]);
+    let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
+    let app = "flip_enc_key_deleted";
+    let encrypted = encrypted_schema();
+    fixture(&pool, &url, app, "people", &encrypted).await;
+
+    let first = insert_through_the_pipeline(
+        &pool,
+        app,
+        "people",
+        &encrypted,
+        json!({ "secret": "hunter2-the-real-one", "nickname": "alice" }),
+    )
+    .await;
+
+    // Control: the encrypting deploy stored ciphertext, so this test is not
+    // green because writes stopped working.
+    let before = physical_rows(
+        &pool,
+        app,
+        "encode(\"secret\", 'escape') AS secret_bytes",
+        [first.id.as_str(), first.id.as_str()],
+    )
+    .await;
+    assert_ne!(
+        before[&first.id]["secret_bytes"].as_str(),
+        Some("hunter2-the-real-one"),
+        "control: the encrypting deploy must not store plaintext: {before:?}",
+    );
+
+    let plain = encrypted_schema_without_the_encrypted_key();
+    zeroship_plugin_db::cache_schema_for_tests(app, "people", plain.clone());
+    let mut docs = json!([{ "secret": "hunter3-also-real", "nickname": "bob" }]);
+    let err = zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
+        .await
+        .expect_err(
+            "a descriptor that dropped the encryption block must not be able to \
+             write the plaintext this column still protects",
+        );
+    assert!(
+        format!("{err:?}").contains("protection_removed_from_descriptor"),
+        "the refusal must carry the typed code a creator branches on, got {err:?}",
+    );
+    assert!(
+        format!("{err:?}").contains("secret"),
+        "and must name the column whose protection went missing, got {err:?}",
+    );
+
+    let leaked = pool
+        .query_text_params(
+            &format!(
+                "SELECT count(*)::text AS n FROM \"{app}\".\"people\" \
+                 WHERE encode(\"secret\", 'escape') = $1"
+            ),
+            &["hunter3-also-real"],
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        leaked[0].get::<_, String>("n"),
+        "0",
+        "the refused write must not have stored the plaintext",
+    );
+
+    release_pg(pool).await;
+}

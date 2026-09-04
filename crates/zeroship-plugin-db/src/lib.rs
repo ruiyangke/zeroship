@@ -925,9 +925,15 @@ pub async fn prepare_insert_many_docs_for_tests(
     let binding = zeroship_data_core::binding::DbBinding::cold_start(app_id);
     let backend = tx_scope::ensure_backend().await?;
     let dialect = tx_scope::configured_dialect();
+    // The route the V8 dispatcher would have captured. The protection-floor
+    // fence reads the live catalog, so the helper has to stand in for that half
+    // of the dispatcher's frame too - a helper that skipped it would let a test
+    // write through a fence production applies.
+    let route = crate::exec::ambient_route_for_tests(app_id, backend.clone());
     crud::prepare_insert_many_docs_for_binding(
         backend.key_store(),
         dialect,
+        &route,
         docs,
         &binding,
         collection,

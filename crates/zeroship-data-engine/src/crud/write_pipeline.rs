@@ -19,16 +19,18 @@ pub enum ApplyMode<'a> {
     Update {
         row_pk: &'a str,
     },
-    /// The only write mode whose PRE-pass issues SQL of its own: the
-    /// deterministic-encryption conflict probe reads the existing row's
-    /// id. That read has to land on the same connection the upsert
-    /// itself will, so the variant carries the dispatch's
-    /// [`TxRoute`] — a field, so an upsert site that has not captured a
-    /// route cannot construct the mode at all.
+    /// The deterministic-encryption conflict probe reads the existing row's id
+    /// before the write is composed.
+    ///
+    /// It used to be the ONLY pre-pass issuing SQL of its own, so this variant
+    /// carried the dispatch's [`TxRoute`] as a field - which made an upsert site
+    /// that had not captured a route unable to construct the mode at all. The
+    /// protection-floor fence now issues a catalog read for EVERY mode, so
+    /// [`apply`] takes the route as a parameter and the same "no route, no
+    /// write" property holds for all four rather than one.
     Upsert {
         actor_id: Option<&'a str>,
         conflict_fields: &'a Value,
-        route: &'a TxRoute,
     },
 }
 
@@ -138,15 +140,28 @@ fn validate_update_patch_keys(patch: &Value) -> Result<(), DbError> {
 /// separate times per write. It now rides down from the caller that resolved
 /// it - off the dispatch's captured route in production - so one write op
 /// lowers under ONE dialect rather than four independent derivations of it.
+///
+/// `route` is a parameter for the OPPOSITE reason, and the contrast is the
+/// point: stage 0 below reads the live catalog, which IS a routing decision. A
+/// key store and a dialect are not, so they stay separate arguments rather than
+/// being derived from the route here - a write that lowers under `route`'s
+/// dialect and one that lowers under a dialect its caller resolved must remain
+/// distinguishable in the signature.
 pub async fn apply(
     keys: &crate::encryption::KeyStore,
     dialect: query::SqlDialect,
+    route: &TxRoute,
     binding: &DbBinding,
     collection: &str,
     payload: &mut Value,
     mode: ApplyMode<'_>,
 ) -> Result<(), DbError> {
     let app_id = binding.app_id();
+    debug_assert_eq!(
+        route.app_id(),
+        app_id,
+        "the write route must belong to the app being written"
+    );
     // DB-8: validate every USER-supplied document field key BEFORE the system /
     // encryption / mask passes below add their own (reserved-suffix / `__zsbin__`)
     // sibling columns. The write SQL builders only `quote_ident`'d these keys —
@@ -184,6 +199,13 @@ pub async fn apply(
     // encryption and mask stages silently skipped - which is what an absent
     // schema used to mean, on a write.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
+    // Stage 0. The descriptor decides which protections the stages below APPLY;
+    // the live catalog decides which ones this collection is ALLOWED to have
+    // lost. Deleting a `mask` or `encrypted` key from a field is otherwise a
+    // silent downgrade - the stages simply find nothing to do and the real value
+    // is written in the clear. See `super::protection_floor`.
+    super::protection_floor::refuse_protection_downgrade(route, binding, collection, &schema)
+        .await?;
     let stages = WriteStages::new(&schema);
 
     match mode {
@@ -221,13 +243,7 @@ pub async fn apply(
         ApplyMode::Upsert {
             actor_id,
             conflict_fields,
-            route,
         } => {
-            debug_assert_eq!(
-                route.app_id(),
-                app_id,
-                "the upsert route must belong to the app being written"
-            );
             super::system_fields_pass::apply_system_fields_on_insert(
                 payload, &schema, collection, actor_id,
             )?;
@@ -815,9 +831,11 @@ mod tests {
                 // than defaulted: the fixture schema declares no encrypted,
                 // masked or binary column, so `WriteStages::any()` is false and
                 // no dialect-sensitive stage runs before the refusal.
+                let (_dir, route) = empty_backend_route(&app_id);
                 let result = apply(
                     &test_key_store(),
                     SqlDialect::Postgres,
+                    &route,
                     &binding,
                     collection,
                     &mut doc,
@@ -857,10 +875,12 @@ mod tests {
             );
             let mut doc = serde_json::json!({ "name": "Alice" });
 
+            let (_dir, route) = empty_backend_route(app_id);
             apply(
                 &test_key_store(),
                 // Unobservable here for the reason given in the sibling case.
                 SqlDialect::Postgres,
+                &route,
                 &binding,
                 collection,
                 &mut doc,
@@ -903,6 +923,29 @@ mod tests {
     /// fixture has supplied roots, which is the state every case here is in.
     fn test_key_store() -> encryption::KeyStore {
         encryption::KeyStore::new(encryption::LocalKeySource::env_var())
+    }
+
+    /// A real SQLite backend over a fresh directory, and the route bound to it.
+    ///
+    /// `apply` reads the LIVE catalog before any stage runs (the
+    /// protection-floor fence), so a case that stands up no backend at all can
+    /// no longer call it. That is the fence working rather than an inconvenience:
+    /// a write path that cannot reach the database cannot be told whether the
+    /// descriptor dropped a protection, and guessing "no" is the defect.
+    ///
+    /// The returned `TempDir` must be kept alive - dropping it removes the app
+    /// file out from under the backend.
+    fn empty_backend_route(app_id: &str) -> (tempfile::TempDir, TxRoute) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let backend = Rc::new(
+            crate::backend_selection::new_sqlite_backend(
+                PathBuf::from(dir.path()),
+                encryption::LocalKeySource::env_var(),
+            )
+            .expect("open sqlite backend"),
+        );
+        let handle = crate::backend::BackendHandle::Sqlite(backend);
+        (dir, crate::exec::ambient_route_for_tests(app_id, handle))
     }
 
     fn last4_mask(plaintext: &str) -> String {
@@ -1033,6 +1076,12 @@ mod tests {
                 .await
                 .expect("ensure schema");
             let handle = crate::backend::BackendHandle::Sqlite(Rc::clone(&backend));
+            // One route for every stage below. `apply` reads the live catalog
+            // through it before any stage runs, so the four write shapes below
+            // all exercise the protection-floor fence against a table whose
+            // sentinels the DDL further down really wrote - the happy arm, where
+            // descriptor and catalog agree.
+            let route = crate::exec::ambient_route_for_tests(app_id, handle.clone());
             cache_schema_for_tests(app_id, collection, schema);
 
             let ddl = build_create_table_with_fks_for_dialect(
@@ -1063,6 +1112,7 @@ mod tests {
             apply(
                 backend.key_store(),
                 SqlDialect::Sqlite,
+                &route,
                 &binding,
                 collection,
                 &mut insert_doc,
@@ -1123,6 +1173,7 @@ mod tests {
             apply(
                 backend.key_store(),
                 SqlDialect::Sqlite,
+                &route,
                 &binding,
                 collection,
                 &mut bulk_docs,
@@ -1174,6 +1225,7 @@ mod tests {
             apply(
                 backend.key_store(),
                 SqlDialect::Sqlite,
+                &route,
                 &binding,
                 collection,
                 &mut update_patch,
@@ -1232,16 +1284,15 @@ mod tests {
                 // the SQLite handle below instead of stamping `Postgres` on it
                 // (it did until 2026-09-03, and this comment called that inert).
                 SqlDialect::Sqlite,
+                // No isolate in a unit test: this path is exercised outside any
+                // transaction, which is what the pool route means.
+                &route,
                 &binding,
                 collection,
                 &mut upsert_doc,
                 ApplyMode::Upsert {
                     actor_id: Some("usr_upsert"),
                     conflict_fields: &conflict_fields,
-                    // No isolate in a unit test: this path is exercised
-                    // outside any transaction, which is what the pool
-                    // route means.
-                    route: &crate::exec::ambient_route_for_tests(app_id, handle.clone()),
                 },
             )
             .await
@@ -1261,6 +1312,118 @@ mod tests {
                 Some("usr_upsert"),
             )
             .await;
+        });
+    }
+
+    /// **The protection floor holds on SQLite too, and this is not implied by
+    /// the PostgreSQL gate.**
+    ///
+    /// The two backends recover the mask sentinel by different code: PostgreSQL
+    /// reads `pg_description` in `pg_introspect`, SQLite regexes
+    /// `sqlite_master.sql` in `parse_mask_sentinels`. Either could stop
+    /// populating `ColumnInfo::mask` on its own, and the fence would then wave
+    /// the downgrade through on that backend while `plugin-db/tests/mask_flip.rs`
+    /// stayed green on the other. This is the SQLite half.
+    ///
+    /// It also binds the DEV TIER specifically: `pnpm dev` runs SQLite, so a
+    /// creator's first encounter with a dropped `mask` key happens here.
+    #[test]
+    fn a_sqlite_write_is_refused_when_the_descriptor_drops_a_mask_the_file_still_records() {
+        run(async {
+            let app_id = "app_sqlite_protection_floor";
+            let binding = DbBinding::cold_start(app_id);
+            let collection = "people";
+            let masked = serde_json::json!({
+                "ssn": { "type": "string", "mask": { "kind": "last4", "classification": "spi" } },
+                // The control: same type, no mask. Every refusal below has to be
+                // about `ssn` and not about the collection being unwritable.
+                "nickname": { "type": "string" },
+            });
+
+            let dir = tempfile::tempdir().expect("tempdir");
+            let backend = Rc::new(
+                crate::backend_selection::new_sqlite_backend(
+                    PathBuf::from(dir.path()),
+                    encryption::LocalKeySource::env_var(),
+                )
+                .expect("open sqlite backend"),
+            );
+            backend.attach_app_file(app_id).await.expect("attach app");
+            let handle = crate::backend::BackendHandle::Sqlite(Rc::clone(&backend));
+            let route = crate::exec::ambient_route_for_tests(app_id, handle);
+
+            // The REAL DDL emitter, so the `__zsmask:` sentinel and the
+            // `__zs_raw__ssn` sibling are the ones the platform writes rather
+            // than ones this test made up.
+            let ddl = build_create_table_with_fks_for_dialect(
+                app_id,
+                collection,
+                &masked,
+                &FkEmission::Inline,
+                SqlDialect::Sqlite,
+            )
+            .expect("build DDL");
+            for stmt in ddl.split(";\n") {
+                let trimmed = stmt.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                backend.pool_exec(trimmed, &[]).await.expect("DDL exec");
+            }
+
+            // Control: under the mask-declaring descriptor the write prepares,
+            // and the mask lands in the field's own column.
+            cache_schema_for_tests(app_id, collection, masked);
+            let mut ok_doc = serde_json::json!({ "ssn": "123-45-6789", "nickname": "alice" });
+            apply(
+                backend.key_store(),
+                SqlDialect::Sqlite,
+                &route,
+                &binding,
+                collection,
+                &mut ok_doc,
+                ApplyMode::Insert { actor_id: None },
+            )
+            .await
+            .expect("the declaring descriptor must still write");
+            assert_eq!(
+                ok_doc.get("ssn").and_then(Value::as_str),
+                Some(last4_mask("123-45-6789").as_str()),
+                "control: the mask belongs in the field's own column: {ok_doc}",
+            );
+
+            // The one-key deletion, against the same file.
+            cache_schema_for_tests(
+                app_id,
+                collection,
+                serde_json::json!({
+                    "ssn": { "type": "string" },
+                    "nickname": { "type": "string" },
+                }),
+            );
+            let mut doc = serde_json::json!({ "ssn": "987-65-4321", "nickname": "bob" });
+            let err = apply(
+                backend.key_store(),
+                SqlDialect::Sqlite,
+                &route,
+                &binding,
+                collection,
+                &mut doc,
+                ApplyMode::Insert { actor_id: None },
+            )
+            .await
+            .expect_err("a descriptor that dropped the mask must not write the plaintext");
+            let rendered = format!("{err:?}");
+            assert!(
+                rendered.contains("protection_removed_from_descriptor") && rendered.contains("ssn"),
+                "the refusal must carry the typed code and name the column, got {rendered}",
+            );
+            assert_eq!(
+                doc.get("ssn").and_then(Value::as_str),
+                Some("987-65-4321"),
+                "the refusal happens BEFORE any stage touches the document, so \
+                 the caller's value is handed back untransformed: {doc}",
+            );
         });
     }
 }
