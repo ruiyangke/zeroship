@@ -86,15 +86,56 @@
 # gate exits 1 in both mutations and 0 with them reverted.
 #
 # ---------------------------------------------------------------------------
+# SECOND MUTATION PROOF, 2026-09-04, for the normaliser
+# ---------------------------------------------------------------------------
+#
+# Arms 1 and 2 were rewritten that day and are NOT bound by the two mutations
+# above, which both use the multi-line attribute spelling that already worked.
+# The binding evidence is an 11-file corpus, each file checked with
+# `rustc --edition 2021 --crate-type lib --emit=metadata` so that "valid Rust"
+# is measured rather than assumed, run through the extractor lifted verbatim
+# out of this file. Six shapes went from 0 violations to 1:
+#
+#   attribute + member on one line, attribute + trait on one line, a wrapped
+#   attribute, `pub unsafe trait`, `unsafe fn`, and a one-line trait body.
+#
+# Two files are the controls. A cleanly ungated trait stays at 0 violations
+# before and after; a trait declared inside a `/* */` block comment stopped
+# being counted as an item (3 -> 2), which is the false POSITIVE the old
+# scanner carried in the other direction.
+#
+# On the real tree the two predicates agree exactly - 9 traits, 37 items, 6
+# signature types before and after - which is the point of diffing counts
+# against the same input rather than trusting that a rewrite preserved
+# behaviour.
+#
+# NOT MEASURED HERE: this gate was not driven red by editing
+# crates/zeroship-data-core, which another agent owned at the time. The
+# predicate under test is byte-identical to the shipped one; the wiring from
+# it to the exit code is unchanged and was not re-proved.
+#
+# ---------------------------------------------------------------------------
 # WHAT THIS DOES NOT RULE ON
 # ---------------------------------------------------------------------------
 #
-# Arms 1 and 2 are line-oriented. They strip `//`-comment lines before counting
-# braces (both files quote `{ todo!() }` and `format!("{app_id}:{name}")` in
-# rustdoc, and an unstripped counter closes a trait block on them) but they do
-# NOT understand `/* */` block comments, which neither file uses. A trait
-# smuggled inside one would be missed; arm 1's floor is what makes the miss
-# visible if the set collapses.
+# Arms 1 and 2 read a NORMALISED record stream, not raw lines - see
+# `normalize_rs` below for what that buys and what it cost to learn. It handles
+# `//` and `/* */` (this paragraph said block comments were NOT handled until
+# 2026-09-04, and a trait smuggled inside one was measured missed), string
+# literals, wrapped attributes and one-line items. It does NOT handle raw
+# strings or character literals, neither of which data-core contains; an
+# unterminated block comment, attribute or string is reported as a violation
+# rather than silently truncating the record set.
+#
+# Both arms still key on a DECLARATION's spelling: `pub trait`, `fn`, `type`,
+# `pub struct`. A trait produced by a macro is invisible to them, and there is
+# no structural alternative short of parsing Rust. Arm 3 is what rules on the
+# macro case, by asking rustc.
+#
+# Visibility: the trait test accepts `pub`, `pub(...)` and `unsafe`, but not a
+# private `trait`. A private trait is not a contract, and admitting one would
+# make every `#[cfg(feature = ...)]` helper trait inside a `#[cfg(test)] mod
+# tests` a violation.
 #
 # `cfg` attributes OUTSIDE a trait block are none of this gate's business -
 # `lock_policy.rs`'s `#[cfg(test)] mod tests` is correct and must stay.
@@ -161,10 +202,117 @@ command -v jq >/dev/null 2>&1 || {
 }
 
 # ---------------------------------------------------------------------------
+# THE NORMALISER, and why arms 1 and 2 no longer read raw lines.
+#
+# Both static arms are line-oriented, and until 2026-09-04 a LINE was the unit
+# they matched on. That is a prose key wearing a syntax costume, and six shapes
+# of genuinely cfg-gated contract item walked past it. Each was checked with
+# `rustc --edition 2021 --crate-type lib --emit=metadata` first, so each is real
+# Rust and not a strawman:
+#
+#   #[cfg(feature = "x")] fn sql_dialect(&self);   attribute and item on ONE
+#       line. The old `line ~ /^#\[/` arm consumed the line and `next`ed, so
+#       the member was never even counted, let alone flagged. THE CHEAPEST.
+#   #[cfg(feature = "x")] pub trait SchemaIntrospect {   the same, on a trait.
+#       Measured: 0 items, 0 violations - the whole trait vanished, which is
+#       exactly the outage shape in the header above.
+#   #[cfg(                    an attribute wrapped over three lines. The
+#       feature = "x"         intervening lines reset `pending_cfg`, so the
+#   )]                        member was counted and reported CLEAN.
+#   pub unsafe trait ...      the trait regex demanded `pub` then `trait`.
+#   unsafe fn ...             the member regex allowed only `pub`/`async`.
+#   pub trait T { #[cfg..] fn f(); }   a one-line trait: `in_trait` was set
+#       after the member test and cleared by the same line's closing brace.
+#
+# So the fix is to stop matching lines and start matching ITEMS. `normalize_rs`
+# turns a Rust file into one record per logical unit, `<origline><TAB><text>`:
+#
+#   * block comments are consumed (nested `/*` included) - the old scanner did
+#     not know them at all, and the header used to admit that a trait smuggled
+#     inside one would be missed. `//` is handled BEFORE `/*` in the same
+#     left-to-right pass, which matters: error.rs line 23 is a `//!` doc line
+#     containing `auth/*`, and a scanner that looked for `/*` first would treat
+#     the rest of that file as a comment.
+#   * `//` line comments are dropped, including trailing ones, which the
+#     old whole-line test could not do.
+#   * string literals are respected, so a `//` or a `#[` inside one is text.
+#   * every `#[...]` / `#![...]` becomes its OWN record, however it was spelled:
+#     joined across lines when wrapped, split off from whatever followed it.
+#   * `{`, `}` and `;` end a record, so a one-line trait becomes the same
+#     record sequence a multi-line one does. Braces are preserved in the text,
+#     so the depth counting downstream is unchanged.
+#
+# It is a scanner, not a Rust parser. It does not know raw strings (`r#"..."#`)
+# or character literals, neither of which appears in data-core today; the END
+# rule refuses on an unterminated block comment or attribute rather than
+# emitting a truncated record set.
+# ---------------------------------------------------------------------------
+normalize_rs() {
+  awk '
+    function flush(   t) {
+      t = obuf
+      gsub(/^[ \t]+|[ \t]+$/, "", t)
+      if (t != "") print oline "\t" t
+      obuf = ""; oline = 0
+    }
+    function put(c) { if (obuf == "") oline = NR; obuf = obuf c }
+    BEGIN { bc = 0; instr = 0; inattr = 0; adepth = 0; obuf = ""; oline = 0 }
+    {
+      line = $0
+      sub(/\r$/, "", line)
+      n = length(line)
+      for (i = 1; i <= n; i++) {
+        c = substr(line, i, 1)
+        d = substr(line, i + 1, 1)
+        if (bc > 0) {
+          if (c == "*" && d == "/") { bc--; i++ }
+          else if (c == "/" && d == "*") { bc++; i++ }
+          continue
+        }
+        if (instr) {
+          if (inattr) abuf = abuf c; else put(c)
+          if (c == "\\") { i++; if (inattr) abuf = abuf substr(line, i, 1); else put(substr(line, i, 1)); continue }
+          if (c == "\"") instr = 0
+          continue
+        }
+        if (inattr) {
+          abuf = abuf c
+          if (c == "\"") { instr = 1; continue }
+          if (c == "[") adepth++
+          else if (c == "]") {
+            adepth--
+            if (adepth == 0) { print aline "\t" abuf; inattr = 0; abuf = "" }
+          }
+          continue
+        }
+        if (c == "/" && d == "/") break
+        if (c == "/" && d == "*") { bc++; i++; continue }
+        if (c == "\"") { instr = 1; put(c); continue }
+        if (c == "#" && (d == "[" || (d == "!" && substr(line, i + 2, 1) == "["))) {
+          flush()
+          inattr = 1; aline = NR; abuf = c; adepth = 0
+          continue
+        }
+        put(c)
+        if (c == "{" || c == "}" || c == ";") flush()
+      }
+      if (inattr) abuf = abuf " "
+      else if (!instr) flush()
+    }
+    END {
+      flush()
+      if (bc > 0)   print "0\tZSNORM-UNTERMINATED-BLOCK-COMMENT"
+      if (inattr)   print "0\tZSNORM-UNTERMINATED-ATTRIBUTE"
+      if (instr)    print "0\tZSNORM-UNTERMINATED-STRING"
+    }
+  ' "$1"
+}
+
+# ---------------------------------------------------------------------------
 # ARMS 1 + 2 - the static rule.
 #
-# One awk pass per file. It tracks whether it is inside a `pub trait` block by
-# brace depth, having first dropped every `//`-comment line, and reports:
+# One awk pass per normalised file. It tracks whether it is inside a trait
+# block by brace depth and reports:
 #
 #   ITEM   <file>:<line>  <trait|member> <name>     (something ruled on)
 #   VIOL   <file>:<line>  <what>                    (a cfg attribute on one)
@@ -176,42 +324,45 @@ command -v jq >/dev/null 2>&1 || {
 : > "$TMP/names.txt"
 
 while IFS= read -r f; do
-  awk -v file="${f#"$ROOT"/}" '
-    # Drop whole-line comments before ANY structural reading. Both contract
-    # files quote braces inside rustdoc; counting those closes a trait early
-    # and turns the rest of the file invisible.
-    {
-      raw = $0
-      line = $0
-      sub(/^[[:space:]]+/, "", line)
-      if (line ~ /^\/\//) {
-        # A comment line cannot carry a cfg attribute, and cannot open or
-        # close a block. It is still a line, so keep the counter moving.
-        next
-      }
+  normalize_rs "$f" | awk -v file="${f#"$ROOT"/}" '
+    # Records arrive as <origline><TAB><text>, comment-free, one logical unit
+    # each. VIS is the visibility prefix an item may carry; it is written once
+    # here so the trait and member tests cannot drift apart.
+    BEGIN {
+      VIS  = "(pub([[:space:]]*\\([^)]*\\))?[[:space:]]+)?"
+      TRT  = "^" VIS "(unsafe[[:space:]]+)?trait[[:space:]]"
+      MEM  = "^" VIS "(default[[:space:]]+)?(const[[:space:]]+)?(async[[:space:]]+)?(unsafe[[:space:]]+)?(extern[[:space:]]+\"[^\"]*\"[[:space:]]+)?fn[[:space:]]"
+      TYP  = "^" VIS "type[[:space:]]"
     }
-    # Attribute lines buffer until the item they decorate arrives.
-    line ~ /^#\[/ {
-      pending = pending "\n" NR "\t" line
-      if (line ~ /cfg\(/) pending_cfg = pending_cfg "\n" NR "\t" line
+    {
+      p = index($0, "\t")
+      ln = substr($0, 1, p - 1)
+      raw = substr($0, p + 1)
+      line = raw
+    }
+    # The normaliser refuses rather than truncating; carry that through as a
+    # violation so it cannot be mistaken for a clean file.
+    line ~ /^ZSNORM-/ {
+      printf "VIOL\t%s\t%s (the scanner could not read this file)\n", file, line
+      next
+    }
+    # An attribute is now always its own record, wherever it was written.
+    line ~ /^#!?\[/ {
+      if (line ~ /cfg[[:space:]]*\(/) pending_cfg = pending_cfg "\n" ln "\t" line
       next
     }
     {
       if (in_trait) {
-        # A member: `fn`, `async fn`, or an associated `type`.
-        if (line ~ /^(pub[[:space:]]+)?(async[[:space:]]+)?fn[[:space:]]/ ||
-            line ~ /^type[[:space:]]/) {
+        # A member: `fn` in any of its prefixed spellings, or an associated
+        # `type`.
+        if (line ~ MEM || line ~ TYP) {
           name = line
-          sub(/^(pub[[:space:]]+)?(async[[:space:]]+)?/, "", name)
+          sub(VIS "(default[[:space:]]+)?(const[[:space:]]+)?(async[[:space:]]+)?(unsafe[[:space:]]+)?(extern[[:space:]]+\"[^\"]*\"[[:space:]]+)?", "", name)
           sub(/^(fn|type)[[:space:]]+/, "", name)
           sub(/[^A-Za-z0-9_].*$/, "", name)
-          printf "ITEM\t%s:%d\tmember\t%s\n", file, NR, name
-          if (pending_cfg != "") {
-            n = split(pending_cfg, arr, "\n")
-            for (i = 1; i <= n; i++)
-              if (arr[i] != "")
-                printf "VIOL\t%s\tmember %s of trait %s\n", file, name, trait_name
-          }
+          printf "ITEM\t%s:%d\tmember\t%s\n", file, ln, name
+          if (pending_cfg != "")
+            printf "VIOL\t%s:%d\tmember %s of trait %s\n", file, ln, name, trait_name
         }
         # Every capitalised identifier inside the block is a candidate type
         # for arm 2. Over-collecting is safe: arm 2 intersects with the set
@@ -223,15 +374,18 @@ while IFS= read -r f; do
         }
       }
       # A trait opens here.
-      if (line ~ /^pub[[:space:]]+trait[[:space:]]/) {
+      if (line ~ TRT) {
         trait_name = line
-        sub(/^pub[[:space:]]+trait[[:space:]]+/, "", trait_name)
+        sub(TRT, "", trait_name)
+        sub(/^[[:space:]]+/, "", trait_name)
         sub(/[^A-Za-z0-9_].*$/, "", trait_name)
-        printf "ITEM\t%s:%d\ttrait\t%s\n", file, NR, trait_name
+        printf "ITEM\t%s:%d\ttrait\t%s\n", file, ln, trait_name
         if (pending_cfg != "")
-          printf "VIOL\t%s\ttrait %s\n", file, trait_name
+          printf "VIOL\t%s:%d\ttrait %s\n", file, ln, trait_name
         in_trait = 1
         depth = 0
+        # A trait header records ends at its `{`, so this record opens the
+        # block; count it below and let the closing `}` record shut it.
       }
       if (in_trait) {
         n_open = gsub(/{/, "{", raw)
@@ -239,9 +393,9 @@ while IFS= read -r f; do
         depth += n_open - n_close
         if (depth <= 0 && (n_open + n_close) > 0) { in_trait = 0; trait_name = "" }
       }
-      pending = ""; pending_cfg = ""
+      pending_cfg = ""
     }
-  ' "$f"
+  '
 done < <(LC_ALL=C find "$CORE_SRC" -name '*.rs' -type f | LC_ALL=C sort) \
   > "$TMP/awk.txt"
 
@@ -268,27 +422,32 @@ fi
 # ---------------------------------------------------------------------------
 # ARM 2 - the vocabulary those signatures name.
 # ---------------------------------------------------------------------------
-grep -rhnE '^[[:space:]]*pub[[:space:]]+(struct|enum)[[:space:]]+[A-Za-z0-9_]+' \
-  "$CORE_SRC" --include='*.rs' >/dev/null 2>&1 || true
-
 : > "$TMP/types.txt"
 : > "$TMP/type_viol.txt"
 while IFS= read -r f; do
-  awk -v file="${f#"$ROOT"/}" '
-    { line = $0; sub(/^[[:space:]]+/, "", line) }
-    line ~ /^\/\// { next }
-    line ~ /^#\[/ {
-      if (line ~ /cfg\(feature/) pending_cfg = 1
+  normalize_rs "$f" | awk -v file="${f#"$ROOT"/}" '
+    # Same normalised records as arm 1, and the same reason: `#[cfg(feature =
+    # "x")] pub struct SnapshotOpts;` on one line used to be consumed as an
+    # attribute and never reach the declaration test.
+    BEGIN { VIS = "(pub([[:space:]]*\\([^)]*\\))?[[:space:]]+)?" }
+    {
+      p = index($0, "\t")
+      ln = substr($0, 1, p - 1)
+      line = substr($0, p + 1)
+    }
+    line ~ /^ZSNORM-/ { next }
+    line ~ /^#!?\[/ {
+      if (line ~ /cfg[[:space:]]*\([[:space:]]*feature/) pending_cfg = 1
       next
     }
-    line ~ /^pub[[:space:]]+(struct|enum)[[:space:]]/ {
+    line ~ "^" VIS "(struct|enum|union)[[:space:]]" {
       name = line
-      sub(/^pub[[:space:]]+(struct|enum)[[:space:]]+/, "", name)
+      sub(VIS "(struct|enum|union)[[:space:]]+", "", name)
       sub(/[^A-Za-z0-9_].*$/, "", name)
-      printf "%s\t%s:%d\t%d\n", name, file, NR, pending_cfg
+      printf "%s\t%s:%d\t%d\n", name, file, ln, pending_cfg
     }
     { pending_cfg = 0 }
-  ' "$f"
+  '
 done < <(LC_ALL=C find "$CORE_SRC" -name '*.rs' -type f | LC_ALL=C sort) \
   > "$TMP/decls.tsv"
 
