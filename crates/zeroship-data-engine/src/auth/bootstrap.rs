@@ -55,7 +55,11 @@ const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 /// Losing ownership is a GAIN, not a regression: a process that owns its own
 /// audit log can `TRUNCATE` or `DROP` it, and privilege follows the process.
 /// The worker should hold exactly the reach it needs to append and no more.
-const WORKER_WRITABLE_RESERVED_TABLE: &str = "__zeroship_audit_unmask";
+///
+/// Read from [`crate::backend_handle::AUDIT_UNMASK_TABLE`] rather than restated:
+/// the grant recipe and the INSERT that uses the grant must name one relation,
+/// and until 2026-09-04 they were two independent literals in two files.
+const WORKER_WRITABLE_RESERVED_TABLE: &str = crate::backend_handle::AUDIT_UNMASK_TABLE;
 
 /// Wrap a `compio_postgres::Error` in [`DbError`] with a context phrase
 /// so operators see *what* the bootstrap layer was doing when the SQL

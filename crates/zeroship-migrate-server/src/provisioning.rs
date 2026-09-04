@@ -331,9 +331,19 @@ pub async fn provision_workflow_journal_schema(
 
 /// The unqualified name of the per-app unmask audit table.
 ///
-/// Shared with the data plane's INSERT (`zeroship-plugin-db`'s
-/// `crud/unmask.rs`), which is the only writer. The SQLite peer of this constant
-/// is `zeroship_migrate_sqlite::backend::AUDIT_UNMASK_TABLE`.
+/// The data plane's INSERT is the only writer, and its own spelling now lives
+/// in one place: `zeroship_data_engine::backend_handle::AUDIT_UNMASK_TABLE`.
+/// (This doc said `zeroship-plugin-db`'s `crud/unmask.rs` until 2026-09-04. The
+/// engine tier left that crate on 2026-09-03, and the SQL itself had already
+/// moved out of `crud/unmask.rs` into `BackendHandle::append_unmask_audit`.)
+/// The SQLite peer of this constant is
+/// `zeroship_migrate_sqlite::backend::AUDIT_UNMASK_TABLE`.
+///
+/// BOUND, as of 2026-09-04, by
+/// `crates/zeroship-plugin-db/tests/audit_table_parity.rs`, which holds all
+/// three against one stated literal and drives [`audit_unmask_table_sql`] to
+/// check the emitted CREATE TABLE names the relation the writer targets. Until
+/// then the citation above WAS the guard, which is to say there was none.
 pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 
 /// The name prefix reserved for platform relations inside a creator's schema.
