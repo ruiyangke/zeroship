@@ -245,8 +245,9 @@ fn to_db_error(e: &PgError) -> DbError {
 /// A borrowed `ToSql`-holder produced from a [`Bind`], so the compio `Client`'s
 /// `&[&(dyn ToSql + Sync)]` slice can borrow into it for the duration of the call.
 ///
-/// `Decimal` maps to a text bind (the IR carries decimals as strings; PG infers
-/// the target type from context).
+/// `Decimal` maps to [`Self::Untyped`], not [`Self::Text`]: the IR carries decimals
+/// as strings and the server must type them from the column they land in, which is
+/// what declaring nothing buys and what declaring `text` forbids.
 enum ToSqlHolder {
     Null,
     Bool(bool),
@@ -351,8 +352,18 @@ fn to_holder(bind: &Bind) -> Result<ToSqlHolder, DbError> {
         Bind::Null => Ok(ToSqlHolder::Null),
         Bind::Bool(b) => Ok(ToSqlHolder::Bool(*b)),
         Bind::Int(n) => Ok(ToSqlHolder::Int(*n)),
-        // Decimal carried as text - PG infers the numeric target from context.
-        Bind::Decimal(s) => Ok(ToSqlHolder::Text(s.clone())),
+        // A decimal crosses as its canonical string with NOTHING declared, so the
+        // server types it from the column it lands in. That is the same `Untyped`
+        // carrier `Inferred` uses and it is not interchangeable with `Text`:
+        // PostgreSQL has no assignment cast from `text` to `numeric`, so a DECLARED
+        // text parameter into a numeric column is refused with
+        //   column "amount" is of type numeric but expression is of type text
+        // (SQLSTATE 42804), and `numeric = $n` with `$n` declared text finds no
+        // operator. This arm read `ToSqlHolder::Text` until 2026-09-04 under a
+        // comment claiming PG inferred the target from context - it does not, and
+        // declaring `text` is precisely what stops it. Measured on PostgreSQL 18.6:
+        // conformance invariant 5 failed with the 42804 above before this changed.
+        Bind::Decimal(s) => Ok(ToSqlHolder::Untyped(Untyped(Some(s.clone())))),
         Bind::Text(s) => Ok(ToSqlHolder::Text(s.clone())),
         Bind::Inferred(v) => Ok(ToSqlHolder::Untyped(Untyped(v.clone()))),
         _ => unsupported_bind_to_holder(bind),

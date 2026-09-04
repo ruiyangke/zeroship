@@ -812,8 +812,16 @@ fn to_holder(bind: &Bind) -> ToSqlHolder {
         Bind::Null => ToSqlHolder::Null,
         Bind::Bool(b) => ToSqlHolder::Bool(*b),
         Bind::Int(n) => ToSqlHolder::Int(*n),
-        // Decimal carried as text — PG infers the numeric target from context.
-        Bind::Decimal(s) => ToSqlHolder::Text(s.clone()),
+        // A decimal crosses as its canonical string with NOTHING declared, so the
+        // server types it from the column it lands in — the same `TextParam` carrier
+        // `Inferred` uses. `ToSqlHolder::Text` is NOT interchangeable here:
+        // `String`'s `accepts` admits only the text family, so rust-postgres refuses
+        // the parameter client-side ("error serializing parameter N") the moment the
+        // server infers `numeric` from the target column, and a driver that got past
+        // that would still hit PostgreSQL's missing text→numeric assignment cast.
+        // This arm read `ToSqlHolder::Text` until 2026-09-04 under a comment claiming
+        // PG inferred the target from context — it does not while a type is declared.
+        Bind::Decimal(s) => ToSqlHolder::Inferred(TextParam(Some(s.clone()))),
         Bind::Text(s) => ToSqlHolder::Text(s.clone()),
         // The whole point of the variant: `TextParam` accepts EVERY inferred type
         // and encodes text-format, where `String`'s `accepts` admits only the text

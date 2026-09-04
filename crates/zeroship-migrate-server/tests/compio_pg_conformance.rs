@@ -65,10 +65,13 @@ use zeroship_migrate_server::session::CompioPgSession;
 const PG_FIXTURE: SeamFixture = SeamFixture {
     temp_keyword: "TEMP",
     bigint_type: "int8",
+    bool_type: "boolean",
+    decimal_type: "numeric(40,10)",
     timestamp_type: "timestamptz",
     timestamp_text_param: "2026-01-02T03:04:05Z",
     placeholder: pg_placeholder,
     as_bigint: pg_as_bigint,
+    as_text: pg_as_text,
     ts_matches: pg_ts_matches,
     undefined_table_sqlstate: "42P01",
 };
@@ -79,6 +82,10 @@ fn pg_placeholder(n: usize) -> String {
 
 fn pg_as_bigint(expr: &str) -> String {
     format!("({expr})::int8")
+}
+
+fn pg_as_text(expr: &str) -> String {
+    format!("({expr})::text")
 }
 
 fn pg_ts_matches() -> String {

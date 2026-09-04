@@ -25,6 +25,19 @@
 //!    `message` is non-empty and whose `sqlstate` (when the driver has one) is the
 //!    real server SQLSTATE - not a stringified panic. Every `#[source]` wrap
 //!    reads this.
+//! 5. **Declared-scalar fidelity.** The two [`Bind`] variants invariants 1-3 never
+//!    touch - [`Bind::Bool`] and [`Bind::Decimal`] - reach the server carrying their
+//!    value, not a lookalike. Both are LIVE at this seam: the PostgreSQL backfill
+//!    progress writer binds `Bind::Bool` for `guard_installed`/`guard_cleaned`, and
+//!    the MySQL DML executor maps every `BindValue::Decimal` to `Bind::Decimal`.
+//!    Until this check they were bound by NO conformance suite on ANY driver, which
+//!    is the same shape of gap `Bind::Inferred` fell through: [`Bind`] is
+//!    `#[non_exhaustive]`, so a driver's `match` ends in a wildcard and the compiler
+//!    can never warn that a variant is mishandled. This check is directional in both
+//!    directions - a decimal is asserted BYTE-EXACT after a round trip (30
+//!    significant digits, past what `f64` or `i64` can hold), and a boolean is bound
+//!    as a PREDICATE against a two-row table, so a driver that sends the wrong
+//!    boolean selects the wrong row rather than merely succeeding.
 //!
 //! This is the FIRST external consumer of the seam beyond the engine itself: a
 //! driver author (or the `PgDevSession` test harness) runs
@@ -35,9 +48,19 @@
 //!
 //! The checks are neutral; the scratch SQL that provokes them is not, so the
 //! caller passes a [`crate::driver::conformance::SeamFixture`] carrying its own
-//! spellings - the session-scoped table keyword, the integer and timestamp
-//! types, the placeholder form, an integer cast, and the SQLSTATE for a missing
-//! table. PostgreSQL and MySQL each supply one and both run this suite live.
+//! spellings - the session-scoped table keyword, the integer, boolean, decimal and
+//! timestamp types, the placeholder form, an integer and a text cast, and the
+//! SQLSTATE for a missing table. PostgreSQL and MySQL each supply one and both run
+//! this suite live.
+//!
+//! That fixture is also how a check states "this is dialect-specific" STRUCTURALLY
+//! rather than by omission. Invariant 5 is the worked example: PostgreSQL has a
+//! first-class `boolean` and MySQL stores `TINYINT(1)`, and the two disagree again
+//! on how a decimal is rendered as text - so the suite names a `bool_type`, a
+//! `decimal_type` and an `as_text` cast, and asserts only the property that is true
+//! of both (the bound value selects the row it equals, and survives the round trip
+//! byte-for-byte). A check that could not be written that way would belong in a
+//! dialect's own suite, not here.
 
 use super::{Bind, DbError, SqlSession};
 
@@ -45,7 +68,8 @@ use super::{Bind, DbError, SqlSession};
 #[derive(Debug, Clone)]
 pub struct ConformanceFailure {
     /// The check that failed (`"session-pinning"`, `"transaction-visibility"`,
-    /// `"bind-inference-semantics"`, `"error-sqlstate-mapping"`).
+    /// `"bind-inference-semantics"`, `"error-sqlstate-mapping"`,
+    /// `"declared-scalar-fidelity"`).
     pub check: &'static str,
     /// A precise, human-readable reason.
     pub reason: String,
@@ -88,6 +112,22 @@ pub struct SeamFixture {
     pub temp_keyword: &'static str,
     /// The 64-bit signed integer column type.
     pub bigint_type: &'static str,
+    /// The boolean column type a [`Bind::Bool`] is asserted to land in.
+    ///
+    /// The two servers do NOT agree on what that is - PostgreSQL has a first-class
+    /// `boolean`, MySQL spells `BOOLEAN` and stores `TINYINT(1)` - which is exactly
+    /// why the spelling is the caller's and the check is not. The neutral property
+    /// is "the bound boolean selects the row whose flag equals it"; that holds on
+    /// both, and it holds through a `TINYINT` as readily as through a `bool`.
+    pub bool_type: &'static str,
+    /// The exact-decimal column type a [`Bind::Decimal`] is asserted to land in.
+    ///
+    /// MUST have a scale of at least 10 and a precision of at least 40, so the
+    /// 30-significant-digit probe value round-trips at full width. A driver that
+    /// routes a decimal through `f64` loses digits inside that range, and a column
+    /// too narrow to hold the value would hide the loss behind a server-side
+    /// rounding error instead.
+    pub decimal_type: &'static str,
     /// The timestamp column type used by the inference-coercion check.
     pub timestamp_type: &'static str,
     /// The instant an inferred bind sends as TEXT, spelled the way this server
@@ -102,6 +142,17 @@ pub struct SeamFixture {
     pub placeholder: fn(usize) -> String,
     /// Wrap a scalar expression so the server returns it as a 64-bit integer.
     pub as_bigint: fn(&str) -> String,
+    /// Wrap a scalar expression so the server renders it as TEXT.
+    ///
+    /// The decimal round-trip reads its value back through this cast rather than
+    /// off the raw column ON PURPOSE, and the reason is a seam gap rather than a
+    /// convenience: [`crate::driver::Value::Decimal`] has no `FromValue` consumer
+    /// at all, so a decimal cell cannot be read out of a [`crate::driver::Row`] by
+    /// any caller. Casting server-side makes the cell arrive as
+    /// [`crate::driver::Value::Text`], which every driver decodes and every caller
+    /// can read - so this check states a property of the BIND, and states nothing
+    /// about a decode path that today has no consumer to state it for.
+    pub as_text: fn(&str) -> String,
     /// The SQLSTATE the server raises for a reference to a missing table. A
     /// driver may carry no SQLSTATE at all, but a driver that carries one MUST
     /// carry this one.
@@ -129,6 +180,7 @@ pub async fn run<S: SqlSession>(
     check_transaction_visibility(session, scratch_table, fixture).await?;
     check_bind_inference_semantics(session, fixture).await?;
     check_error_sqlstate_mapping(session, fixture).await?;
+    check_declared_scalar_fidelity(session, fixture).await?;
     Ok(())
 }
 
@@ -527,5 +579,213 @@ async fn check_error_sqlstate_mapping<S: SqlSession>(
         }
         Err(e) => return Err(fail(CHECK, format!("decode liveness probe: {e}"))),
     }
+    Ok(())
+}
+/// The decimal probe value: 20 integer digits and 10 fractional ones.
+///
+/// Chosen so that NO lossy route can reproduce it. It is larger than `i64::MAX`
+/// (~9.2e18) so an integer path truncates, and it carries 30 significant digits
+/// where `f64` holds about 15-17, so a float path rounds. A driver that sends the
+/// decimal as its canonical string is the only one that reads this back intact.
+const DECIMAL_PROBE: &str = "12345678901234567890.1234567890";
+
+/// The second decimal probe: negative, and entirely below the decimal point at the
+/// last digit of scale 10. Pairs with [`DECIMAL_PROBE`] so the check has a control
+/// that differs in sign and magnitude rather than only in digits.
+const DECIMAL_PROBE_NEG: &str = "-0.0000000001";
+
+/// Check 5 - declared-scalar fidelity: [`Bind::Bool`] and [`Bind::Decimal`] carry
+/// their VALUE to the server.
+///
+/// These are the two variants the other four checks never bind, and both are live:
+/// the PostgreSQL backfill progress writer binds `Bind::Bool`, and the MySQL DML
+/// executor binds `Bind::Decimal` for every `BindValue::Decimal` the IR produces.
+/// Because [`Bind`] is `#[non_exhaustive]` every driver's mapping ends in a
+/// wildcard, so a variant handled wrongly - or not at all - compiles clean and
+/// fails only against a server.
+///
+/// Both halves are checked in the direction that can actually fail:
+///
+/// - The decimal is asserted BYTE-EXACT after a server round trip, at a width no
+///   `f64` or `i64` can carry, and is then bound again as an equality PREDICATE, so
+///   it must also be comparable as a number on the server rather than merely
+///   storable. That second half is what catches a PostgreSQL driver declaring the
+///   parameter `text`: `numeric = text` has no operator, and an INSERT of a
+///   declared-`text` parameter into a `numeric` column is refused outright
+///   (SQLSTATE 42804) - there is no assignment cast.
+/// - The boolean is bound as a predicate against a table holding one `true` row and
+///   one `false` row, and the check asserts WHICH row comes back. A driver that
+///   inverts, constant-folds or nulls the value selects the wrong row or none,
+///   where a plain "the INSERT succeeded" assertion would pass.
+async fn check_declared_scalar_fidelity<S: SqlSession>(
+    session: &S,
+    fixture: &SeamFixture,
+) -> Result<(), ConformanceFailure> {
+    const CHECK: &str = "declared-scalar-fidelity";
+    let temp = fixture.temp_keyword;
+    let int8 = fixture.bigint_type;
+    let bool_ty = fixture.bool_type;
+    let dec_ty = fixture.decimal_type;
+    let p1 = (fixture.placeholder)(1);
+    let p2 = (fixture.placeholder)(2);
+    let p3 = (fixture.placeholder)(3);
+    let id_n = (fixture.as_bigint)("id");
+    let flag_n = (fixture.as_bigint)("CASE WHEN flag THEN 1 ELSE 0 END");
+    let amount_text = (fixture.as_text)("amount");
+
+    session
+        .batch(&format!(
+            "CREATE {temp} TABLE zm_conf_scalar \
+             (id {int8}, flag {bool_ty}, amount {dec_ty})"
+        ))
+        .await
+        .map_err(|e| fail(CHECK, format!("create declared-scalar scratch table: {e}")))?;
+
+    let insert = format!("INSERT INTO zm_conf_scalar (id, flag, amount) VALUES ({p1}, {p2}, {p3})");
+    for (id, flag, amount) in [(1_i64, true, DECIMAL_PROBE), (2, false, DECIMAL_PROBE_NEG)] {
+        let n = session
+            .exec(
+                &insert,
+                &[
+                    Bind::Int(id),
+                    Bind::Bool(flag),
+                    Bind::Decimal(amount.to_string()),
+                ],
+            )
+            .await
+            .map_err(|e| {
+                fail(
+                    CHECK,
+                    format!("INSERT of Bind::Bool({flag}) + Bind::Decimal({amount:?}) failed: {e}"),
+                )
+            })?;
+        if n != 1 {
+            return Err(fail(
+                CHECK,
+                format!("declared-scalar INSERT for id {id} reported {n} rows, expected 1"),
+            ));
+        }
+    }
+
+    // Round trip, row by row: the decimal byte-exact, the boolean as 1/0.
+    for (id, flag, amount) in [(1_i64, 1_i64, DECIMAL_PROBE), (2, 0, DECIMAL_PROBE_NEG)] {
+        let row = session
+            .query_one(
+                &format!(
+                    "SELECT {amount_text} AS amount_text, {flag_n} AS flag_n \
+                     FROM zm_conf_scalar WHERE id = {p1}"
+                ),
+                &[Bind::Int(id)],
+            )
+            .await
+            .map_err(|e| fail(CHECK, format!("read back declared-scalar row {id}: {e}")))?;
+        let got_amount: String = row
+            .try_get("amount_text")
+            .map_err(|e| fail(CHECK, format!("decode round-tripped decimal text: {e}")))?;
+        if got_amount != amount {
+            return Err(fail(
+                CHECK,
+                format!(
+                    "Bind::Decimal({amount:?}) round-tripped as {got_amount:?} - the driver \
+                     did not carry the decimal's canonical string to the server intact"
+                ),
+            ));
+        }
+        let got_flag: i64 = row
+            .try_get("flag_n")
+            .map_err(|e| fail(CHECK, format!("decode round-tripped boolean: {e}")))?;
+        if got_flag != flag {
+            return Err(fail(
+                CHECK,
+                format!("Bind::Bool round-tripped as {got_flag} for row {id}, expected {flag}"),
+            ));
+        }
+    }
+
+    // A bound boolean as a PREDICATE: it must select the `false` row, not the
+    // `true` one and not neither.
+    let by_flag = session
+        .query(
+            &format!("SELECT {id_n} AS id FROM zm_conf_scalar WHERE flag = {p1}"),
+            &[Bind::Bool(false)],
+        )
+        .await
+        .map_err(|e| {
+            fail(
+                CHECK,
+                format!("SELECT with a Bind::Bool predicate failed: {e}"),
+            )
+        })?;
+    match by_flag.as_slice() {
+        [row] => {
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|e| fail(CHECK, format!("decode boolean-predicate id: {e}")))?;
+            if id != 2 {
+                return Err(fail(
+                    CHECK,
+                    format!(
+                        "a Bind::Bool(false) predicate selected id {id}, expected 2 - the \
+                         driver sent a different boolean than the one bound"
+                    ),
+                ));
+            }
+        }
+        rows => {
+            return Err(fail(
+                CHECK,
+                format!(
+                    "a Bind::Bool(false) predicate matched {} rows, expected exactly 1",
+                    rows.len()
+                ),
+            ))
+        }
+    }
+
+    // A bound decimal as a PREDICATE: it must be comparable as a NUMBER on the
+    // server, at full width, and select the row it equals.
+    let by_amount = session
+        .query(
+            &format!("SELECT {id_n} AS id FROM zm_conf_scalar WHERE amount = {p1}"),
+            &[Bind::Decimal(DECIMAL_PROBE.to_string())],
+        )
+        .await
+        .map_err(|e| {
+            fail(
+                CHECK,
+                format!("SELECT with a Bind::Decimal predicate failed: {e}"),
+            )
+        })?;
+    match by_amount.as_slice() {
+        [row] => {
+            let id: i64 = row
+                .try_get("id")
+                .map_err(|e| fail(CHECK, format!("decode decimal-predicate id: {e}")))?;
+            if id != 1 {
+                return Err(fail(
+                    CHECK,
+                    format!(
+                        "a Bind::Decimal({DECIMAL_PROBE:?}) predicate selected id {id}, expected 1"
+                    ),
+                ));
+            }
+        }
+        rows => {
+            return Err(fail(
+                CHECK,
+                format!(
+                    "a Bind::Decimal({:?}) predicate matched {} rows, expected exactly 1 - the \
+                     bound decimal is not comparable as a number at full precision",
+                    DECIMAL_PROBE,
+                    rows.len()
+                ),
+            ))
+        }
+    }
+
+    session
+        .batch("DROP TABLE zm_conf_scalar")
+        .await
+        .map_err(|e| fail(CHECK, format!("drop declared-scalar scratch table: {e}")))?;
     Ok(())
 }
