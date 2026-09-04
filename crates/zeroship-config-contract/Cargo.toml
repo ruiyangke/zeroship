@@ -16,13 +16,22 @@ reason = "Non-shipped configuration contract checker."
 
 [dependencies]
 zeroship-core = { workspace = true }
-# The six generated registries this tool checks and documents. Linking them is
+# The seven generated registries this tool checks and documents. Linking them is
 # the point: `ConfigSpec` and `CONFIG_READ_SITES` are what the COMPILER produced
 # from the declarations, so a check against them cannot be satisfied by editing
 # a manifest, and the syn-based `inventory` scan stays an independent second
 # derivation to compare against.
 zeroship-auth = { workspace = true }
 zeroship-control = { workspace = true }
+# THE ONE EXCEPTION TO "NOTHING DEPENDS ON THE CDC RELAY", and it is named as
+# such in `crates/zeroship-data-cdc-server/Cargo.toml` and enforced by
+# `tests/data_crate_closure_gate.sh` arm 3. This tool is `class =
+# "test-dev-tool"` - it is not shipped - so linking the relay's registry does not
+# put a relay in any deployed binary's closure. The alternative was to classify
+# the relay as something other than `platform`, which would leave a shipped
+# service's configuration surface unaudited: exactly the vacuity
+# `tests/real_registry.rs` exists to prevent.
+zeroship-data-cdc-server = { workspace = true }
 zeroship-gateway = { workspace = true }
 zeroship-migrate-server = { workspace = true }
 zeroship-worker = { workspace = true }
