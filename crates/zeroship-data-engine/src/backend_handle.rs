@@ -49,6 +49,31 @@ use crate::backend::{
 use crate::tx_lanes::TxConnection;
 use zeroship_data_core::error::{BeginIntent, OpenSessionError};
 
+/// The unqualified name of the per-app unmask audit table, for the whole data
+/// plane.
+///
+/// The data plane is this table's only WRITER and holds no authority to create
+/// it: the two migration apply hosts do that, each from its own dialect's DDL
+/// (`zeroship_migrate_sqlite::backend::AUDIT_UNMASK_TABLE` for the dev tier,
+/// `zeroship_migrate_server::provisioning::AUDIT_UNMASK_TABLE` for PostgreSQL).
+/// If a creator's spelling and a writer's spelling ever part company the INSERT
+/// targets a relation nothing made, and since an unmask whose audit row cannot
+/// be written must not return plaintext, EVERY unmask on that app fails.
+///
+/// This constant exists so the data plane contributes exactly ONE spelling to
+/// that agreement rather than three. It was three until 2026-09-04: two inline
+/// literals in [`BackendHandle::append_unmask_audit`]'s two arms and
+/// `auth::bootstrap`'s `WORKER_WRITABLE_RESERVED_TABLE`, which names the one
+/// reserved relation the worker role may append to.
+///
+/// The agreement across the crate boundary is bound by
+/// `crates/zeroship-plugin-db/tests/audit_table_parity.rs`, which is the one
+/// place all three constants are nameable - a shared constant is not available,
+/// because it would need `zeroship-data-engine` to depend on the migration
+/// engine, and privilege follows the process: the tier that runs creator code
+/// does not link the tier that changes schema.
+pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
+
 /// Per-isolate backend handle — the typed enum stashed on
 /// [`crate::context::ThreadDbContext`].
 ///
@@ -425,7 +450,7 @@ impl BackendHandle {
         match self {
             Self::Postgres(pg) => {
                 let sql = format!(
-                    r#"INSERT INTO "{app_id}"."__zeroship_audit_unmask"
+                    r#"INSERT INTO "{app_id}"."{AUDIT_UNMASK_TABLE}"
                        (actor_id, actor_role, claimed_actor, collection, row_pk, "column",
                         classification, reason, outcome)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#
@@ -451,7 +476,7 @@ impl BackendHandle {
             Self::Sqlite(sq) => {
                 let q_app = sq.quote_ident(app_id);
                 let sql = format!(
-                    r#"INSERT INTO {q_app}."__zeroship_audit_unmask"
+                    r#"INSERT INTO {q_app}."{AUDIT_UNMASK_TABLE}"
                        (actor_id, actor_role, claimed_actor, collection, row_pk, "column",
                         classification, reason, outcome)
                        VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)"#

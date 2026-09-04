@@ -73,6 +73,13 @@ use super::authorizer::Mode;
 /// starts with it, which is what keeps a creator from declaring a colliding
 /// table of their own. See the module doc of `provisioning` in
 /// `zeroship-migrate-server` for the caveat on the FORKED copy of that check.
+///
+/// BOUND, as of 2026-09-04, by
+/// `crates/zeroship-plugin-db/tests/audit_table_parity.rs`. It is the one place
+/// this constant, the PostgreSQL creator's and the writer's are all nameable;
+/// it holds the three against a literal stated once there, and drives THIS
+/// module's [`audit_unmask_ddl`] to check the emitted CREATE TABLE names the
+/// relation the writer targets rather than only the constant it declares.
 pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 
 /// Double any embedded quote so `schema` cannot leave its identifier.
