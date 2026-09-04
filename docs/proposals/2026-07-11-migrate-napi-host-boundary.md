@@ -168,10 +168,13 @@ Do-not notes, each recording something that broke:
   would have failed at the first invocation with
   `nativeBinding.baselineIr is not a function`. `tests/napi_export_parity_gate.sh`
   now compares the committed bytes.
-- Do not run a bare `cargo test -p zeroship-migrate-node`. `napi` is a default
-  feature, so the test binaries build with the N-API entrypoints in and fail at link;
-  Node ABI symbols resolve only at `.node` dlopen time. Use
-  `--no-default-features` for the offline core, and `npm test` for the boundary.
+- ~~Do not run a bare `cargo test -p zeroship-migrate-node`.~~ **CORRECTED 2026-09-04:
+  run it; it works with `napi` ON.** The link failure this described was real (exit 101,
+  1719 `undefined reference` lines) and is fixed by a `napi` entry in `[dev-dependencies]`
+  carrying `dyn-symbols`, which resolves the Node ABI through libloading for TEST BINARIES
+  ONLY. The shipped cdylib is unchanged - it still leaves 52 `napi_*` symbols undefined for
+  the host to supply, which `tests/napi_symbol_shape_gate.sh` asserts. `npm test` remains
+  the only thing that exercises the boundary itself.
 - Do not expect `hostDriver` to be called with two arguments. napi delivers
   `(request, done)` as a single array; the host destructures it.
 - Do not have the addon read its own configuration from the process environment. The

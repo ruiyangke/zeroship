@@ -79,7 +79,8 @@ usage() {
 # THE ONLY NUMBER HERE, and it counts FILES, not findings.
 #
 # RE-MEASURED 2026-09-04 by `find tests -maxdepth 1 -name '*_gate.sh' | wc -l`:
-# 41, after source_citation_scan.sh, zship_artifact_contract.sh and
+# 42, after napi_symbol_shape_gate.sh landed. It read
+# 41 before that, after source_citation_scan.sh, zship_artifact_contract.sh and
 # verdaccio_config_guard.sh were renamed into the glob - three checks a NAME had
 # been exempting from every meta-check. It read 37 + 1 = 38 earlier the same
 # day, for ci_wiring_gate.sh, and 36 + 1 = 37 before that, for
@@ -105,7 +106,7 @@ usage() {
 # adding a gate moves one number and not two - the second of two pins is the
 # one that gets forgotten, and a forgotten pin is the stale census both scripts
 # warn about.
-GATE_FILE_FLOOR=41
+GATE_FILE_FLOOR=42
 
 DIR=""
 RUN=()

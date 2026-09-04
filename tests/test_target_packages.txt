@@ -7,87 +7,89 @@
 # binaries while absent from this list - an unlisted package is one whose
 # disappearance tomorrow nothing would notice.
 #
-# MEASURED 2026-08-21 by `cargo metadata`: all 29 workspace members build test
-# binaries, so this list is every member and there are no exclusions to justify.
-# It read 28 on 4abf0f74a, then 29 when zeroship-gatekit landed, then 30 when
-# zeroship-testkit was added - it had been MISSING, which had this gate reporting
-# "these packages build test binaries but are not in the census". It is 29 again
-# because zeroship-gatekit was deleted on 2026-08-21.
+# THE OMISSION THIS GUARDS AGAINST HAS HAPPENED REPEATEDLY, always the same way:
+# a new member lands, nobody adds a row, and only its DELETION makes the two
+# sides agree again. `crates/zeroship-testkit` had been missing; the
+# `crates/zeroship-secret-policy` leaf existed for a few hours on 2026-08-21
+# with 17 unit tests and was never listed at all.
 #
-# THE SAME OMISSION HAPPENED AGAIN and nothing here caught it either: the
-# `crates/zeroship-secret-policy` leaf existed for a few hours on 2026-08-21 with
-# 17 unit tests and was never added to this list. Only its deletion made the two
-# sides agree.
+# ---------------------------------------------------------------------------
+# REGENERATED 2026-09-04, and the blocker that had held it stale is GONE
+# ---------------------------------------------------------------------------
 #
-# THIS LIST IS INCOMPLETE TODAY, and the gap is older and wider than the one row
-# added below. Measured 2026-09-03 against `crates/*/Cargo.toml` +
-# `libs/*/Cargo.toml`: 42 workspace members, 30 rows here. FOURTEEN members are
-# absent - `zeroship-cli`, `zeroship-data-core`, `zeroship-data-postgres`,
-# `zeroship-data-sqlite`, `zeroship-data-query-builder` and every
-# `zeroship-migrate*` - and three rows (`zeroship`, `zeroship-migrate-adapter`,
-# `zeroship-migrated`) name things that are not packages. Each of the absent ones
-# contains `#[cfg(test)]` modules, so each builds a lib test binary and each is
-# an `EXTRA` the gate refuses.
+# This list stood at 30 rows against 44 members for weeks. The note that used to
+# sit here explained why it could not be fixed, in two successive versions, and
+# BOTH are now obsolete:
 #
-# It is NOT fixed here, deliberately: reconciling it needs a
-# `cargo test --workspace --no-run` this workspace cannot currently produce
-# (feature unification breaks registry `postgres-types`), and regenerating a
-# census from a build that does not run is how a gate stops being one - see the
-# warning three lines down. Only `zeroship-data-engine` is added, because that
-# crate was created in the same commit as this note and leaving it out would be
-# a NEW blind spot rather than an inherited one.
+#   - The first said `cargo test --workspace --no-run` could not be produced at
+#     all (feature unification broke registry `postgres-types`). That was fixed
+#     by tests/dev_dep_feature_route_gate.sh's subject.
+#   - The second said the command failed on ONE package, `zeroship-migrate-node`,
+#     whose integration targets could not LINK (`undefined reference to
+#     napi_create_function`), and concluded: "The census cannot be made correct
+#     until either the CI command excludes that package on purpose or the addon
+#     stops defaulting to `napi`. Decide that first."
 #
-# THE BLOCKER NAMED ABOVE IS NO LONGER THE ONE IN THE WAY. Re-measured 2026-09-04
-# at 598e53848: `postgres-types` resolves, and `cargo test --workspace --no-run`
-# now fails on ONE package - `zeroship-migrate-node`, whose nine integration
-# targets fail at LINK with `undefined reference to napi_create_function`. That is
-# not a regression and not fixable here: `napi` is a DEFAULT feature and Node ABI
-# symbols resolve only at `.node` dlopen time, which that crate's own Cargo.toml
-# has documented since `79b339aa7`. `required-features` cannot express it either,
-# since it can only require a feature ON, never OFF.
+# THAT QUESTION HAS A THIRD ANSWER, and it is the one that shipped. The addon
+# KEEPS `napi` as a default feature - so src/bridge.rs is still compiled and
+# type-checked by `cargo check --workspace` - and its test binaries link because
+# `crates/zeroship-migrate-node/Cargo.toml` declares `napi` in
+# `[dev-dependencies]` with the `dyn-symbols` feature, which resolves the Node
+# ABI through libloading instead of static externs. Under resolver v3 that
+# reaches test targets and NOT the shipped `--lib` build, so the `.node` is
+# unchanged: tests/napi_symbol_shape_gate.sh holds the emitted cdylib's symbol
+# shape (52 undefined `napi_*`, a defined `napi_register_module_v1`) and refuses
+# the repair that would quietly change it.
 #
-# THE CONSEQUENCE IS THAT THIS GATE HAS NOT RUN IN CI. `ci.yml` ("Test-target and
-# test-name census") runs that exact command and exits at its own build-failure
-# guard - correctly, since a short count from a partial build would measure the
-# build and not the coverage - so the staleness below has never been REPORTED by
-# CI, only recorded here by hand.
+# So the package now DECLARES test targets and BUILDS them, which is what arm 1
+# wants, and no exclusion is needed anywhere.
 #
-# Measured with the one package excluded (`--exclude zeroship-migrate-node`,
-# build exit 0): 44 members, 43 built test binaries, 192 test binaries, 9425 test
-# names against the floor of 5413, and the gate refuses on 3 rows naming
-# non-packages plus 16 unlisted members.
-#
-# STILL NOT REGENERATED HERE, and now for a sharper reason than "the build does
-# not run": it does run, and the census it would produce bakes in an answer to a
-# question nobody has decided. `zeroship-migrate-node` DECLARES test targets, so
-# listing it makes arm 1 red ("built NO test binary") and omitting it makes arm 1
-# red the day anything builds it. The census cannot be made correct until either
-# the CI command excludes that package on purpose or the addon stops defaulting to
-# `napi`. Decide that first; the paste is mechanical afterwards.
+# MEASURED 2026-09-04: `cargo test --workspace --no-run` exits 0 with NO
+# `--exclude`, and this list is its output - 44 rows, equal to the 44 workspace
+# members `cargo metadata` reports. The diff from the 30-row version was read
+# before it was pasted: 3 rows REMOVED that named things which are not packages
+# (`zeroship`, `zeroship-migrate-adapter`, `zeroship-migrated`) and 17 members
+# ADDED (`zeroship-cli`, the `zeroship-data-*` family, every `zeroship-migrate*`
+# including `zeroship-migrate-node`, `zeroship-cdc-wire`).
 #
 # To regenerate after a deliberate change:
 #   cargo test --workspace --no-run --message-format=json > /tmp/t.json
 #   tests/test_target_census_gate.sh /tmp/t.json --print-census
-# Read the diff before pasting it. Regenerating on red is how a gate stops
-# being one.
+# Read the diff before pasting it, and do not regenerate from a build that did
+# not exit 0: a short count from a partial build measures the build and not the
+# coverage. Regenerating on red is how a gate stops being one.
 compio-postgres
 compio-redis
 compio-s3
-zeroship
 zeroship-auth
 zeroship-authn
 zeroship-authz
 zeroship-bundle
+zeroship-cdc-wire
+zeroship-cli
 zeroship-config-contract
 zeroship-config-macros
 zeroship-control
 zeroship-core
+zeroship-data-cdc-server
+zeroship-data-core
 zeroship-data-engine
+zeroship-data-postgres
+zeroship-data-query-builder
+zeroship-data-sqlite
 zeroship-gateway
 zeroship-mailer
 zeroship-metering
-zeroship-migrate-adapter
-zeroship-migrated
+zeroship-migrate
+zeroship-migrate-backend
+zeroship-migrate-core
+zeroship-migrate-ir
+zeroship-migrate-mysql
+zeroship-migrate-node
+zeroship-migrate-policy
+zeroship-migrate-postgres
+zeroship-migrate-server
+zeroship-migrate-sqlite
 zeroship-plugin-db
 zeroship-plugin-kv
 zeroship-plugin-storage
@@ -96,7 +98,7 @@ zeroship-runtime
 zeroship-runtime-macros
 zeroship-schema
 zeroship-stream
-zeroship-test-support
 zeroship-testkit
+zeroship-test-support
 zeroship-worker
 zeroship-workflow-scheduler

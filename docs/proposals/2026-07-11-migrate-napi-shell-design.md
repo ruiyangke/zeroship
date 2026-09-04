@@ -93,7 +93,12 @@ on `zeroship-migrate` plus the three vendor backends by name
 (`zeroship-migrate-postgres`, `-mysql`, `-sqlite`), because the engine no longer
 re-exports vendors. `napi` 3 is declared `default-features = false` with `napi6` and
 `serde-json` only. The `napi` cargo feature is on by default and gates the Node ABI
-entrypoints; the offline build is `--no-default-features`.
+entrypoints. `--no-default-features` builds the crate without them; it was the ONLY
+configuration that built until 2026-09-04, and is no longer required. A second `napi`
+entry in `[dev-dependencies]` adds `dyn-symbols`, so a bare
+`cargo test -p zeroship-migrate-node` links and runs with `napi` ON while the shipped
+cdylib keeps resolving the Node ABI from its host
+(`tests/napi_symbol_shape_gate.sh`).
 
 **The napi surface** (identical in `index.d.ts` and `index.js`, enforced by
 `tests/napi_export_parity_gate.sh`): `irVersion`, `buildInfo`, `setEngineDiagnostics`,
