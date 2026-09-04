@@ -2204,6 +2204,9 @@ pub fn index_name(table: &str, columns: &[&str], unique: bool) -> String {
 /// this prefix is therefore **unnameable by creator code on surfaces nobody has
 /// written yet**, which is a stronger property than adding a fence to each of
 /// the surfaces that exist today.
+///
+/// Byte-identical to `zeroship_migrate_backend::schema::RAW_COLUMN_PREFIX`; the
+/// `raw_column_parity` module at the bottom of this file is what holds it there.
 pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
 
 /// The longest field name that can carry a mask.
@@ -2216,18 +2219,38 @@ pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
 ///
 /// (The pre-flip `<field>_masked` sibling had exactly this bug and did not cap:
 /// a 60-character masked field produced a 67-character sibling.)
+///
+/// **This copy gates nothing that ships.** Its only reader is
+/// `field_to_column_for_dialect`, reached only from
+/// [`build_create_table_with_fks_for_dialect`], and that emitter has no `src`
+/// call site in the workspace (measured 2026-09-04). Every real creator table is
+/// gated by the migration engine's copy instead. Both are pinned - to each other
+/// and to the tightest identifier budget the shipping vendors declare - by the
+/// `raw_column_parity` module at the bottom of this file.
 pub const MAX_MASKED_FIELD_NAME_BYTES: usize = 63 - RAW_COLUMN_PREFIX.len();
 
 /// The physical column that holds `field`'s REAL value.
 ///
 /// Total, and deliberately a plain concatenation rather than a hashing cap.
-/// This name must stay byte-identical to
+/// This name is byte-identical to
 /// `zeroship_migrate_backend::schema::raw_column_name` - that one names the
-/// column the migration engine CREATES, this one names the column the data
-/// plane READS and WRITES - and a hashing cap implemented in two crates could
-/// not be checked to agree by any compiler. Refusing an overlong masked field
-/// name at declaration time removes the need for one entirely; see
+/// column the migration engine CREATES, this one names the column the data plane
+/// READS and WRITES. Refusing an overlong masked field name at declaration time
+/// is what removes the need for a hashing cap; see
 /// [`MAX_MASKED_FIELD_NAME_BYTES`].
+///
+/// # What holds the two spellings together
+///
+/// The `raw_column_parity` module at the bottom of this file. It compares this
+/// function, [`RAW_COLUMN_PREFIX`] and [`MAX_MASKED_FIELD_NAME_BYTES`] against
+/// the engine's declarations over a corpus, and crosses both DECLARATION paths
+/// so a side that keeps an equal constant while no longer consulting it is still
+/// caught.
+///
+/// These three doc blocks said instead that the pair "could not be checked to
+/// agree by any compiler", which was true and was not a guard - it was a note
+/// that nothing checked them. A plain concatenation is a deliberate choice
+/// BECAUSE it is checkable, so the checking is the half that had to exist.
 #[must_use]
 pub fn raw_column_name(field: &str) -> String {
     format!("{RAW_COLUMN_PREFIX}{field}")
@@ -14307,6 +14330,378 @@ mod tests {
         assert!(
             matches!(err, QueryError::InvalidFilter(_)),
             "expected the projection's own refusal, got {err:?}",
+        );
+    }
+}
+
+/// Does the RAW-value column name mean the same thing on both sides of the
+/// migration-engine boundary?
+///
+/// # The fork
+///
+/// [`RAW_COLUMN_PREFIX`], [`MAX_MASKED_FIELD_NAME_BYTES`] and
+/// [`raw_column_name`] are declared TWICE, once per side of that boundary, and
+/// the two declarations are related by nothing a compiler can see:
+///
+/// - **here**, in the DATA PLANE, which READS and WRITES the column.
+///   `zeroship_data_engine::crud::unmask` names it in the SELECT the unmask API
+///   issues, `crud::mask_pass::relocate_masked_columns` moves the real value
+///   into it on every write, and both backend introspectors
+///   (`zeroship_data_postgres::pg_introspect`, `zeroship_data_sqlite`) report it
+///   as a masked column's `sibling_column`.
+/// - **in `zeroship_migrate_backend::schema`**, in the MIGRATION ENGINE, which
+///   CREATES it. Every creator table that exists on the platform is rendered
+///   there and applied by `zeroship-migrate-server`.
+///
+/// Both doc blocks stated the hazard and mistook the statement for a guard: each
+/// said the other must stay byte-identical and that no compiler could check it.
+/// That was a note that nothing checked it. This module is the check. It reaches
+/// the engine's copy through the existing test-only `zeroship-migrate-core`
+/// dev-dependency, which re-exports `zeroship_migrate_backend::schema` from
+/// `schema::query`, so it costs no production dependency edge - the same route
+/// [`crate::mask_codec`]'s `cross_codec_parity` takes, one layer up, for the
+/// same hazard in the same crate pair.
+///
+/// # The three items are not three independent bindings, and they do not fail
+/// the same way
+///
+/// Measured 2026-09-04, and the measurement contradicts the intuition that the
+/// LENGTH CAP is the dangerous half:
+///
+/// - `MAX_MASKED_FIELD_NAME_BYTES` **has no production consumer on this side**.
+///   Its only reader in this crate is `field_to_column_for_dialect`, reached only
+///   from [`build_create_table_with_fks_for_dialect`], and that emitter has no
+///   `src` call site anywhere in the workspace - the two in
+///   `zeroship_data_engine::crud::write_pipeline` are inside its `#[cfg(test)]
+///   mod tests`. A divergence in this constant alone therefore changes no shipped
+///   behaviour today; the ENGINE's copy is what gates every real creator table's
+///   DDL.
+/// - It is also **derived, not independent**: both sides spell it
+///   `63 - RAW_COLUMN_PREFIX.len()`, so it cannot move on its own unless the
+///   literal `63` moves. Mutating a prefix fails the cap test too, and that is a
+///   consequence of the derivation rather than a second binding.
+///   [`each_side_derives_its_cap_from_its_own_prefix_and_the_same_budget`] is the
+///   arm a prefix mutation does NOT fail, and the one that isolates the `63`.
+/// - `RAW_COLUMN_PREFIX` is the half that ships. A divergence is LOUD on two
+///   paths and quiet on a third:
+///   - **loud** on the write relocation and on the unmask SELECT, which would
+///     name a column the migration engine never created (reasoned from
+///     Postgres' undefined-column error, not run against a live server here);
+///   - **quiet** at `crud::mask_pass::wrap_row_on_read`, whose strip of the raw
+///     column is keyed by `raw_column_name(col)` and would simply stop matching -
+///     except that containment there is a disjunction, not one fence.
+///     `read_pipeline::restrict_rows_to_surface` runs last and retains only
+///     [`read_surface_columns`], an ALLOWLIST of logical field names that knows
+///     nothing about the prefix. A raw column under any spelling is off that
+///     surface, so a prefix divergence does not leak plaintext through the read
+///     pipeline.
+#[cfg(test)]
+mod raw_column_parity {
+    use super::*;
+
+    use zeroship_migrate_core::schema::query as engine;
+
+    /// The identifier budget both sides bake into their cap.
+    ///
+    /// Spelled here, once, so the two assertions in
+    /// [`each_side_derives_its_cap_from_its_own_prefix_and_the_same_budget`]
+    /// compare each crate's derivation against a stated number rather than
+    /// against each other - which is what lets a change to ONE side's literal
+    /// fail.
+    const IDENTIFIER_BUDGET_BYTES: usize = 63;
+
+    /// A schema name both `validate_schema` implementations accept, and the one
+    /// [`CHARTER`] grants `schema.create_table` over.
+    const APP: &str = "app";
+
+    /// The minimum charter that lets the engine's CREATE TABLE emitter run at
+    /// all: one grant over [`APP`], no injected columns. Injection shape is
+    /// irrelevant here - these tests compare an accept/refuse VERDICT, never
+    /// emitted SQL - and an empty inject set keeps the comparison about the
+    /// masked field name and nothing else.
+    const CHARTER: &str = r#"policy_version = 1
+
+[[grant]]
+key = "schema.create_table"
+value = true
+scope = { include = ["app"] }
+"#;
+
+    /// Field-name shapes the two `raw_column_name`s must agree on.
+    ///
+    /// Includes the empty string and a name that already carries the prefix:
+    /// both functions are TOTAL, so a divergence on a degenerate input is as real
+    /// as one at the boundary. Includes a multi-byte name because the cap is
+    /// measured in BYTES on both sides (`field.len()`, not `chars().count()`) -
+    /// see
+    /// [`the_byte_cap_is_unreachable_through_declaration_because_both_validators_are_ascii_only`]
+    /// for why that distinction cannot be reached through a declaration today.
+    fn field_corpus() -> Vec<String> {
+        vec![
+            String::new(),
+            "a".to_string(),
+            "ssn".to_string(),
+            "email_address".to_string(),
+            "Mixed_Case9".to_string(),
+            raw_column_name("ssn"),
+            // Three bytes per character: the byte length is 3x the char count.
+            "\u{4f60}\u{597d}\u{4e16}\u{754c}".to_string(),
+            "x".repeat(MAX_MASKED_FIELD_NAME_BYTES),
+            "x".repeat(MAX_MASKED_FIELD_NAME_BYTES + 1),
+            "x".repeat(IDENTIFIER_BUDGET_BYTES),
+        ]
+    }
+
+    #[test]
+    fn the_raw_column_prefix_matches_the_migration_engine() {
+        assert_eq!(
+            RAW_COLUMN_PREFIX,
+            engine::RAW_COLUMN_PREFIX,
+            "the data plane READS a raw column the migration engine CREATES; \
+             these two spellings are one column name",
+        );
+    }
+
+    #[test]
+    fn the_masked_field_name_cap_matches_the_migration_engine() {
+        assert_eq!(
+            MAX_MASKED_FIELD_NAME_BYTES,
+            engine::MAX_MASKED_FIELD_NAME_BYTES,
+            "one side would accept a masked field declaration the other refuses",
+        );
+    }
+
+    #[test]
+    fn raw_column_name_matches_the_migration_engine_over_the_corpus() {
+        let mut divergences = Vec::new();
+        for field in field_corpus() {
+            let ours = raw_column_name(&field);
+            let theirs = engine::raw_column_name(&field);
+            if ours != theirs {
+                divergences.push(format!("{field:?}: data-plane={ours:?}, engine={theirs:?}"));
+            }
+        }
+        assert!(
+            divergences.is_empty(),
+            "{} raw column name(s) diverged across the migration-engine boundary:\n{}",
+            divergences.len(),
+            divergences.join("\n"),
+        );
+    }
+
+    /// The arm a prefix mutation does NOT fail.
+    ///
+    /// The cap is `63 - RAW_COLUMN_PREFIX.len()` on both sides, so the three
+    /// tests above are not three independent bindings: change one prefix and the
+    /// cap equality falls with it. This one holds each side's `(cap, prefix)`
+    /// pair against the stated budget instead of against the other side, so it
+    /// survives a prefix change and fails only when the `63` moves.
+    #[test]
+    fn each_side_derives_its_cap_from_its_own_prefix_and_the_same_budget() {
+        assert_eq!(
+            MAX_MASKED_FIELD_NAME_BYTES + RAW_COLUMN_PREFIX.len(),
+            IDENTIFIER_BUDGET_BYTES,
+            "the data plane's cap no longer fills the identifier budget",
+        );
+        assert_eq!(
+            engine::MAX_MASKED_FIELD_NAME_BYTES + engine::RAW_COLUMN_PREFIX.len(),
+            IDENTIFIER_BUDGET_BYTES,
+            "the migration engine's cap no longer fills the identifier budget",
+        );
+    }
+
+    /// What the cap is FOR, asserted as a length rather than as a number.
+    ///
+    /// The longest masked field either side accepts must produce a raw column
+    /// that exactly fills the budget, and one byte more must overflow it. This is
+    /// the arm that survives a coordinated rename of the constants and still
+    /// catches a cap that stopped describing the name it caps.
+    #[test]
+    fn the_longest_accepted_masked_field_exactly_fills_the_identifier_budget() {
+        let at_limit = "x".repeat(MAX_MASKED_FIELD_NAME_BYTES);
+        let over = "x".repeat(MAX_MASKED_FIELD_NAME_BYTES + 1);
+        assert_eq!(
+            raw_column_name(&at_limit).len(),
+            IDENTIFIER_BUDGET_BYTES,
+            "the data plane's longest accepted masked field does not fill the budget",
+        );
+        assert_eq!(
+            raw_column_name(&over).len(),
+            IDENTIFIER_BUDGET_BYTES + 1,
+            "the data plane's first refused masked field does not overflow the budget",
+        );
+
+        let engine_at_limit = "x".repeat(engine::MAX_MASKED_FIELD_NAME_BYTES);
+        let engine_over = "x".repeat(engine::MAX_MASKED_FIELD_NAME_BYTES + 1);
+        assert_eq!(
+            engine::raw_column_name(&engine_at_limit).len(),
+            IDENTIFIER_BUDGET_BYTES,
+            "the engine's longest accepted masked field does not fill the budget",
+        );
+        assert_eq!(
+            engine::raw_column_name(&engine_over).len(),
+            IDENTIFIER_BUDGET_BYTES + 1,
+            "the engine's first refused masked field does not overflow the budget",
+        );
+    }
+
+    /// The budget is not this crate's to choose.
+    ///
+    /// `zeroship_migrate_core::schema::query::validate_field_name` caps a field
+    /// name at the TIGHTEST identifier budget any registered backend declares,
+    /// while both `MAX_MASKED_FIELD_NAME_BYTES` bake the literal `63`. Register a
+    /// vendor with a tighter cap and the two disagree: the masked-field cap would
+    /// admit a name the field-name validator refuses. Nothing else in the tree
+    /// relates those numbers.
+    #[test]
+    fn the_identifier_budget_matches_the_tightest_shipping_vendor_limit() {
+        use zeroship_migrate::IdentifierLimit;
+
+        let tightest = zeroship_migrate::shipping_vendors()
+            .as_slice()
+            .iter()
+            .map(|vendor| match vendor.descriptor.limits.identifier {
+                IdentifierLimit::Bytes(n) | IdentifierLimit::Characters(n) => n,
+                IdentifierLimit::Unbounded => usize::MAX,
+            })
+            .min()
+            .expect("the shipping vendor set is never empty");
+
+        assert_eq!(
+            tightest, IDENTIFIER_BUDGET_BYTES,
+            "a registered backend declares a tighter identifier budget than the \
+             masked-field cap assumes; MAX_MASKED_FIELD_NAME_BYTES would admit a \
+             field name validate_field_name refuses",
+        );
+    }
+
+    /// Both sides must still CONSULT their cap, not merely agree on its value.
+    ///
+    /// Two constants can be equal while one side has stopped reading its own, so
+    /// this arm crosses the DECLARATION path rather than the constants: it drives
+    /// each crate's CREATE TABLE emitter with a masked field at the cap and one
+    /// byte over, and requires the same verdict from both, for every shipping
+    /// dialect. The data-plane emitter is test-only in production terms (see this
+    /// module's header), which is exactly why its refusal needs a binding -
+    /// nothing else exercises it.
+    #[test]
+    fn both_declaration_paths_accept_at_the_cap_and_refuse_one_byte_over() {
+        let vendors = zeroship_migrate::shipping_vendors();
+        let policy = zeroship_migrate_core::effective_policy_from_charter_toml(CHARTER)
+            .expect("the minimal create-table charter composes");
+
+        let mut mismatches = Vec::new();
+        for (accepted, field) in [
+            (true, "x".repeat(MAX_MASKED_FIELD_NAME_BYTES)),
+            (false, "x".repeat(MAX_MASKED_FIELD_NAME_BYTES + 1)),
+        ] {
+            let schema = serde_json::json!({
+                &field: { "type": "string", "mask": { "kind": "full" } }
+            });
+
+            let plane_accepts = build_create_table_with_fks_for_dialect(
+                APP,
+                "people",
+                &schema,
+                &FkEmission::Inline,
+                SqlDialect::Postgres,
+            )
+            .is_ok();
+
+            // Pin the verdict itself, so a change making BOTH sides accept (or
+            // both refuse) cannot pass as agreement.
+            assert_eq!(
+                plane_accepts,
+                accepted,
+                "the data plane's declaration path should have returned \
+                 accepted={accepted} for a {}-byte masked field name",
+                field.len(),
+            );
+
+            for vendor in vendors.as_slice() {
+                let engine_accepts = engine::build_create_table_with_fks_for_dialect(
+                    vendors,
+                    APP,
+                    "people",
+                    &schema,
+                    &engine::FkEmission::Inline,
+                    &vendor.descriptor.id,
+                    &policy,
+                )
+                .is_ok();
+                if engine_accepts != accepted {
+                    mismatches.push(format!(
+                        "{}-byte masked field, dialect {}: data-plane={plane_accepts}, \
+                         engine={engine_accepts}, expected {accepted}",
+                        field.len(),
+                        vendor.descriptor.id.as_str(),
+                    ));
+                }
+            }
+        }
+
+        assert!(
+            mismatches.is_empty(),
+            "{} declaration verdict(s) diverged:\n{}",
+            mismatches.len(),
+            mismatches.join("\n"),
+        );
+    }
+
+    /// The byte/char question, and why no test can reach it through a
+    /// declaration.
+    ///
+    /// Both caps compare `field.len()` - BYTES, not characters - so a name that
+    /// is short by characters and long by bytes is the input that separates the
+    /// two readings. Neither validator ever sees it: both `validate_field_name`
+    /// implementations allow only ASCII alphanumerics and underscore, so a
+    /// multi-byte name is refused for its ENCODING and the byte cap is never
+    /// consulted. Recorded as a test rather than a comment so that the day the
+    /// allowlist widens, this states what widening exposes.
+    ///
+    /// # The probe has to be sized, not just multi-byte
+    ///
+    /// This arm first used a 53-character probe (159 bytes) and asserted the
+    /// allowlist refused it. It did not: `validate_field_name` checks
+    /// `name.len() > 63` FIRST, so a 159-byte name is refused for overall
+    /// LENGTH and the assertion was reading a verdict the allowlist never cast.
+    /// The probe is now sized into the window `MAX_MASKED_FIELD_NAME_BYTES <
+    /// bytes <= 63`, where the length gate cannot fire, and the refusal is
+    /// matched against the allowlist's own message rather than against
+    /// `is_err()`.
+    #[test]
+    fn the_byte_cap_is_unreachable_through_declaration_because_both_validators_are_ascii_only() {
+        const ALLOWLIST_REFUSAL: &str = "allowed: ASCII alphanumeric + underscore";
+
+        let vendors = zeroship_migrate::shipping_vendors();
+        // The shortest multi-byte name that overflows the masked-field cap.
+        let chars = MAX_MASKED_FIELD_NAME_BYTES / 3 + 1;
+        let multibyte = "\u{4f60}".repeat(chars);
+
+        assert!(
+            multibyte.chars().count() <= MAX_MASKED_FIELD_NAME_BYTES,
+            "the probe must be short by CHARACTERS for the distinction to exist",
+        );
+        assert!(
+            multibyte.len() > MAX_MASKED_FIELD_NAME_BYTES,
+            "the probe must be long by BYTES for the distinction to exist",
+        );
+        assert!(
+            multibyte.len() <= IDENTIFIER_BUDGET_BYTES,
+            "the probe must fit the overall identifier budget, or the length gate \
+             refuses it and this arm measures that gate instead of the allowlist",
+        );
+
+        let ours = validate_field_name(&multibyte).expect_err("the data plane must refuse it");
+        assert!(
+            ours.to_string().contains(ALLOWLIST_REFUSAL),
+            "the data plane refused for the wrong reason: {ours}",
+        );
+        let theirs = engine::validate_field_name(vendors, &multibyte)
+            .expect_err("the engine must refuse it");
+        assert!(
+            theirs.to_string().contains(ALLOWLIST_REFUSAL),
+            "the engine refused for the wrong reason: {theirs}",
         );
     }
 }

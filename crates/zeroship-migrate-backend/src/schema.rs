@@ -552,6 +552,9 @@ pub fn build_encryption_sentinel_comments(
 /// keys, write-document keys, read identifiers). Naming the raw column something
 /// no validator accepts is what makes it unreachable from creator code on
 /// surfaces nobody has written yet.
+///
+/// Byte-identical to `zeroship_schema::query::RAW_COLUMN_PREFIX`; see
+/// [`raw_column_name`] for what holds it there.
 pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
 
 /// The longest field name that can carry a mask.
@@ -566,15 +569,36 @@ pub const RAW_COLUMN_PREFIX: &str = "__zs_raw__";
 ///
 /// (The pre-flip `<field>_masked` sibling had exactly this bug and did not cap:
 /// a 60-character masked field produced a 67-character sibling.)
+///
+/// **This is the copy that gates real creator tables.** The data plane declares
+/// the same cap, but its only reader is an emitter with no `src` call site
+/// (measured 2026-09-04), so an accepted declaration is accepted HERE. The two
+/// are pinned to each other, and this literal `63` to the tightest identifier
+/// budget the shipping vendors declare, by `zeroship_schema::query`'s
+/// `raw_column_parity`.
 pub const MAX_MASKED_FIELD_NAME_BYTES: usize = 63 - RAW_COLUMN_PREFIX.len();
 
 /// The physical column that holds `field`'s REAL value.
 ///
-/// Total, and deliberately a plain concatenation: it must stay byte-identical
-/// to `zeroship_schema::query::raw_column_name` - this one names the column the
+/// Total, and deliberately a plain concatenation: it is byte-identical to
+/// `zeroship_schema::query::raw_column_name` - this one names the column the
 /// migration engine CREATES, that one names the column the data plane READS and
-/// WRITES - and two hashing implementations in two crates could not be checked
-/// to agree by any compiler.
+/// WRITES.
+///
+/// # What holds the two spellings together
+///
+/// `zeroship_schema::query`'s `raw_column_parity` module. It compares this
+/// function, [`RAW_COLUMN_PREFIX`] and [`MAX_MASKED_FIELD_NAME_BYTES`] against
+/// the data plane's declarations over a corpus, and crosses both DECLARATION
+/// paths so a side that keeps an equal constant while no longer consulting it is
+/// still caught. It lives over there because that crate already dev-depends on
+/// `zeroship-migrate-core` (which re-exports this module), so the check costs no
+/// production dependency edge and this crate keeps none on the data plane.
+///
+/// These three doc blocks said instead that two implementations "could not be
+/// checked to agree by any compiler", which was true and was not a guard - it
+/// was a note that nothing checked them. A plain concatenation is the right
+/// choice BECAUSE it is checkable; the checking is the half that had to exist.
 #[must_use]
 pub fn raw_column_name(field: &str) -> String {
     format!("{RAW_COLUMN_PREFIX}{field}")
