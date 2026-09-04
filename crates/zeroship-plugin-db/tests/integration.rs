@@ -44,6 +44,20 @@
 //! A count from a reused database describes that database's history as much as
 //! it describes the code.
 //!
+//! A FRESH DATABASE IS NECESSARY AND NOT SUFFICIENT, and believing otherwise
+//! cost an hour on 2026-09-04. A worker slot is named from the TEST's own name
+//! (`support::test_app_id_from` -> `replication::worker_slot_name`), so it is
+//! the same string on every run, and `pg_replication_slots` is a CLUSTER-wide
+//! catalog that `replication::ensure_worker_slot` probes with no `database`
+//! predicate - correctly, because slot names are unique per cluster, not per
+//! database. So a slot a failed run leaked into database A is found by the SAME
+//! test running in brand-new database B, where `assert!(first.created)` then
+//! fails for a reason that has nothing to do with the run. It reproduced 5 times
+//! out of 5 and read exactly like a regression this file had just introduced.
+//! Between measurements, drop every `__zs\_%` slot on the SERVER, not only the
+//! database - and assert the count is zero before starting, because the run that
+//! leaked one exits before it can tell you.
+//!
 //! 1. **One shared schema constant.** `SCHEMA = "plugin_db_test"` here and
 //!    `APP_SCHEMA = "default"` in `native_transaction.rs`, each with a setup
 //!    that opens `DROP SCHEMA ... CASCADE`. Fixed by deriving a per-test app id
@@ -148,6 +162,45 @@ async fn require_pg() -> String {
 /// and 9 shared, counted by call site rather than estimated - leaves the other
 /// 72 fully parallel, and states the server limits it is sized against.
 ///
+/// # The case it is kept on, and the three clauses that have none
+///
+/// This module first justified itself with a run it did not isolate: per-test
+/// app ids, the residue sweep and this budget landed together, and the budget
+/// took the credit for turning 78 / 5 / 3 green. It was re-measured on
+/// 2026-09-04 one clause at a time, on PostgreSQL 18.6 with
+/// `max_replication_slots` = `max_wal_senders` = 10 and `nproc` 16, each run
+/// against a database minted for it on a server carrying no `__zs\_%` slot:
+///
+/// ```text
+/// integration --test-threads=16 -- c1_ p8a2_ drop_namespace_    (19 tests)
+///   unmutated                            5 runs, 19/19 pass every time
+///   `exclusive`'s wait deleted           5 runs, ALL FAIL, always the four
+///                                        c1_abandoned_reaper_* tests
+///   both waits deleted                   5 runs, ALL FAIL, those four plus
+///                                        p8a2_supervised_consumer_reconnects_
+///                                        after_kill or c1_setup_resumes_...
+///   `shared`'s wait deleted              5 runs, 19/19 pass every time
+/// ```
+///
+/// So [`exclusive`] is what the budget is for, and the three failure texts are
+/// the three resources named below: `observer must own the fleet sweep` (a
+/// sibling reaper holds the one-per-database leader lock), `exactly one
+/// concurrent reaper must win the drop` and `assert_eq!(due.dropped,
+/// vec![slot])` (a sibling's slot is inside this reaper's fleet-wide
+/// enumeration).
+///
+/// **No mutation could produce a failing case for the other three clauses** -
+/// [`SHARED_LIMIT`], `waiting_exclusive`, or [`shared`] standing aside for an
+/// admitted exclusive. The reason is dispatch order, not safety: libtest starts
+/// tests in name order, every exclusive test here sorts at `c1_abandoned_...` or
+/// `c1_cleanup_...` ahead of every shared one, so an exclusive parks until the
+/// shared population has drained and there is no shared test left to arrive
+/// during it. That is an accident of naming. One shared CDC test named ahead of
+/// `c1_abandoned_` reopens the window in a way no assertion here would attribute
+/// to the harness, which is why [`shared`] keeps a guard nothing currently
+/// binds. Whoever deletes it should first name the test that makes it
+/// observable, not the run that did not.
+///
 /// # Why naming cannot solve this half
 ///
 /// Three resources here are not partitioned by any app id:
@@ -176,12 +229,21 @@ mod cdc_budget {
 
     /// How many slot-holding CDC tests may run at once.
     ///
-    /// `max_replication_slots` is 10 on the test server. The heaviest shared
-    /// test holds two slots at a time
+    /// `max_replication_slots` is 10 on the test server, cluster-wide. The
+    /// heaviest shared test holds two slots at a time
     /// (`c1_setup_resumes_at_existing_lsn_across_restart` re-runs
-    /// `ensure_worker_slot` on a second pool), so 4 x 2 = 8 leaves two slots of
-    /// headroom for a reconnecting consumer. Raising this above 5 would put the
-    /// suite back on the cluster ceiling.
+    /// `ensure_worker_slot` on a second pool), so this caps worst-case demand
+    /// at 4 x 2 = 8.
+    ///
+    /// THAT IS AN ARITHMETIC BOUND AND NOT WHAT HAPPENS. This line claimed
+    /// "raising this above 5 would put the suite back on the cluster ceiling"
+    /// until 2026-09-04, when it was measured by sampling
+    /// `pg_replication_slots` server-side every 2ms across the 19-test CDC run:
+    /// peak slots alive at any instant are **4 of 10 with this cap and 7 of 10
+    /// with no cap at all**, and the uncapped run passed 5 times out of 5. The
+    /// cap does not stand between this suite and a failure anyone has produced;
+    /// it holds 6 free slots instead of 3, on a resource whose exhaustion
+    /// arrives as `wal consumer: db error` and names nothing.
     const SHARED_LIMIT: usize = 4;
 
     struct Budget {
@@ -222,12 +284,20 @@ mod cdc_budget {
     ///
     /// Waits while an exclusive holder is admitted, while the shared population
     /// is at [`SHARED_LIMIT`], or while an exclusive caller is PARKED. That last
-    /// clause is what stops a stream of shared arrivals from starving a waiting
-    /// exclusive test forever: without it a reaper test waits for `shared == 0`,
-    /// a moment fourteen shared CDC tests on sixteen threads need not ever
-    /// produce. It cannot deadlock in return, because no test holds one permit
-    /// while asking for another - every call site takes exactly one, at the top
-    /// of the test, and holds it to the end.
+    /// clause stands aside for a waiting exclusive so a stream of shared
+    /// arrivals cannot starve it: without it a reaper test waits for
+    /// `shared == 0`, a moment nine shared CDC tests on sixteen threads need not
+    /// ever produce. It cannot deadlock in return, because no test holds one
+    /// permit while asking for another - every call site takes exactly one, at
+    /// the top of the test, and holds it to the end.
+    ///
+    /// Starvation is the hazard argued for, not one observed: deleting this
+    /// whole wait ran 5 times without hanging, and 5 more with only the
+    /// `waiting_exclusive` clause deleted. Both are green because every
+    /// exclusive test sorts ahead of every shared one, so a parked exclusive is
+    /// waiting on a population that is already draining and never refilled. See
+    /// the module doc for what that costs the day a shared CDC test is named
+    /// earlier.
     pub fn shared() -> Permit {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         while state.exclusive || state.waiting_exclusive > 0 || state.shared >= SHARED_LIMIT {
@@ -243,6 +313,10 @@ mod cdc_budget {
     /// and no shared holder - because the resources this fences (the reaper's
     /// fleet-wide enumeration and its one-per-database leader lock) are not
     /// partitioned by app id at all.
+    ///
+    /// This is the one wait in the module a mutation can fail: delete it and the
+    /// four `c1_abandoned_reaper_*` tests fail on all 5 runs of the command in
+    /// the module doc, while the unmutated command passes all 5.
     pub fn exclusive() -> Permit {
         let mut state = STATE.lock().unwrap_or_else(|e| e.into_inner());
         state.waiting_exclusive += 1;
