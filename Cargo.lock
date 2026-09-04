@@ -7287,6 +7287,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "zeroship-cdc-wire"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "zeroship-core",
+]
+
+[[package]]
 name = "zeroship-cli"
 version = "0.1.0"
 dependencies = [
