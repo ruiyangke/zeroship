@@ -136,7 +136,7 @@ jobs:
         run: |
           set -o pipefail
           pin=$(grep -oP 'WPT_COMMIT="\$\{WPT_COMMIT:-\K[0-9a-f]{40}' \
-            crates/runtime/tests/setup-wpt.sh)
+            crates/zeroship-runtime/tests/setup-wpt.sh)
           if [ -z "$pin" ]; then
             echo "::error::could not read the WPT pin out of setup-wpt.sh; the cache key would be a constant and would serve a stale tree forever"
             exit 1
@@ -144,10 +144,10 @@ jobs:
           echo "pin=$pin" >> "$GITHUB_OUTPUT"
       - uses: actions/cache@v4
         with:
-          path: crates/runtime/tests/wpt
+          path: crates/zeroship-runtime/tests/wpt
           key: wpt-${{ steps.wpt-pin.outputs.pin }}
       - name: Fetch the WPT tree the runtime test target include_str!s
-        run: ./crates/runtime/tests/setup-wpt.sh
+        run: ./crates/zeroship-runtime/tests/setup-wpt.sh
       # PROVISION BEFORE TESTING, and this step is what makes the deletion of
       # `ZEROSHIP_REQUIRE_LIVE_BACKENDS` safe here rather than merely correct.
       #
