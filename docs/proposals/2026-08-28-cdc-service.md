@@ -7,7 +7,7 @@ relay cheaper to write and none of which is the relay:
 | landed | what it is | commit |
 | --- | --- | --- |
 | `crates/zeroship-cdc-wire` | The leaf wire contract: framing, the eleven frames, `SubscribeRequest` and its permit commitment, the closed enums, and the identity and generation vocabulary. No I/O; `sha2`, `serde`, `serde_json` only, with `zeroship-core` a DEV dependency so the typed-id oracle runs without putting an HTTP client in a no-I/O crate's closure. 35 tests. | `05d9462c8` |
-| `crates/zeroship-cdc-transport-spike` | The ntex-plus-cyper streaming pair, proven as 12 tests. Answers most of Open 4. | `f7e043252` |
+| the ntex-plus-cyper transport | Proven as 12 tests, then the crate that proved it was DELETED the same day. Answers most of Open 4. The evidence is the commit and the paragraph below, NOT a standing crate - re-read it before trusting the four properties across a dependency bump. | proven `f7e043252`, crate deleted 2026-09-03 |
 | `crates/zeroship-data-cdc-server` | **The CRATE, not the SERVICE.** A manifest, a config module and a `main` that answers `--check-config` and then refuses to start. **ZERO files were moved into it**, which is the settled answer rather than a deferral. | `545ceff1e` |
 | SQLite commit-window suppression | The suppression sample point moved from drain to commit. Ships behaviour; INERT today. | `8672dd355` |
 
@@ -70,10 +70,22 @@ this document is most exposed to: a true citation followed by a false claim abou
 what the cited thing is used for. The gate rules on the path and the line, never
 on the sentence.
 
-`crates/zeroship-cdc-transport-spike/` is that evidence, as twelve tests anyone
-can re-run with `cargo test -p zeroship-cdc-transport-spike`. It is a spike, not
-a relay: no election, no slot, no pgoutput, no frames from `zeroship-cdc-wire`.
-Measured on ntex 3.7.2 and cyper 0.8.3 (the versions in `Cargo.lock`):
+`crates/zeroship-cdc-transport-spike/` was that evidence: twelve tests, on ntex
+3.7.2 and cyper 0.8.3 (the versions in `Cargo.lock` at the time). It was a spike,
+not a relay - no election, no slot, no pgoutput, no frames from
+`zeroship-cdc-wire`.
+
+**THE CRATE WAS DELETED ON 2026-09-03, BY OPERATOR DECISION, AND THAT CHANGES
+WHAT THIS SECTION IS.** It is now a RECORD of a measurement rather than a
+standing guard. The four properties below were true of those two versions on that
+day; nothing in the tree re-checks them. That matters more than it usually would,
+because all four are behaviours of THIRD-PARTY crates we do not control, and the
+relay is blocked for an indeterminate time (see the Status block). Whoever
+unblocks it should re-establish these four properties against the versions then in
+`Cargo.lock` before designing on them - reading this paragraph is not the same as
+measuring. `git show f7e043252` restores the harness that did it.
+
+The four properties, as measured:
 
 - **Incremental in both directions.** The handler will not produce frame N+1
   until the client acknowledges frame N, so a buffered response deadlocks rather
@@ -808,8 +820,10 @@ an explicit relay-crate feature addition); client is `cyper` with its `stream`
 feature. Push rather than poll, because a poll interval is a latency floor chosen
 in advance.
 
-**That pair is PROVEN, at `f7e043252`**, as twelve tests in
-`crates/zeroship-cdc-transport-spike/` - incremental in both directions, on
+**That pair was PROVEN, at `f7e043252`**, as twelve tests in a
+`crates/zeroship-cdc-transport-spike/` that was DELETED the same day - so this is
+a past-tense measurement, not a check the tree still runs - incremental in both
+directions, on
 compio with no tokio reactor, ntex write backpressure reaching the response body,
 and "the relay sheds, it never blocks" expressible as written with a
 one-variable control. What is still unproven is TLS terminating in the relay
@@ -1952,9 +1966,11 @@ reopens one by reading a stale option list.
 4. **MOSTLY ANSWERED, 2026-09-03. What is left is TLS and duration.** `ntex` v3
    response streaming and `cyper`'s `stream` feature do compose into an
    incremental framed channel, and ntex's write backpressure reaches the body
-   stream, which is what lets the ring bound its egress. The evidence is
-   `crates/zeroship-cdc-transport-spike/` and the numbers are in the Status
-   block. Two pieces of the original question are still open and neither gates
+   stream, which is what lets the ring bound its egress. The evidence is the
+   commit `f7e043252` and the numbers in the Status block; the crate that carried
+   it, `crates/zeroship-cdc-transport-spike/`, was deleted the same day, so this
+   answer is a record and not a live check. Two pieces of the original question
+   are still open and neither gates
    the wire crate: the spike is plaintext, so TLS terminating in the relay
    process is unproven and needs an ntex feature the workspace does not enable;
    and the longest hold measured is seconds, not the multi-minute channel this
@@ -2015,16 +2031,23 @@ reopens one by reading a stale option list.
     three letters and one is four, `WORKFLOW_CRON_PREFIX = "cron"` at
     `crates/zeroship-core/src/typed_id.rs:504`. The convention is strong and it is
     not a rule, so a length argument cannot decide this on its own.
-13. **NEEDS-DECISION: what happens to `crates/zeroship-cdc-transport-spike`?** It
-    is a permanent workspace member with "spike" in its name - one of the 45
-    packages `cargo metadata --no-deps` reports - and it carries the dev
-    dependency that took `PINNED_ENTRYPOINTS` in `tests/zero_tokio_gate.sh` from
-    nine names to ten. Three shapes are available and none has been chosen: keep
-    it as a named transport conformance suite (rename, and it stops reading as
-    scaffolding); fold its twelve tests into the relay crate when the listener
-    lands (and lose them until then); or delete it and keep the numbers in this
-    document (and lose the ability to re-run them). Deciding by not deciding
-    means the name ships.
+13. **DECIDED 2026-09-03 by the operator: `crates/zeroship-cdc-transport-spike`
+    is DELETED.** Three shapes were available - keep it as a renamed transport
+    conformance suite, fold its twelve tests into the relay crate when the
+    listener lands, or delete it and keep the numbers in this document. The third
+    was chosen, and the cost it buys is stated here rather than left implicit:
+    **the four transport properties are no longer re-checked by anything.** They
+    are behaviours of `ntex` and `cyper`, which we do not control, and a
+    dependency bump can invalidate any of them silently. The measurement above is
+    now a dated record, not a guard.
+
+    That is an acceptable trade only because nothing is built on those properties
+    yet. It stops being acceptable the moment the relay's listener is designed:
+    whoever does that must re-establish the four properties against the versions
+    then in `Cargo.lock` before relying on them, and `git show f7e043252` restores
+    the harness that measured them. The workspace went 45 packages back to 44 and
+    `PINNED_ENTRYPOINTS` in `tests/zero_tokio_gate.sh` went ten names back to
+    nine, which is the only entry that pin has ever gained and then lost.
 14. **NEEDS-DECISION, and it is a PRIVILEGE decision: when does the worker stop
     holding `REPLICATION`?** Extracting the crate left this exactly where it was;
     see "The reaper is a privilege change". The four edits must land in one
