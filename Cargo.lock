@@ -7287,17 +7287,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "zeroship-cdc-transport-spike"
-version = "0.1.0"
-dependencies = [
- "compio",
- "cyper",
- "flume 0.11.1",
- "futures",
- "ntex",
-]
-
-[[package]]
 name = "zeroship-cdc-wire"
 version = "0.1.0"
 dependencies = [
