@@ -161,8 +161,12 @@ pub fn statement_for_test(columns: Vec<Column>) -> Statement {
 /// 4-byte big-endian `i32`, `BOOL` is a single byte (0 or 1), `JSONB`
 /// is a 1-byte version prefix (0x01) followed by UTF-8 JSON text,
 /// `TIMESTAMPTZ` is an 8-byte BE `i64` of microseconds since
-/// 2000-01-01 UTC. See `crates/plugin-db/src/v8_bridge.rs::column_to_json`
-/// for the conversion table.
+/// 2000-01-01 UTC. See
+/// `crates/zeroship-data-postgres/src/pg_row_json.rs::column_to_json` for the
+/// conversion table. (Cited as `crates/plugin-db/src/v8_bridge.rs` until
+/// 2026-09-04: the crate is `crates/zeroship-plugin-db`, and the function moved
+/// out of `v8_bridge.rs` on the data-plane split - it is now the tree's only
+/// `column_to_json`.)
 ///
 /// # Errors
 ///

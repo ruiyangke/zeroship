@@ -106,12 +106,34 @@
 //! because nothing in the type system prevents reaching for the cheaper door:
 //! the bypass is currently avoided by convention, not by construction.
 //!
-//! The mapping is a near-mechanical port of the engine's own
-//! `crates/zeroship-migrate-postgres/src/backend/session.rs`
-//! `PgSession` impl (whose neutral `Seam*` types are the SAME shape as the standalone's
-//! `driver::*` types, renamed): `batch_execute -> batch`, `execute -> exec`,
-//! `query`/`query_one` unchanged; the `SeamBind -> Value`/`SeamRow`/`SeamError`
-//! decode paths carry over byte-for-byte (same OID -> cell classification).
+//! # What this module maps
+//!
+//! The seam is `zeroship_migrate_backend::driver::SqlSession`, re-exported as
+//! [`zeroship_migrate::driver`]. It declares four async verbs - `batch`, `exec`,
+//! `query`, `query_one` - over three neutral types, [`Bind`] in, [`Row`] of
+//! [`Value`] cells out, [`DbError`] on failure. This module forwards each verb
+//! onto [`compio_postgres::Client`]: `batch` -> `batch_execute`, `exec` ->
+//! `execute_typed`, `query` / `query_one` -> `query_typed`, with
+//! `bind_holders` / `holder_params` on the way in and `row_to_neutral` /
+//! `cell_to_value` (OID -> cell classification) on the way out.
+//!
+//! THIS BLOCK CALLED THAT "a near-mechanical port of the engine's own
+//! `crates/zeroship-migrate-postgres/src/backend/session.rs` `PgSession` impl"
+//! UNTIL 2026-09-04, with a `SeamBind` / `SeamRow` / `SeamError` rename table.
+//! None of those four names has ever existed anywhere in this tree - each
+//! occurred only in that sentence, which a plain grep could not see because
+//! `CompioPgSession` contains the substring `PgSession`. The cited file is real
+//! and is the wrong artifact: it holds no `impl SqlSession for` anything, only
+//! generic `<D: SqlSession>` free functions (project locking, session
+//! snapshot/restore, transactional and non-transactional apply), so it CONSUMES
+//! this seam rather than producing it. Nor was a `PgSession` ever renamed away:
+//! `docs/proposals/2026-07-10-migrate-pg-driver-seam-design.md` opens by calling
+//! the seam dialect-neutral, "`SqlSession`, not a PG-only `PgSession`".
+//!
+//! There was a port, and its source is simply not citable from here: the
+//! standalone, out-of-repo `zero-migrate` project's own PG session. The engine
+//! was in-sourced as `crates/zeroship-migrate*` and that source did not come
+//! with it.
 //!
 //! The seam's `execute_text_params -> exec_text` leg is GONE, and its replacement is
 //! not a rename. Server-inferred typing moved from a whole-statement verb to a
@@ -446,9 +468,23 @@ fn row_to_neutral(row: &PgRow) -> Result<Row, DbError> {
     Ok(Row::new(names, values))
 }
 
-/// The native, compio-postgres [`SqlSession`] impl - one forward per verb (mapping
-/// binds/rows/errors through the neutral seam), so the SQL, txn boundaries, and
-/// decoded domain values are identical to the platform's in-tree `PgSession` impl.
+/// The native, compio-postgres [`SqlSession`] impl - one forward per verb,
+/// mapping binds, rows and errors through the neutral seam.
+///
+/// The peer producer is `NapiHostSession`
+/// (`crates/zeroship-migrate-node/src/session.rs`), which answers the same four
+/// verbs over the JS `pg` host. One body of engine code runs over either, so the
+/// SQL issued, the transaction boundaries and the decoded [`Value`] cells have
+/// to come out the same. NOTHING IN THE TREE HOLDS THAT.
+/// `zeroship_migrate_backend::driver::conformance` is the suite built for it,
+/// and it is driven only from `crates/zeroship-migrate/tests/pg_engine/`
+/// `pg_conformance.rs` against the test harness `PgDevSession`; this crate's
+/// `tests/` directory has no conformance target at all. That is precisely the
+/// gap `to_holder`'s comment above names when it says the compiler cannot hold
+/// this seam and the conformance suite has to.
+///
+/// This doc said "identical to the platform's in-tree `PgSession` impl" until
+/// 2026-09-04. No such type exists or has existed; see the module header.
 impl SqlSession for CompioPgSession {
     async fn batch(&self, sql: &str) -> Result<(), DbError> {
         self.client

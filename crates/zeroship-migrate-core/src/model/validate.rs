@@ -8908,8 +8908,9 @@ fn validate_default_expr(
 ///    TypeID, which must obey the internal `^[a-z][a-z0-9_]*$`
 ///    charset rule + reserved-prefix deny-list (`usr`, ...) the runtime enforces via
 ///    [`crate::schema::query::validate_id_prefix`] (the SINGLE source of truth
-///    in this crate, kept in step with `system_fields_pass`'s
-///    `RESERVED_AUTO_PREFIXES`), PLUS a [`MAX_ID_PREFIX_LEN`] length bound so a
+///    in this crate, whose deny-list is
+///    [`crate::schema::query::RESERVED_ID_PREFIXES`]), PLUS a
+///    [`MAX_ID_PREFIX_LEN`] length bound so a
 ///    hand-authored prefix keeps the compact `<prefix>_<22 base62 UUIDv7>` shape.
 ///    A reserved/malformed/over-long prefix is [`CODE_INVALID_ID_PREFIX`], refused
 ///    BEFORE lower - never a render-time surprise minting colliding `usr_...` ids.
@@ -8926,6 +8927,33 @@ fn validate_default_expr(
 /// 4. **`references.name`** - an optional explicit foreign-key constraint name
 ///    must be a non-empty portable bare identifier no longer than the registry's
 ///    generated-identifier budget.
+///
+/// # Where the reserved-prefix list's peers live
+///
+/// This paragraph said the list was "kept in step with `system_fields_pass`'s
+/// `RESERVED_AUTO_PREFIXES`" until 2026-09-04. `RESERVED_AUTO_PREFIXES` has
+/// never existed anywhere in `crates/`, `sdks/` or `packages/` - that comment
+/// was its only occurrence. `system_fields_pass` is real
+/// (`crates/zeroship-data-engine/src/crud/system_fields_pass.rs`) and holds no
+/// prefix list at all: its `prefix_for_collection` routes every declared and
+/// every derived prefix through the runtime's `validate_id_prefix`.
+///
+/// The list has TWO real peers, and both are copies rather than references:
+///
+/// * `zeroship_schema::query::RESERVED_ID_PREFIXES` - the runtime data plane's,
+///   which `system_fields_pass` reaches. Bound to this one over both the
+///   constant and the accept/refuse verdict by
+///   `zeroship-schema/src/query.rs`'s `mod reserved_id_prefix_parity`.
+/// * `ID_RESERVED_PREFIX` in `sdks/db/src/types.ts` - the SDK's build-time
+///   fence. UNBOUND: nothing relates it to either Rust list.
+///
+/// The exposure is DIVERGENCE, not shrinkage. A shrink was already caught on both
+/// sides - this crate's `p2a_create_table_rejects_a_reserved_id_prefix` and the
+/// runtime's `p7_id_prefix_decl_with_reserved_usr_is_rejected` each assert their
+/// own validator refuses `usr`. What nothing held was the two lists differing
+/// while each stays self-consistent: measured 2026-09-04, adding one entry here
+/// alone left all 894 of this crate's `--lib` tests green. That state gives a
+/// creator a prefix one side accepts and the other refuses at apply time.
 ///
 /// # Errors
 /// [`CODE_INVALID_ID_PREFIX`] / [`CODE_INVALID_TYPE_ID_PREFIX`] /

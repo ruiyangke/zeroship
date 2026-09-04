@@ -929,17 +929,24 @@ pub fn validate_field_name_for_declaration(name: &str) -> Result<(), QueryError>
 }
 
 /// Typed-id prefixes reserved for the platform. A creator-declared
-/// `id: t.id("usr")` would mint ids that collide with platform user
-/// ids (`crates/core/src/typed_id.rs`), so the prefix is rejected.
-/// Only `usr` is reserved for now (matches the SDK-side fence in
-/// `sdks/db/src/types.ts`).
+/// `id: t.id("usr")` would mint ids that collide with platform user ids
+/// ([`zeroship_core::typed_id::USER_PREFIX`], defined in
+/// `crates/zeroship-core/src/typed_id.rs`), so the prefix is rejected.
+///
+/// `usr` is the whole list. Two other copies of it exist:
+/// `zeroship_migrate_core::schema::query::RESERVED_ID_PREFIXES`, which
+/// [`reserved_id_prefix_parity`] holds this one against, and
+/// `ID_RESERVED_PREFIX` in `sdks/db/src/types.ts`. THE SDK PAIR IS UNBOUND -
+/// this doc claimed a match with it and nothing checks one; see
+/// [`reserved_id_prefix_parity`]'s header for what binding it would take.
 pub const RESERVED_ID_PREFIXES: &[&str] = &["usr"];
 
 /// Validate a creator-declared typed-id prefix (`t.id("blog")`).
 ///
-/// Defense-in-depth mirror of the SDK-side check in
-/// `sdks/db/src/types.ts`: the SDK throws at build time, while the migration
-/// service re-validates authored operations before applying them.
+/// Defense in depth behind the SDK-side check in `sdks/db/src/types.ts`: the SDK
+/// throws at build time, while the migration service re-validates authored
+/// operations before applying them. The two are unrelated code with no guard
+/// between them - see [`RESERVED_ID_PREFIXES`].
 ///
 /// Rules:
 /// - must match `^[a-z][a-z0-9_]*$` → [`QueryError::InvalidIdent`]
@@ -2861,8 +2868,11 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // is an IEEE-754 double, so this is the exact 1:1 mapping.
         // NUMERIC would be more precise but compio-postgres' text-out
         // path doesn't decode it back to a JS value cleanly;
-        // `t.bigInteger()` exists for callers who need exact 64-bit
-        // ints.
+        // `t.bigInt()` exists for callers who need exact 64-bit
+        // ints. (Spelled `t.bigInteger()` here until 2026-09-04; the DSL
+        // declares `bigInt(): ColumnDef` at `packages/zero-migrate/src/types.ts`
+        // and the arm below matches `"bigInt"`, so the old spelling named no
+        // method that exists.)
         Some("number") => "DOUBLE PRECISION",
         Some("real") => "REAL",
         // `int`/`integer` are first-class integer tokens (the SQLite arm of
@@ -2874,7 +2884,7 @@ fn def_to_pg_type(def: &serde_json::Value) -> &'static str {
         // permanent drift. Mapping to `INTEGER` here makes the snapshot and the
         // emitter agree on BOTH dialects. PG stays byte-identical for every
         // existing column: the SDK's `t.*` surface never emits a bare `int` on PG
-        // (`t.number()` → DOUBLE PRECISION, `t.bigInteger()` → BIGINT), so no
+        // (`t.number()` → DOUBLE PRECISION, `t.bigInt()` → BIGINT), so no
         // previously-emitted PG column changes type. The PG type *names*
         // (`bigint`/`int4`/`int8`) are deliberately NOT accepted — they are not DSL
         // tokens and stay on the TEXT fallback so they remain typo-rejected.
@@ -10324,8 +10334,19 @@ mod tests {
     // (checked 2026-08-20: nothing else names it in a Cargo.toml), and
     // plugin-db's callers of these builders all sit in
     // `#[cfg(any(test, feature = "test-helpers"))]` code. The migration engine,
-    // which applies schema at deploy, carries its OWN copy of this renderer in
-    // `third_party/zero-migrate`. Read the deployed behaviour off the
+    // which applies schema at deploy, carries its OWN copy of this renderer.
+    //
+    // THAT COPY IS IN-TREE AND LIVE. This comment cited `third_party/zero-migrate`
+    // until 2026-09-04; no such directory exists - the engine was in-sourced as
+    // `crates/zeroship-migrate*`, and the duplicate of this very file is
+    // `crates/zeroship-migrate-core/src/schema/query.rs`, with the PG type map
+    // in `crates/zeroship-migrate-postgres/src/schema.rs`. The pair HAS drifted:
+    // the engine's `index_name` cuts at 60 bytes with an 8-char base32 tail
+    // where this file's cuts at 63 with a 10-hex tail through
+    // `ident::cap_ident_name` (documented and absorbed engine-side via
+    // `AcceptedIndexAlias`), and the two PG type maps dispatch on the same
+    // `"bigInt"` key while their comments spelled the DSL method differently
+    // until this commit. Read the deployed behaviour off the
     // foreign keys section of `docs/reference/db.md`, which names the
     // engine's checks; these tests pin only what this crate renders.
     // -----------------------------------------------------------------
@@ -14949,5 +14970,170 @@ scope = { include = ["app"] }
             theirs.to_string().contains(ALLOWLIST_REFUSAL),
             "the engine refused for the wrong reason: {theirs}",
         );
+    }
+}
+
+/// Binds the reserved typed-id prefix fence to the migration engine's copy of it.
+///
+/// # What was unbound - which is NOT what it looks like
+///
+/// [`RESERVED_ID_PREFIXES`] exists in three places: here, at
+/// `zeroship_migrate_core::schema::query::RESERVED_ID_PREFIXES`, and as
+/// `ID_RESERVED_PREFIX` in `sdks/db/src/types.ts`. Both Rust copies carry an
+/// agreement claim in their own doc and neither named a guard.
+///
+/// The obvious hypothesis - that a SHRINK is silent, so dropping `usr` would let
+/// a creator mint ids colliding with platform user ids - is wrong, and was
+/// measured wrong before this module was written. Each crate already binds its
+/// OWN validator: emptying this crate's list fails
+/// `query::tests::p7_id_prefix_decl_with_reserved_usr_is_rejected`, and emptying
+/// the engine's fails four of its arms, `p2a_create_table_rejects_a_reserved_id_prefix`
+/// among them. A coordinated shrink fails both sets. Nothing here needed adding
+/// for that case.
+///
+/// What NOTHING held is the two lists DIVERGING while each side stays
+/// self-consistent. Measured: adding one entry to the engine's list alone leaves
+/// all 894 of `zeroship-migrate-core --lib` green and every pre-existing arm in
+/// this crate green. The cost is a creator prefix the runtime accepts and the
+/// migration service refuses at apply time, or the reverse - a fence that exists
+/// on one side of the deploy path only.
+///
+/// [`the_platform_user_prefix_is_reserved_on_both_sides`] covers the case the
+/// per-crate arms cannot: it holds both lists against
+/// [`zeroship_core::typed_id::USER_PREFIX`] - the prefix
+/// `zeroship_core::typed_id::new_user_id` actually stamps - so the reservation is
+/// tied to the thing it protects rather than to a string three files happen to
+/// share.
+///
+/// # The pair this does NOT bind
+///
+/// `sdks/db/src/types.ts` is a hand-written literal in a package no Rust test
+/// reads. Binding it needs either a fixture generated from the Rust constant that
+/// the TypeScript imports, or one source of truth both sides read; neither
+/// exists, and this module does not pretend otherwise.
+#[cfg(test)]
+mod reserved_id_prefix_parity {
+    use super::*;
+
+    use zeroship_migrate_core::schema::query as engine;
+
+    /// The reserved list, stated here as a literal.
+    ///
+    /// Every arm below drives THIS, never [`RESERVED_ID_PREFIXES`]. Driving the
+    /// list under test is how a shrink goes green: emptying either crate's
+    /// constant makes a loop over it iterate nothing, and a sweep that examines
+    /// nothing reports success. Measured - the first draft of this module did
+    /// exactly that, and `RESERVED_ID_PREFIXES = &[]` left two of its four arms
+    /// passing.
+    const RESERVED: &[&str] = &["usr"];
+
+    /// Well-formed prefixes a creator may have.
+    ///
+    /// `user` / `usrs` / `usr2` are here on purpose: the fence is exact-match,
+    /// not prefix-match, and a side that switched to `starts_with` would begin
+    /// refusing legitimate creator prefixes.
+    const FREE: &[&str] = &["blog", "post", "u", "u1", "a_b", "usr2", "user", "usrs", "acct"];
+
+    /// Refused by the charset rule, not by the deny-list. Separated because a
+    /// prefix can be refused for two reasons and `is_err()` cannot tell them
+    /// apart.
+    const MALFORMED: &[&str] = &["", "Usr", "1abc", "a-b", "_x", "a b", "usr!"];
+
+    /// Each side against the stated list, rather than against the other side.
+    ///
+    /// Comparing the two constants to each other would go green on a coordinated
+    /// edit. Comparing each to [`RESERVED`] fails on a one-sided edit AND on a
+    /// two-sided one.
+    #[test]
+    fn each_side_carries_the_reserved_list_this_module_states() {
+        assert_eq!(
+            RESERVED_ID_PREFIXES, RESERVED,
+            "the data plane's reserved typed-id prefix list moved",
+        );
+        assert_eq!(
+            engine::RESERVED_ID_PREFIXES, RESERVED,
+            "the migration engine's reserved typed-id prefix list moved",
+        );
+    }
+
+    /// Why `usr` is on the list at all, held against its authority.
+    ///
+    /// [`RESERVED`] is a literal in this file, so on its own it is just a fourth
+    /// copy. This arm ties it to `typed_id`'s constant - the prefix
+    /// `zeroship_core::typed_id::new_user_id` actually stamps - so the reservation
+    /// tracks the thing it protects rather than a number someone typed.
+    #[test]
+    fn the_platform_user_prefix_is_reserved_on_both_sides() {
+        let user_prefix = zeroship_core::typed_id::USER_PREFIX;
+        assert!(
+            RESERVED.contains(&user_prefix),
+            "this module's stated list no longer covers the platform user prefix \
+             {user_prefix:?}",
+        );
+        assert!(
+            RESERVED_ID_PREFIXES.contains(&user_prefix),
+            "the data plane stopped reserving the platform user prefix {user_prefix:?}; \
+             a creator declaring t.id({user_prefix:?}) would mint ids in the platform's \
+             own id space",
+        );
+        assert!(
+            engine::RESERVED_ID_PREFIXES.contains(&user_prefix),
+            "the migration engine stopped reserving the platform user prefix \
+             {user_prefix:?}",
+        );
+    }
+
+    /// Both sides must still CONSULT their list, not merely agree on its value.
+    ///
+    /// Two constants can be equal while one validator has stopped reading its own,
+    /// so this arm crosses the VERDICT path and pins the expected verdict rather
+    /// than only comparing the two - a change making both sides accept `usr` could
+    /// otherwise pass as agreement.
+    #[test]
+    fn both_validators_rule_the_same_way_over_the_corpus() {
+        let mut mismatches = Vec::new();
+        for (accepted, prefix) in RESERVED
+            .iter()
+            .map(|p| (false, *p))
+            .chain(FREE.iter().map(|p| (true, *p)))
+            .chain(MALFORMED.iter().map(|p| (false, *p)))
+        {
+            let ours = validate_id_prefix(prefix).is_ok();
+            let theirs = engine::validate_id_prefix(prefix).is_ok();
+            if ours != theirs || ours != accepted {
+                mismatches.push(format!(
+                    "{prefix:?}: data-plane={ours}, engine={theirs}, expected {accepted}"
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "{} typed-id prefix verdict(s) diverged:\n{}",
+            mismatches.len(),
+            mismatches.join("\n"),
+        );
+    }
+
+    /// A reserved prefix must be refused AS reserved.
+    ///
+    /// `is_ok()` alone cannot separate the deny-list from the charset rule, so a
+    /// side that deleted its list but happened to refuse `usr` for some other
+    /// reason would read as agreement. Both crates spell the refusal
+    /// `ReservedSystemFieldName`.
+    #[test]
+    fn both_refuse_a_reserved_prefix_as_reserved_rather_than_as_malformed() {
+        for prefix in RESERVED {
+            let ours = validate_id_prefix(prefix).expect_err("the data plane must refuse it");
+            assert!(
+                matches!(ours, QueryError::ReservedSystemFieldName(_)),
+                "the data plane refused {prefix:?} for the wrong reason: {ours:?}",
+            );
+            let theirs =
+                engine::validate_id_prefix(prefix).expect_err("the engine must refuse it");
+            assert!(
+                matches!(theirs, engine::QueryError::ReservedSystemFieldName(_)),
+                "the engine refused {prefix:?} for the wrong reason: {theirs:?}",
+            );
+        }
     }
 }

@@ -10078,8 +10078,13 @@ fn p6c_data_plane_reaches_the_app_file_on_demand() {
 // arm it exercised (`sqlite_engine::maybe_baseline`) has no production caller
 // either, for the same reason.
 //
-// The engine's own baseline behaviour is still covered where it lives, in
-// `third_party/zero-migrate`. What is NOT covered anywhere after this deletion:
+// The engine's own baseline behaviour is still covered where it lives. That is
+// no longer `third_party/zero-migrate`, which this comment cited until
+// 2026-09-04 and which does not exist: the engine was in-sourced, and adoption
+// now lives in `crates/zeroship-migrate-backend/src/baseline.rs`
+// (`BaselineOutcome` / `BaselineError`, the `MigrationBackend::baseline_one`
+// vocabulary) re-exported through `crates/zeroship-migrate-core/src/apply/`.
+// What is NOT covered anywhere after this deletion:
 // zeroship-side adoption of a pre-existing dev file, which is fine while
 // nothing can create one, and would need re-testing the day something can.
 // ---------------------------------------------------------------------------
