@@ -7871,7 +7871,15 @@ fn direct_connection_sites_do_not_grow() {
     //   0   nothing else moved: the parallel-isolation change that landed with
     //       it rewrote app ids and added permits, neither of which is a
     //       constructor spelling. Measured at 132 against 131 before it.
-    const PINNED: usize = 132;
+    // Raised to 134 on 2026-09-04, and the arithmetic closes exactly:
+    //   +2  `tests/mask_flip.rs`, one `Pool::connect` per test for the two
+    //       protection-downgrade gates. They cannot share one pool: each calls
+    //       `fixture`, which DROPs and recreates its own app schema, and one of
+    //       them supplies a root key the other must not see. Both end in
+    //       `release_pg(pool)`, which is the pairing this pin exists to keep.
+    //       They add no `require_pg` site - that helper already existed in the
+    //       file and is one site however many tests call it.
+    const PINNED: usize = 134;
     // 10 files today, one of them nested. This floor alone does NOT catch a walk
     // that stops descending - measured: flattening it reads 9 and clears 9. That
     // is what the second assertion is for. This one catches the scan being
