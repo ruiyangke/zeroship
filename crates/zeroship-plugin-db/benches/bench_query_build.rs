@@ -2,7 +2,7 @@
 //!
 //! ## Why this bench exists
 //!
-//! A `cargo bench` harness is needed under `crates/plugin-db/benches/`
+//! A `cargo bench` harness is needed under `crates/zeroship-plugin-db/benches/`
 //! before further performance work proceeds. This file is the seed of
 //! that harness; future benches can extend it with more paths.
 //!
