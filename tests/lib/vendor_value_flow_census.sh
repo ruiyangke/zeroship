@@ -171,10 +171,12 @@ trap 'rm -f "$SRCS" "$HITS" "$GATED"' EXIT
 
 # CROSS-FILE GATING. A file is test-only when the `mod` DECLARATION that pulls it
 # in is cfg-gated - and that declaration lives in a DIFFERENT file. Walking files
-# independently misses this entirely: crud/mask_drift.rs looks like ordinary
-# engine code, and `#[cfg(any(test, feature = "test-helpers"))] pub mod
-# mask_drift;` at crud/mod.rs:90-91 is what makes it test-only.
-# Without this, the census reports mask_drift as a production vendor holder.
+# independently misses this entirely: transaction/probe.rs looks like ordinary
+# engine code, and `#[cfg(any(test, feature = "test-helpers"))] pub mod probe;`
+# in transaction/mod.rs is what makes it test-only.
+# Without this, the census reports it as a production vendor holder.
+# The rule was written for crud/mask_drift.rs, which was deleted on 2026-09-03;
+# probe.rs and auth/util.rs are the live cases it still catches.
 # Same failure family as defect 4 of tier_direction_census.sh, one level up.
 # A module declared under BOTH arms of the two-arm pattern
 #   #[cfg(not(feature = "test-helpers"))] pub(crate) mod m;

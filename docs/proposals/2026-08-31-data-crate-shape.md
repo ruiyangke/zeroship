@@ -184,9 +184,9 @@ landed. (The wording is not yet ratified - see Open 4.)
 The remaining surface is three logical operations, each written twice because each carries its own
 dialect, all in `crates/zeroship-data-engine/src/backend_handle.rs`: read an encrypted raw column, read
 a plaintext raw column, append an unmask audit row. Everything else has gone: `crud/unmask.rs` holds
-no SQL text, `transaction/mod.rs`'s `BEGIN ISOLATION LEVEL` is gone, and the `DROP SCHEMA` in
-`drop_namespace.rs` and the whole of `crud/mask_drift.rs` are `#[cfg]`-gated out of every shipped
-binary.
+no SQL text, `transaction/mod.rs`'s `BEGIN ISOLATION LEVEL` is gone, the `DROP SCHEMA` in
+`drop_namespace.rs` is `#[cfg]`-gated out of every shipped binary, and `crud/mask_drift.rs` - which
+held the largest remaining block of hand-written SQL - is deleted (Open 10).
 
 **5. THE CORE AND EVERY OTHER NON-VENDOR CRATE NEVER EMBED A VENDOR DIRECTLY.** Not "should avoid" -
 never. Enforced by `tests/vendor_embedding_gate.sh` (source) and `tests/data_crate_closure_gate.sh`
@@ -337,8 +337,15 @@ nobody runs is a census with a stricter name.
    leaving the feature to gate helpers and fixtures only. The cost is `Backup` and `SchemaIntrospect`
    present unconditionally in a release build - code size, no behaviour. NEEDS-DECISION on paying it.
 
-10. **`crud/mask_drift.rs`.** Fully built, test-gated, zero production callers, and the largest block
-    of hand-written SQL left in the engine tier. Delete or wire. NEEDS-DECISION.
+10. **`crud/mask_drift.rs`.** DECIDED 2026-09-03: deleted. It could not be wired as written - its
+    first statement called `DbBinding::cold_start`, itself `test-helpers`-gated, and it resolved the
+    schema from a `thread_local!` cache keyed by deploy token and published per-isolate, so an
+    operator sweep would have matched no entry. It also missed the defect nearest it: the `MaskKind`
+    came from the creator descriptor, so deleting a `mask` key hid the column from the check, which
+    its own test asserted as a clean `sampled: 0, drifted: 0`. A live-database enumeration cannot
+    substitute - the kind exists nowhere else - so the check that does catch it is structural (a
+    `__zs_raw__` sibling with no matching descriptor declaration) and shares nothing with these 1287
+    lines. Full reasoning in the epitaph at `crates/zeroship-data-engine/src/crud/mod.rs`.
 
 11. **`zeroship-migrate-server`'s name.** It is a service HOST, not engine. Left in the `migrate-*`
     family; a `-service` suffix is arguable. NEEDS-DECISION.

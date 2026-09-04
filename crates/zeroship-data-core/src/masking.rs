@@ -8,8 +8,8 @@
 //! TWO tiers call them:
 //!
 //! * the ENGINE write and read passes (`crud::mask_pass::apply_mask_on_write`
-//!   derives the stored mask, `crud::mask_pass::wrap_row_on_read` re-applies it,
-//!   and `crud::mask_drift` recomputes it to detect drift), and
+//!   derives the stored mask and `crud::mask_pass::wrap_row_on_read`
+//!   re-applies it), and
 //! * [`crate::read_set`], which lowers a filter operand on a masked column to
 //!   its masked form so the broker compares mask against mask.
 //!
