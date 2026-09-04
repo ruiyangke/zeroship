@@ -20,8 +20,23 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 CONFIG="$ROOT/deploy/verdaccio/config.yaml"
 COMPOSE="$ROOT/deploy/compose/docker-compose.yml"
 
+# Per-arm anti-vacuity accounting (tests/lib/gate_arms.sh). The MIN-PASSED floor
+# at the foot of this file already guarded one half of this - assertions that
+# quietly stopped being emitted - and it predates the arm contract. It is kept
+# and it is not the same question: it counts assertions that PASSED, the arms
+# below count assertions RULED ON, and the two differ on exactly the run where
+# something failed. They are also SPLIT here, config from compose, because the
+# two halves parse different files with different awk programs and either can
+# go vacuous alone: a single sum would let seven config assertions vouch for a
+# compose parser that stopped matching.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init verdaccio_config
+
 PASS=0
 FAIL=0
+N_CONFIG=0
+N_COMPOSE=0
 
 pass() {
     PASS=$((PASS + 1))
@@ -87,6 +102,7 @@ verdaccio_ports() {
 # --- 1. self-registration must be disabled -------------------------------
 
 max_users="$(cfg_get auth htpasswd max_users)"
+N_CONFIG=$((N_CONFIG + 1))
 if [ "${max_users:-}" = "-1" ]; then
     pass "auth.htpasswd.max_users is -1 (self-registration disabled)"
 else
@@ -98,6 +114,7 @@ fi
 for pkg in '@zeroship/*' '**'; do
     # Parser sanity: the block must exist (access is always declared).
     access="$(cfg_get packages "$pkg" access)"
+    N_CONFIG=$((N_CONFIG + 1))
     if [ -n "$access" ]; then
         pass "packages['$pkg'] block found (access: $access)"
     else
@@ -107,6 +124,7 @@ for pkg in '@zeroship/*' '**'; do
 
     for action in publish unpublish; do
         val="$(cfg_get packages "$pkg" "$action")"
+        N_CONFIG=$((N_CONFIG + 1))
         open_principal=""
         for token in ${val//[\[\],]/ }; do
             case "$token" in
@@ -130,6 +148,7 @@ while IFS= read -r entry; do
     case "$entry" in
         *4873*)
             registry_ports=$((registry_ports + 1))
+            N_COMPOSE=$((N_COMPOSE + 1))
             if [ "$entry" = "127.0.0.1:4873:4873" ]; then
                 pass "compose verdaccio port '$entry' is loopback-bound"
             else
@@ -147,9 +166,21 @@ fi
 
 echo
 echo "verdaccio config guard: $PASS passed, $FAIL failed"
-if [ "$FAIL" -gt 0 ]; then
-    exit 1
-fi
+
+status=0
+[ "$FAIL" -eq 0 ] || status=1
+
+# MEASURED 2026-09-04: 7 config assertions (max_users, plus access/publish/
+# unpublish for each of the two package blocks) and 1 compose port mapping.
+# Floor 4 on the config half - it survives one package block being retired
+# deliberately and does not survive the awk parser or the block loop going
+# quiet. Floor 1 on the compose half, which is all there is to rule on: one
+# mapping is the correct number, and zero is already a FAIL below.
+if ! gate_arm config_assertions "$N_CONFIG" 4; then status=1; fi
+if ! gate_arm compose_port_mappings "$N_COMPOSE" 1; then status=1; fi
+gate_arms_finish || status=1
+
+[ "$status" -eq 0 ] || exit 1
 
 # MINIMUM-PASSED FLOOR. This is DEFENCE IN DEPTH, not a repair -- all eight
 # assertions were mutation-proven able to fail on 2026-08-12 (granting publish to

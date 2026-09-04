@@ -41,7 +41,21 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
+# Per-arm anti-vacuity accounting (tests/lib/gate_arms.sh). This file already
+# refuses a run that found ZERO artifacts, which is the coarsest version of the
+# same idea; the arms below carry it down a level, because an artifact that
+# unpacks but carries no blobs, or a manifest whose reference extractor stops
+# matching, both leave `FAIL=0` and print what a clean run prints. THREE arms
+# and not one sum: the artifact count, the blobs actually hashed, and the
+# manifest references actually followed are three different enumerations, and
+# 20 checks over 4 artifacts would happily vouch for a blob loop that ruled on
+# nothing.
+# shellcheck source=tests/lib/gate_arms.sh
+. "$ROOT/tests/lib/gate_arms.sh"
+gate_arms_init zship_artifact
+
 PASS=0; FAIL=0; ORPHANS=0; FILES=0
+N_BLOBS=0; N_REFS=0
 ok() { PASS=$((PASS+1)); }
 no() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 
@@ -110,6 +124,7 @@ for art in "${ARTIFACTS[@]}"; do
     fi
   done < <(find "$d/blobs" -type f 2>/dev/null | sort)
 
+  N_BLOBS=$((N_BLOBS + checked))
   if [ "$checked" -eq 0 ]; then
     no "$name: archive carries zero blobs - nothing to content-address"
   elif [ "$mismatched" -gt 0 ]; then
@@ -143,6 +158,7 @@ for art in "${ARTIFACTS[@]}"; do
   fi
 
   nrefs=$(grep -c . "$WORK/$name.refs" || true)
+  N_REFS=$((N_REFS + nrefs))
   if [ "$nrefs" -eq 0 ]; then
     no "$name: manifest references no blobs at all - the extractor found nothing to check"
     continue
@@ -205,4 +221,25 @@ done
 echo ""
 echo "  artifacts: $FILES    checks passed: $PASS    failed: $FAIL    unreferenced blobs noted: $ORPHANS"
 echo "  MUTATIONS: MUTATE_CORRUPT_BLOB=1 must fail check 4; MUTATE_WRONG_SIZE=1 must fail check 6"
-[ "$FAIL" -eq 0 ]
+
+status=0
+[ "$FAIL" -eq 0 ] || status=1
+
+# MEASURED 2026-09-04 on a built tree: 4 artifacts, 20 blobs hashed, 20
+# references followed. The artifact floor is 1 and deliberately weak - which
+# examples the caller built is the caller's business, and zero is already a
+# FATAL above. The strength is on the other two, whose numbers come from inside
+# the per-artifact loops: they are what goes silently to zero if
+# `find $d/blobs` or the jq reference extractor stops matching, and either
+# would leave FAIL=0 and print what a clean run prints.
+#
+# Floor 8 on both, not 20. A floor at today's count makes every deleted example
+# a gate failure, which is how a floor gets lowered until it means nothing
+# (tests/lib/gate_arms.sh says so in as many words). 8 survives losing half the
+# examples and does not survive either enumeration breaking.
+if ! gate_arm artifacts "$FILES" 1; then status=1; fi
+if ! gate_arm blobs_hashed "$N_BLOBS" 8; then status=1; fi
+if ! gate_arm blob_references "$N_REFS" 8; then status=1; fi
+gate_arms_finish || status=1
+
+[ "$status" -eq 0 ]
