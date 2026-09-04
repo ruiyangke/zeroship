@@ -96,6 +96,10 @@
 # sides of an edit: the total went UP by 2 while the pass was supposedly only
 # narrowing. A count that moves the wrong way is the cheapest available signal.
 set -uo pipefail
+# Resolve the shared helper BEFORE the `cd`, which invalidates `$0`-relative
+# paths.
+# shellcheck source=tests/lib/module_gating.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/module_gating.sh"
 cd "$(dirname "$0")/../.."
 
 # ---------------------------------------------------------------------------
@@ -153,35 +157,20 @@ fi
 # 107 in the worklist: `transaction/probe.rs`, declared at
 # `transaction/mod.rs:144` as `#[cfg(any(test, feature = "test-helpers"))]
 # pub mod probe;` and described in its own doc comment as "Not compiled into a
-# production build". Same rule as `module_is_test_gated` in
-# tests/vendor_embedding_gate.sh; kept separate so a rename there cannot
-# silently change this census's numbers.
-module_is_test_gated() {  # $1 = a .rs path under $SRC
-  local file="$1" name decls gated decl_file decl_line prev i
-  name=$(basename "$file" .rs)
-  [ "$name" = "mod" ] && name=$(basename "$(dirname "$file")")
-  [ -z "$name" ] && return 1
-  decls=0; gated=0
-  while IFS= read -r hit; do
-    decl_file="${hit%%:*}"; decl_line="${hit#*:}"; decl_line="${decl_line%%:*}"
-    decls=$((decls + 1))
-    i=$((decl_line - 1))
-    while [ "$i" -ge 1 ]; do
-      prev=$(sed -n "${i}p" "$decl_file")
-      case "$prev" in
-        *"#[cfg("*)
-          case "$prev" in
-            *"not("*) break ;;
-            *test*) gated=$((gated + 1)); break ;;
-            *) break ;;
-          esac ;;
-        "#["*|*"//"*|"") i=$((i - 1)) ;;
-        *) break ;;
-      esac
-    done
-  done < <(grep -rn -E "^[[:space:]]*(pub([[:space:]]*\([^)]*\))?[[:space:]]+)?mod[[:space:]]+${name}[[:space:]]*;" "$SRC" 2>/dev/null)
-  [ "$decls" -gt 0 ] && [ "$decls" -eq "$gated" ]
-}
+# production build".
+#
+# THIS FILE HELD ITS OWN COPY OF `module_is_test_gated` UNTIL 2026-09-04, on the
+# stated grounds that keeping it separate meant "a rename there cannot silently
+# change this census's numbers". THAT REASONING IS REVERSED HERE, and the reason
+# is that the copies had already diverged in BEHAVIOUR rather than in name: this
+# one and two others tested a `*"#[cfg("*` substring BEFORE the comment arm, so a
+# COMMENT quoting `#[cfg(test)]` above a `mod x;` declaration read as a gate.
+# Measured 2026-09-04 over `$ENGINE_SRC`: two files - `backend/mod.rs` and
+# `crud/unmask.rs` - were wrongly counted as test-gated, and their items landed
+# in the "+N in test-gated submodules" column instead of the shipped one.
+# Independence bought nothing against that, because a silent divergence is the
+# failure the independence was supposed to prevent. One definition, in
+# tests/lib/module_gating.sh, with controls that pin both directions.
 
 # Count line-start `pub <kind>` declarations OUTSIDE any `#[cfg(test)] mod`
 # block, tracking brace depth to find where each block ends.
@@ -230,7 +219,7 @@ for m in $capped; do
   n=0; g=0
   for f in $files; do
     k=$(count_shipped_pub "$f")
-    if module_is_test_gated "$f"; then g=$((g + k)); else n=$((n + k)); fi
+    if module_is_test_gated "$f" "$SRC"; then g=$((g + k)); else n=$((n + k)); fi
   done
   note=""
   printf '%s\n' "$twinned" | grep -qx "$m" && note="yes"
@@ -271,7 +260,7 @@ for m in $published; do
   n=0; g=0
   for f in $files; do
     k=$(count_shipped_pub "$f")
-    if module_is_test_gated "$f"; then g=$((g + k)); else n=$((n + k)); fi
+    if module_is_test_gated "$f" "$SRC"; then g=$((g + k)); else n=$((n + k)); fi
   done
   printf '%-22s %10d %10d\n' "$m" "$n" "$g"
   eng_total=$((eng_total + n))
