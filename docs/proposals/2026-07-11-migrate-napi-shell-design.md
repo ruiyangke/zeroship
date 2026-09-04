@@ -200,11 +200,15 @@ recorder for that posture alone.
    indefinitely. There is no watchdog or heartbeat in the addon today. If one is added
    it must be a liveness check, not a wall-clock cap: a single legitimate `CREATE
    INDEX` can run for minutes while the driver is perfectly healthy.
-4. **Workspace isolation of the addon.** `crates/zeroship-migrate-node/Cargo.toml`
-   states the root keeps it out of the default build via `default-members`, but the
-   root `Cargo.toml` declares no `default-members` at all (members are `crates/*` and
-   `libs/*`, with three unrelated `exclude` entries). Either add the key or correct the
-   comment; today a plain `cargo build` does pull the addon.
+4. ~~**Workspace isolation of the addon.**~~ **RESOLVED 2026-09-04: there was no isolation
+   to restore, and none is wanted.** The observation was right - the manifest claimed the
+   root kept the addon out of the default build via `default-members`, and the root declares
+   no such key - so a plain `cargo build` did pull the addon, and a plain `cargo test`
+   selected a package that failed at link. Neither remedy offered here was taken: adding the
+   key or flipping the `napi` default would each have dropped `src/bridge.rs` out of the
+   default workspace check. Instead the addon remains a default member with `napi` ON and
+   links its test binaries through `napi/dyn-symbols` on the dev-dependency. The false
+   comment is deleted and recorded as false in the manifest.
 
 ## History
 

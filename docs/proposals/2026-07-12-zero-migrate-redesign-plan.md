@@ -59,9 +59,13 @@ The three vendor crates implement that contract and depend on the engine not at
 all; the Postgres one also owns the `pg_query`/libpg_query parse-time deny-list,
 cross-schema confinement, statement classification and advisories. `zeroship-migrate`
 is the engine facade the embedder depends on. `zeroship-migrate-node` is a
-terminal `cdylib`, so the graph is acyclic by construction; the root workspace
-keeps it out of `default-members` so a plain `cargo build` never pulls the napi
-toolchain.
+terminal `cdylib`, so the graph is acyclic by construction. **The clause that used to
+follow - "the root workspace keeps it out of `default-members` so a plain `cargo build`
+never pulls the napi toolchain" - was false and is deleted (2026-09-04).** The root
+declares no `default-members` key at all; the addon is a default member, and a plain
+`cargo build` and `cargo test` both pull it. It links under both as of 2026-09-04, via
+`napi/dyn-symbols` on its dev-dependency; the shipped `.node` is unaffected and
+`tests/napi_symbol_shape_gate.sh` holds its symbol shape.
 
 **npm layout.** `@zeroship/migrate` (at `packages/zero-migrate/`) is the authoring
 DSL a migration file imports: `op.*`/`table()`/`t.*`, the closed `Expr` AST, and the
