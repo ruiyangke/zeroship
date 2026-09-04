@@ -4778,10 +4778,17 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
 
     // ----- WRITE (real pipeline, introspected metadata) -----
-    // No `id`: the write pipeline refuses a creator-supplied one. The
-    // `psn_round_trip_1` literal below belongs to the test's OWN raw INSERT,
-    // which writes a different row to exercise the read path - the two were
-    // never the same id.
+    // No `id`: the write pipeline refuses a creator-supplied one and mints a
+    // typed id in `system_fields_pass`. The raw INSERT below MUST then carry
+    // THAT MINTED ID and nothing else: `ssn` is a `randomised` encrypted
+    // column, and randomised mode binds the row primary key into the AEAD's
+    // additional data (`canonical_aad(collection, column, row_pk_bytes)` in
+    // zeroship-data-core's `encryption::aad`, stamped on write by
+    // `crud::encryption_pass` and reconstructed on read from the row's `id`).
+    // Storing this ciphertext under a DIFFERENT id and reading it back is a
+    // ciphertext-relocation attack, and the AEAD refuses it with
+    // `encryption_aead_failed` - correctly. Hard-coding a literal here is what
+    // broke the test.
     let mut docs = json!([{
         "name": "Ada",
         "ssn": "123-45-6789",
@@ -4797,6 +4804,10 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     // the real value moves out to the raw sibling
     // (`mask_pass::relocate_masked_columns`).
     let doc = &docs[0];
+    let row_id = doc["id"]
+        .as_str()
+        .expect("the write pipeline mints the row id, and the AAD binds it")
+        .to_string();
     assert!(
         doc["ssn"].as_str().is_some() && doc["ssn"] != json!("123-45-6789"),
         "ssn must be replaced by ciphertext on write, got {:?}",
@@ -4836,7 +4847,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
              VALUES ($1, $2, decode($3, 'base64')::bytea, $4, $5, '[0.1,0.2,0.3]'::vector)"
         ),
         &[
-            &"psn_round_trip_1",
+            &row_id.as_str(),
             &"Ada",
             &ssn_b64.as_str(),
             &phone_mask.as_str(),
@@ -4856,13 +4867,13 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
                 "SELECT id, name, encode(ssn, 'base64') AS ssn, phone \
                  FROM \"{app}\".\"people\" WHERE id = $1"
             ),
-            &["psn_round_trip_1"],
+            &[row_id.as_str()],
         )
         .await
         .unwrap();
     assert_eq!(raw.len(), 1);
     let row = json!({
-        "id": "psn_round_trip_1",
+        "id": row_id,
         "name": "Ada",
         "ssn": raw[0].get::<_, String>("ssn"),
         "phone": raw[0].get::<_, String>("phone"),
@@ -5015,10 +5026,12 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
     assert_eq!(resolved["phone"]["mask"]["kind"], "last4");
 
     // ----- WRITE via the real pipeline (descriptor metadata) -----
-    // No `id`: the write pipeline refuses a creator-supplied one, and this doc
-    // goes through the real pipeline. The `psn_p5_1` literal below belongs to
-    // the test's OWN raw INSERT, which is a different row written to assert the
-    // read path - the two were never the same id.
+    // No `id`: the write pipeline refuses a creator-supplied one and mints a
+    // typed id. The raw INSERT below MUST carry that minted id - `ssn` is a
+    // `randomised` encrypted column, so the row primary key is bound into the
+    // AEAD's additional data on write and reconstructed from the row's `id` on
+    // read. A literal id here relocates the ciphertext onto another row, and
+    // the read correctly refuses it with `encryption_aead_failed`.
     let mut docs = json!([{
         "name": "Grace",
         "ssn": "987-65-4321",
@@ -5028,6 +5041,10 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
         .await
         .expect("write pipeline");
     let doc = &docs[0];
+    let row_id = doc["id"]
+        .as_str()
+        .expect("the write pipeline mints the row id, and the AAD binds it")
+        .to_string();
     assert!(
         doc["ssn"].as_str().is_some() && doc["ssn"] != json!("987-65-4321"),
         "ssn must be ciphertext on write, got {:?}",
@@ -5062,7 +5079,7 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
              VALUES ($1, $2, decode($3, 'base64')::bytea, $4, $5)"
         ),
         &[
-            &"psn_p5_1",
+            &row_id.as_str(),
             &"Grace",
             &ssn_b64.as_str(),
             &phone_mask.as_str(),
@@ -5081,13 +5098,13 @@ CREATE TABLE "{app}"."people" ({PG_SYSTEM_COLUMNS},
                 "SELECT id, name, encode(ssn, 'base64') AS ssn, phone \
                  FROM \"{app}\".\"people\" WHERE id = $1"
             ),
-            &["psn_p5_1"],
+            &[row_id.as_str()],
         )
         .await
         .unwrap();
     assert_eq!(raw.len(), 1);
     let row = json!({
-        "id": "psn_p5_1",
+        "id": row_id,
         "name": "Grace",
         "ssn": raw[0].get::<_, String>("ssn"),
         "phone": raw[0].get::<_, String>("phone"),
