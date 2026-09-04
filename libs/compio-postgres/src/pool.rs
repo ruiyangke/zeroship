@@ -2934,6 +2934,90 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::task::Wake;
 
+    /// One waker panicking must not strand the waiters queued behind it.
+    ///
+    /// `wake_all` runs arbitrary caller wakers. Waking them in a bare loop
+    /// would let the first panic abandon the rest, and those waiters are
+    /// parked on a pool slot that has ALREADY been released - so they would
+    /// sleep until their acquire timeout rather than take the free connection.
+    ///
+    /// The panic is still the caller's, so it must resurface rather than be
+    /// swallowed. Both halves are asserted: a swallowed panic and a stranded
+    /// waiter are different bugs, and a test that checked only one would pass
+    /// on code that committed the other.
+    #[test]
+    fn a_panicking_waker_does_not_strand_the_waiters_behind_it() {
+        struct Panicking;
+        impl Wake for Panicking {
+            fn wake(self: Arc<Self>) {
+                panic!("scripted waker panic");
+            }
+        }
+
+        struct Recording(Arc<AtomicUsize>);
+        impl Wake for Recording {
+            fn wake(self: Arc<Self>) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+
+        let woken = Arc::new(AtomicUsize::new(0));
+        let wakers = vec![
+            std::task::Waker::from(Arc::new(Panicking)),
+            std::task::Waker::from(Arc::new(Recording(Arc::clone(&woken)))),
+            std::task::Waker::from(Arc::new(Recording(Arc::clone(&woken)))),
+        ];
+
+        // The scripted panic would otherwise print a backtrace and read like a
+        // real failure in the test log.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let unwound =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || wake_all(wakers)));
+        std::panic::set_hook(previous);
+
+        assert!(
+            unwound.is_err(),
+            "the waker's panic was swallowed instead of resumed"
+        );
+        assert_eq!(
+            woken.load(Ordering::Relaxed),
+            2,
+            "a panicking waker stranded the waiters queued behind it"
+        );
+    }
+
+    /// `is_pool_closed` must find the marker in EITHER chain shape.
+    ///
+    /// The pool raises it as `Error::connect(io::Error::other(PoolClosedError))`,
+    /// so today it sits in an io payload and the live suite reaches it that way.
+    /// The source comment records that whether such a payload ALSO surfaces as
+    /// a standard error-chain source depends on the Rust version - which is why
+    /// the function tries both, and why only one of the two arms can be
+    /// exercised by the pool's own constructor on any given toolchain. The
+    /// other is reachable here because `PoolClosedError` is crate-private and
+    /// this is the crate.
+    ///
+    /// Without the direct-source arm, a toolchain that starts exposing io
+    /// payloads as sources would silently turn every closed-pool rejection into
+    /// an ordinary connect failure, and callers branching on this predicate
+    /// would retry a pool that is never coming back.
+    #[test]
+    fn is_pool_closed_finds_the_marker_in_either_chain_shape() {
+        assert!(
+            pool_closed_error().is_pool_closed(),
+            "the shape the pool actually raises was not recognised"
+        );
+        assert!(
+            Error::tls(Box::new(PoolClosedError)).is_pool_closed(),
+            "a directly-sourced marker was not recognised"
+        );
+        assert!(
+            !Error::tls("an unrelated tls failure".into()).is_pool_closed(),
+            "an unrelated error was reported as a closed pool"
+        );
+    }
+
     /// Every `PoolConfig` getter must return its OWN field.
     ///
     /// Four of the five are `Duration`. Any permutation among those four type
@@ -5083,6 +5167,56 @@ mod tests {
         assert!(
             pool.housekeeper.borrow().is_none(),
             "closed pool restarted its housekeeper"
+        );
+    }
+
+    /// A cycle must refuse to start at all on a pool that is gone or closed.
+    ///
+    /// Both guards are unreachable from the production caller, which stores the
+    /// task handle inside the pool so a drop or close cancels a sleeping task
+    /// before it can begin another cycle. They exist because `housekeep` is
+    /// deliberately kept TOTAL over a `Weak` - its own comment says so - which
+    /// is what lets these lifecycle cases be tested directly without weakening
+    /// that ownership argument.
+    ///
+    /// The other housekeeping tests drop or close the pool MID-cycle, so they
+    /// exercise the later bail-outs and leave this entry pair untouched.
+    #[compio::test]
+    async fn housekeeping_refuses_to_start_on_a_dropped_or_closed_pool() {
+        // Dropped: the Weak no longer upgrades.
+        assert!(
+            !Pool::housekeep(&Weak::new()).await,
+            "a cycle started against a pool that no longer exists"
+        );
+
+        // Closed: the pool is alive but out of service.
+        //
+        // The idle entry is deliberately STALE. `housekeep` has later close
+        // checks too, so on a fresh entry the cycle would bail out at one of
+        // those and return false either way - the entry guard would mutate
+        // green. Reaping happens BEFORE those checks, so an expired entry is
+        // what makes the guard the only thing standing between a closed pool
+        // and a mutated idle set. Measured: with a fresh entry this test passes
+        // against a driver whose entry guard has been removed.
+        let config = PoolConfig {
+            max_size: 1,
+            min_idle: 0,
+            idle_timeout: Duration::from_millis(1),
+            ..PoolConfig::default()
+        };
+        let (client, _receiver) = fake_client(4410);
+        let mut entry = PoolEntry::new(client, config.max_lifetime);
+        entry.last_used = Instant::now() - Duration::from_secs(1);
+        let pool = Rc::new(test_pool(config, vec![entry], 0, 1));
+        pool.closed.set(true);
+        assert!(
+            !Pool::housekeep(&Rc::downgrade(&pool)).await,
+            "a cycle started against a closed pool"
+        );
+        assert_eq!(
+            pool.idle_count(),
+            1,
+            "a closed pool reaped its idle entry instead of refusing the cycle"
         );
     }
 

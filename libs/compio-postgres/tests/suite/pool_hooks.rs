@@ -504,6 +504,48 @@ fn validation_error_server() -> ValidationErrorServer {
     }
 }
 
+/// A connection `after_connect` returned `Ok` for can still be unfit to pool,
+/// and warm-up must REFUSE it rather than seed the pool with a dead one.
+///
+/// Two DIFFERENT rejections live side by side in warm-up: the hook returning
+/// `Err`, which had a test, and this one - the hook succeeding while the entry
+/// stops being pool-eligible - which did not. Measured 2026-09-03: disabling
+/// the warm-up `is_pool_eligible` check left the lib (771) and suite (799)
+/// suites green.
+///
+/// SCOPE: this binds the WARM-UP arm only. `is_pool_eligible` has nine call
+/// sites; the twin in `get_inner` raises a different message
+/// (`after_connect left the new pool connection unusable`) and is a separate,
+/// still unmeasured arm. Do not read this test as covering them.
+///
+/// Expiry is the eligibility clause a test can drive deterministically: the
+/// entry's expiry is fixed when it is built, one line BEFORE the hook runs, so
+/// a `max_lifetime` shorter than the hook's own work leaves the connection
+/// already expired when the check happens. The ordering does it, not a race.
+#[compio::test]
+async fn warm_up_refuses_a_connection_after_connect_left_ineligible() {
+    let url = test_url();
+    let mut config = config(1, 1);
+    config.max_lifetime(Duration::from_millis(1));
+    config.after_connect(|client| {
+        Box::pin(async move {
+            // Succeed, but outlive the entry's expiry while doing it.
+            client.simple_query("").await?;
+            compio::time::sleep(Duration::from_millis(50)).await;
+            Ok(())
+        })
+    });
+
+    let error = Pool::connect_with_pool_config(&url, config)
+        .await
+        .expect_err("an expired-on-arrival connection must not seed the pool");
+    let cause = common::error_chain(&error);
+    assert!(
+        cause.contains("warm-up after_connect left connection"),
+        "the refusal must name the unusable warm-up connection, got: {cause}"
+    );
+}
+
 #[compio::test]
 async fn after_connect_runs_once_for_a_reused_connection() {
     let url = test_url();

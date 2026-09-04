@@ -189,6 +189,12 @@ where
             // A truncated handshake is a TLS-level failure, not an ending:
             // rustls treats silent truncation as an attack. The message names
             // the handshake so the cause is legible in a connect error.
+            //
+            // Measured 2026-09-03: disabling this does not fail a test, it
+            // HANGS - the loop re-reads a socket that will never yield another
+            // byte, and the lib run was killed at its 1200s bound instead of
+            // reporting. So a timeout here is this guard being load-bearing,
+            // not a flaky run; the guard turns that spin into a named error.
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
                 "the peer closed the connection during the TLS handshake",
@@ -361,6 +367,12 @@ impl TlsSession {
         while self.conn.wants_write() {
             let before = outgoing.len();
             self.conn.write_tls(&mut outgoing)?;
+            // Defence against a rustls invariant violation - `wants_write`
+            // answering true while `write_tls` emits nothing - which would
+            // otherwise spin this loop forever. Unbound on purpose rather than
+            // by omission: disabling it left the lib (768), suite (797) and
+            // `tls_live` (48) suites green, because reaching it needs a rustls
+            // that contradicts itself. Kept as a termination bound.
             if outgoing.len() == before {
                 return Err(io::Error::new(
                     io::ErrorKind::WriteZero,
@@ -1389,6 +1401,50 @@ mod tests {
         );
     }
 
+    /// The sibling test above binds `plain` alone. The recurring claim about
+    /// this split is about CIPHERTEXT: bytes already read off the socket that
+    /// rustls has not taken yet, which is exactly the window
+    /// `cipher[cipher_read..cipher_len]`.
+    ///
+    /// `try_into_split` carries them because it destructures `TlsReader`
+    /// exhaustively, so a new buffer field cannot be dropped without a compile
+    /// error. That is a strong guarantee against ADDING state and no guarantee
+    /// at all against rewriting these three, which nothing asserted: clearing
+    /// them here truncates the TLS record stream with no error anywhere.
+    #[test]
+    fn tls_split_preserves_unconsumed_ciphertext() {
+        let (client, _server) = handshaken_pair();
+        let mut stream = TlsStreamCore::new(SplitStateSocket, share(client));
+        let record: Vec<u8> = (0..512).map(|i| (i % 251) as u8).collect();
+        stream.reader.cipher = record.clone();
+        stream.reader.cipher_len = 400;
+        stream.reader.cipher_read = 128;
+        let cipher_ptr = stream.reader.cipher.as_ptr();
+
+        let Ok((read, _write)) = stream.try_into_split() else {
+            panic!("the state-carry TLS stream refused to split");
+        };
+
+        assert_eq!(
+            read.reader.cipher_len, 400,
+            "the split lost how much ciphertext the last socket read produced"
+        );
+        assert_eq!(
+            read.reader.cipher_read, 128,
+            "the split lost how much ciphertext rustls had already taken"
+        );
+        assert_eq!(
+            &read.reader.cipher[read.reader.cipher_read..read.reader.cipher_len],
+            &record[128..400],
+            "the split discarded the ciphertext rustls had not yet taken"
+        );
+        assert_eq!(
+            read.reader.cipher.as_ptr(),
+            cipher_ptr,
+            "the split replaced the TLS reader's ciphertext allocation"
+        );
+    }
+
     #[compio::test]
     async fn tls_write_half_shutdown_sends_close_notify() {
         let (client, mut server) = handshaken_pair();
@@ -1441,6 +1497,91 @@ mod tests {
             .with(|_| Ok(()))
             .expect_err("a partially unwound rustls session was reused after try_with");
         assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    }
+
+    /// Re-entering the session from the thread that already holds its lease
+    /// must be REFUSED, not waited on.
+    ///
+    /// This is the only guard here whose absence is a deadlock rather than a
+    /// wrong answer: without it the second lease reaches `available.wait`, and
+    /// the thread blocks on a session only it can return. Rustls invokes
+    /// caller-supplied callbacks - certificate verifiers, key log, client-cert
+    /// resolvers - while we hold the lease, so a callback that reaches back
+    /// into its own `SharedSession` arrives exactly here, which is what the
+    /// `WriteFlight` comment means about a callback on another thread.
+    ///
+    /// Nothing held it: disabling the guard left the lib (770) and suite (797)
+    /// suites green, because no test re-enters.
+    ///
+    /// NOTE FOR WHOEVER SEES THIS HANG: a regression in that guard does not
+    /// fail this test, it deadlocks it, because the re-entrant call waits
+    /// forever. A run wedged on this test name means `lease`'s owner check.
+    #[test]
+    fn a_reentrant_lease_is_refused_instead_of_deadlocking() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+
+        let held = session.lease().expect("the first lease must be granted");
+        // Matched rather than `expect_err`: that would need `SessionLease` to
+        // be `Debug`, and a production type should not grow a derive to let a
+        // test print a value it must never receive.
+        let Err(error) = session.lease() else {
+            panic!("re-entering the session from its own owner must be refused")
+        };
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::WouldBlock,
+            "a re-entrant lease must report WouldBlock: {error}"
+        );
+        assert!(
+            error.to_string().contains("re-entered"),
+            "the refusal must say the session was re-entered: {error}"
+        );
+
+        // Control: once the owner gives the session back, leasing works again,
+        // so the refusal is about re-entrancy and not a session left broken.
+        drop(held);
+        session
+            .lease()
+            .expect("a returned session must be leasable again");
+    }
+
+    /// The non-blocking twin of the refusal above, and it must be an ERROR
+    /// rather than `Ok(None)`.
+    ///
+    /// `try_with` has two failure shapes that read very differently: `Ok(None)`
+    /// means "another thread holds the lease, try later" and is recoverable,
+    /// while `Err` means the session is finished. A poisoned session reported
+    /// as busy would invite exactly the retry that must never happen. The test
+    /// above poisons and then proves `with` refuses, which binds `lease`'s
+    /// check; `try_lease` carries its own and nothing reached it - disabling it
+    /// left the lib (769), suite (797) and `tls_live` (48) suites green.
+    ///
+    /// It is the release path that cares: `release.rs` uses `try_with`
+    /// precisely because it must not block, so a poisoned session escaping
+    /// there is one the shutdown path would go on using.
+    #[test]
+    fn a_poisoned_session_refuses_a_try_lease_rather_than_reporting_it_busy() {
+        let (client, _server) = handshaken_pair();
+        let session = share(client);
+
+        let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = session.with(|_| -> io::Result<()> { panic!("scripted callback panic") });
+        }));
+        assert!(panic.is_err(), "the seeding callback did not panic");
+
+        let error = session
+            .try_with(|_| -> io::Result<()> { Ok(()) })
+            .expect_err("the non-blocking path handed out a poisoned session");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::BrokenPipe,
+            "a poisoned session must not look retryable: {error}"
+        );
+        assert!(
+            error.to_string().contains("poisoned"),
+            "the refusal must name poisoning: {error}"
+        );
     }
 
     #[compio::test]
@@ -1706,6 +1847,53 @@ mod tests {
             error.to_string().contains("already been serialized"),
             "the refusal must say the alert was already serialized: {error}"
         );
+    }
+
+    /// A release landing while a write is still in flight must DECLINE to
+    /// serialize the alert rather than emit one.
+    ///
+    /// This is a real window, not a synthetic state: `flush_outgoing` sets
+    /// `write_in_flight` for exactly the span where the queued ciphertext is
+    /// owned by the async write, and `release.rs` calls `take_close_notify`
+    /// synchronously inside it. An alert queued there would be ordered ahead of
+    /// a record the peer has not received, which is what the module docs mean
+    /// by declining rather than overtaking - and they attribute real server-log
+    /// entries to this path.
+    ///
+    /// Nothing held it. Disabling the guard left the lib (768), suite (797) and
+    /// `tls_live` (48) suites all green.
+    #[test]
+    fn a_close_notify_is_declined_while_a_write_is_in_flight() {
+        let (client, _server) = handshaken_pair();
+        let mut session = TlsSession::new(client);
+        session.write_in_flight = true;
+
+        let error = session
+            .take_close_notify()
+            .expect_err("an alert must not overtake ciphertext still being written");
+        assert_eq!(
+            error.kind(),
+            io::ErrorKind::WouldBlock,
+            "the refusal reported the wrong kind: {error}"
+        );
+        assert!(
+            error.to_string().contains("still being written"),
+            "the refusal must say why it declined: {error}"
+        );
+        // Declining must not spend the one alert the session is allowed. Were
+        // this guard ever moved below the `close_notify_sent` assignment, the
+        // alert would be lost for good rather than deferred.
+        assert!(
+            !session.close_notify_sent,
+            "a declined attempt consumed the single permitted close_notify"
+        );
+
+        // Control: the refusal turns on the in-flight write and nothing else.
+        session.write_in_flight = false;
+        let alert = session
+            .take_close_notify()
+            .expect("the alert must serialize once the write has completed");
+        assert!(!alert.is_empty(), "the alert serialized no ciphertext");
     }
 
     /// `close_notify` is the end of the record stream. A lease taken after it

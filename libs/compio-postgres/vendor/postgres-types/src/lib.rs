@@ -262,48 +262,37 @@ where
     v.to_sql(ty, out)
 }
 
-#[cfg(feature = "with-bit-vec-0_6")]
-mod bit_vec_06;
-#[cfg(feature = "with-bit-vec-0_7")]
-mod bit_vec_07;
+// Only the crate versions `compio-postgres` exposes a passthrough feature for
+// are carried. The fork previously also held bit_vec 0.6/0.7, cidr 0.2,
+// eui48 0.4, geo-types 0.6, jiff 0.1, time 0.2 and uuid 0.8. Nothing in this
+// workspace could reach them: `compio-postgres` declares no passthrough, so no
+// test could compile them, and their dependencies are absent from Cargo.lock -
+// `cargo build --all-features --offline` on this package fails asking to
+// download eight crates. Carrying an untestable second copy of each codec is
+// how `cidr_02` kept emitting the INET flag for a CIDR value for as long as it
+// did, after `cidr_03` had been repaired.
 #[cfg(feature = "with-bit-vec-0_8")]
 mod bit_vec_08;
 #[cfg(feature = "with-bit-vec-0_9")]
 mod bit_vec_09;
 #[cfg(feature = "with-chrono-0_4")]
 mod chrono_04;
-#[cfg(feature = "with-cidr-0_2")]
-mod cidr_02;
 #[cfg(feature = "with-cidr-0_3")]
 mod cidr_03;
-#[cfg(feature = "with-eui48-0_4")]
-mod eui48_04;
 #[cfg(feature = "with-eui48-1")]
 mod eui48_1;
-#[cfg(feature = "with-geo-types-0_6")]
-mod geo_types_06;
 #[cfg(feature = "with-geo-types-0_7")]
 mod geo_types_07;
-#[cfg(feature = "with-jiff-0_1")]
-mod jiff_01;
 #[cfg(feature = "with-jiff-0_2")]
 mod jiff_02;
 #[cfg(feature = "with-serde_json-1")]
 mod serde_json_1;
 #[cfg(feature = "with-smol_str-01")]
 mod smol_str_01;
-#[cfg(feature = "with-time-0_2")]
-mod time_02;
 #[cfg(feature = "with-time-0_3")]
 mod time_03;
-#[cfg(feature = "with-uuid-0_8")]
-mod uuid_08;
 #[cfg(feature = "with-uuid-1")]
 mod uuid_1;
-
-// The time::{date, time} macros produce compile errors if the crate package is renamed.
-#[cfg(feature = "with-time-0_2")]
-extern crate time_02 as time;
 
 mod pg_lsn;
 #[doc(hidden)]
@@ -1018,13 +1007,34 @@ impl<T: ToSql> ToSql for &[T] {
             _ => 1,
         };
 
-        let dimension = ArrayDimension {
-            len: downcast(self.len())?,
-            lower_bound,
+        // PostgreSQL emits an empty array as ndim = 0 with NO dimension header,
+        // and `array_recv` canonicalises a one-dimensional zero-length array
+        // back to exactly that. Upstream always writes one dimension, so its
+        // empty-array wire is a shape the server itself never produces.
+        // `array_to_sql` counts the dimensions it is given, so an empty
+        // iterator is what writes ndim = 0.
+        //
+        // oidvector and int2vector are EXCLUDED, measured against PostgreSQL
+        // 16 rather than assumed. They keep one dimension even when empty:
+        //
+        //   encode(array_send('{}'::int4[]), 'hex')      000000000000000000000017
+        //   encode(oidvectorsend(''::oidvector), 'hex')  00000001000000000000001a0000000000000000
+        //   encode(int2vectorsend(''::int2vector),'hex') 0000000100000000000000150000000000000000
+        //
+        // They are the same two types that need the zero lower bound above, and
+        // ndim = 0 would discard that bound along with the dimension.
+        let keeps_empty_dimension = matches!(*ty, Type::OID_VECTOR | Type::INT2_VECTOR);
+        let dimensions = if self.is_empty() && !keeps_empty_dimension {
+            None
+        } else {
+            Some(ArrayDimension {
+                len: downcast(self.len())?,
+                lower_bound,
+            })
         };
 
         types::array_to_sql(
-            Some(dimension),
+            dimensions,
             member_type.oid(),
             self.iter(),
             |e, w| match e.to_sql(member_type, w)? {

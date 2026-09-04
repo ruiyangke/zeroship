@@ -51,6 +51,26 @@ async fn copy_out_inner(
         match start(client, buf, &statement, unnamed_sql.is_some()).await {
             Ok(result) => result,
             Err(error) => {
+                // DEFENSIVE SECOND CHECK, not the primary invalidation. A
+                // pre-BindComplete ErrorResponse has already crossed the connection
+                // dispatcher, which invalidates this same statement at
+                // `connection.rs:1356` before waking this consumer, and
+                // `invalidate_cached_statement_on_error` returns early unless the
+                // error is a genuine stale-statement one. `query.rs` carries the
+                // same call with the same reasoning spelled out; the sites in
+                // `copy_in.rs` and `bind.rs` carry no such comment, though both
+                // are bound by name.
+                //
+                // Nothing bound this line until 2026-09-02: replacing the condition
+                // with `if false` left all 1694 tests green across every target.
+                // The first version of this comment concluded that no test SHOULD
+                // exist, on the grounds that one would assert a redundant call
+                // rather than behaviour. That was wrong. `bind.rs` asserts the same
+                // call on both of its paths, so the effect is observable from the
+                // statement cache and this crate already treats it as worth
+                // asserting; being a second check does not make it unassertable.
+                // `a_stale_bind_error_invalidates_the_cached_copy_out_statement`
+                // now binds it, and `copy_in.rs` has the twin.
                 if matches!(&error, ExecutionError::BeforeBindComplete(_)) {
                     statement.invalidate_cache_on_error(error.error());
                 }
@@ -91,11 +111,7 @@ async fn start(
             .map_err(ExecutionError::before_bind_complete)?
         {
             Message::ParseComplete => {}
-            _ => {
-                return Err(ExecutionError::before_bind_complete(
-                    Error::unexpected_message(),
-                ));
-            }
+            other => return Err(ExecutionError::pre_bind_mismatch(&other)),
         }
     }
 
@@ -105,11 +121,7 @@ async fn start(
         .map_err(ExecutionError::before_bind_complete)?
     {
         Message::BindComplete => {}
-        _ => {
-            return Err(ExecutionError::before_bind_complete(
-                Error::unexpected_message(),
-            ));
-        }
+        other => return Err(ExecutionError::pre_bind_mismatch(&other)),
     }
 
     // A non-COPY command can complete Execute and then fail while Sync closes
@@ -226,6 +238,170 @@ impl Stream for CopyOutStream {
                     return Poll::Ready(Some(Err(error)));
                 }
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::start;
+    use crate::Statement;
+    use crate::client::{Client, ResponseMessages};
+    use crate::config::{SslMode, SslNegotiation};
+    use crate::connection::Request;
+    use bytes::{BufMut, Bytes, BytesMut};
+    use futures_channel::mpsc;
+    use futures_util::StreamExt;
+    use postgres_protocol::message::backend::Message;
+    use std::collections::VecDeque;
+
+    /// The COPY OUT twin of `bind.rs`'s two
+    /// `..._invalidates_cached_statement` tests and `copy_in.rs`'s.
+    ///
+    /// The comment on the call used to say a test here would only assert that
+    /// a redundant call happened. That was wrong: `bind.rs` asserts exactly
+    /// this on both of its paths, so the behaviour is observable and this
+    /// crate already treats it as worth asserting. Being a second check after
+    /// the connection dispatcher does not make it unassertable.
+    #[compio::test]
+    async fn a_stale_bind_error_invalidates_the_cached_copy_out_statement() {
+        use crate::codec::BackendMessages;
+        use std::num::NonZeroUsize;
+        use std::sync::Arc;
+
+        const SQL: &str = "COPY cached_copy_out TO STDOUT";
+        let (request_sender, mut requests) = mpsc::unbounded();
+        let client = Client::new_with_statement_cache(
+            request_sender,
+            SslMode::Disable,
+            SslNegotiation::Postgres,
+            0,
+            Some(0.into()),
+            None,
+            crate::config::ProtocolVersion::V3_0,
+            crate::client::StatementCacheSettings::new(1, NonZeroUsize::MIN),
+        );
+        let inner = Arc::clone(client.inner());
+        let statement = Statement::new(
+            &inner,
+            "s_stale_copy_out".to_string(),
+            vec![],
+            vec![],
+            false,
+        );
+        let statement = inner.cache_statement(SQL, statement, inner.type_cache_generation());
+        assert!(
+            inner.cached_statement(SQL).is_some(),
+            "fixture did not cache"
+        );
+
+        let copy = super::copy_out_inner(&inner, statement, None);
+        let respond = async {
+            let mut request = requests
+                .next()
+                .await
+                .expect("COPY OUT did not enqueue its request");
+            let mut frame = Vec::with_capacity(64);
+            frame.push(b'E');
+            let body = b"SERROR\0C26000\0Mscripted stale statement\0RFetchPreparedStatement\0\0";
+            frame.extend_from_slice(&(u32::try_from(body.len()).unwrap() + 4).to_be_bytes());
+            frame.extend_from_slice(body);
+            request
+                .sender
+                .try_send(ResponseMessages::Raw(BackendMessages::from_test_bytes(
+                    BytesMut::from(frame.as_slice()),
+                )))
+                .expect("deliver the stale-statement COPY OUT error");
+        };
+
+        let (result, ()) = futures_util::future::join(copy, respond).await;
+        let error = match result {
+            Err(failure) => failure.into_error(),
+            Ok(_) => panic!("a stale cached COPY OUT unexpectedly started"),
+        };
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("26000"),
+            "the COPY OUT failure lost the server's stale-statement diagnosis"
+        );
+        assert!(
+            inner.cached_statement(SQL).is_none(),
+            "the pre-BindComplete error left its stale statement cached"
+        );
+    }
+
+    /// `G` (CopyInResponse) and `H` (CopyOutResponse) share a body: Int8
+    /// overall format, Int16 column count.
+    fn copy_response_message(tag: u8) -> Message {
+        let mut frame = BytesMut::new();
+        frame.put_u8(tag);
+        frame.put_u32(4 + 3);
+        frame.put_u8(0);
+        frame.put_i16(0);
+        Message::parse(&mut frame)
+            .expect("parse the scripted copy response")
+            .expect("the scripted copy response was incomplete")
+    }
+
+    /// Either copy response standing where `BindComplete` was due means the
+    /// server is already in copy mode. `ExecutionError::BeforeBindComplete` is
+    /// documented as the phase that can describe PostgreSQL rejecting the named
+    /// statement, and it licenses the stale-cache replay in `Client::copy_out`;
+    /// a server past Bind is not a rejected statement.
+    ///
+    /// The `CopyInResponse` arm one exchange later already reasons that "the
+    /// server entered COPY IN when it sent this response". This asserts the
+    /// Bind slot draws the same conclusion.
+    #[compio::test]
+    async fn a_copy_response_standing_in_for_bind_complete_forbids_replay() {
+        for (tag, reparsed) in [
+            (b'G', false),
+            (b'H', false),
+            // `reparsed` puts the scripted response in the ParseComplete slot
+            // instead, one exchange earlier - still past Bind.
+            (b'G', true),
+            (b'H', true),
+        ] {
+            let (request_sender, mut requests) = mpsc::unbounded();
+            let client = Client::new(
+                request_sender,
+                SslMode::Disable,
+                SslNegotiation::Postgres,
+                0,
+                Some(0.into()),
+                None,
+            );
+            let statement = Statement::unnamed(Vec::new(), Vec::new());
+            let run = start(
+                client.inner(),
+                Bytes::from_static(b""),
+                &statement,
+                reparsed,
+            );
+            let connection = async move {
+                let Request {
+                    sender: mut response_sender,
+                    ..
+                } = requests.next().await.expect("COPY OUT enqueued no request");
+                response_sender
+                    .try_send(ResponseMessages::Observed(VecDeque::from([Ok(
+                        copy_response_message(tag),
+                    )])))
+                    .expect("deliver the scripted copy response");
+            };
+
+            let (result, ()) = futures_util::future::join(run, connection).await;
+            let failure = match result {
+                Ok(_) => panic!("a copy response in the Bind slot started COPY OUT"),
+                Err(failure) => failure,
+            };
+            let (_, before_bind_complete) = failure.into_parts();
+            assert!(
+                !before_bind_complete,
+                "a '{}' (reparsed={}) in a pre-Bind slot was classified as replay-safe",
+                char::from(tag),
+                reparsed
+            );
         }
     }
 }

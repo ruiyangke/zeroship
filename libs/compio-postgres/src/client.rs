@@ -564,6 +564,40 @@ mod transaction_status_tests {
     use bytes::BytesMut;
     use futures_channel::mpsc;
 
+    /// The status byte is peer-chosen and its decode gates
+    /// `stale_cache_replay_permitted`, which refuses the replay for
+    /// `InTransaction` and `Failed` alike. So the property that matters is not
+    /// "an unknown byte reads as Failed" but the stronger "exactly one of the
+    /// 256 possible bytes yields `Idle`" - only `Idle` opens the replay path.
+    ///
+    /// The single-byte test below cannot express that. A well-meant
+    /// `b'E' => Self::Idle`, added while spelling out the failed-transaction
+    /// status PostgreSQL actually sends, would permit replay on a failed
+    /// transaction and leave that test green. 256 inhabitants, so enumerate.
+    #[test]
+    fn exactly_one_status_byte_decodes_to_the_replay_permitting_state() {
+        let mut idle = Vec::new();
+        let mut in_transaction = Vec::new();
+        for byte in 0..=u8::MAX {
+            match TransactionStatus::from_byte(byte) {
+                TransactionStatus::Idle => idle.push(byte),
+                TransactionStatus::InTransaction => in_transaction.push(byte),
+                TransactionStatus::Failed => {}
+            }
+        }
+
+        assert_eq!(
+            idle,
+            vec![b'I'],
+            "only 'I' may decode to Idle, the one state that permits the stale-cache replay"
+        );
+        assert_eq!(
+            in_transaction,
+            vec![b'T'],
+            "only 'T' may decode to InTransaction"
+        );
+    }
+
     #[test]
     fn unknown_ready_for_query_status_is_conservatively_failed() {
         assert_eq!(
@@ -1278,6 +1312,17 @@ impl CopyMode {
         }
     }
 
+    /// The refusal that keeps a COPY exclusive. Four call sites raise it, and
+    /// they are a REDUNDANT FAMILY: measured 2026-09-03, disabling any single
+    /// one leaves the whole suite green, while disabling the three
+    /// `active_copy_mode` checks together fails both
+    /// `copy_interleaving::copy_in_refuses_queries_until_the_sink_finishes` and
+    /// its `copy_out` twin.
+    ///
+    /// So the property is held and the individual guards are not separately
+    /// bindable - a request reaching one has already been refused by whichever
+    /// fires first. Do not read a single green mutation here as a coverage gap;
+    /// that reading cost a cycle before this note existed.
     fn admission_error(self) -> Error {
         match self {
             Self::In => Error::copy_in_progress(),
@@ -2733,6 +2778,60 @@ impl Client {
             .transpose()
     }
 
+    /// Run a cached statement, retrying exactly once if
+    /// `reprepare_cached_statement_once` supplies a replacement, and otherwise
+    /// propagating the ORIGINAL error rather than the retry's.
+    ///
+    /// `query_raw` reaches this from two entry paths - one for a statement
+    /// promoted out of the probationary unnamed slot, one for an already-named
+    /// cached statement - and until 2026-09-03 each carried its own verbatim
+    /// copy. Only the second copy was held by a test: mutating the propagated
+    /// error in the probationary branch left the lib (771) and suite (797)
+    /// suites green, while the same mutation in the other failed
+    /// `statement_cache_does_not_retry_0a000_after_parameter_input` and
+    /// `statement_cache_requires_server_provenance_before_retrying_26000`.
+    /// One path means those two now hold the behaviour for both callers, and
+    /// the copies can no longer drift apart.
+    async fn query_cached_with_one_reprepare<P>(
+        &self,
+        statement: Statement,
+        cache_sql: &str,
+        replay_permitted: bool,
+        params: Vec<P>,
+    ) -> Result<RowStream, Error>
+    where
+        P: BorrowToSql,
+    {
+        let first = query::query_cached(
+            &self.inner,
+            statement,
+            params.iter().map(BorrowToSql::borrow_to_sql),
+        )
+        .await;
+        match first {
+            Ok(stream) => Ok(stream),
+            Err(error) => {
+                let Some(replacement) = self
+                    .reprepare_cached_statement_once(
+                        Some(cache_sql),
+                        replay_permitted,
+                        params.len(),
+                        &error,
+                    )
+                    .await
+                else {
+                    return Err(error);
+                };
+                query::query_cached(
+                    &self.inner,
+                    replacement?,
+                    params.iter().map(BorrowToSql::borrow_to_sql),
+                )
+                .await
+            }
+        }
+    }
+
     /// The maximally flexible version of [`query`].
     ///
     /// [`query`]: #method.query
@@ -2767,34 +2866,14 @@ impl Client {
                 return query::query(&self.inner, execution.statement, params).await;
             }
 
-            let first = query::query_cached(
-                &self.inner,
-                execution.statement,
-                params.iter().map(BorrowToSql::borrow_to_sql),
-            )
-            .await;
-            return match first {
-                Ok(stream) => Ok(stream),
-                Err(error) => {
-                    let Some(replacement) = self
-                        .reprepare_cached_statement_once(
-                            Some(cache_sql),
-                            replay_permitted,
-                            params.len(),
-                            &error,
-                        )
-                        .await
-                    else {
-                        return Err(error);
-                    };
-                    query::query_cached(
-                        &self.inner,
-                        replacement?,
-                        params.iter().map(BorrowToSql::borrow_to_sql),
-                    )
-                    .await
-                }
-            };
+            return self
+                .query_cached_with_one_reprepare(
+                    execution.statement,
+                    cache_sql,
+                    replay_permitted,
+                    params,
+                )
+                .await;
         }
         let Some(cache_sql) = execution.cache_sql else {
             return query::query(&self.inner, execution.statement, params).await;
@@ -2805,34 +2884,13 @@ impl Client {
         }
 
         let params = params.into_iter().collect::<Vec<_>>();
-        let first = query::query_cached(
-            &self.inner,
+        self.query_cached_with_one_reprepare(
             execution.statement,
-            params.iter().map(BorrowToSql::borrow_to_sql),
+            cache_sql,
+            replay_permitted,
+            params,
         )
-        .await;
-        match first {
-            Ok(stream) => Ok(stream),
-            Err(error) => {
-                let Some(replacement) = self
-                    .reprepare_cached_statement_once(
-                        Some(cache_sql),
-                        replay_permitted,
-                        params.len(),
-                        &error,
-                    )
-                    .await
-                else {
-                    return Err(error);
-                };
-                query::query_cached(
-                    &self.inner,
-                    replacement?,
-                    params.iter().map(BorrowToSql::borrow_to_sql),
-                )
-                .await
-            }
-        }
+        .await
     }
 
     /// Like `query`, but requires the types of query parameters to be explicitly specified.
@@ -2969,80 +3027,31 @@ impl Client {
         .await
     }
 
-    /// The maximally flexible version of [`execute`].
+    /// Run a cached statement for its row count, retrying once only when the
+    /// failure arrived BEFORE `BindComplete`.
     ///
-    /// [`execute`]: #method.execute
-    pub async fn execute_raw<T, P, I>(&self, statement: &T, params: I) -> Result<u64, Error>
+    /// After that point the statement's effect may already be committed, so a
+    /// replay would run it twice; that is what `!before_bind_complete` refuses.
+    /// `execute_raw` reaches this from the same two entry paths as
+    /// `query_raw`, and until 2026-09-03 each carried a verbatim copy. Only the
+    /// second was held: mutating the probationary copy's two error returns left
+    /// the lib (771) and suite (797) suites green, while the same mutation in
+    /// the other failed
+    /// `statement_cache_never_replays_a_committed_effect_after_bind_complete`.
+    /// The replay-safety check now exists once, under that test.
+    async fn execute_cached_with_one_reprepare<P>(
+        &self,
+        statement: Statement,
+        cache_sql: &str,
+        replay_permitted: bool,
+        params: Vec<P>,
+    ) -> Result<u64, Error>
     where
-        T: ?Sized + ToStatement,
         P: BorrowToSql,
-        I: IntoIterator<Item = P>,
-        I::IntoIter: ExactSizeIterator,
     {
-        let execution = statement.__convert().into_statement(&self.inner).await?;
-        if execution.unnamed_sql.is_some() {
-            let params = params.into_iter().collect::<Vec<_>>();
-            let execution = execution
-                .finalize_probationary(&self.inner, params.len())
-                .await?;
-            if let Some(sql) = execution.unnamed_sql {
-                let types = execution.statement.params().to_vec();
-                return query::execute_typed(&self.inner, sql, params.into_iter().zip(types)).await;
-            }
-
-            let Some(cache_sql) = execution.cache_sql else {
-                return query::execute(self.inner(), execution.statement, params).await;
-            };
-            let replay_permitted = self.stale_cache_replay_permitted();
-            if !replay_permitted {
-                return query::execute(self.inner(), execution.statement, params).await;
-            }
-
-            let first = query::execute_cached(
-                self.inner(),
-                execution.statement,
-                params.iter().map(BorrowToSql::borrow_to_sql),
-            )
-            .await;
-            return match first {
-                Ok(rows) => Ok(rows),
-                Err(failure) => {
-                    let (error, before_bind_complete) = failure.into_parts();
-                    if !before_bind_complete {
-                        return Err(error);
-                    }
-                    let Some(replacement) = self
-                        .reprepare_cached_statement_once(
-                            Some(cache_sql),
-                            replay_permitted,
-                            params.len(),
-                            &error,
-                        )
-                        .await
-                    else {
-                        return Err(error);
-                    };
-                    query::execute(
-                        self.inner(),
-                        replacement?,
-                        params.iter().map(BorrowToSql::borrow_to_sql),
-                    )
-                    .await
-                }
-            };
-        }
-        let Some(cache_sql) = execution.cache_sql else {
-            return query::execute(self.inner(), execution.statement, params).await;
-        };
-        let replay_permitted = self.stale_cache_replay_permitted();
-        if !replay_permitted {
-            return query::execute(self.inner(), execution.statement, params).await;
-        }
-
-        let params = params.into_iter().collect::<Vec<_>>();
         let first = query::execute_cached(
             self.inner(),
-            execution.statement,
+            statement,
             params.iter().map(BorrowToSql::borrow_to_sql),
         )
         .await;
@@ -3074,6 +3083,62 @@ impl Client {
         }
     }
 
+    /// The maximally flexible version of [`execute`].
+    ///
+    /// [`execute`]: #method.execute
+    pub async fn execute_raw<T, P, I>(&self, statement: &T, params: I) -> Result<u64, Error>
+    where
+        T: ?Sized + ToStatement,
+        P: BorrowToSql,
+        I: IntoIterator<Item = P>,
+        I::IntoIter: ExactSizeIterator,
+    {
+        let execution = statement.__convert().into_statement(&self.inner).await?;
+        if execution.unnamed_sql.is_some() {
+            let params = params.into_iter().collect::<Vec<_>>();
+            let execution = execution
+                .finalize_probationary(&self.inner, params.len())
+                .await?;
+            if let Some(sql) = execution.unnamed_sql {
+                let types = execution.statement.params().to_vec();
+                return query::execute_typed(&self.inner, sql, params.into_iter().zip(types)).await;
+            }
+
+            let Some(cache_sql) = execution.cache_sql else {
+                return query::execute(self.inner(), execution.statement, params).await;
+            };
+            let replay_permitted = self.stale_cache_replay_permitted();
+            if !replay_permitted {
+                return query::execute(self.inner(), execution.statement, params).await;
+            }
+
+            return self
+                .execute_cached_with_one_reprepare(
+                    execution.statement,
+                    cache_sql,
+                    replay_permitted,
+                    params,
+                )
+                .await;
+        }
+        let Some(cache_sql) = execution.cache_sql else {
+            return query::execute(self.inner(), execution.statement, params).await;
+        };
+        let replay_permitted = self.stale_cache_replay_permitted();
+        if !replay_permitted {
+            return query::execute(self.inner(), execution.statement, params).await;
+        }
+
+        let params = params.into_iter().collect::<Vec<_>>();
+        self.execute_cached_with_one_reprepare(
+            execution.statement,
+            cache_sql,
+            replay_permitted,
+            params,
+        )
+        .await
+    }
+
     /// Executes a `COPY FROM STDIN` statement, returning a sink used to write the copy data.
     ///
     /// PostgreSQL does not support parameters in `COPY` statements. The copy *must* be explicitly
@@ -3100,6 +3165,26 @@ impl Client {
             Ok(sink) => Ok(sink),
             Err(failure) => {
                 let (error, before_bind_complete) = failure.into_parts();
+                // DEFENCE IN DEPTH, measured on 2026-09-03 rather than assumed.
+                // For this condition to change any outcome, COPY needs a
+                // failure that is BOTH post-Bind and replay-eligible, and
+                // neither replay-eligible error is:
+                //
+                //   26000 `FetchPreparedStatement` is raised at Bind, so it
+                //   arrives with `before_bind_complete` already true; 0A000
+                //   `RevalidateCachedQuery` / `RevalidateCachedPlan` does not
+                //   occur for COPY at all - a cached `COPY .. FROM STDIN`
+                //   survived `ADD COLUMN`, `ALTER COLUMN .. TYPE`, `ADD COLUMN
+                //   .. NOT NULL DEFAULT` and `SET NOT NULL`, the second COPY
+                //   succeeding every time.
+                //
+                // So disabling this line leaves the whole suite green, and the
+                // cause is not a missing test: with it disabled the retry DOES
+                // run (transaction status `Idle`, reprepare supplies a
+                // replacement) and then fails identically, so no assertion on
+                // the returned error can separate the two paths. The
+                // propagation itself IS held, by
+                // `post_bind_error_keeps_copy_in_statement_cached`.
                 if !before_bind_complete {
                     return Err(error);
                 }
@@ -3398,6 +3483,108 @@ impl Client {
 impl fmt::Debug for Client {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Client").finish()
+    }
+}
+
+/// `inspect_frontend_frames` keeps a name -> SQL map so a later failure can be
+/// reported against the statement that caused it. These are the arms that take
+/// entries OUT of that map, and nothing exercised them.
+///
+/// A stale entry is not a crash, which is why it needs a test rather than a
+/// panic to find it: the map would answer for a name the server no longer
+/// holds, and the error would be attributed to whatever SQL used to own it.
+/// Every case below is judged by what `Execute` on the name ANSWERS, not by
+/// reading the map, because attribution is the only reason the map exists.
+#[cfg(test)]
+mod frontend_registry_invalidation_tests {
+    use super::{FrontendRegistry, QueryProtocol, inspect_frontend_frames};
+
+    /// tag + 4-byte length (counting itself) + body.
+    fn frame(tag: u8, body: &[u8]) -> Vec<u8> {
+        let mut out = vec![tag];
+        out.extend_from_slice(&u32::try_from(body.len() + 4).unwrap().to_be_bytes());
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn parse(name: &str, sql: &str) -> Vec<u8> {
+        let mut body = format!("{name}\0{sql}\0").into_bytes();
+        body.extend_from_slice(&[0, 0]);
+        frame(b'P', &body)
+    }
+
+    fn bind(portal: &str, statement: &str) -> Vec<u8> {
+        frame(b'B', format!("{portal}\0{statement}\0").as_bytes())
+    }
+
+    fn execute(portal: &str) -> Vec<u8> {
+        frame(b'E', format!("{portal}\0\0\0\0\0").as_bytes())
+    }
+
+    fn close(kind: u8, name: &str) -> Vec<u8> {
+        let mut body = vec![kind];
+        body.extend_from_slice(format!("{name}\0").as_bytes());
+        frame(b'C', &body)
+    }
+
+    #[test]
+    fn a_closed_portal_no_longer_names_the_sql_it_held() {
+        let mut registry = FrontendRegistry::default();
+
+        let mut live = parse("s", "SELECT 1");
+        live.extend_from_slice(&bind("p", "s"));
+        live.extend_from_slice(&execute("p"));
+        let attributed = inspect_frontend_frames(&live, &mut registry)
+            .expect("a live portal must name the SQL its statement was prepared with");
+        assert_eq!(&*attributed.0, "SELECT 1");
+        assert!(matches!(attributed.1, QueryProtocol::Extended));
+
+        let mut closed = close(b'P', "p");
+        closed.extend_from_slice(&execute("p"));
+        assert!(
+            inspect_frontend_frames(&closed, &mut registry).is_none(),
+            "a closed portal still named SQL, so a later error would be blamed on it"
+        );
+    }
+
+    #[test]
+    fn a_closed_statement_stops_a_new_portal_inheriting_its_sql() {
+        let mut registry = FrontendRegistry::default();
+        let mut setup = parse("s", "SELECT 2");
+        setup.extend_from_slice(&bind("p", "s"));
+        assert!(inspect_frontend_frames(&setup, &mut registry).is_none());
+
+        let mut reused = close(b'S', "s");
+        reused.extend_from_slice(&bind("p2", "s"));
+        reused.extend_from_slice(&execute("p2"));
+        assert!(
+            inspect_frontend_frames(&reused, &mut registry).is_none(),
+            "a portal bound to a closed statement inherited the SQL anyway"
+        );
+    }
+
+    /// The `else` arm of `Bind`: binding a portal name to a statement the
+    /// registry does not know must REMOVE that portal, not leave whatever it
+    /// held before. Rebinding a LIVE portal name is how a stale entry survives.
+    #[test]
+    fn rebinding_a_portal_to_an_unknown_statement_clears_it() {
+        let mut registry = FrontendRegistry::default();
+        let mut setup = parse("s", "SELECT 3");
+        setup.extend_from_slice(&bind("p", "s"));
+        setup.extend_from_slice(&execute("p"));
+        assert_eq!(
+            &*inspect_frontend_frames(&setup, &mut registry)
+                .expect("the portal is live here")
+                .0,
+            "SELECT 3"
+        );
+
+        let mut rebound = bind("p", "never-prepared");
+        rebound.extend_from_slice(&execute("p"));
+        assert!(
+            inspect_frontend_frames(&rebound, &mut registry).is_none(),
+            "the portal kept its old SQL after being rebound to an unknown statement"
+        );
     }
 }
 

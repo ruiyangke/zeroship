@@ -366,6 +366,16 @@ where
         self.phase = HandshakePhase::Complete;
     }
 
+    /// Every refusal below was mutation-measured on 2026-09-03 and each has a
+    /// precisely-named witness, so this function needs no further audit. Six of
+    /// the eleven are invisible to `--lib` and only fail under `--test suite`
+    /// (the duplicate, unsupported-version, newer-than-requested, negative and
+    /// oversized option-count, and trailing-byte cases), which is why a lib-only
+    /// run over this function reads as five unbound guards that are not.
+    ///
+    /// The downgrade refusal - a negotiated protocol below `min_protocol` - is
+    /// held by two: `min_protocol_version_rejects_a_lower_server_negotiation`
+    /// and `a_below_minimum_negotiation_with_options_names_both_versions`.
     fn negotiate_protocol(&mut self, body: Bytes) -> Result<(), Error> {
         if self.negotiation_seen {
             return Err(protocol_error(
@@ -2124,6 +2134,58 @@ mod tests {
         );
     }
 
+    /// `begin_startup_info` refuses unless authentication actually ran.
+    ///
+    /// Bound only incidentally before this: mutating the guard to `if false`
+    /// reddened `a_connector_that_verifies_nothing_cannot_serve_a_verifying_sslmode`
+    /// in `tls_live`, a test about sslmode that says nothing about startup
+    /// phases, and the refusal's own message appeared nowhere outside its
+    /// definition. A guard whose only witness is named for something else
+    /// still fails a regression, but reports it as the wrong defect.
+    ///
+    /// Every phase other than `Authenticating` is walked, so the guard cannot
+    /// be narrowed to reject just one of them.
+    #[test]
+    fn startup_info_is_refused_unless_authentication_ran() {
+        let mut ruled_on = 0usize;
+        for phase in [
+            HandshakePhase::AwaitingAuthentication,
+            HandshakePhase::ReadingStartupInfo,
+            HandshakePhase::Complete,
+        ] {
+            let mut handshake = empty_handshake();
+            handshake.phase = phase;
+            let error = handshake
+                .begin_startup_info()
+                .expect_err("startup info was accepted without authentication");
+            let mut chain = error.to_string();
+            let mut source = std::error::Error::source(&error);
+            while let Some(cause) = source {
+                chain.push_str(": ");
+                chain.push_str(&cause.to_string());
+                source = std::error::Error::source(cause);
+            }
+            assert!(
+                chain.contains("authentication completed in an invalid startup phase"),
+                "the refusal for {phase:?} did not name the phase violation: {chain}"
+            );
+            ruled_on += 1;
+        }
+        assert_eq!(
+            ruled_on, 3,
+            "every non-authenticating phase must be ruled on"
+        );
+
+        // Control: the one phase that must be ACCEPTED, or "always refuses"
+        // would satisfy the assertions above.
+        let mut handshake = empty_handshake();
+        handshake.phase = HandshakePhase::Authenticating;
+        handshake
+            .begin_startup_info()
+            .expect("authentication having run must admit startup info");
+        assert_eq!(handshake.phase, HandshakePhase::ReadingStartupInfo);
+    }
+
     /// `Handshake::new` reads the config but does not hold it, so a local one
     /// is enough and the returned value borrows nothing.
     fn empty_handshake() -> Handshake<HandshakeWriteSuccess, crate::tls::NoTlsStream> {
@@ -2233,6 +2295,44 @@ mod tests {
         frame(b'T', &body)
     }
 
+    /// `single_text_value` refuses a probe row carrying more than one column.
+    ///
+    /// Measured 2026-09-02: deleting the surplus-column check left the lib
+    /// suite (763) and the integration suite (797) green. The scripted probe
+    /// tests all send well-formed one-column rows, so nothing drove the arm.
+    ///
+    /// The one-column case is asserted alongside it, or "refuse everything"
+    /// would satisfy the first assertion on its own.
+    #[test]
+    fn a_target_probe_row_with_surplus_columns_is_refused() {
+        fn data_row_body(frame_bytes: Vec<u8>) -> DataRowBody {
+            let mut buf = BytesMut::from(&frame_bytes[..]);
+            match Message::parse(&mut buf)
+                .expect("parse the scripted DataRow")
+                .expect("the scripted DataRow was incomplete")
+            {
+                Message::DataRow(body) => body,
+                _ => panic!("expected a DataRow"),
+            }
+        }
+
+        // Control: exactly one column is what the probes expect.
+        let row = data_row_body(single_column_data_row(b"on"));
+        assert_eq!(
+            single_text_value(&row).expect("a one-column probe row is valid"),
+            b"on",
+            "the accepted row did not yield its only column"
+        );
+
+        // A second column means the server answered a different query shape.
+        let mut body = 2i16.to_be_bytes().to_vec();
+        for value in [b"on".as_slice(), b"off".as_slice()] {
+            body.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
+            body.extend_from_slice(value);
+        }
+        let row = data_row_body(frame(b'D', &body));
+        single_text_value(&row).expect_err("a two-column probe row was accepted");
+    }
     fn single_column_data_row(value: &[u8]) -> Vec<u8> {
         let mut body = 1i16.to_be_bytes().to_vec();
         body.extend_from_slice(&i32::try_from(value.len()).unwrap().to_be_bytes());
@@ -4096,6 +4196,45 @@ mod tests {
             .expect("scripted connection task did not stop after its peer closed");
     }
 
+    /// The ordinary handoff's counterpart to
+    /// `replication_handshake_preserves_coalesced_post_ready_bytes`. That test
+    /// covers the replication path, which rebuilds its data-phase framer and so
+    /// has to carry the bytes deliberately. This covers the path everything
+    /// else uses, which keeps its `BufStream` whole - and whose own comment
+    /// says exactly that, without anything checking it.
+    ///
+    /// Structural preservation is not a tested property. Rebuilding the stream
+    /// at the handoff drops whatever the last startup read over-read, so a
+    /// FATAL arriving in the same segment as ReadyForQuery would vanish with no
+    /// error anywhere.
+    #[compio::test]
+    async fn ordinary_handshake_delivers_coalesced_post_ready_bytes() {
+        let mut script = successful_handshake(std::iter::empty());
+        script.extend_from_slice(&error_response(
+            "57P01",
+            "terminating connection after startup",
+        ));
+        let (stream, _) = scripted_server_after_startup(Some(script)).await;
+
+        let (client, connection) = plaintext_config()
+            .connect_raw(stream, NoTls)
+            .await
+            .expect("a normal handshake must succeed even with a coalesced FATAL");
+        let run = compio::runtime::spawn(async move { connection.run().await });
+
+        let error = compio::time::timeout(Duration::from_secs(5), run)
+            .await
+            .expect("the connection task never observed the coalesced frame")
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .expect_err("the coalesced FATAL must fail the connection task");
+        assert_eq!(
+            error.code().map(crate::error::SqlState::code),
+            Some("57P01"),
+            "the connection lost the frame buffered during startup: {error}"
+        );
+        drop(client);
+    }
+
     #[compio::test]
     async fn connect_raw_timeout_covers_a_stalled_handshake() {
         let (stream, startup_observed) = scripted_server_after_startup(None).await;
@@ -4151,6 +4290,47 @@ mod tests {
             .expect("parse a TLS connection string")
     }
 
+    /// The two capability checks that run BEFORE server verification.
+    ///
+    /// Measured 2026-09-02: deleting either left the lib suite (763) and the
+    /// integration suite (797) green, while the verification sibling below is
+    /// bound by two tests. The comment on those guards explains the ordering -
+    /// an unhonoured `sslmode` is silent, an unhonoured `sslsni` or
+    /// `sslcertmode` "changes what the wire carries" - which is a reason to
+    /// check verification last, not a reason to leave the other two unasserted.
+    ///
+    /// The default `TlsConnect` impls report that a connector always sends SNI
+    /// (`can_honor_sslsni(enabled) == enabled`) and applies only
+    /// `sslcertmode=allow`, so each row below asks for a policy the connector
+    /// cannot deliver and must be refused by name.
+    #[test]
+    fn a_connector_that_cannot_honour_sni_or_certmode_is_refused() {
+        let mut ruled_on = 0usize;
+        for (extra, setting) in [
+            ("sslmode=require sslsni=0", "sslsni=0"),
+            ("sslmode=require sslcertmode=require", "sslcertmode=require"),
+            ("sslmode=require sslcertmode=disable", "sslcertmode=disable"),
+        ] {
+            let config = tls_config(extra);
+            let error = validate_tls_connector_parameters::<crate::Socket, _>(
+                &UnattestedTls,
+                Encryption::Tls,
+                &config,
+            )
+            .expect_err(&format!(
+                "`{extra}` accepted a connector that cannot honour it"
+            ));
+            let cause = std::error::Error::source(&error)
+                .map(ToString::to_string)
+                .unwrap_or_default();
+            assert!(
+                cause.contains(setting),
+                "the refusal must name the setting it could not honour: {cause}"
+            );
+            ruled_on += 1;
+        }
+        assert_eq!(ruled_on, 3, "every unhonourable setting must be ruled on");
+    }
     /// A connector that never read `sslrootcert` cannot have checked the
     /// server certificate against it, so the modes that promise verification
     /// must refuse it rather than report an authenticated session.

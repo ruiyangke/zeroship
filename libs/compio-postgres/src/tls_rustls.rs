@@ -226,6 +226,46 @@ impl CrlDirectoryReload {
     }
 }
 
+/// Trust anchors from the operating system's certificate store.
+///
+/// Individual unparsable entries are ignored: one bad certificate in the OS
+/// store must not take out the whole store. A store that yields nothing usable
+/// is refused, naming the read-error count so the cause is not left to
+/// guesswork.
+///
+/// That refusal is load-bearing rather than cosmetic. `verifier_for` reads an
+/// empty `RootCertStore` as "sslrootcert is unset", so returning one here for
+/// `sslrootcert=system` would hand a weak `sslmode`
+/// `ServerVerification::None` (accept any certificate) after being asked to
+/// trust the OS store. The crate's own connect paths refuse `system` under
+/// anything but `verify-full` before reaching here
+/// (`Config::validate_connection_settings`), but `from_config` is public API
+/// and callers reach it directly, so this is the last check on that path.
+///
+/// The decision is taken here, apart from `load_native_certs`, because the OS
+/// store cannot be steered from a test without setting `SSL_CERT_FILE` in this
+/// process. Splitting the policy from the read makes it provable with neither.
+fn system_trust_anchors(
+    certs: Vec<CertificateDer<'static>>,
+    read_errors: usize,
+) -> Result<RootCertStore, Error> {
+    let mut roots = RootCertStore::empty();
+    for cert in certs {
+        let _ = roots.add(cert);
+    }
+    if roots.is_empty() {
+        return Err(Error::tls(
+            format!(
+                "sslrootcert=system: the operating system certificate store yielded no usable \
+                 certificates ({read_errors} read error(s)). Name a CA file with \
+                 sslrootcert=<path> instead."
+            )
+            .into(),
+        ));
+    }
+    Ok(roots)
+}
+
 /// Turn a policy into the rustls verifier that implements it.
 ///
 /// Every mode goes through this function, including `verify-full` - which
@@ -256,6 +296,16 @@ fn verifier_for(
         return Ok((Arc::new(AcceptAnyServerCert { algorithms }), policy));
     }
 
+    // `VerifierBuilderError` has exactly two variants, `NoRootAnchors` and
+    // `InvalidCrl` (rustls 0.23, checked 2026-09-03). Every `Err(error)` arm
+    // below therefore reduces to `NoRootAnchors` once its `InvalidCrl` sibling
+    // is matched - and that is UNREACHABLE here, because the `select` above
+    // returns `ServerVerification::None` for an empty store and we have already
+    // returned. So those arms carry a case the guards keeping `roots` non-empty
+    // exclude, and they are defence rather than dead weight only for as long as
+    // those guards hold. Both are bound: the file arm by
+    // `sslrootcert_without_a_certificate_block_is_refused_by_name`, the system
+    // arm by `a_system_trust_store_with_nothing_usable_is_refused_by_name`.
     let builder =
         || WebPkiServerVerifier::builder_with_provider(roots.clone(), Arc::new(provider.clone()));
 
@@ -495,6 +545,23 @@ fn read_private_key_file(key_path: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
     read_private_key_file_with_metadata(key_path, std::fs::File::metadata)
 }
 
+/// Whether a private key's mode is safe to load, given the key's owner.
+///
+/// libpq permits a root-owned system key to be group-readable, but a key with
+/// any other owner must have no group or world access at all.
+///
+/// The rule is stated apart from the file it describes because neither arm can
+/// be reached otherwise: a test fixture is owned by whoever runs the suite, so
+/// the root arm needs a root-owned file, and the non-root arm cannot show what
+/// the root arm would have permitted. Both were unbound while this was inline.
+/// Dropping the root exception, and extending it to every owner, each left the
+/// lib and suite suites entirely green.
+#[cfg(unix)]
+const fn key_permissions_are_safe(uid: u32, mode: u32) -> bool {
+    let forbidden = if uid == 0 { 0o037 } else { 0o077 };
+    mode & forbidden == 0
+}
+
 fn read_private_key_file_with_metadata(
     key_path: &str,
     inspect: impl FnOnce(&std::fs::File) -> io::Result<std::fs::Metadata>,
@@ -517,12 +584,9 @@ fn read_private_key_file_with_metadata(
     {
         use std::os::unix::fs::MetadataExt as _;
 
-        // libpq permits root-owned system keys to be group-readable, but a
-        // key with any other owner must have no group or world access. The
-        // file handle and its metadata stay together so a path replacement
+        // The file handle and its metadata stay together so a path replacement
         // cannot make us parse a different, unchecked key.
-        let forbidden = if metadata.uid() == 0 { 0o037 } else { 0o077 };
-        if metadata.mode() & forbidden != 0 {
+        if !key_permissions_are_safe(metadata.uid(), metadata.mode()) {
             return Err(Error::tls(
                 format!(
                     "sslkey={key_path}: private key has group or world access; use permissions \
@@ -556,6 +620,14 @@ fn private_key_from_config(
     // Parse only that one additional label here; malformed plaintext keys must
     // retain the existing rustls PEM error instead of being misreported as a
     // bad passphrase.
+    //
+    // The non-UTF8 arm immediately below has NO OBSERVABLE EFFECT and is not a
+    // coverage gap. Measured 2026-09-03: removing it leaves all 768 lib tests
+    // green, and a probe loading a non-UTF8 key file prints the identical chain
+    // either way - "sslkey=<path>: cannot read PEM: no items found" - because
+    // `SecretDocument::from_pem` refuses the same bytes with the same message
+    // built from the same `unencrypted_error`. It stays as an explicit read of
+    // the failure, not as a behaviour any test could pin. Do not re-audit it.
     let pem_text = match std::str::from_utf8(&pem) {
         Ok(pem) => pem,
         Err(_) => {
@@ -1084,23 +1156,7 @@ impl MakeRustlsConnect {
             SslRootCert::Unset => {}
             SslRootCert::System => {
                 let found = rustls_native_certs::load_native_certs();
-                for cert in found.certs {
-                    // Ignore individual unparsable system certificates: a
-                    // single bad entry in the OS store must not take out the
-                    // whole store. An empty result is caught below.
-                    let _ = roots.add(cert);
-                }
-                if roots.is_empty() {
-                    return Err(Error::tls(
-                        format!(
-                            "sslrootcert=system: the operating system certificate store yielded \
-                             no usable certificates ({} read error(s)). Name a CA file with \
-                             sslrootcert=<path> instead.",
-                            found.errors.len()
-                        )
-                        .into(),
-                    ));
-                }
+                roots = system_trust_anchors(found.certs, found.errors.len())?;
             }
             SslRootCert::File(path) => {
                 let certs = CertificateDer::pem_file_iter(path)
@@ -1967,6 +2023,43 @@ mod tests {
         key
     }
 
+    /// The owner-dependent halves of the `sslkey` permission rule. The fixture
+    /// tests below can only ever own their key as whoever runs the suite, so
+    /// the root exception had no witness and neither did its absence for every
+    /// other owner: 0640 is the mode the two arms disagree about, and no test
+    /// used it.
+    #[cfg(unix)]
+    #[test]
+    fn the_sslkey_permission_rule_turns_on_the_owner() {
+        // A root-owned system key may be group-readable, as libpq allows.
+        assert!(key_permissions_are_safe(0, 0o600), "root 0600 is private");
+        assert!(
+            key_permissions_are_safe(0, 0o640),
+            "libpq permits a group-readable root-owned system key"
+        );
+        // The exception stops at reading: group write and any world access
+        // still expose the key.
+        assert!(
+            !key_permissions_are_safe(0, 0o660),
+            "a group-writable key is not protected by the root exception"
+        );
+        assert!(
+            !key_permissions_are_safe(0, 0o644),
+            "a world-readable key is never safe, whoever owns it"
+        );
+
+        // Any other owner gets no exception: 0640 hands the key to a group.
+        assert!(
+            key_permissions_are_safe(1000, 0o600),
+            "0600 is the mode the message asks for"
+        );
+        assert!(
+            !key_permissions_are_safe(1000, 0o640),
+            "only a root-owned key may be group-readable"
+        );
+        assert!(!key_permissions_are_safe(1000, 0o644), "world-readable");
+    }
+
     #[cfg(unix)]
     #[test]
     fn sslkey_permissions_allow_a_private_file() {
@@ -2002,12 +2095,17 @@ mod tests {
     /// would fail on permissions before reaching the branch under test.
     #[cfg(unix)]
     fn sslkey_fixture(pem: &str) -> tempfile::NamedTempFile {
+        sslkey_fixture_bytes(pem.as_bytes())
+    }
+
+    /// The bytes form, so a fixture can be something `str` cannot hold.
+    #[cfg(unix)]
+    fn sslkey_fixture_bytes(pem: &[u8]) -> tempfile::NamedTempFile {
         use std::io::Write as _;
         use std::os::unix::fs::PermissionsExt as _;
 
         let mut key = tempfile::NamedTempFile::new().expect("create a private key fixture");
-        key.write_all(pem.as_bytes())
-            .expect("write the private key fixture");
+        key.write_all(pem).expect("write the private key fixture");
         std::fs::set_permissions(key.path(), std::fs::Permissions::from_mode(0o600))
             .expect("set private key fixture permissions");
         key
@@ -2054,6 +2152,43 @@ mod tests {
             chain.contains("encrypted private key requires a non-empty sslpassword"),
             "an empty sslpassword must be treated as absent: {chain}"
         );
+    }
+
+    /// A file that is not a PEM document at all - or not even UTF-8 - keeps the
+    /// rustls PEM error too.
+    ///
+    /// The sibling below covers a well-formed PEM carrying the wrong label. It
+    /// reaches the label check, so it leaves both EARLIER refusals untested:
+    /// the UTF-8 decode and `SecretDocument::from_pem`. Those are what an
+    /// `sslkey` pointed at a binary file, or at a config file, actually hits.
+    ///
+    /// A passphrase is supplied deliberately. With `None` the function can only
+    /// report a PEM problem, so the assertion would hold even if the code
+    /// blamed the passphrase whenever one existed; supplying one makes the
+    /// misreport possible, and therefore makes the test meaningful.
+    #[cfg(unix)]
+    #[test]
+    fn an_unparseable_sslkey_is_not_reported_as_a_passphrase_problem() {
+        for (name, bytes) in [
+            (
+                "not a PEM document",
+                &b"sslkey was pointed at a config file, not a key\n"[..],
+            ),
+            ("not even UTF-8", &[0xff_u8, 0xfe, 0x00, 0x01][..]),
+        ] {
+            let key = sslkey_fixture_bytes(bytes);
+            let error = private_key_from_config(key.path().to_str().unwrap(), Some(b"hunter2"))
+                .expect_err("an unparseable file is not a private key");
+            let chain = sslkey_error_chain(&error);
+            assert!(
+                chain.contains("cannot read PEM"),
+                "{name}: the error must report a PEM problem: {chain}"
+            );
+            assert!(
+                !chain.contains("sslpassword"),
+                "{name}: an unreadable key was blamed on the passphrase: {chain}"
+            );
+        }
     }
 
     /// A PEM that is not a private key at all must keep the rustls PEM error.
@@ -2540,6 +2675,61 @@ mod tests {
         }
     }
 
+    /// The two behaviours an all-whitespace name cannot pin: a whitespace RUN
+    /// becomes exactly ONE space, and ASCII case folds.
+    ///
+    /// The tests above prove which bytes count as whitespace, because an
+    /// all-space name canonicalising to empty fails the moment the class
+    /// shrinks. They say nothing about what a run BETWEEN two words becomes.
+    /// Deleting the run instead of collapsing it -- `canonical.push(b' ')`
+    /// removed -- leaves both of them green while changing the hash of every
+    /// issuer whose name contains a space, which is nearly all of them. Every
+    /// `sslcrldir` lookup would then miss, because the filename OpenSSL chose
+    /// is derived from ITS canonical bytes, not ours.
+    ///
+    /// The expectations are not read off our own implementation. They are the
+    /// equivalence classes OpenSSL 3.6.1 itself produces, measured by giving
+    /// `openssl req -x509` a CN per row and reading `openssl x509 -hash`:
+    ///
+    /// ```text
+    ///   49cdc5e0   "A B"  "A\tB"  "A\rB"  "A\x0bB"  "A\x0cB"  "A\t\tB"  "a b"
+    ///   9ab520a7   "\tAB"  "AB\t"  "AB"
+    /// ```
+    ///
+    /// Two rows OpenSSL's own `-subj` parser normalises before encoding ("A  B"
+    /// and " AB") were DISCARDED as evidence: their DER came back already
+    /// collapsed, so they measured the argument parser rather than the
+    /// canonicaliser. The tab rows carry a real 0x09 in the DER and are what
+    /// the classes above rest on.
+    #[test]
+    fn crl_issuer_whitespace_run_becomes_one_space_and_case_folds() {
+        let collapses_to_a_space: &[&[u8]] = &[
+            b"A B", b"A\tB", b"A\rB", b"A\x0bB", b"A\x0cB", b"A\t\tB", b"A \tB", b"a b",
+        ];
+        let mut ruled_on = 0usize;
+        for input in collapses_to_a_space {
+            ruled_on += 1;
+            let value = Any::from_tag_and_data(Tag::Utf8String, input);
+            assert_eq!(
+                openssl_canonical_string(&value),
+                Ok(Some(b"a b".to_vec())),
+                "{input:?} must canonicalise to one space between the words, lowercased"
+            );
+        }
+
+        let strips_to_bare_letters: &[&[u8]] = &[b"\tAB", b"AB\t", b"AB", b"  AB \t "];
+        for input in strips_to_bare_letters {
+            ruled_on += 1;
+            let value = Any::from_tag_and_data(Tag::Utf8String, input);
+            assert_eq!(
+                openssl_canonical_string(&value),
+                Ok(Some(b"ab".to_vec())),
+                "{input:?} must lose its surrounding whitespace entirely"
+            );
+        }
+        assert_eq!(ruled_on, 12, "the OpenSSL equivalence matrix shrank");
+    }
+
     #[test]
     fn crl_issuer_utf8_string_containing_only_c_whitespace_is_empty() {
         let value = Any::from_tag_and_data(Tag::Utf8String, b" \t\n\x0b\x0c\r");
@@ -2829,6 +3019,133 @@ mod tests {
         );
     }
 
+    /// A hashed entry that is not exactly ONE loadable PEM CRL ends the
+    /// directory read, rather than contributing part of itself.
+    ///
+    /// OpenSSL's convention is one CRL per `<hash>.r<n>` file, and rustls
+    /// selects the FIRST CRL matching an issuer. A file holding two therefore
+    /// makes the choice between them arbitrary, which is the same stale-
+    /// revocation hazard the same-issuer guards refuse elsewhere; a file
+    /// holding none means the operator's revocation policy is partly missing
+    /// with nothing to say so. Both are refused by NAME so the offending path
+    /// is actionable.
+    ///
+    /// The two arms are distinct in the source but share one entry point, so
+    /// they are exercised through the same file name, rewritten between them.
+    /// `crls_from_pem_file` answers `None` BOTH when the PEM fails to parse
+    /// and when it parses to nothing, so garbage reaches the load arm rather
+    /// than the count arm.
+    #[test]
+    fn a_hashed_crl_entry_must_be_exactly_one_loadable_pem_crl() {
+        let directory = tempfile::tempdir().expect("create a hashed CRL directory");
+        let entry = directory.path().join("00000000.r0");
+
+        std::fs::write(&entry, b"-----BEGIN X509 CRL-----\nnot base64\n")
+            .expect("write the unloadable entry");
+        let error = crls_from_hashed_directory(directory.path())
+            .expect_err("an unloadable hashed entry must not be skipped");
+        assert!(
+            error.contains("cannot load hashed PEM CRL entry"),
+            "an unloadable entry must be named as such: {error}"
+        );
+        assert!(
+            error.contains("00000000.r0"),
+            "the refusal must name the offending path: {error}"
+        );
+
+        let pem = include_str!("../tests/data/stale_guard_crl.pem");
+        std::fs::write(&entry, format!("{pem}{pem}")).expect("write the two-CRL entry");
+        let error = crls_from_hashed_directory(directory.path())
+            .expect_err("two CRLs in one hashed entry make rustls's first match arbitrary");
+        assert!(
+            error.contains("must contain exactly one PEM CRL"),
+            "a multi-CRL entry must be named as such: {error}"
+        );
+    }
+
+    /// A hashed CRL entry must belong to the issuer its FILE NAME claims.
+    ///
+    /// OpenSSL looks a CRL up BY that name, so a CRL filed under another
+    /// issuer's hash means the real one is never found for either issuer and
+    /// revocation quietly goes unchecked - the same fail-open the directory
+    /// guards refuse elsewhere.
+    ///
+    /// The sibling test above shares this entry point but cannot reach this
+    /// arm: both of its fixtures are refused by the load and count arms first,
+    /// which is how the mismatch check came to be unbound. Disabling it left
+    /// the lib (767) and suite (797) suites entirely green.
+    #[test]
+    fn a_hashed_crl_entry_must_belong_to_the_issuer_it_is_filed_under() {
+        let directory = tempfile::tempdir().expect("create a hashed CRL directory");
+        let pem = include_str!("../tests/data/stale_guard_crl.pem");
+        let misfiled = directory.path().join("00000000.r0");
+        std::fs::write(&misfiled, pem).expect("write the misfiled entry");
+
+        let error = crls_from_hashed_directory(directory.path())
+            .expect_err("a CRL filed under another issuer's hash must be refused");
+        assert!(
+            error.contains("00000000.r0"),
+            "the refusal must name the offending entry: {error}"
+        );
+        assert!(
+            error.contains("not 00000000"),
+            "the refusal must name the hash the entry was filed under: {error}"
+        );
+
+        // Control: the same CRL under its own issuer hash loads, so the
+        // refusal turns on the mismatch rather than on the fixture.
+        let crl = crls_from_pem_file(&misfiled).expect("the fixture is one loadable CRL");
+        let hash = openssl_crl_issuer_hash(&crl[0]).expect("hash the fixture's issuer");
+        std::fs::remove_file(&misfiled).expect("remove the misfiled entry");
+        std::fs::write(directory.path().join(format!("{hash}.r0")), pem)
+            .expect("write the correctly filed entry");
+        let loaded =
+            crls_from_hashed_directory(directory.path()).expect("a correctly filed CRL loads");
+        assert_eq!(loaded.len(), 1, "the correctly filed CRL must be loaded");
+    }
+
+    /// `sslcrldir` naming a directory with nothing usable in it must FAIL,
+    /// because the alternative is silently verifying without revocation.
+    ///
+    /// This is the fail-closed half of the CRL configuration. `sslcrldir` is
+    /// an explicit request to check revocation; a typo in the path, a
+    /// directory whose CRLs were never rehashed, or one holding only source
+    /// `.crl` files all reach here with an empty load and no error of their
+    /// own. Accepting that builds a verifier with NO CRLs, which trusts a
+    /// revoked certificate while the operator believes revocation is on.
+    ///
+    /// The empty load is production-reachable, not a synthetic state:
+    /// `crls_from_hashed_directory` returns `Ok(vec![])` whenever no file name
+    /// matches OpenSSL's `<8 hex digits>.r<n>` pattern, and skips
+    /// non-conforming names rather than failing on them.
+    #[test]
+    fn an_sslcrldir_holding_no_usable_crls_is_refused() {
+        let error = verifier_for(
+            SslMode::VerifyFull,
+            roots_with(CA),
+            ConfiguredCrls {
+                file: Vec::new(),
+                directory: Some(ConfiguredCrlDirectory {
+                    path: "/isolated/empty-crl-directory".to_string(),
+                    loaded: Ok(Vec::new()),
+                }),
+            },
+            &provider(),
+        )
+        .expect_err("an sslcrldir that yields no CRLs must not verify without revocation");
+        let cause = std::error::Error::source(&error)
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        assert!(
+            cause.contains("no usable OpenSSL-hashed PEM CRLs"),
+            "the refusal must say what the directory lacked: {cause}"
+        );
+        assert!(
+            cause.contains("/isolated/empty-crl-directory"),
+            "the refusal must name the directory the operator configured: {cause}"
+        );
+    }
+
     #[test]
     fn sslcrl_and_sslcrldir_cannot_select_different_crls_for_one_issuer() {
         let pem = include_str!("../tests/data/stale_guard_crl.pem");
@@ -2930,6 +3247,48 @@ mod tests {
             chain.contains("no CERTIFICATE blocks"),
             "the refusal must say what the file lacked: {chain}"
         );
+    }
+
+    /// The `sslrootcert=system` arm of the same refusal the test above covers
+    /// for `sslrootcert=<path>`. It had no witness: mutated to `if false` it
+    /// left the lib (765), `tls_live` (48) and `suite` (797) suites green,
+    /// because the OS store cannot be emptied from a test without setting
+    /// `SSL_CERT_FILE` across this process.
+    ///
+    /// It is worth binding because `verifier_for` reads an empty store as
+    /// "sslrootcert is unset". Without this refusal a weak `sslmode` reaching
+    /// the public `from_config` directly - which skips the
+    /// `validate_connection_settings` rule that `system` demands
+    /// `verify-full` - would be handed `ServerVerification::None`, having
+    /// asked to trust the operating system's certificates.
+    #[test]
+    fn a_system_trust_store_with_nothing_usable_is_refused_by_name() {
+        let error = system_trust_anchors(Vec::new(), 3)
+            .expect_err("an empty system store cannot verify anything");
+        let chain = sslkey_error_chain(&error);
+        assert!(
+            chain.contains("sslrootcert=system"),
+            "the refusal must name the setting: {chain}"
+        );
+        assert!(
+            chain.contains("3 read error(s)"),
+            "the refusal must report how many entries could not be read: {chain}"
+        );
+
+        // A store whose every entry is unparsable is empty for this purpose:
+        // the per-certificate failures are ignored, the empty result is not.
+        let garbage = CertificateDer::from(b"not a certificate".to_vec());
+        assert!(
+            system_trust_anchors(vec![garbage], 0).is_err(),
+            "a store no anchor could be added from must not pass as configured"
+        );
+
+        // Control: one usable certificate is enough, and is kept, even beside
+        // read errors - those are what the store tolerates rather than fails on.
+        let ca = CertificateDer::from_pem_slice(include_bytes!("../tests/data/verifier_ca.pem"))
+            .expect("decode the fixture CA");
+        let roots = system_trust_anchors(vec![ca], 7).expect("a usable anchor is accepted");
+        assert_eq!(roots.len(), 1, "the usable anchor must be kept");
     }
 
     #[test]
