@@ -351,7 +351,7 @@ fn report_declared_keys(sources: &[(String, String)]) {
 /// Report every remaining raw environment access and every declared key.
 ///
 /// This is the Step 4 worklist and, once it reaches zero violations, the
-/// evidence that the gate in `crates/config-contract/tests/` can be believed.
+/// evidence that the gate in `crates/zeroship-config-contract/tests/` can be believed.
 /// Rows go to stdout, counts to stderr, so a redirected run keeps a clean list.
 fn raw_env(args: &[String]) {
     let mut root = PathBuf::from(".");
@@ -388,6 +388,17 @@ fn raw_env(args: &[String]) {
         }
     };
 
+    if gate && !planted_fixtures_are_tracked(&sources) {
+        eprintln!(
+            "config raw-env: gate: REFUSED: no tracked Rust file lies under \
+             {PLANTED_VIOLATION_DIR}, so the constant this mode classifies by names \
+             nothing. Every planted violation would be reported as an unexpected one \
+             and every real one would be indistinguishable from them. Repoint the \
+             constant at the fixtures rather than reading this run's verdict."
+        );
+        std::process::exit(1);
+    }
+
     match scan_sources_by_role(&sources) {
         Ok(report) => {
             report_declared_keys(&sources);
@@ -403,7 +414,7 @@ fn raw_env(args: &[String]) {
             );
             if gate {
                 // A CLEAN scan is the FAILING case for the gate. The planted
-                // fixtures under crates/config-contract/tests/fixtures/ break
+                // fixtures under crates/zeroship-config-contract/tests/fixtures/ break
                 // the rule on purpose, so zero violations means the scanner
                 // stopped seeing them - the exact false green this mode exists
                 // to make impossible.
@@ -462,7 +473,25 @@ fn raw_env(args: &[String]) {
 /// finds them and a bare `raw-env` correctly exits 1 with two violations. That
 /// makes the subcommand unusable as a CI gate as written, which is why this
 /// mode exists.
-const PLANTED_VIOLATION_DIR: &str = "crates/config-contract/tests/fixtures/";
+///
+/// DERIVED FROM THE PACKAGE NAME, not spelled out. This was the literal
+/// `crates/config-contract/tests/fixtures/` from `105a75131`
+/// ("every crate directory is named for the package it holds", which renamed the
+/// directory to `crates/zeroship-config-contract`) until 2026-09-04, and it named
+/// nothing for that whole period: `gate_verdict` classifies by
+/// `to_string().contains(...)`, so a prefix matching nothing put all four planted
+/// violations in the UNEXPECTED column and `--gate` exited 1 on every tree. That
+/// is the third site of one defect. `raw_env::CENTRAL_ACCESSOR` and
+/// `crates/zeroship-core/tests/config_env_access_gate.rs`'s `FIXTURE_PREFIXES` were
+/// the first two, both repaired on 2026-08-28; this one was missed because it is
+/// in a `[[bin]]` that no `#[test]` linked. `env!("CARGO_PKG_NAME")` makes the
+/// rename impossible to survive: cargo supplies the name, so a package rename
+/// moves this string in the same build.
+///
+/// The one assumption left is the `crates/` root, which cargo cannot supply.
+/// `refuse_unless_planted_fixtures_are_tracked` below is what stops that
+/// assumption failing silently.
+const PLANTED_VIOLATION_DIR: &str = concat!("crates/", env!("CARGO_PKG_NAME"), "/tests/fixtures/");
 
 /// The expected number of planted violations.
 ///
@@ -476,6 +505,25 @@ const PLANTED_VIOLATION_DIR: &str = "crates/config-contract/tests/fixtures/";
 /// write fixture is what keeps the WRITE rule provably alive - without it the
 /// rule could stop firing entirely and this gate would report clean.
 const PLANTED_VIOLATIONS: usize = 4;
+
+/// Whether any enumerated source actually lies under [`PLANTED_VIOLATION_DIR`].
+///
+/// The one-variable partner to the classification in [`gate_verdict`]. That
+/// function sorts violations into "planted" and "unexpected" by prefix, and a
+/// prefix matching nothing is indistinguishable from a prefix matching only
+/// clean files: both put everything in the second column, and the resulting
+/// failure names the fixtures rather than the constant. Asking the ENUMERATION
+/// whether the prefix resolves separates those two states before the verdict is
+/// computed.
+///
+/// This is the same guard `crates/zeroship-core/tests/config_env_access_gate.rs`
+/// added for `FIXTURE_PREFIXES` on 2026-08-28, at the sibling site that was
+/// repaired then and this one was not.
+fn planted_fixtures_are_tracked(sources: &[(String, String)]) -> bool {
+    sources
+        .iter()
+        .any(|(path, _)| path.starts_with(PLANTED_VIOLATION_DIR))
+}
 
 /// Decide the gate exit status from a violation set.
 ///
@@ -615,5 +663,81 @@ fn inventory(args: &[String]) {
             }
             std::process::exit(1);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `CARGO_MANIFEST_DIR` is this crate's directory; the workspace root is two
+    /// levels above it. Deliberately NOT derived from `PLANTED_VIOLATION_DIR`,
+    /// which is the thing under test.
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("this crate directory has a workspace root two levels above it")
+            .to_path_buf()
+    }
+
+    /// The regression. `PLANTED_VIOLATION_DIR` must name a directory that really
+    /// holds tracked Rust.
+    ///
+    /// FAILS BEFORE THE FIX: the constant read `crates/config-contract/tests/fixtures/`
+    /// from the `105a75131` crate-directory rename until 2026-09-04, matched no
+    /// tracked file, and so put all four planted violations in the "unexpected"
+    /// column - `tests/config_name_alignment_gate.sh` section 5 was red on every
+    /// tree for that whole period, blaming the two fixture files that exist to
+    /// prove the scanner works.
+    ///
+    /// This test lives in the `[[bin]]` because the constant does. That is why the
+    /// 2026-08-28 sweep repaired `raw_env::CENTRAL_ACCESSOR` and
+    /// `config_env_access_gate.rs`'s `FIXTURE_PREFIXES` and missed this one: both
+    /// of those are reachable from a `#[test]` in a library or integration target,
+    /// and nothing linked this one.
+    #[test]
+    fn planted_violation_dir_names_tracked_fixtures() {
+        let sources = collect_tracked_rust_sources(&workspace_root())
+            .unwrap_or_else(|errors| panic!("could not enumerate tracked Rust source: {errors:?}"));
+
+        // Anti-vacuity: an empty or tiny enumeration would fail the assertion
+        // below for the wrong reason, and "the prefix names nothing" would be
+        // reported when the truth is "nothing was enumerated".
+        assert!(
+            sources.len() > 500,
+            "only {} tracked Rust files were enumerated; the enumeration is broken, \
+             so this test cannot rule on the prefix",
+            sources.len()
+        );
+
+        let matched = sources
+            .iter()
+            .filter(|(path, _)| path.starts_with(PLANTED_VIOLATION_DIR))
+            .count();
+        assert!(
+            matched > 0,
+            "no tracked file starts with {PLANTED_VIOLATION_DIR:?}, so `gate_verdict` \
+             classifies every planted violation as an unexpected one. A directory moved \
+             and this constant did not."
+        );
+    }
+
+    /// The one-variable partner: prove the resolve check says NO for the shape
+    /// that caused the defect. Without it `planted_fixtures_are_tracked` could
+    /// return `true` unconditionally and the test above would still pass.
+    #[test]
+    fn the_resolve_check_rejects_a_prefix_that_names_nothing() {
+        let elsewhere = vec![(
+            "crates/zeroship-core/src/config/env.rs".to_owned(),
+            String::new(),
+        )];
+        assert!(!planted_fixtures_are_tracked(&elsewhere));
+
+        let under_the_prefix = vec![(
+            format!("{PLANTED_VIOLATION_DIR}raw_read_alias.rs"),
+            String::new(),
+        )];
+        assert!(planted_fixtures_are_tracked(&under_the_prefix));
     }
 }

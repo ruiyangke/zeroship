@@ -67,11 +67,11 @@ const FIXTURE_PREFIXES: &[&str] = &[
 ];
 
 fn workspace_root() -> &'static Path {
-    // CARGO_MANIFEST_DIR is crates/core; the workspace root is two levels up.
+    // CARGO_MANIFEST_DIR is crates/zeroship-core; the workspace root is two levels up.
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(Path::parent)
-        .expect("crates/core has a workspace root above it")
+        .expect("crates/zeroship-core has a workspace root above it")
 }
 
 fn scan() -> (usize, Vec<RawEnvViolation>) {
