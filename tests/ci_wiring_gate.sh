@@ -496,7 +496,35 @@ gate_arms_init ci_wiring
 echo "ci wiring gate"
 
 # --- the maxdepth-1 blind spot, checked rather than assumed ----------------
-NESTED="$(find "$TESTS_DIR" -mindepth 2 -name '*_gate.sh' -type f | LC_ALL=C sort)"
+#
+# The enumeration below is `find -maxdepth 1 -name '*_gate.sh'`, and
+# tests/gate_arm_census.sh uses the same two keys. A gate one directory down is
+# invisible to both, which is what this check is for.
+#
+# IT USED TO ASK FOR `*_gate.sh` - THE VERY NAME IT EXISTS TO DISTRUST. A gate
+# one directory down under any other name was invisible to the enumeration for
+# being nested AND invisible to this check for being differently named. Two
+# blind spots with the same shape do not cross-check each other; they agree.
+#
+# So this asks TWO questions, blind differently. The first is the old name key,
+# kept because a nested file called `*_gate.sh` is a gate whoever wrote it.
+# The second is structural, and comes from gate_arms.sh's own contract rather
+# than from a filename: a gate is a script that CALLS `gate_arms_init`. That
+# key does not care what the file is called or whether it ends in `.sh`.
+#
+# tests/lib/gate_arms.sh is excluded BY PATH, not by pattern. It DEFINES that
+# function, and an exclusion written as a pattern would also hide a real caller
+# whose name happened to match it.
+#
+# node_modules is pruned: tests/e2e-browser/node_modules is vendored third-party
+# JavaScript, and nothing in it is one of our gates.
+NESTED_BY_NAME="$(find "$TESTS_DIR" -mindepth 2 -name '*_gate.sh' -type f | LC_ALL=C sort)"
+NESTED_BY_ARMS="$(find "$TESTS_DIR" -mindepth 2 \( -name node_modules -o -name .git \) -prune -o \
+    -type f ! -path "$TESTS_DIR/lib/gate_arms.sh" -print 2>/dev/null \
+  | LC_ALL=C sort \
+  | xargs -r grep -l 'gate_arms_init' 2>/dev/null \
+  | LC_ALL=C sort)"
+NESTED="$(printf '%s\n%s\n' "$NESTED_BY_NAME" "$NESTED_BY_ARMS" | grep -v '^$' | LC_ALL=C sort -u)"
 if [ -n "$NESTED" ]; then
   fail "these gates live below tests/ depth 1, where neither this gate's
        enumeration nor tests/gate_arm_census.sh's can see them:
