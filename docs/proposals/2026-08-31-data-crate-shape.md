@@ -345,10 +345,20 @@ edge turns its control arm red.
 proves it.** `crates/zeroship-data-cdc-server` exists and the worker's privilege did not move:
 `crates/zeroship-worker/src/slot_reaper.rs:7` still imports `zeroship_plugin_db::slot_reaper`, and
 `db/migrations-ts/20260818000200_worker_database_authority.ts` still grants `zeroship_worker`
-REPLICATION and BYPASSRLS. Deleting the import alone would leave the worker holding REPLICATION with
-nothing using it - the code moves and the privilege does not. The four coordinated edits are in
+REPLICATION and BYPASSRLS. The four coordinated edits are in
 `docs/proposals/2026-08-28-cdc-service.md` under "The reaper is a privilege change"; they land in one
 commit or not at all.
+
+**THIS PARAGRAPH ADDED "with nothing using it" TO THAT SENTENCE UNTIL 2026-09-04, AND IT IS THE ONE
+CLAIM HERE THAT MEASUREMENT REFUTES.** Deleting the import drops no privilege, because three other
+REPLICATION-gated statements ship in the same binary and one of them is reachable from creator JS:
+`crates/zeroship-plugin-db/src/replication.rs:212` mints a slot,
+`crates/zeroship-plugin-db/src/replication.rs:532` drops one, and
+`crates/zeroship-plugin-db/src/wal_consumer.rs:577` opens the `replication=database` connection.
+The evidence, the two PostgreSQL versions it was taken on and the reachability chain are in the CDC
+document's privilege section. So the reaper is a COUPLING problem here and a privilege problem only
+once the relay owns the streaming path; `tests/worker_replication_privilege_gate.sh` refuses the
+ordering that treats it as the other way round.
 
 **Dead code does not get a crate.** Giving unreferenced modules a home is how the current clusters
 formed. Decide delete-or-wire BEFORE assigning. Applied so far: `cross_app_fk.rs` and

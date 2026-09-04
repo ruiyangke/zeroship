@@ -663,10 +663,45 @@ files. The worker still holds `REPLICATION` and `BYPASSRLS`.
 REFUSES TO BOOT on `if !posture.replication || !posture.bypass_rls`. **This
 document cited `:125` until 2026-09-03**; `:125` is inside the message, not the
 predicate. So deleting the worker's import without dropping the two role
-attributes leaves the worker holding `REPLICATION` with nothing using it - the
-code moves and the privilege does not, which is exactly the outcome AGENTS.md's
-"Privilege follows the PROCESS, not the function" warns this extraction can end
-in.
+attributes leaves the worker holding `REPLICATION` and the code moving while the
+privilege does not - exactly the outcome AGENTS.md's "Privilege follows the
+PROCESS, not the function" warns this extraction can end in.
+
+**THIS PARAGRAPH SAID "WITH NOTHING USING IT" UNTIL 2026-09-04, AND THAT HALF
+WAS FALSE - WHICH MATTERS BECAUSE IT MAKES EDITS 3 AND 4 BELOW LOOK
+SELF-CONTAINED.** Measured at `b6f9656da` by building the shipped binary
+(`cargo build -p zeroship-worker --bin zeroship-worker`, default features) and
+reading its strings: after the reaper's own occurrence is discounted, the worker
+still contains `pg_create_logical_replication_slot($1, 'pgoutput', false,
+false)`, `SELECT pg_drop_replication_slot($1)` and
+`START_REPLICATION SLOT ... LOGICAL ...`. Their sources are
+`crates/zeroship-plugin-db/src/replication.rs:212` and `:532` and
+`crates/zeroship-plugin-db/src/wal_consumer.rs:577`. All three are refused to a
+`NOREPLICATION` role - measured on PostgreSQL 18.6 and on 16.14, the version
+`deploy/compose/docker-compose.yml` pins, with the same two errors each time
+("permission denied to use replication slots", "permission denied to start WAL
+sender"). The first is CREATOR-REACHABLE:
+`crates/zeroship-plugin-db/src/v8_classes/subscription.rs:56` ->
+`crates/zeroship-plugin-db/src/cdc_lifecycle.rs:293` ->
+`crates/zeroship-plugin-db/src/change_stream_pg.rs:175` -> `ensure_worker_slot`.
+
+Two consequences follow, and both cut against reading edits 3 and 4 as a
+refactor that can go early:
+
+- **Deleting the reaper drops no privilege.** It is one `pg_drop_replication_slot`
+  out of four such statements. Its other four statements - two advisory-lock
+  takes, one release, one `SELECT` over `pg_replication_slots` - need no
+  attribute at all, measured with the same `NOREPLICATION` login on both
+  servers.
+- **Deleting the reaper removes a safety valve.** The worker still mints one slot
+  per (app, worker) from creator JS through the chain above, and the reaper is
+  the only thing in the tree that removes an abandoned one. Edits 3 and 4
+  therefore cannot precede the relay; they are consequences of edit 1, not
+  independent cleanups.
+
+`tests/worker_replication_privilege_gate.sh` now enforces this joint condition
+so the ordering cannot be got wrong silently: use, grant, boot check and reaper
+must agree, in both directions.
 
 Four edits land together, in ONE commit whose body says what privilege moved
 where. None of them is correct alone:
