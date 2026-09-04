@@ -205,6 +205,31 @@ pub async fn refuse_protection_downgrade(
     schema: &Value,
 ) -> Result<(), DbError> {
     let floor = resolve_floor(route, binding).await?;
+    refuse_offences(&floor, collection, schema)
+}
+
+/// The verdict, split from the catalog read above.
+///
+/// Split on 2026-09-04, and the reason is a measurement rather than a taste.
+/// The only place this fence's REFUSAL was bound was
+/// `zeroship-plugin-db/tests/mask_flip.rs`, a target carrying
+/// `required-features = ["test-helpers"]` - so the one durable proof that a
+/// protection downgrade is refused came from a build configuration that DOES
+/// NOT SHIP. On the same day, the capability this fence reads
+/// (`SchemaIntrospect`) turned out to be gated on that same feature while the
+/// caller was not, and the shipped binaries had not compiled for a day. A fence
+/// whose only witness needs the feature is one flag away from being a fence
+/// that only exists in test builds.
+///
+/// Everything above this line needs a backend; nothing below it does. Taking
+/// the resolved floor as a parameter is what lets `#[cfg(test)] mod tests`
+/// drive the refusal in the engine's DEFAULT-feature build, where
+/// `feature = "test-helpers"` is off.
+fn refuse_offences(
+    floor: &ProtectionFloor,
+    collection: &str,
+    schema: &Value,
+) -> Result<(), DbError> {
     let Some(stored_columns) = floor.get(collection) else {
         return Ok(());
     };
@@ -381,6 +406,71 @@ mod tests {
         assert!(!descriptor_declares_encryption(
             &json!({ "type": "string", "encrypted": true })
         ));
+    }
+
+    /// THE FENCE REFUSES IN A BUILD THAT HAS NO `test-helpers`.
+    ///
+    /// This module is `#[cfg(test)]`, so it compiles under `cargo test -p
+    /// zeroship-data-engine --lib` with DEFAULT features - where this crate's
+    /// own `feature = "test-helpers"` is off, because nothing in the build
+    /// turns it on (the `[dev-dependencies]` entries enable it on the three
+    /// crates BELOW, never on this one). That is the configuration the
+    /// pre-existing witness could not reach:
+    /// `zeroship-plugin-db/tests/mask_flip.rs` carries `required-features =
+    /// ["test-helpers"]`, so every proof that a downgrade is refused came from
+    /// a build that does not ship.
+    ///
+    /// Both protections, because the fence reads them independently and a
+    /// single-protection test cannot refute the collapsed-to-one-bit shape.
+    ///
+    /// **`cfg(not(feature))` and not a runtime assertion.** The configuration
+    /// is what this test IS, so it is spelled where the compiler enforces it: a
+    /// `--all-features` run does not collect it at all, rather than collecting
+    /// it and failing an assertion about its own build. `mask_flip.rs` binds the
+    /// same refusal on a live database with the feature ON, so the two are
+    /// complementary and neither configuration is left unwitnessed. Verify this
+    /// one still runs with:
+    ///   cargo test -p zeroship-data-engine --lib protection_floor
+    #[cfg(not(feature = "test-helpers"))]
+    #[test]
+    fn a_downgrade_is_refused_without_the_test_helpers_feature() {
+        let floor = floor_from_live(&live_with("ssn", masked_column()));
+        // The descriptor still declares the field - it just dropped the `mask`
+        // key. That one deletion is the whole defect this fence exists for.
+        let downgraded = json!({ "ssn": { "type": "string" } });
+        let err = refuse_offences(&floor, "people", &downgraded)
+            .expect_err("a dropped mask must be refused, not written in the clear");
+        let rendered = format!("{err:?}");
+        assert!(
+            rendered.contains("protection_removed_from_descriptor"),
+            "the refusal must carry the typed code creators match on: {rendered}",
+        );
+        assert!(
+            rendered.contains("ssn (masked)"),
+            "the refusal must name the column and the protection: {rendered}",
+        );
+
+        let enc_floor = floor_from_live(&live_with("secret", encrypted_column()));
+        let enc_err = refuse_offences(
+            &enc_floor,
+            "people",
+            &json!({ "secret": { "type": "string" } }),
+        )
+        .expect_err("a dropped encryption block must be refused too");
+        assert!(
+            format!("{enc_err:?}").contains("secret (encrypted)"),
+            "the encryption arm must name its own protection: {enc_err:?}",
+        );
+
+        // The control, differing in one variable: the SAME floor and the SAME
+        // collection, with the protection still declared, is permitted. Without
+        // it, a fence that refused everything would pass the two cases above.
+        refuse_offences(
+            &floor,
+            "people",
+            &json!({ "ssn": { "type": "string", "mask": { "kind": "last4" } } }),
+        )
+        .expect("a descriptor that still declares the mask must be permitted");
     }
 
     /// The floor is keyed by BINDING, so two deploys of one app do not share a

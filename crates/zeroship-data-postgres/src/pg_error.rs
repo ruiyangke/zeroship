@@ -167,7 +167,6 @@ pub fn coded_sql(context: &str, e: compio_postgres::Error) -> DbError {
 
 /// Translate the PG introspection module's contextual driver error into the
 /// backend-neutral error hierarchy.
-#[cfg(feature = "test-helpers")]
 pub(crate) fn classify_schema_error(e: super::pg_introspect::SchemaError) -> DbError {
     coded_sql(&format!("diff: {}", e.context), e.source)
 }
