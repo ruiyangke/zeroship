@@ -201,13 +201,20 @@ pub(crate) fn cdc_worker_id() -> Option<String> {
 /// dispatch. Re-reading it in the async body would be the weaker choice, not the
 /// safer one: it could answer a different dialect than the prelude planned
 /// against, which is precisely the split this stamp closes.
+///
+/// **It takes the binding, not an app id, because the route carries BOTH
+/// identities.** The tenant decides the transaction frame, the lane key, the
+/// SQLite ATTACH alias and the metering subject; the schema decides how tables
+/// are qualified and which PostgreSQL role the session narrows to. The binding
+/// is the one place both were resolved together.
 pub(crate) fn capture_route(
     scope: &mut v8::PinScope<'_, '_>,
-    app_id: &str,
+    binding: &zeroship_data_core::binding::DbBinding,
 ) -> crate::tx_route::CapturedRoute {
     crate::tx_route::CapturedRoute::capture(
         current_tx_app(scope).as_deref(),
-        app_id,
+        binding.app_id(),
+        binding.schema().clone(),
         configured_dialect(),
     )
 }
@@ -350,6 +357,17 @@ mod tests {
     /// property it pins is what permits the stamp at all: nine `plan_*`
     /// functions build SQL in the synchronous prelude, so if the dialect needed
     /// an open backend the whole design would be unavailable.
+    /// The fixture binding: app id and schema are the same string here, which
+    /// is what production still mints. Spelled once so the tests below read the
+    /// route`s two identities off ONE source, as `mint_db` does.
+    fn app_a_binding() -> zeroship_data_core::binding::DbBinding {
+        zeroship_data_core::binding::DbBinding::new(
+            "app_a",
+            zeroship_data_core::binding::COLD_START_DEPLOY_TOKEN,
+            zeroship_schema::SchemaName::new("app_a").expect("fixture schema name"),
+        )
+    }
+
     #[test]
     fn a_configured_sqlite_dialect_is_captured_without_an_open_backend() {
         in_scope!(let scope);
@@ -360,7 +378,7 @@ mod tests {
             "precondition: nothing has opened a backend on this thread"
         );
         assert_eq!(
-            super::capture_route(scope, "app_a").dialect(),
+            super::capture_route(scope, &app_a_binding()).dialect(),
             crate::query::SqlDialect::Sqlite
         );
         crate::reset_context_for_tests();
@@ -369,7 +387,7 @@ mod tests {
     #[test]
     fn top_level_dispatch_routes_to_the_pool() {
         in_scope!(let scope);
-        let route = super::capture_route(scope, "app_a");
+        let route = super::capture_route(scope, &app_a_binding());
         assert!(!route.in_tx(), "no transaction scope entered");
         assert_eq!(route.app_id(), "app_a");
     }
@@ -378,10 +396,10 @@ mod tests {
     fn dispatch_inside_the_callback_routes_to_the_transaction() {
         in_scope!(let scope);
         let prev = super::enter(scope, "app_a");
-        assert!(super::capture_route(scope, "app_a").in_tx());
+        assert!(super::capture_route(scope, &app_a_binding()).in_tx());
         super::leave(scope, prev);
         assert!(
-            !super::capture_route(scope, "app_a").in_tx(),
+            !super::capture_route(scope, &app_a_binding()).in_tx(),
             "leaving the scope must stop routing to the tx"
         );
     }
@@ -391,10 +409,15 @@ mod tests {
         in_scope!(let scope);
         let prev = super::enter(scope, "app_other");
         assert!(
-            !super::capture_route(scope, "app_a").in_tx(),
+            !super::capture_route(scope, &app_a_binding()).in_tx(),
             "SEC-1: app_a must not join app_other's transaction"
         );
-        assert!(super::capture_route(scope, "app_other").in_tx());
+        let other = zeroship_data_core::binding::DbBinding::new(
+            "app_other",
+            zeroship_data_core::binding::COLD_START_DEPLOY_TOKEN,
+            zeroship_schema::SchemaName::new("app_other").expect("fixture schema name"),
+        );
+        assert!(super::capture_route(scope, &other).in_tx());
         super::leave(scope, prev);
     }
 
@@ -409,7 +432,7 @@ mod tests {
         in_scope!(let scope);
         let prev = super::enter(scope, "app_a");
         let ambient = crate::tx_lanes::with(|l| l.has_tx_for("app_a"));
-        let captured = super::capture_route(scope, "app_a").in_tx();
+        let captured = super::capture_route(scope, &app_a_binding()).in_tx();
         super::leave(scope, prev);
         assert!(!ambient, "precondition: no transaction is parked for app_a");
         assert!(

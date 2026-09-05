@@ -203,11 +203,11 @@ impl PostgresBackend {
     /// Propagates pool checkout, session setup, statement and COMMIT failures.
     pub async fn query_roled_json(
         &self,
-        app_id: &str,
+        schema: &zeroship_schema::SchemaName,
         sql: &str,
         params: &[&str],
     ) -> Result<Vec<serde_json::Value>, DbError> {
-        pg_autocommit::roled_json(&self.pool, app_id, sql, params).await
+        pg_autocommit::roled_json(&self.pool, schema, sql, params).await
     }
 
     /// Read column 0 of the first row as raw bytes, under this app's role.
@@ -218,11 +218,11 @@ impl PostgresBackend {
     /// byte-typed.
     pub async fn read_roled_scalar_bytes(
         &self,
-        app_id: &str,
+        schema: &zeroship_schema::SchemaName,
         sql: &str,
         params: &[&str],
     ) -> Result<pg_autocommit::ScalarRead<Vec<u8>>, DbError> {
-        pg_autocommit::roled_scalar_bytes(&self.pool, app_id, sql, params).await
+        pg_autocommit::roled_scalar_bytes(&self.pool, schema, sql, params).await
     }
 
     /// Read column 0 of the first row as text, under this app's role.
@@ -234,11 +234,11 @@ impl PostgresBackend {
     /// [`Self::read_roled_scalar_bytes`].
     pub async fn read_roled_scalar_text(
         &self,
-        app_id: &str,
+        schema: &zeroship_schema::SchemaName,
         sql: &str,
         params: &[&str],
     ) -> Result<pg_autocommit::ScalarRead<String>, DbError> {
-        pg_autocommit::roled_scalar_text(&self.pool, app_id, sql, params).await
+        pg_autocommit::roled_scalar_text(&self.pool, schema, sql, params).await
     }
 
     /// Run a statement under this app's role, discarding any result rows.
@@ -248,11 +248,11 @@ impl PostgresBackend {
     /// As [`Self::query_roled_json`].
     pub async fn execute_roled(
         &self,
-        app_id: &str,
+        schema: &zeroship_schema::SchemaName,
         sql: &str,
         params: &[&str],
     ) -> Result<(), DbError> {
-        pg_autocommit::roled_statement(&self.pool, app_id, sql, params).await
+        pg_autocommit::roled_statement(&self.pool, schema, sql, params).await
     }
 
     /// Run `sql` under this app's role and render the rows as JSON, keeping the
@@ -274,11 +274,11 @@ impl PostgresBackend {
     /// As [`Self::query_roled_json`].
     pub async fn query_roled_rows_as_json(
         &self,
-        app_id: &str,
+        schema: &zeroship_schema::SchemaName,
         sql: &str,
         params: &[&str],
     ) -> Result<Vec<serde_json::Value>, DbError> {
-        let rows = pg_autocommit::roled_rows(&self.pool, app_id, sql, params).await?;
+        let rows = pg_autocommit::roled_rows(&self.pool, schema, sql, params).await?;
         Ok(super::pg_row_json::rows_to_json_value(&rows))
     }
 }
@@ -652,7 +652,7 @@ impl VectorIndex for PostgresBackend {
             .plan_vector_search(binding, collection, column, query, k, metric, filter, schema)
             .await?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        self.query_roled_json(binding.app_id(), &bq.sql, &param_refs)
+        self.query_roled_json(binding.schema(), &bq.sql, &param_refs)
             .await
     }
 }
@@ -771,7 +771,7 @@ impl SpatialIndex for PostgresBackend {
             )
             .await?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-        self.query_roled_json(binding.app_id(), &bq.sql, &param_refs)
+        self.query_roled_json(binding.schema(), &bq.sql, &param_refs)
             .await
     }
 }
@@ -1485,18 +1485,22 @@ pub fn render_begin(intent: BeginIntent) -> String {
 /// `compio_postgres`.
 pub async fn apply_per_app_role(
     client: &compio_postgres::Client,
-    app_id: &str,
+    schema: &zeroship_schema::SchemaName,
 ) -> Result<(), zeroship_data_core::error::SessionSetupError> {
     // SET LOCAL ROLE + the DB-1 timeout guards (statement / idle-in-tx / lock)
     // in one simple-query batch - all SET LOCAL, so they revert at the tx end.
     // The idle-in-tx guard is the load-bearing defense: a creator callback that
     // never resolves can no longer pin this dedicated connection forever and
     // exhaust the shared Postgres for other tenants.
-    let sql = crate::pg_session_sql::tx_session_setup_sql(app_id)
+    let sql = crate::pg_session_sql::tx_session_setup_sql(schema)
         .map_err(zeroship_data_core::error::SessionSetupError::failed)?;
     client.simple_query(&sql).await.map_err(|e| {
+        // THE SAME `schema`, not a second variable that happens to hold the same
+        // characters. The classifier derives the role it expects to see named in
+        // the failure; handing it a different identity than the setup batch used
+        // is what degrades SCHEMA_NOT_PROVISIONED into a generic failure.
         let mut classified =
-            crate::pg_error::classify_pg_per_app_session_setup(&e, app_id);
+            crate::pg_error::classify_pg_per_app_session_setup(&e, schema);
         zeroship_data_core::error::prefix_message(
             classified.error_mut(),
             "db: tx session setup (per-app section 17.5 + DB-1 guards): ",

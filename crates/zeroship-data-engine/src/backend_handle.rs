@@ -250,7 +250,9 @@ async fn run_planned_postgres_read(
             &rows,
         ));
     }
-    pg.query_roled_json(route.app_id(), &bq.sql, &params).await
+    // SCHEMA: the roled autocommit lane qualifies the table and derives the
+    // per-app role, both from the physical schema.
+    pg.query_roled_json(route.schema(), &bq.sql, &params).await
 }
 
 /// The unmask fetch's lane vendor disagreed with the bound backend's.
@@ -306,11 +308,16 @@ pub async fn read_raw_column_bytes(
     raw_column: &str,
     row_pk: &str,
 ) -> Result<ScalarRead<Vec<u8>>, DbError> {
-    let app_id = route.app_id();
+    // TWO IDENTITIES, and the arms want different ones. Postgres qualifies the
+    // table with the SCHEMA and narrows the session to the role derived from
+    // it; SQLite qualifies with the ATTACH ALIAS, which is TENANT-keyed -
+    // `attach_app_file(app_id)` is what created it.
+    let schema = route.schema().as_str();
+    let attach_alias = route.app_id();
     match route.backend() {
         BackendHandle::Postgres(pg) => {
             let sql =
-                format!("SELECT \"{raw_column}\" FROM \"{app_id}\".\"{collection}\" WHERE id = $1");
+                format!("SELECT \"{raw_column}\" FROM \"{schema}\".\"{collection}\" WHERE id = $1");
             if route.in_tx() {
                 let lane = crate::exec::take_tx_lane(route)?;
                 let TxConnection::Postgres(client) = lane.client() else {
@@ -322,10 +329,10 @@ pub async fn read_raw_column_bytes(
                     .map_err(|e| crate::backend::pg_error::classify(&e))?;
                 return zeroship_data_postgres::pg_autocommit::scalar_bytes(&rows);
             }
-            pg.read_roled_scalar_bytes(app_id, &sql, &[row_pk]).await
+            pg.read_roled_scalar_bytes(route.schema(), &sql, &[row_pk]).await
         }
         BackendHandle::Sqlite(sq) => {
-            let q_app = sq.quote_ident(app_id);
+            let q_app = sq.quote_ident(attach_alias);
             let q_coll = sq.quote_ident(collection);
             let q_col = sq.quote_ident(raw_column);
             let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
@@ -362,11 +369,15 @@ pub async fn read_raw_column_text(
     raw_column: &str,
     row_pk: &str,
 ) -> Result<ScalarRead<String>, DbError> {
-    let app_id = route.app_id();
+    // The same two identities as [`read_raw_column_bytes`], split for the same
+    // reason: PG qualifies with the schema, SQLite with the tenant-keyed ATTACH
+    // alias.
+    let schema = route.schema().as_str();
+    let attach_alias = route.app_id();
     match route.backend() {
         BackendHandle::Postgres(pg) => {
             let sql =
-                format!("SELECT \"{raw_column}\" FROM \"{app_id}\".\"{collection}\" WHERE id = $1");
+                format!("SELECT \"{raw_column}\" FROM \"{schema}\".\"{collection}\" WHERE id = $1");
             if route.in_tx() {
                 let lane = crate::exec::take_tx_lane(route)?;
                 let TxConnection::Postgres(client) = lane.client() else {
@@ -378,10 +389,10 @@ pub async fn read_raw_column_text(
                     .map_err(|e| crate::backend::pg_error::classify(&e))?;
                 return zeroship_data_postgres::pg_autocommit::scalar_text(&rows);
             }
-            pg.read_roled_scalar_text(app_id, &sql, &[row_pk]).await
+            pg.read_roled_scalar_text(route.schema(), &sql, &[row_pk]).await
         }
         BackendHandle::Sqlite(sq) => {
-            let q_app = sq.quote_ident(app_id);
+            let q_app = sq.quote_ident(attach_alias);
             let q_coll = sq.quote_ident(collection);
             let q_col = sq.quote_ident(raw_column);
             let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
@@ -442,21 +453,29 @@ impl BackendHandle {
     /// Empty strings stand in for absent values rather than SQL NULL. The table
     /// is operator-read-only, so `WHERE actor_id = ''` is the filter, and the
     /// simplicity is worth more here than NULL fidelity.
+    ///
+    /// **Two identities, one per arm.** PostgreSQL qualifies the table with the
+    /// SCHEMA and runs the INSERT under the role derived from it; SQLite reaches
+    /// the same table through the ATTACH ALIAS, which is tenant-keyed because
+    /// `attach_app_file(app_id)` is what created it. One `&str` served both
+    /// while the two values were the same string.
     pub async fn append_unmask_audit(
         &self,
-        app_id: &str,
+        schema: &zeroship_schema::SchemaName,
+        attach_alias: &str,
         row: &UnmaskAuditRow<'_>,
     ) -> Result<(), DbError> {
         match self {
             Self::Postgres(pg) => {
+                let schema_name = schema.as_str();
                 let sql = format!(
-                    r#"INSERT INTO "{app_id}"."{AUDIT_UNMASK_TABLE}"
+                    r#"INSERT INTO "{schema_name}"."{AUDIT_UNMASK_TABLE}"
                        (actor_id, actor_role, claimed_actor, collection, row_pk, "column",
                         classification, reason, outcome)
                        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)"#
                 );
                 pg.execute_roled(
-                    app_id,
+                    schema,
                     &sql,
                     &[
                         row.actor_id,
@@ -474,7 +493,7 @@ impl BackendHandle {
                 Ok(())
             }
             Self::Sqlite(sq) => {
-                let q_app = sq.quote_ident(app_id);
+                let q_app = sq.quote_ident(attach_alias);
                 let sql = format!(
                     r#"INSERT INTO {q_app}."{AUDIT_UNMASK_TABLE}"
                        (actor_id, actor_role, claimed_actor, collection, row_pk, "column",
@@ -523,9 +542,15 @@ impl BackendHandle {
     /// It goes back to the pool with a transaction open, which
     /// `Pool::return_client` handles: it rolls back any session it cannot prove
     /// `Idle` before publishing it.
+    ///
+    /// Takes BOTH identities. `app_id` is the SC-1 admission key and the SQLite
+    /// ATTACH alias; `schema` is what the PostgreSQL session narrows its role
+    /// to. One `&str` served both while they were the same string, and the day
+    /// they diverge the PG arm would have narrowed to a role nobody created.
     pub async fn open_tx_session(
         &self,
         app_id: &str,
+        schema: &zeroship_schema::SchemaName,
         begin: BeginIntent,
     ) -> Result<crate::tx_lanes::TxConnection, OpenSessionError> {
         match self {
@@ -533,7 +558,7 @@ impl BackendHandle {
                 let client = pg.acquire_dedicated_client(app_id).await?;
                 let begin_sql = postgres::render_begin(begin);
                 pg.client_exec(&client, &begin_sql, &[]).await?;
-                postgres::apply_per_app_role(&client, app_id).await?;
+                postgres::apply_per_app_role(&client, schema).await?;
                 Ok(crate::tx_lanes::TxConnection::Postgres(client))
             }
             Self::Sqlite(sq) => {

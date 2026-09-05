@@ -329,7 +329,8 @@ async fn exec_postgres_autocommit_with_role(
     // engine-internal.
     match route.backend() {
         BackendHandle::Postgres(pg) => {
-            pg.query_roled_rows_as_json(route.app_id(), sql, params)
+            // SCHEMA: the roled autocommit funnel derives the per-app role from it.
+            pg.query_roled_rows_as_json(route.schema(), sql, params)
                 .await
         }
         BackendHandle::Sqlite(_) => Err(sqlite_shared_crud_unavailable()),
@@ -1817,7 +1818,12 @@ mod tests {
             // SET LOCAL role + timeouts are live on the backend.
             let cancelled = compio::time::timeout(
                 Duration::from_millis(100),
-                crate::backend::pg_autocommit::roled_rows(&pool, app_id, "SELECT pg_sleep(1)", &[]),
+                crate::backend::pg_autocommit::roled_rows(
+                    &pool,
+                    &zeroship_schema::SchemaName::new(app_id).expect("fixture schema"),
+                    "SELECT pg_sleep(1)",
+                    &[],
+                ),
             )
             .await;
             assert!(

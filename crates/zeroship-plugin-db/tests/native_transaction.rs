@@ -2010,6 +2010,15 @@ mod sc1_driver {
     /// `zeroship-data-engine`. The lookup lives here now, in the caller that
     /// owns the thread context, and it is the same call the V8 dispatcher makes
     /// on this test's behalf in production.
+    /// The physical schema a probe opens its session against.
+    ///
+    /// Derived from the app id here because these fixtures still mint one
+    /// string for both identities - the same thing production does today. The
+    /// point of the parameter is that the CALL now states which it means.
+    fn app_schema(app_id: &str) -> zeroship_schema::SchemaName {
+        zeroship_schema::SchemaName::new(app_id).expect("fixture schema name")
+    }
+
     async fn probe_backend() -> zeroship_plugin_db::backend::BackendHandle {
         zeroship_plugin_db::tx_scope::ensure_backend()
             .await
@@ -2130,7 +2139,7 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None, probe_backend().await)
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
                 .await
                 .expect("BEGIN");
             probe::operation(APP, &format!("CREATE TABLE \"{APP}\".kept (id int)"))
@@ -2182,7 +2191,7 @@ mod sc1_driver {
                 (1, 0, 1),
                 "a released session returns to the pool as idle"
             );
-            probe::begin(APP, None, probe_backend().await)
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
                 .await
                 .expect("a second BEGIN reuses it");
             assert_eq!(
@@ -2241,7 +2250,7 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None, probe_backend().await)
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
                 .await
                 .expect("BEGIN");
             let (_, _, total_before) =
@@ -2295,7 +2304,7 @@ mod sc1_driver {
             // And the strongest form: whatever the pool opens next is a
             // DIFFERENT backend.
             probe::reset(APP);
-            probe::begin(APP, None, probe_backend().await)
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
                 .await
                 .expect("a fresh BEGIN");
             let fresh_pid = probe::session_backend_pid(APP).expect("a pinned session");
@@ -2390,7 +2399,7 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None, probe_backend().await)
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
                 .await
                 .expect("BEGIN");
             let pid = probe::session_backend_pid(APP).expect("a pinned session");
@@ -2448,7 +2457,7 @@ mod sc1_driver {
                 (1, 0, 1),
                 "the session went back to the pool as idle"
             );
-            probe::begin(APP, None, probe_backend().await)
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
                 .await
                 .expect("a second BEGIN reuses it");
             assert_eq!(
@@ -2514,7 +2523,7 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None, probe_backend().await)
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
                 .await
                 .expect("BEGIN");
             let held = probe::HeldSession::take(APP).expect("hold the session");
@@ -2581,7 +2590,7 @@ mod sc1_driver {
             let admin = provision(APP).await;
             let _session_guard = SessionGuard(APP);
 
-            probe::begin(APP, None, probe_backend().await)
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
                 .await
                 .expect("BEGIN");
             probe::operation(APP, &format!("CREATE TABLE \"{APP}\".rows_ (tag text)"))
@@ -2726,7 +2735,7 @@ mod sc1_driver {
 
             // The claim was released, so the next transaction is admitted
             // rather than parked forever.
-            probe::begin(APP, None, probe_backend().await)
+            probe::begin(APP, app_schema(APP), None, probe_backend().await)
                 .await
                 .expect("the admission claim was released");
             let settled = probe::settle(APP, false).await;

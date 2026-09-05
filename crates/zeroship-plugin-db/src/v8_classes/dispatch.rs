@@ -107,7 +107,7 @@ pub(crate) fn dispatch_find<'s>(
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let coll = collection.to_string();
 
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
@@ -131,7 +131,7 @@ pub(crate) fn dispatch_insert<'s>(
 
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
 
     // Read the request-bound actor id at the synchronous
     // boundary BEFORE the async tail starts. The runtime's
@@ -162,7 +162,7 @@ pub(crate) fn dispatch_insert_many<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let actor_id = current_actor_id(&state);
 
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
@@ -197,7 +197,7 @@ pub(crate) fn dispatch_update_one<'s>(
 
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
 
     // Read actor at the sync boundary (same rationale as
     // `dispatch_insert`'s actor pin: the runtime's `executing_request_id`
@@ -236,7 +236,7 @@ pub(crate) fn dispatch_update_many<'s>(
 
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
 
     // Actor read at sync boundary (mirrors
     // `dispatch_update_one`'s rationale).
@@ -265,7 +265,7 @@ pub(crate) fn dispatch_delete_one<'s>(
 
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let actor_id = current_actor_id(&state);
 
     let built = plan_delete_one(&binding, &route, &coll, filter, actor_id.as_deref());
@@ -307,7 +307,7 @@ pub(crate) fn dispatch_delete_many<'s>(
 
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let actor_id = current_actor_id(&state);
 
     let built = plan_delete_many(&binding, &route, &coll, filter, actor_id.as_deref());
@@ -356,7 +356,7 @@ pub(crate) fn dispatch_purge_one<'s>(
     // `CapturedRoute`, because the dialect it writes its SQL in is stamped on
     // it. Hoisting it over `setup_js_promise` / `runtime_state` is safe - see
     // the note on `dispatch_count`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let built = plan_purge_one(&binding, &route, collection, filter);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -394,7 +394,7 @@ pub(crate) fn dispatch_purge_many<'s>(
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     // Capture before plan; see [`dispatch_purge_one`].
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let built = plan_purge_many(&binding, &route, collection, filter);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -430,7 +430,7 @@ pub(crate) fn dispatch_restore_one<'s>(
 
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let actor_id = current_actor_id(&state);
 
     let built = plan_restore_one(&binding, &route, &coll, filter, actor_id.as_deref());
@@ -469,7 +469,7 @@ pub(crate) fn dispatch_restore_many<'s>(
 
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let actor_id = current_actor_id(&state);
 
     let built = plan_restore_many(&binding, &route, &coll, filter, actor_id.as_deref());
@@ -509,7 +509,7 @@ pub(crate) fn dispatch_aggregate<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     // Capture before plan; see [`dispatch_purge_one`].
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let planned = plan_aggregate(&binding, &route, collection, &pipeline, &opts);
     let coll = collection.to_string();
     let group_fields = aggregate_group_fields(&pipeline);
@@ -551,7 +551,7 @@ pub(crate) fn dispatch_distinct<'s>(
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
     // Capture before plan; see [`dispatch_purge_one`].
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let planned = plan_distinct(&binding, &route, collection, field, filter, &opts);
     let coll = collection.to_string();
     // The `false` is unobservable, not a default: on the error arm `run_op`
@@ -622,7 +622,7 @@ pub(crate) fn dispatch_count<'s>(
     // isolate slot read) nor `setup_js_promise` (allocates a `PromiseResolver`
     // and reads `executing_request_id`) is among them, and the prelude is one
     // synchronous frame, so no pump turn rotates the slot inside it either.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let built = plan_count(&binding, &route, collection, filter, &opts);
 
     state.borrow_mut().spawned_ops.push(Box::pin(run_op(
@@ -657,7 +657,7 @@ pub(crate) fn dispatch_upsert<'s>(
     let actor_id = current_actor_id(&state);
     let coll = collection.to_string();
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
-    let route = crate::tx_scope::capture_route(scope, app_id);
+    let route = crate::tx_scope::capture_route(scope, &binding);
 
     state.borrow_mut().spawned_ops.push(Box::pin(settle(
         resolver,
@@ -679,7 +679,7 @@ pub(crate) fn dispatch_search<'s>(
     // state. This used to skip the capture on the grounds that the scan never
     // reads `in_tx`; the scan still does not, but `read_pipeline::apply` does -
     // see `run_search`.
-    let route = crate::tx_scope::capture_route(scope, binding.app_id());
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let planned = plan_search(&binding, route.dialect(), collection, &args);
 
     let state = runtime_state(scope);
@@ -706,7 +706,7 @@ pub(crate) fn dispatch_near<'s>(
 ) -> v8::Local<'s, v8::Promise> {
     // Captured like `dispatch_search`, and the plan takes its dialect from the
     // same capture.
-    let route = crate::tx_scope::capture_route(scope, binding.app_id());
+    let route = crate::tx_scope::capture_route(scope, &binding);
     let planned = plan_near(&binding, route.dialect(), collection, &args);
 
     let state = runtime_state(scope);
@@ -865,7 +865,7 @@ pub(crate) fn dispatch_unmask_field<'s>(
     // SELECT, and one issued inside a `db.transaction(fn)` callback has to run
     // on that transaction's connection or it cannot see a row the transaction
     // has just written.
-    let route = crate::tx_scope::capture_route(scope, binding.app_id());
+    let route = crate::tx_scope::capture_route(scope, &binding);
 
     // The parse error folds into `settle`'s error arm via `?`; it made the same
     // `reject_op` call the hand-rolled arm here did.
@@ -911,7 +911,7 @@ pub(crate) fn dispatch_bulk_unmask_field<'s>(
     let parsed = parse_bulk_args(&args_v);
     let binding = binding.clone();
     // Captured adapter-side, as in [`dispatch_unmask_field`].
-    let route = crate::tx_scope::capture_route(scope, binding.app_id());
+    let route = crate::tx_scope::capture_route(scope, &binding);
 
     state.borrow_mut().spawned_ops.push(Box::pin(crate::v8_classes::dispatch::settle(
         resolver,

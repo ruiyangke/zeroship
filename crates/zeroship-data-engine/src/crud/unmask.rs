@@ -512,6 +512,9 @@ pub async fn dispatch_unmask(
     mut args: UnmaskFieldArgs,
 ) -> Result<UnmaskFieldResult, DbError> {
     let app_id = binding.app_id();
+    // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
+    // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
+    let db_schema = binding.schema();
     let backend = route.backend();
     // Step 0 — the descriptor entry. Resolved once for the whole dispatch: the
     // mask metadata, the column-spelling alias and the encryption metadata all
@@ -546,7 +549,7 @@ pub async fn dispatch_unmask(
         // Audit-then-refuse. The audit row carries `outcome = "denied"`
         // so operators see every attempted access — including the
         // `canUnmask()` probe path the SDK uses.
-        write_audit_unmask_row(backend, app_id, &args, &mask_meta.classification, "denied").await?;
+        write_audit_unmask_row(backend, db_schema, app_id, &args, &mask_meta.classification, "denied").await?;
         // The REFUSED unmask still wrote an audit row, and that row cost a
         // statement. Metering counts work performed, not permission granted.
         meter_audit_write(app_id);
@@ -579,7 +582,7 @@ pub async fn dispatch_unmask(
     // is in hand so a SELECT failure / decrypt failure doesn't leave a
     // ghost "granted" row in the audit log (the failure surfaces a
     // typed error; the audit table reflects only completed unmasks).
-    write_audit_unmask_row(backend, app_id, &args, &mask_meta.classification, "granted").await?;
+    write_audit_unmask_row(backend, db_schema, app_id, &args, &mask_meta.classification, "granted").await?;
     meter_audit_write(app_id);
 
     Ok(UnmaskFieldResult { plaintext })
@@ -881,6 +884,11 @@ fn wrap_plaintext_per_wraps(bytes: &[u8], wraps: &str) -> Result<String, DbError
 /// and not this.
 async fn write_audit_unmask_row(
     backend: &BackendHandle,
+    // SCHEMA: where the audit table lives on PostgreSQL, and what the runtime
+    // role the INSERT runs under is derived from.
+    db_schema: &zeroship_schema::SchemaName,
+    // TENANT: the SQLite ATTACH alias the same table is reached through on the
+    // dev tier, and the metering subject.
     app_id: &str,
     args: &UnmaskFieldArgs,
     classification: &str,
@@ -924,6 +932,7 @@ async fn write_audit_unmask_row(
     // than a bare pool checkout.
     backend
         .append_unmask_audit(
+            db_schema,
             app_id,
             &crate::backend::UnmaskAuditRow {
                 actor_id: &actor_id_s,
@@ -1027,6 +1036,9 @@ pub async fn dispatch_bulk_unmask(
         return Ok(BulkUnmaskResult::default());
     }
     let app_id = binding.app_id();
+    // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
+    // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
+    let db_schema = binding.schema();
     let backend = route.backend();
 
     // ---- Step 0 — the descriptor entry, resolved once for every pair.
@@ -1110,6 +1122,7 @@ pub async fn dispatch_bulk_unmask(
     if !unauthorized.is_empty() {
         write_audit_bulk_row(
             backend,
+            db_schema,
             app_id,
             &normalized_audit_args,
             &classifications,
@@ -1172,6 +1185,7 @@ pub async fn dispatch_bulk_unmask(
     // ---- Step 4 — single audit row for the whole call on success.
     write_audit_bulk_row(
         backend,
+        db_schema,
         app_id,
         &normalized_audit_args,
         &classifications,
@@ -1197,6 +1211,7 @@ pub async fn dispatch_bulk_unmask(
 /// exactly which pairs caused the refusal.
 async fn write_audit_bulk_row(
     backend: &BackendHandle,
+    db_schema: &zeroship_schema::SchemaName,
     app_id: &str,
     args: &BulkUnmaskArgs,
     classifications: &std::collections::HashMap<String, String>,
@@ -1249,7 +1264,7 @@ async fn write_audit_bulk_row(
         reason: Some(reason_text),
         rejected_claim: args.rejected_claim.clone(),
     };
-    write_audit_unmask_row(backend, app_id, &synthetic, &classification_joined, outcome).await
+    write_audit_unmask_row(backend, db_schema, app_id, &synthetic, &classification_joined, outcome).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1294,6 +1309,9 @@ pub async fn authorize_query_hint(
         return Ok(());
     }
     let app_id = binding.app_id();
+    // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
+    // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
+    let db_schema = binding.schema();
 
     let schema = crate::descriptor::collection_schema(binding, collection)?;
 
@@ -1325,6 +1343,7 @@ pub async fn authorize_query_hint(
     if !unauthorized.is_empty() {
         write_audit_query_hint_row(
             backend,
+            db_schema,
             app_id,
             collection,
             unmask_columns,
@@ -1379,6 +1398,9 @@ pub async fn audit_query_hint_granted(
         return Ok(());
     }
     let app_id = binding.app_id();
+    // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
+    // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
+    let db_schema = binding.schema();
     // Re-resolve classifications for the audit row. Cheap — the descriptor
     // lookup is a HashMap read.
     let schema = crate::descriptor::collection_schema(binding, collection)?;
@@ -1392,6 +1414,7 @@ pub async fn audit_query_hint_granted(
     }
     write_audit_query_hint_row(
         backend,
+        db_schema,
         app_id,
         collection,
         unmask_columns,
@@ -1445,6 +1468,9 @@ pub async fn dispatch_unmask_for_query(
         return Ok(());
     }
     let app_id = binding.app_id();
+    // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
+    // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
+    let db_schema = binding.schema();
     let schema = crate::descriptor::collection_schema(binding, collection)?;
     prepare_unmask_backend(route.backend(), app_id).await?;
     for row in rows.iter_mut() {
@@ -1536,6 +1562,7 @@ pub async fn dispatch_unmask_for_query(
 #[allow(clippy::too_many_arguments)]
 async fn write_audit_query_hint_row(
     backend: &BackendHandle,
+    db_schema: &zeroship_schema::SchemaName,
     app_id: &str,
     collection: &str,
     unmask_columns: &[String],
@@ -1572,7 +1599,7 @@ async fn write_audit_query_hint_row(
         reason: Some(reason_text),
         rejected_claim: rejected_claim.cloned(),
     };
-    write_audit_unmask_row(backend, app_id, &synthetic, &class_joined, outcome).await
+    write_audit_unmask_row(backend, db_schema, app_id, &synthetic, &class_joined, outcome).await
 }
 
 // ---------------------------------------------------------------------------

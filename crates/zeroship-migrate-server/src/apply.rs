@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
+use zeroship_schema::SchemaName;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
@@ -202,6 +203,11 @@ pub enum ApplyRequestError {
     Connect(compio_postgres::Error),
     #[error("inspect migration database schema: {0}")]
     InspectSchema(compio_postgres::Error),
+    /// `reason` is a rendered string rather than a `#[source]` because
+    /// `zeroship_schema::query::QueryError` implements `Display` but not
+    /// `std::error::Error`, so it cannot be a source in this chain.
+    #[error("app schema name {schema:?} is not a legal identifier: {reason}")]
+    SchemaName { schema: String, reason: String },
     #[error("database {database_id} has not been created")]
     DatabaseNotCreated { database_id: Uuid },
     #[error("migration role provision: {0}")]
@@ -281,7 +287,18 @@ pub async fn apply_ir_documents(
         return Err(ApplyRequestError::Empty);
     }
 
-    let schema = app_id.to_string();
+    // THE SERVICE'S ONE APP-ID-TO-SCHEMA DERIVATION. Everything downstream that
+    // means "the physical schema" takes the [`SchemaName`], and everything that
+    // means "the tenant" keeps taking `app_id`. A `Uuid`'s `Display` is hex and
+    // hyphens, so `SchemaName::new` cannot refuse it today; the refusal is
+    // handled rather than unwrapped because the day the schema stops being the
+    // app id, this line is where the new derivation - and its failure - lands.
+    let schema_text = app_id.to_string();
+    let schema =
+        SchemaName::new(&schema_text).map_err(|reason| ApplyRequestError::SchemaName {
+            schema: schema_text.clone(),
+            reason: reason.to_string(),
+        })?;
 
     // (a) DRIVER: open a native compio session, wrap it in the adapter's
     // `CompioPgSession`, and drive the published engine over it. Provisioning
@@ -295,7 +312,7 @@ pub async fn apply_ir_documents(
             "SELECT EXISTS (\
                  SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = $1\
              )",
-            &[&schema],
+            &[&schema_text],
         )
         .await
         .map_err(ApplyRequestError::InspectSchema)?
@@ -316,7 +333,12 @@ pub async fn apply_ir_documents(
     // carry the same no-inject confined guard charter as guarded lower. The composed
     // inject-bearing policy remains separate and is passed explicitly to shape
     // resolution and `IrAuthor` below.
-    let (exec_cfg, role) = migrator_executor_config(&schema)?;
+    // SCHEMA, still spelled `&str`. `migrator_executor_config`,
+    // `provision_audit_unmask_table` and `prepare_ir_documents` all mean the
+    // physical schema, and typing them reaches the engine`s `ExecutorConfig`,
+    // which takes owned `String`s. The downgrade is explicit and greppable
+    // (`schema.as_str()`) rather than a `&str` that either identity satisfies.
+    let (exec_cfg, role) = migrator_executor_config(schema.as_str())?;
     // THE MIGRATION JOURNAL LIVES IN THE APP'S OWN SCHEMA. `ExecutorConfig::new`
     // derives `meta_schema` as `<project_schema>_migrations`; this host points it at
     // the project schema itself, so the engine writes
@@ -340,7 +362,7 @@ pub async fn apply_ir_documents(
     // clears every additive privilege, then grants only table INSERT and
     // sequence USAGE. Created after the last call, both lookups would be no-ops
     // and the table would be unreachable to the only process that writes it.
-    provision_audit_unmask_table(session.client(), &schema)
+    provision_audit_unmask_table(session.client(), schema.as_str())
         .await
         .map_err(ApplyRequestError::ProvisionAuditUnmask)?;
     let backend = PostgresBackend::new_generic(&session);
@@ -362,7 +384,8 @@ pub async fn apply_ir_documents(
         // document under the guard, refuses a denied plan, and retains those exact
         // artifacts for apply so attestation and execution cannot disagree.
         let prepared =
-            prepare_ir_documents(&session, &exec_cfg, &schema, dir.path(), &policy).await?;
+            prepare_ir_documents(&session, &exec_cfg, schema.as_str(), dir.path(), &policy)
+                .await?;
         attest_complete_history(&backend, &exec_cfg, &prepared).await?;
 
         // Coverage refusal happens above this line. A truncated request therefore
@@ -386,6 +409,7 @@ pub async fn apply_ir_documents(
             &backend,
             policy_config,
             &policy,
+            app_id,
             &schema,
             &prepared,
             &exec_cfg,
@@ -470,7 +494,8 @@ async fn run_apply(
     backend: &PostgresBackend<'_, CompioPgSession>,
     policy_config: &ManagedPolicyConfig,
     apply_policy: &EffectivePolicy,
-    schema: &str,
+    app_id: &Uuid,
+    schema: &SchemaName,
     prepared: &[PreparedIrDocument],
     exec_cfg: &ExecutorConfig,
     role: &str,
@@ -483,7 +508,8 @@ async fn run_apply(
     // rendered-DDL guard is the fixed schema-bound no-inject confined charter.
     let sealed_policy = policy_config.seal_effective_for_app(apply_policy.clone())?;
     tracing::debug!(
-        app_id = %schema,
+        app_id = %app_id,
+        schema = %schema.as_str(),
         ceiling_id = %sealed_policy.ceiling_id,
         ceiling_version = sealed_policy.ceiling_version,
         "migrate-server: applying IR under sealed managed migration policy"
@@ -516,7 +542,15 @@ async fn run_apply(
         .map_err(ApplyRequestError::ProvisionRuntimeRole);
     let outcome = applied?;
     reprovisioned?;
-    reconcile_app_publication(session.client(), schema).await?;
+    // AMBIGUOUS, LEFT AT THE STATUS QUO AND FLAGGED. `reconcile_app_publication`
+    // spends its one `&str` parameter on BOTH identities: it names the
+    // publication from it (tenant-keyed - a publication is a change-stream
+    // subject, not a namespace) and it also filters `pg_class` by it as an
+    // `nspname` (schema-keyed). Splitting that parameter in two is a design call
+    // about publication cardinality, not a typing change, so this keeps handing
+    // it the tenant - the same bytes it received before, since the app id IS the
+    // schema today.
+    reconcile_app_publication(session.client(), &app_id.to_string()).await?;
     Ok(outcome)
 }
 
@@ -1062,6 +1096,13 @@ pub fn apply_error_kind(err: &ApplyRequestError) -> (ntex::http::StatusCode, &'s
         ApplyRequestError::DatabaseNotCreated { .. } => {
             (ntex::http::StatusCode::CONFLICT, "database_not_created")
         }
+        // Not a creator fault and not retryable: the caller supplied an app id,
+        // the service derived a schema name from it, and the derivation produced
+        // something PostgreSQL cannot name. That is a platform defect.
+        ApplyRequestError::SchemaName { .. } => (
+            ntex::http::StatusCode::INTERNAL_SERVER_ERROR,
+            "app_schema_name_invalid",
+        ),
         ApplyRequestError::HistoryAttestation(
             StatusError::Ordering(_) | StatusError::PlanManifest(_),
         ) => (
@@ -1207,7 +1248,7 @@ pub const WORKER_ROLE: &str = "zeroship_worker";
 /// live. This statement converges the row it owns; catching a foreign inheriting
 /// row is `zeroship_worker`'s boot-time posture check, which refuses on ANY
 /// inheriting app-role membership regardless of who granted it.
-fn runtime_dependents_sql_for_role(schema: &str, runtime_role: &str) -> String {
+fn runtime_dependents_sql_for_role(schema: &SchemaName, runtime_role: &str) -> String {
     let runtime_role_q = quote_ident(runtime_role);
     let worker_q = quote_ident(WORKER_ROLE);
     format!(
@@ -1218,7 +1259,10 @@ fn runtime_dependents_sql_for_role(schema: &str, runtime_role: &str) -> String {
          END $runtime_dependents$;
          {journal}",
         worker_lit = quote_lit(WORKER_ROLE),
-        journal = crate::provisioning::workflow_journal_schema_sql(&format!("app_{schema}")),
+        journal = crate::provisioning::workflow_journal_schema_sql(&format!(
+            "app_{}",
+            schema.as_str()
+        )),
     )
 }
 
@@ -1302,8 +1346,8 @@ impl RuntimeRoleProvisioningSql {
 /// why that pair must stay AFTER this statement. A second reserved table the
 /// worker may write therefore has to be given its own explicit recipe, rather
 /// than inheriting reach from a wildcard.
-fn revoke_runtime_reserved_privileges_sql(schema: &str, runtime_role: &str) -> String {
-    let schema_lit = quote_lit(schema);
+fn revoke_runtime_reserved_privileges_sql(schema: &SchemaName, runtime_role: &str) -> String {
+    let schema_lit = quote_lit(schema.as_str());
     let role_lit = quote_lit(runtime_role);
     let prefix_lit = quote_lit(RESERVED_SYSTEM_TABLE_PREFIX);
     format!(
@@ -1343,8 +1387,8 @@ fn revoke_runtime_reserved_privileges_sql(schema: &str, runtime_role: &str) -> S
 /// the audit table is malformed and the grant fails, the deny remains committed
 /// instead of rolling back with it. The lookup is a no-op before the audit table
 /// exists, preserving the role provisioner's idempotent schema-only shape.
-fn revoke_runtime_audit_privileges_sql(schema: &str, runtime_role: &str) -> String {
-    let schema_lit = quote_lit(schema);
+fn revoke_runtime_audit_privileges_sql(schema: &SchemaName, runtime_role: &str) -> String {
+    let schema_lit = quote_lit(schema.as_str());
     let role_lit = quote_lit(runtime_role);
     let audit_lit = quote_lit(AUDIT_UNMASK_TABLE);
     format!(
@@ -1400,8 +1444,8 @@ fn revoke_runtime_audit_privileges_sql(schema: &str, runtime_role: &str) -> Stri
 /// PostgreSQL grants are additive, so this must execute after
 /// [`revoke_runtime_audit_privileges_sql`]. A real audit table without the
 /// `BIGSERIAL` sequence required by the data-plane INSERT is rejected.
-fn grant_runtime_audit_append_privileges_sql(schema: &str, runtime_role: &str) -> String {
-    let schema_lit = quote_lit(schema);
+fn grant_runtime_audit_append_privileges_sql(schema: &SchemaName, runtime_role: &str) -> String {
+    let schema_lit = quote_lit(schema.as_str());
     let role_lit = quote_lit(runtime_role);
     let audit_lit = quote_lit(AUDIT_UNMASK_TABLE);
     format!(
@@ -1455,29 +1499,42 @@ fn grant_runtime_audit_append_privileges_sql(schema: &str, runtime_role: &str) -
 /// Returns an error rather than allowing PostgreSQL to truncate an overlong
 /// authorization-role identifier.
 ///
+/// # Why the parameter is a [`SchemaName`] and not a `&str`
+///
+/// The role this composes is what the data plane's `SET LOCAL ROLE` must name,
+/// and the data plane composes that name on its own side
+/// (`zeroship_data_postgres::pg_session_sql::tx_session_setup_sql`). While both
+/// took `&str`, "they agree" was only ever true of the value each caller
+/// happened to hold: the parameter here is the SCHEMA and the one there was the
+/// TENANT, and the two are the same string only until the physical schema stops
+/// being the app id. Both now take the same type, so a caller reaching for the
+/// wrong identity is a compile error rather than a `SET LOCAL ROLE` naming a
+/// role nobody created.
+///
 /// # Preconditions
 ///
-/// `schema` and `migrator_role` must contain no single quote.
+/// `migrator_role` must contain no single quote. `schema` cannot: [`SchemaName`]
+/// admits only `[A-Za-z0-9_-]`.
 ///
 /// The `DO` block below embeds their `quote_ident` forms inside single-quoted
 /// `EXECUTE '...'` strings. `quote_ident` doubles internal double-quotes and does
 /// nothing to single ones, so a name containing `'` would terminate the EXECUTE
 /// literal early and the remainder would be parsed as SQL.
 ///
-/// That is safe today only because the production caller derives `schema` from
-/// a `Uuid`, derives `migrator_role` from that schema, and derives `role_name`
-/// through [`per_app_role_name`]. None can carry a quote. The guarantee lives
-/// far from this function and nothing here enforces it, so a future caller must
+/// That is safe today for `migrator_role` only because the production caller
+/// derives it from the schema, and derives `role_name` through
+/// [`per_app_role_name`]. Neither can carry a quote. That guarantee lives far
+/// from this function and nothing here enforces it, so a future caller must
 /// preserve the precondition.
 ///
 /// The durable fix is to stop pre-interpolating and let the block quote its own
 /// identifiers with `format('%I', ...)`.
 pub fn runtime_role_provisioning_sql(
-    schema: &str,
+    schema: &SchemaName,
     migrator_role: &str,
 ) -> Result<RuntimeRoleProvisioningSql, PerAppRoleNameError> {
-    let schema_q = quote_ident(schema);
-    let role_name = per_app_role_name(schema)?;
+    let schema_q = schema.quoted();
+    let role_name = per_app_role_name(schema.as_str())?;
     let role_q = quote_ident(&role_name);
     let template_q = quote_ident(APP_ROLE_TEMPLATE);
     let migrator_q = quote_ident(migrator_role);
@@ -1557,7 +1614,7 @@ pub fn runtime_role_provisioning_sql(
 
 async fn provision_runtime_app_role(
     conn: &compio_postgres::Client,
-    schema: &str,
+    schema: &SchemaName,
     migrator_role: &str,
 ) -> Result<(), ProvisionRuntimeRoleError> {
     let provisioning = runtime_role_provisioning_sql(schema, migrator_role)?;
@@ -1586,7 +1643,7 @@ mod tests {
     #[test]
     fn the_reserved_sweep_sits_between_the_wide_grant_and_the_audit_recipe() {
         let provisioning = runtime_role_provisioning_sql(
-            "0191e7a2-b3c4-4d5e-8f90-123456789abc",
+            &SchemaName::new("0191e7a2-b3c4-4d5e-8f90-123456789abc").expect("fixture schema"),
             "zs_migrator_fixture",
         )
         .expect("test runtime role name");
@@ -1623,7 +1680,7 @@ mod tests {
     #[test]
     fn the_reserved_sweep_matches_the_whole_prefix_and_nothing_shorter() {
         let provisioning = runtime_role_provisioning_sql(
-            "0191e7a2-b3c4-4d5e-8f90-123456789abc",
+            &SchemaName::new("0191e7a2-b3c4-4d5e-8f90-123456789abc").expect("fixture schema"),
             "zs_migrator_fixture",
         )
         .expect("test runtime role name");
@@ -1652,7 +1709,7 @@ mod tests {
     #[test]
     fn runtime_provisioning_delegates_only_precreated_narrow_roles() {
         let provisioning = runtime_role_provisioning_sql(
-            "0191e7a2-b3c4-4d5e-8f90-123456789abc",
+            &SchemaName::new("0191e7a2-b3c4-4d5e-8f90-123456789abc").expect("fixture schema"),
             "zs_migrator_fixture",
         )
         .expect("test runtime role name");
@@ -1682,7 +1739,10 @@ mod tests {
     fn runtime_provisioning_plan_refuses_overlong_role_names() {
         let app_id = "a".repeat(55);
         assert_eq!(
-            runtime_role_provisioning_sql(&app_id, "zs_migrator_fixture"),
+            runtime_role_provisioning_sql(
+                &SchemaName::new(&app_id).expect("fixture schema"),
+                "zs_migrator_fixture",
+            ),
             Err(PerAppRoleNameError::TooLong {
                 actual_bytes: 64,
                 max_bytes: 63,
@@ -1706,7 +1766,10 @@ mod tests {
     fn the_apply_path_and_the_exported_helper_share_one_journal_statement() {
         let app_id = uuid::Uuid::parse_str("0191e7a2-b3c4-4d5e-8f90-123456789abc").expect("uuid");
         let schema = app_id.to_string();
-        let sql = runtime_role_provisioning_sql(&schema, "zs_migrator_fixture")
+        let sql = runtime_role_provisioning_sql(
+            &SchemaName::new(&schema).expect("fixture schema"),
+            "zs_migrator_fixture",
+        )
             .expect("test runtime role name")
             .dependents;
         let exported = crate::provisioning::workflow_journal_schema_sql(

@@ -21,7 +21,7 @@ use zeroship_data_core::error::{
 /// Does this server error match the role set by per-app session setup?
 ///
 /// This discriminator is called only where the caller knows it just issued
-/// `SET LOCAL ROLE` for `app_id`. Provenance is the primary guard; SQLSTATE
+/// `SET LOCAL ROLE` for `schema`. Provenance is the primary guard; SQLSTATE
 /// and the exact expected role name pin the measured server response.
 ///
 /// The SQLSTATE alone is not enough. `SET LOCAL ROLE "missing"` reports **22023
@@ -31,18 +31,28 @@ use zeroship_data_core::error::{
 /// so matching it alone would reclassify unrelated configuration failures as
 /// creator-facing.
 ///
-/// Matching the exact role derived from `app_id` is stronger than sniffing the
+/// Matching the exact role derived from `schema` is stronger than sniffing the
 /// `app_<id>_role` shape. A pool DSN can use an app-shaped login name and return
 /// a FATAL 28000 during reconnect; that is an operator connection failure, not
 /// an app condition that `zeroship migrate` can repair.
+///
+/// # Why the parameter is a [`SchemaName`]
+///
+/// It has to derive the SAME role the setup batch asked for, and that batch
+/// derives from the schema. Both parameters were `&str` and both call sites read
+/// one variable two lines apart, so the day the setup call took the schema while
+/// this one kept the tenant, the match would silently stop holding and an
+/// un-migrated database would report a generic failure instead of
+/// SCHEMA_NOT_PROVISIONED - the one error that tells a creator to run
+/// `zeroship migrate`. Sharing the type is what makes that a compile error.
 fn is_missing_per_app_session_role(
     code: &compio_postgres::error::SqlState,
     primary_message: &str,
-    app_id: &str,
+    schema: &zeroship_schema::SchemaName,
 ) -> bool {
     use compio_postgres::error::SqlState;
 
-    let Ok(expected_role) = zeroship_core::database_role::per_app_role_name(app_id) else {
+    let Ok(expected_role) = zeroship_core::database_role::per_app_role_name(schema.as_str()) else {
         return false;
     };
     code == &SqlState::INVALID_PARAMETER_VALUE
@@ -54,12 +64,16 @@ fn is_missing_per_app_session_role(
 /// Call this only at the two session-setup sites, after connection acquisition
 /// and transaction start have succeeded. All other PostgreSQL errors, including
 /// pool connection failures, must use [`classify`].
+///
+/// `schema` must be the SAME value handed to
+/// [`crate::pg_session_sql::tx_session_setup_sql`] /
+/// `autocommit_local_session_setup_sql` on the call this is classifying.
 pub(crate) fn classify_pg_per_app_session_setup(
     e: &compio_postgres::Error,
-    app_id: &str,
+    schema: &zeroship_schema::SchemaName,
 ) -> SessionSetupError {
     if e.as_db_error()
-        .is_some_and(|db| is_missing_per_app_session_role(db.code(), db.message(), app_id))
+        .is_some_and(|db| is_missing_per_app_session_role(db.code(), db.message(), schema))
     {
         let msg = walk_pg_chain(e);
         tracing::warn!(
@@ -99,9 +113,9 @@ pub(crate) fn classify_pg_per_app_session_setup(
 #[cfg(feature = "test-helpers")]
 pub fn classify_pg_per_app_session_setup_for_tests(
     e: &compio_postgres::Error,
-    app_id: &str,
+    schema: &zeroship_schema::SchemaName,
 ) -> DbError {
-    classify_pg_per_app_session_setup(e, app_id).into_db_error()
+    classify_pg_per_app_session_setup(e, schema).into_db_error()
 }
 
 /// Classify a `compio_postgres::Error` by SQLSTATE. Falls back to
@@ -236,13 +250,13 @@ mod tests {
     fn per_app_role_composers_match_across_services() {
         use compio_postgres::error::SqlState;
 
-        let app_id = "role_parity";
-        let role = zeroship_core::database_role::per_app_role_name(app_id)
+        let schema = zeroship_schema::SchemaName::new("role_parity").expect("parity fixture");
+        let role = zeroship_core::database_role::per_app_role_name(schema.as_str())
             .expect("parity fixture role name");
         let quoted_role = zeroship_schema::query::quote_ident(&role);
 
         let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
-            app_id,
+            &schema,
             "zs_migrator_fixture",
         )
         .expect("migration fixture role name");
@@ -253,9 +267,9 @@ mod tests {
         );
 
         for setup_sql in [
-            crate::pg_session_sql::tx_session_setup_sql(app_id)
+            crate::pg_session_sql::tx_session_setup_sql(&schema)
                 .expect("transaction setup role name"),
-            crate::pg_session_sql::autocommit_local_session_setup_sql(app_id)
+            crate::pg_session_sql::autocommit_local_session_setup_sql(&schema)
                 .expect("autocommit setup role name"),
         ] {
             assert!(
@@ -269,45 +283,50 @@ mod tests {
             is_missing_per_app_session_role(
                 &SqlState::INVALID_PARAMETER_VALUE,
                 &server_message,
-                app_id,
+                &schema,
             ),
             "missing-role classifier did not recognize the shared role"
         );
     }
 
-    /// The parity test above is blind to the divergence it appears to guard.
+    /// The parity test above was blind to the divergence it appears to guard.
     ///
-    /// `per_app_role_composers_match_across_services` passes the SINGLE string
-    /// `"role_parity"` to both `runtime_role_provisioning_sql` -- whose parameter
-    /// is named `schema` (crates/zeroship-migrate-server/src/apply.rs:1475) --
-    /// and `tx_session_setup_sql`, whose parameter is named `app_id`
-    /// (crates/zeroship-data-postgres/src/pg_session_sql.rs:36). It therefore
-    /// proves the two composers AGREE GIVEN THE SAME INPUT, and proves nothing
+    /// `per_app_role_composers_match_across_services` passes ONE fixture to both
+    /// `runtime_role_provisioning_sql` and `tx_session_setup_sql`. It therefore
+    /// proves the two composers AGREE GIVEN THE SAME INPUT, and proved nothing
     /// about the inputs agreeing. Both derive through
     /// `zeroship_core::database_role::per_app_role_name`, so given one string
     /// that agreement is close to a tautology.
     ///
-    /// This test feeds them the two DIFFERENT values the app/database decoupling
-    /// produces -- the physical schema becomes `db_<dbsid>` while the tenant
-    /// stays the app uuid -- and pins the property the shipped test cannot see.
+    /// The divergence it could not see is the one the app/database decoupling
+    /// produces: the physical schema becomes `db_<dbsid>` while the tenant stays
+    /// the app uuid. While both composers took `&str`, a call site holding both
+    /// identities could hand each of them a different one and nothing objected.
     ///
-    /// Arm 1 DEMONSTRATES the blindness rather than asserting it: it reruns the
-    /// shipped test's exact shape against each identity separately and shows
-    /// both pass, so a same-input test is satisfied in the diverged world too.
+    /// **THE FIX IS THE TYPE, AND THIS TEST NOW RECORDS THAT.** Both composers
+    /// take [`zeroship_schema::SchemaName`], so the failing call this test was
+    /// written to make fail is no longer expressible - `tx_session_setup_sql`
+    /// cannot be handed a tenant id, because a tenant id is a `&str` and a
+    /// `&str` is not a `SchemaName` and there is no `From`, `AsRef` or `Deref`
+    /// to make it one. What is left to assert at run time is that the two
+    /// composers still agree on the SAME `SchemaName`, and arm 3 keeps the
+    /// fixture honest by proving the two identities really are different
+    /// strings - without that, arm 2 would hold vacuously.
     ///
-    /// Arm 3 is the second-order damage, and it is why this matters beyond a
-    /// failed transaction. `crates/zeroship-data-postgres/src/pg_autocommit.rs`
-    /// calls `autocommit_local_session_setup_sql(app_id)` at :91 and
-    /// `classify_pg_per_app_session_setup(&e, app_id)` at :93 -- ONE variable,
-    /// two lines apart, both `&str`. When the flip makes the setup call take the
-    /// schema, nothing in the type system objects to the classifier call keeping
-    /// the tenant. The server then reports the schema-derived role while the
-    /// classifier expects the tenant-derived one, the match fails, and an
-    /// un-migrated database degrades from an actionable SCHEMA_NOT_PROVISIONED
-    /// into a generic Failed.
+    /// The second-order damage this guards is why it matters beyond a failed
+    /// transaction. `crates/zeroship-data-postgres/src/pg_autocommit.rs` builds
+    /// the setup SQL and classifies its failure from ONE variable, two lines
+    /// apart. While both parameters were `&str`, a flip that gave the setup call
+    /// the schema could leave the classifier call on the tenant; the server
+    /// would then report the schema-derived role while the classifier expected
+    /// the tenant-derived one, the match would fail, and an un-migrated database
+    /// would degrade from an actionable SCHEMA_NOT_PROVISIONED into a generic
+    /// Failed. `missing_role_stays_classified_when_schema_and_tenant_diverge`
+    /// below observes that consequence on its own.
     #[test]
     fn per_app_role_composers_agree_across_the_two_identities_not_one_string() {
         use zeroship_core::database_role::per_app_role_name;
+        use zeroship_schema::SchemaName;
 
         // The two identities the decoupling separates. One string is both today.
         const TENANT_APP_ID: &str = "0191e7a2-b3c4-4d5e-8f90-123456789abc";
@@ -316,11 +335,12 @@ mod tests {
 
         // ---- Arm 1: the blindness, demonstrated. ----
         // The shipped test's shape, run against each identity on its own. Both
-        // hold, so that test stays GREEN through the divergence below.
+        // hold, so that test would stay GREEN through the divergence below - it
+        // is satisfied in the diverged world too.
         for single_input in [TENANT_APP_ID, SCHEMA_NAME] {
+            let as_schema = SchemaName::new(single_input).expect("fixture schema name");
             let migration = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
-                single_input,
-                MIGRATOR,
+                &as_schema, MIGRATOR,
             )
             .expect("provisioning role name");
             let data_plane = per_app_role_name(single_input).expect("data-plane role name");
@@ -333,30 +353,41 @@ mod tests {
         }
 
         // ---- Arm 2: the property the shipped test should have carried. ----
-        // The migration service provisions the role from the SCHEMA it created.
-        // The data plane's session setup asks for a role from the TENANT it was
-        // dispatched for. `SET LOCAL ROLE` names an identifier, so the shipped
-        // setup SQL must name the identifier that was actually created.
+        // The migration service provisions the role from the SCHEMA it created,
+        // and the data plane's `SET LOCAL ROLE` must name the identifier that
+        // was actually created. Both calls take the SAME `SchemaName` value -
+        // and, more to the point, both take the same TYPE, so a call site
+        // holding a tenant id as well cannot feed one to either of them.
         //
         // Asserted at the SQL level rather than helper-to-helper: this is a fact
         // about the statement the data plane sends, and the two role spellings
         // are both carried in the failure message so one assertion diagnoses it.
+        let schema = SchemaName::new(SCHEMA_NAME).expect("fixture schema name");
         let provisioned =
-            zeroship_migrate_server::apply::runtime_role_provisioning_sql(SCHEMA_NAME, MIGRATOR)
+            zeroship_migrate_server::apply::runtime_role_provisioning_sql(&schema, MIGRATOR)
                 .expect("provisioning role name");
-        let requested = per_app_role_name(TENANT_APP_ID).expect("data-plane role name");
-        let setup_sql =
-            crate::pg_session_sql::tx_session_setup_sql(TENANT_APP_ID).expect("tx setup sql");
+        let setup_sql = crate::pg_session_sql::tx_session_setup_sql(&schema).expect("tx setup sql");
         assert!(
             setup_sql.starts_with(&format!(
                 "SET LOCAL ROLE {};",
                 zeroship_schema::query::quote_ident(provisioned.role_name())
             )),
-            "session setup asks for a role derived from the tenant while the migration \
-             service provisioned one derived from the schema, so SET LOCAL ROLE names an \
-             identifier that was never created.\n  provisioned (from schema {SCHEMA_NAME}): \
-             {}\n  requested (from tenant {TENANT_APP_ID}): {requested}",
+            "session setup does not name the role the migration service provisioned, so \
+             SET LOCAL ROLE names an identifier that was never created.\n  provisioned \
+             (from schema {SCHEMA_NAME}): {}\n  setup SQL: {setup_sql}",
             provisioned.role_name(),
+        );
+
+        // ---- Arm 3: the fixture really is a diverged world. ----
+        // Without this, arm 2 would pass for the trivial reason that the tenant
+        // and the schema are the same string, which is the exact blindness the
+        // shipped parity test has.
+        let tenant_derived = per_app_role_name(TENANT_APP_ID).expect("tenant role name");
+        assert_ne!(
+            provisioned.role_name(),
+            tenant_derived,
+            "fixture is not diverged: the schema-derived and tenant-derived roles are equal, \
+             so arm 2 proves nothing about the identities being kept apart"
         );
     }
 
@@ -367,56 +398,71 @@ mod tests {
     /// therefore unmeasured. They fail independently and must be seen to.
     ///
     /// `crates/zeroship-data-postgres/src/pg_autocommit.rs` builds the setup SQL
-    /// at :91 and classifies its failure at :93 from ONE `&str` variable. When
-    /// the flip gives the setup call the schema, nothing stops the classifier
-    /// call from keeping the tenant -- both parameters are `&str` and both are
-    /// spelled `app_id`. The server then names the schema-derived role that does
-    /// not exist while the classifier expects the tenant-derived one, the exact
-    /// string match at `is_missing_per_app_session_role` fails, and an
-    /// un-migrated database stops reporting SCHEMA_NOT_PROVISIONED -- the one
-    /// error that tells a creator to run `zeroship migrate`.
+    /// and classifies its failure two lines later, from ONE variable. While both
+    /// parameters were `&str` and both were spelled `app_id`, a flip that gave
+    /// the setup call the schema left nothing stopping the classifier call from
+    /// keeping the tenant. The server would then name the schema-derived role
+    /// that does not exist while the classifier expected the tenant-derived one,
+    /// the exact string match at `is_missing_per_app_session_role` would fail,
+    /// and an un-migrated database would stop reporting SCHEMA_NOT_PROVISIONED
+    /// -- the one error that tells a creator to run `zeroship migrate`.
+    ///
+    /// **THE MISMATCHED CALL IS NOW A COMPILE ERROR.** The classifier takes the
+    /// same [`zeroship_schema::SchemaName`] the setup builder does, so the two
+    /// call sites in `pg_autocommit.rs` cannot be given different identities.
+    /// What is asserted below is that the classifier recognises a role derived
+    /// from the schema it was handed, in a fixture where the tenant string is
+    /// demonstrably a DIFFERENT string - which is what makes the arm a statement
+    /// about the diverged world rather than about one value used twice.
     #[test]
     fn missing_role_stays_classified_when_schema_and_tenant_diverge() {
         use compio_postgres::error::SqlState;
+        use zeroship_schema::SchemaName;
 
         const TENANT_APP_ID: &str = "0191e7a2-b3c4-4d5e-8f90-123456789abc";
         const SCHEMA_NAME: &str = "db_0191e7a2b3c44d5e8f90123456789abc";
 
+        let schema = SchemaName::new(SCHEMA_NAME).expect("fixture schema name");
         let provisioned = zeroship_migrate_server::apply::runtime_role_provisioning_sql(
-            SCHEMA_NAME,
+            &schema,
             "zs_migrator_fixture",
         )
         .expect("provisioning role name");
 
-        // CONTROL, differing in one variable: with schema and tenant still the
-        // same string, this classifier call succeeds. So the arm below fails
-        // because the identities diverged, not because the fixture is malformed.
-        let control = format!(
-            "role \"{}\" does not exist",
-            zeroship_core::database_role::per_app_role_name(SCHEMA_NAME).expect("control role")
+        // CONTROL, differing in one variable: a message naming a role this
+        // classifier did NOT derive must be refused, so the passing arm below
+        // is measuring the derivation rather than a predicate that says yes to
+        // any "role ... does not exist" text.
+        let tenant_derived =
+            zeroship_core::database_role::per_app_role_name(TENANT_APP_ID).expect("tenant role");
+        assert_ne!(
+            provisioned.role_name(),
+            tenant_derived,
+            "fixture is not diverged: schema-derived and tenant-derived roles are equal"
         );
+        let foreign = format!("role \"{tenant_derived}\" does not exist");
         assert!(
-            is_missing_per_app_session_role(
+            !is_missing_per_app_session_role(
                 &SqlState::INVALID_PARAMETER_VALUE,
-                &control,
-                SCHEMA_NAME,
+                &foreign,
+                &schema,
             ),
-            "control: the classifier must recognise its own derivation: {control}"
+            "control: a role this schema did not derive must not be classified: {foreign}"
         );
 
         // An un-migrated database. The session asked for the schema-derived role
-        // and the server names it; the classifier's call site handed over the
-        // tenant. It must still classify.
+        // and the server names it. The classifier is handed the SAME schema the
+        // setup batch used - it cannot be handed the tenant - and must classify.
         let server_message = format!("role \"{}\" does not exist", provisioned.role_name());
         assert!(
             is_missing_per_app_session_role(
                 &SqlState::INVALID_PARAMETER_VALUE,
                 &server_message,
-                TENANT_APP_ID,
+                &schema,
             ),
-            "the classifier derives its expected role from the tenant and the server named \
-             the schema-derived role, so SCHEMA_NOT_PROVISIONED degrades to a generic \
-             failure: {server_message}"
+            "the classifier must recognise the role the migration service provisioned from \
+             this schema, or SCHEMA_NOT_PROVISIONED degrades to a generic failure: \
+             {server_message}"
         );
     }
 
@@ -427,7 +473,7 @@ mod tests {
         assert!(is_missing_per_app_session_role(
             &SqlState::INVALID_PARAMETER_VALUE,
             r#"role "app_nonexistent_role" does not exist"#,
-            "nonexistent",
+            &zeroship_schema::SchemaName::new("nonexistent").expect("fixture schema"),
         ));
     }
 
@@ -438,7 +484,7 @@ mod tests {
         assert!(!is_missing_per_app_session_role(
             &SqlState::INVALID_PARAMETER_VALUE,
             r#"invalid value for parameter "statement_timeout": "yes""#,
-            "nonexistent",
+            &zeroship_schema::SchemaName::new("nonexistent").expect("fixture schema"),
         ));
     }
 
@@ -449,7 +495,7 @@ mod tests {
         assert!(!is_missing_per_app_session_role(
             &SqlState::UNDEFINED_TABLE,
             r#"role "app_nonexistent_role" does not exist"#,
-            "nonexistent",
+            &zeroship_schema::SchemaName::new("nonexistent").expect("fixture schema"),
         ));
     }
 
@@ -460,12 +506,12 @@ mod tests {
         assert!(!is_missing_per_app_session_role(
             &SqlState::UNDEFINED_OBJECT,
             r#"role "app_x_role" does not exist"#,
-            "x",
+            &zeroship_schema::SchemaName::new("x").expect("fixture schema"),
         ));
         assert!(!is_missing_per_app_session_role(
             &SqlState::INVALID_AUTHORIZATION_SPECIFICATION,
             r#"role "app_x_role" does not exist"#,
-            "x",
+            &zeroship_schema::SchemaName::new("x").expect("fixture schema"),
         ));
     }
 
