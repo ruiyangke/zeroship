@@ -103,7 +103,6 @@ pub(crate) fn dispatch_find<'s>(
     crate::v8_bridge::ensure_read_set_capture();
     let plan = plan_find(&binding, collection, &filter, &opts);
 
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
@@ -125,7 +124,6 @@ pub(crate) fn dispatch_insert<'s>(
     collection: &str,
     doc: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -157,7 +155,6 @@ pub(crate) fn dispatch_insert_many<'s>(
     collection: &str,
     docs: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
@@ -191,7 +188,6 @@ pub(crate) fn dispatch_update_one<'s>(
     filter: Value,
     update: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -230,7 +226,6 @@ pub(crate) fn dispatch_update_many<'s>(
     filter: Value,
     update: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -259,7 +254,6 @@ pub(crate) fn dispatch_delete_one<'s>(
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -301,7 +295,6 @@ pub(crate) fn dispatch_delete_many<'s>(
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -345,7 +338,6 @@ pub(crate) fn dispatch_purge_one<'s>(
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
@@ -388,7 +380,6 @@ pub(crate) fn dispatch_purge_many<'s>(
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let coll = collection.to_string();
@@ -424,7 +415,6 @@ pub(crate) fn dispatch_restore_one<'s>(
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -463,7 +453,6 @@ pub(crate) fn dispatch_restore_many<'s>(
     collection: &str,
     filter: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
 
@@ -504,7 +493,6 @@ pub(crate) fn dispatch_aggregate<'s>(
     // Read-set capture, before planning: `plan_aggregate` records into it.
     crate::v8_bridge::ensure_read_set_capture();
 
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
@@ -546,7 +534,6 @@ pub(crate) fn dispatch_distinct<'s>(
     filter: Value,
     opts: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
@@ -605,7 +592,6 @@ pub(crate) fn dispatch_count<'s>(
     // Read-set capture, before planning: `plan_count` records into it.
     crate::v8_bridge::ensure_read_set_capture();
 
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     // Routing decision frozen HERE, while `scope` is live: see `crate::tx_route`.
@@ -651,7 +637,6 @@ pub(crate) fn dispatch_upsert<'s>(
     doc: Value,
     conflict_fields: Value,
 ) -> v8::Local<'s, v8::Promise> {
-    let app_id = binding.app_id();
     let state = runtime_state(scope);
     let (resolver, request_id, promise) = setup_js_promise(scope, &state);
     let actor_id = current_actor_id(&state);
