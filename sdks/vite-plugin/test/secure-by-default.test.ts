@@ -26,7 +26,7 @@ async function makeConfigFixture(source: string): Promise<{
 }
 
 describe("secure-by-default", () => {
-  test("rejects auth: anon without publiclyAccessible: true (production)", async () => {
+  test("rejects auth: anonymous without publiclyAccessible: true (production)", async () => {
     const fx = await makeConfigFixture(`
 import { defineApp } from "@zeroship/server";
 export default defineApp({
@@ -51,7 +51,7 @@ export default defineApp({
           );
           assert.match(
             err.message,
-            /\/api\/public|anon/,
+            /\/api\/public/,
             "error message mentions which resource"
           );
           return true;
@@ -62,7 +62,7 @@ export default defineApp({
     }
   });
 
-  test("accepts auth: anon when publiclyAccessible: true is present", async () => {
+  test("accepts auth: anonymous when publiclyAccessible: true is present", async () => {
     const fx = await makeConfigFixture(`
 import { defineApp } from "@zeroship/server";
 export default defineApp({

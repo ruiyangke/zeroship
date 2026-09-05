@@ -881,7 +881,7 @@ impl Registry {
                                 app_id = %id,
                                 error = %e,
                                 "registry: invalid manifest — falling back to passthrough, \
-                                 which serves EVERY route as anon-public"
+                                 which serves EVERY route as anonymous-public"
                             );
                             None
                         }
@@ -891,7 +891,7 @@ impl Registry {
                             app_id = %id,
                             error = %e,
                             "registry: manifest parse failure — falling back to passthrough, \
-                             which serves EVERY route as anon-public"
+                             which serves EVERY route as anonymous-public"
                         );
                         None
                     }

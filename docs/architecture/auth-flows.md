@@ -1213,7 +1213,7 @@ VERIFIED walk-through:
 VERIFIED walk-through:
 
 1. Gateway resolves route policy, evaluates a bearer before a cookie, and makes
-   the anonymous/user/admin decision
+   the anonymous/user decision
    (`crates/zeroship-gateway/src/router/auth.rs:142-221`,
    `crates/zeroship-gateway/src/router/auth.rs:283-398`). Cookie-authenticated mutations
    additionally require exact-origin CSRF posture
@@ -2267,17 +2267,22 @@ that decision any more. See section 4.1.
 
 ### 5. HIGH: `auth: "admin"` is enforced exactly as `auth: "user"`
 
-VERIFIED: Gateway combines user and admin in the same cookie and bearer decision
-arms without checking an administrator claim
-(`crates/zeroship-gateway/src/router/auth.rs:329-345`,
-`crates/zeroship-gateway/src/router/auth.rs:384-395`). The manifest type itself says
-admin is currently an alias for user
-(`crates/zeroship-bundle/src/rule.rs:131-155`), and the RPC reference warns that any
-signed-in end user reaches such a procedure (`docs/reference/rpc.md:122-131`).
+VERIFIED: Gateway combined user and admin in the same cookie and bearer decision
+arms without checking an administrator claim. The manifest type itself said
+admin was an alias for user, and the RPC reference warned that any signed-in end
+user reached such a procedure.
 
-This is a trust level exposed in configuration but not enforced in the decision
+This was a trust level exposed in configuration but not enforced in the decision
 point. It should either acquire a real predicate or disappear under the
 repository's pre-launch no-compat policy.
+
+RESOLVED BY DELETION, 2026-09-05: it disappeared. `AuthLevel` is now
+`RequiredPrincipal` with two variants, `Anonymous` and `User`
+(`crates/zeroship-bundle/src/rule.rs`), the gateway's three combined arms are
+plain `RequiredPrincipal::User`, and the build refuses `auth: "admin"` outright
+in every mode (`sdks/vite-plugin/src/manifest.ts`). Deletion rather than a
+predicate, because `docs/architecture/control-plane.md` records that there is no
+platform-admin principal for a predicate to test.
 
 ### 6. HIGH: Shipped containers can read one another's private auth material
 

@@ -252,14 +252,14 @@ export async function add({ text }: { text: string }) {
 
 The TS surface narrows `ctx.user`'s type based on the wrapper's `auth` policy:
 
-- `auth: "anon"` → `ctx.user: User | null` — must null-check.
-- `auth: "user"` or `auth: "admin"` → `ctx.user: User` — gateway already pre-rejected the request if absent.
+- `auth: "anonymous"` → `ctx.user: User | null` — must null-check.
+- `auth: "user"` → `ctx.user: User` — gateway already pre-rejected the request if absent.
 
 ### Field table
 
 | Field | Type | Populated from | Notes |
 | --- | --- | --- | --- |
-| `ctx.user` | `User \| null` | Gateway-injected `ZeroShip-User` HMAC-signed header → exposed via `env.auth.getUser()` (the existing kernel primitive); `ctx.user` is the const-time accessor. | `null` for `auth: "anon"`; throws `UNAUTHENTICATED` if read by an `auth: "user"`/`"admin"` procedure that didn't authenticate (defense-in-depth). |
+| `ctx.user` | `User \| null` | Gateway-injected `ZeroShip-User` HMAC-signed header → exposed via `env.auth.getUser()` (the existing kernel primitive); `ctx.user` is the const-time accessor. | `null` for `auth: "anonymous"`; throws `UNAUTHENTICATED` if read by an `auth: "user"` procedure that didn't authenticate (defense-in-depth). |
 | `ctx.requestId` | `TypedId<"req">` | Gateway generates UUIDv7 typed_id | Echoed in `X-Request-Id` response header; matches `typed_id` invariant. |
 | `ctx.traceId` | `string` (32-char hex) | W3C `traceparent` header (gateway creates if absent) | Used for OTel correlation. |
 | `ctx.signal` | `AbortSignal` | `AbortSignal.any([clientDisconnect, gatewayDeadline, isolateEviction])` (native, `crates/zeroship-runtime/src/web/dom/abort_signal.rs`) | Aborts on any of the three (see "Abort source plumbing" below). Auto-passed to `fetch`, `db.*`, `kv.*`, `storage.*`. |
@@ -813,7 +813,7 @@ traceparent: 00-<trace-id>-<gateway-span-id>-01
 - ETag = `"<sha256(canonical-superjson-of-result)[:16]>"` (16 hex chars, weak ETag).
 - `If-None-Match` matching the current ETag → `304 Not Modified` with the same headers, no body.
 - `Vary: Authorization, Origin, Accept-Encoding` is mandatory: different users see different data; CORS-cached responses must vary by Origin; gzip/br variants vary by encoding.
-- CDN-cacheable iff `auth: "anon"` AND `kind: "query"` AND `cache.public: true` — the gateway sets `Cache-Control: public, max-age=...` only when all three hold.
+- CDN-cacheable iff `auth: "anonymous"` AND `kind: "query"` AND `cache.public: true` — the gateway sets `Cache-Control: public, max-age=...` only when all three hold.
 
 ### Mutation — `POST`
 
@@ -1247,12 +1247,12 @@ The `rpc:` prefix appears only in manifest keys — the wire URL is `/__zeroship
 
   // Policy half — hot-reloadable post-deploy
   "resources": {
-    "*": { "auth": "admin", "rate_limit": { "rpm": 60, "per": "ip" } },
+    "*": { "auth": "anonymous", "publicly_accessible": true, "rate_limit": { "rpm": 60, "per": "ip" } },
 
-    "/api":              { "auth": "user", "override": ["auth"], "cors": { "allow_origins": ["self"] } },
-    "/api/admin":        { "auth": "admin", "override": ["auth"] },
+    "/api":              { "auth": "user", "cors": { "allow_origins": ["self"] } },
+    "/api/admin":        { "required_scopes": ["admin:write"] },
     "/api/admin/users":  { "rate_limit": { "rpm": 100, "per": "user" } },
-    "/api/public":       { "auth": "anon", "override": ["auth"], "publicly_accessible": true },
+    "/api/public":       { "auth": "anonymous", "override": ["auth"], "publicly_accessible": true },
     "/api/v1/*":         { "rewrite": "/__zeroship/v1/*" },
 
     "/old-blog/[slug]":  { "redirect": { "to": "/blog/[slug]", "status": 302 } },
@@ -1261,12 +1261,12 @@ The `rpc:` prefix appears only in manifest keys — the wire URL is `/__zeroship
     "/blog/[slug]":      { "cache": { "max_age": 60, "swr": 300 } },
     "/_assets/*":        { "static": { "try": ["$path"] }, "cache": { "max_age": 31536000, "immutable": true } },
 
-    "rpc:todos":              { "auth": "user", "override": ["auth"], "rate_limit": { "rpm": 600, "per": "user" } },
+    "rpc:todos":              { "auth": "user", "rate_limit": { "rpm": 600, "per": "user" } },
     "rpc:todos.list":         { },
     "rpc:todos.add":          { "rate_limit": { "rpm": 100, "per": "user" } },
-    "rpc:todos.delete":       { "auth": "admin", "override": ["auth"] },
+    "rpc:todos.delete":       { "required_scopes": ["todos:delete"] },
 
-    "rpc:billing":            { "auth": "user", "override": ["auth"] },
+    "rpc:billing":            { "auth": "user" },
     "rpc:billing.charge":     { "middleware": ["transaction"] },
     "rpc:user.uploadAvatar":  { "max_input_bytes": 104857600 },
     "rpc:chat.completion":    { "rate_limit": { "rpm": 30, "per": "user" }, "timeout": { "inactivityMs": 30000, "maxLifetimeMs": 1800000 } }
@@ -1329,17 +1329,17 @@ export default defineApp({
   },
 
   resources: {
-    "*": { auth: "admin", rateLimit: { rpm: 60, per: "ip" } },
+    "*": { auth: "anonymous", publiclyAccessible: true, rateLimit: { rpm: 60, per: "ip" } },
 
     "/api": {
-      auth: "user", override: ["auth"],
+      auth: "user",
       cors: { allowOrigins: ["self"] },
       children: {
         "admin": {
-          auth: "admin", override: ["auth"],
+          requiredScopes: ["admin:write"],
           children: { "users": { rateLimit: { rpm: 100, per: "user" } } },
         },
-        "public": { auth: "anon", override: ["auth"], publiclyAccessible: true },
+        "public": { auth: "anonymous", override: ["auth"], publiclyAccessible: true },
         "v1/*":   { rewrite: "/__zeroship/v1/*" },
       },
     },
@@ -1348,10 +1348,10 @@ export default defineApp({
     "/blog/[slug]":     { cache: { maxAge: 60, swr: 300 } },
 
     "rpc:todos": {
-      auth: "user", override: ["auth"],
+      auth: "user",
       rateLimit: { rpm: 600, per: "user" },
       children: {
-        "delete": { auth: "admin", override: ["auth"] },
+        "delete": { requiredScopes: ["todos:delete"] },
       },
     },
   },
@@ -1366,14 +1366,14 @@ For any resolved resource, walk the most-specific match's parent chain (root `*`
 
 | Field | Merge | Notes |
 | --- | --- | --- |
-| `auth` | **stricter wins** (admin > user > anon) | Override marker required to weaken |
+| `auth` | **boolean OR** (`user` wins over `anonymous`) | Two principals, so no ladder: if any ancestor requires a user, so does the child. Override marker required to weaken |
 | `rate_limit`, `max_input_bytes`, `max_output_bytes`, `timeout` | **min** | Stricter cap survives |
 | `cors.allow_origins`, `cors.allow_methods`, `cors.allow_headers`, `csrf_origins` | **intersect** | Child can only narrow |
 | `cors.allow_credentials`, `cors.max_age_seconds` | **child overrides** | Per-resource decision |
 | `middleware` | **append** (root → child order) | All run; child can't drop ancestor's |
 | `cache`, `idempotent`, `publicly_accessible` | **child overrides** | Per-resource decision |
 
-The `override: [...]` marker is required when a child weakens or widens an inherited field. Without it the build refuses: *"`todos.delete` declares `auth: user` but inherits `auth: admin` from `todos`. Add `override: ["auth"]`."*
+The `override: [...]` marker is required when a child weakens or widens an inherited field. Without it the build refuses: *"`todos.list` declares `auth: anonymous` but inherits `auth: user` from `todos`. Add `override: ["auth"]`."*
 
 ### 7c. Artifact / policy split
 
@@ -1444,13 +1444,13 @@ Build-time and gateway-load-time checks:
 - **Override marker sanity** — every shadowed field needs `override: [field]`. Build error otherwise.
 - **Routing-action exclusivity** — at most one of `redirect`, `rewrite`, `static` per resource.
 - **Glob format** — `[name]` single-segment, `[...rest]` multi-segment, `*` wildcard.
-- **Secure-by-default** — `auth: "anon"` requires `publicly_accessible: true` on the same resource. Build error in production mode (warning in dev).
+- **Secure-by-default** — `auth: "anonymous"` requires `publicly_accessible: true` on the same resource. Build error in production mode (warning in dev).
 - **Procedure kind matches HTTP method** — `kind: "mutation"` cannot be served via `GET`.
 - **`idempotent: true` only on mutations** — round-01 Medium-2. Build error otherwise.
 - **Resource-key format** — `rpc:` prefix followed by `[a-zA-Z0-9._*-]+` for RPC namespace; `/`-prefixed glob for URL namespace; bare `*` for the root default. Any other shape is a build error.
 - **Reserved field names** — `_zs.json` and any field whose name begins with `_zs.` (in user form schemas) or `_zs_` (in user JSON schemas, including streamed payloads) is forbidden. Build error.
 - **Live-version cap** — at most 3 live versions per procedure in the artifact manifest (§13). Build error otherwise.
-- **Anonymous mutation idempotency** — when a procedure has both `auth: "anon"` and `idempotent: true`, the build emits a warning naming the high-entropy-key requirement (gateway-enforced at runtime, but caught early at build time).
+- **Anonymous mutation idempotency** — when a procedure has both `auth: "anonymous"` and `idempotent: true`, the build emits a warning naming the high-entropy-key requirement (gateway-enforced at runtime, but caught early at build time).
 - **`breakingOk: true` attestation** — when a wire-compat check would otherwise fail, the wrapper's `breakingOk: true` field bypasses the check with a warning (recorded in the audit log). Without it, a wire-breaking change is a build error in `--mode production`.
 
 The existing `Manifest::validate()` in `crates/zeroship-core/src/types.rs` absorbs these.
@@ -1600,7 +1600,7 @@ A dedupe hit replays the stored response **verbatim**, so the entry key must nam
 (app_id, wireId, principal, idempotency_key)
 ```
 
-`principal` is the per-app pairwise `pws_…` subject the gateway resolved for the request — the same identity it puts in `ZeroShip-User`, read back out of that verified header so the partition and the worker's view of the caller can never drift. This applies on **every** route, not only `auth: "user"`/`"admin"` ones: an `auth: "anon"` procedure can still resolve a session when the visitor happens to be logged in, and when it does, that visitor gets their own partition.
+`principal` is the per-app pairwise `pws_…` subject the gateway resolved for the request — the same identity it puts in `ZeroShip-User`, read back out of that verified header so the partition and the worker's view of the caller can never drift. This applies on **every** route, not only `auth: "user"`/`"admin"` ones: an `auth: "anonymous"` procedure can still resolve a session when the visitor happens to be logged in, and when it does, that visitor gets their own partition.
 
 When a procedure is declared `auth: "user"`/`"admin"` and the gateway cannot read a principal, it does **not** fall back to the shared namespace — that would be precisely the leak the partition prevents. It answers `500 INTERNAL` with `details.reason: "idempotency_principal_unavailable"`. This is unreachable in normal operation (the auth gate 401s an unauthenticated caller long before dispatch, and the header is minted by the same process moments earlier); it exists so an invariant break fails closed instead of silently sharing.
 
@@ -1608,13 +1608,13 @@ When a procedure is declared `auth: "user"`/`"admin"` and the gateway cannot rea
 
 Requests with no resolved identity all land in **one** shared partition per `(app_id, wireId)` — two anonymous clients picking the same `Idempotency-Key` would otherwise see each other's responses (cross-user leak). The compensating control is that the key itself must be unguessable.
 
-When `auth: "anon"` and `idempotent: true` both apply to a mutation, the key must be **high-entropy**:
+When `auth: "anonymous"` and `idempotent: true` both apply to a mutation, the key must be **high-entropy**:
 
 - The key must be a UUIDv4 (random) or UUIDv7 (timestamp + random), in the canonical 36-character hyphenated spelling. Other UUID versions are refused even though they parse: v1 is a timestamp plus a MAC address, and v3/v5 are a hash of a name the caller may already know — neither is unguessable. The braced/URN/unhyphenated spellings are refused too, because the same UUID written two ways would hash to two different entry keys and silently miss dedupe.
-- If the key fails that check, the gateway returns `400 INVALID_ARGUMENT` with `details.reason: "anonymous_idempotency_key_must_be_uuid_v4_or_v7"` — and the build's `idempotent: true` declaration on an `auth: "anon"` mutation emits a warning at deploy time naming this constraint.
+- If the key fails that check, the gateway returns `400 INVALID_ARGUMENT` with `details.reason: "anonymous_idempotency_key_must_be_uuid_v4_or_v7"` — and the build's `idempotent: true` declaration on an `auth: "anonymous"` mutation emits a warning at deploy time naming this constraint.
 - Collision probability with proper UUIDs is `2^-122` (UUIDv4) or `2^-74` per ms (UUIDv7) — astronomically safe.
 
-The gate keys off the **declared** `auth` level, not off whether the individual caller turned out to be logged in. It has to be knowable from the manifest at build time, and a rule that only bit logged-out callers would make the same key legal or illegal depending on session state. So a logged-in visitor to an `auth: "anon"` procedure gets both: their own partition *and* the UUID requirement.
+The gate keys off the **declared** `auth` level, not off whether the individual caller turned out to be logged in. It has to be knowable from the manifest at build time, and a rule that only bit logged-out callers would make the same key legal or illegal depending on session state. So a logged-in visitor to an `auth: "anonymous"` procedure gets both: their own partition *and* the UUID requirement.
 
 For `auth: "user"`/`"admin"` mutations the UUID-only constraint does not apply — the principal partition already isolates the caller — so any string up to 255 chars is accepted (matches Stripe), which keeps natural keys like an order id usable.
 
@@ -2210,7 +2210,7 @@ The worker verifies HMAC on receipt — see `crates/zeroship-gateway/src/proxy.r
 
 - Verified payload → `ctx.user = User { id, email, role, scopes, sessionId }`.
 - HMAC mismatch → connection drop + log (gateway misconfigured or attempted spoof).
-- Header absent + `auth: "anon"` → `ctx.user = null`.
+- Header absent + `auth: "anonymous"` → `ctx.user = null`.
 - Header absent + `auth: "user"` → gateway pre-rejected with 401 before forwarding (defense-in-depth: worker also checks).
 
 ### `ctx.user` access patterns
@@ -2219,7 +2219,7 @@ The worker verifies HMAC on receipt — see `crates/zeroship-gateway/src/proxy.r
 import { ctx, requireUser } from "@zeroship/server";
 
 export async function add({ text }: { text: string }) {
-  // Pattern 1: ctx.user (may be null if auth: "anon")
+  // Pattern 1: ctx.user (may be null if auth: "anonymous")
   if (!ctx.user) throw new RpcError("UNAUTHENTICATED", "sign in required");
 
   // Pattern 2: requireUser() helper (throws UNAUTHENTICATED if absent)

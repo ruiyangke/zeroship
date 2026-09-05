@@ -486,7 +486,7 @@ impl Manifest {
     /// * Resource CORS cannot combine the `"*"` origin with credentials.
     /// * Each resource has at most one routing action.
     /// * Override marker required when shadowing an inherited field.
-    /// * `auth: anon` requires `publicly_accessible: true`.
+    /// * `auth: anonymous` requires `publicly_accessible: true`.
     /// * Schema-hash references match `sha256:[0-9a-f]{64}` and
     ///   exist in `manifest.schemas`.
     ///

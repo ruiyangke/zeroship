@@ -4131,7 +4131,7 @@ fn url_path_start(url: &str) -> Option<usize> {
 /// path that STARTS WITH the tag. Prefix on one side and substring on the other
 /// is a gateway↔worker disagreement: measured end to end on 2026-08-10
 /// (`tests/e2e_gateway_path_backslash.sh` T9), `GET /x/__zeroship/v1/secret`
-/// was authorized by the gateway against the app's anon URL catch-all and then
+/// was authorized by the gateway against the app's anonymous URL catch-all and then
 /// EXECUTED the `rpc:secret` procedure here, which answers 401 on its own
 /// canonical URL (T7a, the one-variable control). No exotic byte was needed —
 /// any leading segment at all was enough.
