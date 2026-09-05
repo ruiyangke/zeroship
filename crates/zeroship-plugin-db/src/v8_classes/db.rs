@@ -394,10 +394,20 @@ pub fn mint_db<'s>(
 /// Native descriptor binding and the `Db` wrapper both call this helper so
 /// cache keys cannot drift from the receivers that later read them.
 ///
-/// **This is the one place in the tree that derives a schema from an app id.**
-/// Every other consumer takes the [`zeroship_schema::SchemaName`] off the
-/// binding, so the day the physical schema stops being the app id, this
-/// function is what changes and nothing else has to.
+/// **This is the DATA PLANE's one app-id-to-schema derivation.** Every other
+/// data-plane consumer takes the [`zeroship_schema::SchemaName`] off the
+/// binding instead of deriving its own.
+///
+/// It is NOT the only one in the tree, and changing it alone does not complete
+/// the flip. Two other sites derive or assume the same equality:
+///
+/// - `zeroship_migrate_server::apply::apply_ir_documents` holds the migration
+///   service's own derivation, and says so in its own comment.
+/// - The SQLite ATTACH alias is still minted from the TENANT
+///   (`attach_app_file(binding.app_id())`) while every query builder qualifies
+///   with the SCHEMA. The alias occupies SQLite's schema-name position, so a
+///   schema that stops being the app id has to move the alias with it or every
+///   SQLite statement names an alias nothing attached.
 ///
 /// Returns `None` when `app_id` is not a legal schema name. That refusal used
 /// to be deferred: the binding was minted unconditionally and every operation
