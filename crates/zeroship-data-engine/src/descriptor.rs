@@ -115,8 +115,16 @@ mod tests {
     #[test]
     fn two_deploys_of_one_app_hold_separate_descriptor_entries() {
         crate::reset_engine_for_tests();
-        let pinned = DbBinding::new("app_two_deploys", "deploy_pinned");
-        let current = DbBinding::new("app_two_deploys", "deploy_current");
+        let pinned = DbBinding::new(
+            "app_two_deploys",
+            "deploy_pinned",
+            zeroship_schema::SchemaName::new("app_two_deploys").unwrap(),
+        );
+        let current = DbBinding::new(
+            "app_two_deploys",
+            "deploy_current",
+            zeroship_schema::SchemaName::new("app_two_deploys").unwrap(),
+        );
         zeroship_data_core::schema_cache::with_mut(|c| {
             c.insert_one(
                 &pinned,

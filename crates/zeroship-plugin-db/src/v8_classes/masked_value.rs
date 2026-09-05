@@ -589,23 +589,22 @@ pub fn rehydrate_masked_values<'s, 'a>(
     scope: &mut v8::PinScope<'s, 'a>,
     value: v8::Local<'s, v8::Value>,
 ) -> Option<v8::Local<'s, v8::Value>> {
-    let state = runtime_state(scope);
-    let binding = {
+    let app_id = {
+        let state = runtime_state(scope);
         let env_vars = &state.borrow().env_vars;
-        let app_id = env_vars
+        env_vars
             .get("APP_ID")
             .cloned()
-            .unwrap_or_else(|| "default".to_string());
-        // Same two components `v8_classes::db::mint_db` captures, off the same
-        // slot: a pinned workflow isolate and a current isolate of one app hold
-        // different descriptor entries, so a `MaskedValue` minted in one must
-        // not resolve its column metadata out of the other.
-        let deploy_token = env_vars
-            .get("ZEROSHIP_DEPLOY_ID")
-            .cloned()
-            .unwrap_or_else(|| zeroship_data_core::binding::COLD_START_DEPLOY_TOKEN.to_string());
-        DbBinding::new(app_id, deploy_token)
+            .unwrap_or_else(|| "default".to_string())
     };
+    // Same identity `v8_classes::db::mint_db` captures, through the same one
+    // helper: a pinned workflow isolate and a current isolate of one app hold
+    // different descriptor entries, so a `MaskedValue` minted in one must not
+    // resolve its column metadata out of the other. Routing through
+    // `binding_for_isolate` is also what keeps the app-id-to-schema derivation
+    // to a single site - and it refuses an app id that is not a legal schema
+    // name, in which case there is nothing to rehydrate against.
+    let binding = crate::v8_classes::db::binding_for_isolate(scope, &app_id)?;
     let mut walker = RehydrateWalker {
         binding,
         depth: 0,

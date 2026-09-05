@@ -317,6 +317,10 @@ fn normalize_isolation_level(raw: &str) -> Result<IsolationLevel, OpError> {
 /// `build_env_object`. The returned object becomes the `env.db`
 /// namespace value.
 ///
+/// Returns `None` when the identity cannot be resolved - including when
+/// `app_id` is not a legal physical schema name, which
+/// [`binding_for_isolate`] refuses.
+///
 /// Before returning, this also mints a [`crate::v8_classes::db_platform::DbPlatform`]
 /// capability handle scoped to the same `app_id` and stashes it on the
 /// `Db` object under the `ZS_PLATFORM` private symbol. The handle
@@ -329,7 +333,10 @@ pub fn mint_db<'s>(
     scope: &mut v8::PinScope<'s, '_>,
     app_id: &str,
 ) -> Option<v8::Local<'s, v8::Object>> {
-    let binding = binding_for_isolate(scope, app_id);
+    // No binding, no `env.db`. An app id that is not a legal schema name has no
+    // schema to reach, so the namespace is refused here rather than handed back
+    // as an object whose every operation fails.
+    let binding = binding_for_isolate(scope, app_id)?;
 
     let class_tmpl = Db::install(scope);
     let inst_tmpl = class_tmpl.instance_template(scope);
@@ -386,7 +393,21 @@ pub fn mint_db<'s>(
 /// Resolve the immutable app-at-deploy identity for the active isolate.
 /// Native descriptor binding and the `Db` wrapper both call this helper so
 /// cache keys cannot drift from the receivers that later read them.
-pub(crate) fn binding_for_isolate(scope: &mut v8::PinScope<'_, '_>, app_id: &str) -> DbBinding {
+///
+/// **This is the one place in the tree that derives a schema from an app id.**
+/// Every other consumer takes the [`zeroship_schema::SchemaName`] off the
+/// binding, so the day the physical schema stops being the app id, this
+/// function is what changes and nothing else has to.
+///
+/// Returns `None` when `app_id` is not a legal schema name. That refusal used
+/// to be deferred: the binding was minted unconditionally and every operation
+/// failed one at a time inside the query builder, so an isolate could hold a
+/// live `env.db` whose every call was doomed with nothing said at mint time.
+pub(crate) fn binding_for_isolate(
+    scope: &mut v8::PinScope<'_, '_>,
+    app_id: &str,
+) -> Option<DbBinding> {
+    let schema = zeroship_schema::SchemaName::new(app_id).ok()?;
     // The worker injects `deploy_hash` as `ZEROSHIP_DEPLOY_ID`; pinned workflow
     // runtimes carry the hash they were started on. Absent in dev/raw-JS
     // harnesses means the historical `cold_start` token.
@@ -397,7 +418,7 @@ pub(crate) fn binding_for_isolate(scope: &mut v8::PinScope<'_, '_>, app_id: &str
         .get("ZEROSHIP_DEPLOY_ID")
         .cloned()
         .unwrap_or_else(|| COLD_START_DEPLOY_TOKEN.to_string());
-    DbBinding::new(app_id, deploy_token)
+    Some(DbBinding::new(app_id, deploy_token, schema))
 }
 
 #[cfg(test)]
@@ -490,7 +511,8 @@ mod tests {
 
         let pinned_runtime = runtime_for_deploy(APP, PINNED);
         let pinned_collection = mint_collection_binding(&pinned_runtime, APP, COLLECTION);
-        let pinned_binding = DbBinding::new(APP, PINNED);
+        let pinned_binding =
+            DbBinding::new(APP, PINNED, zeroship_schema::SchemaName::new(APP).unwrap());
         crate::cache_schema_for_deploy_for_tests(
             &pinned_binding,
             COLLECTION,
@@ -517,7 +539,8 @@ mod tests {
             "the current deploy must not read the pinned deploy's descriptor entry",
         );
 
-        let current_binding = DbBinding::new(APP, CURRENT);
+        let current_binding =
+            DbBinding::new(APP, CURRENT, zeroship_schema::SchemaName::new(APP).unwrap());
         crate::cache_schema_for_deploy_for_tests(
             &current_binding,
             COLLECTION,

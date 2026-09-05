@@ -522,7 +522,12 @@ impl NativePlugin for DbPlugin {
         // context anyway, so a future validator change cannot publish a
         // partial schema on error.
         let schemas = descriptor_schemas(descriptor)?;
-        let binding = v8_classes::db::binding_for_isolate(scope, app_id);
+        // Same refusal as `mint_db`: an app id that is not a legal schema name
+        // has no binding to key the descriptor under, so publish nothing rather
+        // than key it under a schema that cannot be addressed.
+        let binding = v8_classes::db::binding_for_isolate(scope, app_id).ok_or_else(|| {
+            format!("app id {app_id:?} is not a legal database schema name")
+        })?;
         zeroship_data_core::schema_cache::with_mut(|c| c.replace_for_binding(&binding, schemas));
         Ok(())
     }
@@ -659,7 +664,11 @@ mod runtime_descriptor_binding_tests {
             .bind_runtime_descriptor(scope, APP, Some(&runtime_descriptor))
             .expect("bind descriptor");
 
-        let binding = zeroship_data_core::binding::DbBinding::new(APP, DEPLOY);
+        let binding = zeroship_data_core::binding::DbBinding::new(
+            APP,
+            DEPLOY,
+            zeroship_schema::SchemaName::new(APP).unwrap(),
+        );
         let schema = descriptor::collection_schema(&binding, "users")
             .expect("declared collection must resolve before any read");
         assert_eq!(
@@ -697,7 +706,11 @@ mod runtime_descriptor_binding_tests {
             .bind_runtime_descriptor(scope, APP, None)
             .expect("bind schema-less runtime");
 
-        let binding = zeroship_data_core::binding::DbBinding::new(APP, DEPLOY);
+        let binding = zeroship_data_core::binding::DbBinding::new(
+            APP,
+            DEPLOY,
+            zeroship_schema::SchemaName::new(APP).unwrap(),
+        );
         let error = descriptor::collection_schema(&binding, "stale")
             .expect_err("schema-less binding must declare no collection");
         assert!(
