@@ -1977,10 +1977,73 @@ run_deploy "$SB_FRESH" ZS_GATE_JOURNAL_EXISTS='f'
 # not, in the same run. deploy-remote.sh's non-comment body is 31 KB today, so
 # this was latent and roughly 3x from live. `grep -c` reads to EOF and cannot
 # race; the same corpus reports FAIL at every size.
-ledger_hits="$(grep -v '^[[:space:]]*#' "$REMOTE" | grep -c 'released_migrations\|released_ledger')"
+#
+# IT IS A FUNCTION so the controls below can drive the SAME code this line does.
+# A probe that only ever runs against one shipped file is a probe whose
+# behaviour on any other input is a claim in a comment.
+journal_snapshot_hits() {   # <script> -> non-comment lines naming the snapshot
+  grep -v '^[[:space:]]*#' "$1" | grep -c 'released_migrations\|released_ledger'
+}
+ledger_hits="$(journal_snapshot_hits "$REMOTE")"
 [ "${ledger_hits:-0}" -gt 0 ] \
   && fail "deploy-remote.sh still reads or writes the released-migrations snapshot ($ledger_hits non-comment line(s)); the pre-roll check is supposed to be the only thing that consults a deployment's journal" \
   || pass "the deploy script keeps no copy of the journal and writes none back"
+
+# --- the probe's own controls, and the one that BINDS the grep -c -----------
+#
+# UNTIL 2026-09-04 THE FIX ABOVE WAS CODE PLUS A COMMENT. Reverting `grep -c` to
+# the `| grep -q` pipeline turned nothing in this tree red: the shipped script
+# is 31 KB of non-comment body, three times under the size where the race
+# begins, so the live assertion passes either way. A correct check nobody ever
+# watched fail is the shape this repository keeps finding, and these four cases
+# are what end it here.
+#
+# Case 4 is the regression. It is case 3 with ONE variable changed - the size of
+# the body the match is planted in - which is the whole of the defect.
+#
+# RE-MEASURED 2026-09-04 on this exact pipeline, match on line 2, 30 trials per
+# size: at 67 KB the `| grep -q` form found the match 30/30; at 134 KB, 270 KB,
+# 1.1 MB, 4.4 MB and 17.8 MB it INVERTED 30/30, reporting "no match" under
+# pipefail exactly when the match was there. `grep -c` reported 1 at every size.
+# The corpus below is ~1.2 MB deliberately: 18x the 65,536-byte pipe capacity
+# (`getconf PAGESIZE` x 16) and 9x the smallest size measured to invert every
+# time, so this case does not depend on winning a race.
+JP="$FIX/journal_probe"
+mkdir -p "$JP"
+printf 'echo nothing here names the deleted snapshot\n' >"$JP/clean"
+printf '# a comment naming released_migrations, as this gate does above\necho ordinary line\n' >"$JP/commented"
+printf '# a comment naming released_migrations, as this gate does above\nledger_sync released_migrations.tsv\n' >"$JP/small"
+{
+  printf '# a comment naming released_migrations, as this gate does above\n'
+  printf 'ledger_sync released_migrations.tsv\n'
+  awk 'BEGIN { for (i = 0; i < 20000; i++) print "echo padding line " i " of an ordinary deploy script body" }'
+} >"$JP/large"
+
+JP_CASES=0
+jp_case() {   # <label> <expected hits> <file>
+  local label="$1" want="$2" path="$3" got
+  JP_CASES=$((JP_CASES + 1))
+  got="$(journal_snapshot_hits "$path")"
+  [ "${got:-x}" = "$want" ] \
+    && pass "journal probe: $label (hits=$got)" \
+    || fail "journal probe: $label - expected hits=$want, got hits=$got"
+}
+jp_case "a body naming the snapshot nowhere reports none"        0 "$JP/clean"
+jp_case "a COMMENT naming the snapshot does not count"           0 "$JP/commented"
+jp_case "a live line naming the snapshot counts"                 1 "$JP/small"
+jp_case "the SAME live line counts in a 1.2 MB body ($(wc -c <"$JP/large") bytes)" \
+                                                                 1 "$JP/large"
+
+# FLOOR 4 AND EXACTLY 4 CASES, which is deliberate here and would be wrong for
+# an arm that enumerates the tree. These four are literals twenty lines up, not
+# a population that shrinks on its own: deleting one is a decision, and the
+# floor is what makes that decision arrive as a refusal rather than as a quietly
+# smaller control set. Add a case, raise the floor in the same commit.
+if ! gate_arm journal_probe_controls "$JP_CASES" 4; then
+  fail "the journal-probe controls ruled on $JP_CASES case(s), under their floor
+       of 4. The cases stopped running, so the assertion above is back to being
+       a claim in a comment."
+fi
 
 CAP="$CAP_HAPPY"
 
