@@ -2337,6 +2337,213 @@ mod tests {
         });
     }
 
+    // ── The worker must enforce the DECLARED auth policy ──────────────────
+    //
+    // The two tests below are a matched pair - same fixture, same app, same
+    // dispatch, ONE variable changed: the level the deployed manifest
+    // declares for the route being called. The `anon` arm must be served, the
+    // `user` arm must be refused. Neither is meaningful without the other:
+    // an arm that only asserted the refusal would also pass on a worker that
+    // 401s everything.
+    //
+    // WHY THEY EXIST. `AuthLevel` occurs ZERO times in this crate and zero
+    // times in `zeroship-runtime`; the gateway is the only tier that reads
+    // the declared policy. The worker's own dispatch path handles identity
+    // exactly once - `verified_user_json` above, which HMAC-verifies a
+    // `ZeroShip-User` header when one is present and returns `Ok(None)` when
+    // it is not. `None` is then passed on and the handler runs. So a request
+    // that arrives with no identity is served on a route declared `user`
+    // unless the creator's own JS remembered to call `env.auth.requireUser()`
+    // - a creator-called, optional gate. A creator who forgets has no fence
+    // at all.
+    //
+    // `router/dispatch.rs` states the assumption in prose: "Resource-tree
+    // `user`/`admin` are already short-circuited by `resolve_auth` upstream,
+    // so they never reach the worker." That is a statement about the gateway's
+    // current behaviour, not an invariant the worker enforces, and it is the
+    // thing these tests refuse to accept on trust.
+    //
+    // WHAT IS MISSING, EXACTLY. Not the policy - the manifest already reaches
+    // this crate. `zeroship_core::types` carries `manifest: Option<Manifest>`
+    // in the version feed and `sync.rs` reads it on every reload
+    // (`worker_entry_hash`, `runtime_descriptor_json`). What is missing is the
+    // hand-off: `cache::load_app` takes limits, a net policy, a deploy hash, a
+    // runtime descriptor and an env snapshot, and NOT the resource policy - so
+    // by the time `dispatch` runs there is nothing to consult. The fixture
+    // below therefore builds the declaration, asserts it really says what it
+    // claims, and dispatches; the fix has to carry it the last hop.
+    //
+    // NOTE ON THE FIXTURE MANIFEST. It is a real `zeroship_bundle::Manifest`
+    // parsed from the wire JSON, not a hand-built struct, so a change to the
+    // resource wire shape breaks these tests rather than passing them.
+
+    /// The declaration under test: `/api/private` requires a user,
+    /// `/api/public` does not. Parsed from the wire form the build emits.
+    fn manifest_declaring_a_user_route() -> zeroship_bundle::Manifest {
+        let manifest: zeroship_bundle::Manifest = serde_json::from_value(serde_json::json!({
+            "version": 1,
+            "resources": {
+                "/api/private": { "auth": "user" },
+                "/api/public": { "auth": "anon", "publicly_accessible": true },
+            }
+        }))
+        .expect("fixture manifest parses as the real wire shape");
+
+        // Guard the fixture: if this ever stops saying `user`, the tests
+        // below would be ruling on a route nobody declared.
+        assert_eq!(
+            manifest
+                .resources
+                .get("/api/private")
+                .and_then(|entry| entry.auth),
+            Some(zeroship_bundle::AuthLevel::User),
+            "fixture must declare /api/private as a user route"
+        );
+        assert_eq!(
+            manifest
+                .resources
+                .get("/api/public")
+                .and_then(|entry| entry.auth),
+            Some(zeroship_bundle::AuthLevel::Anon),
+            "fixture must declare /api/public as an anonymous route"
+        );
+        manifest
+    }
+
+    /// App code that records that it ran, so a test can tell "refused before
+    /// creator code" apart from "creator code ran and happened to 401".
+    /// It calls NOTHING from `env.auth` - that is the point: enforcement must
+    /// not depend on the creator remembering.
+    const AUTH_OBLIVIOUS_APP: &[u8] = br#"
+        export default {
+          fetch(req) {
+            console.log("creator-code-ran", new URL(req.url).pathname);
+            return new Response("served");
+          }
+        }
+    "#;
+
+    /// Boot a worker with `AUTH_OBLIVIOUS_APP` loaded and dispatch `path`
+    /// with NO `ZeroShip-User` header at all. Returns the status the worker
+    /// answered and the console lines the app produced.
+    async fn dispatch_unauthenticated(
+        manifest: &zeroship_bundle::Manifest,
+        path: &str,
+    ) -> (StatusCode, Vec<String>) {
+        init_runtime();
+
+        let app_id = Uuid::new_v4();
+        crate::cache::init_cache(
+            10,
+            4,
+            crate::cache::KernelConfig {
+                control_url: "http://127.0.0.1:1".to_string(),
+                control_key: String::new(),
+                db_service: None,
+                kv_url: None,
+                storage_backend: None,
+                meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
+            },
+        );
+        // The declared policy stops here. `load_app` has no parameter that
+        // can carry `manifest`, which is the defect these tests name.
+        let _declared_policy = manifest;
+        crate::cache::load_app(
+            app_id,
+            AUTH_OBLIVIOUS_APP,
+            AppRuntimeLimits::default(),
+            zeroship_core::types::AppNetPolicy::default(),
+            None,
+            None,
+            &EnvSnapshot::empty(),
+        )
+        .expect("app loads");
+
+        let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+        crate::sync::put_env_from_json(&envs, app_id, r#"{"vars":{},"secrets":{},"expose":[]}"#, 0)
+            .expect("insert env");
+        let logs = crate::logs::new_store();
+        let blob_root = tmpdir("declared-auth-policy");
+        let config = test_worker_config(&blob_root);
+
+        let app = test::init_service(
+            web::App::new()
+                .state(config)
+                .state(envs)
+                .state(logs.clone())
+                .configure(configure),
+        )
+        .await;
+
+        // No `ZeroShip-User`, no `Authorization`, no cookie. This is exactly
+        // what a caller with direct network access to the worker sends, and
+        // what the gateway forwards on a public route.
+        let req = test::TestRequest::post()
+            .uri(&format!("/dispatch/{app_id}"))
+            .set_payload(dispatch_frame(
+                "GET",
+                &format!("http://app.test{path}"),
+                b"",
+            ))
+            .to_request();
+        let resp = test::call_service(&app, req).await;
+        let status = resp.status();
+        let _ = test::read_body(resp).await;
+        let lines = crate::logs::get(&logs, &app_id);
+
+        let _ = std::fs::remove_dir_all(blob_root);
+        (status, lines)
+    }
+
+    /// THE DEFECT. A route the deploy declares `auth: "user"`, called with no
+    /// identity at all, must be refused by the worker in Rust before the
+    /// creator's handler is entered.
+    #[test]
+    fn dispatch_refuses_an_unauthenticated_request_to_a_user_route() {
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
+
+        runtime.block_on(async {
+            let manifest = manifest_declaring_a_user_route();
+            let (status, lines) = dispatch_unauthenticated(&manifest, "/api/private").await;
+
+            assert_eq!(
+                status,
+                StatusCode::UNAUTHORIZED,
+                "a `user` route reached with no identity must be refused by the \
+                 worker; got {status} instead, which means the request was served"
+            );
+            assert!(
+                lines.is_empty(),
+                "the refusal must happen BEFORE creator code runs, so the app \
+                 must have logged nothing; got {lines:?}"
+            );
+        });
+    }
+
+    /// THE CONTROL. Same app, same missing identity, one variable changed:
+    /// the route is declared `anon`. It must still be served, or the arm
+    /// above would pass on a worker that simply refuses everything.
+    #[test]
+    fn dispatch_still_serves_an_unauthenticated_request_to_an_anonymous_route() {
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
+
+        runtime.block_on(async {
+            let manifest = manifest_declaring_a_user_route();
+            let (status, lines) = dispatch_unauthenticated(&manifest, "/api/public").await;
+
+            assert_eq!(
+                status,
+                StatusCode::OK,
+                "an `anon` route must stay reachable without identity"
+            );
+            assert_eq!(
+                lines,
+                vec!["creator-code-ran /api/public".to_string()],
+                "the app's handler must have run on the anonymous route"
+            );
+        });
+    }
+
     #[test]
     fn dispatch_preserves_non_utf8_request_body_bytes() {
         let runtime = compio::runtime::Runtime::new().expect("compio runtime");
