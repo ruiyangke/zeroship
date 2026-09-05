@@ -22,8 +22,8 @@ export interface ProcedureSchema<T = unknown> {
   parse(input: unknown): T;
 }
 
-/** Authentication level required to reach a resource. */
-export type AuthLevel = "anon" | "user" | "admin";
+/** The principal a request must present to reach a resource. */
+export type RequiredPrincipal = "anonymous" | "user";
 
 /** Discriminator on RPC procedures.
  *
@@ -74,7 +74,7 @@ export interface ProcedureConfig<TIn = unknown, TOut = unknown> {
    */
   idempotencyTtl?: { hours?: number };
   /** Authentication required to reach this procedure. */
-  auth?: AuthLevel;
+  auth?: RequiredPrincipal;
   /** Per-procedure rate-limit override. */
   rateLimit?: RateLimit;
   /** Per-procedure max body bytes. */
@@ -158,7 +158,7 @@ export interface Resource {
   static?: StaticAction;
 
   // ── Policy ──
-  auth?: AuthLevel;
+  auth?: RequiredPrincipal;
   cors?: CorsConfig;
   cache?: CacheControl;
   rateLimit?: RateLimit;
@@ -196,7 +196,7 @@ export interface Timeout {
  * built-in defaults.
  */
 export interface RpcDefaults {
-  auth?: AuthLevel;
+  auth?: RequiredPrincipal;
   rateLimit?: RateLimit;
   timeout?: Timeout;
   maxInputBytes?: number;

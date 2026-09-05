@@ -764,10 +764,10 @@ function buildAutoResources(opts: {
     if (userHasDefaultFetch) {
       // SSR catch-all: forward to the worker. No explicit action — a
       // URL-namespace resource without a routing action defaults to
-      // worker SSR dispatch. We mark it `anon` + publicly_accessible
+      // worker SSR dispatch. We mark it `anonymous` + publicly_accessible
       // so the gateway's secure-by-default check doesn't reject it.
       out[catchAllKey] = {
-        auth: "anon",
+        auth: "anonymous",
         publicly_accessible: true,
       };
     } else if (assets["/index.html"]) {

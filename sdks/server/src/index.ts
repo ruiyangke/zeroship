@@ -10,7 +10,7 @@ export {
   type AppDefinition,
   type Resource,
   type ResourceTree,
-  type AuthLevel,
+  type RequiredPrincipal,
   type ProcedureKind,
   type ProcedureConfig,
   type ProcedureSchema,

@@ -422,13 +422,42 @@ function validateResources(
     }
   }
 
+  // The `auth` value must name a principal the platform has. Two exist:
+  // "anonymous" (no identity required) and "user" (an authenticated end
+  // user). This is an ERROR IN EVERY MODE, dev included — an unknown value
+  // is not a posture the runtime can honour, so a dev build that accepted
+  // it would emit a manifest the gateway cannot compile.
+  //
+  // `"admin"` is called out by name because the platform used to accept it
+  // and the build itself used to recommend it. It was never enforced: the
+  // gateway matched it in the same arm as `user`, so a route locked down
+  // with `admin` was reachable by every signed-in end user. There is no
+  // platform-admin principal (`docs/architecture/control-plane.md`), so the
+  // level was deleted rather than implemented.
+  for (const [key, node] of Object.entries(flat)) {
+    if (!("auth" in node) || node.auth === undefined) continue;
+    if (node.auth === "anonymous" || node.auth === "user") continue;
+    const wrote = JSON.stringify(node.auth);
+    let msg =
+      `resource ${JSON.stringify(key)} sets auth: ${wrote}, which is not a principal ` +
+      `this platform has. Use auth: "user" to require an authenticated end user, or ` +
+      `auth: "anonymous" with publiclyAccessible: true to make it deliberately public.`;
+    if (node.auth === "admin") {
+      msg +=
+        ` The "admin" level was deleted on 2026-09-05: no platform-admin principal ` +
+        `exists, and the gateway enforced it identically to "user", so a route gated ` +
+        `with it was reachable by every signed-in end user.`;
+    }
+    errors.push(msg);
+  }
+
   // Secure-by-default.
   for (const [key, node] of Object.entries(flat)) {
-    if (node.auth === "anon" && node.publicly_accessible !== true) {
+    if (node.auth === "anonymous" && node.publicly_accessible !== true) {
       const msg =
-        `resource ${JSON.stringify(key)} sets auth: "anon" without publicly_accessible: true. ` +
+        `resource ${JSON.stringify(key)} sets auth: "anonymous" without publicly_accessible: true. ` +
         `Add publicly_accessible: true to confirm this is an intentionally public endpoint, ` +
-        `or set auth: "user" or "admin".`;
+        `or set auth: "user".`;
       if (mode === "production") errors.push(msg);
       else warnings.push(msg);
     }
@@ -440,7 +469,6 @@ function validateResources(
   // for them — the spec doesn't explicitly forbid e.g. weakening rate_limit
   // (the merge rule is "min" anyway) but it does require declarative
   // intent for `auth`.
-  const authStrength: Record<string, number> = { anon: 0, user: 1, admin: 2 };
   const shadowableFields = [
     "auth",
     "rate_limit",
@@ -466,12 +494,11 @@ function validateResources(
       // Same value? Not a shadow.
       if (canonicalJson(node[field]) === canonicalJson(parent[field])) continue;
       // For auth, the spec only requires `override` when the child weakens.
-      if (field === "auth") {
-        const childN = authStrength[node.auth as string] ?? -1;
-        const parentN = authStrength[parent.auth as string] ?? -1;
-        // Strengthening (child >= parent) is fine without override.
-        if (childN >= parentN) continue;
-      }
+      // With two principals there is no ladder to consult: the values differ
+      // (checked just above), so the child either ADDS the user requirement —
+      // strengthening, allowed bare — or DROPS it, which is the weakening the
+      // marker exists to make explicit.
+      if (field === "auth" && node.auth === "user") continue;
       if (!declaredOverrides.has(field)) {
         errors.push(
           `resource ${JSON.stringify(key)} shadows inherited field ` +
@@ -703,7 +730,7 @@ export function extractDefineAppLiteral(
     throw new Error(
       `[zeroship:manifest] cannot evaluate defineApp argument in ${filePath} as a literal. ` +
         `This build only supports literal resource trees (no computed expressions). ` +
-        `Hint: replace dynamic values like \`env.PROD ? "anon" : "user"\` with a constant. ` +
+        `Hint: replace dynamic values like \`env.PROD ? "anonymous" : "user"\` with a constant. ` +
         `Underlying error: ${(e as Error).message}`,
     );
   }
@@ -845,13 +872,13 @@ function rpcInheritanceChain(key: string): string[] {
  * Surface, AT BUILD TIME, every procedure that will deploy fail-closed.
  *
  * A `rpc:` procedure whose whole inheritance chain declares no `auth`
- * resolves to `AuthLevel::User` in the gateway (`resolve_effective_policy`,
+ * resolves to `RequiredPrincipal::User` in the gateway (`resolve_effective_policy`,
  * the `if !auth_declared && key.starts_with("rpc:")` arm). That default is
  * deliberate and stays as it is: forgetting a policy must be a loud 401,
  * never a silent public endpoint.
  *
  * The gap this closes is visibility, not policy. Enforcement lives ONLY in
- * the gateway -- `AuthLevel` has no reader in `crates/cli` or
+ * the gateway -- `RequiredPrincipal` has no reader in `crates/cli` or
  * `crates/runtime` -- so `pnpm dev` cannot reproduce the 401 and the
  * creator learns about it only after deploying. The build, by contrast,
  * already holds both halves of the answer (the discovered procedure list
@@ -909,11 +936,11 @@ function warnFailClosedProcedures(
       `  Declare the policy in src/server/config.ts:\n` +
       `      export default defineApp({\n` +
       `        resources: {\n` +
-      `          ${JSON.stringify(sample)}: { auth: "anon", publiclyAccessible: true },\n` +
+      `          ${JSON.stringify(sample)}: { auth: "anonymous", publiclyAccessible: true },\n` +
       `        },\n` +
       `      });\n` +
-      `  Use \`auth: "anon", publiclyAccessible: true\` to make a procedure publicly ` +
-      `reachable, or \`auth: "user"\` / \`auth: "admin"\` to keep it gated and make that ` +
+      `  Use \`auth: "anonymous", publiclyAccessible: true\` to make a procedure publicly ` +
+      `reachable, or \`auth: "user"\` to keep it gated and make that ` +
       `intent explicit.`,
   );
 }

@@ -219,7 +219,7 @@ done
 # gateway's refusal rather than the worker's environment -- and that reads as a
 # clean "no leak".
 d="$WORK/unpack"; mkdir -p "$d"; tar -xf "$ZSHIP" -C "$d"
-grep -qE '"rpc:envp\.report":\{[^}]*"auth":"anon"' "$d/manifest.json" \
+grep -qE '"rpc:envp\.report":\{[^}]*"auth":"anonymous"' "$d/manifest.json" \
   && pass "envp.report is anon in the manifest (deployed calls reach the WORKER)" \
   || { fail "envp.report is not anon in the manifest -- deployed calls never reach the worker"; exit 1; }
 

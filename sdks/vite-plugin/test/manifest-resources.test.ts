@@ -173,7 +173,7 @@ export default defineApp({
       auth: "user",
       rateLimit: { rpm: 600, per: "user" },
       children: {
-        "delete": { auth: "admin", override: ["auth"] },
+        "delete": { auth: "anonymous", override: ["auth"], publiclyAccessible: true },
       },
     },
   },
@@ -221,7 +221,7 @@ export default defineApp({
       // Flattened child — note the dot separator in the rpc: namespace.
       const del = result.resources["rpc:todos.delete"];
       assert.ok(del, "rpc:todos.delete (flattened) present");
-      assert.equal(del.auth, "admin", "child auth wins (with override)");
+      assert.equal(del.auth, "anonymous", "child auth wins (with override)");
       assert.deepEqual(del.override, ["auth"], "override marker preserved");
       assert.equal(del.kind, "mutation", "kind from auto-derived merged in");
     } finally {
@@ -388,7 +388,7 @@ export default defineApp({
       "src/server/config.ts": `import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "*": { auth: "admin", rateLimit: { rpm: 30, per: "ip" } },
+    "*": { auth: "user", rateLimit: { rpm: 30, per: "ip" } },
   },
 });
 `,
@@ -399,7 +399,7 @@ export default defineApp({
         procedures: [],
         mode: "production",
       });
-      assert.equal(result.resources["*"].auth, "admin", "config picked up");
+      assert.equal(result.resources["*"].auth, "user", "config picked up");
     } finally {
       await fix.cleanup();
     }
@@ -413,7 +413,7 @@ export default defineApp({
       "zeroship.config.ts": `import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "*": { auth: "admin", rateLimit: { rpm: 30, per: "ip" } },
+    "*": { auth: "user", rateLimit: { rpm: 30, per: "ip" } },
   },
 });
 `,
@@ -635,7 +635,7 @@ describe("declared-vs-discovered rpc reconciliation", () => {
     const fix = await makeFixture({
       "src/server/config.ts": `
 import { defineApp } from "@zeroship/server";
-export default defineApp({ resources: { "rpc:getMessages": { auth: "anon", publiclyAccessible: true } } });
+export default defineApp({ resources: { "rpc:getMessages": { auth: "anonymous", publiclyAccessible: true } } });
       `,
     });
     try {
@@ -664,7 +664,7 @@ export default defineApp({ resources: { "rpc:getMessages": { auth: "anon", publi
     const fix = await makeFixture({
       "src/server/config.ts": `
 import { defineApp } from "@zeroship/server";
-export default defineApp({ resources: { "rpc:getMessages": { auth: "anon", publiclyAccessible: true } } });
+export default defineApp({ resources: { "rpc:getMessages": { auth: "anonymous", publiclyAccessible: true } } });
       `,
     });
     try {
