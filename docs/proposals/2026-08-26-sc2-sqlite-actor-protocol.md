@@ -183,11 +183,20 @@ gaps between statements. That is the stricter of the two available answers and
 the one SC-1's deadline rule needs: a deadline that cannot interrupt a running
 statement is not a deadline.
 
-**No production canceller exists yet.** `SqliteCancelHandle`,
-`SqliteCancelGuard` and `Interrupts::interrupt` carry `#[allow(dead_code)]`, and
-that annotation is real rather than defensive: SC-2 owns the primitives, SC-1
-step 9 owns the deadline and dropped-future wiring that calls them, and until it
-lands the only callers are this crate's tests.
+**No production canceller exists yet.** `SqliteCancelHandle` and
+`Interrupts::interrupt` carry `#[allow(dead_code)]`, and that annotation is real
+rather than defensive: SC-2 owns the primitives, SC-1 step 9 owns the deadline
+and dropped-future wiring that calls them, and until it lands the only callers
+are this crate's tests.
+
+**`SqliteCancelGuard` was DELETED on 2026-09-04 and this paragraph named it
+until then.** It is not merely unwired: nothing ever constructed it, so its
+`Drop` - the entire point of a guard - was unreachable in every configuration,
+which is what separated it from the other parked primitives here, where a live
+consumer waits on a producer nobody calls. SC-1 shipped EXPLICIT cancellation
+through `backend::cancel::TxCanceller` instead of the drop-cancels shape SC-2
+asked for. Whoever builds step 9 should read that as "this was tried and found
+to be the wrong half", not as a missing file to restore.
 
 ### The four interleavings, and the definition that makes them decidable
 
@@ -233,11 +242,16 @@ turns four fuzzy races into four decidable cases:
    not call `interrupt()`** - it joins as a terminal waiter and receives
    `AlreadyCompleted` carrying that exact stored outcome. No `ROLLBACK` is sent;
    **the write stays durable.**
-4. **Cancel after the reply is polled.** The future disarms its drop-cancel
-   guard **before** returning `Ready` (`SqliteCancelGuard::disarm`), so a later
-   drop cannot retroactively cancel a delivered result. The poll order closes the
-   registration race: fast-path the reply, register the real waker on `Pending`,
-   then re-poll the reply once more before sleeping.
+4. **Cancel after the reply is polled.** The future must disarm its drop-cancel
+   guard **before** returning `Ready`, so a later drop cannot retroactively
+   cancel a delivered result. The poll order closes the registration race:
+   fast-path the reply, register the real waker on `Pending`, then re-poll the
+   reply once more before sleeping.
+
+   The mechanism named here was `SqliteCancelGuard::disarm`, and **that type no
+   longer exists** (deleted 2026-09-04, see above). The REQUIREMENT stands and is
+   unmet: no shipped code disarms anything before returning `Ready`, because no
+   shipped code arms a drop-cancel guard at all. Step 9 has to supply both halves.
 
 Cases 3 and 4 are the ones worth stating explicitly, because both are places
 where a plausible implementation destroys committed data in the name of honoring

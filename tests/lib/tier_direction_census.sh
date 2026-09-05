@@ -280,7 +280,7 @@ tier_of_file() {
     # and a test-only conformance marker: all at or below ENGINE. Issue #170
     # closes here.
     ./backend/mod.rs)                                    echo ENGINE ;;
-    # THREE FILES ARE DELIBERATELY LEFT CONTESTED, and each has a reason that is
+    # TWO FILES ARE DELIBERATELY LEFT CONTESTED, and each has a reason that is
     # an open QUESTION rather than an omission:
     #   auth/mod.rs - #156 asks whether auth/ is deleted outright
     #     (zero production callers, a live twin in migrate-server). Tiering code

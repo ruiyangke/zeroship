@@ -380,7 +380,7 @@ impl Interrupts {
     /// command yet... until SC-1 step 9 lands the only callers are this crate's
     /// tests". SC-1 landed. This is reachable from production in three hops -
     /// `interrupt` <- `SqliteCancelHandle::signal` <- `SqliteCancelHandle::cancel`
-    /// <- `transaction::cancel::TxCanceller::cancel` in `zeroship-data-engine`,
+    /// <- `backend::cancel::TxCanceller::cancel` in `zeroship-data-engine`,
     /// whose SQLite arm calls `handle.cancel().await`. Two of those hops are
     /// private and the last is in ANOTHER CRATE, which is why the chain reads as
     /// broken from here and why the prose outlived the fact.
@@ -1140,7 +1140,7 @@ impl SqliteCancelHandle {
 // It was an `Option<SqliteCancelHandle>` whose `Drop` made a caller-side drop
 // cancel. Nothing ever constructed it: SC-2 asked for a drop-cancels guard and
 // SC-1 shipped EXPLICIT cancellation instead, through
-// `transaction::cancel::TxCanceller`. Its own comment said so. Inert in both
+// `backend::cancel::TxCanceller`. Its own comment said so. Inert in both
 // directions - no constructor, so its `Drop` was unreachable - which is what
 // separates it from the other unwired code in these crates, where a live
 // consumer is waiting on a producer nobody calls.
