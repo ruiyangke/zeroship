@@ -632,7 +632,7 @@ fn desired_physical_columns(schema: &Value) -> std::collections::HashSet<String>
 /// per-field against the live column set.
 pub fn compute_diff(
     live: &LiveSchema,
-    app_id: &str,
+    schema_name: &crate::SchemaName,
     collection: &str,
     schema: &Value,
     create_table_sql: &str,
@@ -681,7 +681,7 @@ pub fn compute_diff(
             // Build the ALTER. Note: build_add_column emits IF NOT EXISTS,
             // making the operation idempotent even if the live snapshot
             // is briefly stale.
-            let sql = crate::query::build_add_column(app_id, collection, field, def)
+            let sql = crate::query::build_add_column(schema_name, collection, field, def)
                 .ok()
                 .map(|s| s.to_string());
             ops.push(DiffOp {
@@ -785,7 +785,7 @@ pub fn compute_diff(
                     // emit AddForeignKey as a separate op so the
                     // orchestrator can run ALTER TABLE ADD CONSTRAINT
                     // after the column is created.
-                    let sql = crate::query::build_add_foreign_key(app_id, collection, field, def)
+                    let sql = crate::query::build_add_foreign_key(schema_name, collection, field, def)
                         .ok()
                         .map(|s| s.to_string());
                     ops.push(DiffOp {
@@ -812,7 +812,7 @@ pub fn compute_diff(
             // Column exists. Need to attach the FK if not present, or
             // detect a policy mismatch.
             if live_fk.is_none() {
-                let sql = crate::query::build_add_foreign_key(app_id, collection, field, def)
+                let sql = crate::query::build_add_foreign_key(schema_name, collection, field, def)
                     .ok()
                     .map(|s| s.to_string());
                 ops.push(DiffOp {
@@ -851,7 +851,7 @@ pub fn compute_diff(
                         change_kind: ChangeKind::DropForeignKey,
                         class: ChangeClass::Compatible,
                         sql: crate::query::build_drop_foreign_key(
-                            app_id,
+                            schema_name,
                             collection,
                             &fk.constraint_name,
                         )
@@ -867,7 +867,7 @@ pub fn compute_diff(
                         collection: collection.to_string(),
                         change_kind: ChangeKind::AddForeignKey,
                         class: ChangeClass::Compatible,
-                        sql: crate::query::build_add_foreign_key(app_id, collection, field, def)
+                        sql: crate::query::build_add_foreign_key(schema_name, collection, field, def)
                             .ok(),
                         details: serde_json::json!({
                             "kind": "add_foreign_key",
@@ -1210,6 +1210,11 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// Wrap a fixture app id as the physical schema `compute_diff` now takes.
+    fn s(name: &str) -> crate::SchemaName {
+        crate::SchemaName::new(name).expect("fixture schema name")
+    }
+
     fn live_with_rows(coll: &str, n: i64) -> LiveSchema {
         let mut live = LiveSchema::default();
         live.row_counts.insert(coll.to_string(), n);
@@ -1304,7 +1309,7 @@ mod tests {
         live.tables.insert("posts".to_string(), cols);
 
         let declared = json!({}); // Empty declared schema — drop everything user-side
-        let ops = compute_diff(&live, "app1", "posts", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "posts", &declared, "", &[]);
         // We should see exactly one DropColumn op for legacy_score.
         let drops: Vec<&DiffOp> = ops
             .iter()
@@ -1363,7 +1368,7 @@ mod tests {
         let declared = json!({
             "ssn": { "type": "string", "encrypted": { "mode": "randomised", "keyId": "default" } }
         });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
 
         let rewrites: Vec<&DiffOp> = ops
             .iter()
@@ -1407,7 +1412,7 @@ mod tests {
         // rewrite (every value must be decrypt-backfilled).
         let live = live_with_cols("users", vec![("ssn", encrypted_bytea_col())]);
         let declared = json!({ "ssn": { "type": "string" } });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
 
         let rewrites: Vec<&DiffOp> = ops
             .iter()
@@ -1443,7 +1448,7 @@ mod tests {
         let declared = json!({
             "ssn": { "type": "string", "encrypted": { "mode": "randomised", "keyId": "default" } }
         });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
         assert!(
             !ops.iter()
                 .any(|o| matches!(o.change_kind, ChangeKind::RewriteColumnType { .. })),
@@ -1456,7 +1461,7 @@ mod tests {
         // Live plaintext + declared plaintext → no rewrite.
         let live = live_with_cols("users", vec![("name", plaintext_text_col())]);
         let declared = json!({ "name": { "type": "string" } });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
         assert!(
             !ops.iter()
                 .any(|o| matches!(o.change_kind, ChangeKind::RewriteColumnType { .. })),
@@ -1504,7 +1509,7 @@ mod tests {
         live.tables.insert("users".to_string(), cols);
 
         let declared = json!({ "email": { "type": "string", "required": true } });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
         assert!(
             !ops.iter()
                 .any(|op| matches!(op.change_kind, ChangeKind::DropColumn)),
@@ -1516,7 +1521,7 @@ mod tests {
     fn create_table_emitted_when_live_empty() {
         let live = LiveSchema::default();
         let declared = json!({"name": {"type": "string"}});
-        let ops = compute_diff(&live, "app1", "fresh", &declared, "CREATE TABLE ...", &[]);
+        let ops = compute_diff(&live, &s("app1"), "fresh", &declared, "CREATE TABLE ...", &[]);
         let creates: Vec<&DiffOp> = ops
             .iter()
             .filter(|o| matches!(o.change_kind, ChangeKind::CreateTable))
@@ -1532,7 +1537,7 @@ mod tests {
             "name": { "type": "string" },
             "rank": { "type": "int", "required": true },
         });
-        let ops = compute_diff(&live, "app1", "fresh", &declared, "CREATE TABLE ...", &[]);
+        let ops = compute_diff(&live, &s("app1"), "fresh", &declared, "CREATE TABLE ...", &[]);
         assert!(
             ops.iter()
                 .all(|op| !matches!(op.change_kind, ChangeKind::AddColumn)),
@@ -1576,7 +1581,7 @@ mod tests {
         let declared = json!({
             "authorId": {"type": "ref", "refTarget": "users"},
         });
-        let ops = compute_diff(&live, "app1", "posts", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "posts", &declared, "", &[]);
         let fk_ops: Vec<&DiffOp> = ops
             .iter()
             .filter(|o| matches!(o.change_kind, ChangeKind::AddForeignKey))
@@ -1631,7 +1636,7 @@ mod tests {
         let declared = json!({
             "authorId": {"type": "ref", "refTarget": "users"},
         });
-        let ops = compute_diff(&live, "app1", "posts", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "posts", &declared, "", &[]);
         assert!(
             !ops.iter().any(|o| matches!(
                 o.change_kind,
@@ -1676,7 +1681,7 @@ mod tests {
         let declared = json!({
             "authorId": {"type": "ref", "refTarget": "users", "onDelete": "cascade"},
         });
-        let ops = compute_diff(&live, "app1", "posts", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "posts", &declared, "", &[]);
         let drops: Vec<&DiffOp> = ops
             .iter()
             .filter(|o| matches!(o.change_kind, ChangeKind::DropForeignKey))
@@ -1751,7 +1756,7 @@ mod tests {
             "value": { "type": "number" }
         });
 
-        let ops = compute_diff(&live, "app1", "events", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "events", &declared, "", &[]);
         // Adds: `name` and `value` (new-variant fields). Both nullable
         // → additive.
         let new_field_ops: Vec<&DiffOp> = ops
@@ -1805,7 +1810,7 @@ mod tests {
             },
             "userId": { "type": "number" }
         });
-        let ops = compute_diff(&live, "app1", "events", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "events", &declared, "", &[]);
         let drops: Vec<&DiffOp> = ops
             .iter()
             .filter(|o| matches!(o.change_kind, ChangeKind::DropColumn))
@@ -1855,7 +1860,7 @@ mod tests {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
 
         assert!(
             !ops.iter()
@@ -1891,7 +1896,7 @@ mod tests {
         // pass on an implementation that refused masking outright.
         let ops = compute_diff(
             &live,
-            "app1",
+            &s("app1"),
             "users",
             &json!({
                 "ssn": { "type": "string" },
@@ -1931,7 +1936,7 @@ mod tests {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
         let backfill = ops
             .iter()
             .find(|op| matches!(op.change_kind, ChangeKind::MaskBackfill { .. }))
@@ -1961,7 +1966,7 @@ mod tests {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
         let rewrites: Vec<&DiffOp> = ops
             .iter()
             .filter(|o| matches!(o.change_kind, ChangeKind::MaskRewrite { .. }))
@@ -1996,7 +2001,7 @@ mod tests {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
         assert!(
             !ops.iter().any(|o| matches!(
                 o.change_kind,
@@ -2019,7 +2024,7 @@ mod tests {
         let declared = json!({
             "ssn": { "type": "string" }
         });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
         let removes: Vec<&DiffOp> = ops
             .iter()
             .filter(|o| matches!(o.change_kind, ChangeKind::MaskRemove { .. }))
@@ -2044,7 +2049,7 @@ mod tests {
                 "mask": { "kind": "none", "classification": "spi" }
             }
         });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
         let removes: Vec<&DiffOp> = ops
             .iter()
             .filter(|o| matches!(o.change_kind, ChangeKind::MaskRemove { .. }))
@@ -2102,7 +2107,7 @@ mod tests {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let ops = compute_diff(&live, "app1", "users", &declared, "", &[]);
+        let ops = compute_diff(&live, &s("app1"), "users", &declared, "", &[]);
         assert!(
             !ops.iter()
                 .any(|o| matches!(o.change_kind, ChangeKind::DropColumn)

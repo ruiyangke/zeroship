@@ -1285,14 +1285,19 @@ impl SqliteBackend {
     }
 }
 
+/// SCHEMA, not tenant: this qualifies the table the query reads.
+///
+/// On SQLite the two are the same string today because the ATTACH alias IS
+/// the app id - see `attach_app_file`. The parameter states which of the two
+/// meanings the query builder is being handed.
 fn build_spatial_near_base_query(
-    app_id: &str,
+    schema_name: &zeroship_schema::SchemaName,
     collection: &str,
     filter: &serde_json::Value,
     schema_hint: &serde_json::Value,
 ) -> Result<zeroship_schema::query::BuiltQuery, DbError> {
     zeroship_schema::query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
-        app_id,
+        schema_name,
         collection,
         filter,
         /* limit  */ None,
@@ -1381,13 +1386,12 @@ impl SqliteBackend {
         limit: Option<usize>,
         schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
-        let app_id = binding.app_id();
         // Build the WHERE clause via the same machinery `dispatch_find`
         // uses (the SQLite-on-PG-SQL path; `$N` placeholders bind
         // positionally on rusqlite). No ORDER BY at the SQL layer —
         // we sort in Rust by computed distance.
         let schema_hint = schema;
-        let bq = build_spatial_near_base_query(app_id, collection, filter, schema_hint)?;
+        let bq = build_spatial_near_base_query(binding.schema(), collection, filter, schema_hint)?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         let typed = session.query_typed_internal(&bq.sql, &param_refs).await?;
 
@@ -2307,7 +2311,12 @@ mod tests {
             },
             "location": { "type": "geoPoint" }
         });
-        let bq = build_spatial_near_base_query("app1", "places", &serde_json::json!({}), &schema)
+        let bq = build_spatial_near_base_query(
+            &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
+            "places",
+            &serde_json::json!({}),
+            &schema,
+        )
             .expect("spatial base query");
         assert!(
             !bq.sql.starts_with("SELECT *"),

@@ -849,7 +849,7 @@ pub async fn run_find(
     let mut sql_filter = filter;
     maybe_lower_sqlite_boolean_filter(route.dialect(), &schema_hint, &mut sql_filter);
     let bq = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
-        binding.app_id(),
+        binding.schema(),
         &coll,
         &sql_filter,
         plan.limit,
@@ -940,7 +940,7 @@ pub async fn run_insert(
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     maybe_lower_sqlite_boolean_doc(route.dialect(), &schema, &mut doc);
     let bq =
-        query::build_insert_with_dialect(binding.app_id(), &coll, &schema, &doc, route.dialect())
+        query::build_insert_with_dialect(binding.schema(), &coll, &schema, &doc, route.dialect())
             .map_err(DbError::from)?;
     let rows = exec_mutation_with_emit(
         bq,
@@ -987,7 +987,7 @@ pub async fn run_insert_many(
     maybe_lower_sqlite_boolean_docs(route.dialect(), &schema, &mut docs);
 
     let bq = query::build_insert_many_with_dialect(
-        binding.app_id(),
+        binding.schema(),
         &coll,
         &schema,
         &docs,
@@ -1123,7 +1123,7 @@ pub async fn run_update_one(
         ..Default::default()
     };
     let built = query::build_update_one_with_system_fields(
-        binding.app_id(),
+        binding.schema(),
         &coll,
         &schema,
         &sql_filter,
@@ -1286,7 +1286,7 @@ pub async fn run_update_many(
                 // bounds the statement to this exact row.
                 row_queries.push(
                     query::build_update_many_with_system_fields(
-                        binding.app_id(),
+                        binding.schema(),
                         &coll,
                         &schema,
                         &row_filter,
@@ -1346,7 +1346,7 @@ pub async fn run_update_many(
     let mut sql_filter = filter.clone();
     maybe_lower_sqlite_boolean_filter(dialect, &schema, &mut sql_filter);
     let bq = query::build_update_many_with_system_fields(
-        binding.app_id(),
+        binding.schema(),
         &coll,
         &schema,
         &sql_filter,
@@ -1407,7 +1407,6 @@ pub fn plan_delete_one(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<query::BuiltQuery, DbError> {
-    let app = binding.app_id();
     let autobump = query::SystemFieldAutoBump {
         actor_id,
         ..Default::default()
@@ -1419,7 +1418,7 @@ pub fn plan_delete_one(
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_soft_delete_one_with_system_fields(
-            app,
+            binding.schema(),
             collection,
             &schema,
             &filter,
@@ -1442,7 +1441,6 @@ pub fn plan_delete_many(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<query::BuiltQuery, DbError> {
-    let app = binding.app_id();
     let autobump = query::SystemFieldAutoBump {
         actor_id,
         ..Default::default()
@@ -1451,7 +1449,7 @@ pub fn plan_delete_many(
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_soft_delete_many_with_system_fields(
-            app,
+            binding.schema(),
             collection,
             &schema,
             &filter,
@@ -1482,12 +1480,11 @@ pub fn plan_purge_one(
     collection: &str,
     filter: Value,
 ) -> Result<query::BuiltQuery, DbError> {
-    let app_id = binding.app_id();
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_delete_one_with_dialect(
-            app_id,
+            binding.schema(),
             collection,
             &schema,
             &filter,
@@ -1507,11 +1504,10 @@ pub fn plan_purge_many(
     collection: &str,
     filter: Value,
 ) -> Result<query::BuiltQuery, DbError> {
-    let app_id = binding.app_id();
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
-        query::build_delete_many(app_id, collection, &schema, &filter, route.dialect())
+        query::build_delete_many(binding.schema(), collection, &schema, &filter, route.dialect())
             .map_err(DbError::from)
     })
 }
@@ -1530,7 +1526,6 @@ pub fn plan_restore_one(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<query::BuiltQuery, DbError> {
-    let app = binding.app_id();
     let autobump = query::SystemFieldAutoBump {
         dispatch_write: true,
         actor_id,
@@ -1540,7 +1535,7 @@ pub fn plan_restore_one(
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_restore_one_with_system_fields(
-            app,
+            binding.schema(),
             collection,
             &schema,
             &filter,
@@ -1562,7 +1557,6 @@ pub fn plan_restore_many(
     filter: Value,
     actor_id: Option<&str>,
 ) -> Result<query::BuiltQuery, DbError> {
-    let app = binding.app_id();
     let autobump = query::SystemFieldAutoBump {
         dispatch_write: true,
         actor_id,
@@ -1572,7 +1566,7 @@ pub fn plan_restore_many(
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_restore_many_with_system_fields(
-            app,
+            binding.schema(),
             collection,
             &schema,
             &filter,
@@ -1631,13 +1625,12 @@ pub fn plan_aggregate(
         .unwrap_or(false);
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
 
-    let app_id = binding.app_id();
     // The descriptor entry is the aggregate builder's identifier allowlist.
     // `$group.by` / `$sum` / `$sort` on a masked column read the field's own
     // column, which holds the mask - there is no sibling to lower to any more.
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         query::build_aggregate_with_result_columns(
-            app_id,
+            binding.schema(),
             collection,
             pipeline,
             filter_soft_deleted,
@@ -1674,7 +1667,6 @@ pub fn plan_distinct(
     filter: Value,
     opts: &Value,
 ) -> Result<(query::BuiltQuery, bool), DbError> {
-    let app_id = binding.app_id();
 
     let include_deleted = opts
         .get("include_deleted")
@@ -1695,7 +1687,7 @@ pub fn plan_distinct(
     maybe_lower_sqlite_boolean_filter(route.dialect(), &schema_hint, &mut filter);
 
     let built = query::build_distinct_with_soft_delete_with_dialect(
-        app_id,
+        binding.schema(),
         collection,
         field,
         &filter,
@@ -1749,12 +1741,11 @@ pub fn plan_count(
         .unwrap_or(false);
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(include_deleted);
 
-    let app_id = binding.app_id();
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
         query::build_count_with_soft_delete(
-            app_id,
+            binding.schema(),
             collection,
             &schema,
             &filter,
@@ -1793,7 +1784,7 @@ pub async fn run_upsert(
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     maybe_lower_sqlite_boolean_doc(route.dialect(), &schema, &mut doc);
     let bq = query::build_upsert_with_dialect(
-        binding.app_id(),
+        binding.schema(),
         &coll,
         &schema,
         &doc,

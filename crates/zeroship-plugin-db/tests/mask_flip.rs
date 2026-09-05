@@ -188,7 +188,7 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    let ddl = build_create_table_with_fks(app, collection, schema, &FkEmission::Inline)
+    let ddl = build_create_table_with_fks(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), collection, schema, &FkEmission::Inline)
         .expect("the platform's own CREATE TABLE emitter");
     pool.batch_execute(&ddl)
         .await
@@ -241,7 +241,7 @@ async fn insert_through_the_pipeline(
         .as_str()
         .unwrap_or_else(|| panic!("the write pipeline must mint an id: {}", docs[0]))
         .to_string();
-    let bq = build_insert(app, collection, schema, &docs[0]).expect("insert builder");
+    let bq = build_insert(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), collection, schema, &docs[0]).expect("insert builder");
     assert!(
         !bq.sql.contains("RETURNING *") && bq.sql.contains(r#"RETURNING "id""#),
         "the write path's shape is a named projection; this suite is written against it: {}",
@@ -273,7 +273,7 @@ fn row_to_json(row: &compio_postgres::Row) -> Value {
 
 async fn run_find(pool: &Rc<Pool>, app: &str, filter: &Value, schema: &Value) -> Vec<Value> {
     let bq = build_find_with_schema(
-        app, "people", filter, Some(50), None, None, None, schema,
+        &zeroship_schema::SchemaName::new(app).expect("fixture schema name"), "people", filter, Some(50), None, None, None, schema,
     )
     .expect("find builder");
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
@@ -433,7 +433,7 @@ async fn a_range_filter_on_a_masked_column_cannot_narrow_the_plaintext() {
     // column sorts by the mask, so a `limit 1` cannot name the largest SSN.
     let ordered = {
         let bq = build_find_with_schema(
-            app,
+            &zeroship_schema::SchemaName::new(app).expect("fixture schema name"),
             "people",
             &json!({}),
             Some(1),
@@ -2075,7 +2075,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
             // against the same declared shape.
             "aggregate $match",
             build_aggregate(
-                "app1",
+                &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &json!([{ "$match": { raw.clone(): "x" } }]),
                 &schema,
@@ -2085,7 +2085,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         (
             "select",
             build_find_with_schema(
-                "app1",
+                &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &json!({}),
                 Some(1),
@@ -2099,7 +2099,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         (
             "orderBy",
             build_find_with_schema(
-                "app1",
+                &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &json!({}),
                 Some(1),
@@ -2113,7 +2113,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         (
             "$group.by",
             build_aggregate(
-                "app1",
+                &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
                 "people",
                 &json!([{ "$group": { "by": [raw.clone()] } }]),
                 &schema,
@@ -2122,7 +2122,7 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
         ),
         (
             "distinct",
-            build_distinct("app1", "people", &raw, &json!({}), &schema).is_err(),
+            build_distinct(&zeroship_schema::SchemaName::new("app1").expect("fixture schema name"), "people", &raw, &json!({}), &schema).is_err(),
         ),
         (
             // The exact function the write pipeline's document-key and
@@ -2140,10 +2140,10 @@ fn the_raw_column_is_refused_on_every_inbound_surface() {
     // The control: the LOGICAL name is ACCEPTED on those same surfaces. Without
     // it, a validator that refused everything would pass all seven above.
     assert!(build_where(&json!({ "ssn": "x" }), &mut Vec::new(), &schema).is_ok());
-    assert!(build_distinct("app1", "people", "ssn", &json!({}), &schema).is_ok());
+    assert!(build_distinct(&zeroship_schema::SchemaName::new("app1").expect("fixture schema name"), "people", "ssn", &json!({}), &schema).is_ok());
     assert!(validate_field_name("ssn").is_ok());
     assert!(build_find_with_schema(
-        "app1",
+        &zeroship_schema::SchemaName::new("app1").expect("fixture schema name"),
         "people",
         &json!({}),
         Some(1),
@@ -2343,7 +2343,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
     // `build_create_indexes` emits CONCURRENTLY, which cannot run inside the
     // implicit transaction `batch_execute` uses, so the fixture's DDL carries
     // the table alone. Apply the index the platform would build.
-    for spec in zeroship_plugin_db::query::build_create_indexes(app, "people", &schema).unwrap() {
+    for spec in zeroship_plugin_db::query::build_create_indexes(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), "people", &schema).unwrap() {
         pool.execute(&spec.sql.replace("CONCURRENTLY ", ""), &[])
             .await
             .unwrap_or_else(|e| panic!("index must build: {e}\n{}", spec.sql));
@@ -2408,7 +2408,7 @@ async fn a_unique_masked_field_admits_rows_that_share_a_mask() {
     zeroship_plugin_db::prepare_insert_many_docs_for_tests(&mut docs, app, "people", None)
         .await
         .expect("write pipeline");
-    let bq = build_insert(app, "people", &schema, &docs[0]).unwrap();
+    let bq = build_insert(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), "people", &schema, &docs[0]).unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let err = pool
         .query_text_params(&bq.sql, &param_refs)

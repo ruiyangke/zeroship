@@ -152,7 +152,7 @@ async fn fixture(admin: &Client, suffix: &str) -> (String, String) {
         .await
         .expect("create the app schema");
 
-    let ddl = build_create_table_with_fks(&app, COLLECTION, &schema, &FkEmission::Inline)
+    let ddl = build_create_table_with_fks(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, &schema, &FkEmission::Inline)
         .expect("the platform's own CREATE TABLE emitter");
     admin
         .batch_execute(&ddl)
@@ -294,7 +294,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "insert",
             build_insert(
-                app,
+                &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &json!({ "id": "psn_ins", "nickname": "a" }),
@@ -304,7 +304,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "insertMany",
             build_insert_many(
-                app,
+                &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &json!([{ "id": "psn_m1", "nickname": "b" }, { "id": "psn_m2", "nickname": "c" }]),
@@ -314,7 +314,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "upsert",
             build_upsert(
-                app,
+                &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &json!({ "id": "psn_up", "nickname": "d" }),
@@ -324,23 +324,23 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         ),
         mk(
             "updateMany",
-            build_update_many_with_system_fields(app, COLLECTION, schema, &filter, &update, d, &ab)
+            build_update_many_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, &update, d, &ab)
                 .unwrap(),
         ),
         mk(
             "softDeleteMany",
-            build_soft_delete_many_with_system_fields(app, COLLECTION, schema, &filter, d, &ab)
+            build_soft_delete_many_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, d, &ab)
                 .unwrap(),
         ),
         mk(
             "restoreMany",
-            build_restore_many_with_system_fields(app, COLLECTION, schema, &filter, d, &ab)
+            build_restore_many_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, d, &ab)
                 .unwrap(),
         ),
         mk(
             "deleteMany",
             build_delete_many(
-                app,
+                &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &json!({ "id": "psn_ins" }),
@@ -363,21 +363,21 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
     vec![
         mk(
             "updateOne",
-            build_update_one_with_system_fields(app, COLLECTION, schema, &filter, &update, d, &ab)
+            build_update_one_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, &update, d, &ab)
                 .unwrap(),
         ),
         mk(
             "softDeleteOne",
-            build_soft_delete_one_with_system_fields(app, COLLECTION, schema, &filter, d, &ab)
+            build_soft_delete_one_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, d, &ab)
                 .unwrap(),
         ),
         mk(
             "restoreOne",
-            build_restore_one_with_system_fields(app, COLLECTION, schema, &filter, d, &ab).unwrap(),
+            build_restore_one_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, d, &ab).unwrap(),
         ),
         mk(
             "deleteOne",
-            build_delete_one(app, COLLECTION, schema, &filter).unwrap(),
+            build_delete_one(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter).unwrap(),
         ),
     ]
 }
@@ -503,7 +503,7 @@ async fn column_scoped_reads_complete_every_projected_write_verb() {
     // Seed one row the update / delete / restore verbs act on, as the ROLE.
     begin_as_role(&session, &role).await;
     let seed = build_insert(
-        &app,
+        &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw.clone(): "123-45-6789" }),
@@ -585,7 +585,7 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
     let session = connect(&url).await;
     begin_as_role(&session, &role).await;
     let seed = build_insert(
-        &app,
+        &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &json!({ "id": "psn_seed", "nickname": "s" }),
@@ -679,7 +679,7 @@ async fn the_single_row_verbs_succeed_without_ctid_access() {
 
     let raw = raw_column_name("ssn");
     let seed = build_insert(
-        &app,
+        &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
@@ -735,7 +735,7 @@ async fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
     begin_as_role(&session, &role).await;
     let raw = raw_column_name("ssn");
     let seed = build_insert(
-        &app,
+        &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),

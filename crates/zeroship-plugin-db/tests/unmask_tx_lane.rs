@@ -114,7 +114,7 @@ async fn fixture_with_schema(pool: &Rc<Pool>, url: &str, app: &str, schema: Valu
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    let ddl = build_create_table_with_fks(app, "people", &schema, &FkEmission::Inline)
+    let ddl = build_create_table_with_fks(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), "people", &schema, &FkEmission::Inline)
         .expect("the platform's own CREATE TABLE emitter");
     pool.batch_execute(&ddl)
         .await
