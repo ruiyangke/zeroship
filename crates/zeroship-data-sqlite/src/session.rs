@@ -78,9 +78,10 @@
 //! Dropping the awaiting future drops the reply receiver. That alone still
 //! cancels **nothing** - it is not observable by the actor, which is why the
 //! protocol has an explicit [`Command::Cancel`] rather than treating a drop as
-//! one. A caller that wants a drop to cancel holds a
-//! [`SqliteCancelGuard`], whose `Drop` sets the cancel intent, interrupts the
-//! target connection and enqueues `Cancel`.
+//! one. Nothing makes a drop cancel today: `SqliteCancelGuard`, which would
+//! have, was deleted on 2026-09-04 with no constructor anywhere. The rules it
+//! carried are kept beside `SqliteCancelHandle` for whoever builds SC-2's
+//! drop-cancel path.
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -192,9 +193,10 @@ pub enum TypedCell {
 /// 2026-09-02 on exactly that evidence and the compiler refused with 39
 /// errors: `crates/zeroship-plugin-db/tests/sqlite_integration.rs` obtains one by INFERENCE from
 /// `query_typed` and then reads `.rows`, so it never writes the type's name
-/// and a reference count cannot see it. Its five siblings in this file -
-/// `Interrupts`, `SqliteSession`, `TxLease`, `SqliteCancelGuard`,
-/// `NextCommandGate` - narrowed cleanly in the same pass; this one is the
+/// and a reference count cannot see it. Its siblings in this file -
+/// `Interrupts`, `SqliteSession`, `TxLease`, `NextCommandGate` (and
+/// `SqliteCancelGuard`, until it was deleted as dead on 2026-09-04) - narrowed
+/// cleanly in the same pass; this one is the
 /// exception, and the reason is the return position, not the count.
 #[derive(Debug, Clone)]
 pub struct TypedRows {
@@ -373,13 +375,19 @@ impl Interrupts {
     /// reports `false` for the same reason a stale generation does: there is no
     /// connection this cancellation has any right to touch.
     ///
-    /// `#[allow(dead_code)]` is REAL, not defensive, and worth stating plainly:
-    /// **nothing in production cancels a SQLite command yet.** SC-2 asked for
-    /// the primitives; SC-1 step 9 owns the deadline and dropped-future wiring
-    /// that will call them. Until that lands the only callers are this crate's
-    /// tests. See the same note on [`SqliteSession::cancel_handle`],
-    /// [`SqliteCancelHandle`] and [`SqliteCancelGuard`].
-    #[allow(dead_code)]
+    /// THIS PARAGRAPH USED TO SAY THE OPPOSITE, AND CARRIED AN
+    /// `#[allow(dead_code)]` TO MATCH: "nothing in production cancels a SQLite
+    /// command yet... until SC-1 step 9 lands the only callers are this crate's
+    /// tests". SC-1 landed. This is reachable from production in three hops -
+    /// `interrupt` <- `SqliteCancelHandle::signal` <- `SqliteCancelHandle::cancel`
+    /// <- `transaction::cancel::TxCanceller::cancel` in `zeroship-data-engine`,
+    /// whose SQLite arm calls `handle.cancel().await`. Two of those hops are
+    /// private and the last is in ANOTHER CRATE, which is why the chain reads as
+    /// broken from here and why the prose outlived the fact.
+    ///
+    /// A rustdoc paragraph asserting that an item is dead is the most misleading
+    /// artifact in this crate: it reads as an audit that already happened, and
+    /// it is what nearly got this function deleted on 2026-09-04.
     fn interrupt(&self, lane: Lane, generation: u64) -> bool {
         fn fire(entry: &LaneInterrupt, generation: u64) -> bool {
             if entry.generation.load(Ordering::SeqCst) != generation {
@@ -1125,71 +1133,32 @@ impl SqliteCancelHandle {
     }
 }
 
-/// Makes a caller-side drop cancel.
-///
-/// SC-2 case 4: the guard must be **disarmed before the reply is delivered**,
-/// so a drop that happens after a result was handed to the caller cannot
-/// retroactively cancel it. [`Self::disarm`] is that moment.
-// Still dead, and for a narrower reason than before: SC-1 forced cleanup DOES
-// cancel now, but it does so explicitly through `transaction::cancel::TxCanceller`.
-// Nothing arms a guard that cancels on DROP.
-#[allow(dead_code)]
-pub(crate) struct SqliteCancelGuard {
-    handle: Option<SqliteCancelHandle>,
-}
-
-impl std::fmt::Debug for SqliteCancelGuard {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("SqliteCancelGuard")
-            .field("armed", &self.handle.is_some())
-            .finish()
-    }
-}
-
-impl SqliteCancelGuard {
-    #[allow(dead_code)] // nothing arms this guard yet - see the type comment
-    #[must_use]
-    pub(crate) fn new(handle: SqliteCancelHandle) -> Self {
-        Self {
-            handle: Some(handle),
-        }
-    }
-
-    /// Stop this guard from cancelling. Call it before returning a delivered
-    /// result to the caller.
-    #[allow(dead_code)] // nothing arms this guard yet - see the type comment
-    pub(crate) fn disarm(mut self) {
-        self.handle = None;
-    }
-}
-
-impl Drop for SqliteCancelGuard {
-    fn drop(&mut self) {
-        let Some(handle) = self.handle.take() else {
-            return;
-        };
-        // Fire-and-forget: a `Drop` cannot await. The intent + interrupt are
-        // synchronous and are what actually stops a running statement; the
-        // queued `Cancel` is what makes the actor roll back and retire.
-        //
-        // Both terminal verdicts short-circuit, and `AlreadyCancelling` is not
-        // the tidier of the two. Nobody is waiting for this guard's answer, so
-        // a `Cancel` it queues can only *act*; queuing a second one for a
-        // reservation another caller is already cancelling asks the actor to
-        // run cleanup twice on a shared connection.
-        if matches!(
-            handle.signal(),
-            CancelIntent::AlreadyCompleted | CancelIntent::AlreadyCancelling
-        ) {
-            return;
-        }
-        let (reply_tx, _reply_rx) = flume::bounded(1);
-        let _ = handle.queue.try_send(Command::Cancel {
-            reservation: Arc::clone(&handle.reservation),
-            reply: reply_tx,
-        });
-    }
-}
+// ---------------------------------------------------------------------------
+// SqliteCancelGuard was deleted on 2026-09-04, and the rules it encoded are not
+// ---------------------------------------------------------------------------
+//
+// It was an `Option<SqliteCancelHandle>` whose `Drop` made a caller-side drop
+// cancel. Nothing ever constructed it: SC-2 asked for a drop-cancels guard and
+// SC-1 shipped EXPLICIT cancellation instead, through
+// `transaction::cancel::TxCanceller`. Its own comment said so. Inert in both
+// directions - no constructor, so its `Drop` was unreachable - which is what
+// separates it from the other unwired code in these crates, where a live
+// consumer is waiting on a producer nobody calls.
+//
+// THREE THINGS IT KNEW, for whoever builds SC-2's drop-cancel path:
+//
+//  1. DISARM BEFORE THE REPLY IS DELIVERED (SC-2 case 4). A drop that happens
+//     after the result reached the caller must not retroactively cancel it.
+//     The disarm point is that hand-off, not the end of the scope.
+//  2. A `Drop` cannot await, so the cancel is fire-and-forget: the intent plus
+//     `Interrupts::interrupt` are SYNCHRONOUS and are what actually stops a
+//     running statement. The queued `Command::Cancel` is only what makes the
+//     actor roll back and retire.
+//  3. BOTH terminal verdicts short-circuit, and `AlreadyCancelling` is not the
+//     tidier of the two. Nobody awaits a dropped guard's answer, so a `Cancel`
+//     it queues can only act; queuing a second for a reservation another caller
+//     is already cancelling asks the actor to run cleanup twice on a shared
+//     connection.
 
 async fn recv_reply<T>(rx: flume::Receiver<T>) -> Result<T, DbError> {
     rx.recv_async().await.map_err(|_| {
