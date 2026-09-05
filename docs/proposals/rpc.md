@@ -1423,7 +1423,7 @@ The gateway never walks a tree at runtime — `EffectivePolicy` is precomputed o
 
 - Pre-404 unknown resources.
 - Reject wrong HTTP method (procedure `kind: "mutation"` via `GET` → 405).
-- Validate auth (ZeroShip-User HMAC + JWT) for `auth: "user"`/`"admin"` — 401 before forwarding.
+- Validate auth (ZeroShip-User HMAC + JWT) for `auth: "user"` — 401 before forwarding.
 - Enforce `rate_limit` per the declared bucket — 429 with `Retry-After` and `X-RateLimit-Reset`.
 - Reject oversized inputs (`max_input_bytes`) — 413.
 - Reject oversized outputs (`max_output_bytes`) — 502 + structured log.
@@ -1600,9 +1600,9 @@ A dedupe hit replays the stored response **verbatim**, so the entry key must nam
 (app_id, wireId, principal, idempotency_key)
 ```
 
-`principal` is the per-app pairwise `pws_…` subject the gateway resolved for the request — the same identity it puts in `ZeroShip-User`, read back out of that verified header so the partition and the worker's view of the caller can never drift. This applies on **every** route, not only `auth: "user"`/`"admin"` ones: an `auth: "anonymous"` procedure can still resolve a session when the visitor happens to be logged in, and when it does, that visitor gets their own partition.
+`principal` is the per-app pairwise `pws_…` subject the gateway resolved for the request — the same identity it puts in `ZeroShip-User`, read back out of that verified header so the partition and the worker's view of the caller can never drift. This applies on **every** route, not only `auth: "user"` ones: an `auth: "anonymous"` procedure can still resolve a session when the visitor happens to be logged in, and when it does, that visitor gets their own partition.
 
-When a procedure is declared `auth: "user"`/`"admin"` and the gateway cannot read a principal, it does **not** fall back to the shared namespace — that would be precisely the leak the partition prevents. It answers `500 INTERNAL` with `details.reason: "idempotency_principal_unavailable"`. This is unreachable in normal operation (the auth gate 401s an unauthenticated caller long before dispatch, and the header is minted by the same process moments earlier); it exists so an invariant break fails closed instead of silently sharing.
+When a procedure is declared `auth: "user"` and the gateway cannot read a principal, it does **not** fall back to the shared namespace — that would be precisely the leak the partition prevents. It answers `500 INTERNAL` with `details.reason: "idempotency_principal_unavailable"`. This is unreachable in normal operation (the auth gate 401s an unauthenticated caller long before dispatch, and the header is minted by the same process moments earlier); it exists so an invariant break fails closed instead of silently sharing.
 
 ### Anonymous mutations + idempotency
 
@@ -1616,7 +1616,7 @@ When `auth: "anonymous"` and `idempotent: true` both apply to a mutation, the ke
 
 The gate keys off the **declared** `auth` level, not off whether the individual caller turned out to be logged in. It has to be knowable from the manifest at build time, and a rule that only bit logged-out callers would make the same key legal or illegal depending on session state. So a logged-in visitor to an `auth: "anonymous"` procedure gets both: their own partition *and* the UUID requirement.
 
-For `auth: "user"`/`"admin"` mutations the UUID-only constraint does not apply — the principal partition already isolates the caller — so any string up to 255 chars is accepted (matches Stripe), which keeps natural keys like an order id usable.
+For `auth: "user"` mutations the UUID-only constraint does not apply — the principal partition already isolates the caller — so any string up to 255 chars is accepted (matches Stripe), which keeps natural keys like an order id usable.
 
 ### RPC-on-RPC — server function calling another server function
 
