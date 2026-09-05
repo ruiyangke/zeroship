@@ -3,7 +3,7 @@
  *
  * A `rpc:` procedure whose entire inheritance chain declares no `auth`
  * resolves to `RequiredPrincipal::User` in the gateway
- * (`crates/zeroship-gateway/src/compiled.rs`, `resolve_effective_policy`, the
+ * (`crates/zeroship-bundle/src/compiled.rs`, `resolve_effective_policy`, the
  * `if !auth_declared && key.starts_with("rpc:")` arm). That default is
  * deliberate and correct — a forgotten policy must be a loud 401, not a
  * silent public endpoint.
