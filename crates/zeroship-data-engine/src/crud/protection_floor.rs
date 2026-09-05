@@ -477,8 +477,16 @@ mod tests {
     /// resolved answer.
     #[test]
     fn the_floor_key_carries_the_deploy_token() {
-        let pinned = DbBinding::new("app_floor", "deploy_1");
-        let current = DbBinding::new("app_floor", "deploy_2");
+        let pinned = DbBinding::new(
+            "app_floor",
+            "deploy_1",
+            zeroship_schema::SchemaName::new("app_floor").unwrap(),
+        );
+        let current = DbBinding::new(
+            "app_floor",
+            "deploy_2",
+            zeroship_schema::SchemaName::new("app_floor").unwrap(),
+        );
         assert_ne!(
             floor_key(&pinned),
             floor_key(&current),
