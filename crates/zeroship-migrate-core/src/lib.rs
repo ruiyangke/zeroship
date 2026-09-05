@@ -490,10 +490,17 @@ pub use model::expr::{
 };
 // The STRUCTURAL expression-AST validator + the structured-error envelope.
 // No parser, no fuzzer - a pure allow-list walk.
+// `validate_declared_identifiers` / `validate_declared_descriptor_identifiers` are the
+// reserved-identifier SLICE of that walk, exported for the artifact generator: it does
+// not run `load_ir_document` and so never reached the declaration gate, which is how a
+// creator could name a column `ssn_masked` and learn about it from the deploy instead
+// of from the build. They are fail-fast ergonomics, never a boundary - see their own
+// docs.
 pub use model::validate::{
-    validate_expr, validate_ir, validate_ir_resolved, validate_op, validate_op_resolved,
-    AuthoringError, LogicalColumnContract, LogicalColumnContracts, LogicalColumnKey, TargetScope,
-    UnsupportedKind, CODE_COLUMN_FACET_CONFLICT, CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE,
+    validate_declared_descriptor_identifiers, validate_declared_identifiers, validate_expr,
+    validate_ir, validate_ir_resolved, validate_op, validate_op_resolved, AuthoringError,
+    LogicalColumnContract, LogicalColumnContracts, LogicalColumnKey, TargetScope, UnsupportedKind,
+    CODE_COLUMN_FACET_CONFLICT, CODE_DIALECT_UNSUPPORTED, CODE_EXPR_NOT_PORTABLE,
     CODE_OP_OUTSIDE_RECORDER, CODE_PARTITION_BOUNDS_ILL_FORMED, CODE_PARTITION_BOUNDS_NOT_TOTAL,
     CODE_PARTITION_COMPOSITE_KEY_UNSUPPORTED, CODE_PARTITION_HASH_DROP_UNDERIVABLE,
     CODE_PARTITION_KEY_COVERAGE, CODE_PARTITION_KEY_NULLABLE_UNDER_COLLAPSE, CODE_UNSUPPORTED,
