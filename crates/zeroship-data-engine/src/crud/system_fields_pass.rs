@@ -563,6 +563,11 @@ mod tests {
     use serde_json::json;
     use zeroship_migrate_policy::{PolicyRegistry, RootCharter};
 
+    /// The fixture schema the INSERT builders take now that they refuse a `&str`.
+    fn fixture_schema() -> zeroship_schema::SchemaName {
+        zeroship_schema::SchemaName::new("app1").expect("fixture schema name")
+    }
+
     // ---- the charter drives the pass -------------------------------
 
     /// Stamp a charter of the test's own making onto this thread, so a test can
@@ -744,7 +749,7 @@ mod tests {
         )
         .expect("derived prefix must be accepted");
         let built =
-            crate::query::build_insert_many("app1", "posts", &schema_without_id_prefix(), &docs)
+            crate::query::build_insert_many(&fixture_schema(), "posts", &schema_without_id_prefix(), &docs)
                 .expect("build_insert_many");
         let columns = built
             .sql
@@ -1189,7 +1194,7 @@ mod tests {
         assert_eq!(obj.get("created_by"), Some(&Value::Null));
         assert_eq!(obj.get("updated_by"), Some(&Value::Null));
 
-        let built = crate::query::build_insert("app1", "posts", &schema_without_id_prefix(), &doc)
+        let built = crate::query::build_insert(&fixture_schema(), "posts", &schema_without_id_prefix(), &doc)
             .expect("build_insert");
         assert!(
             built.sql.contains("\"created_by\""),
@@ -1217,7 +1222,7 @@ mod tests {
             Some("usr_x"),
         )
         .expect("derived prefix must be accepted");
-        let built = build_insert("app1", "posts", &schema_without_id_prefix(), &doc)
+        let built = build_insert(&fixture_schema(), "posts", &schema_without_id_prefix(), &doc)
             .expect("build_insert");
         let returning = built
             .sql

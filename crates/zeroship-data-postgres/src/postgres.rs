@@ -623,7 +623,7 @@ impl PostgresBackend {
         // off the descriptor. A collection this deploy does not declare is
         // refused here rather than searched with an unbounded projection.
         zeroship_schema::query::build_vector_search(
-            binding.app_id(),
+            binding.schema(),
             collection,
             column,
             query,
@@ -740,7 +740,7 @@ impl PostgresBackend {
         self.ensure_postgis_available().await?;
 
         zeroship_schema::query::build_spatial_near(
-            binding.app_id(),
+            binding.schema(),
             collection,
             column,
             point,

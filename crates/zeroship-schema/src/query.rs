@@ -19,6 +19,7 @@ use serde_json::Value;
 // `crate::ident` for why capping (rather than refusing) is right for derived
 // names, and why a second copy of the cap is the failure mode to avoid.
 use crate::ident::cap_ident_name;
+use crate::schema_name::SchemaName;
 
 /// Errors from query building.
 #[derive(Debug)]
@@ -134,18 +135,18 @@ pub trait SchemaRenderer {
     fn system_field_columns(&self) -> Vec<String>;
     fn system_field_indexes(
         &self,
-        app_id: &str,
+        schema_name: &SchemaName,
         collection: &str,
         sqlite_scope: SqliteEmitScope,
     ) -> Vec<String>;
-    fn foreign_key_target(&self, app_id: &str, target: &str) -> String;
+    fn foreign_key_target(&self, schema_name: &SchemaName, target: &str) -> String;
     fn column_type(&self, def: &serde_json::Value) -> String;
     fn json_object_default(&self) -> String;
     fn json_array_default(&self) -> String;
     fn current_timestamp_expr(&self) -> &'static str;
     fn column_comment_statements(
         &self,
-        app_id: &str,
+        schema_name: &SchemaName,
         collection: &str,
         schema: &serde_json::Value,
     ) -> Vec<String>;
@@ -220,7 +221,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
 
     fn system_field_indexes(
         &self,
-        app_id: &str,
+        schema_name: &SchemaName,
         collection: &str,
         _sqlite_scope: SqliteEmitScope,
     ) -> Vec<String> {
@@ -232,7 +233,7 @@ impl SchemaRenderer for PostgresSchemaRenderer {
                 format!(
                     "CREATE INDEX IF NOT EXISTS {} ON {}.{} ({})",
                     quote_ident(&idx_name),
-                    quote_ident(app_id),
+                    schema_name.quoted(),
                     quote_ident(collection),
                     quote_ident(col),
                 )
@@ -240,8 +241,8 @@ impl SchemaRenderer for PostgresSchemaRenderer {
             .collect()
     }
 
-    fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
-        format!("{}.{}", quote_ident(app_id), quote_ident(target))
+    fn foreign_key_target(&self, schema_name: &SchemaName, target: &str) -> String {
+        format!("{}.{}", schema_name.quoted(), quote_ident(target))
     }
 
     fn column_type(&self, def: &serde_json::Value) -> String {
@@ -290,13 +291,13 @@ impl SchemaRenderer for PostgresSchemaRenderer {
 
     fn column_comment_statements(
         &self,
-        app_id: &str,
+        schema_name: &SchemaName,
         collection: &str,
         schema: &serde_json::Value,
     ) -> Vec<String> {
-        let mut statements = build_mask_sentinel_comments(app_id, collection, schema);
+        let mut statements = build_mask_sentinel_comments(schema_name, collection, schema);
         statements.extend(build_encryption_sentinel_comments(
-            app_id, collection, schema,
+            schema_name, collection, schema,
         ));
         statements
     }
@@ -348,7 +349,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
 
     fn system_field_indexes(
         &self,
-        app_id: &str,
+        schema_name: &SchemaName,
         collection: &str,
         sqlite_scope: SqliteEmitScope,
     ) -> Vec<String> {
@@ -367,7 +368,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
                 } else {
                     format!(
                         "CREATE INDEX IF NOT EXISTS {}.{} ON {} ({})",
-                        quote_ident(app_id),
+                        schema_name.quoted(),
                         quote_ident(&idx_name),
                         quote_ident(collection),
                         quote_ident(col),
@@ -377,7 +378,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
             .collect()
     }
 
-    fn foreign_key_target(&self, _app_id: &str, target: &str) -> String {
+    fn foreign_key_target(&self, _schema_name: &SchemaName, target: &str) -> String {
         quote_ident(target)
     }
 
@@ -435,7 +436,7 @@ impl SchemaRenderer for SqliteSchemaRenderer {
 
     fn column_comment_statements(
         &self,
-        _app_id: &str,
+        _schema_name: &SchemaName,
         _collection: &str,
         _schema: &serde_json::Value,
     ) -> Vec<String> {
@@ -478,7 +479,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
 
     fn system_field_indexes(
         &self,
-        app_id: &str,
+        schema_name: &SchemaName,
         collection: &str,
         _sqlite_scope: SqliteEmitScope,
     ) -> Vec<String> {
@@ -490,7 +491,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
                 format!(
                     "CREATE INDEX {} ON {}.{} ({})",
                     mysql_quote_ident(&idx_name),
-                    mysql_quote_ident(app_id),
+                    mysql_quote_ident(schema_name.as_str()),
                     mysql_quote_ident(collection),
                     mysql_quote_ident(col),
                 )
@@ -498,10 +499,10 @@ impl SchemaRenderer for MysqlSchemaRenderer {
             .collect()
     }
 
-    fn foreign_key_target(&self, app_id: &str, target: &str) -> String {
+    fn foreign_key_target(&self, schema_name: &SchemaName, target: &str) -> String {
         format!(
             "{}.{}",
-            mysql_quote_ident(app_id),
+            mysql_quote_ident(schema_name.as_str()),
             mysql_quote_ident(target)
         )
     }
@@ -578,7 +579,7 @@ impl SchemaRenderer for MysqlSchemaRenderer {
 
     fn column_comment_statements(
         &self,
-        _app_id: &str,
+        _schema_name: &SchemaName,
         _collection: &str,
         _schema: &serde_json::Value,
     ) -> Vec<String> {
@@ -1084,8 +1085,8 @@ fn mysql_native_enum_values(def: &serde_json::Value) -> Option<Vec<String>> {
 // ---------------------------------------------------------------------------
 
 /// Build CREATE SCHEMA IF NOT EXISTS for an app.
-pub fn build_create_schema(app_id: &str) -> String {
-    format!("CREATE SCHEMA IF NOT EXISTS {}", quote_ident(app_id))
+pub fn build_create_schema(schema_name: &SchemaName) -> String {
+    format!("CREATE SCHEMA IF NOT EXISTS {}", schema_name.quoted())
 }
 
 // `build_create_table` (the non-`_with_fks` wrapper that hardcoded
@@ -1122,22 +1123,22 @@ pub enum FkEmission<'a> {
 /// the SAME emitter must spell SQLite DDL two ways:
 ///
 /// - [`SqliteEmitScope::AttachAlias`] — the **plugin-db runtime** ATTACHes each
-///   app file under its `<app_id>` alias (`ATTACH … AS "<app_id>"`), so its DDL
-///   is `"<app_id>"."<table>"` (table) and `"<app_id>"."<index>" ON "<table>"`
+///   app file under its `<schema_name>` alias (`ATTACH … AS "<schema_name>"`), so its DDL
+///   is `"<schema_name>"."<table>"` (table) and `"<schema_name>"."<index>" ON "<table>"`
 ///   (index). This is the historical behaviour and the default for the
 ///   stable [`build_create_table_with_fks_for_dialect`] entry point.
 /// - [`SqliteEmitScope::MainUnqualified`] — the **zeroship-migrate engine**'s
 ///   `SqliteBackend` ATTACHes the one app file as `main` (`main` IS the app
 ///   file), and its hardened authorizer DENIES any other alias. An unqualified
 ///   `CREATE TABLE users(...)` therefore lands in (and persists to) the app
-///   file. A `"<app_id>"`-qualified statement would target a nonexistent alias
+///   file. A `"<schema_name>"`-qualified statement would target a nonexistent alias
 ///   and be denied. So the engine MUST emit UNqualified DDL — that is this
 ///   variant: no schema qualifier on the table name OR the index name.
 ///
 /// The Postgres arm ignores this enum entirely.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SqliteEmitScope {
-    /// SQLite DDL is `"<app_id>"`-qualified (the plugin-db ATTACH-alias model).
+    /// SQLite DDL is `"<schema_name>"`-qualified (the plugin-db ATTACH-alias model).
     /// The default for the stable dialected entry point.
     AttachAlias,
     /// SQLite DDL is UNqualified — `main` IS the app file (the zeroship-migrate
@@ -1158,13 +1159,13 @@ pub enum SqliteEmitScope {
 // this signature; the dialect-aware emitter
 // lives behind the other symbol and routes the SQLite arm independently.
 pub fn build_create_table_with_fks(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
 ) -> Result<String, QueryError> {
     build_create_table_with_fks_for_dialect(
-        app_id,
+        schema_name,
         collection,
         schema,
         fk_emit,
@@ -1196,17 +1197,17 @@ pub fn build_create_table_with_fks(
 /// backends (`COLLATE "C"` on PostgreSQL and `COLLATE BINARY` on SQLite),
 /// so base62 typed IDs retain their sortable contract. See [`def_to_pg_type`].
 pub fn build_create_table_with_fks_for_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
     dialect: SqlDialect,
 ) -> Result<String, QueryError> {
     // The stable entry point keeps the historical plugin-db namespacing: SQLite
-    // DDL is `"<app_id>"`-qualified (the ATTACH-alias model). The zeroship-migrate
+    // DDL is `"<schema_name>"`-qualified (the ATTACH-alias model). The zeroship-migrate
     // engine calls the `_scoped` form with `MainUnqualified` instead.
     build_create_table_with_fks_for_dialect_scoped(
-        app_id,
+        schema_name,
         collection,
         schema,
         fk_emit,
@@ -1226,12 +1227,12 @@ pub fn build_create_table_with_fks_for_dialect(
 /// lands in `main` (= the app file) under the hardened authorizer (which denies
 /// any non-`main` alias). The plugin-db runtime passes
 /// [`SqliteEmitScope::AttachAlias`] (via the stable entry point) because it
-/// ATTACHes the file under the `<app_id>` alias.
+/// ATTACHes the file under the `<schema_name>` alias.
 ///
 /// # Errors
 /// Same as [`build_create_table_with_fks_for_dialect`].
 pub fn build_create_table_with_fks_for_dialect_scoped(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
@@ -1244,7 +1245,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
     // [`build_create_table_with_fks_for_dialect_scoped_statements`]. `join(";\n")`
     // over that list reproduces this string byte-for-byte.
     Ok(build_create_table_with_fks_for_dialect_scoped_statements(
-        app_id,
+        schema_name,
         collection,
         schema,
         fk_emit,
@@ -1265,7 +1266,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped(
 /// DEFAULT whose value itself contains `;\n` (e.g. `DEFAULT 'a;\nb'`) is NEVER
 /// split mid-statement — the split is structural, not a textual `;\n` heuristic.
 pub fn build_create_table_with_fks_for_dialect_scoped_statements(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema: &serde_json::Value,
     fk_emit: &FkEmission<'_>,
@@ -1273,7 +1274,6 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     sqlite_scope: SqliteEmitScope,
 ) -> Result<Vec<String>, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
 
     // SQLite `MainUnqualified` drops the schema qualifier entirely (`main` is the
     // app file); every other case keeps the `"<schema>"."<table>"` form. PG always
@@ -1285,7 +1285,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     } else {
         format!(
             "{}.{}",
-            quote_ident_for_dialect(app_id, dialect),
+            quote_ident_for_dialect(schema_name.as_str(), dialect),
             quote_ident_for_dialect(collection, dialect)
         )
     };
@@ -1384,7 +1384,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
                         }
                     };
                     if should_inline {
-                        if let Ok(fk_clause) = build_fk_clause(app_id, field, def, target, dialect)
+                        if let Ok(fk_clause) = build_fk_clause(schema_name, field, def, target, dialect)
                         {
                             deferred_fks.push(fk_clause);
                         }
@@ -1492,12 +1492,12 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
     // already builds an implicit unique index). The index for
     // `version` is not emitted (per §5 of the proposal —
     // `version` bumps on every UPDATE and an index would thrash).
-    let system_index_stmts = build_system_field_indexes(app_id, collection, dialect, sqlite_scope);
+    let system_index_stmts = build_system_field_indexes(schema_name, collection, dialect, sqlite_scope);
 
     let mut statements: Vec<String> = vec![create_table];
     statements.extend(system_index_stmts);
 
-    statements.extend(renderer(dialect).column_comment_statements(app_id, collection, schema));
+    statements.extend(renderer(dialect).column_comment_statements(schema_name, collection, schema));
 
     Ok(statements)
 }
@@ -1511,7 +1511,7 @@ pub fn build_create_table_with_fks_for_dialect_scoped_statements(
 /// Returns the empty vector when no column is encrypted.
 #[must_use]
 pub fn build_encryption_sentinel_comments(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema: &serde_json::Value,
 ) -> Vec<String> {
@@ -1530,7 +1530,7 @@ pub fn build_encryption_sentinel_comments(
         let escaped = body.replace('\'', "''");
         out.push(format!(
             "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-            quote_ident(app_id),
+            schema_name.quoted(),
             quote_ident(collection),
             quote_ident(field),
             escaped,
@@ -1580,12 +1580,12 @@ fn build_system_field_columns(dialect: SqlDialect) -> Vec<String> {
 /// auto-named per-field indexes and the NAMEDATALEN-safe 60-byte
 /// truncation kicks in for long table names.
 fn build_system_field_indexes(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     dialect: SqlDialect,
     sqlite_scope: SqliteEmitScope,
 ) -> Vec<String> {
-    renderer(dialect).system_field_indexes(app_id, collection, sqlite_scope)
+    renderer(dialect).system_field_indexes(schema_name, collection, sqlite_scope)
 }
 
 /// Build an `ALTER TABLE … ADD CONSTRAINT … FOREIGN KEY` statement.
@@ -1595,34 +1595,32 @@ fn build_system_field_indexes(
 /// from `<collection>_<field>_fkey` and truncated to 63 bytes via the
 /// same hash strategy as index names.
 pub fn build_add_foreign_key(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     field: &str,
     def: &serde_json::Value,
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
 
     let target = def
         .get("refTarget")
         .and_then(|v| v.as_str())
         .ok_or_else(|| QueryError::InvalidFilter("ref field missing refTarget".to_string()))?;
 
-    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
-    let fk_clause = build_fk_clause(app_id, field, def, target, SqlDialect::Postgres)?;
+    let table = format!("{}.{}", schema_name.quoted(), quote_ident(collection));
+    let fk_clause = build_fk_clause(schema_name, field, def, target, SqlDialect::Postgres)?;
     Ok(format!("ALTER TABLE {} ADD {}", table, fk_clause))
 }
 
 /// Build `ALTER TABLE … DROP CONSTRAINT` for an existing FK (the diff
 /// engine's `DropForeignKey` op).
 pub fn build_drop_foreign_key(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     constraint_name: &str,
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
-    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let table = format!("{}.{}", schema_name.quoted(), quote_ident(collection));
     Ok(format!(
         "ALTER TABLE {} DROP CONSTRAINT IF EXISTS {}",
         table,
@@ -1648,7 +1646,7 @@ pub fn fk_constraint_name(field: &str, _reserved: &str) -> String {
 /// constraint names per-table, so cross-table uniqueness is not needed)
 /// and is hash-truncated for ≤ 63 byte NAMEDATALEN budget.
 fn build_fk_clause(
-    app_id: &str,
+    schema_name: &SchemaName,
     field: &str,
     def: &serde_json::Value,
     target: &str,
@@ -1666,7 +1664,7 @@ fn build_fk_clause(
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
 
-    let target_qualified = renderer(dialect).foreign_key_target(app_id, target);
+    let target_qualified = renderer(dialect).foreign_key_target(schema_name, target);
     let deferrable_clause = if deferrable && !matches!(dialect, SqlDialect::Mysql) {
         " DEFERRABLE INITIALLY DEFERRED"
     } else {
@@ -1725,15 +1723,14 @@ pub fn normalize_fk_action_for_dialect(s: Option<&str>, dialect: SqlDialect) -> 
 
 /// Build ALTER TABLE ADD COLUMN IF NOT EXISTS for a single field.
 pub fn build_add_column(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     field: &str,
     def: &serde_json::Value,
 ) -> Result<String, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
 
-    let table = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let table = format!("{}.{}", schema_name.quoted(), quote_ident(collection));
     let pg_type = ddl_column_type_for_dialect(def, SqlDialect::Postgres);
     // The declared type and constraints go on the column that holds the REAL
     // value - `__zs_raw__<field>` when masked, the field's own name otherwise.
@@ -1769,7 +1766,7 @@ pub fn build_add_column(
             table,
             quote_ident(field),
         ));
-        if let Some(comment) = build_mask_sentinel_comment_for_field(app_id, collection, field, def)
+        if let Some(comment) = build_mask_sentinel_comment_for_field(schema_name, collection, field, def)
         {
             sql.push_str(&format!(";\n{comment}"));
         }
@@ -1869,12 +1866,11 @@ pub enum IndexKind {
 /// (effectively impossible since a field is either indexed or unique, but the
 /// rule keeps the contract obvious).
 pub fn build_create_indexes(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema: &serde_json::Value,
 ) -> Result<Vec<IndexSpec>, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
 
     let mut out = Vec::new();
 
@@ -1882,7 +1878,7 @@ pub fn build_create_indexes(
         return Ok(out);
     };
 
-    let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let table_qualified = format!("{}.{}", schema_name.quoted(), quote_ident(collection));
 
     for (field, def) in obj {
         // Skip top-level metadata keys (`_meta`,
@@ -2095,12 +2091,11 @@ pub fn build_create_indexes(
 /// the schema. Here we re-check the wire-format shape so a hand-rolled
 /// caller can't slip a malformed entry past the orchestrator.
 pub fn build_named_indexes(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     indexes: &serde_json::Value,
 ) -> Result<Vec<IndexSpec>, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
 
     let mut out = Vec::new();
     let Some(arr) = indexes.as_array() else {
@@ -2110,7 +2105,7 @@ pub fn build_named_indexes(
         return Ok(out);
     }
 
-    let table_qualified = format!("{}.{}", quote_ident(app_id), quote_ident(collection));
+    let table_qualified = format!("{}.{}", schema_name.quoted(), quote_ident(collection));
 
     for (i, entry) in arr.iter().enumerate() {
         let name = entry
@@ -2459,7 +2454,7 @@ pub fn mask_sentinel_for_field(def: &serde_json::Value) -> Option<String> {
 /// columns — the caller then emits no extra DDL.
 #[must_use]
 pub fn build_mask_sentinel_comments(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema: &serde_json::Value,
 ) -> Vec<String> {
@@ -2483,7 +2478,7 @@ pub fn build_mask_sentinel_comments(
         let escaped = sentinel.replace('\'', "''");
         out.push(format!(
             "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-            quote_ident(app_id),
+            schema_name.quoted(),
             quote_ident(collection),
             quote_ident(field),
             escaped,
@@ -2505,7 +2500,7 @@ pub fn build_mask_sentinel_comments(
 /// no masked column, no sentinel.
 #[must_use]
 pub fn build_mask_sentinel_comment_for_field(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     field: &str,
     def: &serde_json::Value,
@@ -2515,7 +2510,7 @@ pub fn build_mask_sentinel_comment_for_field(
     let escaped = sentinel.replace('\'', "''");
     Some(format!(
         "COMMENT ON COLUMN {}.{}.{} IS '{}'",
-        quote_ident(app_id),
+        schema_name.quoted(),
         quote_ident(collection),
         quote_ident(field),
         escaped,
@@ -3258,7 +3253,7 @@ fn push_creator_value_bind(
 /// an overflowing one; `updateOne` asks for one. This is deliberately separate
 /// from creator-facing `find`, whose public limit remains `MAX_QUERY_LIMIT`.
 pub fn build_write_target_probe(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
@@ -3268,7 +3263,7 @@ pub fn build_write_target_probe(
     let select = serde_json::json!(["id"]);
     let mut built =
         build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
-            app_id,
+            &schema_name,
             collection,
             filter,
             Some(limit),
@@ -3288,14 +3283,13 @@ pub fn build_write_target_probe(
 }
 
 pub fn build_conflict_probe_with_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
 
     let obj = filter.as_object().ok_or_else(|| {
         QueryError::InvalidFilter("conflict probe filter must be an object".to_string())
@@ -3306,7 +3300,7 @@ pub fn build_conflict_probe_with_dialect(
         ));
     }
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
     let mut params = Vec::new();
     let mut conditions = Vec::new();
@@ -3385,7 +3379,7 @@ pub fn build_conflict_probe_with_dialect(
 /// pass through unchanged.
 #[allow(clippy::too_many_arguments)]
 pub fn build_find_with_schema(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     filter: &Value,
     limit: Option<i64>,
@@ -3395,7 +3389,7 @@ pub fn build_find_with_schema(
     schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_find_with_schema_and_unmask(
-        app_id,
+        schema_name,
         collection,
         filter,
         limit,
@@ -3446,7 +3440,7 @@ pub fn build_find_with_schema(
 /// path threads the soft-delete flag through the dedicated entry.
 #[allow(clippy::too_many_arguments)]
 pub fn build_find_with_schema_and_unmask(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     filter: &Value,
     limit: Option<i64>,
@@ -3457,7 +3451,7 @@ pub fn build_find_with_schema_and_unmask(
     unmask_columns: &[String],
 ) -> Result<BuiltQuery, QueryError> {
     build_find_with_schema_and_unmask_and_soft_delete(
-        app_id,
+        schema_name,
         collection,
         filter,
         limit,
@@ -3477,7 +3471,7 @@ pub fn build_find_with_schema_and_unmask(
 /// SQLite can emulate Postgres' NULL ordering semantics.
 #[allow(clippy::too_many_arguments)]
 pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     filter: &Value,
     limit: Option<i64>,
@@ -3490,7 +3484,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
-        app_id,
+        schema_name,
         collection,
         filter,
         limit,
@@ -3507,7 +3501,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
 
 #[allow(clippy::too_many_arguments)]
 fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     filter: &Value,
     limit: Option<i64>,
@@ -3521,9 +3515,8 @@ fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceil
     limit_ceiling: i64,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
@@ -3586,7 +3579,7 @@ fn build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceil
 /// migration table.
 #[allow(clippy::too_many_arguments)]
 pub fn build_find_with_schema_and_unmask_and_soft_delete(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     filter: &Value,
     limit: Option<i64>,
@@ -3598,7 +3591,7 @@ pub fn build_find_with_schema_and_unmask_and_soft_delete(
     filter_soft_deleted: bool,
 ) -> Result<BuiltQuery, QueryError> {
     build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
-        app_id,
+        schema_name,
         collection,
         filter,
         limit,
@@ -3984,13 +3977,13 @@ fn push_group_by_field(
 /// Thin shim around [`build_count_with_soft_delete`]
 /// passing `filter_soft_deleted = false`.
 pub fn build_count(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_count_with_soft_delete(
-        app_id,
+        schema_name,
         collection,
         schema_hint,
         filter,
@@ -4004,7 +3997,7 @@ pub fn build_count(
 /// `db.posts.count()` on a post-migration table excludes soft-deleted
 /// rows by default.
 pub fn build_count_with_soft_delete(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
@@ -4012,9 +4005,8 @@ pub fn build_count_with_soft_delete(
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
@@ -4031,18 +4023,18 @@ pub fn build_count_with_soft_delete(
 }
 
 /// Build an INSERT query:
-/// `INSERT INTO "app_id"."collection" (...) VALUES (...) RETURNING "id", ...`
+/// `INSERT INTO "schema_name"."collection" (...) VALUES (...) RETURNING "id", ...`
 ///
 /// PG-flavour wrapper around [`build_insert_with_dialect`]. Every
 /// existing CRUD call site stays on this signature — the orchestrator's
 /// `dispatch_insert` path still goes through Postgres today.
 pub fn build_insert(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     doc: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_insert_with_dialect(app_id, collection, schema_hint, doc, SqlDialect::Postgres)
+    build_insert_with_dialect(schema_name, collection, schema_hint, doc, SqlDialect::Postgres)
 }
 
 /// Dialect-aware INSERT builder.
@@ -4053,14 +4045,13 @@ pub fn build_insert(
 /// can bind the raw bytes as BLOB. Non-encrypted columns are
 /// dialect-agnostic on both arms.
 pub fn build_insert_with_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     doc: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
     let obj = doc.as_object().ok_or_else(|| {
@@ -4073,7 +4064,7 @@ pub fn build_insert_with_dialect(
         ));
     }
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     // A write pass marks each binary-bind column with a sibling
@@ -4479,18 +4470,18 @@ pub fn build_set_clauses_with_system_fields(
 }
 
 /// Build an UPDATE query:
-/// `UPDATE "app_id"."collection" SET ... WHERE id = (...) RETURNING "id", ...`
+/// `UPDATE "schema_name"."collection" SET ... WHERE id = (...) RETURNING "id", ...`
 ///
 /// PG-flavour wrapper — every existing call site goes through Postgres.
 pub fn build_update_one(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     update: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_update_one_with_dialect(
-        app_id,
+        schema_name,
         collection,
         schema_hint,
         filter,
@@ -4505,7 +4496,7 @@ pub fn build_update_one(
 /// the platform primary key and locks the selected row. SQLite keeps its
 /// `rowid` target because it has no column-grant boundary.
 pub fn build_update_one_with_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
@@ -4513,7 +4504,7 @@ pub fn build_update_one_with_dialect(
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     build_update_one_with_system_fields(
-        app_id,
+        schema_name,
         collection,
         schema_hint,
         filter,
@@ -4529,7 +4520,7 @@ pub fn build_update_one_with_dialect(
 /// the `autobump` knobs). Direct callers that need SQL without the
 /// auto-bumps keep using [`build_update_one_with_dialect`].
 pub fn build_update_one_with_system_fields(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
@@ -4538,10 +4529,9 @@ pub fn build_update_one_with_system_fields(
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
@@ -4565,31 +4555,30 @@ pub fn build_update_one_with_system_fields(
 }
 
 /// Build an INSERT query for multiple documents:
-/// `INSERT INTO "app_id"."collection" ("col1", "col2") VALUES ($1, $2), ($3, $4) RETURNING "id", ...`
+/// `INSERT INTO "schema_name"."collection" ("col1", "col2") VALUES ($1, $2), ($3, $4) RETURNING "id", ...`
 ///
 /// Column names are unioned across documents; a missing or explicit null value
 /// is emitted as a SQL `NULL` literal and consumes no bind parameter.
 ///
 /// PG-flavour wrapper around [`build_insert_many_with_dialect`].
 pub fn build_insert_many(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     docs: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_insert_many_with_dialect(app_id, collection, schema_hint, docs, SqlDialect::Postgres)
+    build_insert_many_with_dialect(schema_name, collection, schema_hint, docs, SqlDialect::Postgres)
 }
 
 /// Dialect-aware `insertMany` builder.
 pub fn build_insert_many_with_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     docs: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
     let arr = docs.as_array().ok_or_else(|| {
@@ -4613,7 +4602,7 @@ pub fn build_insert_many_with_dialect(
         )));
     }
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     // Binary-bind union across all docs. We treat
@@ -4720,18 +4709,18 @@ pub fn build_insert_many_with_dialect(
 }
 
 /// Build an UPDATE query for multiple rows (no LIMIT 1):
-/// `UPDATE "app_id"."collection" SET ... WHERE ... RETURNING "id", ...`
+/// `UPDATE "schema_name"."collection" SET ... WHERE ... RETURNING "id", ...`
 ///
 /// PG-flavour wrapper around [`build_update_many_with_dialect`].
 pub fn build_update_many(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     update: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_update_many_with_dialect(
-        app_id,
+        schema_name,
         collection,
         schema_hint,
         filter,
@@ -4744,7 +4733,7 @@ pub fn build_update_many(
 /// binds follow the dialect's
 /// [`SqlDialect::binary_bind_placeholder`].
 pub fn build_update_many_with_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
@@ -4752,7 +4741,7 @@ pub fn build_update_many_with_dialect(
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     build_update_many_with_system_fields(
-        app_id,
+        schema_name,
         collection,
         schema_hint,
         filter,
@@ -4768,7 +4757,7 @@ pub fn build_update_many_with_dialect(
 /// this to keep the bulk-update SQL emitting `version` + `updated_at`
 /// + `updated_by` bumps even on multi-row updates.
 pub fn build_update_many_with_system_fields(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
@@ -4777,10 +4766,9 @@ pub fn build_update_many_with_system_fields(
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
@@ -4801,19 +4789,18 @@ pub fn build_update_many_with_system_fields(
 }
 
 /// Build a DELETE query for multiple rows (no LIMIT 1):
-/// `DELETE FROM "app_id"."collection" WHERE ... RETURNING "id", ...`
+/// `DELETE FROM "schema_name"."collection" WHERE ... RETURNING "id", ...`
 pub fn build_delete_many(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
@@ -4831,15 +4818,15 @@ pub fn build_delete_many(
 }
 
 /// Build a DELETE query:
-/// `DELETE FROM "app_id"."collection" WHERE ... RETURNING "id", ...`
+/// `DELETE FROM "schema_name"."collection" WHERE ... RETURNING "id", ...`
 pub fn build_delete_one(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_delete_one_with_dialect(
-        app_id,
+        schema_name,
         collection,
         schema_hint,
         filter,
@@ -4849,17 +4836,16 @@ pub fn build_delete_one(
 
 /// Dialect-aware single-row DELETE builder.
 pub fn build_delete_one_with_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
@@ -5015,7 +5001,7 @@ fn build_restore_set_clauses(
 /// dispatch layer translates 0-affected to a `null` result (matches the
 /// `deleteOne` contract).
 pub fn build_soft_delete_one_with_system_fields(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
@@ -5023,10 +5009,9 @@ pub fn build_soft_delete_one_with_system_fields(
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
@@ -5062,7 +5047,7 @@ pub fn build_soft_delete_one_with_system_fields(
 /// `AND deleted_at IS NULL` is preserved so re-deleting an already-
 /// deleted row is still a no-op.
 pub fn build_soft_delete_many_with_system_fields(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
@@ -5070,10 +5055,9 @@ pub fn build_soft_delete_many_with_system_fields(
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
@@ -5101,7 +5085,7 @@ pub fn build_soft_delete_many_with_system_fields(
 /// (affected-rows = 0 → typed `not_found_or_already_live` via the
 /// dispatch layer).
 pub fn build_restore_one_with_system_fields(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
@@ -5109,10 +5093,9 @@ pub fn build_restore_one_with_system_fields(
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
@@ -5136,7 +5119,7 @@ pub fn build_restore_one_with_system_fields(
 
 /// Dialect-aware `restore_many` builder.
 pub fn build_restore_many_with_system_fields(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     filter: &Value,
@@ -5144,10 +5127,9 @@ pub fn build_restore_many_with_system_fields(
     autobump: &SystemFieldAutoBump<'_>,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut params: Vec<String> = Vec::new();
@@ -5183,12 +5165,12 @@ pub fn build_restore_many_with_system_fields(
 /// filter through the dedicated entry; direct callers keep the same
 /// SQL byte-identical.
 pub fn build_aggregate(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     pipeline: &Value,
     schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_aggregate_with_soft_delete(app_id, collection, pipeline, false, schema_hint)
+    build_aggregate_with_soft_delete(schema_name, collection, pipeline, false, schema_hint)
 }
 
 /// Aggregate builder with the soft-delete auto-filter.
@@ -5197,14 +5179,14 @@ pub fn build_aggregate(
 /// to whatever WHERE clause the pipeline's `$match` stage produced
 /// (or `WHERE deleted_at IS NULL` when no `$match` is present).
 pub fn build_aggregate_with_soft_delete(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     pipeline: &Value,
     filter_soft_deleted: bool,
     schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_aggregate_with_soft_delete_with_dialect(
-        app_id,
+        schema_name,
         collection,
         pipeline,
         filter_soft_deleted,
@@ -5215,7 +5197,7 @@ pub fn build_aggregate_with_soft_delete(
 
 /// Dialect-aware variant of [`build_aggregate_with_soft_delete`].
 pub fn build_aggregate_with_soft_delete_with_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     pipeline: &Value,
     filter_soft_deleted: bool,
@@ -5223,7 +5205,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     build_aggregate_with_result_columns(
-        app_id,
+        schema_name,
         collection,
         pipeline,
         filter_soft_deleted,
@@ -5247,7 +5229,7 @@ pub fn build_aggregate_with_soft_delete_with_dialect(
 /// result columns, and the drop would look like a missing accumulator rather
 /// than like a bug in a surface filter.
 pub fn build_aggregate_with_result_columns(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     pipeline: &Value,
     filter_soft_deleted: bool,
@@ -5255,9 +5237,8 @@ pub fn build_aggregate_with_result_columns(
     dialect: SqlDialect,
 ) -> Result<(BuiltQuery, Option<Vec<String>>), QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let stages = pipeline.as_array().ok_or_else(|| {
@@ -5490,18 +5471,18 @@ pub fn build_aggregate_with_result_columns(
 /// [`build_distinct_with_soft_delete`] passing
 /// `filter_soft_deleted = false`.
 pub fn build_distinct(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     field: &str,
     filter: &Value,
     schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
-    build_distinct_with_soft_delete(app_id, collection, field, filter, false, schema_hint)
+    build_distinct_with_soft_delete(schema_name, collection, field, filter, false, schema_hint)
 }
 
 /// DISTINCT builder with the soft-delete auto-filter.
 pub fn build_distinct_with_soft_delete(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     field: &str,
     filter: &Value,
@@ -5509,7 +5490,7 @@ pub fn build_distinct_with_soft_delete(
     schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_distinct_with_soft_delete_with_dialect(
-        app_id,
+        schema_name,
         collection,
         field,
         filter,
@@ -5521,7 +5502,7 @@ pub fn build_distinct_with_soft_delete(
 
 /// Dialect-aware variant of [`build_distinct_with_soft_delete`].
 pub fn build_distinct_with_soft_delete_with_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     field: &str,
     filter: &Value,
@@ -5530,10 +5511,9 @@ pub fn build_distinct_with_soft_delete_with_dialect(
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     validate_read_identifier(field, schema_hint)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
     let col = quote_ident(field);
     // DISTINCT over the field's own column. For a masked field that column
@@ -5586,7 +5566,7 @@ pub fn build_distinct_with_soft_delete_with_dialect(
 /// `$3` because [`build_where`] always allocates fresh numbers from
 /// the `params` length.
 pub fn build_vector_search(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     column: &str,
     query: &[f32],
@@ -5596,11 +5576,10 @@ pub fn build_vector_search(
     schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     validate_read_identifier(column, schema_hint)?;
     validate_search_limit_bound("search.k", k)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
     let col = quote_ident(column);
 
@@ -5674,7 +5653,7 @@ pub fn build_vector_search(
 /// `geography(POINT, 4326)`. The PG DDL emitter ([`field_to_column_for_dialect`])
 /// wires this when the schema field type is `geoPoint`.
 pub fn build_spatial_near(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     column: &str,
     point: crate::descriptors::GeoPoint,
@@ -5684,10 +5663,9 @@ pub fn build_spatial_near(
     schema_hint: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     validate_read_identifier(column, schema_hint)?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
     let col = quote_ident(column);
 
@@ -6497,7 +6475,7 @@ pub fn value_to_param(value: &Value) -> String {
 
 /// Build an UPSERT (INSERT ... ON CONFLICT DO UPDATE) query:
 /// ```sql
-/// INSERT INTO "app_id"."collection" ("col1", "col2") VALUES ($1, $2)
+/// INSERT INTO "schema_name"."collection" ("col1", "col2") VALUES ($1, $2)
 /// ON CONFLICT ("conflict_col") DO UPDATE SET "col2" = EXCLUDED."col2"
 /// RETURNING "id", "created_at", ...
 /// ```
@@ -6506,14 +6484,14 @@ pub fn value_to_param(value: &Value) -> String {
 /// `conflict_fields` is an array of column names that form the conflict target.
 /// Non-conflict columns are set to `EXCLUDED."col"` in the DO UPDATE SET clause.
 pub fn build_upsert(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     doc: &Value,
     conflict_fields: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     build_upsert_with_dialect(
-        app_id,
+        schema_name,
         collection,
         schema_hint,
         doc,
@@ -6524,7 +6502,7 @@ pub fn build_upsert(
 
 /// Dialect-aware UPSERT builder.
 pub fn build_upsert_with_dialect(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     doc: &Value,
@@ -6532,7 +6510,6 @@ pub fn build_upsert_with_dialect(
     dialect: SqlDialect,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
     let obj = doc.as_object().ok_or_else(|| {
@@ -6564,7 +6541,7 @@ pub fn build_upsert_with_dialect(
         ));
     }
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
     let binary_bind_cols = collect_binary_bind_cols(obj);
 
@@ -6675,14 +6652,13 @@ pub fn build_upsert_with_dialect(
 /// appends `(xmax = 0) AS __created` so the caller can tell whether
 /// the row was newly inserted (xmax = 0) or pre-existing (xmax != 0).
 pub fn build_find_or_create(
-    app_id: &str,
+    schema_name: &SchemaName,
     collection: &str,
     schema_hint: &Value,
     doc: &Value,
     conflict_fields: &Value,
 ) -> Result<BuiltQuery, QueryError> {
     validate_collection(collection)?;
-    validate_schema(app_id)?;
     let returning = build_returning_expr(schema_hint)?;
 
     let obj = doc.as_object().ok_or_else(|| {
@@ -6713,7 +6689,7 @@ pub fn build_find_or_create(
             QueryError::InvalidFilter("conflict_fields must contain string values".to_string())
         })?;
 
-    let schema = quote_ident(app_id);
+    let schema = schema_name.quoted();
     let table = quote_ident(collection);
 
     let mut columns = Vec::new();
@@ -6769,6 +6745,16 @@ pub fn build_find_or_create(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// Wrap a fixture app id as the physical schema the builders now take.
+    ///
+    /// The builders stopped taking `&str` so a tenant id cannot reach a
+    /// parameter that wants a schema. Tests still spell one string for both,
+    /// because that is what production mints today - the point is that the
+    /// CALL says which meaning it is passing.
+    fn s(name: &str) -> SchemaName {
+        SchemaName::new(name).expect("fixture schema name")
+    }
 
     /// The read schema the filter/order/limit-shape tests below build against.
     ///
@@ -6855,7 +6841,7 @@ mod tests {
 
     /// Test-local stand-in for the deleted `build_find`, over [`tschema`].
     fn build_find(
-        app_id: &str,
+        schema_name: &SchemaName,
         collection: &str,
         filter: &Value,
         limit: Option<i64>,
@@ -6864,7 +6850,7 @@ mod tests {
         select: Option<&Value>,
     ) -> Result<BuiltQuery, QueryError> {
         build_find_with_schema(
-            app_id,
+            &schema_name,
             collection,
             filter,
             limit,
@@ -6878,7 +6864,7 @@ mod tests {
     #[test]
     fn test_simple_eq_filter() {
         let filter = json!({"name": "alice"});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
             format!(r#"{} FROM "app1"."users" WHERE "name" = $1"#, tselect())
@@ -6889,7 +6875,7 @@ mod tests {
     #[test]
     fn test_comparison_operators() {
         let filter = json!({"age": {"$gte": 18, "$lt": 65}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""age" >= $1"#));
         assert!(q.sql.contains(r#""age" < $2"#));
         assert_eq!(q.params.len(), 2);
@@ -6898,7 +6884,7 @@ mod tests {
     #[test]
     fn test_in_operator() {
         let filter = json!({"status": {"$in": ["active", "pending"]}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""status" IN ($1, $2)"#));
         assert_eq!(q.params, vec!["active", "pending"]);
     }
@@ -6922,7 +6908,7 @@ mod tests {
     #[test]
     fn in_with_null_member_means_is_null_not_empty_string() {
         let filter = json!({"status": {"$in": [null]}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains(r#""status" IS NULL"#),
             "a null $in member must become IS NULL; got {}",
@@ -6940,7 +6926,7 @@ mod tests {
     #[test]
     fn in_with_mixed_null_and_values_keeps_both_arms() {
         let filter = json!({"status": {"$in": ["active", null]}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains(r#""status" IN ($1)"#),
             "non-null members must still bind; got {}",
@@ -6964,7 +6950,7 @@ mod tests {
     #[test]
     fn nin_with_null_member_means_is_not_null() {
         let filter = json!({"status": {"$nin": [null]}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains(r#""status" IS NOT NULL"#),
             "a null $nin member must become IS NOT NULL; got {}",
@@ -6980,7 +6966,7 @@ mod tests {
     #[test]
     fn nin_with_mixed_null_and_values_keeps_both_arms() {
         let filter = json!({"status": {"$nin": ["active", null]}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains(r#""status" NOT IN ($1)"#),
             "non-null members must still bind; got {}",
@@ -7006,7 +6992,7 @@ mod tests {
     #[test]
     fn empty_in_matches_nothing_without_emitting_invalid_sql() {
         let filter = json!({"status": {"$in": []}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             !q.sql.contains("IN ()"),
             "IN () is a syntax error in PostgreSQL; got {}",
@@ -7025,7 +7011,7 @@ mod tests {
     #[test]
     fn empty_nin_matches_everything_without_emitting_invalid_sql() {
         let filter = json!({"status": {"$nin": []}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             !q.sql.contains("NOT IN ()"),
             "NOT IN () is a syntax error in PostgreSQL; got {}",
@@ -7042,7 +7028,7 @@ mod tests {
     #[test]
     fn test_or_combinator() {
         let filter = json!({"$or": [{"name": "alice"}, {"name": "bob"}]});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains("OR"));
         assert_eq!(q.params, vec!["alice", "bob"]);
     }
@@ -7050,7 +7036,7 @@ mod tests {
     #[test]
     fn test_empty_filter() {
         let filter = json!({});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(q.sql, format!(r#"{} FROM "app1"."users""#, tselect()));
         assert!(q.params.is_empty());
     }
@@ -7058,14 +7044,14 @@ mod tests {
     #[test]
     fn test_null_filter() {
         let filter = Value::Null;
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(q.sql, format!(r#"{} FROM "app1"."users""#, tselect()));
     }
 
     #[test]
     fn test_limit_offset() {
         let filter = json!({});
-        let q = build_find("app1", "users", &filter, Some(10), Some(20), None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, Some(10), Some(20), None, None).unwrap();
         assert!(q.sql.contains("LIMIT 10"));
         assert!(q.sql.contains("OFFSET 20"));
     }
@@ -7073,7 +7059,7 @@ mod tests {
     #[test]
     fn test_insert() {
         let doc = json!({"name": "alice", "age": 30});
-        let q = build_insert("app1", "users", &tschema(), &doc).unwrap();
+        let q = build_insert(&s("app1"), "users", &tschema(), &doc).unwrap();
         assert!(q.sql.contains("INSERT INTO"));
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert_eq!(q.params.len(), 2);
@@ -7085,7 +7071,7 @@ mod tests {
         let doc = json!({"occurred_at": -1});
 
         let pg =
-            build_insert_with_dialect("app1", "events", &schema, &doc, SqlDialect::Postgres)
+            build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Postgres)
                 .unwrap();
         assert!(
             pg.sql.contains("VALUES (to_timestamp($1/1000.0))"),
@@ -7095,7 +7081,7 @@ mod tests {
         assert_eq!(pg.params, vec!["-1"]);
 
         let sqlite =
-            build_insert_with_dialect("app1", "events", &schema, &doc, SqlDialect::Sqlite)
+            build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Sqlite)
                 .unwrap();
         assert!(
             sqlite
@@ -7153,7 +7139,7 @@ mod tests {
             "optional": null,
         });
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let q = build_insert_with_dialect("app1", "events", &schema, &doc, dialect).unwrap();
+            let q = build_insert_with_dialect(&s("app1"), "events", &schema, &doc, dialect).unwrap();
             assert!(!q.sql.contains("to_timestamp"), "sql: {}", q.sql);
             assert!(!q.sql.contains("strftime"), "sql: {}", q.sql);
             assert!(q.sql.contains("NULL"), "sql: {}", q.sql);
@@ -7185,7 +7171,7 @@ mod tests {
             "__zsbin__occurred_at": true,
         });
         let pg =
-            build_insert_with_dialect("app1", "events", &schema, &doc, SqlDialect::Postgres)
+            build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Postgres)
                 .unwrap();
         assert!(
             pg.sql.contains("VALUES (decode($1, 'base64')::bytea)"),
@@ -7195,7 +7181,7 @@ mod tests {
         assert!(!pg.sql.contains("to_timestamp"), "sql: {}", pg.sql);
 
         let sqlite =
-            build_insert_with_dialect("app1", "events", &schema, &doc, SqlDialect::Sqlite)
+            build_insert_with_dialect(&s("app1"), "events", &schema, &doc, SqlDialect::Sqlite)
                 .unwrap();
         assert!(sqlite.sql.contains("VALUES ($1)"), "sql: {}", sqlite.sql);
         assert!(!sqlite.sql.contains("strftime"), "sql: {}", sqlite.sql);
@@ -7205,14 +7191,14 @@ mod tests {
     #[test]
     fn test_invalid_collection() {
         let filter = json!({});
-        let result = build_find("app1", "users; DROP TABLE", &filter, None, None, None, None);
+        let result = build_find(&s("app1"), "users; DROP TABLE", &filter, None, None, None, None);
         assert!(result.is_err());
     }
 
     #[test]
     fn test_exists_operator() {
         let filter = json!({"email": {"$exists": true}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""email" IS NOT NULL"#));
         assert!(q.params.is_empty());
     }
@@ -7220,7 +7206,7 @@ mod tests {
     #[test]
     fn test_count() {
         let filter = json!({"active": true});
-        let q = build_count("app1", "users", &tschema(), &filter).unwrap();
+        let q = build_count(&s("app1"), "users", &tschema(), &filter).unwrap();
         assert!(q.sql.contains("SELECT COUNT(*)"));
         assert_eq!(q.params, vec!["true"]);
     }
@@ -7228,7 +7214,7 @@ mod tests {
     #[test]
     fn test_ilike_operator() {
         let filter = json!({"name": {"$ilike": "%alice%"}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
             format!(r#"{} FROM "app1"."users" WHERE "name" ILIKE $1"#, tselect())
@@ -7240,7 +7226,7 @@ mod tests {
     fn test_ilike_operator_sqlite_uses_like_nocase() {
         let filter = json!({"name": {"$ilike": "%alice%"}});
         let q = build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &filter,
             None,
@@ -7266,7 +7252,7 @@ mod tests {
     #[test]
     fn test_not_operator() {
         let filter = json!({"$not": {"role": "admin"}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
             format!(
@@ -7281,7 +7267,7 @@ mod tests {
     fn test_update_inc() {
         let filter = json!({"id": 1});
         let update = json!({"views": {"$inc": 1}});
-        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""views" = "views" + $1::numeric"#),
             "sql: {}",
@@ -7294,7 +7280,7 @@ mod tests {
     fn test_update_dec() {
         let filter = json!({"id": 1});
         let update = json!({"stock": {"$dec": 1}});
-        let q = build_update_one("app1", "items", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "items", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""stock" = "stock" - $1::numeric"#),
             "sql: {}",
@@ -7307,7 +7293,7 @@ mod tests {
     fn test_update_mul() {
         let filter = json!({"id": 1});
         let update = json!({"price": {"$mul": 1.1}});
-        let q = build_update_one("app1", "items", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "items", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""price" = "price" * $1::numeric"#),
             "sql: {}",
@@ -7320,7 +7306,7 @@ mod tests {
     fn test_update_push() {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$push": "new"}});
-        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         // Appends the JSON-encoded value to the jsonb array. The `::jsonb`
         // cast (not `to_jsonb(::text)`) keeps numbers, booleans, and objects
         // as their real JSON types — the old shape stringified everything.
@@ -7338,7 +7324,7 @@ mod tests {
     fn test_update_pull() {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$pull": "old"}});
-        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         // Removes array elements by value. An earlier implementation used
         // `"tags" - $1`, but that's the jsonb "remove key" operator and
         // would mutate objects, not filter array elements.
@@ -7354,7 +7340,7 @@ mod tests {
     fn test_update_add_to_set() {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$addToSet": "unique"}});
-        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         // Appends only if the array doesn't already contain the value
         // (jsonb @> containment check). Both sides use ::jsonb so type is
         // preserved — same rationale as $push.
@@ -7372,7 +7358,7 @@ mod tests {
     fn test_update_mixed_operators() {
         let filter = json!({"id": 1});
         let update = json!({"name": "New", "views": {"$inc": 1}});
-        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         // Both plain set and $inc should appear
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(
@@ -7390,7 +7376,7 @@ mod tests {
             {"name": "alice", "age": 30},
             {"name": "bob",   "age": 25}
         ]);
-        let q = build_insert_many("app1", "users", &tschema(), &docs).unwrap();
+        let q = build_insert_many(&s("app1"), "users", &tschema(), &docs).unwrap();
         assert!(
             q.sql.starts_with(r#"INSERT INTO "app1"."users""#),
             "sql: {}",
@@ -7412,7 +7398,7 @@ mod tests {
         let over: Vec<Value> = (0..=MAX_INSERT_MANY_BATCH)
             .map(|i| json!({ "n": i }))
             .collect();
-        let err = build_insert_many("app1", "users", &tschema(), &Value::Array(over)).unwrap_err();
+        let err = build_insert_many(&s("app1"), "users", &tschema(), &Value::Array(over)).unwrap_err();
         match err {
             QueryError::InvalidFilter(m) => assert!(m.contains("exceeds the maximum"), "{m}"),
             other => panic!("expected InvalidFilter, got {other:?}"),
@@ -7420,7 +7406,7 @@ mod tests {
         let at_cap: Vec<Value> = (0..MAX_INSERT_MANY_BATCH)
             .map(|i| json!({ "n": i }))
             .collect();
-        assert!(build_insert_many("app1", "users", &tschema(), &Value::Array(at_cap)).is_ok());
+        assert!(build_insert_many(&s("app1"), "users", &tschema(), &Value::Array(at_cap)).is_ok());
     }
 
     fn full_non_null_insert_many_batch(column_count: usize) -> Value {
@@ -7467,7 +7453,7 @@ mod tests {
         );
 
         let accepted = build_insert_many(
-            "app1",
+            &s("app1"),
             "users",
             &tschema(),
             &full_non_null_insert_many_batch(largest_full_width),
@@ -7480,7 +7466,7 @@ mod tests {
         assert!(accepted.params.len() <= protocol_limit);
 
         let rejected = build_insert_many(
-            "app1",
+            &s("app1"),
             "users",
             &tschema(),
             &full_non_null_insert_many_batch(first_rejected_width),
@@ -7509,12 +7495,12 @@ mod tests {
             Some(MAX_INSERT_MANY_BATCH),
             "the exact-boundary batch must exercise the documented document cap"
         );
-        let accepted = build_insert_many("app1", "users", &tschema(), &accepted_docs)
+        let accepted = build_insert_many(&s("app1"), "users", &tschema(), &accepted_docs)
             .expect("exactly the PostgreSQL non-null field-value limit must build");
         assert_eq!(accepted.params.len(), protocol_limit);
 
         let rejected_docs = insert_many_batch_with_exact_non_null_cells(protocol_limit + 1);
-        let rejected = build_insert_many("app1", "users", &tschema(), &rejected_docs);
+        let rejected = build_insert_many(&s("app1"), "users", &tschema(), &rejected_docs);
         match rejected {
             Err(QueryError::InvalidFilter(message)) => {
                 assert!(message.contains("65536"), "{message}");
@@ -7539,7 +7525,7 @@ mod tests {
         );
 
         let accepted = build_insert_many_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &tschema(),
             &full_non_null_insert_many_batch(largest_full_width),
@@ -7553,7 +7539,7 @@ mod tests {
         assert!(accepted.params.len() <= SQLITE_MAX_BIND_PARAMETERS);
 
         let rejected = build_insert_many_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &tschema(),
             &full_non_null_insert_many_batch(first_rejected_width),
@@ -7585,7 +7571,7 @@ mod tests {
     #[test]
     fn test_insert_many_empty() {
         let docs = json!([]);
-        let result = build_insert_many("app1", "users", &tschema(), &docs);
+        let result = build_insert_many(&s("app1"), "users", &tschema(), &docs);
         assert!(result.is_err(), "expected error for empty array");
     }
 
@@ -7593,7 +7579,7 @@ mod tests {
     fn test_update_many() {
         let filter = json!({"active": true});
         let update = json!({"status": "verified"});
-        let q = build_update_many("app1", "users", &tschema(), &filter, &update).unwrap();
+        let q = build_update_many(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.starts_with(r#"UPDATE "app1"."users" SET"#),
             "sql: {}",
@@ -7608,7 +7594,7 @@ mod tests {
     fn test_delete_many() {
         let filter = json!({"active": false});
         let q =
-            build_delete_many("app1", "users", &tschema(), &filter, SqlDialect::Postgres).unwrap();
+            build_delete_many(&s("app1"), "users", &tschema(), &filter, SqlDialect::Postgres).unwrap();
         assert!(
             q.sql.starts_with(r#"DELETE FROM "app1"."users""#),
             "sql: {}",
@@ -7623,7 +7609,7 @@ mod tests {
     fn test_delete_many_no_filter() {
         let filter = json!({});
         let q =
-            build_delete_many("app1", "users", &tschema(), &filter, SqlDialect::Postgres).unwrap();
+            build_delete_many(&s("app1"), "users", &tschema(), &filter, SqlDialect::Postgres).unwrap();
         assert!(!q.sql.contains("WHERE"), "sql: {}", q.sql);
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
         assert!(q.params.is_empty());
@@ -7633,7 +7619,7 @@ mod tests {
     fn test_find_with_select() {
         let filter = json!({});
         let select = json!(["name", "email"]);
-        let q = build_find("app1", "users", &filter, None, None, None, Some(&select)).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, Some(&select)).unwrap();
         assert!(
             q.sql.contains(r#"SELECT "name", "email" FROM"#),
             "sql: {}",
@@ -7644,14 +7630,14 @@ mod tests {
     #[test]
     fn test_find_without_select() {
         let filter = json!({});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
     }
 
     #[test]
     fn test_distinct() {
         let filter = json!({});
-        let q = build_distinct("app1", "users", "country", &filter, &tschema()).unwrap();
+        let q = build_distinct(&s("app1"), "users", "country", &filter, &tschema()).unwrap();
         assert!(
             q.sql
                 .starts_with(r#"SELECT DISTINCT "country" FROM "app1"."users""#),
@@ -7665,7 +7651,7 @@ mod tests {
     #[test]
     fn test_distinct_with_filter() {
         let filter = json!({"active": true});
-        let q = build_distinct("app1", "users", "role", &filter, &tschema()).unwrap();
+        let q = build_distinct(&s("app1"), "users", "role", &filter, &tschema()).unwrap();
         assert!(
             q.sql
                 .contains(r#"SELECT DISTINCT "role" FROM "app1"."users" WHERE"#),
@@ -7688,7 +7674,7 @@ mod tests {
             }
         });
         let q = build_distinct_with_soft_delete_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             "email",
             &json!({}),
@@ -7719,7 +7705,7 @@ mod tests {
             {"$sort": {"count": -1}},
             {"$limit": 5}
         ]);
-        let q = build_aggregate("app1", "users", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "users", &pipeline, &tschema()).unwrap();
         assert!(
             q.sql.contains(r#"SELECT "country", COUNT(*) AS "count""#),
             "sql: {}",
@@ -7736,7 +7722,7 @@ mod tests {
         let pipeline = json!([
             {"$group": {"by": ["country", "city"], "total": {"$sum": "revenue"}}}
         ]);
-        let q = build_aggregate("app1", "orders", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "orders", &pipeline, &tschema()).unwrap();
         assert!(
             q.sql.contains(r#"GROUP BY "country", "city""#),
             "sql: {}",
@@ -7755,7 +7741,7 @@ mod tests {
             {"$group": {"by": "category", "cnt": {"$count": true}}},
             {"$having": {"cnt": {"$gte": 10}}}
         ]);
-        let q = build_aggregate("app1", "products", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "products", &pipeline, &tschema()).unwrap();
         assert!(q.sql.contains("HAVING COUNT(*) >= $1"), "sql: {}", q.sql);
         assert!(q.sql.contains("GROUP BY"), "sql: {}", q.sql);
         assert_eq!(q.params, vec!["10"]);
@@ -7773,7 +7759,7 @@ mod tests {
         let schema = timestamp_test_schema();
 
         let pg = build_aggregate_with_soft_delete_with_dialect(
-            "app1",
+            &s("app1"),
             "events",
             &pipeline,
             false,
@@ -7790,7 +7776,7 @@ mod tests {
         assert_eq!(pg.params, vec!["-1", "10"]);
 
         let sqlite = build_aggregate_with_soft_delete_with_dialect(
-            "app1",
+            &s("app1"),
             "events",
             &pipeline,
             false,
@@ -7813,7 +7799,7 @@ mod tests {
         let pipeline = json!([
             {"$match": {"active": true}}
         ]);
-        let q = build_aggregate("app1", "users", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "users", &pipeline, &tschema()).unwrap();
         assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
         assert!(!q.sql.contains("GROUP BY"), "sql: {}", q.sql);
     }
@@ -7852,7 +7838,7 @@ mod tests {
         ]);
         let schema = mask_only_ssn_schema();
         let q = build_aggregate_with_soft_delete_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &pipeline,
             false,
@@ -7888,7 +7874,7 @@ mod tests {
         ]);
         let schema = mask_only_ssn_schema();
         let q = build_aggregate_with_soft_delete_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &pipeline,
             false,
@@ -7927,7 +7913,7 @@ mod tests {
                 {"$group": {"by": "tenant", "v": {op: "ssn"}}}
             ]);
             let q = build_aggregate_with_soft_delete_with_dialect(
-                "app1",
+                &s("app1"),
                 "users",
                 &pipeline,
                 false,
@@ -7957,7 +7943,7 @@ mod tests {
     fn test_update_one_plain() {
         let filter = json!({"id": 1});
         let update = json!({"name": "bob"});
-        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         // Plain field: value → SET "name" = $1
         assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
         assert!(
@@ -7973,7 +7959,7 @@ mod tests {
     fn test_update_one_set_operator() {
         let filter = json!({"id": 1});
         let update = json!({"$set": {"name": "carol"}});
-        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $1"#), "sql: {}", q.sql);
         assert!(
             q.sql.contains("WHERE id = (SELECT id FROM"),
@@ -7987,7 +7973,7 @@ mod tests {
     #[test]
     fn test_delete_one() {
         let filter = json!({});
-        let q = build_delete_one("app1", "users", &tschema(), &filter).unwrap();
+        let q = build_delete_one(&s("app1"), "users", &tschema(), &filter).unwrap();
         assert!(
             q.sql.contains("WHERE id = (SELECT id FROM") && q.sql.contains("LIMIT 1 FOR UPDATE)"),
             "sql: {}",
@@ -8001,7 +7987,7 @@ mod tests {
     #[test]
     fn test_delete_one_with_filter() {
         let filter = json!({"role": "guest"});
-        let q = build_delete_one("app1", "users", &tschema(), &filter).unwrap();
+        let q = build_delete_one(&s("app1"), "users", &tschema(), &filter).unwrap();
         assert!(
             q.sql.contains("WHERE id = (SELECT id FROM"),
             "sql: {}",
@@ -8064,7 +8050,7 @@ mod tests {
     fn test_find_with_order() {
         let filter = json!({});
         let order = json!({"created_at": -1});
-        let q = build_find("app1", "posts", &filter, Some(10), None, Some(&order), None).unwrap();
+        let q = build_find(&s("app1"), "posts", &filter, Some(10), None, Some(&order), None).unwrap();
         assert!(
             q.sql.contains(r#"ORDER BY "created_at" DESC NULLS FIRST"#),
             "sql: {}",
@@ -8078,7 +8064,7 @@ mod tests {
         let filter = json!({});
         let order = json!({"optional": 1});
         let q = build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &filter,
             None,
@@ -8106,7 +8092,7 @@ mod tests {
     #[test]
     fn test_and_combinator() {
         let filter = json!({"$and": [{"status": "active"}, {"verified": true}]});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains("AND"), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""status" = $1"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""verified" = $2"#), "sql: {}", q.sql);
@@ -8117,7 +8103,7 @@ mod tests {
     fn test_nested_and_or() {
         // { $and: [{ $or: [{a: 1}, {b: 2}] }, {c: 3}] }
         let filter = json!({"$and": [{"$or": [{"a": 1}, {"b": 2}]}, {"c": 3}]});
-        let q = build_find("app1", "t", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "t", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains("OR"), "sql: {}", q.sql);
         assert!(q.sql.contains("AND"), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""c" = "#), "sql: {}", q.sql);
@@ -8127,7 +8113,7 @@ mod tests {
     fn test_null_eq() {
         // { field: null } → IS NULL (implicit $eq)
         let filter = json!({"bio": null});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
             format!(r#"{} FROM "app1"."users" WHERE "bio" IS NULL"#, tselect())
@@ -8139,7 +8125,7 @@ mod tests {
     fn test_ne_null() {
         // { field: { $ne: null } } → IS NOT NULL
         let filter = json!({"bio": {"$ne": null}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
             format!(
@@ -8154,7 +8140,7 @@ mod tests {
     fn test_multiple_operators_on_field() {
         // { age: { $gte: 18, $lt: 65 } } — both conditions must appear
         let filter = json!({"age": {"$gte": 18, "$lt": 65}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains(r#""age" >= $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""age" < $"#), "sql: {}", q.sql);
         assert_eq!(q.params.len(), 2);
@@ -8166,7 +8152,7 @@ mod tests {
     #[test]
     fn test_nin_operator() {
         let filter = json!({"role": {"$nin": ["admin", "moderator"]}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             q.sql.contains(r#""role" NOT IN ($1, $2)"#),
             "sql: {}",
@@ -8178,7 +8164,7 @@ mod tests {
     #[test]
     fn test_like_operator() {
         let filter = json!({"name": {"$like": "ali%"}});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert_eq!(
             q.sql,
             format!(r#"{} FROM "app1"."users" WHERE "name" LIKE $1"#, tselect())
@@ -8190,7 +8176,7 @@ mod tests {
     fn test_empty_and() {
         // { $and: [] } → no WHERE clause
         let filter = json!({"$and": []});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             !q.sql.contains("WHERE"),
             "sql should have no WHERE: {}",
@@ -8203,7 +8189,7 @@ mod tests {
     fn test_empty_or() {
         // { $or: [] } → no WHERE clause
         let filter = json!({"$or": []});
-        let q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         assert!(
             !q.sql.contains("WHERE"),
             "sql should have no WHERE: {}",
@@ -8216,7 +8202,7 @@ mod tests {
     fn test_not_with_multiple_fields() {
         // { $not: { a: 1, b: 2 } }
         let filter = json!({"$not": {"a": 1, "b": 2}});
-        let q = build_find("app1", "t", &filter, None, None, None, None).unwrap();
+        let q = build_find(&s("app1"), "t", &filter, None, None, None, None).unwrap();
         assert!(q.sql.contains("NOT ("), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""a" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""b" = $"#), "sql: {}", q.sql);
@@ -8231,7 +8217,7 @@ mod tests {
     fn test_collection_sql_injection() {
         let filter = json!({});
         let result = build_find(
-            "app1",
+            &s("app1"),
             "users; DROP TABLE users",
             &filter,
             None,
@@ -8247,12 +8233,21 @@ mod tests {
         assert!(msg.contains("invalid collection"), "msg: {msg}");
     }
 
+    /// The refusal MOVED; it did not disappear.
+    ///
+    /// `build_find` used to take a `&str` and refuse a schema carrying a
+    /// semicolon on every call. It now takes a `SchemaName`, so the illegal
+    /// name cannot reach it at all - the refusal is at construction, once,
+    /// and the same `QueryError` value comes out.
     #[test]
     fn test_schema_sql_injection() {
-        let filter = json!({});
-        let result = build_find("app1; DROP TABLE", "users", &filter, None, None, None, None);
-        assert!(result.is_err(), "should reject semicolon in schema/app_id");
-        let msg = result.unwrap_err().to_string();
+        let err = SchemaName::new("app1; DROP TABLE")
+            .expect_err("a semicolon must not survive into a schema name");
+        assert!(
+            matches!(err, QueryError::InvalidCollection(_)),
+            "unexpected refusal: {err}"
+        );
+        let msg = err.to_string();
         assert!(msg.contains("invalid"), "msg: {msg}");
     }
 
@@ -8260,7 +8255,7 @@ mod tests {
     fn test_field_name_with_quotes() {
         // Field name containing double quotes should be escaped (doubled) in the identifier
         let filter = json!({"name": "alice"});
-        let _q = build_find("app1", "users", &filter, None, None, None, None).unwrap();
+        let _q = build_find(&s("app1"), "users", &filter, None, None, None, None).unwrap();
         // Standard field works; now verify quote_ident escapes embedded quotes
         let quoted = super::quote_ident(r#"col"name"#);
         assert_eq!(quoted, r#""col""name""#, "embedded quote must be doubled");
@@ -8269,7 +8264,7 @@ mod tests {
     #[test]
     fn test_collection_empty() {
         let filter = json!({});
-        let result = build_find("app1", "", &filter, None, None, None, None);
+        let result = build_find(&s("app1"), "", &filter, None, None, None, None);
         assert!(result.is_err(), "empty collection name should fail");
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -8285,14 +8280,14 @@ mod tests {
     #[test]
     fn test_insert_with_boolean() {
         let doc = json!({"active": true});
-        let q = build_insert("app1", "users", &tschema(), &doc).unwrap();
+        let q = build_insert(&s("app1"), "users", &tschema(), &doc).unwrap();
         assert_eq!(q.params, vec!["true"]);
     }
 
     #[test]
     fn test_insert_with_null_field() {
         let doc = json!({"name": "alice", "bio": null});
-        let q = build_insert("app1", "users", &tschema(), &doc).unwrap();
+        let q = build_insert(&s("app1"), "users", &tschema(), &doc).unwrap();
         // null is inlined as a SQL `NULL` literal — not bound as a
         // text-format parameter (the wire protocol can't represent
         // NULL as a parameter; empty string would fail enum / NOT
@@ -8312,14 +8307,14 @@ mod tests {
     #[test]
     fn test_insert_with_number() {
         let doc = json!({"age": 30});
-        let q = build_insert("app1", "users", &tschema(), &doc).unwrap();
+        let q = build_insert(&s("app1"), "users", &tschema(), &doc).unwrap();
         assert_eq!(q.params, vec!["30"]);
     }
 
     #[test]
     fn test_insert_with_nested_json() {
         let doc = json!({"settings": {"theme": "dark"}});
-        let q = build_insert("app1", "users", &tschema(), &doc).unwrap();
+        let q = build_insert(&s("app1"), "users", &tschema(), &doc).unwrap();
         // Nested object is serialized as JSON text
         assert_eq!(q.params.len(), 1);
         let param = &q.params[0];
@@ -8339,7 +8334,7 @@ mod tests {
         // The spec says "no $group → error", but the current code returns SELECT * FROM.
         // Test that the function at minimum returns without panicking and produces valid SQL.
         let pipeline = json!([]);
-        let q = build_aggregate("app1", "users", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "users", &pipeline, &tschema()).unwrap();
         assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
     }
 
@@ -8347,7 +8342,7 @@ mod tests {
     fn test_aggregate_match_only() {
         // Only $match without $group → select * (same as no_group test)
         let pipeline = json!([{"$match": {"status": "active"}}]);
-        let q = build_aggregate("app1", "users", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "users", &pipeline, &tschema()).unwrap();
         assert!(q.sql.starts_with(&tselect()), "sql: {}", q.sql);
         assert!(!q.sql.contains("GROUP BY"), "sql: {}", q.sql);
         assert!(q.sql.contains("WHERE"), "sql: {}", q.sql);
@@ -8366,7 +8361,7 @@ mod tests {
                 "max_price": {"$max": "price"}
             }
         }]);
-        let q = build_aggregate("app1", "orders", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "orders", &pipeline, &tschema()).unwrap();
         assert!(q.sql.contains("COUNT(*)"), "sql: {}", q.sql);
         assert!(q.sql.contains(r#"SUM("amount")"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#"AVG("price")"#), "sql: {}", q.sql);
@@ -8382,7 +8377,7 @@ mod tests {
     #[test]
     fn test_unsupported_filter_operator() {
         let filter = json!({"name": {"$regex": "^ali"}});
-        let result = build_find("app1", "users", &filter, None, None, None, None);
+        let result = build_find(&s("app1"), "users", &filter, None, None, None, None);
         assert!(result.is_err(), "unsupported operator should fail");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("unsupported"), "msg: {msg}");
@@ -8392,7 +8387,7 @@ mod tests {
     fn test_unsupported_update_operator() {
         let filter = json!({});
         let update = json!({"name": {"$unset": true}});
-        let result = build_update_one("app1", "users", &tschema(), &filter, &update);
+        let result = build_update_one(&s("app1"), "users", &tschema(), &filter, &update);
         assert!(result.is_err(), "unsupported update operator should fail");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("unsupported"), "msg: {msg}");
@@ -8401,7 +8396,7 @@ mod tests {
     #[test]
     fn test_insert_empty_doc() {
         let doc = json!({});
-        let result = build_insert("app1", "users", &tschema(), &doc);
+        let result = build_insert(&s("app1"), "users", &tschema(), &doc);
         assert!(result.is_err(), "empty document should fail");
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -8413,7 +8408,7 @@ mod tests {
     #[test]
     fn test_insert_non_object() {
         let doc = json!("just a string");
-        let result = build_insert("app1", "users", &tschema(), &doc);
+        let result = build_insert(&s("app1"), "users", &tschema(), &doc);
         assert!(result.is_err(), "non-object document should fail");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("object"), "msg: {msg}");
@@ -8423,7 +8418,7 @@ mod tests {
     fn test_update_empty_fields() {
         let filter = json!({});
         let update = json!({});
-        let result = build_update_one("app1", "users", &tschema(), &filter, &update);
+        let result = build_update_one(&s("app1"), "users", &tschema(), &filter, &update);
         assert!(result.is_err(), "empty update should fail");
         let msg = result.unwrap_err().to_string();
         assert!(
@@ -8435,7 +8430,7 @@ mod tests {
     #[test]
     fn test_in_non_array() {
         let filter = json!({"field": {"$in": "not-an-array"}});
-        let result = build_find("app1", "users", &filter, None, None, None, None);
+        let result = build_find(&s("app1"), "users", &filter, None, None, None, None);
         assert!(result.is_err(), "$in with non-array should fail");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("array"), "msg: {msg}");
@@ -8444,7 +8439,7 @@ mod tests {
     #[test]
     fn test_exists_non_bool() {
         let filter = json!({"field": {"$exists": "yes"}});
-        let result = build_find("app1", "users", &filter, None, None, None, None);
+        let result = build_find(&s("app1"), "users", &filter, None, None, None, None);
         assert!(result.is_err(), "$exists with non-bool should fail");
         let msg = result.unwrap_err().to_string();
         assert!(msg.contains("boolean"), "msg: {msg}");
@@ -8459,7 +8454,7 @@ mod tests {
         let pipeline = json!([
             {"$group": {"by": "department", "top_name": {"$first": "name"}}}
         ]);
-        let q = build_aggregate("app1", "employees", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "employees", &pipeline, &tschema()).unwrap();
         // Without a preceding $sort, $first uses plain array_agg
         assert!(
             q.sql.contains(r#"(array_agg("name"))[1]"#),
@@ -8474,7 +8469,7 @@ mod tests {
             {"$sort": {"salary": -1}},
             {"$group": {"by": "department", "top_name": {"$first": "name"}}}
         ]);
-        let q = build_aggregate("app1", "employees", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "employees", &pipeline, &tschema()).unwrap();
         // With a preceding $sort, $first threads the ORDER BY into array_agg
         assert!(
             q.sql
@@ -8490,7 +8485,7 @@ mod tests {
             {"$sort": {"salary": -1, "name": 1}},
             {"$group": {"by": "department", "top_name": {"$first": "name"}}}
         ]);
-        let q = build_aggregate("app1", "employees", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "employees", &pipeline, &tschema()).unwrap();
         // Multi-column sort should appear in the ORDER BY clause
         assert!(
             q.sql.contains(r#"array_agg("name" ORDER BY"#),
@@ -8512,7 +8507,7 @@ mod tests {
                 "cnt": {"$count": true}
             }}
         ]);
-        let q = build_aggregate("app1", "employees", &pipeline, &tschema()).unwrap();
+        let q = build_aggregate(&s("app1"), "employees", &pipeline, &tschema()).unwrap();
         // $first should have ORDER BY
         assert!(
             q.sql
@@ -8529,7 +8524,7 @@ mod tests {
     fn test_upsert_basic() {
         let doc = json!({"name": "alice", "age": 30});
         let conflict = json!(["name"]);
-        let q = build_upsert("app1", "users", &tschema(), &doc, &conflict).unwrap();
+        let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
         assert!(q.sql.contains("INSERT INTO"), "sql: {}", q.sql);
         assert!(q.sql.contains("ON CONFLICT"), "sql: {}", q.sql);
         assert!(q.sql.contains("DO UPDATE SET"), "sql: {}", q.sql);
@@ -8548,7 +8543,7 @@ mod tests {
     fn test_upsert_multiple_conflict_fields() {
         let doc = json!({"email": "a@b.com", "name": "alice", "age": 30});
         let conflict = json!(["email", "name"]);
-        let q = build_upsert("app1", "users", &tschema(), &doc, &conflict).unwrap();
+        let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
         assert!(
             q.sql.contains(r#"ON CONFLICT ("email", "name")"#),
             "sql: {}",
@@ -8578,7 +8573,7 @@ mod tests {
         // When all columns are conflict columns, we still produce a valid DO UPDATE SET
         let doc = json!({"email": "a@b.com"});
         let conflict = json!(["email"]);
-        let q = build_upsert("app1", "users", &tschema(), &doc, &conflict).unwrap();
+        let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
         assert!(q.sql.contains("DO UPDATE SET"), "sql: {}", q.sql);
         assert!(q.sql.contains(&treturning()), "sql: {}", q.sql);
     }
@@ -8594,7 +8589,7 @@ mod tests {
             "name": "alice"
         });
         let conflict = json!(["email"]);
-        let q = build_upsert("app1", "users", &tschema(), &doc, &conflict).unwrap();
+        let q = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
         assert!(
             !q.sql.contains(r#""id" = EXCLUDED."id""#),
             "upsert must not overwrite id on conflict: {}",
@@ -8627,7 +8622,7 @@ mod tests {
         let doc = json!({"email": "a@b.com", "name": "alice"});
         let conflict = json!(["email"]);
         let q = build_upsert_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &tschema(),
             &doc,
@@ -8658,7 +8653,7 @@ mod tests {
         });
         let conflict = json!(["email"]);
         let q = build_upsert_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &tschema(),
             &doc,
@@ -8697,7 +8692,7 @@ mod tests {
         });
         let conflict = json!(["email"]);
         let q = build_upsert_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &tschema(),
             &doc,
@@ -8728,7 +8723,7 @@ mod tests {
     fn test_upsert_empty_doc_error() {
         let doc = json!({});
         let conflict = json!(["name"]);
-        let result = build_upsert("app1", "users", &tschema(), &doc, &conflict);
+        let result = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict);
         assert!(result.is_err());
     }
 
@@ -8736,7 +8731,7 @@ mod tests {
     fn test_upsert_empty_conflict_fields_error() {
         let doc = json!({"name": "alice"});
         let conflict = json!([]);
-        let result = build_upsert("app1", "users", &tschema(), &doc, &conflict);
+        let result = build_upsert(&s("app1"), "users", &tschema(), &doc, &conflict);
         assert!(result.is_err());
     }
 
@@ -8744,7 +8739,7 @@ mod tests {
     fn test_upsert_invalid_collection_error() {
         let doc = json!({"name": "alice"});
         let conflict = json!(["name"]);
-        let result = build_upsert("app1", "users; DROP TABLE", &tschema(), &doc, &conflict);
+        let result = build_upsert(&s("app1"), "users; DROP TABLE", &tschema(), &doc, &conflict);
         assert!(result.is_err());
     }
 
@@ -8752,7 +8747,7 @@ mod tests {
     fn test_find_or_create_emits_xmax_returning() {
         let doc = json!({"email": "a@b.com", "name": "alice"});
         let conflict = json!(["email"]);
-        let q = build_find_or_create("app1", "users", &tschema(), &doc, &conflict).unwrap();
+        let q = build_find_or_create(&s("app1"), "users", &tschema(), &doc, &conflict).unwrap();
         assert!(q.sql.contains("INSERT INTO"), "sql: {}", q.sql);
         assert!(q.sql.contains(r#"ON CONFLICT ("email")"#), "sql: {}", q.sql);
         // No-op self-assignment on the conflict column so RETURNING
@@ -8773,14 +8768,14 @@ mod tests {
     fn test_find_or_create_rejects_empty_conflict() {
         let doc = json!({"email": "a@b.com"});
         let conflict = json!([]);
-        assert!(build_find_or_create("app1", "users", &tschema(), &doc, &conflict).is_err());
+        assert!(build_find_or_create(&s("app1"), "users", &tschema(), &doc, &conflict).is_err());
     }
 
     #[test]
     fn test_find_or_create_rejects_empty_doc() {
         let doc = json!({});
         let conflict = json!(["email"]);
-        assert!(build_find_or_create("app1", "users", &tschema(), &doc, &conflict).is_err());
+        assert!(build_find_or_create(&s("app1"), "users", &tschema(), &doc, &conflict).is_err());
     }
 
     // -----------------------------------------------------------------------
@@ -8798,7 +8793,7 @@ mod tests {
         // serialized as JSON, so `42` stays a JSON number.
         let filter = json!({"id": 1});
         let update = json!({"scores": {"$push": 42}});
-        let q = build_update_one("app1", "games", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""scores" = "scores" || $1::jsonb"#),
             "sql: {}",
@@ -8813,7 +8808,7 @@ mod tests {
     fn test_update_push_bool_preserves_type() {
         let filter = json!({"id": 1});
         let update = json!({"flags": {"$push": true}});
-        let q = build_update_one("app1", "games", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""flags" = "flags" || $1::jsonb"#),
             "sql: {}",
@@ -8826,7 +8821,7 @@ mod tests {
     fn test_update_push_object_preserves_type() {
         let filter = json!({"id": 1});
         let update = json!({"entries": {"$push": {"k": "v", "n": 3}}});
-        let q = build_update_one("app1", "log", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "log", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""entries" = "entries" || $1::jsonb"#),
             "sql: {}",
@@ -8854,7 +8849,7 @@ mod tests {
         // correctly removes array elements equal to the value.
         let filter = json!({"id": 1});
         let update = json!({"scores": {"$pull": 100}});
-        let q = build_update_one("app1", "games", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql
                 .contains(r#"FROM jsonb_array_elements("scores") elem WHERE elem != $1::jsonb"#),
@@ -8868,7 +8863,7 @@ mod tests {
     fn test_update_add_to_set_number() {
         let filter = json!({"id": 1});
         let update = json!({"ids": {"$addToSet": 7}});
-        let q = build_update_one("app1", "games", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "games", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(
                 r#""ids" = CASE WHEN "ids" @> $1::jsonb THEN "ids" ELSE "ids" || $1::jsonb END"#
@@ -8888,7 +8883,7 @@ mod tests {
         // explicitly set it. This is part of the platform contract.
         let filter = json!({"id": 1});
         let update = json!({"name": "bob"});
-        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
     }
 
@@ -8899,7 +8894,7 @@ mod tests {
         let filter = json!({"id": 1});
         let explicit_ts = "2026-01-01T00:00:00Z";
         let update = json!({"name": "bob", "updated_at": explicit_ts});
-        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(
             !q.sql.contains("NOW()"),
             "sql should not contain NOW() when updated_at is explicit: {}",
@@ -8919,7 +8914,7 @@ mod tests {
         // $set into the top level, so both `name` and `age` must appear.
         let filter = json!({"id": 1});
         let update = json!({"$set": {"name": "alice"}, "age": 30});
-        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""age" = $"#), "sql: {}", q.sql);
         assert!(q.params.contains(&"alice".to_string()));
@@ -8932,7 +8927,7 @@ mod tests {
         // produce SET clauses and share the same params vector.
         let filter = json!({"id": 1});
         let update = json!({"$set": {"name": "alice"}, "views": {"$inc": 5}});
-        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""views" = "views" + $"#), "sql: {}", q.sql);
         assert!(q.params.contains(&"alice".to_string()));
@@ -8946,7 +8941,7 @@ mod tests {
         // accepts it without a client-side conversion.
         let filter = json!({"id": 1});
         let update = json!({"balance": {"$inc": 1.5}});
-        let q = build_update_one("app1", "accounts", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "accounts", &tschema(), &filter, &update).unwrap();
         assert_eq!(q.params[0], "1.5");
     }
 
@@ -8957,7 +8952,7 @@ mod tests {
         // minus sign on the numeric literal fine.
         let filter = json!({"id": 1});
         let update = json!({"stock": {"$inc": -3}});
-        let q = build_update_one("app1", "items", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "items", &tschema(), &filter, &update).unwrap();
         assert!(
             q.sql.contains(r#""stock" = "stock" + $1::numeric"#),
             "sql: {}",
@@ -8972,7 +8967,7 @@ mod tests {
         // placeholders must be contiguous across both halves.
         let filter = json!({"status": "active"});
         let update = json!({"name": "alice", "views": {"$inc": 1}});
-        let q = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         // Two SET params: name ($1), inc ($2); one WHERE param: status ($3).
         assert_eq!(q.params.len(), 3, "params: {:?}", q.params);
         assert!(q.sql.contains("$3"), "sql: {}", q.sql);
@@ -8986,7 +8981,7 @@ mod tests {
         // which would silently bump timestamps without user intent.
         let filter = json!({"id": 1});
         let update = json!({});
-        let err = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap_err();
+        let err = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap_err();
         // Variant is QueryError::InvalidFilter — compare Display form so
         // this doesn't need to import the enum.
         assert!(
@@ -8999,7 +8994,7 @@ mod tests {
     fn test_update_unknown_operator_rejected() {
         let filter = json!({"id": 1});
         let update = json!({"tags": {"$weirdOp": "val"}});
-        let err = build_update_one("app1", "posts", &tschema(), &filter, &update).unwrap_err();
+        let err = build_update_one(&s("app1"), "posts", &tschema(), &filter, &update).unwrap_err();
         assert!(
             format!("{err}").contains("$weirdOp"),
             "error should name the unsupported op, got: {err}"
@@ -9012,7 +9007,7 @@ mod tests {
         // auto-timestamp behaviour must hold there too.
         let filter = json!({"status": "draft"});
         let update = json!({"status": "published"});
-        let q = build_update_many("app1", "posts", &tschema(), &filter, &update).unwrap();
+        let q = build_update_many(&s("app1"), "posts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""updated_at" = NOW()"#), "sql: {}", q.sql);
         // updateMany must not wrap the WHERE in a LIMIT 1 subquery.
         assert!(!q.sql.contains("LIMIT 1"), "sql: {}", q.sql);
@@ -9023,7 +9018,7 @@ mod tests {
         // Pure $set with no siblings — flattening must still work.
         let filter = json!({"id": 1});
         let update = json!({"$set": {"name": "alice", "age": 30}});
-        let q = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""name" = $"#), "sql: {}", q.sql);
         assert!(q.sql.contains(r#""age" = $"#), "sql: {}", q.sql);
     }
@@ -9034,7 +9029,7 @@ mod tests {
         // silently treated as a scalar $set on a column named "$set".
         let filter = json!({"id": 1});
         let update = json!({"$set": "not an object"});
-        let err = build_update_one("app1", "users", &tschema(), &filter, &update).unwrap_err();
+        let err = build_update_one(&s("app1"), "users", &tschema(), &filter, &update).unwrap_err();
         assert!(
             format!("{err}").contains("$set"),
             "error should mention $set, got: {err}"
@@ -9047,7 +9042,7 @@ mod tests {
         // reserved word as its name still works.
         let filter = json!({"id": 1});
         let update = json!({"user": "alice"}); // "user" is a reserved word
-        let q = build_update_one("app1", "accounts", &tschema(), &filter, &update).unwrap();
+        let q = build_update_one(&s("app1"), "accounts", &tschema(), &filter, &update).unwrap();
         assert!(q.sql.contains(r#""user" = $"#), "sql: {}", q.sql);
     }
 
@@ -9072,7 +9067,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9097,7 +9092,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9123,7 +9118,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9149,7 +9144,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9184,7 +9179,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9216,7 +9211,7 @@ mod tests {
         let update = json!({ "title": "new" });
         let autobump = SystemFieldAutoBump::default();
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9244,7 +9239,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9283,7 +9278,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9320,7 +9315,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9363,7 +9358,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9404,7 +9399,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9434,7 +9429,7 @@ mod tests {
         let filter = json!({ "id": "post_x" });
         let update = json!({ "title": "new" });
         let q = build_update_one_with_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9468,7 +9463,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9518,7 +9513,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9564,7 +9559,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9606,7 +9601,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -9640,7 +9635,7 @@ mod tests {
     #[test]
     fn test_build_indexes_empty_schema() {
         let schema = json!({});
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &schema).unwrap();
         assert!(out.is_empty(), "expected no indexes, got: {out:?}");
     }
 
@@ -9650,7 +9645,7 @@ mod tests {
             "email": {"type": "string", "required": true},
             "age": {"type": "number"},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &schema).unwrap();
         assert!(out.is_empty(), "expected no indexes when no markers set");
     }
 
@@ -9659,7 +9654,7 @@ mod tests {
         let schema = json!({
             "email": {"type": "string", "required": true, "unique": true},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &schema).unwrap();
         assert_eq!(out.len(), 1, "expected one unique index");
         let spec = &out[0];
         assert!(spec.unique, "should be a unique index");
@@ -9686,7 +9681,7 @@ mod tests {
         let schema = json!({
             "handle": {"type": "string", "index": true},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &schema).unwrap();
         assert_eq!(out.len(), 1);
         let spec = &out[0];
         assert!(!spec.unique);
@@ -9712,7 +9707,7 @@ mod tests {
         let schema = json!({
             "email": {"type": "string", "unique": true, "index": true},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &schema).unwrap();
         assert_eq!(out.len(), 1);
         assert!(out[0].unique);
         assert_eq!(out[0].name, "users_email_key");
@@ -9725,7 +9720,7 @@ mod tests {
             "name": {"type": "string"},
             "tenant_id": {"type": "string", "index": true},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &schema).unwrap();
         assert_eq!(out.len(), 2, "expected 2 indexes, got: {out:?}");
         let names: Vec<_> = out.iter().map(|s| s.name.clone()).collect();
         assert!(names.contains(&"users_email_key".to_string()), "{names:?}");
@@ -9744,7 +9739,7 @@ mod tests {
         let schema = json!({
             "user": {"type": "string", "index": true},
         });
-        let out = build_create_indexes("app1", "accounts", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "accounts", &schema).unwrap();
         assert_eq!(out.len(), 1);
         let spec = &out[0];
         assert!(spec.sql.contains(r#"("user")"#), "sql: {}", spec.sql);
@@ -9753,14 +9748,16 @@ mod tests {
     #[test]
     fn test_build_indexes_rejects_bad_collection() {
         let schema = json!({"x": {"type": "string", "index": true}});
-        let err = build_create_indexes("app1", "users; DROP TABLE", &schema).unwrap_err();
+        let err = build_create_indexes(&s("app1"), "users; DROP TABLE", &schema).unwrap_err();
         assert!(matches!(err, QueryError::InvalidCollection(_)));
     }
 
+    /// Same move as `test_schema_sql_injection`: the index builder can no
+    /// longer be handed an illegal schema, so the refusal is asserted where it
+    /// now lives.
     #[test]
     fn test_build_indexes_rejects_bad_schema() {
-        let schema = json!({"x": {"type": "string", "index": true}});
-        let err = build_create_indexes("app; --", "users", &schema).unwrap_err();
+        let err = SchemaName::new("app; --").unwrap_err();
         assert!(matches!(err, QueryError::InvalidCollection(_)));
     }
 
@@ -9873,7 +9870,7 @@ mod tests {
             "alpha": { "type": "string", "index": true, "mask": { "kind": "partial" } },
             "beta":  { "type": "string", "index": true, "mask": { "kind": "partial" } },
         });
-        let specs = build_create_indexes("app1", &coll, &schema).expect("indexes build");
+        let specs = build_create_indexes(&s("app1"), &coll, &schema).expect("indexes build");
 
         // The auto mask index lands on the field's OWN (masked) column and
         // is named `<coll>__<field>_mask_idx` - but at this ceiling that
@@ -9935,7 +9932,7 @@ mod tests {
             "alpha": { "type": "string", "unique": true },
             "beta":  { "type": "string", "unique": true },
         });
-        let specs = build_create_indexes("app1", &coll, &schema).expect("indexes build");
+        let specs = build_create_indexes(&s("app1"), &coll, &schema).expect("indexes build");
         let uniq: Vec<&IndexSpec> = specs.iter().filter(|s| s.unique).collect();
         assert_eq!(uniq.len(), 2, "expected two unique indexes: {uniq:?}");
         for spec in &uniq {
@@ -9972,7 +9969,7 @@ mod tests {
         let schema = json!({
             "email": {"type": "string", "required": true, "unique": true},
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &schema).unwrap();
         assert_eq!(
             out.len(),
             1,
@@ -10007,7 +10004,7 @@ mod tests {
             "email": {"type": "string", "required": true, "unique": true},
         });
         let create =
-            build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline).unwrap();
         assert!(
             create.contains("NOT NULL"),
             "still emits NOT NULL: {}",
@@ -10020,7 +10017,7 @@ mod tests {
         );
 
         let alter = build_add_column(
-            "app1",
+            &s("app1"),
             "users",
             "email",
             &json!({"type": "string", "required": true, "unique": true}),
@@ -10044,7 +10041,7 @@ mod tests {
             "title": {"type": "string", "required": true},
         });
         let create =
-            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline).unwrap();
         // The system PK is emitted as `id TEXT COLLATE "C" PRIMARY KEY` (unquoted -
         // see `build_system_field_columns`). The prefix declaration must
         // NOT add a second column (which would appear as a quoted
@@ -10071,7 +10068,7 @@ mod tests {
         // SDK fence). Reuses `ReservedSystemFieldName`.
         let schema = json!({ "id": {"type": "id", "idPrefix": "usr"} });
         let err =
-            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap_err();
+            build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline).unwrap_err();
         assert!(
             matches!(err, QueryError::ReservedSystemFieldName(_)),
             "usr prefix must be rejected as reserved, got {err:?}"
@@ -10082,7 +10079,7 @@ mod tests {
     fn p7_id_prefix_decl_with_malformed_prefix_is_rejected() {
         let schema = json!({ "id": {"type": "id", "idPrefix": "1bad"} });
         let err =
-            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap_err();
+            build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline).unwrap_err();
         assert!(
             matches!(err, QueryError::InvalidIdent(_)),
             "malformed prefix must be rejected, got {err:?}"
@@ -10095,7 +10092,7 @@ mod tests {
         // prefix declaration — it must still trip the reserved-name fence.
         let schema = json!({ "id": {"type": "string"} });
         let err =
-            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap_err();
+            build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline).unwrap_err();
         assert!(
             matches!(err, QueryError::ReservedSystemFieldName(_)),
             "id with non-id type must stay rejected, got {err:?}"
@@ -10113,7 +10110,7 @@ mod tests {
             "authorId": {"type": "ref", "refTarget": "users"},
         });
         let sql =
-            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline).unwrap();
         // TEXT column for the FK (cascades to match the
         // `id TEXT PRIMARY KEY` system-field DDL; was INTEGER previously).
         assert!(sql.contains("\"authorId\" TEXT"), "{sql}");
@@ -10136,7 +10133,7 @@ mod tests {
             },
         });
         let sql =
-            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("ON DELETE CASCADE"), "{sql}");
         assert!(sql.contains("ON UPDATE CASCADE"), "{sql}");
     }
@@ -10168,7 +10165,7 @@ mod tests {
             },
         });
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -10194,7 +10191,7 @@ mod tests {
             },
         });
         let sql =
-            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline).unwrap();
         assert!(!sql.contains("DEFERRABLE"), "{sql}");
     }
 
@@ -10209,7 +10206,7 @@ mod tests {
             },
         });
         let sql =
-            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("REFERENCES \"app1\".\"users\" (id)"), "{sql}");
         assert!(sql.contains("ON UPDATE RESTRICT"), "{sql}");
         assert!(!sql.contains("ON DELETE"), "{sql}");
@@ -10225,7 +10222,7 @@ mod tests {
             },
         });
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -10244,7 +10241,7 @@ mod tests {
             "refTarget": "users",
             "onDelete": "cascade",
         });
-        let sql = build_add_foreign_key("app1", "posts", "authorId", &def).unwrap();
+        let sql = build_add_foreign_key(&s("app1"), "posts", "authorId", &def).unwrap();
         assert!(
             sql.starts_with("ALTER TABLE \"app1\".\"posts\" ADD"),
             "{sql}"
@@ -10256,7 +10253,7 @@ mod tests {
 
     #[test]
     fn b2_build_drop_foreign_key() {
-        let sql = build_drop_foreign_key("app1", "posts", "authorId_fkey").unwrap();
+        let sql = build_drop_foreign_key(&s("app1"), "posts", "authorId_fkey").unwrap();
         assert_eq!(
             sql,
             "ALTER TABLE \"app1\".\"posts\" DROP CONSTRAINT IF EXISTS \"authorId_fkey\""
@@ -10289,7 +10286,7 @@ mod tests {
         });
         let existing: std::collections::HashSet<String> = std::collections::HashSet::new();
         let sql =
-            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Deferred(&existing))
+            build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Deferred(&existing))
                 .unwrap();
         // FK is deferred — column still present but no FOREIGN KEY clause.
         // TEXT (cascade from the ref-column type change; was INTEGER previously).
@@ -10307,7 +10304,7 @@ mod tests {
         });
         let existing: std::collections::HashSet<String> = std::collections::HashSet::new();
         let sql = build_create_table_with_fks(
-            "app1",
+            &s("app1"),
             "employees",
             &schema,
             &FkEmission::Deferred(&existing),
@@ -10329,7 +10326,7 @@ mod tests {
     //      charset is `[A-Za-z0-9_]`, so a dot-qualified target is not a
     //      legal collection name at all; and
     //   2. `PostgresSchemaRenderer::foreign_key_target` qualifies with
-    //      `app_id` -- the CALLER's app -- and never reads a schema out
+    //      `schema_name` -- the CALLER's app -- and never reads a schema out
     //      of the author's target string.
     //
     // Property 2 is the load-bearing one: 1 alone would be defeated by
@@ -10361,7 +10358,7 @@ mod tests {
     #[test]
     fn fk_target_naming_another_app_is_not_a_legal_collection_name() {
         let def = json!({"type": "ref", "refTarget": "other_app.users"});
-        let err = build_add_foreign_key("app_demo", "posts", "authorId", &def)
+        let err = build_add_foreign_key(&s("app_demo"), "posts", "authorId", &def)
             .expect_err("a dot-qualified FK target must not build");
         match err {
             QueryError::InvalidCollection(msg) => assert!(
@@ -10379,7 +10376,7 @@ mod tests {
     #[test]
     fn fk_target_without_a_qualifier_builds() {
         let def = json!({"type": "ref", "refTarget": "other_app_users"});
-        let sql = build_add_foreign_key("app_demo", "posts", "authorId", &def)
+        let sql = build_add_foreign_key(&s("app_demo"), "posts", "authorId", &def)
             .expect("an unqualified target must build");
         assert!(
             sql.contains("REFERENCES \"app_demo\".\"other_app_users\" (id)"),
@@ -10387,13 +10384,13 @@ mod tests {
         );
     }
 
-    /// The rendered schema tracks `app_id`, not anything the schema
+    /// The rendered schema tracks `schema_name`, not anything the schema
     /// author wrote. Same target string, two callers, two schemas.
     #[test]
     fn fk_reference_schema_is_the_calling_app_not_the_target() {
         let def = json!({"type": "ref", "refTarget": "users"});
-        let a = build_add_foreign_key("app_a", "posts", "authorId", &def).expect("app_a");
-        let b = build_add_foreign_key("app_b", "posts", "authorId", &def).expect("app_b");
+        let a = build_add_foreign_key(&s("app_a"), "posts", "authorId", &def).expect("app_a");
+        let b = build_add_foreign_key(&s("app_b"), "posts", "authorId", &def).expect("app_b");
         assert!(a.contains("REFERENCES \"app_a\".\"users\" (id)"), "{a}");
         assert!(b.contains("REFERENCES \"app_b\".\"users\" (id)"), "{b}");
         assert!(!a.contains("app_b"), "app_a's FK must not name app_b: {a}");
@@ -10422,7 +10419,7 @@ mod tests {
     #[test]
     fn fk_ref_field_build_add_column_emits_bytewise_text() {
         let def = json!({"type": "ref", "refTarget": "users"});
-        let sql = build_add_column("app1", "posts", "authorId", &def).expect("build_add_column");
+        let sql = build_add_column(&s("app1"), "posts", "authorId", &def).expect("build_add_column");
         assert!(
             sql.contains("ADD COLUMN IF NOT EXISTS \"authorId\" TEXT COLLATE \"C\""),
             "expected a bytewise ref column, got: {sql}"
@@ -10449,7 +10446,7 @@ mod tests {
             ),
         ] {
             let sql = build_create_table_with_fks_for_dialect(
-                "app1",
+                &s("app1"),
                 "posts",
                 &schema,
                 &FkEmission::Deferred(&existing),
@@ -10484,7 +10481,7 @@ mod tests {
             ),
         ] {
             let sql = build_create_table_with_fks_for_dialect(
-                "app1",
+                &s("app1"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -10509,7 +10506,7 @@ mod tests {
             "authorId": {"type": "ref", "refTarget": "users"},
             "title": {"type": "string"},
         });
-        let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline)
+        let sql = build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline)
             .expect("build DDL");
         // The column itself must NOT carry INTEGER. (The CONSTRAINT
         // clause text contains nothing about INTEGER, so a substring
@@ -10536,7 +10533,7 @@ mod tests {
             },
         });
         let sql =
-            build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("\"profile\" JSONB"), "{sql}");
         // Defaults to an empty JSON object (like t.json()).
         assert!(sql.contains("DEFAULT '{}'::jsonb"), "{sql}");
@@ -10572,7 +10569,7 @@ mod tests {
             },
         });
         let sql =
-            build_create_table_with_fks("app1", "notes", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "notes", &schema, &FkEmission::Inline).unwrap();
         assert!(
             !sql.contains("hunter2"),
             "an encrypted column must not carry its declared default as plaintext DDL: {sql}"
@@ -10591,7 +10588,7 @@ mod tests {
             "rank": { "type": "int", "required": true },
         });
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &schema,
             &FkEmission::Inline,
@@ -10615,7 +10612,7 @@ mod tests {
             "birthday": { "type": "calendarDate" },
         });
         let sql =
-            build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline).unwrap();
         // DATE, not TIMESTAMPTZ — the whole point of D3.
         assert!(sql.contains("\"birthday\" DATE"), "{sql}");
         assert!(!sql.contains("TIMESTAMPTZ DATE"), "{sql}");
@@ -10630,7 +10627,7 @@ mod tests {
             "birthday": { "type": "calendarDate" },
         });
         let sql =
-            build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("\"createdAt\" TIMESTAMPTZ"), "{sql}");
         assert!(sql.contains("\"birthday\" DATE"), "{sql}");
     }
@@ -10640,7 +10637,7 @@ mod tests {
         // ALTER TABLE ADD COLUMN for a calendarDate field must also
         // emit DATE so subsequent migrations stay consistent.
         let sql = build_add_column(
-            "app1",
+            &s("app1"),
             "users",
             "birthday",
             &json!({ "type": "calendarDate" }),
@@ -10675,7 +10672,7 @@ mod tests {
             "schema_revision": { "type": "number", "default": 1 },
         });
         let sql =
-            build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline).unwrap();
         assert!(
             sql.contains("\"schema_revision\" DOUBLE PRECISION"),
             "{sql}"
@@ -10746,7 +10743,7 @@ mod tests {
         // level; per-variant CHECK constraints enforce integrity).
         let schema = c2_events_union_schema();
         let sql =
-            build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "events", &schema, &FkEmission::Inline).unwrap();
 
         // Discriminator: TEXT, NOT NULL, with CHECK IN-list.
         assert!(sql.contains("\"kind\" TEXT"), "expected kind TEXT: {sql}");
@@ -10781,7 +10778,7 @@ mod tests {
         // form: `kind <> 'login' OR (userId IS NOT NULL AND ip IS NOT NULL)`.
         let schema = c2_events_union_schema();
         let sql =
-            build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "events", &schema, &FkEmission::Inline).unwrap();
 
         // The login variant requires userId AND ip.
         assert!(
@@ -10815,7 +10812,7 @@ mod tests {
     fn c2_union_constraint_names_are_unique_per_variant() {
         let schema = c2_events_union_schema();
         let sql =
-            build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "events", &schema, &FkEmission::Inline).unwrap();
         // Each variant constraint name follows `<table>_<disc>_<value>_chk`.
         assert!(
             sql.contains("CONSTRAINT \"events_kind_login_chk\""),
@@ -10856,7 +10853,7 @@ mod tests {
             "x": { "type": "string" },
             "y": { "type": "string" }
         });
-        let sql = build_create_table_with_fks("app1", "evt", &schema, &FkEmission::Inline).unwrap();
+        let sql = build_create_table_with_fks(&s("app1"), "evt", &schema, &FkEmission::Inline).unwrap();
         // No per-variant CHECK clauses, but discriminator IN-list still
         // applies.
         assert!(sql.contains("CHECK (\"kind\" IN ('a', 'b'))"), "{sql}");
@@ -10890,7 +10887,7 @@ mod tests {
             "a": { "type": "string" },
             "b": { "type": "string" }
         });
-        let sql = build_create_table_with_fks("app1", "evt", &schema, &FkEmission::Inline).unwrap();
+        let sql = build_create_table_with_fks(&s("app1"), "evt", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("\"code\" DOUBLE PRECISION"), "{sql}");
         // Number enum members are bare (no quotes).
         assert!(sql.contains("CHECK (\"code\" IN (1, 2))"), "{sql}");
@@ -10914,7 +10911,7 @@ mod tests {
             }
         });
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "apps",
             &schema,
             &FkEmission::Inline,
@@ -10940,7 +10937,7 @@ mod tests {
             "kind": { "type": "literal", "literalValue": "login", "required": true },
         });
         let sql =
-            build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline).unwrap();
+            build_create_table_with_fks(&s("app1"), "events", &schema, &FkEmission::Inline).unwrap();
         assert!(sql.contains("\"kind\" TEXT"), "{sql}");
         assert!(sql.contains("CHECK (\"kind\" = 'login')"), "{sql}");
     }
@@ -10971,7 +10968,7 @@ mod tests {
             "url":    { "type": "string" },
             "target": { "type": "string" }
         });
-        let sql = build_create_table_with_fks("app1", "evt", &schema, &FkEmission::Inline).unwrap();
+        let sql = build_create_table_with_fks(&s("app1"), "evt", &schema, &FkEmission::Inline).unwrap();
         // Sanitised identifiers (dots / hyphens → underscore).
         assert!(
             sql.contains("CONSTRAINT \"evt_kind_page_view_chk\""),
@@ -11299,7 +11296,7 @@ mod tests {
     fn build_create_table_rejects_oversized_field_name() {
         let long_field = "f".repeat(64);
         let schema = serde_json::json!({ long_field: { "type": "string" } });
-        let result = build_create_table_with_fks("app1", "events", &schema, &FkEmission::Inline);
+        let result = build_create_table_with_fks(&s("app1"), "events", &schema, &FkEmission::Inline);
         assert!(result.is_err(), "expected error for 64-byte field name");
     }
 
@@ -11400,7 +11397,7 @@ mod tests {
             "_meta": { "strictness": "off" },
             "name": { "type": "string" },
         });
-        let sql = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline)
+        let sql = build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline)
             .expect("schema with _meta + a real field should build");
         assert!(sql.contains("\"name\""), "expected name column: {sql}");
         assert!(
@@ -11523,7 +11520,7 @@ mod tests {
             let mut schema_obj = serde_json::Map::new();
             schema_obj.insert((*name).to_string(), serde_json::json!({ "type": "string" }));
             let schema = serde_json::Value::Object(schema_obj);
-            let err = build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline)
+            let err = build_create_table_with_fks(&s("app1"), "posts", &schema, &FkEmission::Inline)
                 .unwrap_err();
             match err {
                 QueryError::ReservedSystemFieldName(msg) => {
@@ -11559,7 +11556,7 @@ mod tests {
             "title": { "type": "string" },
         });
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11598,7 +11595,7 @@ mod tests {
             "title": { "type": "string" },
         });
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11627,7 +11624,7 @@ mod tests {
     fn create_table_emits_bytewise_typed_id_system_fields() {
         let schema = serde_json::json!({});
         let postgres = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11649,7 +11646,7 @@ mod tests {
         );
 
         let sqlite = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11671,7 +11668,7 @@ mod tests {
         );
 
         let mysql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11699,7 +11696,7 @@ mod tests {
     fn create_table_emits_created_at_default_now_pg() {
         let schema = serde_json::json!({});
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11721,7 +11718,7 @@ mod tests {
     fn create_table_emits_created_at_default_current_timestamp_sqlite() {
         let schema = serde_json::json!({});
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11753,7 +11750,7 @@ mod tests {
     fn create_table_emits_version_default_one() {
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             let sql = build_create_table_with_fks_for_dialect(
-                "app1",
+                &s("app1"),
                 "posts",
                 &serde_json::json!({}),
                 &FkEmission::Inline,
@@ -11774,7 +11771,7 @@ mod tests {
     fn create_table_emits_deleted_at_nullable() {
         let schema = serde_json::json!({});
         let sql_pg = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11786,7 +11783,7 @@ mod tests {
             "PG deleted_at must be TIMESTAMPTZ NULL: {sql_pg}"
         );
         let sql_sq = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11807,7 +11804,7 @@ mod tests {
     fn create_table_emits_three_indexes_deleted_at_updated_at_created_by() {
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
             let sql = build_create_table_with_fks_for_dialect(
-                "app1",
+                &s("app1"),
                 "posts",
                 &serde_json::json!({}),
                 &FkEmission::Inline,
@@ -11839,7 +11836,7 @@ mod tests {
     #[test]
     fn create_table_does_not_emit_index_for_id() {
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &serde_json::json!({}),
             &FkEmission::Inline,
@@ -11859,7 +11856,7 @@ mod tests {
     #[test]
     fn create_table_does_not_emit_index_for_version() {
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &serde_json::json!({}),
             &FkEmission::Inline,
@@ -11883,7 +11880,7 @@ mod tests {
             "body":  { "type": "string" },
         });
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11904,7 +11901,7 @@ mod tests {
     #[test]
     fn create_table_with_zero_user_fields_emits_seven_columns_only() {
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &serde_json::json!({}),
             &FkEmission::Inline,
@@ -11946,7 +11943,7 @@ mod tests {
             "authorId": { "type": "ref", "refTarget": "users" },
         });
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -11976,7 +11973,7 @@ mod tests {
     #[test]
     fn create_table_sqlite_uses_dotted_schema_for_index() {
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &serde_json::json!({}),
             &FkEmission::Inline,
@@ -11998,7 +11995,7 @@ mod tests {
     #[test]
     fn create_table_pg_uses_on_dot_schema_for_index() {
         let sql = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &serde_json::json!({}),
             &FkEmission::Inline,
@@ -12067,7 +12064,7 @@ mod tests {
             obj.insert((*name).to_string(), serde_json::json!({ "type": "string" }));
             let schema = serde_json::Value::Object(obj);
             let err = build_create_table_with_fks_for_dialect(
-                "app1",
+                &s("app1"),
                 "posts",
                 &schema,
                 &FkEmission::Inline,
@@ -12091,7 +12088,7 @@ mod tests {
             "title": { "type": "string", "required": true },
         });
         let pg = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -12099,7 +12096,7 @@ mod tests {
         )
         .expect("pg ok");
         let sq = build_create_table_with_fks_for_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &schema,
             &FkEmission::Inline,
@@ -12207,7 +12204,7 @@ mod tests {
             "ssn": "Y2lwaGVydGV4dF9ibG9i",
             "__zsbin__ssn": true,
         });
-        let bq = build_insert("app1", "users", &tschema(), &doc).expect("build_insert ok");
+        let bq = build_insert(&s("app1"), "users", &tschema(), &doc).expect("build_insert ok");
         assert!(
             bq.sql.contains("decode($"),
             "PG path must wrap encrypted-column placeholder with decode(...)::bytea: {}",
@@ -12246,7 +12243,7 @@ mod tests {
             "ssn": "Y2lwaGVydGV4dF9ibG9i",
             "__zsbin__ssn": true,
         });
-        let bq = build_insert_with_dialect("app1", "users", &tschema(), &doc, SqlDialect::Sqlite)
+        let bq = build_insert_with_dialect(&s("app1"), "users", &tschema(), &doc, SqlDialect::Sqlite)
             .expect("build_insert_with_dialect ok");
         assert!(
             !bq.sql.contains("decode("),
@@ -12286,7 +12283,7 @@ mod tests {
             "__zsbin__ssn": true,
         });
         let bq = build_update_one_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &tschema(),
             &filter,
@@ -12314,7 +12311,7 @@ mod tests {
             { "id": "row2", "ssn": "YW5vdGhlcl9jaXBoZXI=", "__zsbin__ssn": true },
         ]);
         let bq =
-            build_insert_many_with_dialect("app1", "users", &tschema(), &docs, SqlDialect::Sqlite)
+            build_insert_many_with_dialect(&s("app1"), "users", &tschema(), &docs, SqlDialect::Sqlite)
                 .expect("build_insert_many_with_dialect ok");
         assert!(!bq.sql.contains("decode("), "no PG cast: {}", bq.sql);
         let tagged = bq
@@ -12564,7 +12561,7 @@ mod tests {
             },
             "name": { "type": "string" }
         });
-        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+        let sql = build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
             sql.contains("\"ssn\" TEXT"),
@@ -12604,7 +12601,7 @@ mod tests {
                 "mask": { "kind": "full", "classification": "pii" }
             }
         });
-        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+        let sql = build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         let raw_score = raw_column_name("score");
         let raw_tier = raw_column_name("tier");
@@ -12645,7 +12642,7 @@ mod tests {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+        let sql = build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
             sql.contains("COMMENT ON COLUMN \"app1\".\"users\".\"ssn\""),
@@ -12675,7 +12672,7 @@ mod tests {
                 "mask": { "kind": "email", "classification": "pii" }
             }
         });
-        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+        let sql = build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
             sql.contains("\"email\" TEXT /* zero-migrate:mask:kind=email,classification=pii */"),
@@ -12701,7 +12698,7 @@ mod tests {
                 "mask": { "kind": "none", "classification": "pii" }
             }
         });
-        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+        let sql = build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
             !sql.contains("COMMENT ON COLUMN"),
@@ -12724,7 +12721,7 @@ mod tests {
             "type": "string",
             "mask": { "kind": "last4", "classification": "spi" }
         });
-        let sql = build_add_column("app1", "users", "ssn", &def).expect("build_add_column ok");
+        let sql = build_add_column(&s("app1"), "users", "ssn", &def).expect("build_add_column ok");
         let raw = raw_column_name("ssn");
         assert!(
             sql.contains(&format!("ADD COLUMN IF NOT EXISTS \"{raw}\"")),
@@ -12753,7 +12750,7 @@ mod tests {
     #[test]
     fn build_add_column_no_sibling_when_unmasked() {
         let def = serde_json::json!({ "type": "string" });
-        let sql = build_add_column("app1", "users", "name", &def).expect("build_add_column ok");
+        let sql = build_add_column(&s("app1"), "users", "name", &def).expect("build_add_column ok");
         assert!(!sql.contains("_masked"), "no sibling for unmasked: {sql}");
         assert!(!sql.contains("COMMENT ON COLUMN"), "no comment: {sql}");
     }
@@ -12773,7 +12770,7 @@ mod tests {
                 "mask": { "kind": "full", "classification": "pii" }
             }
         });
-        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+        let sql = build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         let raw = raw_column_name("ssn");
         assert!(
@@ -12805,7 +12802,7 @@ mod tests {
                 "mask": { "kind": "none", "classification": "pii" }
             }
         });
-        let sql = build_create_table_with_fks("app1", "users", &schema, &FkEmission::Inline)
+        let sql = build_create_table_with_fks(&s("app1"), "users", &schema, &FkEmission::Inline)
             .expect("build_create_table_with_fks ok");
         assert!(
             !sql.contains("\"ssn_masked\""),
@@ -12828,7 +12825,7 @@ mod tests {
                 "mask": { "kind": "email", "classification": "pii" }
             }
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &schema).unwrap();
 
         let raw = raw_column_name("email");
         let raw_idx: Vec<_> = out
@@ -12885,7 +12882,7 @@ mod tests {
                 "mask": { "kind": "email", "classification": "pii" }
             }
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &schema).unwrap();
         let raw = raw_column_name("email");
         let raw_idx = out
             .iter()
@@ -12922,7 +12919,7 @@ mod tests {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let out = build_create_indexes("app1", "users", &schema).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &schema).unwrap();
         let raw = raw_column_name("ssn");
         assert!(
             out.iter()
@@ -12940,7 +12937,7 @@ mod tests {
                 "mask": { "kind": "last4", "classification": "spi" }
             }
         });
-        let out = build_create_indexes("app1", "users", &indexed).unwrap();
+        let out = build_create_indexes(&s("app1"), "users", &indexed).unwrap();
         assert!(out.iter().any(|s| s.columns == vec![raw.clone()]));
         assert!(out.iter().any(|s| s.columns == vec!["ssn".to_string()]));
     }
@@ -12955,7 +12952,7 @@ mod tests {
             "ssn": "123-45-6789",
             "ssn_masked": "***-**-6789"
         });
-        let bq = build_insert("app1", "users", &tschema(), &doc).expect("build_insert ok");
+        let bq = build_insert(&s("app1"), "users", &tschema(), &doc).expect("build_insert ok");
         assert!(
             bq.sql.contains("\"ssn\""),
             "parent column in SQL: {}",
@@ -13008,7 +13005,7 @@ mod tests {
         });
         let filter = serde_json::json!({ "id": 7 });
         let bq =
-            build_find_with_schema("app1", "users", &filter, Some(1), None, None, None, &schema)
+            build_find_with_schema(&s("app1"), "users", &filter, Some(1), None, None, None, &schema)
                 .expect("build_find_with_schema ok");
 
         // The masked column rides through under its own name, no alias.
@@ -13046,7 +13043,7 @@ mod tests {
         let filter = serde_json::json!({});
         let select = serde_json::json!(["id", "ssn"]);
         let bq = build_find_with_schema(
-            "app1",
+            &s("app1"),
             "users",
             &filter,
             None,
@@ -13088,12 +13085,12 @@ mod tests {
         let filter = serde_json::json!({});
 
         let bq_no_hint =
-            build_find_with_schema("app1", "users", &filter, None, None, None, None, &schema)
+            build_find_with_schema(&s("app1"), "users", &filter, None, None, None, None, &schema)
                 .expect("build_find_with_schema ok");
 
         let unmask: Vec<String> = vec!["ssn".to_string()];
         let bq_with_hint = build_find_with_schema_and_unmask(
-            "app1", "users", &filter, None, None, None, None, &schema, &unmask,
+            &s("app1"), "users", &filter, None, None, None, None, &schema, &unmask,
         )
         .expect("build_find_with_schema_and_unmask ok");
 
@@ -13124,7 +13121,7 @@ mod tests {
                      "mask": { "kind": "last4", "classification": "spi" } },
         });
         let filter = serde_json::json!({ "ssn_masked": "***-**-6789" });
-        let err = build_find_with_schema("app1", "users", &filter, None, None, None, None, &schema)
+        let err = build_find_with_schema(&s("app1"), "users", &filter, None, None, None, None, &schema)
             .expect_err("filter by sibling must be refused");
         let msg = format!("{err}");
         assert!(
@@ -13149,7 +13146,7 @@ mod tests {
                      "mask": { "kind": "last4", "classification": "spi" } },
         });
         let filter = serde_json::json!({});
-        let bq = build_find_with_schema("app1", "users", &filter, None, None, None, None, &schema)
+        let bq = build_find_with_schema(&s("app1"), "users", &filter, None, None, None, None, &schema)
             .unwrap();
         // SELECT * is never emitted when any column is masked.
         assert!(
@@ -13188,7 +13185,7 @@ mod tests {
     #[test]
     fn the_weakest_possible_schema_still_projects_an_explicit_allowlist() {
         let bq = build_find_with_schema(
-            "app1",
+            &s("app1"),
             "users",
             &serde_json::json!({}),
             None,
@@ -13222,7 +13219,7 @@ mod tests {
     #[test]
     fn an_undeclared_identifier_is_refused_under_the_empty_schema() {
         let refused = build_find_with_schema(
-            "app1",
+            &s("app1"),
             "users",
             &serde_json::json!({}),
             None,
@@ -13245,7 +13242,7 @@ mod tests {
     fn a_non_object_schema_is_an_error_not_an_unrestricted_projection() {
         for bad in [Value::Null, json!([]), json!("users"), json!(7)] {
             let refused = build_find_with_schema(
-                "app1",
+                &s("app1"),
                 "users",
                 &serde_json::json!({}),
                 None,
@@ -13317,7 +13314,7 @@ mod tests {
         let schema = l26_masked_schema();
         let read = "ssn";
         let bq = build_find_with_schema(
-            "app1",
+            &s("app1"),
             "users",
             &serde_json::json!({}),
             Some(10),
@@ -13349,7 +13346,7 @@ mod tests {
         let schema = l26_masked_schema();
         let read = "ssn";
         let bq = build_find_with_schema(
-            "app1",
+            &s("app1"),
             "users",
             &serde_json::json!({}),
             None,
@@ -13379,7 +13376,7 @@ mod tests {
             "embedding": { "type": "vector" },
         });
         let q = build_vector_search(
-            "app1",
+            &s("app1"),
             "users",
             "embedding",
             &[0.1, 0.2],
@@ -13418,7 +13415,7 @@ mod tests {
             "location": { "type": "geoPoint" },
         });
         let q = build_spatial_near(
-            "app1",
+            &s("app1"),
             "users",
             "location",
             crate::descriptors::GeoPoint {
@@ -13454,7 +13451,7 @@ mod tests {
             "name": { "type": "string" },
         });
         let bq = build_find_with_schema(
-            "app1",
+            &s("app1"),
             "users",
             &serde_json::json!({}),
             None,
@@ -13487,7 +13484,7 @@ mod tests {
         });
 
         let select_err = build_find_with_schema(
-            "app1",
+            &s("app1"),
             "users",
             &serde_json::json!({}),
             None,
@@ -13500,7 +13497,7 @@ mod tests {
         assert!(matches!(select_err, QueryError::InvalidIdent(_)));
 
         let sort_err = build_find_with_schema(
-            "app1",
+            &s("app1"),
             "users",
             &serde_json::json!({}),
             None,
@@ -13513,7 +13510,7 @@ mod tests {
         assert!(matches!(sort_err, QueryError::InvalidIdent(_)));
 
         let distinct_err = build_distinct_with_soft_delete_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             "ssn_masked",
             &serde_json::json!({}),
@@ -13525,7 +13522,7 @@ mod tests {
         assert!(matches!(distinct_err, QueryError::InvalidIdent(_)));
 
         let aggregate_err = build_aggregate_with_soft_delete_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &serde_json::json!([
                 { "$group": { "by": "name", "cnt": { "$count": true } } },
@@ -13545,7 +13542,7 @@ mod tests {
             "name": { "type": "string" },
         });
         let err = build_find_with_schema(
-            "app1",
+            &s("app1"),
             "users",
             &serde_json::json!({}),
             Some(MAX_QUERY_LIMIT + 1),
@@ -13568,7 +13565,7 @@ mod tests {
             "embedding": { "type": "vector" },
         });
         let err = build_vector_search(
-            "app1",
+            &s("app1"),
             "users",
             "embedding",
             &[0.1, 0.2],
@@ -13594,7 +13591,7 @@ mod tests {
         for _ in 0..MAX_FILTER_NESTING_DEPTH {
             filter = serde_json::json!({ "$and": [filter] });
         }
-        let err = build_find_with_schema("app1", "users", &filter, None, None, None, None, &schema)
+        let err = build_find_with_schema(&s("app1"), "users", &filter, None, None, None, None, &schema)
             .expect_err("pathological nesting must be rejected");
         assert!(matches!(err, QueryError::InvalidFilter(_)));
         assert!(
@@ -13657,7 +13654,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_soft_delete_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13691,7 +13688,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_soft_delete_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13715,7 +13712,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_soft_delete_many_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13739,7 +13736,7 @@ mod tests {
         let filter = serde_json::json!({ "id": "post_x" });
         let autobump = SystemFieldAutoBump::default();
         let q = build_soft_delete_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13761,7 +13758,7 @@ mod tests {
         let filter = serde_json::json!({ "id": "post_x" });
         let autobump = SystemFieldAutoBump::default();
         let q = build_restore_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13787,7 +13784,7 @@ mod tests {
         let filter = serde_json::json!({ "id": "post_x" });
         let update = serde_json::json!({ "title": "x" });
         let dispatched = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13806,7 +13803,7 @@ mod tests {
         );
 
         let direct = build_update_one_with_dialect(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13830,7 +13827,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_restore_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13853,7 +13850,7 @@ mod tests {
             ..Default::default()
         };
         let q = build_restore_many_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13870,7 +13867,7 @@ mod tests {
     fn build_find_with_soft_delete_flag_appends_filter() {
         let filter = serde_json::json!({ "title": "hi" });
         let q = build_find_with_schema_and_unmask_and_soft_delete(
-            "app1",
+            &s("app1"),
             "posts",
             &filter,
             None,
@@ -13893,7 +13890,7 @@ mod tests {
     fn build_find_with_soft_delete_flag_off_is_byte_identical_to_legacy() {
         let filter = serde_json::json!({ "title": "hi" });
         let q_legacy = build_find_with_schema_and_unmask(
-            "app1",
+            &s("app1"),
             "posts",
             &filter,
             None,
@@ -13905,7 +13902,7 @@ mod tests {
         )
         .unwrap();
         let q_new = build_find_with_schema_and_unmask_and_soft_delete(
-            "app1",
+            &s("app1"),
             "posts",
             &filter,
             None,
@@ -13925,7 +13922,7 @@ mod tests {
     fn build_find_empty_filter_with_soft_delete_flag_emits_lone_predicate() {
         let filter = serde_json::json!({});
         let q = build_find_with_schema_and_unmask_and_soft_delete(
-            "app1",
+            &s("app1"),
             "posts",
             &filter,
             None,
@@ -13948,7 +13945,7 @@ mod tests {
     fn build_count_with_soft_delete_appends_filter() {
         let filter = serde_json::json!({});
         let q = build_count_with_soft_delete(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13958,7 +13955,7 @@ mod tests {
         .unwrap();
         assert!(q.sql.contains("WHERE \"deleted_at\" IS NULL"));
         let q2 = build_count_with_soft_delete(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -13976,7 +13973,7 @@ mod tests {
             { "$group": { "by": "city", "n": { "$count": 1 } } },
         ]);
         let q =
-            build_aggregate_with_soft_delete("app1", "users", &pipeline, true, &tschema()).unwrap();
+            build_aggregate_with_soft_delete(&s("app1"), "users", &pipeline, true, &tschema()).unwrap();
         assert!(
             q.sql.contains("WHERE ") && q.sql.contains("AND \"deleted_at\" IS NULL"),
             "aggregate WHERE must compose creator $match AND soft-delete: {}",
@@ -13988,7 +13985,7 @@ mod tests {
     fn build_distinct_with_soft_delete_appends_filter() {
         let filter = serde_json::json!({});
         let q =
-            build_distinct_with_soft_delete("app1", "users", "country", &filter, true, &tschema())
+            build_distinct_with_soft_delete(&s("app1"), "users", "country", &filter, true, &tschema())
                 .unwrap();
         assert!(q.sql.contains("WHERE \"deleted_at\" IS NULL"));
     }
@@ -13996,9 +13993,9 @@ mod tests {
     #[test]
     fn legacy_build_count_is_byte_identical_to_soft_delete_off() {
         let filter = serde_json::json!({ "id": "x" });
-        let q_legacy = build_count("app1", "posts", &tschema(), &filter).unwrap();
+        let q_legacy = build_count(&s("app1"), "posts", &tschema(), &filter).unwrap();
         let q_new = build_count_with_soft_delete(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -14014,7 +14011,7 @@ mod tests {
         let filter = serde_json::json!({ "id": "post_1" });
         let update = serde_json::json!({ "title": "next" });
         let q = build_update_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -14031,7 +14028,7 @@ mod tests {
     fn build_delete_one_sqlite_uses_rowid_narrowing() {
         let filter = serde_json::json!({ "id": "post_1" });
         let q =
-            build_delete_one_with_dialect("app1", "posts", &tschema(), &filter, SqlDialect::Sqlite)
+            build_delete_one_with_dialect(&s("app1"), "posts", &tschema(), &filter, SqlDialect::Sqlite)
                 .unwrap();
         assert!(q.sql.contains("WHERE rowid = (SELECT rowid FROM"));
         assert!(!q.sql.contains("FOR UPDATE"));
@@ -14041,7 +14038,7 @@ mod tests {
     fn build_soft_delete_one_sqlite_uses_rowid_narrowing() {
         let filter = serde_json::json!({ "id": "post_1" });
         let q = build_soft_delete_one_with_system_fields(
-            "app1",
+            &s("app1"),
             "posts",
             &tschema(),
             &filter,
@@ -14055,7 +14052,7 @@ mod tests {
 
     // -----------------------------------------------------------------------
     // PHASE 4 — `SqliteEmitScope` namespacing (descriptor→DDL for the migrate
-    // engine). The `MainUnqualified` scope drops the `<app_id>` qualifier on
+    // engine). The `MainUnqualified` scope drops the `<schema_name>` qualifier on
     // the SQLite arm so the DDL lands in `main` (= the app file). PG and the
     // `AttachAlias` SQLite default are unchanged (regression guard).
     // -----------------------------------------------------------------------
@@ -14080,13 +14077,13 @@ mod tests {
     }
 
     /// `MainUnqualified` SQLite emits an UNqualified `CREATE TABLE "<coll>"`
-    /// (no `"<app_id>".` prefix) and UNqualified system indexes — so the DDL
+    /// (no `"<schema_name>".` prefix) and UNqualified system indexes — so the DDL
     /// lands in `main` under the migrate engine's hardened authorizer.
     #[test]
     fn sqlite_main_unqualified_drops_app_id_qualifier() {
-        let app_id = "app_demo";
+        let schema_name = s("app_demo");
         let sql = build_create_table_with_fks_for_dialect_scoped(
-            app_id,
+            &schema_name,
             "posts",
             &json!({ "title": { "type": "string", "required": true } }),
             &FkEmission::Inline,
@@ -14100,7 +14097,7 @@ mod tests {
             sql.contains(r#"CREATE TABLE IF NOT EXISTS "posts" ("#),
             "table must be unqualified, got: {sql}"
         );
-        // No `"<app_id>".` qualifier anywhere in the payload.
+        // No `"<schema_name>".` qualifier anywhere in the payload.
         assert!(
             !sql.contains(r#""app_demo"."#),
             "MainUnqualified must not emit any `\"app_demo\".` qualifier: {sql}"
@@ -14113,13 +14110,13 @@ mod tests {
     }
 
     /// The stable `AttachAlias` SQLite default is BYTE-UNCHANGED — it keeps the
-    /// `"<app_id>"`-qualified table + index spelling plugin-db's runtime depends
-    /// on (it ATTACHes the file under the `<app_id>` alias).
+    /// `"<schema_name>"`-qualified table + index spelling plugin-db's runtime depends
+    /// on (it ATTACHes the file under the `<schema_name>` alias).
     #[test]
     fn sqlite_attach_alias_keeps_app_id_qualifier() {
-        let app_id = "app_demo";
+        let schema_name = s("app_demo");
         let default_sql = build_create_table_with_fks_for_dialect(
-            app_id,
+            &schema_name,
             "posts",
             &json!({ "title": { "type": "string", "required": true } }),
             &FkEmission::Inline,
@@ -14127,7 +14124,7 @@ mod tests {
         )
         .expect("build default sqlite ddl");
         let scoped_sql = build_create_table_with_fks_for_dialect_scoped(
-            app_id,
+            &schema_name,
             "posts",
             &json!({ "title": { "type": "string", "required": true } }),
             &FkEmission::Inline,
@@ -14141,14 +14138,14 @@ mod tests {
             default_sql, scoped_sql,
             "the stable dialected entry point must equal AttachAlias scope"
         );
-        // It is `<app_id>`-qualified (the plugin-db ATTACH-alias contract).
+        // It is `<schema_name>`-qualified (the plugin-db ATTACH-alias contract).
         assert!(
             default_sql.contains(r#"CREATE TABLE IF NOT EXISTS "app_demo"."posts" ("#),
-            "AttachAlias must keep the app_id-qualified table: {default_sql}"
+            "AttachAlias must keep the schema_name-qualified table: {default_sql}"
         );
         assert!(
             default_sql.contains(r#"CREATE INDEX IF NOT EXISTS "app_demo"."posts_deleted_at_idx""#),
-            "AttachAlias must keep the app_id-qualified index: {default_sql}"
+            "AttachAlias must keep the schema_name-qualified index: {default_sql}"
         );
     }
 
@@ -14156,10 +14153,10 @@ mod tests {
     /// flips the SQLite qualifier). This is the PG-regression bar.
     #[test]
     fn pg_arm_byte_identical_across_sqlite_scopes() {
-        let app_id = "app_demo";
+        let schema_name = s("app_demo");
         let schema = goodies_schema();
         let via_stable = build_create_table_with_fks_for_dialect(
-            app_id,
+            &schema_name,
             "accounts",
             &schema,
             &FkEmission::Inline,
@@ -14171,7 +14168,7 @@ mod tests {
             SqliteEmitScope::MainUnqualified,
         ] {
             let via_scoped = build_create_table_with_fks_for_dialect_scoped(
-                app_id,
+                &schema_name,
                 "accounts",
                 &schema,
                 &FkEmission::Inline,
@@ -14197,7 +14194,7 @@ mod tests {
     #[test]
     fn sqlite_main_unqualified_carries_mask_enc_and_fk() {
         let sql = build_create_table_with_fks_for_dialect_scoped(
-            "app_demo",
+            &s("app_demo"),
             "accounts",
             &goodies_schema(),
             &FkEmission::Inline,
@@ -14269,69 +14266,69 @@ mod tests {
         vec![
             (
                 "insert",
-                build_insert_with_dialect("app1", "users", schema, &doc, d).unwrap(),
+                build_insert_with_dialect(&s("app1"), "users", schema, &doc, d).unwrap(),
             ),
             (
                 "insertMany",
-                build_insert_many_with_dialect("app1", "users", schema, &docs, d).unwrap(),
+                build_insert_many_with_dialect(&s("app1"), "users", schema, &docs, d).unwrap(),
             ),
             (
                 "updateOne",
                 build_update_one_with_system_fields(
-                    "app1", "users", schema, &filter, &update, d, &autobump,
+                    &s("app1"), "users", schema, &filter, &update, d, &autobump,
                 )
                 .unwrap(),
             ),
             (
                 "updateMany",
                 build_update_many_with_system_fields(
-                    "app1", "users", schema, &filter, &update, d, &autobump,
+                    &s("app1"), "users", schema, &filter, &update, d, &autobump,
                 )
                 .unwrap(),
             ),
             (
                 "deleteOne",
-                build_delete_one_with_dialect("app1", "users", schema, &filter, d).unwrap(),
+                build_delete_one_with_dialect(&s("app1"), "users", schema, &filter, d).unwrap(),
             ),
             (
                 "deleteMany",
-                build_delete_many("app1", "users", schema, &filter, d).unwrap(),
+                build_delete_many(&s("app1"), "users", schema, &filter, d).unwrap(),
             ),
             (
                 "softDeleteOne",
                 build_soft_delete_one_with_system_fields(
-                    "app1", "users", schema, &filter, d, &autobump,
+                    &s("app1"), "users", schema, &filter, d, &autobump,
                 )
                 .unwrap(),
             ),
             (
                 "softDeleteMany",
                 build_soft_delete_many_with_system_fields(
-                    "app1", "users", schema, &filter, d, &autobump,
+                    &s("app1"), "users", schema, &filter, d, &autobump,
                 )
                 .unwrap(),
             ),
             (
                 "restoreOne",
                 build_restore_one_with_system_fields(
-                    "app1", "users", schema, &filter, d, &autobump,
+                    &s("app1"), "users", schema, &filter, d, &autobump,
                 )
                 .unwrap(),
             ),
             (
                 "restoreMany",
                 build_restore_many_with_system_fields(
-                    "app1", "users", schema, &filter, d, &autobump,
+                    &s("app1"), "users", schema, &filter, d, &autobump,
                 )
                 .unwrap(),
             ),
             (
                 "upsert",
-                build_upsert_with_dialect("app1", "users", schema, &doc, &conflict, d).unwrap(),
+                build_upsert_with_dialect(&s("app1"), "users", schema, &doc, &conflict, d).unwrap(),
             ),
             (
                 "findOrCreate",
-                build_find_or_create("app1", "users", schema, &doc, &conflict).unwrap(),
+                build_find_or_create(&s("app1"), "users", schema, &doc, &conflict).unwrap(),
             ),
         ]
     }
@@ -14469,7 +14466,7 @@ mod tests {
         let doc = serde_json::json!({ "ssn": "1" });
         let conflict = serde_json::json!(["id"]);
         let upsert = build_upsert_with_dialect(
-            "app1",
+            &s("app1"),
             "users",
             &schema,
             &doc,
@@ -14477,7 +14474,7 @@ mod tests {
             SqlDialect::Postgres,
         )
         .unwrap();
-        let foc = build_find_or_create("app1", "users", &schema, &doc, &conflict).unwrap();
+        let foc = build_find_or_create(&s("app1"), "users", &schema, &doc, &conflict).unwrap();
 
         assert!(
             foc.sql.ends_with("(xmax = 0) AS __created"),
@@ -14550,7 +14547,7 @@ mod tests {
         let doc = serde_json::json!({ "ssn": "1" });
         let conflict = serde_json::json!(["id"]);
         for dialect in [SqlDialect::Postgres, SqlDialect::Sqlite] {
-            let q = build_upsert_with_dialect("app1", "users", &schema, &doc, &conflict, dialect)
+            let q = build_upsert_with_dialect(&s("app1"), "users", &schema, &doc, &conflict, dialect)
                 .unwrap();
             assert!(
                 q.sql
@@ -14575,7 +14572,7 @@ mod tests {
     fn a_write_builder_refuses_a_non_object_schema_rather_than_starring() {
         let doc = serde_json::json!({ "ssn": "1" });
         let err =
-            build_insert_with_dialect("app1", "users", &Value::Null, &doc, SqlDialect::Postgres)
+            build_insert_with_dialect(&s("app1"), "users", &Value::Null, &doc, SqlDialect::Postgres)
                 .expect_err("a schema-less write must be refused");
         assert!(
             matches!(err, QueryError::InvalidFilter(_)),
@@ -14686,6 +14683,11 @@ mod raw_column_parity {
     /// A schema name both `validate_schema` implementations accept, and the one
     /// [`CHARTER`] grants `schema.create_table` over.
     const APP: &str = "app";
+
+    /// `APP` as the physical schema the emitter takes.
+    fn s(name: &str) -> SchemaName {
+        SchemaName::new(name).expect("fixture schema name")
+    }
 
     /// The minimum charter that lets the engine's CREATE TABLE emitter run at
     /// all: one grant over [`APP`], no injected columns. Injection shape is
@@ -14873,7 +14875,7 @@ scope = { include = ["app"] }
             });
 
             let plane_accepts = build_create_table_with_fks_for_dialect(
-                APP,
+                &s(APP),
                 "people",
                 &schema,
                 &FkEmission::Inline,

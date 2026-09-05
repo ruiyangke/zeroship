@@ -441,12 +441,11 @@ pub async fn resolve_target_row_ids(
     limit: i64,
     schema: &Value,
 ) -> Result<Vec<TargetRowId>, DbError> {
-    let app_id = route.app_id();
     note_target_row_resolution_for_tests();
     let mut sql_filter = filter.clone();
     super::maybe_lower_sqlite_boolean_filter(dialect, schema, &mut sql_filter);
     let built =
-        query::build_write_target_probe(app_id, collection, schema, &sql_filter, limit, dialect)
+        query::build_write_target_probe(route.schema(), collection, schema, &sql_filter, limit, dialect)
             .map_err(DbError::from)?;
     note_target_row_resolution_sql_for_tests(&built.sql);
     let rows = exec_query(route, built).await?;
@@ -612,7 +611,7 @@ async fn rewrite_upsert_doc_id_to_existing_row_id(
     note_upsert_conflict_probe_for_tests();
     super::maybe_lower_sqlite_boolean_filter(dialect, schema, &mut filter);
     let built =
-        query::build_conflict_probe_with_dialect(app_id, collection, schema, &filter, dialect)
+        query::build_conflict_probe_with_dialect(route.schema(), collection, schema, &filter, dialect)
             .map_err(DbError::from)?;
     let rows = exec_query(route, built).await?;
     let Some(existing_id) = rows.first().and_then(|row| match row.get("id") {
@@ -1085,7 +1084,7 @@ mod tests {
             cache_schema_for_tests(app_id, collection, schema);
 
             let ddl = build_create_table_with_fks_for_dialect(
-                app_id,
+                &zeroship_schema::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &ddl_schema,
                 &FkEmission::Inline,
@@ -1136,7 +1135,7 @@ mod tests {
             // `schema` was moved into `cache_schema_for_tests`; `ddl_schema` is
             // its byte-identical twin and is still owned here.
             let insert_built = build_insert_with_dialect(
-                app_id,
+                &zeroship_schema::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &ddl_schema,
                 &insert_doc,
@@ -1366,7 +1365,7 @@ mod tests {
             // ENGINE's emitter; this case still earns its place as the SQLITE
             // arm of the fence, which that live-PostgreSQL suite cannot reach.
             let ddl = build_create_table_with_fks_for_dialect(
-                app_id,
+                &zeroship_schema::SchemaName::new(app_id).expect("fixture schema name"),
                 collection,
                 &masked,
                 &FkEmission::Inline,

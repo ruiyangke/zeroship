@@ -401,7 +401,7 @@ fn the_ir_and_the_shipped_builder_rank_identically() {
             "embedding": { "type": "vector", "vectorDims": DIMS },
         });
         let shipped = zeroship_schema::query::build_vector_search(
-            SCHEMA,
+            &zeroship_schema::SchemaName::new(SCHEMA).expect("fixture schema name"),
             "docs",
             "embedding",
             &query,

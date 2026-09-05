@@ -1468,9 +1468,6 @@ pub async fn dispatch_unmask_for_query(
         return Ok(());
     }
     let app_id = binding.app_id();
-    // SCHEMA: the audit table is reached through it on PostgreSQL. `app_id`
-    // above stays the TENANT - metering subject, SQLite ATTACH alias, key salt.
-    let db_schema = binding.schema();
     let schema = crate::descriptor::collection_schema(binding, collection)?;
     prepare_unmask_backend(route.backend(), app_id).await?;
     for row in rows.iter_mut() {
