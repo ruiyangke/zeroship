@@ -26,7 +26,6 @@ pub mod auth_token;
 pub mod backchannel_logout;
 pub mod blob_cache;
 pub mod browser_auth;
-pub mod compiled;
 pub mod config;
 pub mod db;
 pub mod dispatch;

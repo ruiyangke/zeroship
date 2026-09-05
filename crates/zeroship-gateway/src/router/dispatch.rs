@@ -1045,10 +1045,10 @@ pub(crate) enum CanonicalPath {
 /// and the caller forwards THAT canonical string to the worker so the worker's
 /// `new URL(req.url).pathname` reproduces exactly what the gateway matched.
 pub(crate) fn canonicalize_dispatch_path(dispatch_path: &str) -> CanonicalPath {
-    if crate::compiled::path_has_traversal_or_empty_segment(dispatch_path) {
+    if zeroship_bundle::compiled::path_has_traversal_or_empty_segment(dispatch_path) {
         return CanonicalPath::Reject;
     }
-    CanonicalPath::Use(crate::compiled::canonicalize_path(dispatch_path))
+    CanonicalPath::Use(zeroship_bundle::compiled::canonicalize_path(dispatch_path))
 }
 
 async fn handle_request(
@@ -1162,13 +1162,13 @@ async fn execute_resource_tree(
     state: web::types::State<Arc<GateState>>,
     app_id: &Uuid,
     compiled_route: &crate::sync::CompiledRoute,
-    resolved_resource: crate::compiled::ResolvedResource<'_>,
+    resolved_resource: zeroship_bundle::compiled::ResolvedResource<'_>,
     dispatch_path: &str,
     tail: &str,
     body: Bytes,
     wall_start: std::time::Instant,
 ) -> HttpResponse {
-    use crate::compiled::ResolvedAction;
+    use zeroship_bundle::compiled::ResolvedAction;
     use zeroship_bundle::ProcedureKind;
 
     let policy = resolved_resource.policy;
@@ -1817,7 +1817,7 @@ pub(super) fn build_replay_response(
 /// `DEFAULT_INFLIGHT_WAIT_MS` (~30s). Letting dedupe contention block a
 /// worker thread for longer than the handler itself could run is
 /// pointless.
-fn inflight_wait_ms(policy: &crate::compiled::EffectivePolicy) -> u64 {
+fn inflight_wait_ms(policy: &zeroship_bundle::compiled::EffectivePolicy) -> u64 {
     match policy.timeout_ms {
         Some(t) if t > 0 => t.min(idempotency::DEFAULT_INFLIGHT_WAIT_MS),
         _ => idempotency::DEFAULT_INFLIGHT_WAIT_MS,
@@ -1845,7 +1845,7 @@ fn inflight_wait_ms(policy: &crate::compiled::EffectivePolicy) -> u64 {
 /// cross-user leak the partition exists to prevent.
 fn resolve_dedupe_principal(
     state: &Arc<GateState>,
-    policy: &crate::compiled::EffectivePolicy,
+    policy: &zeroship_bundle::compiled::EffectivePolicy,
     user_header: Option<&str>,
     wire_id: &str,
     wall_start: std::time::Instant,
@@ -1884,7 +1884,7 @@ fn resolve_dedupe_principal(
 /// An empty/absent key returns `None` here so it falls through to
 /// `pre_dispatch`'s `MissingHeader` arm and keeps that more specific error.
 fn reject_low_entropy_anon_key(
-    policy: &crate::compiled::EffectivePolicy,
+    policy: &zeroship_bundle::compiled::EffectivePolicy,
     idem_key: Option<&str>,
     wall_start: std::time::Instant,
 ) -> Option<IdempotencyOutcome> {
@@ -1922,7 +1922,7 @@ pub(super) async fn handle_idempotency_pre_dispatch(
     state: &Arc<GateState>,
     app_id: &Uuid,
     dispatch_path: &str,
-    policy: &crate::compiled::EffectivePolicy,
+    policy: &zeroship_bundle::compiled::EffectivePolicy,
     user_header: Option<&str>,
     body: &Bytes,
     wall_start: std::time::Instant,
@@ -2883,7 +2883,7 @@ mod tests {
     use ntex::util::Bytes;
     use ntex::web::{self, HttpResponse};
 
-    use crate::compiled::{CompiledManifest, EffectivePolicy};
+    use zeroship_bundle::compiled::{CompiledManifest, EffectivePolicy};
     use zeroship_bundle::{
         Manifest, ProcedureKind, RateLimit, RateLimitPer, RequiredPrincipal, ResourceEntry,
     };
@@ -4311,7 +4311,7 @@ mod tests {
             publicly_accessible: true,
             required_scopes: vec![],
             kind: Some(ProcedureKind::Mutation),
-            action: crate::compiled::ResolvedAction::WorkerRpc,
+            action: zeroship_bundle::compiled::ResolvedAction::WorkerRpc,
             timeout_ms: None,
             input_schema: None,
             output_schema: None,
@@ -4801,7 +4801,7 @@ mod tests {
             publicly_accessible: true,
             required_scopes: vec![],
             kind: Some(ProcedureKind::Subscription),
-            action: crate::compiled::ResolvedAction::WorkerRpc,
+            action: zeroship_bundle::compiled::ResolvedAction::WorkerRpc,
             timeout_ms: None,
             input_schema: None,
             output_schema: None,
@@ -4815,7 +4815,7 @@ mod tests {
                 policy.kind,
                 Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action) | None
             )
-            && matches!(policy.action, crate::compiled::ResolvedAction::WorkerRpc);
+            && matches!(policy.action, zeroship_bundle::compiled::ResolvedAction::WorkerRpc);
         assert!(!engages, "idempotency must NOT engage for subscriptions");
     }
 
