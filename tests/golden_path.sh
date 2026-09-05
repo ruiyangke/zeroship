@@ -2788,7 +2788,7 @@ fi
 # claim sat on record for a day as an INFERENCE.
 #
 # WHAT THIS ASSERTS, and what it deliberately does NOT. It does not assert 401,
-# and it must not: whether the template SHOULD ship `auth: "anon"` (an
+# and it must not: whether the template SHOULD ship `auth: "anonymous"` (an
 # anonymous write surface in every new app) or explicit `auth: "user"` (which
 # still 401s, but silences the build's only warning) is an open operator
 # decision, and a gate that pinned either one would be asserting an answer
@@ -2956,15 +2956,15 @@ if [ "${MUTATE_SCAFFOLD_POLICY:-0}" = "1" ]; then
   {
     echo 'import { defineApp } from "@zeroship/server";'
     echo 'export default defineApp({ resources: {'
-    echo '  "rpc:notes.list": { auth: "anon", publiclyAccessible: true },'
-    echo '  "rpc:notes.add": { auth: "anon", publiclyAccessible: true },'
-    echo '  "rpc:notes.delete": { auth: "anon", publiclyAccessible: true },'
-    echo '  "rpc:files.upload": { auth: "anon", publiclyAccessible: true },'
-    echo '  "rpc:files.list": { auth: "anon", publiclyAccessible: true },'
-    echo '  "rpc:visits.bump": { auth: "anon", publiclyAccessible: true },'
+    echo '  "rpc:notes.list": { auth: "anonymous", publiclyAccessible: true },'
+    echo '  "rpc:notes.add": { auth: "anonymous", publiclyAccessible: true },'
+    echo '  "rpc:notes.delete": { auth: "anonymous", publiclyAccessible: true },'
+    echo '  "rpc:files.upload": { auth: "anonymous", publiclyAccessible: true },'
+    echo '  "rpc:files.list": { auth: "anonymous", publiclyAccessible: true },'
+    echo '  "rpc:visits.bump": { auth: "anonymous", publiclyAccessible: true },'
     echo '} });'
   } > "$SCAFFOLD/src/server/config.ts"
-  echo "  MUTATION ACTIVE: scaffold given an anon policy before the build"
+  echo "  MUTATION ACTIVE: scaffold given an anonymous policy before the build"
 fi
 ( cd "$SCAFFOLD" && pnpm build ) >/tmp/gp-scaffold-build.log 2>&1
 SC_BUILD_RC=$?
@@ -3194,7 +3194,7 @@ else
     # failures should not be believed.
     #
     # The flip is written from the manifest, not hard-coded, so this control
-    # keeps working after the operator decides: policy absent -> add anon;
+    # keeps working after the operator decides: policy absent -> add anonymous;
     # policy present -> take it away.
     SC_CTL_DIR="$SCAFFOLD/src/server"
     if [ -n "$SC_UNPOLICED" ]; then
@@ -3203,11 +3203,11 @@ else
         echo 'import { defineApp } from "@zeroship/server";'
         echo 'export default defineApp({ resources: {'
         printf '%s\n' "$SC_ACTUAL_IDS" | tr ',' '\n' | while read -r rid; do
-          [ -n "$rid" ] && echo "  \"$rid\": { auth: \"anon\", publiclyAccessible: true },"
+          [ -n "$rid" ] && echo "  \"$rid\": { auth: \"anonymous\", publiclyAccessible: true },"
         done
         echo '} });'
       } > "$SC_CTL_DIR/config.ts"
-      SC_CTL_DESC="policy ADDED (anon)"
+      SC_CTL_DESC="policy ADDED (anonymous)"
     else
       rm -rf "$SC_CTL_DIR"
       SC_CTL_DESC="policy REMOVED"
@@ -3390,7 +3390,7 @@ sector_ok=$(docker exec "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -tAc \
 
 # WHY db-todos AND NOT THE SCAFFOLD. Step 10's app answers 401 deployed (it
 # ships no policy), so no env.db operation of it is observable on the deployed
-# tier. db-todos is anon by policy, has migrations, and its `todos.list` already
+# tier. db-todos is anonymous by policy, has migrations, and its `todos.list` already
 # sorts `{ id: -1 }` -- the surface a creator would actually use.
 step 11 "env.db ordering: sort({id}) is creation order on both tiers"
 DB_APP="dbtodos"
@@ -3647,7 +3647,7 @@ gp_close_step
 #
 # THE VEHICLE had to be built: NO app on the deploy path emitted anything.
 # examples/starter now logs one line in `getMessages` (d7c3d4cce), chosen
-# because it is `auth: "anon", publiclyAccessible` and so runs on BOTH tiers;
+# because it is `auth: "anonymous", publiclyAccessible` and so runs on BOTH tiers;
 # addMessage is default-user and 401s deployed, which would have manufactured a
 # divergence rather than found one.
 #
@@ -3823,7 +3823,7 @@ SQL
   # That is READ, not run, which is why this arm exists.
   #
   # WHAT THIS DRIVES IS AN INPUT-REJECTION, NOT A HANDLER THROW. getMessages is
-  # the only anon procedure and takes no input, so garbage in `?input=` is the
+  # the only anonymous procedure and takes no input, so garbage in `?input=` is the
   # error class reachable without adding a procedure. A genuine uncaught throw
   # is still untested and needs its own vehicle (#333) -- so a red here is
   # informative and a green here does NOT license "errors reach the creator"
@@ -3848,7 +3848,7 @@ SQL
       \`?input=\` was very likely ignored and this drove a SUCCESS. A zero
       error-line count here says nothing about whether the error rail reaches
       the creator -- it is a FAILED SETUP, not a finding. A genuine uncaught
-      throw needs its own anon procedure (#333); note golden_path.sh:334 asserts
+      throw needs its own anonymous procedure (#333); note golden_path.sh:334 asserts
       the manifest ids are exactly rpc:addMessage,rpc:boom,rpc:getMessages, so that
       assertion moves with it."
   elif [ "${LOG_ERR:-0}" -ge 1 ] 2>/dev/null; then

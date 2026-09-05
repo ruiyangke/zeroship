@@ -23,7 +23,7 @@
 #      were the harness faithfully reporting an unmigrated app, and the arm
 #      below that blamed schema-init was reading the wrong cause.
 #   5. Exercise primitives THROUGH THE EDGE:
-#        a. anon SSR/HTML for a schema-less app  (proves dispatch+load+serve)
+#        a. anonymous SSR/HTML for a schema-less app  (proves dispatch+load+serve)
 #        b. db-todos RPC over the gateway          (env.db primitive)
 #        c. db-todos RPC direct to worker /dispatch (env.db, worker bearer)
 #

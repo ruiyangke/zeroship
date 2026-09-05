@@ -435,17 +435,17 @@ grep -qF "\"$LEAK_MARKER\"" "$APP/src/index.ts" \
   && pass "leak marker '$LEAK_MARKER' matches examples/error-probe/src/index.ts" \
   || { fail "marker drift: '$LEAK_MARKER' is not in $APP/src/index.ts"; exit 1; }
 
-# EVERY procedure must be anon in the BUILT manifest. If any is gated, the
+# EVERY procedure must be anonymous in the BUILT manifest. If any is gated, the
 # gateway answers it and the deployed row is the GATEWAY's envelope, not the
 # worker's -- which is precisely the blind spot this harness exists to close,
 # and it would read as a clean "no stack" rather than as "never measured".
 d="$WORK/unpack"; mkdir -p "$d"; tar -xf "$ZSHIP" -C "$d"
 anon_ok=1
 for p in $PROCS err.needsInput; do
-  grep -qE "\"rpc:${p//./\\.}\":\{[^}]*\"auth\":\"anon\"" "$d/manifest.json" \
-    || { fail "$p is not anon in the manifest -- deployed calls never reach the worker for it"; anon_ok=0; }
+  grep -qE "\"rpc:${p//./\\.}\":\{[^}]*\"auth\":\"anonymous\"" "$d/manifest.json" \
+    || { fail "$p is not anonymous in the manifest -- deployed calls never reach the worker for it"; anon_ok=0; }
 done
-[ "$anon_ok" = "1" ] && pass "all $(echo $PROCS err.needsInput | wc -w) procedures are anon in the manifest (deployed calls reach the WORKER)"
+[ "$anon_ok" = "1" ] && pass "all $(echo $PROCS err.needsInput | wc -w) procedures are anonymous in the manifest (deployed calls reach the WORKER)"
 
 # The dispatcher leg's INVALID_ARGUMENT rows are only reachable if the built
 # manifest says err.needsInput is a `query`. If the vite plugin ever stopped
@@ -777,7 +777,7 @@ cut -c1-200 "$WORK/dev.raw" | sed 's/^/  /'
 # 12 unconditional
 # top-level `pass` sites
 # (AUTH_INSECURE_DEV unset here, .zship built, leak marker matches the fixture,
-# all 5 procedures anon, dev reachable, dev probe, dev-vs-dev self-diff empty,
+# all 5 procedures anonymous, dev reachable, dev probe, dev-vs-dev self-diff empty,
 # deployed, the live-process rail check, gateway routes, deployed probe, the
 # err.ok CONTROL) + 4 from the `for p in err.plain err.status4xx
 # err.status4xxCode err.publicCode5xx` no-stack loop + 1 section-5 diff = 17,

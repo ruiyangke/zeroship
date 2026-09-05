@@ -293,7 +293,7 @@ WORK="$WORK_EARLY"   # stack_up replaces this; the build needs a scratch dir now
 
 if [ "$MUTATE" = "declare-defaulted" ]; then
   # ROW-LEVEL SENSITIVITY CONTROL: give `probe.defaulted` an explicit
-  # `auth:"anon"` posture, changing ONE variable, and check that exactly the
+  # `auth:"anonymous"` posture, changing ONE variable, and check that exactly the
   # rows named `probe.defaulted` move and nothing else does. A diff that reports
   # 27 divergences either way would prove nothing about which row measures what.
   #
@@ -305,10 +305,10 @@ if [ "$MUTATE" = "declare-defaulted" ]; then
   # reason (dev sessions never expire), which is the point of running it.
   MUTATE_BAK="$WORK/config.ts.bak"
   cp "$APP/src/server/config.ts" "$MUTATE_BAK"
-  sed -i 's|"rpc:probe.public": { auth: "anon", publiclyAccessible: true },|"rpc:probe.public": { auth: "anon", publiclyAccessible: true },\n    "rpc:probe.defaulted": { auth: "anon", publiclyAccessible: true },|' \
+  sed -i 's|"rpc:probe.public": { auth: "anonymous", publiclyAccessible: true },|"rpc:probe.public": { auth: "anonymous", publiclyAccessible: true },\n    "rpc:probe.defaulted": { auth: "anonymous", publiclyAccessible: true },|' \
     "$APP/src/server/config.ts"
   grep -q 'rpc:probe.defaulted' "$APP/src/server/config.ts" \
-    && echo "  MUTATED: probe.defaulted declared auth:anon (both builds; only deployed changes)" \
+    && echo "  MUTATED: probe.defaulted declared auth:anonymous (both builds; only deployed changes)" \
     || { fail "mutation did not apply"; exit 1; }
 fi
 
@@ -328,8 +328,8 @@ if [ "$MUTATE" = "none" ]; then
     || fail "probe.defaulted now declares an auth posture -- the #163 probe is dead, see src/server/config.ts"
 fi
 for p in probe.public probe.requireAnon probe.appGate probe.userShape; do
-  grep -qE "\"rpc:$p\":\{[^}]*\"auth\":\"anon\"" "$d/manifest.json" \
-    || fail "$p is not anon in the manifest -- the deployed side will never reach the worker for it"
+  grep -qE "\"rpc:$p\":\{[^}]*\"auth\":\"anonymous\"" "$d/manifest.json" \
+    || fail "$p is not anonymous in the manifest -- the deployed side will never reach the worker for it"
 done
 pass "manifest postures match src/server/config.ts"
 

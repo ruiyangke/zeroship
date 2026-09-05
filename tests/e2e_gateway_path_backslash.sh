@@ -284,7 +284,7 @@ else
 fi
 # T7b: same procedure, backslash-folded path. The gateway's rpc_index is keyed
 # on a canonical path beginning `/__zeroship/v1/`; this one does not, so it
-# falls through to the anon URL catch-all.
+# falls through to the anonymous URL catch-all.
 raw_req '/apps/bslash/x\..\__zeroship/v1/secret'
 T7_STATUS="$RSTATUS"; T7_BODY="$RBODY"
 note "T7b status=$T7_STATUS body=$(printf '%s' "$T7_BODY" | cut -c1-300)"
