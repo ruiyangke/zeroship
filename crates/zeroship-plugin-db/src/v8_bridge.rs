@@ -15,7 +15,11 @@
 //! - **Argument decoders**: `read_json_arg`, `v8_value_to_serde_json`
 //!   (the hot-path walker that avoids a `JSON.stringify` round-trip).
 //! - **State accessors**: `runtime_state` (read the `SharedState` off
-//!   the isolate slot), `get_app_id_pub` (read APP_ID out of env_vars).
+//!   the isolate slot). `get_app_id` and its `get_app_id_pub` wrapper
+//!   were deleted on 2026-09-04: the wrapper existed for
+//!   `v8_classes::migration`, that consumer is gone, and a two-link
+//!   chain like this only reads as dead once the public half goes -
+//!   the private half looks called right up until then.
 //! - **Capability gate**: `refuse_if_query_capability` — the B3 gate
 //!   that rejects writes from inside a `query()` handler.
 //! - **Row decoding**: `row_to_json`, `column_to_json`,
@@ -33,22 +37,6 @@ use zeroship_runtime::state::{ResolveValue, SharedState};
 // ---------------------------------------------------------------------------
 // State accessors
 // ---------------------------------------------------------------------------
-
-/// Get the app_id from RuntimeState env_vars.
-fn get_app_id(state: &SharedState) -> String {
-    state
-        .borrow()
-        .env_vars
-        .get("APP_ID")
-        .cloned()
-        .unwrap_or_else(|| "default".to_string())
-}
-
-/// Public wrapper around [`get_app_id`] for sibling modules
-/// (`v8_classes::migration`) that need the same APP_ID convention.
-pub(crate) fn get_app_id_pub(state: &SharedState) -> String {
-    get_app_id(state)
-}
 
 /// Get the runtime state slot off the isolate. Shared by every callback
 /// and dispatch helper; consolidated here to avoid copy-pasting the

@@ -1146,36 +1146,15 @@ pub fn clear_pending_emits_for_tests(app_id: &str) {
     exec::clear_pending_emits(app_id);
 }
 
-/// **Test-only**: acquire a real pooled Postgres `LockGuard` against a
-/// caller-owned pool and drop it without `release()`/`into_held()`.
-/// Used by the integration suite to verify the catastrophic Drop path
-/// closes the pooled client instead of leaking the advisory lock onto
-/// a reusable backend session.
-#[cfg(any(test, feature = "test-helpers"))]
-#[doc(hidden)]
-pub async fn drop_pooled_lock_guard_without_release_for_tests(
-    pool: Rc<compio_postgres::Pool>,
-    url: &str,
-    app_id: &str,
-    name: &str,
-) -> Result<(), String> {
-    use crate::backend::LockScope;
-
-    let backend = crate::backend::PostgresBackend::new(Rc::clone(&pool), url.to_string(), crate::context::isolate_key_source());
-    let client = pool
-        .get_owned()
-        .await
-        .map_err(|e| backend::pg_error::classify(&e).into_string())?;
-    let scope = LockScope::GlobalApp {
-        app_id: app_id.to_string(),
-        name: name.to_string(),
-    };
-    let guard = backend::lock_guard::LockGuard::acquire(&backend, client, &scope)
-        .await
-        .map_err(DbError::into_string)?;
-    drop(guard);
-    Ok(())
-}
+// `drop_pooled_lock_guard_without_release_for_tests` was deleted on
+// 2026-09-04. Its doc claimed "used by the integration suite to verify the
+// catastrophic Drop path"; no integration test ever called it, in this crate or
+// any other. A `#[cfg(any(test, feature = "test-helpers"))] #[doc(hidden)] pub`
+// item is invisible BOTH ways - rustc's dead_code lint cannot see a `pub` item,
+// and a default-features build does not compile it at all - so nothing was ever
+// going to report it. The Drop path it named is still guarded, by
+// `drop_with_released_true_does_not_warn` in data-postgres's `lock_guard.rs`,
+// against the flag rather than a live pool.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum BackendUrl {
