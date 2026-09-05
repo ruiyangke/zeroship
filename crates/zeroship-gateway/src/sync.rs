@@ -11,7 +11,7 @@ use zeroship_core::types::{GatewaySnapshot, RouteEntry, RouteMap};
 
 use zeroship_core::types::SpendState;
 
-use crate::compiled::CompiledManifest;
+use zeroship_bundle::compiled::CompiledManifest;
 use crate::enforce::{ConcurrencyRegistry, RateLimitRegistry};
 use crate::GateState;
 

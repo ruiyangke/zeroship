@@ -143,7 +143,7 @@ pub(super) fn inject_cors_response_headers(
 mod tests {
     use super::*;
 
-    use crate::compiled::CompiledManifest;
+    use zeroship_bundle::compiled::CompiledManifest;
     use zeroship_bundle::{Cors, HttpMethod, Manifest, ResourceEntry};
 
     /// Single-resource manifest with a CORS policy attached to `/api/*`.

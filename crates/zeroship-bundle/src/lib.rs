@@ -6,6 +6,7 @@
 pub mod asset;
 pub mod blob;
 pub mod blob_config;
+pub mod compiled;
 pub mod limits;
 pub mod manifest;
 pub mod rule;

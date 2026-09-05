@@ -5,7 +5,7 @@ use zeroship_bundle::{
     Manifest, ProcedureKind, RateLimit, RateLimitPer, RequiredPrincipal, ResourceEntry,
     StaticAction,
 };
-use zeroship_gateway::compiled::CompiledManifest;
+use zeroship_bundle::compiled::CompiledManifest;
 
 struct Case {
     name: &'static str,

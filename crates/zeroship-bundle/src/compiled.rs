@@ -1,15 +1,33 @@
 //! Pre-compiled manifest dispatch.
 //!
-//! Source `Manifest` is unchanged on the wire. At route-update time the
-//! gateway compiles each app's manifest into a hot-path-friendly form:
-//! one `EffectivePolicy` per resource, an RPC wire-id index, and a
-//! path-segment trie for URL resources. Per-request work drops to a
-//! single `HashMap::get` on the most-specific resource key.
+//! Source `Manifest` is unchanged on the wire. At app-load time each tier
+//! compiles an app's manifest into a hot-path-friendly form: one
+//! `EffectivePolicy` per resource, an RPC wire-id index, and a path-segment
+//! matcher for URL resources. Per-request work drops to a single
+//! `HashMap::get` on the most-specific resource key.
+//!
+//! ## Why this lives in `zeroship-bundle` and not in the gateway
+//!
+//! TWO tiers resolve the declared policy, and they must reach the same answer
+//! for the same request or the second one is worse than useless. The gateway
+//! gates a request before it forwards; the worker is about to gate it again
+//! before the creator's handler is entered, because a caller with direct
+//! network access to a worker never passes through the gateway at all - the
+//! threat the signed `ZeroShip-User` header was built for.
+//!
+//! Everything here is derived from the `Manifest`, so this is the manifest
+//! crate's work, not the gateway's: it names no gateway type and imports
+//! nothing but `crate` and `std`. Resolution is security-relevant in both
+//! directions - the SEC-2 canonicalisation (a `%2e`-encoded traversal must
+//! resolve to the PROTECTED resource, not fall through to a permissive
+//! catch-all) and the SEC-5 fail-closed RPC default are both here - so a
+//! second implementation for the second enforcer would be a second thing to
+//! get wrong, silently, in one tier only.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use zeroship_bundle::{
+use crate::{
     AssetEntry, CacheCtl, Cors, HttpMethod, Manifest, ProcedureKind, RateLimit, RequiredPrincipal,
     ResourceEntry, WorkerCode,
 };
@@ -168,7 +186,7 @@ fn is_double_dot_segment(seg: &str) -> bool {
 /// is the gateway↔worker path-disagreement vector SEC-2 closes. Callers that
 /// want fail-closed rejection (the dispatch layer) use this to 400 such paths;
 /// the matcher uses [`canonicalize_path`] to resolve them defensively.
-pub(crate) fn is_dot_segment(seg: &str) -> bool {
+pub fn is_dot_segment(seg: &str) -> bool {
     is_single_dot_segment(seg) || is_double_dot_segment(seg)
 }
 
@@ -202,7 +220,7 @@ const WHATWG_PATH_REWRITE_BYTES: [char; 4] = ['\\', '\t', '\n', '\r'];
 /// while matching auth on a different normalization is the SEC-2 bypass. The
 /// dispatch layer rejects such requests (400) rather than guess which
 /// normalization the worker will pick.
-pub(crate) fn path_has_traversal_or_empty_segment(path: &str) -> bool {
+pub fn path_has_traversal_or_empty_segment(path: &str) -> bool {
     // Checked before segmentation: a `\` never survives to become its own
     // segment (that is exactly why splitting on `/` alone misses it).
     if path.contains(WHATWG_PATH_REWRITE_BYTES) {
@@ -251,7 +269,7 @@ pub(crate) fn path_has_traversal_or_empty_segment(path: &str) -> bool {
 /// STRICTER resource rather than the catch-all. Dispatch itself rejects a
 /// backslash path before it ever reaches here, so this fold never decides what
 /// gets forwarded to the worker.
-pub(crate) fn canonicalize_path(path: &str) -> String {
+pub fn canonicalize_path(path: &str) -> String {
     let trimmed = path.strip_prefix('/').unwrap_or(path);
     let mut out: Vec<&str> = Vec::new();
     for seg in trimmed.split(['/', '\\']) {
@@ -384,7 +402,7 @@ impl CompiledManifest {
     /// Resolve a resource from an already-canonical path. Dispatch uses this
     /// after `canonicalize_dispatch_path` so the request path is normalized
     /// exactly once before policy and rate-limit resolution.
-    pub(crate) fn lookup_canonical_resource_resolved(
+    pub fn lookup_canonical_resource_resolved(
         &self,
         canonical_path: &str,
     ) -> Option<ResolvedResource<'_>> {
@@ -432,7 +450,6 @@ impl CompiledManifest {
         None
     }
 }
-
 // ---------------------------------------------------------------------------
 // Resource-tree compilation
 // ---------------------------------------------------------------------------
@@ -784,7 +801,7 @@ fn compile_glob(pattern: &str) -> CompiledGlob {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use zeroship_bundle::{
+    use crate::{
         Manifest, ProcedureKind, RateLimit, RateLimitPer, RedirectAction, RequiredPrincipal,
         ResourceEntry, StaticAction,
     };
@@ -1453,3 +1470,4 @@ mod tests {
         assert!(c.lookup_resource("/__zeroship/v1/anything").is_none());
     }
 }
+

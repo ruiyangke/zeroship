@@ -155,7 +155,7 @@ async fn family_revocation_decision(
 pub(crate) async fn resolve_auth(
     req: &HttpRequest,
     state: &Arc<GateState>,
-    policy: &crate::compiled::EffectivePolicy,
+    policy: &zeroship_bundle::compiled::EffectivePolicy,
     request_id: &Uuid,
     oauth_client_id: Option<&str>,
     sector_identifier: Option<&str>,
@@ -281,7 +281,7 @@ pub(super) fn user_header_subject(state: &Arc<GateState>, header: &str) -> Optio
 async fn resolve_auth_inner(
     req: &HttpRequest,
     state: &Arc<GateState>,
-    policy: &crate::compiled::EffectivePolicy,
+    policy: &zeroship_bundle::compiled::EffectivePolicy,
     request_id: &Uuid,
     oauth_client_id: Option<&str>,
     sector_identifier: Option<&str>,
@@ -1419,8 +1419,8 @@ mod tests {
     /// for the Bearer-arm policy gate.
     fn policy_with_auth(
         auth: zeroship_bundle::RequiredPrincipal,
-    ) -> crate::compiled::EffectivePolicy {
-        crate::compiled::EffectivePolicy {
+    ) -> zeroship_bundle::compiled::EffectivePolicy {
+        zeroship_bundle::compiled::EffectivePolicy {
             auth,
             rate_limit: None,
             cors: None,
@@ -1434,17 +1434,17 @@ mod tests {
             publicly_accessible: true,
             required_scopes: vec![],
             kind: None,
-            action: crate::compiled::ResolvedAction::WorkerRpc,
+            action: zeroship_bundle::compiled::ResolvedAction::WorkerRpc,
             input_schema: None,
             output_schema: None,
         }
     }
 
-    fn anonymous_policy() -> crate::compiled::EffectivePolicy {
+    fn anonymous_policy() -> zeroship_bundle::compiled::EffectivePolicy {
         policy_with_auth(zeroship_bundle::RequiredPrincipal::Anonymous)
     }
 
-    fn user_policy() -> crate::compiled::EffectivePolicy {
+    fn user_policy() -> zeroship_bundle::compiled::EffectivePolicy {
         policy_with_auth(zeroship_bundle::RequiredPrincipal::User)
     }
 
@@ -1452,7 +1452,7 @@ mod tests {
     /// the route-level scope gate.
     fn user_policy_requiring(
         required: &[&str],
-    ) -> crate::compiled::EffectivePolicy {
+    ) -> zeroship_bundle::compiled::EffectivePolicy {
         let mut p = user_policy();
         p.required_scopes = required.iter().map(|s| s.to_string()).collect();
         p
