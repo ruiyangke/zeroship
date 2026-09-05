@@ -89,6 +89,10 @@
 # it describes went on to delete - a design doc naming the code it replaced.
 # Such a citation passes only if the citing line also says DELETED, so the
 # author has to state the fact rather than leave a pointer that silently rots.
+#
+# Run the harness's own planted cases and their controls: this script --self-test.
+# It rules on the INSTRUMENT and touches no document; the bare run rules on the
+# tree. CI runs both, as two steps, for the reason the self-test header gives.
 set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -301,6 +305,186 @@ check_citations() {
 }
 
 # ---------------------------------------------------------------------------
+# `--self-test` - plant citations this gate MUST refuse, and prove it does.
+#
+# WHY THIS GATE NEEDS ONE. Every arm passes at zero bad citations, which is also
+# what an extractor that stopped matching prints. The floors catch a collapse to
+# NOTHING; they cannot catch the loss of ONE CAPABILITY inside a population that
+# is mostly something else. Measured 2026-09-04: delete the `(:[0-9]+(-[0-9]+)?)?`
+# group from the extractor and the root filter above - which removes every line
+# check this gate performs, on every document - and `agents_md_citations` falls
+# from 77 to 76 and stays GREEN at floor 30, because only 7 of its 77 citations
+# carry a line at all. Raising that floor to 7 was considered and rejected:
+# ordinary editing of AGENTS.md moves that number, and a floor sized to the thing
+# it protects is the fragile shape tests/lib/gate_arms.sh warns about. So the
+# capability is bound HERE, by a planted citation a line-blind extractor cannot
+# refuse, rather than by a proxy count.
+#
+# EVERY CASE HAS A CONTROL DIFFERING IN ONE VARIABLE, and the controls are the
+# half that makes the refusals mean something: a harness that refuses everything
+# passes every refusal case and is worthless. The past-EOF pair differs by ONE in
+# the line number (eof+1 against eof), which also pins the boundary at `>` and
+# not `>=`.
+#
+# THE ABSENT ANCHORS ARE BUILT AT RUN TIME, NOT WRITTEN OUT. A literal dead path
+# under `tests/`, `docs/` or `crates/` in this file would be a real finding for
+# tests/source_citation_gate.sh, which scans this directory - a detector that
+# fires on its own probe reports nothing but itself.
+#
+# WHAT THIS STILL DOES NOT BIND. A citation naming a REAL line that says
+# something else: all seven wrong citations corrected in AGENTS.md on 2026-09-04
+# were of exactly that kind, and nothing here closes it - see the arm-1b header.
+# Arm 1's `-e` sweep is also unbound, because it reads the literal filename
+# AGENTS.md and so cannot be pointed at a fixture.
+#
+# THE CODE-FENCE CASE IS NOT HERE, AND IT CANNOT BE. This gate has no notion of
+# a fence: it extracts citations from a document's whole text, so an unclosed
+# fence changes nothing it does and there is no state for a fixture to invert.
+# The arm that DOES invert on one is `doc_cargo_selectors` in
+# tests/cargo_package_spec_gate.sh, whose `fenced_only` flips in-block state for
+# the rest of a file; both halves are addressed there rather than mimicked here -
+# its self-test now runs in CI and goes red on the inverted filter, and the cause
+# the self-test cannot reach, an unclosed fence in a live DOCUMENT, is refused by
+# a fence-balance arm over the whole live set.
+# ---------------------------------------------------------------------------
+if [ "${1:-}" = "--self-test" ]; then
+  echo "== self-test: planted citations, each with a one-variable control =="
+
+  # Arm 1 has already run: it sits above `check_citations`, which is what this
+  # harness drives. Its TREE verdict is dropped here on purpose - a dead path in
+  # AGENTS.md is a finding for the bare run, which CI runs as its own step, and
+  # reporting it here would say the instrument is broken when it is working. Its
+  # ARM refusal is NOT dropped: a collapse of arm 1's enumeration IS an
+  # instrument failure, and gate_arms_finish still carries it.
+  FAILED=0
+
+  probe="$(mktemp -d "${TMPDIR:-/tmp}/zsdoccite.XXXXXX")" || exit 1
+  trap 'rm -rf "$probe"' EXIT
+
+  st_ok()  { printf '  ok   %s\n' "$1"; }
+  st_bad() { printf '  FAIL %s\n' "$1"; FAILED=1; }
+
+  # Anchors. Present ones are real files; absent ones carry `$$` so this file
+  # contains no dead citation of its own, and so two runs cannot collide.
+  a_sh="tests/lib/gate_arms.sh"
+  a_md="docs/reference/db.md"
+  a_rs="crates/zeroship-data-engine/src/lib.rs"
+  gone_md="docs/reference/absent-$$.md"
+  gone_rs_dir="crates/zeroship-data-engine/src/transaction/"
+  gone_rs_tail="absent-$$.rs"
+  for a in "$a_sh" "$a_md" "$a_rs"; do
+    [ -f "$a" ] || { echo "self-test anchor is missing: $a" >&2; exit 1; }
+  done
+  for g in "$gone_md" "$gone_rs_dir$gone_rs_tail"; do
+    [ -e "$g" ] && { echo "self-test anchor exists and must not: $g" >&2; exit 1; }
+  done
+  eof_sh=$(wc -l < "$a_sh")
+
+  # Drive check_citations over one planted document and rule on its verdict.
+  # The arm's `examined` is the number of citations THE FIXTURE YIELDED, so a
+  # fixture the extractor stopped seeing fails on its floor rather than passing
+  # as "nothing to refuse" - the same contract the real arms carry.
+  #
+  #   st_case <arm> <floor> refuse|accept <fixture> <description>
+  st_case() {
+    local arm="$1" floor="$2" expect="$3" doc="$4" what="$5"
+    check_citations "$doc" 2>/dev/null
+    if ! gate_arm "$arm" "$cites_examined" "$floor"; then
+      st_bad "$what: the fixture yielded $cites_examined citation(s), so this case proves nothing"
+      return
+    fi
+    case "$expect" in
+      refuse)
+        if [ "$cites_bad" -ge 1 ]; then
+          st_ok "$what: REFUSED ($cites_bad bad of $cites_examined examined)"
+        else
+          st_bad "$what: ACCEPTED - $cites_examined citation(s) examined, none refused"
+        fi
+        ;;
+      accept)
+        if [ "$cites_bad" -eq 0 ]; then
+          st_ok "$what: accepted ($cites_examined examined)"
+        else
+          st_bad "$what: REFUSED $cites_bad of $cites_examined - the control must stay clean"
+        fi
+        ;;
+    esac
+  }
+
+  # 1+2. PAST EOF, and its control one line lower. This is the pair that binds
+  # the line check itself: with the line group deleted from the extractor, the
+  # first fixture yields a citation to a file that EXISTS and is accepted.
+  printf 'The floor lives at `%s:%d`.\n' "$a_sh" "$((eof_sh + 1))" > "$probe/past_eof.md"
+  printf 'The floor lives at `%s:%d`.\n' "$a_sh" "$eof_sh" > "$probe/at_eof.md"
+  st_case selftest_past_eof 1 refuse "$probe/past_eof.md" "a line one past end-of-file"
+  st_case selftest_at_eof   1 accept "$probe/at_eof.md"   "control: the last line of the same file"
+
+  # 3+4. A RANGE IS TESTED AT ITS END. Same one-variable pair, moved to the end
+  # of a range: a check that read the START would accept the first fixture, and
+  # the reader would believe the whole quoted span is anchored.
+  printf 'Quoted at `%s:1-%d`.\n' "$a_sh" "$((eof_sh + 1))" > "$probe/range_past.md"
+  printf 'Quoted at `%s:1-%d`.\n' "$a_sh" "$eof_sh" > "$probe/range_at.md"
+  st_case selftest_range_past 1 refuse "$probe/range_past.md" "a range ending past end-of-file"
+  st_case selftest_range_at   1 accept "$probe/range_at.md"   "control: the same range ending at EOF"
+
+  # 5+6. THE POSITIVE CONTROL FOR THE HARNESS ITSELF: a path that does not
+  # exist. If this one ever passes, nothing else here means anything. The `.md`
+  # anchors also bind the document half of the extension alternation.
+  printf 'See `%s` for the contract.\n' "$gone_md" > "$probe/absent.md"
+  printf 'See `%s` for the contract.\n' "$a_md" > "$probe/present.md"
+  st_case selftest_absent_path  1 refuse "$probe/absent.md"  "a cited document that does not exist"
+  st_case selftest_present_path 1 accept "$probe/present.md" "control: the same sentence naming a real document"
+
+  # 7+8. THE `DELETED` ESCAPE, both directions. A doc may cite a file the change
+  # it describes deleted, but EVERY occurrence must say so - one escaped mention
+  # must not cover a second, live one elsewhere in the same document.
+  printf 'The old surface `%s` was DELETED on 2026-08-28.\n' "$gone_md" > "$probe/deleted.md"
+  printf 'The old surface `%s` was DELETED on 2026-08-28.\nStill read `%s` first.\n' \
+    "$gone_md" "$gone_md" > "$probe/deleted_partial.md"
+  st_case selftest_deleted_escape  1 accept "$probe/deleted.md"         "a dead path whose only mention says DELETED"
+  st_case selftest_deleted_partial 1 refuse "$probe/deleted_partial.md" "control: a second, unescaped mention of it"
+
+  # 9+10. THE WRAPPED-COMMENT PRE-PASS, which the arm-7 header says is proven by
+  # mutation rather than by a number. Here it is proven by both, permanently:
+  # ONE fixture read two ways. Under `unwrap_comment_continuations` the citation
+  # split across two `//` lines is rejoined and refused; under plain `cat` the
+  # head has no extension and the tail no repository root, so the file yields
+  # only its unwrapped neighbour - which is the blindness the pre-pass removes.
+  #
+  # THE FIXTURE'S THIRD LINE ENDS IN `/` ON PURPOSE, and without it this pair is
+  # weaker than it looks. The pre-pass is ADDITIVE - raw text first, then the
+  # joined lines - because an earlier join-only version HID five citations that
+  # resolve: gluing a prose line's tail onto a path makes the token start with
+  # that tail and fail the repository-root test. A fixture whose live citation is
+  # not preceded by a joinable line cannot tell additive from join-only. This one
+  # is, so dropping the raw half takes the join arm to one citation, under its
+  # floor, and the additive assertion below goes red with it. Measured both ways.
+  printf '// asserted in %s\n// %s and nowhere else\n// and see the note above/\n// %s is the entry point\n' \
+    "$gone_rs_dir" "$gone_rs_tail" "$a_rs" > "$probe/wrapped.ts"
+  CITE_SOURCE=unwrap_comment_continuations
+  st_case selftest_unwrap_join 2 refuse "$probe/wrapped.ts" "a citation wrapped across two comment lines"
+  unwrap_examined=$cites_examined
+  CITE_SOURCE=cat
+  st_case selftest_unwrap_blind 1 accept "$probe/wrapped.ts" "control: the same file read line by line"
+  cat_examined=$cites_examined
+  if [ "$unwrap_examined" -gt "$cat_examined" ]; then
+    st_ok "the pre-pass is additive: $unwrap_examined citations joined against $cat_examined raw"
+  else
+    st_bad "the pre-pass added nothing ($unwrap_examined against $cat_examined): either it stopped
+       joining, or it REPLACED the raw text and is hiding citations that resolve"
+  fi
+
+  gate_arms_finish || FAILED=1
+  if [ "$FAILED" -ne 0 ]; then
+    echo "::error::doc citation gate SELF-TEST FAILED" >&2
+    echo "::error::  The instrument does not discriminate; its clean runs say nothing." >&2
+    exit 1
+  fi
+  echo "doc citation gate self-test: every planted citation refused, every control clean"
+  exit 0
+fi
+
+# ---------------------------------------------------------------------------
 # Arm 1b - AGENTS.md's `path:LINE` citations.
 #
 # ARM 1 DISCARDS THE LINE NUMBER. Its extractor's character class
@@ -315,6 +499,33 @@ check_citations() {
 # the wrong line. Do not read this arm as closing that hole - if the next drift
 # is met with "but we gated that", this arm has done net harm. The header above
 # explains why the arm that WOULD close it was measured and rejected, twice.
+#
+# WHAT IS BOUND, AND BY WHAT. Added 2026-09-04, after this arm's own number was
+# measured against the capability it exists for. THE COUNT CANNOT SEE THE
+# CAPABILITY: delete the line group from the extractor and the root filter -
+# which removes every line check this gate performs, on every document - and this
+# arm falls 77 -> 76 and stays GREEN at floor 30, because only 7 of the 77 carry
+# a line at all. The floor was NOT raised to 7; a floor sized to the thing it
+# protects moves whenever somebody edits AGENTS.md, and this file's own history
+# records an earlier draft getting that wrong in the other direction.
+#
+# The past-EOF check is bound instead by `--self-test` above, which plants a
+# citation at eof+1, requires a refusal, and puts the eof citation beside it as
+# the control. That binds the INSTRUMENT rather than a proxy count, and CI runs
+# it as its own step. Under the mutation described, the self-test fails on
+# exactly those two planted cases while its eight other cases stay green.
+#
+# AND THE LINE GROUP IS THE ONLY COLLAPSE NO ARM SEES, re-measured rather than
+# assumed. Dropping `crates` from the root filter, or `rs` from the extension
+# alternation, leaves THIS arm green at 58 - but turns the whole gate RED through
+# arm 7, which falls 28 -> 2 against a floor of 12. So the floors are not useless
+# here; they are blind to exactly one thing, which is a capability that touches a
+# small minority of every arm's population. That is the shape a self-test is for.
+#
+# WHAT IS STILL NOT BOUND, and it is the hole the paragraph above describes: a
+# citation naming a REAL line that says something else. All seven wrong citations
+# were of that kind. No fixture here catches one, none is proposed, and the file
+# header records why the two candidate arms were measured and rejected twice.
 #
 # COUNT AND FLOOR. Measured 2026-09-04: 77 citations, of which SEVEN carry a
 # line. The seven are the genuinely new coverage; the other 70 are paths, which
