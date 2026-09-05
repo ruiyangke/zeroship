@@ -569,8 +569,9 @@ impl OidcRp {
     ///
     /// [`OidcRpError::VerifyAccessToken`] wrapping an [`OidcError`] for any
     /// JWKS/signature/iss/exp failure. Callers translate this into a
-    /// `401` (User/Admin route) or fall-through to anonymous (Anon
-    /// route), per the Bearer-arm policy gate.
+    /// `401` (a `RequiredPrincipal::User` route) or a fall-through to
+    /// anonymous (a `RequiredPrincipal::Anonymous` route), per the Bearer-arm
+    /// policy gate.
     pub async fn verify_access_token(&self, token: &str) -> Result<AccessClaims, OidcRpError> {
         let claims = verify_access_jwt(&self.jwks, token, &self.issuer).await?;
         Ok(claims)
