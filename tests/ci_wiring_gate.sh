@@ -296,6 +296,42 @@ invoked_scripts() {
   ' | LC_ALL=C sort -u
 }
 
+# ---------------------------------------------------------------------------
+# THE NESTED-GATE FINDERS, and the directory is an ARGUMENT so `--self-test`
+# drives the same code the real run does.
+#
+# THEY WERE INLINE IN THE MAIN BODY UNTIL 2026-09-04, which is why the fix that
+# added the second key was unbound: `--self-test` returns at the top of this
+# file, long before the block, so nothing could plant a nested gate and watch a
+# finder miss it. Both keys return the EMPTY SET against this tree - there is no
+# gate below tests/ depth 1 - so the check's live output says nothing about
+# whether either finder can find anything, and a revert of the arms key changed
+# no verdict anywhere.
+#
+# nested_scanned reports the population they rule on, for the arm. It is the
+# pruned walk, so a vendored node_modules cannot inflate it; the name key walks
+# node_modules too, which only ever adds hits.
+nested_by_name() {   # <tests-dir> - the old key: a nested file CALLED *_gate.sh
+  find "$1" -mindepth 2 -name '*_gate.sh' -type f | LC_ALL=C sort
+}
+nested_by_arms() {   # <tests-dir> - the structural key: it CALLS gate_arms_init
+  nested_scan_files "$1" | xargs -r grep -l 'gate_arms_init' 2>/dev/null | LC_ALL=C sort
+}
+nested_scan_files() {
+  find "$1" -mindepth 2 \( -name node_modules -o -name .git \) -prune -o \
+    -type f ! -path "$1/lib/gate_arms.sh" -print 2>/dev/null | LC_ALL=C sort
+}
+nested_scanned() {
+  local n=0 out
+  out="$(nested_scan_files "$1")"
+  [ -n "$out" ] && n="$(printf '%s\n' "$out" | grep -c .)"
+  printf '%s\n' "$n"
+}
+nested_gates() {     # <tests-dir> - the union; either key alone is blind
+  printf '%s\n%s\n' "$(nested_by_name "$1")" "$(nested_by_arms "$1")" \
+    | grep -v '^$' | LC_ALL=C sort -u
+}
+
 # is_wired <repo-relative path> - true when some invocation of it does
 # something other than `--self-test`.
 is_wired() {
@@ -475,6 +511,46 @@ jobs:
 YML
   check "a gate run with other arguments IS wiring" 1
 
+  # -------------------------------------------------------------------------
+  # THE NESTED-GATE FINDERS. Both keys return the empty set against the real
+  # tests/ directory, so the live check cannot show that either one WORKS - a
+  # finder that matches nothing and a tree with no nested gate print the same
+  # thing, which is this repo's founding bug sitting inside the check written to
+  # distrust a name key.
+  #
+  # Case B IS THE REGRESSION for the two-key fix: a nested script that calls
+  # gate_arms_init under a name the old key never looked at. It is case A with
+  # ONE variable changed, the filename. Case C is its mirror - the name key
+  # finding what the arms key cannot - so neither key can be deleted while both
+  # pass, and case D is the negative that stops "found" meaning "everything".
+  # -------------------------------------------------------------------------
+  local nt="$tmp/tests" nfound
+  mkdir -p "$nt/lib" "$nt/sub"
+  printf '#!/usr/bin/env bash\ngate_arms_init a\n' > "$nt/sub/a_gate.sh"
+  printf '#!/usr/bin/env bash\ngate_arms_init b\n' > "$nt/sub/check_b.sh"
+  printf '#!/usr/bin/env bash\necho no arm accounting here\n' > "$nt/sub/c_gate.sh"
+  printf '#!/usr/bin/env bash\necho neither a gate name nor an arm\n' > "$nt/sub/verify_d.sh"
+  printf 'gate_arms_init() { :; }\n' > "$nt/lib/gate_arms.sh"
+  nfound="$(nested_gates "$nt")"
+
+  ncheck() {   # <label> <path under $nt> <want found: 1|0>
+    local label="$1" want="$2" seen=0
+    case "
+$nfound" in *"
+$nt/$want"*) seen=1 ;; esac
+    if [ "$seen" = "$3" ]; then
+      echo "  ok   $label"
+    else
+      echo "  FAIL $label: found=$seen, expected found=$3"
+      status=1
+    fi
+  }
+  ncheck "a nested *_gate.sh that declares arms is found"            sub/a_gate.sh      1
+  ncheck "a nested ARM-DECLARING script under another name is found" sub/check_b.sh     1
+  ncheck "a nested *_gate.sh that declares no arm is still found"    sub/c_gate.sh      1
+  ncheck "a nested script that is neither is NOT reported"           sub/verify_d.sh    0
+  ncheck "the gate_arms.sh that DEFINES the function is excluded"    lib/gate_arms.sh   0
+
   return "$status"
 }
 
@@ -518,18 +594,32 @@ echo "ci wiring gate"
 #
 # node_modules is pruned: tests/e2e-browser/node_modules is vendored third-party
 # JavaScript, and nothing in it is one of our gates.
-NESTED_BY_NAME="$(find "$TESTS_DIR" -mindepth 2 -name '*_gate.sh' -type f | LC_ALL=C sort)"
-NESTED_BY_ARMS="$(find "$TESTS_DIR" -mindepth 2 \( -name node_modules -o -name .git \) -prune -o \
-    -type f ! -path "$TESTS_DIR/lib/gate_arms.sh" -print 2>/dev/null \
-  | LC_ALL=C sort \
-  | xargs -r grep -l 'gate_arms_init' 2>/dev/null \
-  | LC_ALL=C sort)"
-NESTED="$(printf '%s\n%s\n' "$NESTED_BY_NAME" "$NESTED_BY_ARMS" | grep -v '^$' | LC_ALL=C sort -u)"
+#
+# THE ARM COUNTS THE FILES SCANNED, NOT THE GATES FOUND, and that is the only
+# honest count here: the finders return the empty set against this tree and are
+# meant to. An arm keyed on hits would have to declare a floor of zero, which
+# the contract refuses and rightly - "found nothing" and "looked at nothing"
+# would print identically. So the number is the population ruled on: 77 files at
+# mindepth 2 after the prune, measured 2026-09-04 over six subdirectories.
+# Floor 25 is far under that and far over the handful a collapsed find produces.
+# That the finders can find anything AT ALL is proved by --self-test, which is
+# where the planted nested gates live; this arm only says they were pointed at a
+# real population. Arm run_commands below is still the first thing to read on a
+# multi-arm failure - it is the one every OTHER arm's input derives from.
+N_NESTED_SCANNED="$(nested_scanned "$TESTS_DIR")"
+if ! gate_arm nested_scan "$N_NESTED_SCANNED" 25; then
+  fail "the nested-gate scan walked $N_NESTED_SCANNED file(s) below tests/ depth
+       1. The find stopped matching, so 'no nested gates' below means 'nothing
+       was looked at'."
+fi
+NESTED="$(nested_gates "$TESTS_DIR")"
 if [ -n "$NESTED" ]; then
   fail "these gates live below tests/ depth 1, where neither this gate's
        enumeration nor tests/gate_arm_census.sh's can see them:
 $(printf '%s\n' "$NESTED" | sed 's|^|         |')
        Move them to tests/, or both meta-gates are blind to them."
+elif [ "$N_NESTED_SCANNED" -ge 25 ]; then
+  pass "no gate hides below tests/ depth 1 ($N_NESTED_SCANNED file(s) scanned, by name AND by arm declaration)"
 fi
 
 # --- Arm 1: the extractor still finds commands -----------------------------
