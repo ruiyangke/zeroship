@@ -30,6 +30,9 @@
 //!   [`descriptors::EncryptionMode`]) + [`descriptors::GeoPoint`].
 //! - [`error`] — the leaf-crate sentinel error
 //!   ([`error::MaskSentinelError`]).
+//! - [`schema_name`] — [`SchemaName`], the validated physical schema identity.
+//!   Every builder and DDL emitter above takes it rather than a `&str`, so a
+//!   tenant id cannot reach a parameter that wants a schema.
 //!
 //! ## What does NOT live here (the *transform* layer — stays in plugin-db)
 //!
@@ -69,3 +72,6 @@ pub mod error;
 pub mod ident;
 pub mod mask_codec;
 pub mod query;
+pub mod schema_name;
+
+pub use schema_name::SchemaName;
