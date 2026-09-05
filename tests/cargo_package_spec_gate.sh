@@ -226,8 +226,32 @@ collect_specs() {
 # arm, or silently admitting prose. The floor notices only the emptying
 # direction. ``` is a weaker structural signal than a YAML mapping key, and
 # there is no stronger one available in markdown.
+#
+# THAT UNDERSTATED IT, AND THE RE-MEASUREMENT IS WHY ARM 4 EXISTS. Measured
+# 2026-09-04 by mutating this function to `BEGIN{inblk=1}` - which is exactly
+# what an unclosed fence does to every line after it: arm 3 went from 11 distinct
+# specs to 10 and the gate EXITED 0. The floor of 5 was never approached. So
+# inversion is not "the emptying direction only"; it is INDISTINGUISHABLE FROM A
+# CLEAN RUN, because the flipped population is live documents' PROSE, whose nine
+# distinct `-p` names all resolve today. The arm rules on the wrong text and says
+# the same thing.
+#
+# Both halves are now bound, in the two places they can be:
+#   * the CODE inverting - `--self-test`'s markdown pair, which goes red on that
+#     mutation and is run by its own CI step;
+#   * the DATA that causes it - arm 4 below, which refuses a live document whose
+#     fence markers do not pair up.
 fenced_only() {
   awk '/^[[:space:]]*```/ { inblk = !inblk; next } inblk { print }' "$1"
+}
+
+# True when every fence <file> opens is closed. An odd number of fence markers
+# leaves one open, and `fenced_only` then treats the rest of the file - and, in a
+# concatenated scan, nothing beyond it, since state is per file - as in-block.
+fences_balanced() {
+  local n
+  n=$(grep -cE '^[[:space:]]*```' "$1")
+  [ $((n % 2)) -eq 0 ]
 }
 
 # Fenced content of one document, run through the SAME cargo-line extraction the
@@ -439,6 +463,56 @@ if ! gate_arm doc_cargo_selectors "$n_doc" 5; then
 fi
 
 # ---------------------------------------------------------------------------
+# Arm 4: every live document closes every fence it opens.
+#
+# THIS IS ARM 3'S INPUT, RULED ON DIRECTLY. Arm 3 cannot detect its own
+# inversion: with the in-block state flipped it reads prose instead of commands,
+# finds ten `-p` names that all resolve, and prints what a clean run prints (11
+# distinct specs to 10, exit 0 - measured, by this gate rather than by a scratch
+# scan; a hand-rolled sweep without the continuation join says nine). A count
+# cannot separate "read the
+# commands" from "read the prose"; only the document's structure can, so this arm
+# rules on the structure.
+#
+# It is also the cheapest possible check of the thing that actually happens. An
+# unclosed fence is an editing accident, not a rewrite of this gate - and one of
+# them, anywhere in the 70 documents, silently redirects arm 3 for the rest of
+# that file.
+#
+# THE EXAMINED COUNT IS DOCUMENTS, because the question is asked once per
+# document and has an answer either way. It goes to zero if live_docs() stops
+# expanding - the same collapse that would empty arm 3 - so the two arms fail
+# together rather than one covering for the other.
+echo
+echo "== live documents pair their code fences =="
+
+n_fence_docs=0
+n_unbalanced=0
+while IFS= read -r d; do
+  [ -n "$d" ] || continue
+  n_fence_docs=$((n_fence_docs + 1))
+  fences_balanced "$d" && continue
+  n_unbalanced=$((n_unbalanced + 1))
+  bad "$d has an odd number of fence markers, so a fence is left open. Every line
+       after it reads as code to arm 3 above, and every fenced command after it
+       reads as prose - which arm cannot tell you, because both populations
+       resolve."
+done < <(live_docs)
+
+if [ "$n_unbalanced" -eq 0 ]; then
+  ok "all $n_fence_docs live documents close every fence they open"
+else
+  FAIL=$((FAIL + n_unbalanced))
+fi
+
+# FLOOR. 70 live documents on 2026-09-04. 30 is set to survive deleting a good
+# number of runbooks and references while catching live_docs() collapsing, which
+# is the failure that would make this arm and arm 3 both vacuous at once.
+if ! gate_arm doc_fence_balance "$n_fence_docs" 30; then
+  FAIL=$((FAIL + 1))
+fi
+
+# ---------------------------------------------------------------------------
 # Self-test: prove the detector still fires. Two runs, one variable apart.
 # ---------------------------------------------------------------------------
 if [ "${1:-}" = "--self-test" ]; then
@@ -534,6 +608,27 @@ MD
   else
     bad "DELETED escape control FAILED: the escape ate the whole block, so one
        historical command would silently un-cover every command beside it"
+  fi
+
+  # THE FENCE-BALANCE PAIR, arm 4's predicate. One variable: the closing fence.
+  # The unbalanced fixture is the DOCUMENT-side cause of the inversion the
+  # markdown pair above catches on the CODE side, and neither substitutes for the
+  # other: a live document with an open fence leaves this file untouched, so no
+  # mutation of this script would ever reveal it.
+  printf 'Prose.\n\n```bash\ncargo build -p zeroship-cli\n' > "$probe/open.md"
+  printf 'Prose.\n\n```bash\ncargo build -p zeroship-cli\n```\n' > "$probe/closed.md"
+  if fences_balanced "$probe/open.md"; then
+    bad "fence-balance FAILED: a document that opens a fence and never closes it
+       passed. Arm 3 then reads every following line of it as code, or every
+       fenced command in it as prose, and its count barely moves either way"
+  else
+    ok "fence balance: an unclosed fence is refused"
+  fi
+  if fences_balanced "$probe/closed.md"; then
+    ok "fence-balance control: the same document with its closing fence passes"
+  else
+    bad "fence-balance control FAILED: a correctly fenced document is refused, so
+       arm 4 would report every live document and mean nothing"
   fi
 fi
 

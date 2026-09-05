@@ -520,12 +520,34 @@ jobs:
       # a database of its own and carries its reason on the allowlist in
       # tests/ci_wiring_gate.sh - the step that makes this question mechanical
       # instead of something somebody remembers to ask.
+      # SELF-TEST FIRST, and this one had been written and never run. The gate's
+      # own header said "Run the detector's own positive/control pair: this
+      # script --self-test" while the only invocation in this file was the bare
+      # run below - so the pair that proves its fence and YAML filters are
+      # SELECTIVE, rather than blind, was enforced by whoever remembered. Its
+      # markdown pair is what notices `fenced_only` inverting: measured 2026-09-04
+      # with the in-block state flipped, the bare run's doc arm went 11 -> 10 and
+      # EXITED 0, while the self-test went red on three cases - both halves of
+      # that pair and the DELETED control beside it.
+      - name: Cargo package spec gate self-test
+        run: tests/cargo_package_spec_gate.sh --self-test
       - name: Every cargo -p spec in the repo names a real package
         run: tests/cargo_package_spec_gate.sh
       - name: The data crates cannot reach a driver or the V8 runtime
         run: tests/data_crate_closure_gate.sh
       - name: No feature routes onto a dev-only dependency
         run: tests/dev_dep_feature_route_gate.sh
+      # TWO STEPS, and the split is the point. The bare run passes at zero bad
+      # citations, which is also what an extractor that stopped matching prints;
+      # its arm floors catch a collapse to nothing but cannot see ONE capability
+      # going missing inside a population that is mostly something else. Measured
+      # 2026-09-04: deleting the line-number group from the extractor removes
+      # every line check the gate performs and takes its AGENTS.md arm from 77 to
+      # 76 - green at floor 30. The self-test plants a citation one line past
+      # end-of-file and requires a refusal, with the eof citation beside it as the
+      # control, so the capability is bound rather than counted.
+      - name: Doc citation gate self-test
+        run: tests/doc_citation_gate.sh --self-test
       - name: Every path and line a document cites exists
         run: tests/doc_citation_gate.sh
       - name: The napi addon's declared and exported functions agree
