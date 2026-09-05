@@ -1022,77 +1022,229 @@ already this tree's habit. `LocalDiskBlobStore::blob_path` shards blobs into 256
 buckets by `hash[0..2]` (`blob.rs:214-218`). Directory chunking is the same
 discipline applied to a lookup key instead of a content hash.
 
-## Size arithmetic, and the estimate that gates the premise
+## Size arithmetic, re-derived rather than estimated
 
-DESIGNED entry layout, packed binary, with derivable fields omitted:
+This section carried an ESTIMATE (112 bytes packed) beside a MEASURED JSON figure
+(347 bytes) and called the 3.1x band between them the open question that gates
+replicate-whole. The band was measured wrongly - it paired a long-name packed
+figure against a short-name JSON one - and, more importantly, it was the wrong
+question. Both halves are re-derived below, field by field, from the schema and
+the id formats. There is still NO PRODUCTION CORPUS: zeroship is pre-launch, so
+every per-entry width here is derived from a real definition and every
+population figure is arithmetic over an assumed name-length distribution, tagged
+as such.
 
-```
-  app_id                       16 B    raw UUID
-  name                       1+~14 B   length-prefixed host label
-  deploy_hash                  32 B    raw sha256; also the manifest address
-  api_key_hash                 32 B    raw sha256
-  plan ordinal                  2 B    index into the plan catalog
-  spend_state, account_state,
-    provisioned                 2 B
-  entry generation              8 B
-                             ------
-                                107 B, call it 112 with framing
-```
-
-Two fields are omitted because Part 2 measured them derivable. `oauth_client_id`
-is `oac_` plus base62 of `app_id` and round-trips exactly. `sector_identifier` is
-`{scheme}://{apex_host}` where the apex is the derived default; when it equals
-that default the field carries no information, and an app with a custom apex
-carries it explicitly. ASSUMED, not measured: that the derived default covers the
-overwhelming majority. There is no production corpus to check this against, and
-if it is wrong the entry grows by roughly 30 bytes.
-
-**The 112-byte figure is an ESTIMATE, not a measurement, and it is the number
-that gates the whole replicate-whole premise.** For contrast, a MEASURED upper
-bound, with the shape pinned so it can be re-run: the same nine facts written as
-the JSON this tree already uses -
-`{"app_id":"<36-char uuid>","name":"myapp","plan_id":"pln_<22>","api_key_hash":"<64>","deploy_hash":"<64>","spend_state":"allow","account_state":"active","provisioned":true,"generation":1}`
-- is **347 bytes**. No separate manifest digest appears, because `deploy_hash`
-already is one. The band between 112 and 347 is a factor of 3.1 and it decides
-the argument:
+DERIVED entry layout, packed binary, one line per field, each width justified
+against the definition beneath it:
 
 ```
-  per entry   1M hosts     10M hosts
-  ---------  ----------   ----------
-     112 B    106.8 MiB     1.04 GiB
-     128 B    122.1 MiB     1.19 GiB
-     256 B    244.1 MiB     2.38 GiB
-     347 B    330.9 MiB     3.23 GiB
+  app_id             16 B   raw uuid
+  deploy_hash        32 B   raw sha256, and ALSO the manifest address
+  api_key_hash       32 B   raw sha256
+  generation          8 B   u64
+  name arena offset   4 B   u32 (u16, 2 B, if the arena is chunk-local)
+  name length         1 B   u8
+  plan ordinal        2 B   u16 index into the root's plan table
+  state               1 B   spend 2b | account 2b | provisioned 1b
+                            | archived 1b, 2 bits spare
+                    ------
+                      96 B  fixed
+  name              +  L B  in the chunk's string arena
 ```
 
-Read this as the gate it is. At 1M hosts every figure in the column is something
-a gateway process can hold, so replicate-whole survives at 1M on any encoding. At
-10M hosts, 112 bytes is 1 GiB of resident index per gateway and 347 bytes is
-3.23 GiB; the first is arguable, the second is not. **So replicate-whole is sound
-at 1M and is conditional at 10M on the packed encoding landing near 112 bytes.
-That conditional has not been measured and cannot be until an encoder exists.**
-If it lands at 256 the premise needs a partial-replication story at 10M, and that
-is a different proposal.
+MEASURED, each from the definition named:
 
-For scale, what the arithmetic replaces: MEASURED, the mean full `RouteEntry`
-with its manifest inline is 1588 bytes, so 1M apps is a **1.48 GiB** snapshot
-pulled by every gateway every 5 seconds and 10M is 14.8 GiB. The directory at 112
-bytes is about 14x smaller, and unlike the snapshot it is not re-transferred
-wholesale.
+- **`app_id` is a raw uuid, not a typed id.** `zeroship.apps.id` is
+  `t.uuid().notNull().default(uuidV4())`
+  (`db/migrations-ts/20260702000200_control_tables.ts:152`). 16 raw bytes, 36 bytes
+  in canonical text.
+- **A digest is hex in every store and on every wire we have.**
+  `deploy_hash = sha256_hex(&canonical_omit)` (`unpack.rs:237`) and
+  `hash_api_key` is `hex::encode(hasher.finalize())`
+  (`crates/zeroship-core/src/auth/mod.rs:71-75`). Both columns are `t.text()`,
+  both are 64 characters, both are 32 bytes raw. Packing them raw is where a
+  third of the JSON goes.
+- **`plan_id` IS a typed id, contrary to the shape a `t.text()` column suggests.**
+  `builtin_plan_id` mints `pln_` plus `uuid_to_base62` of a frozen SHA-256
+  derivation (`crates/zeroship-control/src/plan_catalog.rs:321-334`), so the
+  value is 26 ASCII characters and, underneath, 16 uuid bytes. It is also a small
+  closed set - three built-ins (`free`, `pro`, `unlimited`, `:340-354`) with no
+  operator API to mint more - so a u16 ordinal into a plan table carried by the
+  root replaces 26 bytes with 2.
+- **`live` needs more than one bit, and the column its name suggests DOES NOT
+  EXIST.** `zeroship.apps.suspended` is created in the base migration
+  (`db/migrations-ts/20260702000200_control_tables.ts:159`) and then DROPPED,
+  together with `audit_locked`, by
+  `db/migrations-ts/20260817000200_drop_app_freeze_flags.ts:21-22` - whose own
+  comment records that both were operator freeze levers that "never reached the
+  data plane." Derived from the migration corpus, NOT from a live introspection:
+  no database on the inspection cluster carries a `zeroship.apps` at all, so what
+  is stated here is the shape the corpus produces, and `apps` ends at thirteen
+  columns. The live states are therefore `SpendState`
+  (4: allow/warn/degrade/block) and `AccountState` (3: active/past_due/suspended)
+  on `RouteEntry` (`crates/zeroship-core/src/types.rs:171-177` and `:204-209`),
+  plus `provisioned` and, for a directory specifically, an archived bit that
+  today's route table does not need because the projection filters archived apps
+  out entirely
+  (`WHERE a.archived_at IS NULL`, `registry.rs:860`). A directory cannot do that:
+  an archived app KEEPS its name (`apps_name_key` is unique and archive retains
+  the row), so "archived" and "no such app" must be distinguishable or the
+  authoritative negative answer is wrong. 4 * 3 * 2 * 2 = 48 states, 6 bits, one
+  byte with two to spare.
+- **`zone` does not exist.** No region, zone or datacenter concept is in the
+  tree. ASSUMED: a u16 zone id, on the grounds that anything smaller re-opens as
+  soon as a third region lands and anything larger is unjustifiable.
+- **The name must be STORED, not just hashed.** A chunk keyed on
+  `sha256(name)` could hold a truncated hash instead of the name, but a 64-bit
+  prefix over 10M entries carries a birthday collision probability near 2.7e-6,
+  and a collision on a lookup turns an authoritative NEGATIVE into a wrong
+  POSITIVE - a request routed to another tenant's app. The name is the
+  confirmation, so it is load-bearing and is charged for.
 
-Chunk arithmetic, DESIGNED (dividing the estimate above):
+The previous estimate's 107 was right by cancellation, not by construction: it
+charged `1+~14` for an inline name (no arena pointer, which a fixed-width
+mmap-and-binary-search record needs) and 2 bytes for three flags that fit in one.
+The two errors nearly cancel. Re-derived, the fixed record is 96 bytes and the
+entry is `96 + L`.
+
+**The lookup key is the LABEL, not the FQDN, and that is what makes L small.**
+`extract_app_name` takes the first label of `Host`
+(`crates/zeroship-gateway/src/router/dispatch.rs:82-89`) and the cache index is
+`HashMap<String, Uuid>` keyed on `entry.name` (`sync.rs:43`, built at `:220`).
+`reserved_names.rs:6` states it outright: "An app's name IS its hostname label."
+The apex is a deployment constant (`{$ZEROSHIP_DOMAIN}` in
+`deploy/ops/Caddyfile`), so it costs nothing per entry. The moment custom domains
+ship, the key becomes an FQDN and L roughly doubles; that is the single largest
+future mover of the total, and it is a design decision, not a distribution.
+
+MEASURED bound on L, and the hole it exposes: `create_app` refuses a name that
+`is_empty() || name.len() > 64` or is not `[A-Za-z0-9_-]`
+(`crates/zeroship-control/src/registry.rs:245-254`). That is the ONLY check -
+`zeroship.apps.name` carries no CHECK constraint, and three other live
+`INSERT INTO zeroship.apps` sites bypass it (`schema_apply_store.rs:377`,
+`zeroship-worker/src/handler.rs:3808`, `cron/spend_recompute.rs:664`). Two
+consequences for the encoder: `name_length` as a u8 is only safe while that one
+Rust function holds, and **the ceiling is wrong anyway**. A DNS label is at most
+63 octets (RFC 1035, sections 2.3.4 and 3.1: the length octet's high two bits are
+zero, so six bits bound the label), and `_` is not a legal hostname character
+(RFC 1123 section 2.1); a 64-character or underscore-bearing name is a name that
+cannot be resolved or certificated. The validator should say 63 and LDH.
+
+ASSUMED, and this is the only invented distribution in the section: names cluster
+short. The sample available is this repository's own 33 app-shaped directories
+under `examples/`, MEASURED at n=33, min 5, median 10, mean 11.03, p90 15, max 24.
+That is a biased sample - probes and demos, named by engineers - and it is stated
+as the assumption rather than dressed up as a population. Everything below is
+computed at L=11 with the L=10 / L=16 / L=64 arithmetic beside it, so a reader who
+rejects the assumption can re-read the row they believe.
+
+MEASURED, by construction of the exact byte strings: the debuggable JSON form of
+the same nine facts, with `RouteEntry`'s field names verbatim (there is no
+`serde(rename_all)` on the struct at `types.rs:213`), is a fixed skeleton of
+**326 bytes** plus the name, the two enum literals, the boolean literal and the
+generation digits. The 347 this document previously quoted reproduces EXACTLY -
+`326 + 5 (name "myapp") + 5 ("allow") + 6 ("active") + 4 ("true") + 1 (gen)` -
+but it is a 5-character name. At the assumed L=11 with the same literals the
+entry is **353 bytes**, and over a 100000-entry corpus with a plausible state mix
+the mean is **354.92**.
+
+So the packed-to-JSON band, taken at ONE name length instead of two, is
+`354.92 / 107.02 = 3.32x`, not 3.1x and not the 4.4x an earlier draft carried.
+
+MEASURED over a GENERATED corpus - the entries are synthetic, the compressor is
+not. 100000 entries per row; names are hyphen-joined tokens from a 96-word
+vocabulary at the length distribution above (a second arm uses random base36
+names of the same lengths, to bound how much of the ratio is name structure);
+uuids, both sha256 hex fields and the base62 plan suffix are uniform random.
+`zstd` 1.5.7, no dictionary, default window, one shot over the whole corpus:
+
+```
+  form                            B/entry   zstd -3   ratio   zstd -19   ratio
+  ------------------------------  -------   -------   -----   --------   -----
+  JSON, 9 facts, L~11              354.92    109.83   3.23x      99.36   3.57x
+  JSON, 9 facts, random names      354.99    114.10   3.11x     102.60   3.46x
+  PACKED, 9 facts, L~11            107.02     93.86   1.14x      90.03   1.19x
+  JSON, 6 fields, L~11             216.05     69.50   3.11x      61.67   3.50x
+  PACKED, 6 fields, L~11            69.02     58.89   1.17x      56.15   1.23x
+```
+
+**That table settles the question this section was asking, and answers it
+differently than the framing expected.** JSON's 3.3x penalty is a RESIDENT-memory
+penalty and almost NOT a bandwidth penalty at all, because zstd recovers very
+nearly the same factor: 164 of the 326 skeleton bytes are hex and uuid text at 4
+bits of entropy per character, and roughly 100 more are key names repeated
+identically in every entry. Compressed JSON on the wire (109.83 B/entry) costs
+about what raw packed costs in memory (107.02). The packed form barely compresses
+- 1.14x - precisely because it has already removed the redundancy zstd was
+living on.
+
+DERIVED, dividing by the assumed population:
+
+```
+                                    1M          10M        100M
+  PACKED 9-fact resident        102.1 MiB   0.997 GiB    9.97 GiB
+  PACKED 6-field resident        65.8 MiB   0.643 GiB    6.43 GiB
+  JSON 9-fact resident          338.5 MiB   3.305 GiB   33.05 GiB
+  PACKED 9-fact on the wire      89.5 MiB   0.874 GiB    8.74 GiB
+  JSON 9-fact on the wire       104.7 MiB   1.023 GiB   10.23 GiB
+```
+
+Read that as the gate, corrected. **Replicate-whole survives at 1M on any
+encoding and at 10M on the packed one**, which is what the earlier draft
+suspected; the correction is that the conditional it hung the premise on -
+"the packed encoding landing near 112 bytes" - is met at 107.02, and would still
+be met at 112 if every name were 16 characters. What does NOT survive at 10M is
+holding the JSON resident (3.3 GiB), and what was never the problem is shipping
+JSON over the wire (1.02 GiB compressed, within 17% of packed).
+
+DERIVED sensitivity, one input at a time off `96 + 11.02 = 107.02`:
+
+```
+  change                                   B/entry    delta
+  drop api_key_hash                          75.02    -32.00
+  drop deploy_hash / manifest digest         75.02    -32.00
+  drop BOTH digests                          43.02    -64.00
+  generation u64 -> u32                     103.02     -4.00
+  name offset u32 -> u16 (chunk-local)      105.02     -2.00
+  app_id raw 16 B -> 36 B text              127.02    +20.00
+  plan ordinal u16 -> pln_ text             131.02    +24.00
+  mean name 11 -> 16                        112.00     +4.98
+  mean name 11 -> 24 (FQDN key)             120.00    +12.98
+  every name at the 64 ceiling              160.00    +52.98
+  pad the record to an 8-byte multiple      115.02     +8.00
+```
+
+**The single input that moves the total most is whether BOTH sha256 digests
+belong in the entry.** They are 64 of the 96 fixed bytes - 67% - and no other
+single change is within a factor of two of that. `deploy_hash` earns its place:
+it is the manifest address and the whole immutable half hangs off it.
+`api_key_hash` is the one to interrogate. It has exactly ONE production consumer,
+`check_api_key` at `crates/zeroship-gateway/src/auth.rs:19`, on a header-bearing
+request path. Moving it out of the directory and into a lazily-fetched per-app
+credential object takes the entry from 107 to 75 bytes and 10M hosts from 0.997
+GiB to 0.699 GiB. That is a real decision with a real cost - the first
+`X-Api-Key` request against a cold app would take a fetch - and it is now a
+decision rather than a guess.
+
+The second-largest mover is the name-length assumption, and it is asymmetric: the
+downside is bounded (a 5-byte-shorter mean saves 5 bytes) and the upside is not
+(every name at the legal ceiling costs 53 more, and an FQDN key costs 13). The
+ceiling case is not a forecast, but it is the one an encoder must not fall over
+on.
+
+Chunk arithmetic, DESIGNED (dividing the derived entry above):
 
 ```
   chunks   per entry   hosts    entries/chunk   chunk size   root size
   ------   ---------   -----    -------------   ----------   ---------
-    4096      128 B      1M           244          30.5 KiB   128.0 KiB
-    4096      128 B     10M          2441         305.1 KiB   128.0 KiB
-    4096      347 B     10M          2441         827.2 KiB   128.0 KiB
-   65536      128 B     10M           153          19.1 KiB     2.0 MiB
+    4096      107 B      1M           244          25.5 KiB   128.0 KiB
+    4096      107 B     10M          2441         255.0 KiB   128.0 KiB
+    4096      355 B     10M          2441         846.4 KiB   128.0 KiB
+   65536      107 B     10M           153          16.0 KiB     2.0 MiB
 ```
 
 At 4096 chunks (k = 12, three hex characters of prefix) and 10M hosts, one app
-changing republishes 305 KiB instead of 1.19 GiB: a 4096-fold reduction in write
+changing republishes 255 KiB instead of 0.997 GiB: a 4096-fold reduction in write
 amplification, by construction rather than by measurement. Raising k to 16
 shrinks chunks by another 16x at the cost of a 2 MiB root that changes on every
 mutation, which is the wrong trade while the root is the hot object. **k is a
@@ -1423,13 +1575,14 @@ a field of the root object so it can be raised without a flag day, at the cost o
 every reader carrying a re-chunk path.
 
 **Recommendation: put k in the root and start at 12.** The arithmetic above is
-DESIGNED, not measured, and the two inputs that would settle it are both
-unmeasured today: the packed entry size (ESTIMATE, 112 bytes, against a MEASURED
-JSON upper bound of 347) and the app creation and mutation rate, for which this
-tree has no instrument. A k baked into readers as a constant is a value that
-cannot be corrected once the number it was chosen from turns out wrong, and the
-number it was chosen from is currently an estimate over an assumed population.
-The re-chunk path is cheap while the fleet is small and impossible to add later.
+DESIGNED, and ONE of its two inputs is now settled: the packed entry is
+`96 + name`, derived field by field in Part 3, which is 107 bytes at the assumed
+name length and 160 at the legal ceiling. The other is not, and cannot be from
+this tree: the app creation and mutation rate, for which there is no instrument.
+A k baked into readers as a constant is a value that cannot be corrected once the
+number it was chosen from turns out wrong, and half the number it was chosen from
+is still an assumed population. The re-chunk path is cheap while the fleet is
+small and impossible to add later.
 
 ## 2. Does the envelope collapse into `manifest.json` entirely?
 
@@ -1515,13 +1668,19 @@ decision cannot be implemented in either direction.
 These three numbers gate the design. Two of them cannot be taken from this
 repository at all, which is itself worth stating.
 
-**1. Real directory entry size, measured against the `apps` table.** Build the
-packed encoder, run it over a real `zeroship.apps` join, and report the byte
-distribution. The 112-byte figure in Part 3 is an ESTIMATE and the MEASURED JSON
-upper bound is 347; the factor of 3.1 between them decides whether replicate-whole
-survives at 10M hosts. The measurement is cheap - it is an encoder and a query -
-and it is the only one that changes the shape of the design rather than its
-parameters. Nothing else on this list should be done first.
+**1. The NAME LENGTH DISTRIBUTION - and only that.** This item used to read "real
+directory entry size," on the grounds that the 112-byte packed figure was an
+estimate and the 3.1x band against JSON decided whether replicate-whole survives
+at 10M. Part 3 now derives both halves from the schema, and the answer is that
+the entry is `96 + name`: every fixed field has a width fixed by a definition in
+this tree, so there is nothing left to measure in it. What is left is the ONE
+free variable. `name` is creator-chosen, bounded only by
+`registry.rs:245-254`, and its distribution is the single input the arithmetic
+still assumes - taken here from 33 example directories, mean 11.03. A real corpus
+moves the 10M figure between 0.94 GiB (all names at 5) and 1.49 GiB (all names at
+the 64 ceiling), so it is worth a query the day one exists; it is NOT worth
+building an encoder to find out, because the encoder's output is already known
+per name length. Nothing else on this list should be done first.
 
 **2. App creation and mutation rate.** Chunk count, root republication frequency
 and gossip fanout all follow from how often the directory changes, and this tree
@@ -1761,6 +1920,19 @@ with them: 1.67 GB to 1.59 GB, 1.55 GiB to 1.48 GiB, 330 MB/s to 318 MB/s, "15x
 smaller" to 14x, and the 112-to-JSON band from 4.4x to 3.1x. **No conclusion in
 this document changes**, which is exactly why the error survived: every one of
 these numbers was load-bearing for an argument that a 5% error could not move.
+
+**The band moved a FOURTH time, and this one was a category error rather than an
+arithmetic one.** 4.4x, then 3.1x, and now 3.32x - but the correction that
+matters is that the two figures were never taken at the same name length. 112
+assumed a ~14-character name and 347 a 5-character one, so the ratio compared two
+different apps. Part 3 now derives the packed entry as `96 + name` from the
+column definitions and the JSON as `326 + name + literals` from the exact byte
+string, so both move together and the band is a property of the ENCODING alone.
+Two things the re-derivation found that no amount of re-checking the ratio would
+have: the packed 107 was right by cancellation (an omitted arena pointer against
+an over-charged flag byte), and the question the band was posed to settle was the
+wrong one - zstd recovers 3.2x on the JSON, so the penalty is resident memory,
+not bandwidth. A ratio between two numbers is not a measurement of either.
 
 ## Found by the adversarial re-audit of `ed161c341`
 
