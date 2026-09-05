@@ -343,12 +343,23 @@ So the comparison form buys nothing the name does not, and costs a statement in 
 forever.
 
 **Only the producer is missing; the consumer ships.**
-`crates/zeroship-data-engine/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`, and `:313-315`
+`crates/zeroship-data-engine/src/transaction/reducer/identity.rs:97` defines `SchemaEpoch`, and `:265-267`
 compares the observed epoch against the expected one and returns `Verdict::ReResolve` - retryable,
-distinct from the terminal denials above it. What has no input is
-`crates/zeroship-data-engine/src/transaction/driver.rs:106`, which mints `SchemaEpoch::new(0)` on both
-sides and says so at `:100-101`: "The wiring is real; the *input* is not yet." Building the epoch is
-supplying one input to a classifier that already ships.
+distinct from the terminal denials above it. What has no input is `expected_authority` at
+`crates/zeroship-data-engine/src/transaction/driver.rs:142-148`, which mints `SchemaEpoch::new(0)`, and
+`observation_for` at `:158-165`, which echoes it back; the doc comment at `:140-141` says so outright:
+"The wiring is real; the *input* is not yet." Building the epoch is supplying one input to a
+classifier that already ships.
+
+<!-- CORRECTED 2026-09-04. Three of this paragraph's four line citations were
+wrong, and they were wrong DIFFERENTLY from the same claims in AGENTS.md - two
+documents drifting independently over one piece of code, not one copy-paste
+propagating. `identity.rs:313-315` pointed at `);`, `}` and a blank line;
+`driver.rs:106` is inside unrelated BACKEND_GENERATION prose; and `:100-101` was
+credited with a quote that lives at `:140-141`. Only `identity.rs:97` was right.
+Every one passed tests/doc_citation_gate.sh, which rules on the path and on the
+line being inside the file, never on it being the right line. -->
+
 
 **Live epochs are capped at two, fail-closed.** The reaper is part of the apply, not a sweep: an
 apply that cannot drop epoch `E-1`'s roles refuses to advance to `E+1`. That bounds an otherwise

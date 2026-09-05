@@ -23,18 +23,19 @@ verification** are real.
   same dev server the cargo integration tests use. The harness creates a
   **dedicated** DB `zeroship_stripe_e2e` and **never** touches the real
   `zeroship` DB nor the concurrent `zeroship_billing_test` DB.
-- `docker`, the `zeroship-platform-migrate` binary (invoked through
-  `deploy/ops/db-migrate.sh`), `node`, `openssl`, `curl`, and `psql` (taken from
-  $PATH, else the nix store; override with `PSQL`. Absent psql is a refusal,
-  not a skip).
+- `docker`, the built `zero-migrate` CLI
+  (`packages/zero-migrate-cli/dist/cli-bin.js`, which the harness reaches
+  through `zs_platform_migrate` in `tests/lib/runtime_secrets.sh`), `node`,
+  `openssl`, `curl`, and `psql` (taken from $PATH, else the nix store;
+  override with `PSQL`. Absent psql is a refusal, not a skip).
 - The operator's Stripe **TEST** keys, sourced from the env file (see Secrets).
 
 ## Run
 
 ```bash
-# 1. Build control if needed
+# 1. Build control and the migrate CLI if needed
 cargo build --release -p zeroship-control
-cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
+pnpm install && pnpm build
 
 # 2. Source the Stripe TEST keys (REQUIRED — the harness skips cleanly if unset)
 source /home/ruiyang/.config/zeroship-stripe-test.env

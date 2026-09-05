@@ -143,8 +143,11 @@ service reaches it over HTTP via `SANDBOX_URL` / `SANDBOX_TOKEN`.
 
 The single `Dockerfile` builds all SIX binaries (`zeroship-control`,
 `zeroship-gate`, `zeroship-worker`, `zeroship-auth`, the `zeroship` CLI, and
-`zeroship-platform-migrate` - the platform DB migration one-shot the `migrate`
-service runs) in three stages:
+`zeroship-migrate-server` - the creator migration service) in three stages.
+The SIXTH used to be `zeroship-platform-migrate`; it was deleted on 2026-08-28
+and the platform one-shot is now the Node `zero-migrate` CLI, which ships in a
+separate `migrate` stage rather than in `runtime`, so that the control, gateway,
+worker and auth containers keep carrying no JavaScript runtime:
 
 1. **`sdks` (node:22)** runs `pnpm install --frozen-lockfile && pnpm build` to
    emit `sdks/bootstrap/dist/{runtime-entry,dispatcher}.js`. The runtime crate
@@ -453,23 +456,31 @@ binaries, including the arms where a dependency is taken away.
 
 ## Database migrations
 
-The shared Postgres `zeroship` schema is managed by the platform migration
-runner, built from `zeroship-migrate-adapter` with its `platform-cli` feature.
-After Postgres is healthy and before control/auth start, the one-shot `migrate`
-service runs:
+The shared Postgres `zeroship` schema is managed by the `zero-migrate` CLI, a
+Node program that ships in its own `migrate` image stage. After Postgres is
+healthy and before control/auth start, the one-shot `migrate` service runs:
 
 ```bash
-zeroship-platform-migrate \
-  --database-url-file /etc/zeroship/secrets/migrate-dsn \
-  --migrations-dir /db/migrations-ts \
-  --project-schema zeroship \
-  --project-id zeroship
+# deploy/ops/migrate-entrypoint.sh, the migrate image's entrypoint
+--migrations-dir /app/db/migrations-ts \
+--database-url-file /etc/zeroship/secrets/migrate-dsn
 ```
 
-The privileged DSN is mounted as a file, not passed as an argument: there is no
-`--database-url` value flag, because a container's argv is published by
-`docker inspect`, `docker ps --no-trunc` and /proc/<pid>/cmdline. The file must
-be mode 0600.
+THIS SECTION DESCRIBED A DELETED BINARY UNTIL 2026-09-04. It said the runner was
+`zeroship-platform-migrate`, "built from `zeroship-migrate-adapter` with its
+`platform-cli` feature"; that crate and that binary were both deleted on
+2026-08-28, and three details of the invocation went with them. `--project-schema`
+and `--project-id` are gone - neither was a knob, since the corpus spells
+`schema: "zeroship"` itself and the CLI derives its advisory-lock key from the
+schema. And the corpus path is `/app/db/migrations-ts`, not `/db/migrations-ts`:
+the `.ts` files resolve `import ... from "@zeroship/migrate"` by Node's upward
+walk, so they must sit above the pnpm store at `/app/node_modules`.
+
+The privileged DSN is mounted as a file, not passed as an argument, because a
+container's argv is published by `docker inspect`, `docker ps --no-trunc` and
+/proc/<pid>/cmdline. The CLI's own flag IS `--database-url <value>` and this path
+deliberately does not use it: `deploy/ops/migrate-entrypoint.sh` takes the path
+and builds the 0600 config the CLI reads. The file must be mode 0600.
 
 `migrate-server` mounts the SAME file and reads it through
 `ZEROSHIP_MIGRATE_SERVER_PROVISION_DATABASE_URL`, which defaults to

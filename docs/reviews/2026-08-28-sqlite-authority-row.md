@@ -220,6 +220,29 @@ still happens elsewhere. It does not happen anywhere. Measured across
 
 ### And if the epoch's question ever returns, the carrier already exists
 
+**CORRECTED 2026-09-04: IT DOES NOT. THIS WHOLE SUBSECTION IS NOW FALSE, and it
+is left standing rather than deleted because a later document leans on it.** The
+carrier and all four of the code citations below are gone.
+`crates/zeroship-plugin-db/src/audit.rs` does not exist; the deletion is recorded
+in two places - `crates/zeroship-data-engine/src/backend/mod.rs:300-304` says the
+audit-table operations "(`ensure_audit_table`, `next_schema_version`,
+`write_audit_row`, ...) and the `IndexBuilder` capability they existed to record
+are both DELETED", because with the data plane's last DDL removed the provenance
+log had nothing to record. `grep -rn next_schema_version crates/` now matches
+only that comment.
+
+So "nobody needs to re-mint `__zeroship_state`, the carrier already exists" is no
+longer a reason to do nothing: **there is no carrier on either tier.** This
+matters beyond bookkeeping, because
+`docs/proposals/2026-08-26-sc4-dev-and-hmr-mechanism.md` cites this review for
+its "No dev epoch, and no dev authority domain - there is nothing here to
+specify" conclusion, and
+`docs/proposals/2026-08-28-app-database-decoupling.md` says the opposite, that "a
+dev-tier equivalent is owed". Whoever settles that disagreement must start from
+the tree as it is, not from the paragraph below.
+
+The original text follows, for the record:
+
 Worth recording so nobody re-mints `__zeroship_state` later. A monotonic per-app
 schema revision, written by the migration path into the **app's own schema**,
 already exists on both backends: `__zeroship_migrations.schema_version`
