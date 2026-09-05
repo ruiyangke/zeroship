@@ -41,7 +41,7 @@ The shape we want (v1 flat `resources` map):
       "cache": { "max_age": 31536000, "immutable": true }
     },
     "/[...rest]": {
-      "auth": "anon",
+      "auth": "anonymous",
       "publicly_accessible": true
     }
   },
@@ -49,7 +49,7 @@ The shape we want (v1 flat `resources` map):
 }
 ```
 
-The `/[...rest]` catch-all has no `static` action — a URL-namespace resource without a routing action defaults to worker SSR dispatch. `auth: "anon"` + `publicly_accessible: true` satisfies the gateway's secure-by-default check.
+The `/[...rest]` catch-all has no `static` action — a URL-namespace resource without a routing action defaults to worker SSR dispatch. `auth: "anonymous"` + `publicly_accessible: true` satisfies the gateway's secure-by-default check.
 
 ## Client manifest
 

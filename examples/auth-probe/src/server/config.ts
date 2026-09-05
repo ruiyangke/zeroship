@@ -15,14 +15,14 @@ import { defineApp } from "@zeroship/server";
 // measurement, not fix anything. See docs/pilot/e2e-scenarios.md scenario 6.
 export default defineApp({
   resources: {
-    "rpc:probe.public": { auth: "anon", publiclyAccessible: true },
+    "rpc:probe.public": { auth: "anonymous", publiclyAccessible: true },
     "rpc:probe.userDeclared": { auth: "user" },
     // Anonymously reachable ON PURPOSE: it is how the kernel's own
     // `requireUser()` throw becomes observable on the deployed side, where a
     // gated procedure is answered by the gateway and never reaches the worker.
-    "rpc:probe.requireAnon": { auth: "anon", publiclyAccessible: true },
+    "rpc:probe.requireAnon": { auth: "anonymous", publiclyAccessible: true },
     "rpc:probe.requireGated": { auth: "user" },
-    "rpc:probe.appGate": { auth: "anon", publiclyAccessible: true },
-    "rpc:probe.userShape": { auth: "anon", publiclyAccessible: true },
+    "rpc:probe.appGate": { auth: "anonymous", publiclyAccessible: true },
+    "rpc:probe.userShape": { auth: "anonymous", publiclyAccessible: true },
   },
 });

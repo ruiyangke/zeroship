@@ -1,7 +1,7 @@
 // uri-echo — reflects the EXACT URL the worker's V8 sees back to the caller,
 // so a test can assert what the gateway forwarded (path, encoding, query).
 //
-// A plain `{ fetch }` app: URL resources default to anon/public, so every path
+// A plain `{ fetch }` app: URL resources default to anonymous/public, so every path
 // dispatches to this handler through the gateway without a session.
 export default {
   fetch(request: Request): Response {

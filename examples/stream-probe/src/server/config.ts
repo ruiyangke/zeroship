@@ -6,7 +6,7 @@ import { defineApp } from "@zeroship/server";
 // This app has no users and no per-user data; it emits a fixed counter.
 export default defineApp({
   resources: {
-    "rpc:probe.ticks": { auth: "anon", publiclyAccessible: true },
-    "rpc:probe.ping": { auth: "anon", publiclyAccessible: true },
+    "rpc:probe.ticks": { auth: "anonymous", publiclyAccessible: true },
+    "rpc:probe.ping": { auth: "anonymous", publiclyAccessible: true },
   },
 });

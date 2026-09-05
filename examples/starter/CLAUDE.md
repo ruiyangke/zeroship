@@ -45,13 +45,13 @@ import { defineApp } from "@zeroship/server";
 
 export default defineApp({
   resources: {
-    // intentionally public — the validator requires publiclyAccessible alongside anon
-    "rpc:getMessages": { auth: "anon", publiclyAccessible: true },
+    // intentionally public — publiclyAccessible is required alongside anonymous
+    "rpc:getMessages": { auth: "anonymous", publiclyAccessible: true },
   },
 });
 ```
 
-For procedures that need a user, leave them at the default (`auth: "user"`) and read identity inside the handler with `env.auth.getUser()` / `env.auth.requireUser()`. `auth: "admin"` restricts to platform admins.
+For procedures that need a user, leave them at the default (`auth: "user"`) and read identity inside the handler with `env.auth.getUser()` / `env.auth.requireUser()`. `"anonymous"` and `"user"` are the only two principals the platform has.
 
 ## Client Calls
 

@@ -4,7 +4,7 @@ import { zeroship } from "@zeroship/vite-plugin";
 // error-probe is a SERVER-ONLY app (like examples/auth-probe): no index.html,
 // no client bundle - only `src/index.ts` exporting RPC procedures that throw.
 //
-// No `devAuth` block on purpose. Every procedure here is `auth: "anon"`, so no
+// No `devAuth` block on purpose. Every procedure here is `auth: "anonymous"`, so no
 // identity is ever involved and the only thing the two tiers can disagree about
 // is the ERROR ENVELOPE. See `tests/e2e_dev_vs_deployed_errors.sh`.
 export default defineConfig({
