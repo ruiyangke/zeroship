@@ -284,6 +284,34 @@ mod tests {
         );
     }
 
+    /// The gateway forwards `worker_visible_url(scheme, host, tail, query)`,
+    /// where `tail` is the CANONICAL path it gated minus its leading slash.
+    /// This fence therefore has to recover exactly that path back out of the
+    /// URL, or the two tiers rule on different resources. A query string, a
+    /// port, and a trailing slash are the three shapes that would silently
+    /// shift it.
+    ///
+    /// Note which direction a mismatch fails in: an unrecovered path matches
+    /// no resource and is ADMITTED, so a bug here costs the second fence
+    /// rather than opening a hole. That is why it is pinned rather than left
+    /// to be noticed.
+    #[test]
+    fn the_forwarded_url_shape_recovers_the_path_the_gateway_gated() {
+        let c = protected_tree();
+        for url in [
+            "https://app.test/api/private",
+            "https://app.test/api/private?next=%2Fhome&page=2",
+            "http://app.test:8080/api/private",
+            "https://app.test/api/private/",
+        ] {
+            assert_eq!(
+                enforce(&c, url, None),
+                Err(Refusal::NoPrincipal),
+                "{url} must resolve to the same protected resource"
+            );
+        }
+    }
+
     #[test]
     fn a_path_outside_the_declared_tree_is_left_to_the_gateways_404() {
         let c = protected_tree();
