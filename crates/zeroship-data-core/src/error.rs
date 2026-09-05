@@ -678,35 +678,21 @@ impl DbError {
         }
     }
 
-    /// Build the canonical [`DbError::Configuration`] returned when
-    /// `BackendHandle::as_postgres` yields `None` —
-    /// i.e. the active backend isn't the Postgres arm. Every call site
-    /// (`as_postgres().ok_or_else(...)?` / `Some/None` match) routes
-    /// through this helper so the wire `.code` (`backend_unsupported`)
-    /// AND the operator-facing `hint` stay identical across backend-specific
-    /// operation paths.
-    ///
-    /// Prior hand-rolled `DbError::Configuration { code:
-    /// "backend_unsupported", ... }` literals at four call sites had
-    /// drifted into three distinct `hint` shapes; centralising
-    /// here keeps the SDK-visible hint stable as the backend-arm
-    /// dispatcher evolves.
-    ///
-    /// `op` names the operation surface for the message body
-    /// (e.g. `"transaction"`, `"migration RPC"`)
-    /// so the operator-facing text stays specific without forcing each
-    /// call site to re-spell the static `code` / `hint`.
-    pub fn backend_unsupported(op: &str) -> Self {
-        DbError::Configuration {
-            code: "backend_unsupported",
-            message: format!("`{op}` is not supported by the active database backend"),
-            hint: Some(
-                "SQLite↔Postgres parity is still being wired; some operations remain backend-specific."
-                    .to_string(),
-            ),
-        }
-    }
 }
+
+// `DbError::backend_unsupported(op)` stood here until 2026-09-04, when it was
+// deleted as dead: zero callers in any cfg. Its own rustdoc claimed "every call
+// site routes through this helper", and that was the reverse of the truth - the
+// two sites emitting that `code` today spell the struct literal out by hand
+// (`zeroship-data-engine`'s `exec.rs` and `zeroship-plugin-db`'s
+// `v8_classes/replication.rs`), with two different `hint` shapes.
+//
+// THE WARNING THE HELPER CARRIED IS WORTH MORE THAN THE HELPER WAS, so it is
+// kept here: four hand-rolled literals of this code had already drifted into
+// three distinct hints once, which is why the helper was written. The drift has
+// simply restarted from two. Anyone re-centralising it should start from the
+// live literals rather than resurrecting this function, whose message text no
+// callers ever agreed to.
 
 /// Prepend a contextual phrase to the human-readable body of `err`
 /// while keeping its variant (and therefore its wire `.code`) intact.

@@ -184,12 +184,6 @@ impl FrameStack {
         }
     }
 
-    /// Has `BEGIN` been confirmed?
-    #[must_use]
-    pub const fn has_root(&self) -> bool {
-        !self.frames.is_empty()
-    }
-
     /// The number of frames currently open, root included.
     #[must_use]
     pub const fn depth(&self) -> usize {
