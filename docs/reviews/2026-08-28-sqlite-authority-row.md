@@ -212,11 +212,28 @@ still happens elsewhere. It does not happen anywhere. Measured across
   names for CDC events**, fail-soft with a positional fallback
   (`backend/sqlite/cdc.rs:652-663`, fallback at `:588-599`). It never reaches
   `collection_schema`.
-- `epoch` occurs **0 times** in `crates/zeroship-schema/src/`. All 20 hits in
+- ~~`epoch` occurs **0 times** in `crates/zeroship-schema/src/`. All 20 hits in
   `crates/zeroship-plugin-db/src/` are Unix-time arithmetic or prose; the one
   schema-epoch mention is an explicit negation at
-  `crates/zeroship-plugin-db/src/auth/mod.rs:36-38`: "the runtime descriptor -
-  not a platform-owned schema epoch - is the schema authority."
+  `crates/zeroship-plugin-db/src/auth/mod.rs:36-38`.~~
+
+  **CORRECTED 2026-09-04: ALL THREE OF THOSE NUMBERS ARE NOW WRONG, and the
+  cited file does not exist.** The 2026-09-03 engine extraction moved the data
+  plane out of `zeroship-plugin-db` into `zeroship-data-engine`, which
+  invalidated the measurement rather than merely the path - so repointing the
+  citation alone would have left two stale counts standing beside a freshly
+  corrected link. Re-measured today with `grep -rio epoch`:
+  `crates/zeroship-schema/src/` **6** (not 0), `crates/zeroship-plugin-db/src/`
+  **0** (not 20), `crates/zeroship-data-engine/src/` **69**. The quoted
+  negation is verbatim at `crates/zeroship-data-engine/src/auth/mod.rs:36-38`.
+
+  The 69 also change what the bullet ARGUED. It was offered as evidence that the
+  data plane does not carry an epoch; the data plane now carries the whole
+  consumer half of one - `SchemaEpoch`, the `ReResolve` verdict and the
+  comparison - with only the producer missing. The negation at `:36-38` is still
+  in the tree and still says the runtime descriptor is the schema authority, so
+  the two now sit side by side and the contradiction is the live question, not
+  a settled one.
 
 ### And if the epoch's question ever returns, the carrier already exists
 
