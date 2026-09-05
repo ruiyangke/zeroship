@@ -7,8 +7,8 @@
  * clear error.
  *
  * This is the safety mechanism that prevents accidental policy
- * weakening (a child silently downgrading from `auth: admin` to
- * `auth: user`).
+ * weakening (a child silently downgrading from `auth: user` to
+ * `auth: anonymous`).
  */
 
 import { test, describe } from "node:test";
@@ -109,8 +109,10 @@ export default defineApp({
     }
   });
 
-  test("does not require override when child is stricter than parent (admin > user)", async () => {
-    // user → admin is a *strengthening* — no override marker needed.
+  test("does not require override when child is stricter than parent (anonymous to user)", async () => {
+    // anonymous → user is a *strengthening* — no override marker needed.
+    // With two principals the merge is a boolean OR, so "stricter" means
+    // exactly one thing: the child demands a user where the parent did not.
     const fx = await makeConfigFixture(`
 import { defineApp } from "@zeroship/server";
 export default defineApp({

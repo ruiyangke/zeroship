@@ -127,7 +127,7 @@ describe("ISS-59 — server-only app (no index.html) builds to a valid .zship", 
       const catchAll = resources["/[...rest]"];
       assert.ok(catchAll, "expected an SSR catch-all resource");
       // A worker(SSR) catch-all has NO `static` action — it falls through
-      // to worker dispatch (marked anon + publicly_accessible).
+      // to worker dispatch (marked anonymous + publicly_accessible).
       assert.equal(
         catchAll.static,
         undefined,

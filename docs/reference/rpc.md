@@ -109,22 +109,28 @@ import { defineApp } from "@zeroship/server";
 
 export default defineApp({
   resources: {
-    // A whole namespace public: every `wizard.*` procedure resolves to anon.
-    "rpc:wizard": { auth: "anon", publiclyAccessible: true },
+    // A whole namespace public: every `wizard.*` procedure resolves to anonymous.
+    "rpc:wizard": { auth: "anonymous", publiclyAccessible: true },
   },
 });
 ```
 
 `publiclyAccessible: true` is the deliberate confirmation the manifest validator
-requires alongside `auth: "anon"` — it makes "this endpoint is intentionally
+requires alongside `auth: "anonymous"` — it makes "this endpoint is intentionally
 public" explicit and reviewable.
 
-> **`auth: "admin"` does not restrict anything today.** The gateway enforces it
-> exactly as `auth: "user"`: it checks that the caller is authenticated and
-> nothing more, so any signed-in end user reaches an `admin` procedure. The
-> level parses and inherits down a family, which makes it look like a control
-> it is not. Do not use it to protect an admin surface — put the check in your
-> own handler until this says otherwise.
+> **`"anonymous"` and `"user"` are the only two values `auth` accepts.** The
+> build refuses anything else, in dev as well as production. Inheritance is a
+> boolean OR: if any resource in a family's chain requires a user, the whole
+> family requires one, and a child weakens that only by naming `auth` in its
+> own `override` list.
+>
+> A third `"admin"` level was deleted on 2026-09-05. It never restricted
+> anything — the gateway matched it in the same arm as `"user"`, so a route
+> locked down with `admin` was reachable by every signed-in end user — and
+> there is no platform-admin principal for it to name
+> (`docs/architecture/control-plane.md`). To gate a genuine operator surface,
+> put the check in your own handler.
 
 Manifest auth is enforced only by the gateway; the
 single-tenant `zeroship serve` and `pnpm dev` runtimes do not gate by policy, so
@@ -276,7 +282,7 @@ default).
 
 The stored response belongs to the caller who produced it. Keys are scoped per
 signed-in user, so two people can use the same key on the same procedure and
-each gets their own result. On procedures declared `auth: "anon"` there is no
+each gets their own result. On procedures declared `auth: "anonymous"` there is no
 signed-in user to scope by, so every anonymous caller shares one keyspace and
 the key must be unguessable: pass a UUIDv4 or UUIDv7 in the canonical hyphenated
 form (`crypto.randomUUID()` produces one). Anything else is rejected with `400

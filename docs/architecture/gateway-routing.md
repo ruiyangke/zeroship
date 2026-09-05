@@ -6,7 +6,7 @@ That compile step replaced the rule walker so inheritance flattening and RPC/pat
 ## Relevant files
 
 - [crates/zeroship-bundle/src/manifest.rs](../../crates/zeroship-bundle/src/manifest.rs): `Manifest`
-- [crates/zeroship-bundle/src/rule.rs](../../crates/zeroship-bundle/src/rule.rs): `ResourceEntry`, `AuthLevel`, `ProcedureKind`, `Cors`, `RateLimit`
+- [crates/zeroship-bundle/src/rule.rs](../../crates/zeroship-bundle/src/rule.rs): `ResourceEntry`, `RequiredPrincipal`, `ProcedureKind`, `Cors`, `RateLimit`
 - [crates/zeroship-gateway/src/compiled.rs](../../crates/zeroship-gateway/src/compiled.rs): `CompiledManifest`, `EffectivePolicy`, `ResolvedAction`
 - [crates/zeroship-gateway/src/router/dispatch.rs](../../crates/zeroship-gateway/src/router/dispatch.rs): request entry and policy enforcement
 - [crates/zeroship-gateway/src/router/static_serve.rs](../../crates/zeroship-gateway/src/router/static_serve.rs): static asset path
@@ -63,9 +63,9 @@ Policy flattening is done once per route update. The compiled policy carries aut
 When a resource's inheritance chain declares no `auth` at all, the default depends on the surface:
 
 - **`rpc:` procedures fail closed — they default to `auth: user`.** A server function nobody gave an explicit policy still requires an authenticated session, so a forgotten or mistyped resource key can never *silently* expose it. This is the root-cause fix for the SEC-5 class (a drifted `rpc:apps` vs `projects.*` family key had left the whole surface anonymous); see `crates/zeroship-gateway/src/compiled.rs::resolve_effective_policy`.
-- **URL / SSR / static resources stay public by default (`auth: anon`)** — the web norm: a creator's blog, landing page, or static asset is readable without login.
+- **URL / SSR / static resources stay public by default (`auth: anonymous`)** — the web norm: a creator's blog, landing page, or static asset is readable without login.
 
-To expose an RPC procedure publicly, opt in **explicitly** with `auth: "anon"` + `publicly_accessible: true` on the procedure or a `rpc:<prefix>` family policy (the `publicly_accessible` flag is the deliberate confirmation the manifest validator requires alongside `auth: anon`). Manifest auth is enforced only by the gateway — the single-tenant CLI `serve` and the dev runtime do not gate by manifest policy.
+To expose an RPC procedure publicly, opt in **explicitly** with `auth: "anonymous"` + `publicly_accessible: true` on the procedure or a `rpc:<prefix>` family policy (the `publicly_accessible` flag is the deliberate confirmation the manifest validator requires alongside `auth: anonymous`). `RequiredPrincipal` has exactly two variants, so merging a chain is a boolean OR and there is no strictness ladder. Manifest auth is enforced only by the gateway — the single-tenant CLI `serve` and the dev runtime do not gate by manifest policy.
 
 ## Pre-dispatch gates
 

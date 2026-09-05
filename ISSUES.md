@@ -644,9 +644,9 @@ missing SMTP host. `config_check_e2e.sh` auth cases 4/4 pass.
 
 **Fix:** csr-todo now declares its two read-only demo procedures public in
 `examples/csr-todo/src/server/config.ts` — `defineApp({ resources: { "rpc:listTodos":
-{ auth: "anon", publiclyAccessible: true }, "rpc:searchTodos": {...} } })` (the
+{ auth: "anonymous", publiclyAccessible: true }, "rpc:searchTodos": {...} } })` (the
 documented mechanism, `docs/reference/rpc.md` "Procedure auth"). The rebuilt manifest
-stamps both as `auth: anon, publicly_accessible: true`, so the anonymous browser SPA
+stamps both as `auth: anonymous, publicly_accessible: true`, so the anonymous browser SPA
 reaches them through the gateway. The CSR `listTodos` round-trip + the streamed-data
 browser specs now pass over the real edge. **Closing it surfaced two real platform
 bugs the curl harness had never exercised: ISS-70 (gateway dropped the query string)
@@ -680,7 +680,7 @@ browser specs pass; only the CSR client-RPC specs fail, all with 401-shaped
 empty-DOM timeouts.
 
 **Where the fix belongs (DONE):** the csr-todo example opted its read-only demo
-procedures into anon access via `src/server/config.ts` (above). The authenticated
+procedures into anonymous access via `src/server/config.ts` (above). The authenticated
 client-RPC-through-the-gateway path (per-user procedures) remains ISS-64 (needs a
 Hydra dev-auth session for headless E2E).
 
