@@ -36,12 +36,20 @@ a placement design.
 ## How to read this document
 
 **Provenance.** Every citation below was re-derived by opening the file on
-2026-09-05, against `58deea301` on `main`. The working tree is dirty: nine
-tracked files are modified (`crates/zeroship-gateway/src/router/dispatch.rs`,
-four docs, `sdks/vite-plugin/src/manifest.ts`, one vite-plugin test, one e2e
-shell script). Only one of them is cited here, `dispatch.rs`, and only for line
-numbers of `enforce::check_account` / `enforce::check_spend` call sites and
-`extract_app_name`; treat those four numbers as the softest in the document.
+2026-09-05. The first pass ran against `58deea301` on `main` with nine tracked
+files modified in the working tree; those nine landed the same day as
+`cb0742195` and `825de4112`, so the numbers taken from them describe committed
+code rather than an unsaved edit. Only one of the nine is cited here,
+`crates/zeroship-gateway/src/router/dispatch.rs`, for the
+`enforce::check_account` / `enforce::check_spend` call sites and
+`extract_app_name`; those four were re-opened after the commit and hold.
+
+**Re-audited on 2026-09-05 against `ed161c341`**, the commit that added this
+file. That pass opened every citation a second time and found nine wrong
+citations at six sites, two wrong counts, one unreproducible measurement cluster
+and one over-general claim, all recorded in the corrections section below rather
+than silently repaired. Read that section before trusting any number here: this
+document has now been wrong twice about its own measurements.
 
 **Tags, applied per claim.**
 
@@ -209,7 +217,7 @@ MEASURED. `RouteCache::update` (`sync.rs:176-237`) is not a diff. For every app
 in the new table it calls `entry.manifest.validate()` (`:209`), then
 `CompiledManifest::compile(&entry.manifest)` (`:226`), which clones the assets
 map, the runtime-assets map and the worker-code entry
-(`crates/zeroship-bundle/src/compiled.rs:376-377`). The finished map replaces the
+(`crates/zeroship-bundle/src/compiled.rs:376-378`). The finished map replaces the
 old one wholesale (`:235-236`). Per-poll cost at the gateway is therefore
 O(all apps) in JSON parse, validation, manifest compilation and allocation, paid
 whether or not a single app changed, with peak memory briefly holding two full
@@ -234,11 +242,12 @@ with **no `WHERE` clause at all** (`:697-705`), and every row of
 `zeroship.app_egress_rules` ordered by app (`:710-716`). Archived apps
 deliberately remain in this projection, which is issue #89.
 
-MEASURED. The worker consumes it in one process-wide poller
-(`crates/zeroship-worker/src/sync.rs:122-231`, fetch at `:233-234`), sharing the
-result to every ntex thread through `SharedVersions` (`:79`) so HTTP traffic is
-not multiplied by thread count; per-thread reconcile loops read the shared map
-(`:240`).
+MEASURED. The worker consumes it in one process-wide poller: `start_version_poller`
+(`crates/zeroship-worker/src/sync.rs:104`) spawns `version_poll_loop` (`:129-231`),
+whose fetch is `poll_versions` at `:233-234`. The result reaches every ntex thread
+through `SharedVersions` (`:79`) so HTTP traffic is not multiplied by thread count;
+the per-thread reconcile loop is a separate spawn, `start_sync` (`:122-127`) into
+`reconcile_loop` (`:240`), and it reads the shared map rather than polling.
 
 **Correction, and a sharp one.** The conversation recorded that the worker pulls
 "over the same transport" as the gateway. MEASURED, it does not:
@@ -303,7 +312,7 @@ reconcile path touches `info.manifest` at three sites, not one:
   (defined at `:40`), which fetches one blob by hash at `:49`;
 - `:446` does `let declared = info.manifest.clone().unwrap_or_default();` and
   hands it to `cache::load_app` (`crates/zeroship-worker/src/cache.rs:567`) as
-  the `manifest: &Manifest` parameter at `:576`, which compiles it at `:586` into
+  the `manifest: &Manifest` parameter at `:574`, which compiles it at `:586` into
   the per-isolate declared policy.
 
 MEASURED. `load_app`'s doc at `cache.rs:556-561` states the intent: the manifest
@@ -393,25 +402,31 @@ conversation recorded.
 
 ## The arithmetic that disqualifies the shape
 
-MEASURED. Serialising a `RouteEntry` around each of the 31 real manifests, with
-realistic values for the other eight fields (a 26-character `pln_` plan id, two
-64-character sha256 hex strings, a 26-character `oac_` client id, a subdomain
-name, an apex origin, and the two snake_case state strings), gives a **mean of
-1669 bytes per entry**, of which the eight non-manifest fields are a nearly
-constant **360 bytes**. The manifest is between 57% and 94% of an entry.
+MEASURED, and the construction is spelled out so it can be re-run. Wrap each of
+the 31 stored `manifest.json` bodies in a `RouteEntry`-shaped object whose eight
+other fields carry `name = "myapp"`, `plan_id = "pln_" + 22 chars`,
+`api_key_hash` and `deploy_hash` each 64 hex characters,
+`oauth_client_id = "oac_" + 22 chars`,
+`sector_identifier = "https://myapp.zeroship.ai"`, `spend_state = "allow"` and
+`account_state = "active"`; serialise compactly with the Rust field names as
+keys. That gives a **mean of 1588 bytes per entry**, of which the eight
+non-manifest fields are **exactly 372 bytes** - exactly, not nearly, because
+every one of those values is fixed by the construction. The manifest is between
+51% and 95% of an entry (382/754 for the smallest manifest, 6484/6856 for the
+largest).
 
-DERIVED, with the assumption named. At 10^6 apps one pull is about **1.67 GB**,
-or **1.55 GiB**. At the default 5-second interval that is roughly **330 MB/s of
+DERIVED, with the assumption named. At 10^6 apps one pull is about **1.59 GB**,
+or **1.48 GiB**. At the default 5-second interval that is roughly **318 MB/s of
 egress per gateway**, times the number of gateways, produced by re-running a
 five-table join and re-serialising the whole corpus each time. On the receiving
-side each gateway spends that same interval parsing 1.55 GiB of JSON and calling
+side each gateway spends that same interval parsing 1.48 GiB of JSON and calling
 `validate` plus `compile` a million times, then briefly holding two compiled
 tables.
 
 **The assumption carrying the most weight is the population.** The 31 examples in
 this repo are probes and demos, not a sample of a creator population, and a real
 corpus will have a heavier tail (the measured spread already runs 17x, from 382
-to 6484 bytes). Treat 1669 bytes as an order-of-magnitude anchor, not a forecast.
+to 6484 bytes). Treat 1588 bytes as an order-of-magnitude anchor, not a forecast.
 The conclusion does not depend on the constant: for any manifest distribution
 consistent with what was measured, 10^6 apps puts the pull somewhere between
 roughly 0.4 GB and 6 GB per gateway per interval, and every value in that range
@@ -479,10 +494,12 @@ live in `GateState` (`:3-25`). `checkout` is at `:128`. It serves
 (`:240`), `update_rotated_family` (`:280`) and the delete paths.
 
 **Correction.** The conversation recorded this pool as used by `browser_auth.rs`
-and `backchannel_logout.rs`. MEASURED, `db::checkout` is named in **six** gateway
-source files - `lib.rs`, `auth_token.rs`, `browser_auth.rs`,
-`backchannel_logout.rs`, `router/auth.rs` and `router/dispatch.rs` - across 26
-call sites including tests. Two of six understates how much per-request database
+and `backchannel_logout.rs`. MEASURED, `db::checkout(` is CALLED from **five**
+gateway source files - `auth_token.rs` (8), `router/auth.rs` (13),
+`browser_auth.rs` (2), `backchannel_logout.rs` (1) and `router/dispatch.rs` (1) -
+across **25** call sites including tests. A sixth file, `lib.rs`, names it in a
+rustdoc link at `:177` and calls it nowhere; `db.rs` itself defines it. Two of
+five understates how much per-request database
 state a gateway holds, which matters for any design that assumes gateways are
 cheap to place near users.
 
@@ -743,7 +760,7 @@ delivery was empty, stale, or lost," which is a transport property and can
 persist. The current design also couples the two - routes and enforcement arrive
 in one payload, so a gateway that cannot reach control serves nothing at all
 (MEASURED: empty cache at `main.rs:559`, first sleep before first fetch at
-`sync.rs:279-281`). Decoupling deliberately breaks that coupling: routes could be
+`sync.rs:282`). Decoupling deliberately breaks that coupling: routes could be
 fresh while the overlay is absent.
 
 DESIGNED, and this is a requirement on the implementation rather than a
@@ -863,11 +880,14 @@ dispatch decision reads (`resources`, `worker`, `version`, `transformer`,
 content hash. The asset map becomes an ordinary blob under `blobs/<sha256>`,
 fetched and cached by exactly the machinery that already fetches asset *bytes*.
 
-MEASURED support that the split is clean today: nothing in the tree ever writes a
-non-empty `runtime_assets`. Every producer writes an empty map
+MEASURED support that the split is clean today: no PRODUCER writes a non-empty
+`runtime_assets`. Every one writes an empty map
 (`crates/zeroship-bundle/src/manifest.rs:213`, `:458`;
-`sdks/vite-plugin/src/zship.ts:471`; `crates/zeroship-worker/src/handler.rs:3623`),
-and ingest *refuses* a non-empty one on a fresh deploy alongside a non-zero
+`sdks/vite-plugin/src/zship.ts:471`; `crates/zeroship-worker/src/handler.rs:3623`).
+One test constructs a populated one to exercise variant validation
+(`crates/zeroship-core/tests/types_test.rs:689`), which is why this says
+"producer" rather than "nothing in the tree".
+Ingest *refuses* a non-empty one on a fresh deploy alongside a non-zero
 `asset_version` (`unpack.rs:206-219`). The `env.assets.*` namespace that would
 mutate them is listed in AGENTS.md as planned, not registered. So the manifest is
 in fact immutable-after-deploy today.
@@ -897,7 +917,7 @@ form (`compiled.rs:376-377`), and the compiled form is stored in a
 asset map.
 
 MEASURED, and new at HEAD as recorded in Part 1: the worker needs the whole
-manifest too, as its declared dispatch policy (`cache.rs:567`, `:576`, `:586`).
+manifest too, as its declared dispatch policy (`cache.rs:567`, `:574`, `:586`).
 
 DESIGNED resolution: both tiers keep reading a full manifest and a full asset
 map, but obtain them by digest and cache them content-addressed, so N hosts
@@ -1029,9 +1049,12 @@ if it is wrong the entry grows by roughly 30 bytes.
 
 **The 112-byte figure is an ESTIMATE, not a measurement, and it is the number
 that gates the whole replicate-whole premise.** For contrast, a MEASURED upper
-bound: the same facts written as the JSON this tree already uses, with a digest
-field standing in for the inline manifest, is **493 bytes** for a representative
-app. The band between 112 and 493 is a factor of 4.4 and it decides the argument:
+bound, with the shape pinned so it can be re-run: the same nine facts written as
+the JSON this tree already uses -
+`{"app_id":"<36-char uuid>","name":"myapp","plan_id":"pln_<22>","api_key_hash":"<64>","deploy_hash":"<64>","spend_state":"allow","account_state":"active","provisioned":true,"generation":1}`
+- is **347 bytes**. No separate manifest digest appears, because `deploy_hash`
+already is one. The band between 112 and 347 is a factor of 3.1 and it decides
+the argument:
 
 ```
   per entry   1M hosts     10M hosts
@@ -1039,22 +1062,22 @@ app. The band between 112 and 493 is a factor of 4.4 and it decides the argument
      112 B    106.8 MiB     1.04 GiB
      128 B    122.1 MiB     1.19 GiB
      256 B    244.1 MiB     2.38 GiB
-     493 B    470.2 MiB     4.59 GiB
+     347 B    330.9 MiB     3.23 GiB
 ```
 
 Read this as the gate it is. At 1M hosts every figure in the column is something
 a gateway process can hold, so replicate-whole survives at 1M on any encoding. At
-10M hosts, 112 bytes is 1 GiB of resident index per gateway and 493 bytes is
-4.59 GiB; the first is arguable, the second is not. **So replicate-whole is sound
+10M hosts, 112 bytes is 1 GiB of resident index per gateway and 347 bytes is
+3.23 GiB; the first is arguable, the second is not. **So replicate-whole is sound
 at 1M and is conditional at 10M on the packed encoding landing near 112 bytes.
 That conditional has not been measured and cannot be until an encoder exists.**
 If it lands at 256 the premise needs a partial-replication story at 10M, and that
 is a different proposal.
 
 For scale, what the arithmetic replaces: MEASURED, the mean full `RouteEntry`
-with its manifest inline is 1669 bytes, so 1M apps is a **1.55 GiB** snapshot
-pulled by every gateway every 5 seconds and 10M is 15.5 GiB. The directory at 112
-bytes is about 15x smaller, and unlike the snapshot it is not re-transferred
+with its manifest inline is 1588 bytes, so 1M apps is a **1.48 GiB** snapshot
+pulled by every gateway every 5 seconds and 10M is 14.8 GiB. The directory at 112
+bytes is about 14x smaller, and unlike the snapshot it is not re-transferred
 wholesale.
 
 Chunk arithmetic, DESIGNED (dividing the estimate above):
@@ -1064,7 +1087,7 @@ Chunk arithmetic, DESIGNED (dividing the estimate above):
   ------   ---------   -----    -------------   ----------   ---------
     4096      128 B      1M           244          30.5 KiB   128.0 KiB
     4096      128 B     10M          2441         305.1 KiB   128.0 KiB
-    4096      493 B     10M          2441           1.1 MiB   128.0 KiB
+    4096      347 B     10M          2441         827.2 KiB   128.0 KiB
    65536      128 B     10M           153          19.1 KiB     2.0 MiB
 ```
 
@@ -1207,12 +1230,14 @@ already this platform's fleet coordination primitive.
 by a test at `:82` rather than by transcribed literals; the header at `:1-35`
 records that this replaced four hand-written comparison tests covering ten of
 twenty-one pairs, with the two keys defined in the same file compared by none of
-them. **73 source files across 12 crates** name `pg_advisory_lock`,
-`pg_try_advisory_lock` or `pg_advisory_xact_lock` today: `zeroship-auth`,
-`zeroship-control`, `zeroship-data-core`, `zeroship-data-postgres`,
-`zeroship-data-sqlite`, `zeroship-migrate-backend`, `zeroship-migrate-core`,
-`zeroship-migrate-mysql`, `zeroship-migrate-postgres`, `zeroship-migrate-server`,
-`zeroship-plugin-db` and `zeroship-plugin-workflow`. Adding etcd would add a
+them. **73 source files across 16 crates** name `pg_advisory_lock`,
+`pg_try_advisory_lock` or `pg_advisory_xact_lock` today - 69 files in 15
+`crates/` members plus 4 in `libs/compio-postgres`: `zeroship-auth`,
+`zeroship-authn`, `zeroship-control`, `zeroship-data-core`,
+`zeroship-data-postgres`, `zeroship-data-sqlite`, `zeroship-migrate`,
+`zeroship-migrate-backend`, `zeroship-migrate-core`, `zeroship-migrate-mysql`,
+`zeroship-migrate-node`, `zeroship-migrate-postgres`, `zeroship-migrate-server`,
+`zeroship-plugin-db`, `zeroship-plugin-workflow` and `compio-postgres`. Adding etcd would add a
 second, independently-failing source of coordination truth for a role that is
 filled and tested. The deeper objection: etcd cannot fan a watch out to a large
 number of watchers, which is why Kubernetes had to put an API server in front of
@@ -1289,7 +1314,7 @@ There is one existing proxy endpoint on the public gateway surface,
 with a different destination.
 
 MEASURED, on the state of zones: there is no region, zone or datacenter concept
-anywhere in the tree. `docs/architecture/data-system.md:550-553` records the same
+anywhere in the tree. `docs/architecture/data-system.md:552-555` records the same
 finding independently ("no region or datacenter concept anywhere in the tree",
 checked 2026-08-29) and `docs/architecture/distributed.md:93` lists "No
 multi-region route propagation or data replication in the shipping code path"
@@ -1313,7 +1338,7 @@ scheme breaks sessions outright.** Both browser session credentials use the
 with `Path=/; HttpOnly; SameSite=Strict; Secure` and deliberately no `Domain`
 attribute (`set_anchor_cookie` at `:89-93`, rationale at `:84-87`); the
 interactive credential is `__Host-zeroship_app_session`
-(`crates/zeroship-gateway/src/oidc_rp.rs:961`). A `__Host-` cookie set on
+(`crates/zeroship-gateway/src/oidc_rp.rs:962`). A `__Host-` cookie set on
 `app.zeroship.ai` is not sent to `app.zone-b.zeroship.ai` and cannot be made to
 be. Any scheme that puts a zone into the hostname logs every user out on every
 failover. Anycast keeps one hostname, so the cookie keeps working, so failover is
@@ -1335,7 +1360,7 @@ Part 1: a per-ntex-thread `compio-postgres` pool
 (`crates/zeroship-gateway/src/db.rs:68-76`, `checkout` at `:128`) serving
 `zeroship.app_session_anchors` through `anchors::create` (`:183`), `read_live`
 (`:240`), `update_rotated_family` (`:280`) and the delete paths, with
-`db::checkout` named in six gateway source files. A gateway in zone B validating
+`db::checkout` called from five gateway source files. A gateway in zone B validating
 a session for an app whose anchor row is in zone A must read zone A's database.
 Until anchors are addressable from any zone - replicated, or homed with the app
 and read over the same forward hop - moving an app moves its sessions' storage
@@ -1400,7 +1425,7 @@ every reader carrying a re-chunk path.
 **Recommendation: put k in the root and start at 12.** The arithmetic above is
 DESIGNED, not measured, and the two inputs that would settle it are both
 unmeasured today: the packed entry size (ESTIMATE, 112 bytes, against a MEASURED
-JSON upper bound of 493) and the app creation and mutation rate, for which this
+JSON upper bound of 347) and the app creation and mutation rate, for which this
 tree has no instrument. A k baked into readers as a constant is a value that
 cannot be corrected once the number it was chosen from turns out wrong, and the
 number it was chosen from is currently an estimate over an assumed population.
@@ -1416,7 +1441,7 @@ only the parts it reads.
 **Recommendation: digest the asset map out, and stop there for now.** MEASURED,
 the two tiers read overlapping but different parts - the gateway reads
 `resources` and both asset maps (`static_serve.rs:41-101`), the worker compiles
-the whole manifest as its declared policy (`cache.rs:576`, `:586`). A finer split
+the whole manifest as its declared policy (`cache.rs:574`, `:586`). A finer split
 would let each fetch less, but the measured mean manifest is 1216 bytes and the
 median 999, so the saving is small and the cost is several round trips on a cold
 isolate load. Revisit if the p99 manifest measured over a real corpus is large;
@@ -1434,7 +1459,7 @@ zones a partition of users rather than of apps, and MEASURED it fights the
 `__Host-` cookie property that makes anycast work: one hostname, one cookie, any
 zone. The forward-hop option costs a round trip on the session-validating path
 only, which is already the path that does database I/O today
-(`gateway/src/db.rs:128`, six caller modules). It is the smaller change to the
+(`gateway/src/db.rs:128`, five calling modules). It is the smaller change to the
 model even though it is the larger change to the code.
 
 ## 4. Encryption key rotation
@@ -1460,7 +1485,7 @@ placement hint over shared storage.
 
 **Recommendation: a zone is a failure domain, and nothing in the tree records
 one today.** MEASURED, there is no region, zone or datacenter concept anywhere
-(zero occurrences; `data-system.md:550-553` and `distributed.md:93` say the same
+(zero occurrences; `data-system.md:552-555` and `distributed.md:93` say the same
 independently). That means the term is currently free to define, and the two
 definitions have opposite consequences for every decision above: the
 failure-domain reading makes decisions 3 and 4 blocking, the placement-hint
@@ -1493,7 +1518,7 @@ repository at all, which is itself worth stating.
 **1. Real directory entry size, measured against the `apps` table.** Build the
 packed encoder, run it over a real `zeroship.apps` join, and report the byte
 distribution. The 112-byte figure in Part 3 is an ESTIMATE and the MEASURED JSON
-upper bound is 493; the factor of 4.4 between them decides whether replicate-whole
+upper bound is 347; the factor of 3.1 between them decides whether replicate-whole
 survives at 10M hosts. The measurement is cheap - it is an encoder and a query -
 and it is the only one that changes the shape of the design rather than its
 parameters. Nothing else on this list should be done first.
@@ -1599,7 +1624,7 @@ HEAD.** An earlier draft said the worker carries a whole manifest on every
 `/internal/versions` poll to pull out the worker-entry blob hash and the runtime
 descriptor hash. MEASURED, there is a third consumption site: `worker/src/sync.rs:446`
 clones the whole manifest and passes it to `cache::load_app`
-(`crates/zeroship-worker/src/cache.rs:567`, parameter at `:576`), which compiles
+(`crates/zeroship-worker/src/cache.rs:567`, parameter at `:574`), which compiles
 it at `:586` into the per-isolate declared policy. That behaviour landed in the
 HEAD commit itself (`58deea301`). The design conclusion is unchanged and slightly
 strengthened - both tiers need the manifest, neither needs it re-transmitted on a
@@ -1657,13 +1682,15 @@ survives comfortably; the range as quoted understated the maximum twenty-fold.
 
 **16. The `Manifest` struct has 19 fields, not 16** (`manifest.rs:33-173`).
 
-**17. The gateway PG pool has six caller modules, not two and not five.**
-`db::checkout` is named in `lib.rs`, `auth_token.rs`, `browser_auth.rs`,
-`backchannel_logout.rs`, `router/auth.rs` and `router/dispatch.rs`, across 26
-call sites including tests.
+**17. The gateway PG pool has five calling modules, not two and not six.**
+`db::checkout(` is called from `auth_token.rs`, `router/auth.rs`,
+`browser_auth.rs`, `backchannel_logout.rs` and `router/dispatch.rs`, across 25
+call sites including tests. `lib.rs` names it only in a rustdoc link (`:177`).
+An earlier version of this very list said six modules and 26 sites, counting the
+doc link as a caller and the definition in `db.rs` as a call.
 
 **18. Advisory locks reach much further than "6+ modules."** 73 source files
-across 12 crates name an advisory-lock function. "6+" is technically true and
+across 16 crates name an advisory-lock function. "6+" is technically true and
 reads as an estimate of six; the real reach strengthens the argument against etcd
 rather than weakening it.
 
@@ -1707,11 +1734,76 @@ much of the conversation held: `gateway/src/sync.rs:292` (the poll URL),
 `limits.rs:11` (the 1 MiB cap), and the three manifest sizes 529 / 1066 / 1508
 with `assets` at 708 of 1066 in `ssg-docs`.
 
-**23. Derived byte figures that shifted on re-measurement.** An earlier draft put
-the mean full `RouteEntry` at 1640 bytes and its non-manifest scalars at 390-402
-(one draft said 440); measured over the same 31 manifests with the same synthetic
-scalars, 1669 and 360. The directory JSON entry was 499; measured 493. The
-per-asset and per-resource marginal costs were 243 and 59; measured 240 and 57.
-All are within a few percent and none changes an argument, but they are recorded
-because a number carried forward without re-measurement is how the larger errors
-above got their start.
+**23. Derived byte figures that shifted on re-measurement, three times.** An
+early draft put the mean full `RouteEntry` at 1640 bytes and its non-manifest
+scalars at 390-402 (one draft said 440). The version committed as `ed161c341`
+said 1669 and 360, the directory JSON entry 493, and the manifest "between 57%
+and 94%" of an entry. The per-asset and per-resource marginal costs went 243/59
+to 240/57, and those two reproduce exactly.
+
+**None of 1669, 360, 493 or "57%" reproduces**, and that is the finding, not the
+size of the gap. Re-run against the same 31 stored manifests with the field
+values the document itself names elsewhere (the 142-byte breakdown pins
+`sector_identifier` at `https://myapp.zeroship.ai`, 25 characters), the mean
+entry is **1588** and the non-manifest overhead is a hard **372** - hard, because
+every value in it is fixed, so "nearly constant" was already a tell that
+something unnamed was varying. 360 is not reachable at all with a 25-character
+sector: the floor is 368, at a one-character app name. The manifest share runs
+**51% to 95%**, not 57% to 94%; 57% would need a smallest manifest near 477
+bytes, and the measured smallest is 382. The 493-byte directory entry could not
+be reconstructed from any field set tried, which is the real defect: the shape
+was never written down, so the number could not be checked, only believed.
+
+The repair is to pin the construction rather than to publish a better number.
+Both figures now carry the exact object that produced them, and both are
+re-runnable from the artifacts in `examples/*/dist/`. Downstream figures moved
+with them: 1.67 GB to 1.59 GB, 1.55 GiB to 1.48 GiB, 330 MB/s to 318 MB/s, "15x
+smaller" to 14x, and the 112-to-JSON band from 4.4x to 3.1x. **No conclusion in
+this document changes**, which is exactly why the error survived: every one of
+these numbers was load-bearing for an argument that a 5% error could not move.
+
+## Found by the adversarial re-audit of `ed161c341`
+
+**24. Nine wrong citations at six sites, in a document whose own opening says the
+line is a courtesy.** `crates/zeroship-worker/src/cache.rs:576` for the
+`manifest: &Manifest` parameter (it is `:574`; `:576` is the closing paren and
+return type) - cited three times, in Part 1, in open decision 2 and in
+correction 7. `crates/zeroship-gateway/src/oidc_rp.rs:961` for
+`APP_SESSION_COOKIE` (`:962`; `:961` is its doc line).
+`crates/zeroship-bundle/src/compiled.rs:376-377` for a clone of three things, the
+third of which is at `:378`. `sync.rs:279-281` for the sleep that precedes the
+first fetch (the `sleep` is `:282`; the cited range stops one line short of the
+statement the sentence is about). And `docs/architecture/data-system.md:550-553`
+for a sentence quoted verbatim - "no region or datacenter concept anywhere in the
+tree" - which is at `:554`, outside the range, cited twice. A quoted string
+outside its own citation is the sharpest form of this error, because the quote
+looks like proof that the line was opened.
+
+**25. The worker's poller was cited at its neighbour.** `worker/src/sync.rs:122`
+is `start_sync`, which spawns the PER-THREAD reconcile loop; the process-wide
+version poller is `start_version_poller` at `:104` into `version_poll_loop` at
+`:129-231`. The cited range `:122-231` therefore opened on the wrong function and
+excluded the right one's entry point, while still covering the loop body - which
+is why it read as correct. The claim it supports (one poller, shared through
+`SharedVersions`, HTTP not multiplied by thread count) is unaffected.
+
+**26. The advisory-lock reach was undercounted by four crates.** 73 files is
+right; **16 crates**, not 12. The list omitted `zeroship-authn`,
+`zeroship-migrate`, `zeroship-migrate-node` and `libs/compio-postgres` - and the
+last of those is the interesting one, because a `crates/`-only scan yields 69
+files across 15 members and neither of that pair's numbers is the pair that was
+published. This is correction 18 committing, at smaller scale, the same error it
+was written to fix.
+
+**27. The provenance paragraph went stale within hours of being written.** It
+described a dirty working tree of nine modified files as a caveat on four line
+numbers. Those nine were committed the same day as `cb0742195` and `825de4112`,
+so the caveat pointed at a condition that no longer existed while the numbers it
+warned about were fine. A provenance note that names a transient state is a note
+that expires; this one now names the commits instead.
+
+**28. "Nothing in the tree ever writes a non-empty `runtime_assets`" is true of
+producers and false as written.** `crates/zeroship-core/tests/types_test.rs:689`
+constructs one with an entry, to exercise variant validation. The design point
+(no production writer, so the manifest is immutable-after-deploy today) stands;
+the universal quantifier did not.
