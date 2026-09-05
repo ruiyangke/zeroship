@@ -169,6 +169,31 @@ pub fn gen_artifacts_from_envelopes(
                 return gen_err(format!("envelope[{i}] is not a valid IR document: {e}"));
             }
         };
+        // THE RESERVED-IDENTIFIER GATE, run PER ENVELOPE and BEFORE the concatenation.
+        //
+        // Per envelope because the op index is only useful next to the migration it
+        // indexes; once the streams are concatenated, "op 1" names nothing the creator
+        // can open. Before the fold because these ops are still the recorder's RAW
+        // author-only ops - the policy charter has not injected `id`/`created_at`/
+        // `version` yet, which is exactly what makes the pre-injection validator the
+        // right one to call (see `validate_declared_identifiers`).
+        //
+        // `loadVerify` above has refused these names since the declaration gate landed,
+        // through the same two validators. This verb did not, and it is the one that
+        // writes `generated/zeroship/` - so a creator declaring `ssn_masked` got a green
+        // build, a typed `env.db.ts` field and a committed descriptor, and met the
+        // reservation only when the migration service refused the deploy.
+        //
+        // FAIL-FAST ERGONOMICS, NOT CONTAINMENT: this runs on the creator's machine, so
+        // a hand-written `schema.runtime.json` never passes through it. The gate that
+        // cannot be bypassed stays the guarded apply in `zeroship-migrate-server`.
+        if let Err(e) = zeroship_migrate::validate_declared_identifiers(
+            zeroship_migrate::shipping_vendors(),
+            &raw_ir.ops,
+            &dialect,
+        ) {
+            return gen_err(format!("migration {:?}: {e}", raw_ir.name));
+        }
         // Keep the recorder's raw author-only ops here. `render_artifacts` owns the
         // one policy-resolution seam for every generated-artifact caller.
         ops.extend(raw_ir.ops);
@@ -222,6 +247,21 @@ pub fn gen_artifacts_from_descriptors(
         Ok(p) => p,
         Err(e) => return gen_err(format!("schema-emit policy charter failed to load: {e}")),
     };
+    // THE RESERVED-IDENTIFIER GATE for the MANUAL source, the twin of the one in
+    // `gen_artifacts_from_envelopes`. It reads the descriptors' OWN declared names and
+    // runs BEFORE `render_schema_export_from_descriptors` calls
+    // `descriptors_to_create_ops`, which resolves each table's shape under `effective`
+    // and injects the platform system columns - names this validator was never asked
+    // about. Both artifact sources must refuse the same declarations or the two paths
+    // stop being interchangeable, which is the property `collection_export_round_trip`
+    // exists to hold.
+    if let Err(e) = zeroship_migrate::validate_declared_descriptor_identifiers(
+        zeroship_migrate::shipping_vendors(),
+        descriptors,
+        &dialect,
+    ) {
+        return gen_err(e.to_string());
+    }
     match render_schema_export_from_descriptors(
         zeroship_migrate::shipping_vendors(),
         descriptors,

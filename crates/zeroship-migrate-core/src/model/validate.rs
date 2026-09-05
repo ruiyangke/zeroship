@@ -6433,6 +6433,20 @@ fn validate_declared_collection_name(
         _ => return Ok(()),
     };
 
+    refuse_reserved_collection_name(vendors, name, target_dialect, op_index)
+}
+
+/// The collection-name refusal itself, taking the NAME rather than the op.
+///
+/// Split out so the op-shaped gate above and the descriptor-shaped gate in
+/// [`validate_declared_descriptor_identifiers`] produce a byte-identical message from
+/// one place. Two inputs, two traversals, ONE rule and ONE wording.
+fn refuse_reserved_collection_name(
+    vendors: VendorSet,
+    name: &str,
+    target_dialect: &DialectId,
+    op_index: usize,
+) -> Result<(), AuthoringError> {
     crate::schema::query::validate_collection(vendors, name).map_err(|error| AuthoringError {
         code: CODE_OP_INVALID.to_string(),
         kind: Some(UnsupportedKind::Op),
@@ -6533,24 +6547,132 @@ fn validate_declared_table_column_names(
     target_dialect: &DialectId,
     op_index: usize,
 ) -> Result<(), AuthoringError> {
-    let validate = |name: &str| {
-        crate::schema::query::validate_field_name(vendors, name).map_err(|error| AuthoringError {
-            code: CODE_OP_INVALID.to_string(),
-            kind: Some(UnsupportedKind::Op),
-            op_index,
-            dialect: target_dialect.clone(),
-            reason: error.to_string(),
-            suggested_fix: Some(
-                "rename the declared table column so it uses only the portable identifier \
-                 shape and no platform- or backend-reserved name"
-                    .to_string(),
-            ),
-        })
-    };
-
     declared_table_column_names(op)
         .into_iter()
-        .try_for_each(validate)
+        .try_for_each(|name| refuse_reserved_column_name(vendors, name, target_dialect, op_index))
+}
+
+/// The column-name refusal itself, taking the NAME rather than the op. The peer of
+/// [`refuse_reserved_collection_name`], and split out for the same reason.
+fn refuse_reserved_column_name(
+    vendors: VendorSet,
+    name: &str,
+    target_dialect: &DialectId,
+    op_index: usize,
+) -> Result<(), AuthoringError> {
+    crate::schema::query::validate_field_name(vendors, name).map_err(|error| AuthoringError {
+        code: CODE_OP_INVALID.to_string(),
+        kind: Some(UnsupportedKind::Op),
+        op_index,
+        dialect: target_dialect.clone(),
+        reason: error.to_string(),
+        // NOT `validate_field_name_for_declaration`. That one additionally refuses the
+        // columns the active table policy injects (`id`, `created_at`, `version`, ...),
+        // which the confined charter injects into EVERY creator table - so calling it
+        // from a pre-injection gate would refuse every schema on the platform.
+        suggested_fix: Some(
+            "rename the declared table column so it uses only the portable identifier \
+             shape and no platform- or backend-reserved name"
+                .to_string(),
+        ),
+    })
+}
+
+/// Refuse every creator-declared collection and table-column name in an op stream,
+/// and NOTHING else.
+///
+/// # Why this exists separately from [`validate_op_authorized`]
+///
+/// The declaration gate ships inside the full structural validator, which only
+/// `load_ir_document` runs. The ARTIFACT GENERATOR does not go through that loader:
+/// `zeroship-migrate-node`'s `gen_artifacts_from_envelopes` /
+/// `gen_artifacts_from_descriptors` fold raw recorder ops straight into
+/// `generated/zeroship/{env.db.ts,schema.runtime.json}`. So until this function
+/// existed, a creator could declare `ssn_masked`, get a green build, a typed field
+/// and a committed descriptor, and meet the reservation for the first time when the
+/// migration service refused the deploy.
+///
+/// Running the WHOLE op validator there is not an option and is not the intent: the
+/// generator's input is pre-injection, so the primary-key policy gate, the vendor
+/// capability gate and the schema-confinement gate would refuse ordinary schemas that
+/// deploy correctly. This is the reserved-identifier slice, sharing the same two
+/// validators (and therefore the same messages) as the loader's gate rather than a
+/// second copy of the rules.
+///
+/// # What it is worth, exactly
+///
+/// FAIL-FAST ERGONOMICS, NOT CONTAINMENT. Every caller of this function runs on the
+/// creator's own machine, so a hand-edited `schema.runtime.json` never passes through
+/// it. The gate that cannot be bypassed is still the guarded apply in
+/// `zeroship-migrate-server`, which runs in a service the creator does not control.
+/// Do not delete that one on the grounds that the generator checks now.
+///
+/// # Coverage limit, stated rather than implied
+///
+/// The traversal is congruent with the loader's - deliberately, so the two verbs
+/// cannot disagree - which means it inherits the loader's one blind spot: a
+/// `Op::Dialectal` leg naming a backend no `VendorSet` registers is skipped, columns
+/// and all, exactly as [`validate_dialectal_op`] skips it. Widening only here would
+/// make the generator refuse streams the deploy path accepts.
+///
+/// # Errors
+/// The first [`AuthoringError`] any declared name produces, carrying the op index
+/// within `ops` and the dialect the name was validated against.
+pub fn validate_declared_identifiers(
+    vendors: VendorSet,
+    ops: &[crate::model::ir::Op],
+    target_dialect: &DialectId,
+) -> Result<(), AuthoringError> {
+    for (op_index, op) in ops.iter().enumerate() {
+        // A dialectal op is a container, so recurse into the legs a registered
+        // backend claims and validate each leg's names against the backend the leg
+        // NAMES - never against the outer target. Same rule, same predicate and same
+        // attribution as `validate_dialectal_op`.
+        if let crate::model::ir::Op::Dialectal { legs } = op {
+            for (id, leg_ops) in legs {
+                if vendors.get(id).is_none() {
+                    continue;
+                }
+                for leg_op in leg_ops {
+                    validate_declared_collection_name(vendors, leg_op, id, op_index)?;
+                    validate_declared_table_column_names(vendors, leg_op, id, op_index)?;
+                }
+            }
+            continue;
+        }
+        validate_declared_collection_name(vendors, op, target_dialect, op_index)?;
+        validate_declared_table_column_names(vendors, op, target_dialect, op_index)?;
+    }
+    Ok(())
+}
+
+/// [`validate_declared_identifiers`] for the MANUAL artifact source, whose input is a
+/// declared [`CollectionDescriptor`](crate::render::declarative::CollectionDescriptor)
+/// set rather than an op stream.
+///
+/// It reads the AUTHOR-DECLARED names only (the descriptor's own `name` and its
+/// `fields`), and therefore runs BEFORE `descriptors_to_create_ops`, which resolves
+/// each descriptor's shape under the caller's charter and injects the platform system
+/// columns. Validating after that step would put the injected names in front of a
+/// validator that was never asked about them.
+///
+/// `op_index` is reported as the descriptor's position in `descriptors`: the manual
+/// source has no ops for an index to mean anything else.
+///
+/// # Errors
+/// As [`validate_declared_identifiers`].
+pub fn validate_declared_descriptor_identifiers(
+    vendors: VendorSet,
+    descriptors: &[crate::render::declarative::CollectionDescriptor],
+    target_dialect: &DialectId,
+) -> Result<(), AuthoringError> {
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        refuse_reserved_collection_name(vendors, &descriptor.name, target_dialect, index)?;
+        for field in &descriptor.fields {
+            refuse_reserved_column_name(vendors, &field.name, target_dialect, index)?;
+        }
+    }
+    Ok(())
 }
 
 /// [`validate_op_scoped`] threaded with the charter that answers vendor authority.
@@ -14390,5 +14512,174 @@ mod tests {
             CatalogColumnEvidence::none(),
         )
         .expect("a missing primitive target is left for physical catalog validation");
+    }
+
+    // -- the reserved-identifier slice the ARTIFACT GENERATOR runs ------------
+    //
+    // `crates/zeroship-migrate-node/tests/gen_artifacts_reserved_identifiers.rs`
+    // drives this through the real production verb over the real committed
+    // `examples/db-todos` envelopes, and that is where the wiring is proven. It can
+    // only reach `createTable`, because `createTable` is the only op kind any
+    // committed corpus in this tree contains (measured across all nine
+    // `migrations.ir.json` files). The op shapes below are the ones that suite
+    // cannot reach.
+
+    #[test]
+    fn the_generator_slice_refuses_a_reserved_add_column() {
+        let ops = vec![op_json(
+            r#"{"op":"addColumn","table":"users","column":"ssn_masked","type":"text"}"#,
+        )];
+        let error = validate_declared_identifiers(crate::test_fixtures::VENDORS, &ops, &POSTGRES)
+            .expect_err("addColumn declares a column and must pass the declaration gate");
+        assert_eq!(error.code, CODE_OP_INVALID, "got: {error}");
+        assert!(error.reason.contains("_masked"), "got: {error}");
+    }
+
+    #[test]
+    fn the_generator_slice_refuses_a_reserved_rename_column_target() {
+        let ops = vec![op_json(
+            r#"{"op":"renameColumn","table":"users","from":"ssn","to":"_secret","type":"text"}"#,
+        )];
+        let error = validate_declared_identifiers(crate::test_fixtures::VENDORS, &ops, &POSTGRES)
+            .expect_err("a rename DESTINATION is a declaration");
+        assert!(error.reason.contains("_secret"), "got: {error}");
+    }
+
+    #[test]
+    fn the_generator_slice_refuses_a_reserved_rename_table_target() {
+        let ops = vec![op_json(
+            r#"{"op":"renameTable","table":"users","to":"pg_users"}"#,
+        )];
+        let error = validate_declared_identifiers(crate::test_fixtures::VENDORS, &ops, &POSTGRES)
+            .expect_err("a rename DESTINATION is a declaration");
+        assert!(error.reason.contains("pg_"), "got: {error}");
+    }
+
+    /// The op index is reported against the position in the stream handed in, which is
+    /// what lets the host name a migration and an op the creator can open.
+    #[test]
+    fn the_generator_slice_reports_the_offending_ops_index() {
+        let ops = vec![
+            op_json(
+                r#"{"op":"createTable","name":"users","columns":[{"name":"email","type":"text"}]}"#,
+            ),
+            op_json(
+                r#"{"op":"createTable","name":"notes","columns":[{"name":"pii","type":"text"}]}"#,
+            ),
+        ];
+        let error = validate_declared_identifiers(crate::test_fixtures::VENDORS, &ops, &POSTGRES)
+            .expect_err("the second op declares a reserved classification name");
+        assert_eq!(error.op_index, 1, "got: {error}");
+    }
+
+    /// A dialectal leg is a container, and its columns are declarations too. The leg is
+    /// validated against the backend it NAMES, so the attributed dialect is the leg's.
+    #[test]
+    fn the_generator_slice_recurses_into_a_registered_dialectal_leg() {
+        let ops = vec![op_json(
+            r#"{"op":"dialectal","legs":{"sqlite":[
+                 {"op":"addColumn","table":"users","column":"ssn_masked","type":"text"}]}}"#,
+        )];
+        let error = validate_declared_identifiers(crate::test_fixtures::VENDORS, &ops, &POSTGRES)
+            .expect_err("a leg's declared columns are declarations");
+        assert_eq!(
+            error.dialect, SQLITE,
+            "the leg is judged as its own backend"
+        );
+        assert!(error.reason.contains("_masked"), "got: {error}");
+    }
+
+    /// **The documented blind spot, asserted rather than implied.**
+    ///
+    /// A leg naming a backend no `VendorSet` registers is skipped, columns and all.
+    /// That is inherited from [`validate_dialectal_op`] ON PURPOSE: the generator and
+    /// the deploy-side loader must refuse the same streams, and widening only here
+    /// would make `pnpm build` fail on a schema the platform would happily apply.
+    /// If this test starts failing because the loader was widened, widen both.
+    #[test]
+    fn the_generator_slice_skips_an_unregistered_dialectal_leg_as_the_loader_does() {
+        let source = r#"{"op":"dialectal","legs":{"duckdb":[
+             {"op":"addColumn","table":"users","column":"ssn_masked","type":"text"}]}}"#;
+        let ops = vec![op_json(source)];
+        validate_declared_identifiers(crate::test_fixtures::VENDORS, &ops, &POSTGRES)
+            .expect("an unregistered leg is skipped by the generator slice");
+        // The CONTROL that makes the line above evidence about the LEG rather than
+        // about the op shape: the same declaration inside a REGISTERED leg is refused.
+        let registered = vec![op_json(&source.replace("duckdb", "sqlite"))];
+        validate_declared_identifiers(crate::test_fixtures::VENDORS, &registered, &POSTGRES)
+            .expect_err("the identical declaration in a registered leg IS refused");
+    }
+
+    /// The MANUAL artifact source reads descriptors, not ops, and must refuse the same
+    /// declarations. Its input is PRE-injection, which is the whole reason it runs
+    /// before `descriptors_to_create_ops`.
+    #[test]
+    fn the_descriptor_slice_refuses_the_same_declarations() {
+        let descriptor =
+            |name: &str, field: &str| crate::render::declarative::CollectionDescriptor {
+                name: name.to_string(),
+                owner_app: "app".to_string(),
+                fields: vec![crate::render::declarative::FieldDescriptor {
+                    name: field.to_string(),
+                    ty: "string".to_string(),
+                    ..Default::default()
+                }],
+                indexes: Vec::new(),
+                runtime_options: Default::default(),
+            };
+
+        validate_declared_descriptor_identifiers(
+            crate::test_fixtures::VENDORS,
+            &[descriptor("users", "email")],
+            &POSTGRES,
+        )
+        .expect("an ordinary descriptor set passes");
+
+        let column = validate_declared_descriptor_identifiers(
+            crate::test_fixtures::VENDORS,
+            &[descriptor("users", "ssn_masked")],
+            &POSTGRES,
+        )
+        .expect_err("a reserved field name is refused on the manual source too");
+        assert!(column.reason.contains("_masked"), "got: {column}");
+
+        let collection = validate_declared_descriptor_identifiers(
+            crate::test_fixtures::VENDORS,
+            &[descriptor("__zeroship_admin", "email")],
+            &POSTGRES,
+        )
+        .expect_err("a reserved collection name is refused on the manual source too");
+        assert!(
+            collection.reason.contains("__zeroship"),
+            "got: {collection}"
+        );
+    }
+
+    /// **The system columns the charter injects must NOT be refused.**
+    ///
+    /// `validate_field_name_for_declaration` additionally fences the policy-injected
+    /// set. Calling it from this pre-injection gate - or moving the gate after
+    /// `resolve_create_table_policy` - would refuse `id` / `created_at` / `version` on
+    /// every table the confined charter touches, i.e. on 100% of apps. The seven names
+    /// are `policies/confined-system-shape.inject.toml`'s.
+    #[test]
+    fn the_generator_slice_accepts_every_charter_injected_system_column() {
+        for injected in [
+            "id",
+            "created_at",
+            "updated_at",
+            "created_by",
+            "updated_by",
+            "version",
+            "deleted_at",
+        ] {
+            let ops = vec![op_json(&format!(
+                r#"{{"op":"createTable","name":"users","columns":[{{"name":"{injected}","type":"text"}}]}}"#
+            ))];
+            validate_declared_identifiers(crate::test_fixtures::VENDORS, &ops, &POSTGRES)
+                .unwrap_or_else(|e| {
+                    panic!("the injected system column `{injected}` must not be refused: {e}")
+                });
+        }
     }
 }
