@@ -601,13 +601,30 @@ echo "ci wiring gate"
 # the contract refuses and rightly - "found nothing" and "looked at nothing"
 # would print identically. So the number is the population ruled on: 77 files at
 # mindepth 2 after the prune, measured 2026-09-04 over six subdirectories.
-# Floor 25 is far under that and far over the handful a collapsed find produces.
+#
+# FLOOR 60, AND IT WAS 25 UNTIL AN ADVERSARIAL RE-MEASUREMENT THE SAME DAY. The
+# comment here used to say 25 was "far over the handful a collapsed find
+# produces". That is true of a TOTAL collapse and false of the collapse that
+# actually happens, which is one step: re-measured with this arm's own predicate,
+# mindepth 3 walks 27 files and mindepth 4 walks 4. So `-mindepth 2` drifting to
+# `-mindepth 3` - one character - cleared the old floor by two while 50 of the 77
+# files, 65% of the population, silently dropped out. A floor is only worth its
+# margin against the SMALLEST plausible collapse, not against zero.
+#
+# 60 refuses the one-step collapse and still leaves room for ordinary editing:
+# six subdirectories would have to lose a quarter of their contents to reach it.
+# Do not lower it to accommodate a shrinking tests/ tree; re-measure and say why.
+#
 # That the finders can find anything AT ALL is proved by --self-test, which is
 # where the planted nested gates live; this arm only says they were pointed at a
-# real population. Arm run_commands below is still the first thing to read on a
-# multi-arm failure - it is the one every OTHER arm's input derives from.
+# real population. The self-test DOES catch the one-step collapse independently
+# (case B goes red with "found=0"), so this floor is the second of two keys, not
+# the only one - but an arm that needs its sibling to cover a collapse it counts
+# is not self-sufficient, which is why the floor moved rather than the comment.
+# Arm run_commands below is still the first thing to read on a multi-arm failure
+# - it is the one every OTHER arm's input derives from.
 N_NESTED_SCANNED="$(nested_scanned "$TESTS_DIR")"
-if ! gate_arm nested_scan "$N_NESTED_SCANNED" 25; then
+if ! gate_arm nested_scan "$N_NESTED_SCANNED" 60; then
   fail "the nested-gate scan walked $N_NESTED_SCANNED file(s) below tests/ depth
        1. The find stopped matching, so 'no nested gates' below means 'nothing
        was looked at'."
