@@ -12,7 +12,7 @@
 #   • best-effort: fetch egress (weather-proxy) + node-compat (openai-demo)
 #
 # These are PUBLIC web surfaces: URL/SSR/static resources default to
-# anon/publicly_accessible, so they serve through the gateway WITHOUT a
+# anonymous/publicly_accessible, so they serve through the gateway WITHOUT a
 # session / native-OP login (the SEC-5 fail-closed default only gates `rpc:` resources —
 # which is why the *authenticated* env.db RPC in e2e_app_primitives.sh is the
 # ISS-64 known-fail, and why here we drive RPC streaming over the worker

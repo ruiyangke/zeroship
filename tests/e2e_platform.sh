@@ -443,7 +443,7 @@ fi
 # WHAT THIS NO LONGER TESTS, and why. Until fe571dc03 (2026-04-30) the
 # gateway called `auth::check_api_key` for `WorkerMode::Rpc` requests and
 # SSR was open by design. RPC v1 replaced the key check with the compiled
-# per-resource `EffectivePolicy` (`auth: anon|user|...`), and deleted the
+# per-resource `EffectivePolicy` (`auth: anonymous|user`), and deleted the
 # only call site. `crates/zeroship-gateway/src/auth.rs::check_api_key` and
 # `RouteEntry.api_key_hash` are still there but nothing calls them
 # (grep: the sole match in non-test gateway code is the definition), so a
@@ -454,9 +454,9 @@ fi
 #
 # The gate that DOES exist is asserted instead, on ONE app whose manifest
 # carries two `rpc:` resources differing in exactly one field — `auth` —
-# plus an anon URL resource. 6b alone would not prove the auth level is what
+# plus an anonymous URL resource. 6b alone would not prove the auth level is what
 # rejects: a 401 on any `/__zeroship/v1/` path would satisfy it. 6c is the
-# one-variable partner (same app, same deploy, same path shape, auth: anon)
+# one-variable partner (same app, same deploy, same path shape, auth: anonymous)
 # and must come back 200.
 echo ""
 echo "=== Test 6: Auth ==="
@@ -469,12 +469,12 @@ elif ! deploy_js "$AUTH_ID" 'export default { fetch() { return new Response("ope
     fail "authgate: deploy failed"
 else
     sleep 5
-    # 6a: anon URL resource is reachable — proves the app is live, so a 401
+    # 6a: anonymous URL resource is reachable — proves the app is live, so a 401
     #     on 6b cannot be "the app never deployed".
     if http GET "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/authgate/" && [ "$HTTP_STATUS" = "200" ]; then
-        pass "auth:anon resource served (HTTP 200)"
+        pass "auth:anonymous resource served (HTTP 200)"
     else
-        fail "auth:anon resource: HTTP $HTTP_STATUS $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
+        fail "auth:anonymous resource: HTTP $HTTP_STATUS $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
     fi
     # 6b: rpc resource declaring auth:user, no session.
     if http POST "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/authgate/__zeroship/v1/secret" \
@@ -484,13 +484,13 @@ else
     else
         fail "rpc auth:user returned HTTP $HTTP_STATUS (expected 401/403): $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
     fi
-    # 6c: the control. Identical in every respect except `auth: anon`.
+    # 6c: the control. Identical in every respect except `auth: anonymous`.
     if http POST "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/authgate/__zeroship/v1/open" \
         -H 'Content-Type: application/json' -d '{"json":{}}' \
         && [ "$HTTP_STATUS" = "200" ]; then
-        pass "rpc resource with auth:anon passes the same gate (HTTP 200)"
+        pass "rpc resource with auth:anonymous passes the same gate (HTTP 200)"
     else
-        fail "rpc auth:anon returned HTTP $HTTP_STATUS (expected 200) — 6b's 401 may not be the auth gate: $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
+        fail "rpc auth:anonymous returned HTTP $HTTP_STATUS (expected 200) — 6b's 401 may not be the auth gate: $(printf '%s' "$HTTP_BODY" | cut -c1-160)"
     fi
 fi
 

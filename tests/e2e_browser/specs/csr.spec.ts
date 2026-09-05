@@ -30,7 +30,7 @@ test.describe("CSR (csr-todo) — SPA mount + RPC round-trip", () => {
 
   // The SPA mounts and the todo list round-trips through the PUBLIC listTodos
   // RPC over the real browser→gateway→worker→V8 path. csr-todo declares
-  // `rpc:listTodos` as `auth: anon, publiclyAccessible: true` in
+  // `rpc:listTodos` as `auth: anonymous, publiclyAccessible: true` in
   // src/server/config.ts (ISS-69), so the anonymous browser reaches it through
   // the gateway. This is the only spec that proves PUBLIC client RPC over the
   // gateway — the curl harness deliberately bypasses the gateway via /dispatch.

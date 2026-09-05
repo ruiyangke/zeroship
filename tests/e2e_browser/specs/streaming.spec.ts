@@ -4,7 +4,7 @@ import { appSlug, appUrl } from "../helpers";
 // RPC streaming, consumed CLIENT-SIDE in the browser. csr-todo's search box
 // drives `searchTodos` (a `stream()` RPC, kind: "stream") via an async iterator
 // in App.tsx: each yielded Todo is appended to React state and rendered as a
-// new <li>. searchTodos is declared `auth: anon, publiclyAccessible: true`
+// new <li>. searchTodos is declared `auth: anonymous, publiclyAccessible: true`
 // (ISS-69), so the anonymous browser reaches it through the gateway.
 //
 // These specs caught ISS-71. Two distinct issues, isolated with raw-fetch probes:
@@ -20,7 +20,7 @@ test.describe("RPC streaming (csr-todo searchTodos)", () => {
   test.skip(!appSlug("csr"), "csr-todo not deployed (dist missing)");
 
   // RELIABLE: the mount default-"build" stream's data frame renders in the
-  // browser DOM — proof that anon streaming RPC reaches the browser over the
+  // browser DOM — proof that anonymous streaming RPC reaches the browser over the
   // gateway (the transport works end-to-end into client React state).
   test("a streamed match renders in the browser over the gateway", async ({ page }) => {
     await page.goto(appUrl("csr", "/"), { waitUntil: "domcontentloaded" });
