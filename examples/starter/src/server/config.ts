@@ -9,7 +9,7 @@ import { defineApp } from "@zeroship/server";
 //
 // This starter is a PUBLIC demo (no login / no per-user data), so we opt its two
 // procedures into anonymous access. `publiclyAccessible: true` is the deliberate
-// confirmation the manifest validator requires alongside `auth: "anon"`, making
+// confirmation the manifest validator requires alongside `auth: "anonymous"`, making
 // "this endpoint is intentionally public" explicit and reviewable.
 //
 // When your app has real user data, DROP these entries (or set `auth: "user"`)
@@ -17,10 +17,10 @@ import { defineApp } from "@zeroship/server";
 // `requireUser()`. See docs/reference/rpc.md — "Procedure auth".
 export default defineApp({
   resources: {
-    "rpc:getMessages": { auth: "anon", publiclyAccessible: true },
-    "rpc:addMessage": { auth: "anon", publiclyAccessible: true },
+    "rpc:getMessages": { auth: "anonymous", publiclyAccessible: true },
+    "rpc:addMessage": { auth: "anonymous", publiclyAccessible: true },
     // Deliberately public so the platform error path is reachable without a
     // session; see the note on `boom` in ../server.ts.
-    "rpc:boom": { auth: "anon", publiclyAccessible: true },
+    "rpc:boom": { auth: "anonymous", publiclyAccessible: true },
   },
 });

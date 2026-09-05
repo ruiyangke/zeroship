@@ -32,7 +32,7 @@
 // one call, rather than the harness making three round trips whose results
 // might not describe the same process state.
 //
-// EVERY PROCEDURE IS `auth: "anon"` (src/server/config.ts). That is load-
+// EVERY PROCEDURE IS `auth: "anonymous"` (src/server/config.ts). That is load-
 // bearing, not laziness: a gated procedure is answered by the GATEWAY before
 // dispatch, so it never reaches the worker at all and the deployed row would
 // describe the gateway's refusal rather than the worker's environment - which

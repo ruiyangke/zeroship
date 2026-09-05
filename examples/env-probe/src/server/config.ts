@@ -7,9 +7,9 @@ import { defineApp } from "@zeroship/server";
 // worker and the deployed response would describe the gateway's refusal, not
 // the app's environment. That failure mode reads as a clean "no leak", which is
 // exactly the false green `tests/e2e_dev_vs_deployed_env.sh` exists to avoid.
-// The harness re-asserts this `anon` declaration against the BUILT manifest.
+// The harness re-asserts this `anonymous` declaration against the BUILT manifest.
 export default defineApp({
   resources: {
-    "rpc:envp.report": { auth: "anon", publiclyAccessible: true },
+    "rpc:envp.report": { auth: "anonymous", publiclyAccessible: true },
   },
 });

@@ -5,7 +5,7 @@ import { zeroship } from "@zeroship/vite-plugin";
 // client bundle - only `src/index.ts` exporting RPC procedures that report what
 // app code can observe of the process environment.
 //
-// No `devAuth` block on purpose. Every procedure is `auth: "anon"`, so identity
+// No `devAuth` block on purpose. Every procedure is `auth: "anonymous"`, so identity
 // never enters the picture and the only thing the two tiers can disagree about
 // is the ENVIRONMENT SURFACE. See `tests/e2e_dev_vs_deployed_env.sh`.
 export default defineConfig({

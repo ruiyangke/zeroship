@@ -18,7 +18,7 @@
 // can assert the ABSOLUTE property (deployed must not ship a stack) alongside
 // the relative one.
 //
-// EVERY PROCEDURE IS `auth: "anon"` (src/server/config.ts). That is load-
+// EVERY PROCEDURE IS `auth: "anonymous"` (src/server/config.ts). That is load-
 // bearing, not laziness: a gated procedure is answered by the GATEWAY's auth
 // gate before dispatch, so its error body never touches the worker's
 // `build_error_body` at all. Anonymous reachability is the only way a

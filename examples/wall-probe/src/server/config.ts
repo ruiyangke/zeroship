@@ -9,7 +9,7 @@ import { defineApp } from "@zeroship/server";
 // clean answer, which would hide the very thing this app measures.
 export default defineApp({
   resources: {
-    "rpc:wallp.fast": { auth: "anon", publiclyAccessible: true },
-    "rpc:wallp.slow": { auth: "anon", publiclyAccessible: true },
+    "rpc:wallp.fast": { auth: "anonymous", publiclyAccessible: true },
+    "rpc:wallp.slow": { auth: "anonymous", publiclyAccessible: true },
   },
 });

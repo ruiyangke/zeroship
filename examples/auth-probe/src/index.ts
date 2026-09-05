@@ -17,22 +17,26 @@
 // THE FIVE AUTH POSTURES, one procedure each. The posture lives in
 // `src/server/config.ts`; the difference between them is the whole point:
 //
-//   probe.public       auth:"anon"  - reachable anonymously on both sides.
-//   probe.defaulted    (undeclared) - SEC-5 fail-closed default resolves it to
-//                                     `auth:"user"`. THE #163 PROBE: deployed
-//                                     the gateway refuses an anonymous caller,
-//                                     dev has no gateway and therefore no gate.
-//   probe.userDeclared auth:"user"  - the same gate, declared explicitly.
-//   probe.requireAnon  auth:"anon"  - RAW `auth.requireUser()` reachable
-//                                     anonymously, so the KERNEL's own failure
-//                                     shape is observable on BOTH sides (a
-//                                     gated procedure never reaches the worker
-//                                     deployed, so it cannot show this).
-//   probe.appGate      auth:"anon"  - an app-level `getUser()` gate throwing a
-//                                     status-bearing 401. Handler code, so it
-//                                     SHOULD be identical on both sides; it is
-//                                     the control that separates "the platform
-//                                     gate diverges" from "everything diverges".
+//   probe.public       auth:"anonymous" - reachable anonymously on both sides.
+//   probe.defaulted    (undeclared)     - SEC-5 fail-closed default resolves
+//                                         it to `auth:"user"`. THE #163 PROBE:
+//                                         deployed the gateway refuses an
+//                                         anonymous caller, dev has no gateway
+//                                         and therefore no gate.
+//   probe.userDeclared auth:"user"      - the same gate, declared explicitly.
+//   probe.requireAnon  auth:"anonymous" - RAW `auth.requireUser()` reachable
+//                                         anonymously, so the KERNEL's own
+//                                         failure shape is observable on BOTH
+//                                         sides (a gated procedure never
+//                                         reaches the worker deployed, so it
+//                                         cannot show this).
+//   probe.appGate      auth:"anonymous" - an app-level `getUser()` gate
+//                                         throwing a status-bearing 401.
+//                                         Handler code, so it SHOULD be
+//                                         identical on both sides; it is the
+//                                         control that separates "the platform
+//                                         gate diverges" from "everything
+//                                         diverges".
 //
 // Every procedure returns the RAW `env.auth.getUser()` value, unmapped. That is
 // deliberate: `getUser()` is a bare `JSON.parse` of the `ZeroShip-User` payload

@@ -47,7 +47,7 @@ explicitly in `src/server/config.ts`:
 import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "rpc:notes.list": { auth: "anon", publiclyAccessible: true },
+    "rpc:notes.list": { auth: "anonymous", publiclyAccessible: true },
   },
 });
 ```
