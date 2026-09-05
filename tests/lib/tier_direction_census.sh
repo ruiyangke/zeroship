@@ -282,7 +282,7 @@ tier_of_file() {
     ./backend/mod.rs)                                    echo ENGINE ;;
     # THREE FILES ARE DELIBERATELY LEFT CONTESTED, and each has a reason that is
     # an open QUESTION rather than an omission:
-    #   auth/mod.rs, auth/util.rs - #156 asks whether auth/ is deleted outright
+    #   auth/mod.rs - #156 asks whether auth/ is deleted outright
     #     (zero production callers, a live twin in migrate-server). Tiering code
     #     that may not exist would assert a placement for it. They travelled to
     #     `zeroship-data-engine` with `auth/bootstrap.rs`, which needs the
@@ -456,9 +456,9 @@ prod() {
 # cycle was 7 down, not 8.
 #
 # That file was DELETED on 2026-09-03, so it is history rather than a live
-# example; `transaction/probe.rs` and `auth/util.rs` are the modules this rule
-# still excludes. The rule is unchanged - the deletion removes a case, not the
-# need for the check.
+# example, and `auth/util.rs` followed it on 2026-09-04. `transaction/probe.rs`
+# is the module this rule still excludes. The rule is unchanged - a deletion
+# removes a case, not the need for the check.
 #
 # THIS MATTERS BEYOND ONE FILE: the header promises the count is a FLOOR. For
 # UP-edges it is. For DOWN-edges it was not - the census could OVER-count, and a

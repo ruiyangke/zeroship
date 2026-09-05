@@ -126,8 +126,9 @@ fi
 #
 # THE TWO NUMBERS DIFFER ON PURPOSE, and did not until 2026-09-02. The census
 # reports SHIPPED surface and now excludes items in test-gated submodules
-# (transaction/probe.rs, auth/util.rs - and crud/mask_drift.rs until it was
-# deleted on 2026-09-03), because a module no shipped binary compiles is not API
+# (transaction/probe.rs - plus crud/mask_drift.rs until it was deleted on
+# 2026-09-03 and auth/util.rs until 2026-09-04), because a module no shipped
+# binary compiles is not API
 # the split publishes. This gate counts them, because it runs UNDER
 # `--features test-helpers`, where those modules very much do compile and the
 # lint very much can fire inside them.

@@ -91,8 +91,8 @@
 #   --tests   TEST region, foreign crates ANYWHERE. A test body is not a
 #             signature; the question there is only whether the module's test
 #             build links something its crate may not. It matters for the same
-#             reason the proposal's Phase 0.2 gives for moving auth/util.rs -
-#             "test-tier today, but test builds must compile".
+#             reason the proposal's Phase 0.2 gives for moving a test-gated
+#             module - "test-tier today, but test builds must compile".
 #
 # USAGE
 #   tests/lib/tier_signature_census.sh              # production signatures, violations only
