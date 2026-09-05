@@ -433,14 +433,6 @@ impl Projection {
             .map(|f| f.alias.as_str())
             .collect()
     }
-
-    /// Whether any field carries a masked substitution.
-    #[must_use]
-    pub fn has_masked_field(&self) -> bool {
-        self.fields
-            .iter()
-            .any(|f| matches!(f.source, ProjectionSource::MaskedSibling { .. }))
-    }
 }
 
 /// Why a projection was refused.
