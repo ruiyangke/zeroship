@@ -1,30 +1,30 @@
 /**
  * The build must REFUSE `auth: "admin"`.
  *
- * `admin` is a level for a principal that does not exist.
+ * `admin` was a level for a principal that does not exist.
  * `docs/architecture/control-plane.md` states "There is no platform admin
- * surface", and the gateway enforces `Admin` byte-for-byte as `User` at all
- * three of its match sites:
+ * surface", and the gateway enforced `Admin` byte-for-byte as `User` at all
+ * three of its match sites - two arms in
+ * `crates/zeroship-gateway/src/router/auth.rs` and one in
+ * `crates/zeroship-gateway/src/router/dispatch.rs`, each spelled
+ * `User | Admin`. No site anywhere tested for platform-admin identity. A
+ * `rank()` function made `Admin` win a MERGE against `User`, which is why the
+ * level read as implemented: the merge question was answered and the access
+ * question never was.
  *
- *   crates/zeroship-gateway/src/router/auth.rs      `AuthLevel::User | AuthLevel::Admin` (x2)
- *   crates/zeroship-gateway/src/router/dispatch.rs  `(None, AuthLevel::User | AuthLevel::Admin)`
+ * That would have been an internal wart if the creator surface had not
+ * RECOMMENDED the value. It did, twice, in this file's production sibling
+ * (`src/manifest.ts`): the secure-by-default remedy said `or set auth:
+ * "user" or "admin"`, and the fail-closed banner said `auth: "user"` /
+ * `auth: "admin"` "to keep it gated". A creator who followed that advice to
+ * lock a route down got user-level protection - every signed-in end user
+ * reached it.
  *
- * No site anywhere tests for platform-admin identity, and
- * `crates/zeroship-bundle/src/rule.rs` says so in the variant's own doc
- * comment: `rank()` is real and load-bearing, but for the MERGE question,
- * not the ACCESS question.
- *
- * That would be an internal wart if the creator surface did not RECOMMEND
- * the value. It does, twice, in this very file's production sibling
- * (`src/manifest.ts`): the secure-by-default remedy says `or set auth:
- * "user" or "admin"`, and the fail-closed banner says `auth: "user"` /
- * `auth: "admin"` "to keep it gated". A creator who follows that advice to
- * lock a route down gets user-level protection - every signed-in end user
- * reaches it.
- *
- * The decision is to DELETE the variant, not implement it. The build is the
- * right place to say so: it is the first thing a creator runs, and it can
- * name the file and the key. These tests pin the refusal and the message.
+ * The decision was to DELETE the variant, not implement it
+ * (`crates/zeroship-bundle/src/rule.rs`, now `RequiredPrincipal` with two
+ * variants). The build is the right place to say so: it is the first thing a
+ * creator runs, and it can name the file and the key. These tests pin the
+ * refusal and the message.
  *
  * `computeManifestExtras` is the same entry point `src/build.ts` calls, so a
  * refusal here is a refusal of `zeroship build`.
@@ -50,9 +50,9 @@ async function makeConfigFixture(source: string): Promise<{
 }
 
 describe("auth: admin is refused by the build", () => {
-  // The headline case. Today this call RESOLVES and emits
+  // The headline case. Before the deletion this call RESOLVED and emitted
   // `resources["/api/reports"].auth === "admin"` into the manifest, which the
-  // gateway then enforces as `user`.
+  // gateway then enforced as `user`.
   test("refuses auth: admin on a URL-namespace resource, in production", async () => {
     const fx = await makeConfigFixture(`
 import { defineApp } from "@zeroship/server";
@@ -102,10 +102,10 @@ export default defineApp({
     }
   });
 
-  // Dev mode is not a softer tier here. `auth: "anon"` without
+  // Dev mode is not a softer tier here. `auth: "anonymous"` without
   // `publiclyAccessible` is a warning in dev because the shape is legal and
   // the creator may be mid-edit. `admin` is not legal in any mode: the
-  // variant is being deleted, so a dev build that accepted it would emit a
+  // variant is gone, so a dev build that accepted it would emit a
   // manifest the runtime cannot honour.
   test("refuses auth: admin in development mode too", async () => {
     const fx = await makeConfigFixture(`
@@ -135,10 +135,9 @@ export default defineApp({
     }
   });
 
-  // The wildcard root is how a creator locks a whole app down in one line,
-  // and `manifest-resources.test.ts` already has fixtures shaped exactly
-  // like this using `admin`. Inheritance means one accepted `admin` here
-  // silently under-protects every descendant.
+  // The wildcard root is how a creator locks a whole app down in one line.
+  // Inheritance means one accepted `admin` here silently under-protects
+  // every descendant.
   test("refuses auth: admin on the wildcard root", async () => {
     const fx = await makeConfigFixture(`
 import { defineApp } from "@zeroship/server";
@@ -211,7 +210,7 @@ import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
     "/api/reports": { auth: "user" },
-    "/health": { auth: "anon", publiclyAccessible: true }
+    "/health": { auth: "anonymous", publiclyAccessible: true }
   }
 });
 `);
@@ -222,7 +221,7 @@ export default defineApp({
         mode: "production",
       });
       assert.equal(result.resources["/api/reports"].auth, "user");
-      assert.equal(result.resources["/health"].auth, "anon");
+      assert.equal(result.resources["/health"].auth, "anonymous");
     } finally {
       await fx.cleanup();
     }

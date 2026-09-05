@@ -2,7 +2,7 @@
  * Secure-by-default validation.
  *
  * `docs/proposals/rpc.md` §7 ("Validation") requires
- * `auth: "anon"` to be paired with `publiclyAccessible: true` on the
+ * `auth: "anonymous"` to be paired with `publiclyAccessible: true` on the
  * same resource. Build error in production; warning in dev.
  */
 
@@ -31,7 +31,7 @@ describe("secure-by-default", () => {
 import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "/api/public": { auth: "anon", override: ["auth"] }
+    "/api/public": { auth: "anonymous", override: ["auth"] }
   }
 });
 `);
@@ -67,7 +67,7 @@ export default defineApp({
 import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "/api/public": { auth: "anon", override: ["auth"], publiclyAccessible: true }
+    "/api/public": { auth: "anonymous", override: ["auth"], publiclyAccessible: true }
   }
 });
 `);
@@ -77,7 +77,7 @@ export default defineApp({
         procedures: [],
         mode: "production",
       });
-      assert.equal(r.resources["/api/public"].auth, "anon");
+      assert.equal(r.resources["/api/public"].auth, "anonymous");
       assert.equal(
         (r.resources["/api/public"] as Record<string, unknown>).publicly_accessible,
         true
@@ -92,7 +92,7 @@ export default defineApp({
 import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "/api/public": { auth: "anon", override: ["auth"] }
+    "/api/public": { auth: "anonymous", override: ["auth"] }
   }
 });
 `);

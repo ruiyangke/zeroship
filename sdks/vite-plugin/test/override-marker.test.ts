@@ -49,14 +49,14 @@ async function makeConfigFixture(source: string): Promise<{
 
 describe("override marker validation", () => {
   test("rejects child weakening parent auth without override", async () => {
-    // /api requires `auth: admin`. /api/public sets `auth: user` (a
-    // weakening) without `override: ["auth"]`. Build must refuse.
+    // /api requires `auth: user`. /api/public drops that to `auth: anonymous`
+    // (a weakening) without `override: ["auth"]`. Build must refuse.
     const fx = await makeConfigFixture(`
 import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "/api": { auth: "admin", override: ["auth"] },
-    "/api/public": { auth: "user", publiclyAccessible: true }
+    "/api": { auth: "user" },
+    "/api/public": { auth: "anonymous", publiclyAccessible: true }
   }
 });
 `);
@@ -92,8 +92,8 @@ export default defineApp({
 import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "/api": { auth: "admin", override: ["auth"] },
-    "/api/public": { auth: "anon", override: ["auth"], publiclyAccessible: true }
+    "/api": { auth: "user" },
+    "/api/public": { auth: "anonymous", override: ["auth"], publiclyAccessible: true }
   }
 });
 `);
@@ -103,7 +103,7 @@ export default defineApp({
         procedures: [],
         mode: "production",
       });
-      assert.equal(r.resources["/api/public"].auth, "anon");
+      assert.equal(r.resources["/api/public"].auth, "anonymous");
     } finally {
       await fx.cleanup();
     }
@@ -115,8 +115,8 @@ export default defineApp({
 import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "rpc:todos": { auth: "user", override: ["auth"] },
-    "rpc:todos.delete": { auth: "admin", override: ["auth"] }
+    "rpc:todos": { auth: "anonymous", publiclyAccessible: true },
+    "rpc:todos.delete": { auth: "user" }
   }
 });
 `);
@@ -126,7 +126,7 @@ export default defineApp({
         procedures: [procFor(fx.root, "todos.delete")],
         mode: "production",
       });
-      assert.equal(r.resources["rpc:todos.delete"].auth, "admin");
+      assert.equal(r.resources["rpc:todos.delete"].auth, "user");
     } finally {
       await fx.cleanup();
     }

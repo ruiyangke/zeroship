@@ -10,7 +10,7 @@ export interface ProcedureSchema<T = unknown> {
   parse(input: unknown): T;
 }
 
-export type AuthLevel = "anon" | "user" | "admin";
+export type RequiredPrincipal = "anonymous" | "user";
 export type RateLimitScope = "ip" | "user" | "session" | "app";
 
 export interface RateLimit {
@@ -32,7 +32,7 @@ export interface ProcedureConfig<TIn = unknown, TOut = unknown> {
   idempotent?: boolean;
   /** Idempotency-key TTL override. Default 24 h; max 7 d. */
   idempotencyTtl?: { hours?: number };
-  auth?: AuthLevel;
+  auth?: RequiredPrincipal;
   rateLimit?: RateLimit;
   maxInputBytes?: number;
   timeout?: Timeout;

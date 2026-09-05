@@ -33,8 +33,8 @@ import {
  *     },
  *   },
  *   resources: {
- *     "*": { auth: "admin", rateLimit: { rpm: 60, per: "ip" } },
- *     "rpc:todos.delete": { auth: "admin", override: ["auth"] },
+ *     "*": { auth: "user", rateLimit: { rpm: 60, per: "ip" } },
+ *     "rpc:todos.delete": { auth: "anonymous", publiclyAccessible: true, override: ["auth"] },
  *   },
  * });
  * ```

@@ -39,7 +39,7 @@ export default defineApp({
       children: {
         "list":   { kind: "query" },
         "add":    { kind: "mutation", idempotent: true },
-        "delete": { auth: "admin", override: ["auth"] },
+        "delete": { auth: "anonymous", override: ["auth"], publiclyAccessible: true },
       },
     },
   },
@@ -87,12 +87,12 @@ export default defineApp({
       auth: "user", override: ["auth"],
       children: {
         "admin": {
-          auth: "admin", override: ["auth"],
+          auth: "anonymous", override: ["auth"], publiclyAccessible: true,
           children: {
             "users": { rateLimit: { rpm: 100, per: "user" } },
           },
         },
-        "public": { auth: "anon", override: ["auth"], publiclyAccessible: true },
+        "public": { auth: "anonymous", override: ["auth"], publiclyAccessible: true },
       },
     },
   },
@@ -111,7 +111,7 @@ export default defineApp({
         "/api/admin/users (deeply nested) flattened"
       );
       assert.ok(r.resources["/api/public"], "/api/public flattened");
-      assert.equal(r.resources["/api/admin"].auth, "admin");
+      assert.equal(r.resources["/api/admin"].auth, "anonymous");
     } finally {
       await fx.cleanup();
     }
@@ -127,7 +127,7 @@ import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
     "/api/public": {
-      auth: "anon",
+      auth: "anonymous",
       override: ["auth"],
       publiclyAccessible: true,
       maxInputBytes: 4096,

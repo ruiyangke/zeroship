@@ -24,7 +24,7 @@
  * FIXTURE DISCRIMINATION (this pair must not collapse): the warn side
  * resolves to a merged resource whose `auth` field is literally
  * `undefined`; the silent side resolves to one whose `auth` field is a
- * string ("anon" / "user" / "admin"). Several tests assert that resolved
+ * string ("anonymous" / "user"). Several tests assert that resolved
  * value directly alongside the warning assertion, so a fixture that
  * accidentally gave both sides the same `auth` would fail loudly rather
  * than pass vacuously.
@@ -145,7 +145,7 @@ describe("fail-closed auth warning", () => {
 import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "rpc:listTodos": { auth: "anon", publiclyAccessible: true }
+    "rpc:listTodos": { auth: "anonymous", publiclyAccessible: true }
   }
 });
 `,
@@ -155,7 +155,7 @@ export default defineApp({
     // Fixture discrimination: silent side resolves to a real auth string.
     assert.equal(
       extras.resources["rpc:listTodos"].auth,
-      "anon",
+      "anonymous",
       "silent-side fixture must actually resolve to a declared auth",
     );
 
@@ -176,9 +176,9 @@ export default defineApp({
 
   test("SILENT when auth comes from module-level $config", async () => {
     const { warnings, extras } = await run(null, [
-      proc("listTodos", { moduleConfig: { auth: "admin" } }),
+      proc("listTodos", { moduleConfig: { auth: "user" } }),
     ]);
-    assert.equal(extras.resources["rpc:listTodos"].auth, "admin");
+    assert.equal(extras.resources["rpc:listTodos"].auth, "user");
     assert.deepEqual(authWarnings(warnings), []);
   });
 
@@ -237,7 +237,7 @@ export default defineApp({
 import { defineApp } from "@zeroship/server";
 export default defineApp({
   resources: {
-    "rpc:declared": { auth: "anon", publiclyAccessible: true }
+    "rpc:declared": { auth: "anonymous", publiclyAccessible: true }
   }
 });
 `,
@@ -245,7 +245,7 @@ export default defineApp({
     );
 
     // The two sides of the pair take genuinely different resolved values.
-    assert.equal(extras.resources["rpc:declared"].auth, "anon");
+    assert.equal(extras.resources["rpc:declared"].auth, "anonymous");
     assert.equal(extras.resources["rpc:undeclared"].auth, undefined);
 
     const w = authWarnings(warnings).join("\n");
