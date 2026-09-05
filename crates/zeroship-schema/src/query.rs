@@ -1022,9 +1022,14 @@ fn validate_search_limit_bound(name: &str, value: usize) -> Result<(), QueryErro
     Ok(())
 }
 
-/// Validate an app_id (schema name): alphanumeric + underscores + hyphens.
+/// Validate a physical schema name: alphanumeric + underscores + hyphens.
 /// UUIDs contain hyphens. Schema names are always double-quoted in SQL.
-fn validate_schema(name: &str) -> Result<(), QueryError> {
+///
+/// `pub(crate)` rather than private because [`crate::SchemaName`] is the one
+/// caller left: this predicate used to run once per operation inside every
+/// `build_*` function, and now runs once at construction of the type those
+/// functions take.
+pub(crate) fn validate_schema(name: &str) -> Result<(), QueryError> {
     if name.is_empty() {
         return Err(QueryError::InvalidCollection(
             "schema name cannot be empty".to_string(),
