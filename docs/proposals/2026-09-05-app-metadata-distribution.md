@@ -51,6 +51,17 @@ and one over-general claim, all recorded in the corrections section below rather
 than silently repaired. Read that section before trusting any number here: this
 document has now been wrong twice about its own measurements.
 
+**A third pass, also on 2026-09-05, settled the replication envelope and the
+chunk count.** It found something worse than a wrong number: the chunking
+section preserved the authoritative negative answer in the branch where a node
+holds the chunk and said nothing about the branch where it does not, which is
+where the property fails silently (correction 30). It also found that a
+per-entry size had been derived and never multiplied by any budget a node
+actually has (29), that the chunk key is not canonical because the tree
+disagrees with itself about the case of an app name (31), and that two design
+rejections rested on a measured corpus while enforced ceilings sat far above it
+(32, 33). Corrections 29 to 33.
+
 **Tags, applied per claim.**
 
 - **MEASURED** - I opened the code or ran the measurement, and the number came
@@ -399,6 +410,37 @@ false claims.
 MEASURED. The manifest struct itself has **19 fields**
 (`crates/zeroship-bundle/src/manifest.rs:33-173`), not the sixteen the
 conversation recorded.
+
+**The argument above is a slope argument, and there is a stronger one beside it
+that this document did not make: the ENFORCED ceiling, not the measured corpus.**
+MEASURED, `crates/zeroship-bundle/src/limits.rs` caps a manifest at
+`MAX_MANIFEST_BYTES = 1 MiB` (`:11`), a single blob at `MAX_BLOB_BYTES = 16 MiB`
+(`:14`), and a deploy at `MAX_BLOBS_PER_DEPLOY = 10_000` blobs (`:17`, enforced
+at `unpack.rs:288`). Two things follow that the measured corpus cannot show,
+because every artifact in it is three orders of magnitude below the ceiling:
+
+1. **A legal deploy can put 1 MiB inline on every poll, forever.** The manifest
+   rides on every `RouteEntry` (`types.rs:223`) at the default 5-second interval,
+   so ONE app at the cap costs each gateway 1 MiB per poll - 209.7 KB/s
+   sustained, times every gateway, for an object that is immutable for the life
+   of the deploy and never changes between polls. A thousand such apps is 1 GiB
+   per poll per gateway. That is not a projection about a hypothetical creator
+   population; it is what ingest already accepts today.
+2. **The two enforced caps contradict each other, and the digest is what
+   reconciles them.** At the measured 240 bytes per asset entry, 10,000 assets
+   need 2.4 MB of `assets` value alone - **2.3x more than the whole manifest is
+   allowed to be**. So the blob-count cap permits a deploy the manifest cap
+   refuses, and the binding limit is reached at roughly 4370 assets, not 10,000.
+   A creator who builds an ordinary documentation site hits a refusal whose
+   stated reason is manifest size and whose real cause is that the manifest
+   carries a per-file map at all. Digesting the asset map out removes the map
+   from the 1 MiB budget entirely: `MAX_BLOBS_PER_DEPLOY` becomes the real
+   ceiling as it was presumably meant to be, and the per-poll cost of a
+   10,000-asset app falls from *refused* to 32 bytes of digest.
+
+This is the argument for the digest that does not depend on a corpus at all. The
+slope argument says assets will grow; the ceiling argument says the shape is
+already broken at limits the code enforces today.
 
 ## The arithmetic that disqualifies the shape
 
@@ -1022,6 +1064,88 @@ already this tree's habit. `LocalDiskBlobStore::blob_path` shards blobs into 256
 buckets by `hash[0..2]` (`blob.rs:214-218`). Directory chunking is the same
 discipline applied to a lookup key instead of a content hash.
 
+## But chunking breaks the negative answer, unless a third state is added
+
+**This is a defect in the section above, not a refinement of it.** The sentence
+two paragraphs up is conditional - "*if* it holds that chunk at the current
+root's digest and the host is not in it" - and the document never says what
+happens when the condition fails. That complement is where the whole property
+dies, and the code has no way to represent it.
+
+MEASURED, the shape of the hole. A lookup today has exactly TWO outcomes.
+`lookup_by_name` (`sync.rs:239-244`) is a `HashMap::get` returning `Option`, and
+`dispatch.rs:1064` turns `None` into a 404 with no I/O. There is no third state
+because under a single atomic full-table pull there cannot be one: a table that
+landed IS complete, so "absent" and "absent from a complete table" are the same
+fact. Chunking separates them and nothing in the code notices.
+
+DERIVED consequence, and it is worse than a stale table. A gateway missing chunk
+`i` answers **authoritative 404s for every app in that chunk** - a hash-random
+1/N slice of the platform, spread across unrelated tenants and indistinguishable
+at the edge from a correct negative. No tenant loses everything, no pattern
+appears in any single app's metrics, and the fleet-wide signal is a small uniform
+rise in 404s, which is what a public edge sees from scanners all day. The current
+design fails LOUDLY here (an empty table 404s everything, and `/readyz` says so);
+the chunked design would fail *quietly and partially*, which is strictly worse.
+
+MEASURED, that this is not hypothetical and the existing mitigation does not
+generalise. `/readyz` is a **freshness** test, not a completeness test:
+`is_ready` (`crates/zeroship-gateway/src/health.rs:68`) is
+`!dev_escape && freshness.is_fresh(staleness_budget(poll_interval))`, over
+`SyncFreshness` (`sync.rs:69`) and a three-interval budget
+(`crates/zeroship-core/src/readiness.rs:186`, `is_fresh` at `:172`). Under one
+atomic pull those coincide. Under chunking a node holding a current root and
+4095 of 4096 chunks is *fresh* and *incomplete*, and `is_ready` returns true.
+The orchestrator would route traffic to it, and it would serve confident 404s.
+
+DESIGNED repair, and it is the price of the negative answer rather than an
+add-on. The reader tracks per-chunk residency against the root, and the lookup
+has THREE outcomes, not two:
+
+```
+   chunk_state[i] : Missing | Held { root_version }
+
+   held at CURRENT root, host absent   -> 404. Authoritative. The design's
+                                          whole claim, and only here.
+   held at an OLDER root, host absent  -> 404, but a KNOWN-STALE negative:
+                                          the host may have been created
+                                          since. Serve it, count it, alarm
+                                          on the age.
+   chunk MISSING entirely              -> NOT a negative. 503, or a fetch,
+                                          or an upstream ask. Never 404.
+```
+
+Three consequences follow, and each is a change to something that exists:
+
+- **The root is fetched first and separately, and it is the completeness
+  certificate, not merely an index of digests.** A node with no root cannot
+  answer any negative authoritatively, because it cannot know which chunks it is
+  missing. This is what makes the root the object worth signing.
+- **`/readyz` must gain a completeness term**: ready means "I hold every chunk
+  named by the current root," not "a pull landed recently." That is a change to
+  `is_ready`'s inputs, and it is the mechanism that keeps the cold-start hole
+  from becoming permanent and partial.
+- **The chunk key must be CANONICAL, and today it is not.** `chunk_index =
+  first k bits of sha256(host)` is only deterministic if producer and consumer
+  agree on the exact bytes. MEASURED, they do not agree on case:
+  `extract_app_name` returns the Host label verbatim, with no normalisation
+  (`crates/zeroship-gateway/src/router/dispatch.rs:49`, returning
+  `Some(subdomain.to_string())` at `:89`); the index is a case-sensitive
+  `HashMap<String, Uuid>` (`sync.rs:43`); `create_app` accepts any
+  `is_ascii_alphanumeric()` name, uppercase included (`registry.rs:245-254`);
+  and `apps_name_key` is a plain UNIQUE over `text`
+  (`db/migrations-ts/20260702000600_constraints_indexes_fks.ts:8`), which
+  compares by bytes. So `MyApp` and `myapp` are two permitted, distinct rows
+  resolving from ONE case-insensitive DNS name. Meanwhile the reserved-name
+  check IS case-insensitive - `is_reserved_app_name` uses `eq_ignore_ascii_case`
+  (`crates/zeroship-control/src/reserved_names.rs:206-209`) -
+  so the tree already treats the label as case-folded where a name is *claimed*
+  and as case-sensitive where it is *routed*. Today that inconsistency produces
+  an ordinary lookup miss. Under chunking it sends the lookup to the wrong chunk,
+  where the host is legitimately absent, and the rule above then certifies the
+  404 as authoritative. **A canonicalisation rule - lowercase, LDH, 63 octets -
+  is a prerequisite of the chunk scheme, not hygiene alongside it.**
+
 ## Size arithmetic, re-derived rather than estimated
 
 This section carried an ESTIMATE (112 bytes packed) beside a MEASURED JSON figure
@@ -1232,24 +1356,229 @@ downside is bounded (a 5-byte-shorter mean saves 5 bytes) and the upside is not
 ceiling case is not a forecast, but it is the one an encoder must not fall over
 on.
 
-Chunk arithmetic, DESIGNED (dividing the derived entry above):
+## The replication envelope, and where replicate-whole stops
+
+DERIVED, multiplying the entry above by an assumed population. The `coarse10`
+row is a two-tier variant introduced below; it is here so the whole range is on
+one table.
 
 ```
-  chunks   per entry   hosts    entries/chunk   chunk size   root size
-  ------   ---------   -----    -------------   ----------   ---------
-    4096      107 B      1M           244          25.5 KiB   128.0 KiB
-    4096      107 B     10M          2441         255.0 KiB   128.0 KiB
-    4096      355 B     10M          2441         846.4 KiB   128.0 KiB
-   65536      107 B     10M           153          16.0 KiB     2.0 MiB
+  form              100k          1M           10M          100M
+  --------------  ---------   ----------   -----------   ----------
+  packed 9-fact   10.21 MiB   102.06 MiB   1020.62 MiB    9.967 GiB
+  packed, no key   7.15 MiB    71.54 MiB    715.45 MiB    6.987 GiB
+  packed 6-field   6.58 MiB    65.82 MiB    658.23 MiB    6.428 GiB
+  JSON 9-fact     33.85 MiB   338.48 MiB     3.305 GiB   33.055 GiB
+  coarse 10 B      0.95 MiB     9.54 MiB     95.37 MiB   953.67 MiB
 ```
 
-At 4096 chunks (k = 12, three hex characters of prefix) and 10M hosts, one app
-changing republishes 255 KiB instead of 0.997 GiB: a 4096-fold reduction in write
-amplification, by construction rather than by measurement. Raising k to 16
-shrinks chunks by another 16x at the cost of a 2 MiB root that changes on every
-mutation, which is the wrong trade while the root is the hot object. **k is a
-tunable and 4096 is a starting point, not a measured optimum**; the open decision
-below says what would settle it.
+MEASURED, the only two per-node budgets this tree actually declares, both
+gateway settings with defaults in `crates/zeroship-gateway/src/config.rs`:
+`blob_cache_mem_mb` = **256** (`:148-149`) and `blob_cache_disk_gb` = **20**
+(`:152-153`), turned into byte counts at `main.rs:405-406`. They are not the
+directory's budget, but they are the operator's own statement of what a gateway
+node's memory and disk are worth, so they are the right yardstick:
+
+```
+  hosts    directory     x blob_cache_mem (256 MiB)   % blob_cache_disk (20 GiB)
+  -----    ----------    --------------------------   --------------------------
+   100k     10.21 MiB              0.04x                       0.05%
+     1M    102.06 MiB              0.40x                       0.50%
+    10M      0.997 GiB             3.99x                       4.98%
+   100M      9.967 GiB            39.87x                      49.84%
+```
+
+**The directory is not a cache and that is what decides this.** `BlobCache` may
+be any size an operator likes because a miss has a fetch behind it. The
+directory's entire value is that a miss is an ANSWER, so it has no miss path and
+no eviction policy: every byte of it is working set, permanently, on every node.
+A 0.997 GiB working set on a node whose declared content-cache budget is 256 MiB
+is not a rounding error - it is the largest single resident structure in the
+gateway process, four times the cache the operator was asked to size.
+
+DERIVED, the mmap question, which is the one that decides 10M. A fixed-width
+record array is mmap-able and should be mmap'd rather than parsed onto the heap
+(the tree already does exactly this for cached blob bodies: `mmap_to_bytes`
+hands a mapping to ntex as `Bytes::from_owner`,
+`crates/zeroship-gateway/src/blob_cache.rs:677`, over files verified at `:621`).
+Two things follow, and the second is why chunking is load-bearing for reasons
+the section above never mentions:
+
+- 96-byte fixed records put **42 records in a 4 KiB page**, so 10M records are
+  261,279 pages of record array plus a name arena.
+- A binary search over the WHOLE array touches `log2(10^7) = 23.3` probes, of
+  which the last ~5 land inside one page: **~19 distinct pages per cold lookup**,
+  plus an arena page. Searching within a 4096-chunk instead is `log2(2441) =
+  11.3` probes, **~7 pages**; an open-addressed index inside the chunk is **~3**.
+
+**A page fault on an mmap'd directory is a synchronous, blocking fault on the
+ntex worker thread.** compio and io_uring cannot see it, cannot schedule around
+it, and cannot overlap it with other work, so a major fault stalls every
+connection multiplexed onto that thread, not just the request that caused it.
+This is the difference between the directory and the blob cache: the blob cache
+faults while streaming a response body that was already going to take a while,
+and the directory would fault *before the routing decision*, on every request
+including the negatives it exists to make free. The design consequence is
+categorical: **the directory must be page-cache resident, not merely mmap-able**,
+and chunk-local indexing is what keeps the resident-page count per lookup in the
+low single digits so the residency assumption is affordable.
+
+DERIVED, the break point, stated as a formula rather than a verdict because the
+budget is the operator's to choose: `hosts = budget / 107.02`.
+
+```
+  resident budget    hosts
+  ---------------    ----------
+      256 MiB          2.51 M
+      512 MiB          5.02 M
+        1 GiB         10.03 M
+        2 GiB         20.07 M
+        4 GiB         40.13 M
+        8 GiB         80.26 M
+```
+
+**Replicate-whole of the full entry is comfortable to 1M, defensible to 10M, and
+finished before 100M.** At 1M (102 MiB) it is smaller than the default blob
+memory cache and needs no mmap at all. At 10M (0.997 GiB) it survives only as a
+chunk-indexed mmap'd file on a node budgeted about 1 GiB of page cache for it -
+possible, but it is now the dominant resident structure and the first thing an
+undersized node loses. At 100M (9.967 GiB) it is 40x the declared memory budget
+and half the entire declared disk budget; page-cache residency cannot be
+assumed, so lookups become major-fault-bound on the routing path, which is the
+one failure this design cannot trade away.
+
+### Past that point: split the ENTRY, never the directory
+
+DESIGNED, and it corrects the instinct rather than confirming it. The natural
+move - "shard by zone, and keep a coarse host-to-zone map for the rest" - does
+not work as stated, because **completeness is not shardable**. Every gateway
+must answer "no app at this host" for hosts served by every zone, so whatever
+structure answers that question must be complete on every node. A coarse
+host-to-zone map that is complete IS a directory; calling it a fallback for "the
+rest" understates it, because it is consulted on every lookup, including every
+negative.
+
+What does work is splitting the ENTRY into two tiers with different completeness
+obligations:
+
+```
+  tier                       held by            entry        complete?
+  ------------------------   ----------------   ----------   ---------
+  existence + placement      EVERY node         ~10 B        YES, always
+  full record (the 9 facts)  the owning zone    107.02 B     per zone
+```
+
+DERIVED, why this actually buys something: 10 bytes is `u64` truncated
+`sha256(host)` plus a `u16` zone, so the placement tier at **100M hosts is
+953.67 MiB** - the same order as the full directory at 10M. With Z zones and an
+even split, a node holds `953.67 MiB + (100M / Z) * 107.02`: at Z=10 that is
+1.95 GiB, at Z=4 it is 3.44 GiB. The scheme's real ceiling is therefore set by
+the tier that cannot shard: at 10 B/host, 1e9 hosts is 9.31 GiB, and that is
+where the whole approach ends.
+
+DESIGNED, and the reason to prefer this over anything cleverer: the placement
+tier changes on **app creation, deletion and movement only** - never on a
+deploy, a spend-state flip, a plan change or a key rotation, which are the
+events that drive directory churn. It is both the smallest object and the
+slowest-changing one, so its chunks are near-static and its root is nearly
+quiet.
+
+DERIVED caveat, and it is the same argument the full directory uses against
+truncation, reaching a *different* answer for a *different* reason. Part 3 above
+refuses a truncated hash in the full directory because a collision turns an
+authoritative negative into a cross-tenant POSITIVE. In the placement tier a
+collision between a real host and a nonexistent one costs only a wasted forward
+hop, because the destination zone re-checks the full name and answers the
+authoritative 404 itself. But a collision between **two real hosts in different
+zones** is not benign: one of them would forward to the wrong zone and get a
+confident 404 for a live app. At 100M entries in 64 bits the expected number of
+colliding pairs is `n^2 / 2^65 = 2.7e-4`, so this is rare rather than absent,
+and rare-rather-than-absent is exactly the case a design must name: a colliding
+slot must widen (carry both zones, or carry the full name for that slot) rather
+than silently pick one.
+
+## Chunk count, derived rather than chosen
+
+This section previously carried a table at a chosen `k` and admitted 4096 was "a
+starting point, not a measured optimum." It is derivable, and the derivation
+changes the answer at 1M and confirms it at 10M.
+
+DERIVED. Let `H` be hosts, `b` the bytes per entry (107.02), `N` the chunk count
+and `d` the bytes per root slot (32, one sha256). Under the model where the root
+is refetched whole whenever it changes - which is what "the root is the only
+object that changes on every mutation" means - the bytes a node moves per
+mutation are:
+
+```
+   J(N) = N*d        (the root)
+        + H*b/N      (the one chunk that changed)
+
+   dJ/dN = d - H*b/N^2 = 0   ->   N* = sqrt(H*b/d)
+```
+
+Two properties fall out that are worth more than the number. **At the optimum
+the root and a chunk are the same size**, both `sqrt(H*b*d)` - that is what
+setting the derivative to zero means here. And the minimum cost is
+`2*sqrt(H*b*d)`, which grows as `sqrt(H)`: quadrupling the fleet only doubles
+the per-mutation traffic.
+
+```
+  hosts     N*     k*     root = chunk    per mutation    nearest 2^k
+  ------  ------  -----   ------------    ------------    -----------
+   100k      578   9.18       18.1 KiB        36.1 KiB      512  (k=9)
+     1M     1829  10.84       57.1 KiB       114.3 KiB     2048  (k=11)
+    10M     5783  12.50      180.7 KiB       361.4 KiB     4096  (k=12)
+   100M    18288  14.16      571.5 KiB       1.116 MiB    16384  (k=14)
+```
+
+`k* = 0.5 * log2(H*b/d)`, so **`k*` rises by exactly one bit for every
+quadrupling of the host count.** That is the strongest argument for putting `k`
+in the root rather than baking it into readers: it is not a constant that might
+be wrong, it is a function of a number that grows.
+
+DERIVED, the cost of getting it wrong, at H=10M:
+
+```
+      N     root       chunk      root+chunk    vs optimum
+  -----   --------   ---------    ----------    ----------
+    256      8 KiB    3.99 MiB      3.99 MiB       11.32x
+   1024     32 KiB    1.00 MiB      1.03 MiB        2.91x
+   2048     64 KiB     510 KiB       574 KiB        1.59x
+   4096    128 KiB     255 KiB       383 KiB        1.06x
+   8192    256 KiB     128 KiB       384 KiB        1.06x
+  16384    512 KiB      64 KiB       576 KiB        1.59x
+  65536      2 MiB      16 KiB      2.016 MiB       5.71x
+```
+
+**The objective is flat: 4096 and 8192 differ by 0.1%, and anything inside a 2x
+window of `N*` is within 6%.** That is why a guessed value can look fine. It is
+also why the two ends are so bad: 256 costs 11.3x the optimum at 10M (and 3.6x
+at 1M), because a 4 MiB chunk is republished for a single spend-state flip.
+
+**Verdict.** 4096 is CONFIRMED at 10M - it lands 6% off a derived optimum of
+5783. It is 34% high at 1M, where `N*` is 1829 and the right start is **k = 11,
+2048 chunks**. So the number in this document does not move for the fleet size
+the arithmetic was aimed at, and the recommendation in open decision 1 changes
+from "start at 12" to "start at 11 and let it climb one bit per 4x."
+
+DESIGNED, and it is a real fork the model above hides. Part 4 commits to gossip
+for membership, with invalidation riding free. **If gossip carries a signed
+per-chunk announcement** (`chunk i is now digest D at directory version V`),
+the `N*d` root term disappears from the steady state, `J(N) = H*b/N` is
+monotonically decreasing, and `N` should be pushed far higher - bounded not by
+bytes but by (a) the per-request overhead being worth amortising, say a 16 KiB
+floor on chunk size, giving `N <= H*b/16384` = 65,320 at 10M, and (b) cold-start
+warm time, since a node must fetch **all N chunks** before it may answer any
+negative authoritatively. At 65536 chunks and 64-way concurrency that is 1024
+round-trip batches before the node is complete.
+
+**The fork is a signing question, not a sizing question, and it should be
+settled first.** If only the ROOT is signed, every node must fetch the whole
+root to validate any chunk, the `N*d` term is real, and `N* = sqrt(H*b/d)`
+stands. If per-chunk announcements are independently signed by the authority,
+the root becomes a slow-path completeness certificate rather than a hot object,
+and `k = 16` is the right target at 10M. The two answers differ by 16x, which is
+larger than any error in the entry size this document spent a section correcting.
 
 ## What the directory does not carry
 
@@ -1407,6 +1736,25 @@ the transfer it saves. ASSUMED, and marked as such: the gigabyte scale those
 tools target is external context I could not verify from this tree, so the
 argument rests on our measured sizes, not theirs.
 
+**That rejection is CONDITIONAL, and this document did not say so.** The
+argument above rests entirely on a measured corpus of 31 probes and demos. The
+number the platform actually enforces is three orders of magnitude larger.
+MEASURED, in `crates/zeroship-bundle/src/limits.rs`:
+`MAX_COMPRESSED_BYTES = 256 MiB` (`:5`),
+with `MAX_DECOMPRESSED_BYTES` the same (`:8`) and a 10,000-blob ceiling at 16 MiB
+each (`:14`, `:17`). So a legal `.zship` today may be **412x the largest one ever
+built here**, and "swarming does not begin at a 651 KB maximum" is a statement
+about the sample, not about the artifact format. Rejecting a mechanism on a
+corpus while the enforced ceiling sits far above it is the exact error corrected
+elsewhere in this document, applied to a design decision instead of a byte count.
+
+The rejection still stands, for the reason it should have been given: at the
+sizes this platform's build pipeline currently produces, peer negotiation costs
+more than the transfer. What must travel with it is the **re-open trigger**: if
+the p99 artifact approaches even a tenth of `MAX_COMPRESSED_BYTES`, the origin
+egress term that swarming exists to amortise becomes real and this decision must
+be taken again. That trigger is now item 3 of "What to measure first".
+
 MEASURED, on the state of the tree: `gossip`, `libp2p`, `SWIM`, `consul`,
 `hickory` and `trust-dns` each appear **zero** times across `crates/` and `libs/`
 in any `.rs` or `.toml` (word-boundary search); `Cargo.lock` contains no package
@@ -1464,6 +1812,16 @@ There is one existing proxy endpoint on the public gateway surface,
 `/__zeroship/internal/workflow-advance`, wired at
 `crates/zeroship-gateway/src/main.rs:659`; a cross-zone hop is the same mechanism
 with a different destination.
+
+DESIGNED, and it is what the envelope arithmetic in Part 3 forces rather than a
+placement preference: **zones do not shard the directory, they shard the
+ENTRY.** Every gateway in every zone still holds a complete existence-and-
+placement tier, because a negative answer is only authoritative against a
+complete structure and no zone may be asked to answer for hosts it does not
+know. What becomes zone-local is the 107-byte record. At 10 bytes per host that
+placement tier is 953.67 MiB at 100M hosts and 9.31 GiB at 1e9, which is where
+this whole approach ends; the derivation, including why truncating the key is
+tolerable there and not in the full directory, is in Part 3.
 
 MEASURED, on the state of zones: there is no region, zone or datacenter concept
 anywhere in the tree. `docs/architecture/data-system.md:552-555` records the same
@@ -1570,19 +1928,29 @@ Each is a concrete either/or with a recommendation. None is settled.
 
 ## 1. Chunk count
 
-**Either** fix k = 12 (4096 chunks) now and treat it as a constant, **or** make k
-a field of the root object so it can be raised without a flag day, at the cost of
-every reader carrying a re-chunk path.
+**Either** fix k now and treat it as a constant, **or** make k a field of the
+root object so it can be raised without a flag day, at the cost of every reader
+carrying a re-chunk path.
 
-**Recommendation: put k in the root and start at 12.** The arithmetic above is
-DESIGNED, and ONE of its two inputs is now settled: the packed entry is
-`96 + name`, derived field by field in Part 3, which is 107 bytes at the assumed
-name length and 160 at the legal ceiling. The other is not, and cannot be from
-this tree: the app creation and mutation rate, for which there is no instrument.
-A k baked into readers as a constant is a value that cannot be corrected once the
-number it was chosen from turns out wrong, and half the number it was chosen from
-is still an assumed population. The re-chunk path is cheap while the fleet is
-small and impossible to add later.
+**Recommendation: put k in the root and start at 11 (2048), not 12.** This
+recommendation said "start at 12" until the chunk count was derived rather than
+chosen. `N* = sqrt(H*b/d)` is 1829 at 1M and 5783 at 10M, so 4096 is right for a
+ten-million-host fleet and 34% high for a one-million-host one; 2048 is within
+0.6% of optimal at 1M and 59% high at 10M, which is the direction to be wrong in
+while the fleet is small and the chunks are cheap.
+
+The stronger argument for k-in-the-root is now quantitative rather than a
+hedge: `k* = 0.5 * log2(H*b/d)` rises by **exactly one bit per quadrupling of
+the host count**. k is not a constant that might have been chosen badly, it is a
+function of a number that grows monotonically, so a reader that cannot re-chunk
+is a reader that is wrong on a schedule.
+
+**A prior decision determines the target, and it is not this one.** If gossip
+carries independently signed per-chunk announcements, the root's `N*d` term
+leaves the steady state and the right target at 10M is k = 16, not 12 - a 16x
+difference, larger than any correction this document has made to an entry size.
+If only the root is signed, `N* = sqrt(H*b/d)` stands. **Settle what is signed
+before settling k.**
 
 ## 2. Does the envelope collapse into `manifest.json` entirely?
 
@@ -1682,23 +2050,39 @@ the 64 ceiling), so it is worth a query the day one exists; it is NOT worth
 building an encoder to find out, because the encoder's output is already known
 per name length. Nothing else on this list should be done first.
 
-**2. App creation and mutation rate.** Chunk count, root republication frequency
-and gossip fanout all follow from how often the directory changes, and this tree
-has no instrument for it. `zeroship.apps` has `created_at` and `updated_at`
-columns (`db/migrations-ts/20260702000200_control_tables.ts:163-164`), so the
-creation rate is a query away on any populated database; the mutation rate is
-harder, because MEASURED the spend evaluator writes an `app_spend_state` row for
-every app on every tick (`spend.rs:408-420`) and those writes are not directory
+**2. App creation and mutation rate.** Root republication frequency and gossip
+fanout follow from how often the directory changes, and this tree has no
+instrument for it. `zeroship.apps` has `created_at` and `updated_at` columns
+(`db/migrations-ts/20260702000200_control_tables.ts:163-164`), so the creation
+rate is a query away on any populated database; the mutation rate is harder,
+because MEASURED the spend evaluator writes an `app_spend_state` row for every
+app on every tick (`spend.rs:408-420`) and those writes are not directory
 mutations. The measurement to build is "how many entries would have changed since
 the last root," not "how many rows were written."
+
+**This item used to say the CHUNK COUNT follows from it. It does not.** `N* =
+sqrt(H*b/d)` contains no rate term: the mutation rate scales the whole cost
+curve without moving its minimum, because every mutation pays the same
+`root + chunk` and the ratio between those two terms is what k trades. So the
+rate decides how much the scheme costs and whether gossip must carry per-chunk
+deltas; it does not decide k. That is why k could be derived here and the rate
+could not.
 
 **3. p50 and p99 manifest and `.zship` size over a realistic corpus.** MEASURED
 here over 31 examples: manifests min 382, median 999, mean 1216, max 6484;
 artifacts min 4356, median 31632, max 650908, with ten of 31 above 130 KB. That
 corpus is probes and demos and its tail is almost certainly wrong in both
 directions. The p99 manifest is the number that settles open decision 2, and the
-p99 artifact is the number that would reopen the P2P-swarming rejection if it
-were three orders of magnitude larger than measured here.
+p99 artifact is the number that would reopen the P2P-swarming rejection.
+
+**Both have an ENFORCED ceiling, and the ceiling is the number to compare
+against, not the corpus.** MEASURED: `MAX_MANIFEST_BYTES = 1 MiB`
+(`crates/zeroship-bundle/src/limits.rs:11`) is 161x the largest manifest
+measured, and `MAX_COMPRESSED_BYTES = 256 MiB` (`:5`) is 412x the largest
+artifact. The re-open triggers are therefore concrete rather than "three orders
+of magnitude": a p99 manifest near 100 KiB makes open decision 2 live, and a p99
+artifact near 25 MiB - a tenth of the cap - makes the swarming rejection live.
+Neither needs a new instrument; both are one query over a populated deploy table.
 
 **What cannot be measured from this repository.** There is no deployed fleet, no
 zone abstraction, and no app count. Every aggregate figure in this document -
@@ -1979,3 +2363,72 @@ producers and false as written.** `crates/zeroship-core/tests/types_test.rs:689`
 constructs one with an entry, to exercise variant validation. The design point
 (no production writer, so the manifest is immutable-after-deploy today) stands;
 the universal quantifier did not.
+
+## Found by settling the replication envelope
+
+**29. The document derived a per-entry size and never multiplied it by
+anything.** Part 3 spent a section deriving 107.02 bytes field by field, and
+"replicate the whole directory to every node" was never checked against a
+number a node actually has. The two the tree declares are
+`blob_cache_mem_mb = 256` and `blob_cache_disk_gb = 20`
+(`crates/zeroship-gateway/src/config.rs:148-153`). Against those, 10M hosts is
+**4x the whole memory budget and 5% of the disk budget**, and 100M is 40x and
+50%. The per-entry derivation was necessary and, on its own, decided nothing:
+an entry size is not an envelope. **The load-bearing distinction the envelope
+exposes is that the directory is not a cache.** `BlobCache` may be any size
+because a miss has a fetch behind it; the directory's whole value is that a miss
+is an ANSWER, so it has no miss path, no eviction and no tunable - every byte is
+permanent working set on every node.
+
+**30. Chunking breaks the authoritative negative, and the document stated only
+the branch where it works.** "The directory must be chunked" said a gateway that
+holds the right chunk at the current root can answer 404 soundly. True, and the
+complement was never written: a gateway that does NOT hold that chunk has no way
+to say so. MEASURED, a lookup has exactly two outcomes today - `lookup_by_name`
+is an `Option` (`sync.rs:239-244`) and `None` is a 404 (`dispatch.rs:1064`) -
+because under one atomic full-table pull "absent" and "absent from a complete
+table" are the same fact. Chunking separates them, and a missing chunk becomes
+authoritative 404s for a hash-random 1/N slice of the platform, indistinguishable
+at the edge from correct negatives. The existing mitigation does not generalise:
+`is_ready` (`crates/zeroship-gateway/src/health.rs:68`) tests FRESHNESS
+(`readiness.rs:186`, `:172`), not completeness, so a node with a current root and
+4095 of 4096 chunks reports ready. **This is the sharpest correction in the
+document**, because the chunking section was written to preserve the very
+property it silently removed, and the failure it introduces is quieter than the
+one it replaced: today a cold gateway 404s everything and `/readyz` says so.
+
+**31. The chunk key is not canonical, and the tree disagrees with itself about
+the case of an app name.** `chunk_index = f(sha256(host))` is deterministic only
+if producer and consumer hash identical bytes. MEASURED, `extract_app_name`
+returns the Host label verbatim (`dispatch.rs:49`, `:89`), the index is a
+case-sensitive `HashMap` (`sync.rs:43`), `create_app` accepts uppercase
+(`registry.rs:245-254`), and `apps_name_key` is a byte-comparing UNIQUE
+(`db/migrations-ts/20260702000600_constraints_indexes_fks.ts:8`) - so `MyApp` and
+`myapp` are two permitted rows behind one case-insensitive DNS name. Yet
+`is_reserved_app_name` folds case (`reserved_names.rs:206-209`). The tree
+case-folds where a name is CLAIMED and does not where it is ROUTED. Today that
+yields an ordinary miss; under chunking it routes the lookup to a chunk where the
+host is legitimately absent, and correction 30's rule then certifies the 404 as
+authoritative. Canonicalisation becomes a prerequisite, not hygiene.
+
+**32. The P2P rejection was measured against a corpus while an enforced ceiling
+sat 412x above it.** "Rejected on artifact size" rested on 4356..650908 bytes
+across 31 probes. `MAX_COMPRESSED_BYTES = 256 MiB`
+(`crates/zeroship-bundle/src/limits.rs:5`) is what the platform actually admits.
+The verdict survives - peer negotiation does cost more than the transfer at the
+sizes this pipeline produces - but it was stated as a property of the artifact
+format when it is a property of the sample, which is the error this document
+corrects in itself four times over byte counts and had not noticed it was making
+over a design decision. The repair is a named re-open trigger, not a better
+number.
+
+**33. The assets-digest argument was made on slope alone, and the enforced caps
+make a stronger one.** The document argued that `assets` cardinality is set by a
+build rather than a person, so it hits the cap first. Both true. Unstated:
+`MAX_MANIFEST_BYTES = 1 MiB` (`limits.rs:11`) rides inline on every `RouteEntry`
+(`types.rs:223`) at a 5-second poll, so one legal app at the cap costs every
+gateway 209.7 KB/s forever for an object that never changes; and
+`MAX_BLOBS_PER_DEPLOY = 10_000` (`:17`) permits 2.4 MB of asset entries, **2.3x
+more than the manifest is allowed to be**, so the two enforced limits contradict
+each other and the binding one refuses at ~4370 assets. The digest reconciles
+them. This argument depends on no corpus and no forecast.
