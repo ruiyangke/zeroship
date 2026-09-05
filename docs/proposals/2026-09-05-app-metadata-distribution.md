@@ -1472,7 +1472,7 @@ DERIVED, why this actually buys something: 10 bytes is `u64` truncated
 `sha256(host)` plus a `u16` zone, so the placement tier at **100M hosts is
 953.67 MiB** - the same order as the full directory at 10M. With Z zones and an
 even split, a node holds `953.67 MiB + (100M / Z) * 107.02`: at Z=10 that is
-1.95 GiB, at Z=4 it is 3.44 GiB. The scheme's real ceiling is therefore set by
+1.93 GiB, at Z=4 it is 3.42 GiB. The scheme's real ceiling is therefore set by
 the tier that cannot shard: at 10 B/host, 1e9 hosts is 9.31 GiB, and that is
 where the whole approach ends.
 
