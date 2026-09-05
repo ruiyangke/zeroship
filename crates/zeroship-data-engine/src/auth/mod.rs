@@ -36,13 +36,24 @@
 //! Concretely: slot and publication ownership belongs to the CDC relay,
 //! and the runtime descriptor - not a platform-owned schema epoch - is
 //! the schema authority.
-
-// `util` owns the helpers — TTL default, getrandom fallback, ISO
-// timestamp formatter, hex codec — used by the SQLite session-minter
-// surface. That surface is test-only today, so keep the helpers behind
-// the same gate.
-#[cfg(any(test, feature = "test-helpers"))]
-pub mod util;
+//!
+//! ## The last residue went 2026-09-04
+//!
+//! `auth/util.rs` outlived the anchor by a week. It held the helpers the
+//! two `SessionMinter` impls had to share so both arms produced
+//! byte-identical tokens - TTL default, `/dev/urandom` fallback, an ISO
+//! timestamp formatter, a hex codec, Hinnant's civil-from-days. The
+//! SQLite impl was deleted on 2026-09-02 and the PG one went with the
+//! anchor, so nothing was left to keep byte-identical.
+//!
+//! It survived an audit because a chain hides its own root:
+//! `iso_timestamp_after` calls `format_unix_millis` calls
+//! `civil_from_days`, and `hex_decode` calls `hex_nibble`, so every link
+//! but the root scored as called. Only the roots had zero references,
+//! and a mention count reported an 8-symbol dead module as 2. Rank by
+//! reachability from a live consumer, not by how often a name appears.
+//! (`hex_decode`/`hex_nibble` have a surviving private twin in
+//! `zeroship-data-core`'s `encryption/keys.rs`, so nothing was lost.)
 
 // Per-app PG role provisioning. Always compiled: the data plane's
 // `SET LOCAL ROLE` batch comes from here on every transaction.

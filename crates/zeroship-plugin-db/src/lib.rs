@@ -337,8 +337,8 @@ mod cdc_lifecycle;
 // The `keys` / `session` submodules and the `__zeroship_admin` schema they
 // spoke to are deleted -- see `auth/mod.rs` for why they are not coming back.
 // `auth::util` was the shared-helper subtree the SQLite `SessionMinter` impl
-// reused; that impl was deleted on 2026-09-02, so `util` now has no consumer
-// in the crate at all.
+// reused; that impl was deleted on 2026-09-02 and `util` followed it on
+// 2026-09-04, having had no consumer in any crate or cfg in between.
 #[cfg(not(feature = "test-helpers"))]
 pub(crate) use zeroship_data_engine::auth;
 #[cfg(feature = "test-helpers")]

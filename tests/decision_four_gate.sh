@@ -886,9 +886,12 @@ N_SITES=0
 # --- Arm 1: the extractor could read the crate ----------------------------
 #
 # THE ANTI-VACUITY ANCHOR. Everything else this gate says is conditional on
-# having read the files. 29 production files today (33 `.rs` files, four of them
-# modules gated at their declaration: `auth/util.rs`, `transaction/probe.rs`,
-# `transaction/reducer/tests.rs`, `test_support/mod.rs`). Floor 20: far enough
+# having read the files. 29 production files today (32 `.rs` files, three of them
+# modules gated at their declaration: `transaction/probe.rs`,
+# `transaction/reducer/tests.rs`, `test_support/mod.rs`). `auth/util.rs` was a
+# fourth until it was deleted on 2026-09-04 as dead; the production count did
+# not move, which is exactly what a gated module leaving should look like here.
+# Floor 20: far enough
 # below that ordinary deletion does not reach it, close enough that a moved root
 # or a broken `find` does. Unlike the two arms below, THIS number has no
 # legitimate reason to fall - the crate is not shrinking to nothing - so it is

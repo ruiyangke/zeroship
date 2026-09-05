@@ -175,8 +175,9 @@ trap 'rm -f "$SRCS" "$HITS" "$GATED"' EXIT
 # engine code, and `#[cfg(any(test, feature = "test-helpers"))] pub mod probe;`
 # in transaction/mod.rs is what makes it test-only.
 # Without this, the census reports it as a production vendor holder.
-# The rule was written for crud/mask_drift.rs, which was deleted on 2026-09-03;
-# probe.rs and auth/util.rs are the live cases it still catches.
+# The rule was written for crud/mask_drift.rs, which was deleted on 2026-09-03,
+# and auth/util.rs followed on 2026-09-04; probe.rs is the live case it still
+# catches.
 # Same failure family as defect 4 of tier_direction_census.sh, one level up.
 # A module declared under BOTH arms of the two-arm pattern
 #   #[cfg(not(feature = "test-helpers"))] pub(crate) mod m;
