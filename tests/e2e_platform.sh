@@ -159,7 +159,7 @@ jget() { printf '%s' "$1" | jq -r "$2 // empty" 2>/dev/null || true; }
 build_zship() {
     local js_file="$1" out_path="$2" resources="${3:-}"
     if [ -z "$resources" ]; then
-        resources='{"/[...rest]":{"auth":"anon","publicly_accessible":true}}'
+        resources='{"/[...rest]":{"auth":"anonymous","publicly_accessible":true}}'
     fi
 
     local stage; stage=$(mktemp -d -t zeroship-e2e-zship-XXXXXX)
@@ -465,7 +465,7 @@ AUTH_ID="$(create_app authgate || true)"
 if [ -z "$AUTH_ID" ]; then
     fail "authgate: create failed"
 elif ! deploy_js "$AUTH_ID" 'export default { fetch() { return new Response("open"); } };' \
-        '{"/[...rest]":{"auth":"anon","publicly_accessible":true},"rpc:secret":{"auth":"user"},"rpc:open":{"auth":"anon","publicly_accessible":true}}'; then
+        '{"/[...rest]":{"auth":"anonymous","publicly_accessible":true},"rpc:secret":{"auth":"user"},"rpc:open":{"auth":"anonymous","publicly_accessible":true}}'; then
     fail "authgate: deploy failed"
 else
     sleep 5

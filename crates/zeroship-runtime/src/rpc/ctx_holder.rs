@@ -34,7 +34,7 @@ use crate::state::OpError;
 /// Per-request platform context. Built fresh for every `default.rpc`
 /// invocation. `user_json` carries the gateway-verified `ZeroShip-User`
 /// payload as a JSON string — same format `zeroship.auth.getUser()`
-/// already returns. `None` for `auth: "anon"` requests.
+/// already returns. `None` for `auth: "anonymous"` requests.
 pub struct RpcCtx {
     pub request_id: String,
     pub trace_id: String,

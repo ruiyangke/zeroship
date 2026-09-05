@@ -152,7 +152,7 @@ EOF
 
 # The arrangement under test: a public catch-all (an SPA/SSR fallback) plus a
 # gated admin subtree. This is the ordinary shape, not a contrived one.
-RESOURCES='{"/[...rest]":{"auth":"anon","publicly_accessible":true},"/admin/[...rest]":{"auth":"user"},"rpc:secret":{"auth":"user"}}'
+RESOURCES='{"/[...rest]":{"auth":"anonymous","publicly_accessible":true},"/admin/[...rest]":{"auth":"user"},"rpc:secret":{"auth":"user"}}'
 ZSHIP="$WORK/bslash.zship"
 build_zship "$APPJS" "$ZSHIP" "$RESOURCES"
 

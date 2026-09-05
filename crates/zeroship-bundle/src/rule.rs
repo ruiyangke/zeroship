@@ -73,7 +73,7 @@ pub struct ResourceEntry {
 
     // ── Policy fields (any combination) ──────────────────────────────────
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth: Option<AuthLevel>,
+    pub auth: Option<RequiredPrincipal>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rate_limit: Option<RateLimit>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -98,10 +98,11 @@ pub struct ResourceEntry {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub publicly_accessible: Option<bool>,
     /// OAuth scopes a request MUST carry to access this resource
-    /// (auth-sdk Slice 3c, spec §5.3). Independent of `auth: AuthLevel`:
-    /// a route can be `auth: user` AND additionally demand
-    /// `read:billing`. The gateway enforces it AFTER authentication, and
-    /// ONLY on `User`/`Admin` routes — a public (`auth: anon`) route never
+    /// (auth-sdk Slice 3c, spec §5.3). Independent of
+    /// `auth: RequiredPrincipal`: a route can be `auth: user` AND
+    /// additionally demand `read:billing`. The gateway enforces it AFTER
+    /// authentication, and ONLY on `User` routes — a public
+    /// (`auth: anonymous`) route never
     /// scope-gates an authenticated visitor. An authenticated principal on a
     /// protected route whose granted `scopes` are not a superset gets a `403`
     /// (`WWW-Authenticate: …error="insufficient_scope"`, JSON body
@@ -128,46 +129,39 @@ pub struct ResourceEntry {
     pub output_schema: Option<String>,
 }
 
-/// Authentication level applied to a resource. Strictness order is
-/// `admin > user > anon`; the inheritance walk uses this to decide who
-/// wins (stricter wins; weakening requires `override`).
+/// Which principal a request must present to reach a resource.
+///
+/// Two variants, so the inheritance merge is a boolean OR: if any resource
+/// in the chain requires a user, the effective policy requires a user. A
+/// child weakens that only by naming `auth` in its own `override` list,
+/// which the build validates. There is no strictness ladder and no rank —
+/// with two variants the OR *is* the whole rule.
+///
+/// The wire spelling is the variant name in `snake_case`: `"anonymous"` and
+/// `"user"`. The abbreviation `"anon"` is not accepted.
+///
+/// ## A third `admin` variant was deleted on 2026-09-05
+///
+/// It named a principal that does not exist. `docs/architecture/control-plane.md`
+/// states there is no platform admin surface, and no site in this tree ever
+/// tested for platform-admin identity: the gateway matched `Admin` in the
+/// same arm as `User`, so a route a creator locked down with `admin` was
+/// reachable by every signed-in end user. That was creator-facing — the SDK
+/// union carried the value and the build's own remedy messages recommended
+/// it "to keep it gated". A rank function made it *win a merge* against
+/// `User`, which is why the variant read as implemented to an auditor: the
+/// merge question was answered and the access question never was.
+///
+/// Adding it back means building the principal FIRST — an identity the
+/// gateway can verify — not a third string an existing arm accepts.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
-pub enum AuthLevel {
-    /// No authentication required. Unsafe by default — must pair with
-    /// `publicly_accessible: true` to confirm intent.
-    Anon,
-    /// Authenticated end-user.
+pub enum RequiredPrincipal {
+    /// No authenticated principal required. Unsafe by default — must pair
+    /// with `publicly_accessible: true` to confirm intent.
+    Anonymous,
+    /// An authenticated end user.
     User,
-    /// Platform admin. Highest level *for merging* — *not* for enforcement.
-    ///
-    /// **The gateway enforces `Admin` exactly as `User`.** Both are handled by
-    /// the same match arm (`router/dispatch.rs`, the `(None, AuthLevel::User |
-    /// AuthLevel::Admin)` arm), and `router/auth.rs` special-cases only `Anon`.
-    /// So any signed-in end user reaches a procedure declared `admin`; nothing
-    /// checks for platform-admin identity.
-    ///
-    /// Easy to get wrong from the code, because `rank()` below IS real and IS
-    /// load-bearing — it makes `Admin` win a merge against `User`. An auditor
-    /// who finds `rank()` reasonably concludes the level is handled. It is,
-    /// but for the merge question, not the access question. The two are
-    /// separate and only one of them is implemented.
-    Admin,
-}
-
-impl AuthLevel {
-    /// Strictness rank — higher number = stricter. Used by the merge
-    /// rule "stricter wins".
-    ///
-    /// This orders levels for MERGING only. It is not consulted to decide
-    /// whether a caller may proceed; see the `Admin` note above.
-    pub fn rank(self) -> u8 {
-        match self {
-            Self::Anon => 0,
-            Self::User => 1,
-            Self::Admin => 2,
-        }
-    }
 }
 
 /// Procedure kind, declared on `rpc:` resource entries. Drives method
@@ -611,7 +605,7 @@ mod required_scopes_tests {
     #[test]
     fn bundle_required_scopes_round_trips() {
         let entry = ResourceEntry {
-            auth: Some(AuthLevel::User),
+            auth: Some(RequiredPrincipal::User),
             required_scopes: vec!["read:billing".to_string(), "write:projects".to_string()],
             ..Default::default()
         };
@@ -627,7 +621,7 @@ mod required_scopes_tests {
             vec!["read:billing".to_string(), "write:projects".to_string()],
             "required_scopes must round-trip verbatim"
         );
-        assert_eq!(back.auth, Some(AuthLevel::User));
+        assert_eq!(back.auth, Some(RequiredPrincipal::User));
     }
 
     /// Empty `required_scopes` is the default and is OMITTED from the wire

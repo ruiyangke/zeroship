@@ -251,7 +251,7 @@ mkdir -p "$WORK/zstage/blobs"
 cp "$WORK/workflow.js" "$WORK/zstage/blobs/$HASH"
 NOW="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
 cat > "$WORK/zstage/manifest.json" <<EOF
-{"version":1,"resources":{"/[...rest]":{"auth":"anon","publicly_accessible":true}},"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$HASH"}},"workflows":["ProbeWorkflow"],"schedules":[],"metadata":{"compiler":"wfadvz-probe","built_at":"$NOW"}}
+{"version":1,"resources":{"/[...rest]":{"auth":"anonymous","publicly_accessible":true}},"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$HASH"}},"workflows":["ProbeWorkflow"],"schedules":[],"metadata":{"compiler":"wfadvz-probe","built_at":"$NOW"}}
 EOF
 ( cd "$WORK/zstage" && tar --format=ustar -cf - manifest.json "blobs/$HASH" ) | zstd -q -f -o "$WORK/workflow.zship"
 pass "packed workflow.zship"

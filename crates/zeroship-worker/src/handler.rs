@@ -2341,12 +2341,12 @@ mod tests {
     //
     // The two tests below are a matched pair - same fixture, same app, same
     // dispatch, ONE variable changed: the level the deployed manifest
-    // declares for the route being called. The `anon` arm must be served, the
+    // declares for the route being called. The `anonymous` arm must be served, the
     // `user` arm must be refused. Neither is meaningful without the other:
     // an arm that only asserted the refusal would also pass on a worker that
     // 401s everything.
     //
-    // WHY THEY EXIST. `AuthLevel` occurs ZERO times in this crate and zero
+    // WHY THEY EXIST. `RequiredPrincipal` occurs ZERO times in this crate and zero
     // times in `zeroship-runtime`; the gateway is the only tier that reads
     // the declared policy. The worker's own dispatch path handles identity
     // exactly once - `verified_user_json` above, which HMAC-verifies a
@@ -2358,7 +2358,7 @@ mod tests {
     // at all.
     //
     // `router/dispatch.rs` states the assumption in prose: "Resource-tree
-    // `user`/`admin` are already short-circuited by `resolve_auth` upstream,
+    // `user` routes are already short-circuited by `resolve_auth` upstream,
     // so they never reach the worker." That is a statement about the gateway's
     // current behaviour, not an invariant the worker enforces, and it is the
     // thing these tests refuse to accept on trust.
@@ -2384,7 +2384,7 @@ mod tests {
             "version": 1,
             "resources": {
                 "/api/private": { "auth": "user" },
-                "/api/public": { "auth": "anon", "publicly_accessible": true },
+                "/api/public": { "auth": "anonymous", "publicly_accessible": true },
             }
         }))
         .expect("fixture manifest parses as the real wire shape");
@@ -2396,7 +2396,7 @@ mod tests {
                 .resources
                 .get("/api/private")
                 .and_then(|entry| entry.auth),
-            Some(zeroship_bundle::AuthLevel::User),
+            Some(zeroship_bundle::RequiredPrincipal::User),
             "fixture must declare /api/private as a user route"
         );
         assert_eq!(
@@ -2404,7 +2404,7 @@ mod tests {
                 .resources
                 .get("/api/public")
                 .and_then(|entry| entry.auth),
-            Some(zeroship_bundle::AuthLevel::Anon),
+            Some(zeroship_bundle::RequiredPrincipal::Anonymous),
             "fixture must declare /api/public as an anonymous route"
         );
         manifest
@@ -2521,7 +2521,7 @@ mod tests {
     }
 
     /// THE CONTROL. Same app, same missing identity, one variable changed:
-    /// the route is declared `anon`. It must still be served, or the arm
+    /// the route is declared `anonymous`. It must still be served, or the arm
     /// above would pass on a worker that simply refuses everything.
     #[test]
     fn dispatch_still_serves_an_unauthenticated_request_to_an_anonymous_route() {
@@ -2534,7 +2534,7 @@ mod tests {
             assert_eq!(
                 status,
                 StatusCode::OK,
-                "an `anon` route must stay reachable without identity"
+                "an `anonymous` route must stay reachable without identity"
             );
             assert_eq!(
                 lines,

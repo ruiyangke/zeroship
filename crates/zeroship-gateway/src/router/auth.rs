@@ -19,13 +19,13 @@ use crate::GateState;
 /// (HTML navigation).
 #[derive(Debug)]
 pub(crate) enum AuthOutcome {
-    /// Policy is `Anon` (request passes without identity) OR the
-    /// policy required `User`/`Admin` and a user credential validated.
+    /// Policy is `Anonymous` (request passes without identity) OR the
+    /// policy required `User` and a user credential validated.
     /// `user_header` is `Some(...)` whenever identity was actually
-    /// resolved — even on `Anon` resources, so the worker can still
+    /// resolved — even on `Anonymous` resources, so the worker can still
     /// see the authenticated user when present.
     Allowed { user_header: Option<String> },
-    /// Policy required `User`/`Admin` and no valid user credential was found.
+    /// Policy required `User` and no valid user credential was found.
     /// Caller decides between a 401 (API) and a 302 → op (HTML).
     Unauthenticated,
     /// A raw OP bearer resolved a real user, but the route has no
@@ -39,8 +39,8 @@ pub(crate) enum AuthOutcome {
     /// narrow. The caller answers `403 scope_required` (JSON body) with a
     /// `WWW-Authenticate: Bearer error="insufficient_scope"` challenge and
     /// lists the required scopes. Reached ONLY by an AUTHENTICATED principal
-    /// on a `User`/`Admin` route — an unauthenticated request is gated by the
-    /// `Anon`/`User`/`Admin` policy first (401/redirect), and an `Anon`
+    /// on a `User` route — an unauthenticated request is gated by the
+    /// `Anonymous`/`User` policy first (401/redirect), and an `Anonymous`
     /// (public) route never scope-gates an authenticated visitor.
     InsufficientScope { required: Vec<String> },
 }
@@ -149,7 +149,7 @@ async fn family_revocation_decision(
 /// checked through the read-through cache; only that secondary check is skipped
 /// in no-database smoke mode.
 ///
-/// Anonymous routes allow a request without resolved identity. `User` and `Admin`
+/// Anonymous routes allow a request without resolved identity. `User`
 /// routes require one, and any declared `required_scopes` must be covered by the
 /// authenticated principal's scopes.
 pub(crate) async fn resolve_auth(
@@ -178,13 +178,13 @@ pub(crate) async fn resolve_auth(
     // principal's granted `scopes`, encoded in that header, MUST
     // be a superset, else `403 scope_required`. An UNAUTHENTICATED request
     // never reaches this gate — `Unauthenticated`/`ClientNotProvisioned`
-    // pass through unchanged, gated by the Anon/User/Admin policy first
+    // pass through unchanged, gated by the Anonymous/User policy first
     // (401/redirect). Empty `required_scopes` ⇒ no gate (unchanged behavior).
     // The arms stay scope-agnostic; we read the just-resolved header's scopes
     // here (the same wire form the worker consumes) so there is ONE
     // enforcement point regardless of which arm authenticated.
     //
-    // CRITICAL: the gate fires ONLY on `User`/`Admin` routes. An `Anon` route
+    // CRITICAL: the gate fires ONLY on `User` routes. An `Anonymous` route
     // is part of the app's PUBLIC surface (HTML/JS/CSS, SSR, public RPCs); it
     // can still resolve a `ZeroShip-User` when a session is present, but it
     // must NEVER scope-403 an authenticated visitor — otherwise a logged-in
@@ -192,10 +192,10 @@ pub(crate) async fn resolve_auth(
     // parent would get 403 on public pages a logged-OUT user loads fine. That
     // is the "logged-in is worse than anonymous on public routes" footgun the
     // Invalid-Bearer fix removed; scope gating must not re-introduce
-    // it. Scopes on `*` therefore constrain only the protected (`User`/`Admin`)
+    // it. Scopes on `*` therefore constrain only the protected (`User`)
     // descendants, exactly like the auth level itself.
     if policy.required_scopes.is_empty()
-        || matches!(policy.auth, zeroship_bundle::AuthLevel::Anon)
+        || matches!(policy.auth, zeroship_bundle::RequiredPrincipal::Anonymous)
     {
         return outcome;
     }
@@ -286,7 +286,7 @@ async fn resolve_auth_inner(
     oauth_client_id: Option<&str>,
     sector_identifier: Option<&str>,
 ) -> AuthOutcome {
-    use zeroship_bundle::AuthLevel;
+    use zeroship_bundle::RequiredPrincipal;
 
     // 1. Bearer arm. Ordered BEFORE the cookie arm.
     //    Serves NON-BROWSER OAuth clients (CLI /
@@ -297,12 +297,12 @@ async fn resolve_auth_inner(
     //      - `Allowed(header)`     → short-circuit, fully authenticated.
     //      - `Invalid`            → a recognized raw OP user-session token
     //        that failed verify/binding/revocation. By policy: anonymous on
-    //        an `Anon` route (a non-browser client may auto-attach Bearer,
+    //        an `Anonymous` route (a non-browser client may auto-attach Bearer,
     //        and an expired-but-present Bearer must not break public pages),
-    //        401 on `User`/`Admin`.
+    //        401 on `User`.
     //      - `NotUserSession`     → a Bearer that is not a raw OP JWT
     //        (e.g. a future `zsk_…` API key). Reserved path → 401 on EVERY
-    //        route, including `Anon` (it asserts a DIFFERENT scheme, not an
+    //        route, including `Anonymous` (it asserts a DIFFERENT scheme, not an
     //        expired user session).
     //      - `NotBearer`          → no `Authorization: Bearer`. Fall
     //        through to the cookie arm.
@@ -326,10 +326,10 @@ async fn resolve_auth_inner(
         BearerOutcome::Invalid => match policy.auth {
             // Expired/invalid auto-attached user-session Bearer: serve the
             // public page anonymously; the SDK's next refresh re-auths.
-            AuthLevel::Anon => {
+            RequiredPrincipal::Anonymous => {
                 return AuthOutcome::Allowed { user_header: None };
             }
-            // INTENTIONAL: on a `User`/`Admin` route an
+            // INTENTIONAL: on a `User` route an
             // Invalid Bearer 401s and
             // does NOT fall through to the cookie arm — even if the request
             // also carries a valid cookie session. A client that presented
@@ -338,7 +338,7 @@ async fn resolve_auth_inner(
             // before firing, so a stale-Bearer + valid-cookie collision is a
             // bug to surface (401), not to paper over. See
             // `resolve_auth_invalid_bearer_on_user_route_does_not_use_cookie`.
-            AuthLevel::User | AuthLevel::Admin => {
+            RequiredPrincipal::User => {
                 return AuthOutcome::Unauthenticated;
             }
         },
@@ -368,7 +368,7 @@ async fn resolve_auth_inner(
             // the browser sets and script cannot forge cross-site) carries the
             // defense. A failure REJECTS the cookie credential for this request
             // (treated as if no session resolved) rather than 403, so a public
-            // (`Anon`) route still serves anonymously and a `User` route 401s —
+            // (`Anonymous`) route still serves anonymously and a `User` route 401s —
             // identical posture to a missing cookie.
             if cookie_csrf_rejected(req, &state.config) {
                 None
@@ -379,10 +379,10 @@ async fn resolve_auth_inner(
         CookieOutcome::None => None,
     };
     match policy.auth {
-        AuthLevel::Anon => AuthOutcome::Allowed {
+        RequiredPrincipal::Anonymous => AuthOutcome::Allowed {
             user_header: session_user_header,
         },
-        AuthLevel::User | AuthLevel::Admin => {
+        RequiredPrincipal::User => {
             if session_user_header.is_some() {
                 AuthOutcome::Allowed {
                     user_header: session_user_header,
@@ -405,7 +405,7 @@ async fn resolve_auth_inner(
 /// metadata. `GET`/`HEAD`/`OPTIONS` are exempt
 /// (non-state-changing). When `true`, the caller drops the resolved
 /// `ZeroShip-User` so the request is treated as if no session was present
-/// (anon on a public route, 401 on a protected route) — never a leaked
+/// (anonymous on a public route, 401 on a protected route) — never a leaked
 /// cross-site mutation.
 ///
 /// No custom-header requirement here (unlike `auth_token::same_origin_guard`):
@@ -469,8 +469,8 @@ enum BearerOutcome {
     /// A recognized raw OP user-session token (`iss == oidc_rp.issuer`)
     /// that FAILED verification / per-app binding / revocation, OR was
     /// presented while the route is un-provisioned (`oauth_client_id ==
-    /// None`). Treated as no-identity: anonymous on `Anon`, 401 on
-    /// `User`/`Admin`.
+    /// None`). Treated as no-identity: anonymous on `Anonymous`, 401 on
+    /// `User`.
     Invalid,
     /// A Bearer token whose `iss` is not OP — the reserved API-key path
     /// (a future `zsk_…` shape). 401 on every route.
@@ -1258,7 +1258,7 @@ mod tests {
     // locally via the gateway JWKS) for non-browser clients — plus the
     // reserved API-key path (any other `iss`). These tests exercise
     // `resolve_bearer_user_header` directly with the REAL `JwksCache` (no
-    // stubs), and the `Anon`/`User` policy gate through `resolve_auth`.
+    // stubs), and the `Anonymous`/`User` policy gate through `resolve_auth`.
 
     /// The logical OP issuer the raw OP path pins. The test JWKS
     /// server dials loopback, but `OidcRp::with_issuer` decouples the
@@ -1417,7 +1417,9 @@ mod tests {
     /// `EffectivePolicy` has no `Default` (its `action` field has none),
     /// so build the minimal policy explicitly. Only `auth` is load-bearing
     /// for the Bearer-arm policy gate.
-    fn policy_with_auth(auth: zeroship_bundle::AuthLevel) -> crate::compiled::EffectivePolicy {
+    fn policy_with_auth(
+        auth: zeroship_bundle::RequiredPrincipal,
+    ) -> crate::compiled::EffectivePolicy {
         crate::compiled::EffectivePolicy {
             auth,
             rate_limit: None,
@@ -1438,12 +1440,12 @@ mod tests {
         }
     }
 
-    fn anon_policy() -> crate::compiled::EffectivePolicy {
-        policy_with_auth(zeroship_bundle::AuthLevel::Anon)
+    fn anonymous_policy() -> crate::compiled::EffectivePolicy {
+        policy_with_auth(zeroship_bundle::RequiredPrincipal::Anonymous)
     }
 
     fn user_policy() -> crate::compiled::EffectivePolicy {
-        policy_with_auth(zeroship_bundle::AuthLevel::User)
+        policy_with_auth(zeroship_bundle::RequiredPrincipal::User)
     }
 
     /// A `User` policy that additionally demands `required` scopes, exercising
@@ -1663,7 +1665,7 @@ mod tests {
     async fn bearer_non_jwt_token_is_not_user_session() {
         // An opaque, non-JWT Bearer (e.g. a future `zsk_…` API key) is the
         // reserved path → NotUserSession (401 on every route, including
-        // Anon).
+        // Anonymous).
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_session(gateway_signing);
         let req = bearer_req("zsk_opaque_api_key_value", "myapp.zeroship.ai");
@@ -1700,7 +1702,7 @@ mod tests {
 
     #[ntex::test]
     async fn resolve_auth_invalid_raw_op_on_anon_route_serves_anonymously() {
-        // A present-but-INVALID raw OP user-session Bearer on an `Anon`
+        // A present-but-INVALID raw OP user-session Bearer on an `Anonymous`
         // route must NOT 401 — it falls through to anonymous (a client may
         // auto-attach a Bearer to every request; a stale/invalid one must not
         // break public pages). The same invalid Bearer on a `User`
@@ -1734,19 +1736,19 @@ mod tests {
         let req = bearer_req(&token, aud);
         let request_id = Uuid::new_v4();
 
-        // Anon route: invalid Bearer → Allowed with NO user header.
-        let anon = resolve_auth(
+        // Anonymous route: invalid Bearer → Allowed with NO user header.
+        let anonymous = resolve_auth(
             &req,
             &state,
-            &anon_policy(),
+            &anonymous_policy(),
             &request_id,
             Some("oac_myapp"),
             Some("https://myapp.zeroship.ai"),
         )
         .await;
         assert!(
-            matches!(anon, AuthOutcome::Allowed { user_header: None }),
-            "invalid Bearer on Anon route must serve anonymously, got {anon:?}"
+            matches!(anonymous, AuthOutcome::Allowed { user_header: None }),
+            "invalid Bearer on Anonymous route must serve anonymously, got {anonymous:?}"
         );
 
         // User route: same invalid Bearer → Unauthenticated (401).
@@ -1948,9 +1950,9 @@ mod tests {
     }
 
     #[ntex::test]
-    async fn resolve_auth_underscoped_authenticated_on_anon_route_is_allowed() {
+    async fn resolve_auth_underscoped_authenticated_on_anonymous_route_is_allowed() {
         // Regression: the scope gate must NOT fire
-        // on an `Anon` (public) route. A logged-in browser whose session lacks
+        // on an `Anonymous` (public) route. A logged-in browser whose session lacks
         // a scope that a broad `*` parent put into `required_scopes` would
         // otherwise get 403 on the app's own HTML/JS/CSS while a logged-OUT
         // visitor loads it fine — the "logged-in is worse than anonymous on
@@ -1963,15 +1965,15 @@ mod tests {
         let req = scope_cookie_req(&state, "oac_myapp", &["openid"], aud);
         let request_id = Uuid::new_v4();
 
-        // `Anon` route that nonetheless carries `required_scopes` (e.g.
-        // inherited from a scoped `*`). The Anon policy must win: Allowed.
-        let mut anon_with_scope = anon_policy();
-        anon_with_scope.required_scopes = vec!["read:billing".to_string()];
+        // `Anonymous` route that nonetheless carries `required_scopes` (e.g.
+        // inherited from a scoped `*`). The Anonymous policy must win: Allowed.
+        let mut anonymous_with_scope = anonymous_policy();
+        anonymous_with_scope.required_scopes = vec!["read:billing".to_string()];
 
         let outcome = resolve_auth(
             &req,
             &state,
-            &anon_with_scope,
+            &anonymous_with_scope,
             &request_id,
             Some("oac_myapp"),
             None,
@@ -1979,7 +1981,7 @@ mod tests {
         .await;
         assert!(
             matches!(outcome, AuthOutcome::Allowed { user_header: Some(_) }),
-            "underscoped authenticated principal on an Anon route must be Allowed, \
+            "underscoped authenticated principal on an Anonymous route must be Allowed, \
              never scope-403'd, got {outcome:?}"
         );
     }
@@ -2002,9 +2004,9 @@ mod tests {
     }
 
     #[compio::test]
-    async fn resolve_auth_non_user_session_bearer_401s_even_on_anon() {
+    async fn resolve_auth_non_user_session_bearer_401s_even_on_anonymous() {
         // The reserved API-key path asserts a DIFFERENT scheme, not an
-        // expired user session — so it 401s even on an `Anon` route
+        // expired user session — so it 401s even on an `Anonymous` route
         // (unlike an invalid raw OP Bearer, which falls through to anonymous).
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_session(gateway_signing);
@@ -2013,7 +2015,7 @@ mod tests {
         let outcome = resolve_auth(
             &req,
             &state,
-            &anon_policy(),
+            &anonymous_policy(),
             &request_id,
             Some("oac_myapp"),
             None,
@@ -2021,7 +2023,7 @@ mod tests {
         .await;
         assert!(
             matches!(outcome, AuthOutcome::Unauthenticated),
-            "reserved-scheme Bearer must 401 even on Anon, got {outcome:?}"
+            "reserved-scheme Bearer must 401 even on Anonymous, got {outcome:?}"
         );
     }
 
@@ -2198,7 +2200,7 @@ mod tests {
     #[ntex::test]
     async fn bearer_raw_op_expired_rejected() {
         // An expired raw OP JWT (beyond the 60s leeway) fails the JWKS
-        // verify → Invalid (401 on User, anonymous on Anon).
+        // verify → Invalid (401 on User, anonymous on Anonymous).
         let jwks_signing = ed25519_dalek::SigningKey::from_bytes(&[55u8; 32]);
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let srv = start_jwks_server(op_jwks_doc(&jwks_signing)).await;
@@ -2268,7 +2270,7 @@ mod tests {
     async fn resolve_auth_no_bearer_falls_through_to_cookie_arm() {
         // No Authorization header at all → the Bearer arm yields
         // NotBearer and resolve_auth falls through to the cookie arm
-        // (which, with no DB and no cookie, resolves to None). On an Anon
+        // (which, with no DB and no cookie, resolves to None). On an Anonymous
         // route that is Allowed{None}; on a User route, Unauthenticated.
         let gateway_signing = ed25519_dalek::SigningKey::from_bytes(&[7u8; 32]);
         let state = build_state_with_session(gateway_signing);
@@ -2277,16 +2279,16 @@ mod tests {
             .header(http::header::HOST, "myapp.zeroship.ai")
             .to_http_request();
         let request_id = Uuid::new_v4();
-        let anon = resolve_auth(
+        let anonymous = resolve_auth(
             &req,
             &state,
-            &anon_policy(),
+            &anonymous_policy(),
             &request_id,
             Some("oac_myapp"),
             None,
         )
         .await;
-        assert!(matches!(anon, AuthOutcome::Allowed { user_header: None }));
+        assert!(matches!(anonymous, AuthOutcome::Allowed { user_header: None }));
         let gated = resolve_auth(
             &req,
             &state,
@@ -2516,7 +2518,7 @@ mod tests {
 
     // ─── Invalid Bearer does NOT fall back to a valid cookie ──────
     //
-    // Documents the behavior: on a User/Admin route an Invalid
+    // Documents the behavior: on a User route an Invalid
     // raw OP Bearer 401s and is NOT silently
     // rescued by a valid cookie session. The cookie path is DB-free: it uses a
     // SIGNED `zeroship-sess+jwt` verified locally, so the test mints a real signed
