@@ -226,6 +226,20 @@ impl SqliteBackend {
     /// Mark one table's cached CDC column-name list stale. The
     /// publisher loop clears the entry before decoding the next event
     /// for the same `(app_id, collection)` pair.
+    ///
+    /// UNWIRED PRODUCER, LIVE CONSUMER - do not delete it as dead. Nothing
+    /// calls this today, so `cdc_name_cache_invalidations` is a set that is
+    /// drained and never filled. The CONSUMER is real:
+    /// `cdc::publisher_loop` does `invalidations.borrow_mut().remove(&key)`
+    /// and evicts `name_cache` on a hit, so removing this leaves the
+    /// publisher serving stale column names after DDL with no way to be told.
+    /// The missing caller is the SQLite apply path
+    /// (`docs/archive/proposals/2026-06-20-sqlite-engine-production-wiring-design.md`
+    /// §7b.4: invalidate per changed collection after CreateTable/AddColumn).
+    /// Deleting half a live mechanism is a design change, not a dead-code
+    /// sweep; a 2026-09-04 audit flagged this as dead on caller count alone
+    /// and it was kept for exactly that reason.
+    #[allow(dead_code)] // producer unwired; the consumer above is not - read the doc
     pub(crate) fn invalidate_cdc_name_cache(&self, app_id: &str, collection: &str) {
         self.cdc_name_cache_invalidations
             .borrow_mut()
@@ -2230,12 +2244,16 @@ mod backup_sqlite {
         Ok(())
     }
 
-    /// `pitr_replay` does not need a helper — the impl method body
-    /// returns the typed `Configuration { code: "pitr_pg_only" }`
-    /// directly. PG retains its own replay path; SQLite cannot
-    /// participate without a WAL-archive substrate.
-    #[allow(dead_code)]
-    fn _pitr_marker(_target: PitrTarget) {}
+    // `pitr_replay` does not need a helper — the impl method body returns the
+    // typed `Configuration { code: "pitr_pg_only" }` directly. PG retains its
+    // own replay path; SQLite cannot participate without a WAL-archive
+    // substrate.
+    //
+    // That statement was carried by an empty `fn _pitr_marker(PitrTarget) {}`
+    // under `#[allow(dead_code)]`, deleted 2026-09-04. A no-op function is a
+    // bad home for a sentence about why code is ABSENT: it compiles, so it
+    // reads as a mechanism, and the `allow` stopped the one tool that would
+    // have said otherwise.
 }
 
 #[cfg(test)]
