@@ -2440,11 +2440,16 @@ async fn handle_dispatch(
     };
 
     // 401 from worker on an HTML navigation → start the OIDC dance.
-    // The worker reaches this branch on resources its own JS code
-    // gated as `user` when the gateway forwarded without a
-    // `ZeroShip-User` header. (Resource-tree `user` are
-    // already short-circuited by `resolve_auth` upstream, so they
-    // never reach the worker.) API clients still see the 401 verbatim.
+    // The worker reaches this branch two ways: its own JS gated a resource as
+    // `user` and answered 401, or the worker's own declared-policy fence
+    // refused before creator code ran (`crates/zeroship-worker/src/policy.rs`).
+    // API clients still see the 401 verbatim.
+    //
+    // THIS COMMENT SAID resource-tree `user` routes "never reach the worker",
+    // on the strength of `resolve_auth` short-circuiting them upstream. That
+    // was a description of the gateway's behaviour, not an invariant anything
+    // enforced, and the worker now refuses them itself rather than trusting it.
+    // The redirect is the right answer either way, so no arm changes here.
     //
     // Both arms REPLACE the worker's answer with the gateway's own, so both
     // are `Gateway`-origin. That matters beyond bookkeeping for the redirect:
@@ -4815,7 +4820,10 @@ mod tests {
                 policy.kind,
                 Some(ProcedureKind::Mutation) | Some(ProcedureKind::Action) | None
             )
-            && matches!(policy.action, zeroship_bundle::compiled::ResolvedAction::WorkerRpc);
+            && matches!(
+                policy.action,
+                zeroship_bundle::compiled::ResolvedAction::WorkerRpc
+            );
         assert!(!engages, "idempotency must NOT engage for subscriptions");
     }
 

@@ -10,12 +10,12 @@
 #
 #   * the gateway splits a request path on '/' only, matches the resulting
 #     segments against `manifest.resources`, and enforces that resource's
-#     `auth` level (crates/zeroship-gateway/src/compiled.rs, router/dispatch.rs);
+#     `auth` level (crates/zeroship-bundle/src/compiled.rs, router/dispatch.rs);
 #   * the worker hands the forwarded URL string to the V8 runtime, whose
 #     WHATWG/ada URL parser folds '\' -> '/' for special schemes before the
 #     app ever sees `new URL(request.url).pathname`.
 #
-# `crates/zeroship-gateway/src/compiled.rs` states that dot-segments and '//' are
+# `crates/zeroship-bundle/src/compiled.rs` states that dot-segments and '//' are
 # "exactly the forms a browser's WHATWG `new URL` rewrites" and rejects them
 # (400). A backslash run is a THIRD such form and is not modelled. A unit test
 # on either side passes; only a request driven end to end through a running

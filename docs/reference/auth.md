@@ -179,6 +179,15 @@ All server helpers read `env.auth.user`, which the runtime populates from the
 gateway's HMAC-signed `ZeroShip-User` header. The browser client uses only the
 BFF endpoints above; it never receives an access token or refresh token.
 
+**`requireUser()` reads identity; it is not the gate.** A route declared
+`auth: "user"` is refused by the platform before your handler is entered, twice:
+at the gateway, and again inside the worker
+(`crates/zeroship-worker/src/policy.rs`). Forgetting to call `requireUser()`
+therefore does not leave a declared route open — which is the whole reason the
+worker fence exists, since a gate that depends on the creator remembering is
+not a gate. Call it when you want the user object, or when you want a 401 on a
+route you deliberately declared `anonymous`.
+
 ```javascript
 import { auth } from "@zeroship/auth";
 

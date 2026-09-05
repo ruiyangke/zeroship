@@ -132,9 +132,15 @@ public" explicit and reviewable.
 > (`docs/architecture/control-plane.md`). To gate a genuine operator surface,
 > put the check in your own handler.
 
-Manifest auth is enforced only by the gateway; the
-single-tenant `zeroship serve` and `pnpm dev` runtimes do not gate by policy, so
-local runs reach every procedure regardless of its declared auth.
+Manifest auth is enforced twice in a deployed app: once at the gateway, and
+again inside the worker before your handler is entered, so a procedure declared
+`user` is refused even by a caller that reaches the worker directly. You do not
+have to call `requireUser()` to be protected — it reads identity, it is not the
+gate.
+
+The single-tenant `zeroship serve` and `pnpm dev` runtimes still do NOT gate by
+policy: they build no manifest, so local runs reach every procedure regardless
+of its declared auth. Test an auth decision against a deploy, not against dev.
 
 ## Vite-generated calls
 

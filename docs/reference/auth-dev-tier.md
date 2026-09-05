@@ -30,19 +30,30 @@ only the backend that answers them differs.
 > **Identity has a dev tier. Authorization does not.** Everything on this page
 > is about *who the caller is*. The separate question of *whether this
 > procedure requires a caller* — the manifest's per-procedure `auth: "user"`
-> posture — is enforced by the **gateway**, before dispatch. There is
-> no gateway under `pnpm dev`, and nothing in the dev path substitutes for one:
-> `RequiredPrincipal` is read only in `crates/gateway` (`compiled.rs`,
-> `router/auth.rs`), and `crates/zeroship-cli/src` and `crates/zeroship-runtime/src` contain no
-> reader for it at all.
+> posture — is enforced by the **deployed** tiers only: the gateway before it
+> forwards, and, since 2026-09-05, the **worker** as well, before your handler
+> is entered (`crates/zeroship-worker/src/policy.rs`). Both read the same
+> compiled manifest (`crates/zeroship-bundle/src/compiled.rs`).
+>
+> There is no gateway under `pnpm dev`, no worker either, and nothing in the
+> dev path substitutes for one — the dev runtime
+> (`crates/zeroship-runtime/src/core/serve.rs`) has no manifest to read, so the
+> declarative posture is inert locally. THAT DIVERGENCE WIDENED rather than
+> narrowed: the deployed side now has two enforcers and dev still has none.
+>
+> The one thing that did NOT change is the shape the fence reads. It rules on
+> the resolved principal — the same `ZeroShip-User` payload
+> `dev_auth::resolve_dev_user_json` mints from the dev session cookie — not on
+> a signature, so there is no dev special case to go wrong, and a dev identity
+> would satisfy it unchanged the day dev gains a manifest.
 >
 > So a procedure declared `auth: "user"` runs for **anyone** in dev and returns
 > `401` once deployed. `env.auth.requireUser()` inside the handler still throws
-> in both tiers — that is app code and has parity. What has no parity is the
-> declarative posture, which is inert locally.
+> in both tiers — that is app code and has parity. It is a convenience for
+> READING identity, not the gate: deployed, the platform refuses the request
+> before your handler runs whether or not you call it.
 >
-> Call `requireUser()` in any handler whose posture you are relying on, and
-> treat a green `pnpm dev` as saying nothing about whether your auth
+> Treat a green `pnpm dev` as saying nothing about whether your auth
 > declarations are correct. `tests/e2e_dev_vs_deployed_auth.sh` measures this
 > divergence directly, including a `declare-defaulted` control that flips one
 > posture and shows only the deployed side move.
