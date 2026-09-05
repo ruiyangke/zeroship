@@ -127,6 +127,18 @@ gate_arm specifier "$spec_examined" 25
 
 # Arm 2: load the canonical package using Node's ESM resolver from the corpus
 # directory, which is where the CLI's migration import begins its upward walk.
+#
+# WHAT MAKES THAT WALK SUCCEED, recorded here because the link it finds is
+# gitignored and so reads as debris to anyone who notices it. `pnpm install`
+# creates a scoped package link in the corpus directory's own node_modules,
+# because db/migrations-ts is a declared workspace member whose manifest depends
+# on the DSL by `workspace:*`. It is a required development prerequisite, not
+# residue: delete it and this arm fails on every corpus file with
+# `Cannot find package`, since the walk then reaches the repo root, whose
+# node_modules holds no @zeroship scope at all. That is written down in
+# pnpm-workspace.yaml, whose member entry states both reasons (resolution and
+# module kind) and names this gate as what rules on them; `pnpm install`
+# restores it.
 res_examined=0
 res_bad=0
 for f in "$CORPUS_DIR"/*.ts; do
