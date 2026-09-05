@@ -29,6 +29,19 @@ This is a deliberate stance — not a limitation. Pre-launch is the moment to ge
 
 ---
 
+## No statistics in durable artifacts
+
+**Do not write magnitudes into docs, code comments, or commit messages** - byte counts, timings, percentages, test counts, tallies. A number in a durable artifact is a maintenance obligation nothing enforces, and prose does not re-measure itself. One proposal here needed repeated follow-up commits that changed no code, purely to repair its own figures.
+
+- **State the shape, not the magnitude.** Which term dominates, and where the sign flips.
+- **Name the instrument, not the value.** The setting or symbol a reader can look up stays true when its default moves; the number quoted for it does not.
+- **Gate what is load-bearing.** A claim worth protecting is re-measured on every run, never asserted in prose.
+- **A line number in a citation is the same defect.** The citation gate checks that a path resolves, never that a line is right, so drift stays invisible. Cite the path, name the function, and quote the code when the line matters.
+
+None of this is licence to measure less - measure more, and put the result in a gate or a re-runnable script rather than a sentence. This file predates the rule and violates it throughout: fix the passage you are already touching, not the rest.
+
+---
+
 ## Where to start, by task
 
 | If you're working on… | Start here |
