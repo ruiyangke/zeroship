@@ -715,7 +715,7 @@ mod tests {
         assert!(
             cache.lookup_by_name("broken.zeroship.ai").is_none(),
             "an app whose manifest fails validation must not resolve; serving it \
-             as anon-public exposes every route the manifest was meant to gate"
+             as anonymous-public exposes every route the manifest was meant to gate"
         );
 
         // A sibling app in the same sync batch is unaffected: one bad manifest
@@ -738,14 +738,16 @@ mod tests {
         // (the compile step), and assert the compiled `EffectivePolicy`
         // carries the scopes the gateway auth gate enforces.
         use std::collections::HashMap as Map;
-        use zeroship_bundle::{AuthConfig, AuthLevel, ProcedureKind, ResourceEntry, ScopeDef};
+        use zeroship_bundle::{
+            AuthConfig, ProcedureKind, RequiredPrincipal, ResourceEntry, ScopeDef,
+        };
 
         let mut resources: Map<String, ResourceEntry> = Map::new();
         resources.insert(
             "rpc:billing.read".to_string(),
             ResourceEntry {
                 kind: Some(ProcedureKind::Query),
-                auth: Some(AuthLevel::User),
+                auth: Some(RequiredPrincipal::User),
                 required_scopes: vec!["read:billing".to_string()],
                 ..Default::default()
             },

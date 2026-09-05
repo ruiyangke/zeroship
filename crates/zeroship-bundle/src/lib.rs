@@ -31,8 +31,8 @@ pub use manifest::{
     RuntimeDescriptorEntry, ScopeDef, WorkerCode,
 };
 pub use rule::{
-    Action, AuthLevel, CacheCtl, Cors, HttpMethod, Match, ProcedureKind, RateLimit,
-    RateLimitPer, RedirectAction, ResourceEntry, Rule, StaticAction, WorkerMode,
+    Action, CacheCtl, Cors, HttpMethod, Match, ProcedureKind, RateLimit, RateLimitPer,
+    RedirectAction, RequiredPrincipal, ResourceEntry, Rule, StaticAction, WorkerMode,
 };
 pub use store::{BundleStore, LocalFs, VfsError, VfsResult};
 pub use unpack::{ingest, IngestError, IngestSuccess};

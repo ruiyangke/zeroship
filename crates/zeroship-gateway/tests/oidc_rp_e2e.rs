@@ -23,7 +23,7 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::identity::password;
 use zeroship_auth::oidc::{BrokerSecrets, Issuer, PrincipalAccessTokenMint};
 use zeroship_auth::server;
-use zeroship_bundle::{AssetEntry, AuthLevel, Manifest, ResourceEntry, StaticAction};
+use zeroship_bundle::{AssetEntry, Manifest, RequiredPrincipal, ResourceEntry, StaticAction};
 use zeroship_gateway::blob_cache::{BlobCache, DiskBlobCache};
 use zeroship_gateway::enforce;
 use zeroship_gateway::idempotency;
@@ -268,7 +268,7 @@ fn protected_static_manifest(body: bytes::Bytes) -> (Manifest, MemoryBlobStore) 
     resources.insert(
         "/private".to_string(),
         ResourceEntry {
-            auth: Some(AuthLevel::User),
+            auth: Some(RequiredPrincipal::User),
             r#static: Some(StaticAction {
                 r#try: vec!["/private.txt".to_string()],
             }),
@@ -290,7 +290,7 @@ fn protected_static_manifest(body: bytes::Bytes) -> (Manifest, MemoryBlobStore) 
 fn protected_worker_manifest() -> Manifest {
     let mut manifest = Manifest::passthrough();
     let root = manifest.resources.get_mut("*").expect("passthrough root");
-    root.auth = Some(AuthLevel::User);
+    root.auth = Some(RequiredPrincipal::User);
     root.publicly_accessible = None;
     manifest
         .resources

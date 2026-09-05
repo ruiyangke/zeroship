@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
 
-use zeroship_bundle::AuthLevel;
+use zeroship_bundle::RequiredPrincipal;
 
 use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
 
@@ -803,7 +803,7 @@ fn parse_duration_number(raw: &str) -> Option<f64> {
 /// and the JWT `sub` are read WITHOUT re-verifying a signature here, which
 /// is sound only because something upstream already did. On an `auth:
 /// "user"` route that holds — an invalid credential never reaches this
-/// point. On an `auth: "anon"` route it does not: `resolve_auth` lets a
+/// point. On an `auth: "anonymous"` route it does not: `resolve_auth` lets a
 /// missing, expired, or outright forged credential through, so trusting
 /// those bytes would let the caller pick their own bucket and mint a
 /// fresh allowance per request simply by varying a cookie. Whenever
@@ -1298,9 +1298,9 @@ async fn execute_resource_tree(
         }
     }
 
-    // 3. Auth gate. `anon` always passes (subject to
+    // 3. Auth gate. `anonymous` always passes (subject to
     //    `publicly_accessible` being set, which is enforced at
-    //    validate-time). `user`/`admin` require a valid
+    //    validate-time). `user` require a valid
     //    `__Host-zeroship_app_session` cookie. Richer admin-vs-user role
     //    checks will arrive with the auth tier.
     //
@@ -1833,11 +1833,11 @@ fn inflight_wait_ms(policy: &crate::compiled::EffectivePolicy) -> u64 {
 /// The subject is recovered from the VERIFIED `ZeroShip-User` header, so
 /// the partition is the same identity the worker will act under and is
 /// never a client-supplied value. It keys off the RESOLVED identity, not
-/// the declared auth level: an `auth: "anon"` procedure still resolves a
+/// the declared auth level: an `auth: "anonymous"` procedure still resolves a
 /// session for a logged-in visitor, and that visitor gets their own
 /// partition rather than sharing the anonymous one.
 ///
-/// A `user`/`admin` procedure with no readable principal is REFUSED. Only
+/// A `user` procedure with no readable principal is REFUSED. Only
 /// a gateway-side invariant break reaches that arm — `resolve_auth` 401s
 /// an unauthenticated caller long before dispatch, and the header is
 /// minted and MAC'd by this same process moments earlier — but falling
@@ -1853,8 +1853,8 @@ fn resolve_dedupe_principal(
     let principal_sub = user_header.and_then(|h| super::auth::user_header_subject(state, h));
     match (principal_sub, policy.auth) {
         (Some(sub), _) => Ok(Some(sub)),
-        (None, AuthLevel::Anon) => Ok(None),
-        (None, AuthLevel::User | AuthLevel::Admin) => {
+        (None, RequiredPrincipal::Anonymous) => Ok(None),
+        (None, RequiredPrincipal::User) => {
             tracing::error!(
                 wire_id = %wire_id,
                 "gateway: idempotent authenticated procedure without a readable principal; \
@@ -1874,7 +1874,7 @@ fn resolve_dedupe_principal(
 }
 
 /// Entropy gate for the SHARED anonymous namespace (spec §8): reject an
-/// `auth: "anon"` procedure's `Idempotency-Key` unless it is a UUIDv4/v7.
+/// `auth: "anonymous"` procedure's `Idempotency-Key` unless it is a UUIDv4/v7.
 ///
 /// Keyed on the DECLARED auth level, not on whether this particular caller
 /// happened to be logged in. The constraint has to be knowable from the
@@ -1888,7 +1888,7 @@ fn reject_low_entropy_anon_key(
     idem_key: Option<&str>,
     wall_start: std::time::Instant,
 ) -> Option<IdempotencyOutcome> {
-    if !matches!(policy.auth, AuthLevel::Anon) {
+    if !matches!(policy.auth, RequiredPrincipal::Anonymous) {
         return None;
     }
     let key = idem_key.filter(|s| !s.is_empty())?;
@@ -2441,8 +2441,8 @@ async fn handle_dispatch(
 
     // 401 from worker on an HTML navigation → start the OIDC dance.
     // The worker reaches this branch on resources its own JS code
-    // gated as `user`/`admin` when the gateway forwarded without a
-    // `ZeroShip-User` header. (Resource-tree `user`/`admin` are
+    // gated as `user` when the gateway forwarded without a
+    // `ZeroShip-User` header. (Resource-tree `user` are
     // already short-circuited by `resolve_auth` upstream, so they
     // never reach the worker.) API clients still see the 401 verbatim.
     //
@@ -2885,7 +2885,7 @@ mod tests {
 
     use crate::compiled::{CompiledManifest, EffectivePolicy};
     use zeroship_bundle::{
-        AuthLevel, Manifest, ProcedureKind, RateLimit, RateLimitPer, ResourceEntry,
+        Manifest, ProcedureKind, RateLimit, RateLimitPer, RequiredPrincipal, ResourceEntry,
     };
 
     fn test_broker_secret() -> crate::oidc_rp::BrokerSecret {
@@ -4042,10 +4042,10 @@ mod tests {
         );
     }
 
-    /// On an `auth: "anon"` resource the caller used to control the
+    /// On an `auth: "anonymous"` resource the caller used to control the
     /// `per: "session"` discriminator outright. `extract_session_cookie`
     /// returns the raw `__Host-zeroship_app_session` value without
-    /// verifying anything, and an anon route serves happily without a
+    /// verifying anything, and an anonymous route serves happily without a
     /// session — `resolve_auth` answers `Allowed { user_header: None }`
     /// rather than rejecting. So rotating the cookie minted a fresh
     /// `TokenBucket` every request and the creator's declared cap never
@@ -4084,7 +4084,7 @@ mod tests {
             admitted <= 2,
             "a per-session `rps: 1` rule admitted {admitted}/50 requests from one \
              caller who simply rotated the (unverified) session-cookie value; the \
-             discriminator must not be attacker-chosen on an anon route",
+             discriminator must not be attacker-chosen on an anonymous route",
         );
     }
 
@@ -4245,7 +4245,7 @@ mod tests {
         resources.insert(
             "*".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::User),
+                auth: Some(RequiredPrincipal::User),
                 rate_limit: Some(RateLimit { rpm: Some(600), rps: None, per: RateLimitPer::Ip }),
                 ..Default::default()
             },
@@ -4299,7 +4299,7 @@ mod tests {
 
     fn idempotent_mutation_policy() -> EffectivePolicy {
         EffectivePolicy {
-            auth: AuthLevel::Anon,
+            auth: RequiredPrincipal::Anonymous,
             rate_limit: None,
             cors: None,
             cache: None,
@@ -4789,7 +4789,7 @@ mod tests {
     fn idempotency_bypasses_subscriptions() {
         // Same shape as `idempotent_mutation_policy` but with kind: Subscription.
         let policy = EffectivePolicy {
-            auth: AuthLevel::Anon,
+            auth: RequiredPrincipal::Anonymous,
             rate_limit: None,
             cors: None,
             cache: None,
@@ -5172,7 +5172,7 @@ mod tests {
             "rpc:ping".to_string(),
             ResourceEntry {
                 kind: Some(ProcedureKind::Query),
-                auth: Some(zeroship_bundle::AuthLevel::Anon),
+                auth: Some(zeroship_bundle::RequiredPrincipal::Anonymous),
                 publicly_accessible: Some(true),
                 ..Default::default()
             },
@@ -5207,7 +5207,7 @@ mod tests {
         resources.insert(
             "/about".to_string(),
             ResourceEntry {
-                auth: Some(zeroship_bundle::AuthLevel::Anon),
+                auth: Some(zeroship_bundle::RequiredPrincipal::Anonymous),
                 publicly_accessible: Some(true),
                 r#static: Some(StaticAction {
                     r#try: vec!["/about.html".into()],
@@ -5582,7 +5582,7 @@ mod tests {
             "rpc:ping".to_string(),
             ResourceEntry {
                 kind: Some(ProcedureKind::Mutation),
-                auth: Some(zeroship_bundle::AuthLevel::Anon),
+                auth: Some(zeroship_bundle::RequiredPrincipal::Anonymous),
                 publicly_accessible: Some(true),
                 max_input_bytes: Some(max),
                 ..Default::default()
@@ -6078,7 +6078,7 @@ mod tests {
             "rpc:todos.add".to_string(),
             ResourceEntry {
                 kind: Some(ProcedureKind::Mutation),
-                auth: Some(AuthLevel::Anon),
+                auth: Some(RequiredPrincipal::Anonymous),
                 publicly_accessible: Some(true),
                 idempotent: Some(true),
                 ..Default::default()
@@ -6510,7 +6510,7 @@ mod tests {
     const TEST_AUTH_HOST: &str = "idem-auth.zeroship.localhost";
 
     /// Same shape as [`TEST_AUTH_HOST`] but the procedure is declared
-    /// `auth: "anon"`. A logged-in visitor can still reach it, which is
+    /// `auth: "anonymous"`. A logged-in visitor can still reach it, which is
     /// why the partition must not key off the declared auth level.
     const TEST_ANON_HOST: &str = "idem-anon.zeroship.localhost";
 
@@ -6519,7 +6519,7 @@ mod tests {
     /// session cookie can bind to it.
     fn authenticated_idempotent_route(
         host: &str,
-        auth: AuthLevel,
+        auth: RequiredPrincipal,
     ) -> zeroship_core::types::RouteEntry {
         let mut resources = std::collections::HashMap::new();
         resources.insert(
@@ -6527,7 +6527,7 @@ mod tests {
             ResourceEntry {
                 kind: Some(ProcedureKind::Mutation),
                 auth: Some(auth),
-                publicly_accessible: Some(matches!(auth, AuthLevel::Anon)),
+                publicly_accessible: Some(matches!(auth, RequiredPrincipal::Anonymous)),
                 idempotent: Some(true),
                 ..Default::default()
             },
@@ -6568,11 +6568,11 @@ mod tests {
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         routes.insert(
             Uuid::new_v4(),
-            authenticated_idempotent_route(TEST_AUTH_HOST, AuthLevel::User),
+            authenticated_idempotent_route(TEST_AUTH_HOST, RequiredPrincipal::User),
         );
         routes.insert(
             Uuid::new_v4(),
-            authenticated_idempotent_route(TEST_ANON_HOST, AuthLevel::Anon),
+            authenticated_idempotent_route(TEST_ANON_HOST, RequiredPrincipal::Anonymous),
         );
         state.routes.update_snapshot(
             zeroship_core::types::GatewaySnapshot {
@@ -6732,15 +6732,15 @@ mod tests {
     }
 
     /// The partition keys off the RESOLVED identity, not the DECLARED auth
-    /// level. An `auth: "anon"` procedure still resolves a session when the
+    /// level. An `auth: "anonymous"` procedure still resolves a session when the
     /// visitor happens to be logged in, and two such visitors sharing a key
     /// must not share a stored response.
     ///
     /// This is the arm a spec-literal fix — "partition only `auth:
-    /// user`/`admin`" — would leave open. The key here is a valid UUIDv7,
+    /// user`" — would leave open. The key here is a valid UUIDv7,
     /// so the anonymous entropy gate cannot be what saves it.
     #[compio::test]
-    async fn logged_in_visitors_to_an_anon_procedure_are_partitioned_too() {
+    async fn logged_in_visitors_to_an_anonymous_procedure_are_partitioned_too() {
         use std::sync::atomic::Ordering;
 
         let worker = spawn_mock_worker(false, 201);
@@ -6772,7 +6772,7 @@ mod tests {
         assert_eq!(
             worker.served.load(Ordering::SeqCst),
             2,
-            "a second logged-in visitor must reach the worker even on an anon procedure",
+            "a second logged-in visitor must reach the worker even on an anonymous procedure",
         );
         assert_eq!(
             collect_body(second.take_body()).await,
@@ -6783,7 +6783,7 @@ mod tests {
 
     /// The anonymous namespace has no principal to partition on, so the
     /// spec's compensating control is that the key must be unguessable:
-    /// `docs/proposals/rpc.md` §8 requires a UUIDv4/v7 for `auth: "anon"`
+    /// `docs/proposals/rpc.md` §8 requires a UUIDv4/v7 for `auth: "anonymous"`
     /// mutations. A guessable key ("checkout-1") is exactly how two
     /// unrelated anonymous clients collide, so it must be rejected BEFORE
     /// the worker runs.
@@ -6856,7 +6856,7 @@ mod tests {
             .header("idempotency-key", "3f2504e0-4f89-41d3-9a0c-0305e82c3301")
             .to_http_request();
         let mut policy = idempotent_mutation_policy();
-        policy.auth = AuthLevel::User;
+        policy.auth = RequiredPrincipal::User;
 
         let outcome = handle_idempotency_pre_dispatch(
             &req,

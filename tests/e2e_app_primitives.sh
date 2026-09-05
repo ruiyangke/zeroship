@@ -403,7 +403,7 @@ JS
 H="$(sha256sum "$STAGE/app.js" | awk '{print $1}')"
 cp "$STAGE/app.js" "$STAGE/blobs/$H"
 cat > "$STAGE/manifest.json" <<EOF
-{"version":1,"resources":{"/[...rest]":{"auth":"anon","publicly_accessible":true}},"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$H"}},"metadata":{"compiler":"e2e","built_at":"$(date -u +%FT%TZ)"}}
+{"version":1,"resources":{"/[...rest]":{"auth":"anonymous","publicly_accessible":true}},"assets":{},"runtime_assets":{},"asset_version":0,"sourcemaps":{},"worker":{"entry":"index.js","modules":{"index.js":"$H"}},"metadata":{"compiler":"e2e","built_at":"$(date -u +%FT%TZ)"}}
 EOF
 (cd "$STAGE" && tar --format=ustar -cf - manifest.json "blobs/$H") | zstd -q -f -o "$STAGE/app.zship"
 NS_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"name":"noschema-e2e"}')"

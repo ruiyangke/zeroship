@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::asset::AssetEntry;
-use crate::rule::{AuthLevel, ResourceEntry};
+use crate::rule::{RequiredPrincipal, ResourceEntry};
 
 // ---------------------------------------------------------------------------
 // Routing manifest — the per-app dispatch table the gateway walks.
@@ -431,7 +431,7 @@ impl Manifest {
     /// Synthesize the default "everything goes to the worker" manifest.
     /// Used for apps that haven't yet shipped a manifest of their own.
     /// One catch-all `*` resource entry keeps every URL path landing on
-    /// the worker as SSR; an `anon` policy with `publicly_accessible: true`
+    /// the worker as SSR; an `anonymous` policy with `publicly_accessible: true`
     /// satisfies the secure-by-default check. Synthesized rather than
     /// built — `metadata.built_at` is the fixed epoch sentinel so it's
     /// recognizable.
@@ -440,7 +440,7 @@ impl Manifest {
         resources.insert(
             "*".to_string(),
             ResourceEntry {
-                auth: Some(AuthLevel::Anon),
+                auth: Some(RequiredPrincipal::Anonymous),
                 publicly_accessible: Some(true),
                 ..Default::default()
             },
@@ -634,9 +634,11 @@ impl Manifest {
                 ));
             }
             // Secure-by-default.
-            if entry.auth == Some(AuthLevel::Anon) && entry.publicly_accessible != Some(true) {
+            if entry.auth == Some(RequiredPrincipal::Anonymous)
+                && entry.publicly_accessible != Some(true)
+            {
                 return Err(format!(
-                    "resource {key:?}: `auth: anon` requires `publicly_accessible: true`"
+                    "resource {key:?}: `auth: anonymous` requires `publicly_accessible: true`"
                 ));
             }
             // Redirect status must be 3xx.

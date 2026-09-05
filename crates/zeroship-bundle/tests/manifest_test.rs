@@ -8,7 +8,8 @@
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use zeroship_bundle::{
-    AuthConfig, AuthLevel, Cors, HandlerEntry, Manifest, ManifestExports, ResourceEntry, ScopeDef,
+    AuthConfig, Cors, HandlerEntry, Manifest, ManifestExports, RequiredPrincipal, ResourceEntry,
+    ScopeDef,
 };
 
 #[test]
@@ -265,7 +266,7 @@ fn manifest_requiring(required: &[&str], declared: &[&str]) -> Manifest {
     resources.insert(
         "rpc:billing.read".to_string(),
         ResourceEntry {
-            auth: Some(AuthLevel::User),
+            auth: Some(RequiredPrincipal::User),
             required_scopes: required.iter().map(|s| s.to_string()).collect(),
             ..Default::default()
         },

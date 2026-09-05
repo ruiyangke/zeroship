@@ -1,6 +1,6 @@
 use zeroship_bundle::{
-    AssetEntry, AssetVariant, AuthLevel, HttpMethod, Manifest, ManifestMetadata, Match,
-    ProcedureKind, RedirectAction, ResourceEntry, StaticAction, WorkerCode,
+    AssetEntry, AssetVariant, HttpMethod, Manifest, ManifestMetadata, Match,
+    ProcedureKind, RedirectAction, RequiredPrincipal, ResourceEntry, StaticAction, WorkerCode,
 };
 use zeroship_core::net_policy::Verdict;
 use zeroship_core::types::{
@@ -351,7 +351,8 @@ fn manifest_v1_round_trips_resources() {
     resources.insert(
         "*".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::Admin),
+            auth: Some(RequiredPrincipal::Anonymous),
+            publicly_accessible: Some(true),
             ..Default::default()
         },
     );
@@ -366,7 +367,7 @@ fn manifest_v1_round_trips_resources() {
     resources.insert(
         "/api".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::User),
+            auth: Some(RequiredPrincipal::User),
             r#override: vec!["auth".into()],
             ..Default::default()
         },
@@ -395,7 +396,7 @@ fn manifest_v1_round_trips_resources() {
     assert_eq!(d.transformer.as_deref(), Some("superjson"));
     assert_eq!(d.resources["rpc:todos.add"].kind, Some(ProcedureKind::Mutation));
     assert_eq!(d.resources["rpc:todos.add"].idempotent, Some(true));
-    assert_eq!(d.resources["/api"].auth, Some(AuthLevel::User));
+    assert_eq!(d.resources["/api"].auth, Some(RequiredPrincipal::User));
 }
 
 #[test]
@@ -721,7 +722,8 @@ fn validate_accepts_root_url_and_rpc_keys() {
     resources.insert(
         "*".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::Admin),
+            auth: Some(RequiredPrincipal::Anonymous),
+            publicly_accessible: Some(true),
             ..Default::default()
         },
     );
@@ -754,12 +756,12 @@ fn validate_rejects_multiple_routing_actions() {
 }
 
 #[test]
-fn validate_rejects_anon_without_publicly_accessible() {
+fn validate_rejects_anonymous_without_publicly_accessible() {
     let mut resources = HashMap::new();
     resources.insert(
         "/api/public".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::Anon),
+            auth: Some(RequiredPrincipal::Anonymous),
             ..Default::default()
         },
     );
@@ -772,12 +774,12 @@ fn validate_rejects_anon_without_publicly_accessible() {
 }
 
 #[test]
-fn validate_anon_with_publicly_accessible_passes() {
+fn validate_anonymous_with_publicly_accessible_passes() {
     let mut resources = HashMap::new();
     resources.insert(
         "/api/public".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::Anon),
+            auth: Some(RequiredPrincipal::Anonymous),
             publicly_accessible: Some(true),
             ..Default::default()
         },
@@ -786,7 +788,7 @@ fn validate_anon_with_publicly_accessible_passes() {
         resources,
         ..Manifest::default()
     };
-    m.validate().expect("anon + publicly_accessible is the secure-by-default opt-in");
+    m.validate().expect("anonymous + publicly_accessible is the secure-by-default opt-in");
 }
 
 #[test]
@@ -873,7 +875,7 @@ fn validate_override_marker_required_for_inherited_field() {
     resources.insert(
         "rpc:todos".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::User),
+            auth: Some(RequiredPrincipal::User),
             ..Default::default()
         },
     );
@@ -881,7 +883,8 @@ fn validate_override_marker_required_for_inherited_field() {
     resources.insert(
         "rpc:todos.delete".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::Admin),
+            auth: Some(RequiredPrincipal::Anonymous),
+            publicly_accessible: Some(true),
             kind: Some(ProcedureKind::Mutation),
             ..Default::default()
         },
@@ -900,14 +903,15 @@ fn validate_override_marker_satisfies_check() {
     resources.insert(
         "rpc:todos".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::User),
+            auth: Some(RequiredPrincipal::User),
             ..Default::default()
         },
     );
     resources.insert(
         "rpc:todos.delete".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::Admin),
+            auth: Some(RequiredPrincipal::Anonymous),
+            publicly_accessible: Some(true),
             kind: Some(ProcedureKind::Mutation),
             r#override: vec!["auth".into()],
             ..Default::default()
@@ -926,7 +930,7 @@ fn validate_url_inheritance_chain_is_segment_aware() {
     resources.insert(
         "/api".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::User),
+            auth: Some(RequiredPrincipal::User),
             ..Default::default()
         },
     );
@@ -934,7 +938,8 @@ fn validate_url_inheritance_chain_is_segment_aware() {
     resources.insert(
         "/api/admin/users".into(),
         ResourceEntry {
-            auth: Some(AuthLevel::Admin),
+            auth: Some(RequiredPrincipal::Anonymous),
+            publicly_accessible: Some(true),
             ..Default::default()
         },
     );
@@ -963,10 +968,36 @@ fn static_action_round_trips() {
     assert_eq!(d.r#try, vec!["$path".to_string(), "/index.html".to_string()]);
 }
 
+/// The wire spelling of `RequiredPrincipal` is the WHOLE creator contract:
+/// the vite plugin emits these strings and the gateway compiles them into the
+/// access decision. `"anonymous"` is spelled out; the abbreviation `"anon"` is
+/// NOT a second accepted spelling, and neither is the deleted `"admin"`.
+///
+/// This replaces `auth_level_rank_ordering`, which asserted a three-level
+/// strictness ladder. `rank()` is gone with the third level: two variants make
+/// the merge a boolean OR, which the gateway proves in
+/// `compiled::tests::effective_policy_stricter_auth_wins_along_chain`.
 #[test]
-fn auth_level_rank_ordering() {
-    assert!(AuthLevel::Admin.rank() > AuthLevel::User.rank());
-    assert!(AuthLevel::User.rank() > AuthLevel::Anon.rank());
+fn required_principal_wire_spelling_is_exactly_two_values() {
+    assert_eq!(
+        serde_json::to_string(&RequiredPrincipal::Anonymous).unwrap(),
+        "\"anonymous\"",
+        "the public wire value is spelled out, never abbreviated"
+    );
+    assert_eq!(
+        serde_json::to_string(&RequiredPrincipal::User).unwrap(),
+        "\"user\""
+    );
+    for spelling in ["\"anon\"", "\"admin\"", "\"Anonymous\"", "\"\""] {
+        assert!(
+            serde_json::from_str::<RequiredPrincipal>(spelling).is_err(),
+            "{spelling} must not deserialise: there is no alias and no admin level"
+        );
+    }
+    let anonymous: RequiredPrincipal = serde_json::from_str("\"anonymous\"").unwrap();
+    assert_eq!(anonymous, RequiredPrincipal::Anonymous);
+    let user: RequiredPrincipal = serde_json::from_str("\"user\"").unwrap();
+    assert_eq!(user, RequiredPrincipal::User);
 }
 
 #[test]
@@ -981,7 +1012,13 @@ fn manifest_does_not_serialize_rules_field() {
     );
 
     let mut resources = HashMap::new();
-    resources.insert("*".into(), ResourceEntry { auth: Some(AuthLevel::Admin), ..Default::default() });
+    resources.insert(
+        "*".into(),
+        ResourceEntry {
+            auth: Some(RequiredPrincipal::User),
+            ..Default::default()
+        },
+    );
     let m2 = Manifest {
         resources,
         ..Manifest::default()

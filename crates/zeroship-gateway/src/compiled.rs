@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::collections::HashMap;
 
 use zeroship_bundle::{
-    AssetEntry, AuthLevel, CacheCtl, Cors, HttpMethod, Manifest, ProcedureKind, RateLimit,
+    AssetEntry, CacheCtl, Cors, HttpMethod, Manifest, ProcedureKind, RateLimit, RequiredPrincipal,
     ResourceEntry, WorkerCode,
 };
 
@@ -61,7 +61,7 @@ enum GlobSegment {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 pub struct EffectivePolicy {
-    pub auth: AuthLevel,
+    pub auth: RequiredPrincipal,
     pub rate_limit: Option<RateLimit>,
     pub cors: Option<Cors>,
     pub cache: Option<CacheCtl>,
@@ -83,8 +83,8 @@ pub struct EffectivePolicy {
     /// (root → child): a scoped parent's requirement is inherited and a
     /// child can only ADD, never weaken it. Empty ⇒ no scope gate. The
     /// auth gate (`resolve_auth`) checks the authenticated principal's
-    /// granted `scopes` against this set — ONLY on `User`/`Admin` routes
-    /// (an `Anon` public route never scope-gates an authenticated visitor)
+    /// granted `scopes` against this set — ONLY on `User` routes
+    /// (an `Anonymous` public route never scope-gates an authenticated visitor)
     /// — and answers a `403` (`scope_required` JSON body,
     /// `insufficient_scope` `WWW-Authenticate` token) on a miss.
     pub required_scopes: Vec<String>,
@@ -180,7 +180,7 @@ pub(crate) fn is_dot_segment(seg: &str) -> bool {
 ///   is ONE segment to the gateway and THREE to the worker. Measured
 ///   end to end through a running gateway on 2026-08-10
 ///   (`tests/e2e_gateway_path_backslash.sh` T4): `GET /pub\..\admin/secret`
-///   was authorized against the anon catch-all (200) while the worker's
+///   was authorized against the anonymous catch-all (200) while the worker's
 ///   handler served `/admin/secret`, the `auth: user` resource that answers
 ///   401 on its own URL.
 /// * TAB / LF / CR (0x09/0x0A/0x0D) — STRIPPED by the parser before parsing,
@@ -501,10 +501,10 @@ fn resolve_effective_policy(
 ) -> EffectivePolicy {
     let chain = build_inheritance_chain(key, resources);
 
-    let mut auth: AuthLevel = AuthLevel::Anon;
+    let mut auth: RequiredPrincipal = RequiredPrincipal::Anonymous;
     // SEC-5: track whether ANY resource in the chain declared `auth`, so a
     // procedure that falls through to the default is distinguishable from one
-    // deliberately set to `anon` — see the fail-closed default after the loop.
+    // deliberately set to `anonymous` — see the fail-closed default after the loop.
     let mut auth_declared = false;
     let mut rate_limit: Option<RateLimit> = None;
     let mut cors: Option<Cors> = None;
@@ -526,11 +526,14 @@ fn resolve_effective_policy(
 
         if let Some(a) = node.auth {
             auth_declared = true;
-            // stricter wins — child only weakens via override (validated).
-            if a.rank() > auth.rank()
-                || (is_self && node.r#override.iter().any(|f| f == "auth"))
-            {
+            // Boolean OR — if ANY resource in the chain requires a user, so
+            // does this one. The child weakens only by naming `auth` in its
+            // OWN `override` list, which the build validates; that arm takes
+            // the child's value outright.
+            if is_self && node.r#override.iter().any(|f| f == "auth") {
                 auth = a;
+            } else if matches!(a, RequiredPrincipal::User) {
+                auth = RequiredPrincipal::User;
             }
         }
         if let Some(rl) = &node.rate_limit {
@@ -588,14 +591,14 @@ fn resolve_effective_policy(
 
     // SEC-5 fail-closed default for the RPC surface. A procedure whose entire
     // inheritance chain declares no `auth` defaults to `User`, never the silent
-    // `Anon` that turned a forgotten or mistyped policy into an unauthenticated
+    // `Anonymous` that turned a forgotten or mistyped policy into an unauthenticated
     // exposure (the SEC-5 class — a drifted family key left `projects.*` open).
     // The web surface (URL / SSR / static) keeps the public-by-default norm;
     // only `rpc:` procedures flip. A deliberately public procedure opts in with
-    // `auth: anon` + `publicly_accessible: true` somewhere in its chain, which
+    // `auth: anonymous` + `publicly_accessible: true` somewhere in its chain, which
     // sets `auth_declared` and so is left untouched here.
     if !auth_declared && key.starts_with("rpc:") {
-        auth = AuthLevel::User;
+        auth = RequiredPrincipal::User;
     }
 
     let action = resolve_action(key, resources);
@@ -782,7 +785,7 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use zeroship_bundle::{
-        AuthLevel, Manifest, ProcedureKind, RateLimit, RateLimitPer, RedirectAction,
+        Manifest, ProcedureKind, RateLimit, RateLimitPer, RedirectAction, RequiredPrincipal,
         ResourceEntry, StaticAction,
     };
 
@@ -829,14 +832,15 @@ mod tests {
         resources.insert(
             "/api".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::User),
+                auth: Some(RequiredPrincipal::User),
                 ..Default::default()
             },
         );
         resources.insert(
             "/api/admin".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::Admin),
+                auth: Some(RequiredPrincipal::Anonymous),
+                publicly_accessible: Some(true),
                 r#override: vec!["auth".into()],
                 ..Default::default()
             },
@@ -858,8 +862,8 @@ mod tests {
         // resource matching, so dot-segment / percent-encoded-dot /
         // trailing-slash evasions of a protected literal can never fall
         // through to a permissive catch-all. Manifest: `/api/admin` is
-        // `user`-gated; a root catch-all glob is `anon`. Pre-fix each
-        // evasion matches the anon catch-all (the literal compares the RAW
+        // `user`-gated; a root catch-all glob is `anonymous`. Pre-fix each
+        // evasion matches the anonymous catch-all (the literal compares the RAW
         // string and misses); post-fix the canonical form re-matches the
         // `/api/admin` user literal. The worker's WHATWG `new URL` collapses
         // these exact forms to `/api/admin`, so the gateway match and the
@@ -868,14 +872,14 @@ mod tests {
         resources.insert(
             "/api/admin".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::User),
+                auth: Some(RequiredPrincipal::User),
                 ..Default::default()
             },
         );
         resources.insert(
             "/[...rest]".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::Anon),
+                auth: Some(RequiredPrincipal::Anonymous),
                 publicly_accessible: Some(true),
                 ..Default::default()
             },
@@ -891,7 +895,7 @@ mod tests {
         assert_eq!(
             c.lookup_resource_key("/public/page").as_deref(),
             Some("/[...rest]"),
-            "unrelated path falls through to the anon catch-all"
+            "unrelated path falls through to the anonymous catch-all"
         );
 
         for evasion in [
@@ -908,13 +912,13 @@ mod tests {
                 key.as_deref(),
                 Some("/api/admin"),
                 "evasion {evasion:?} must canonicalize to the user-gated /api/admin, \
-                 not fall through to the anon catch-all (got {key:?})"
+                 not fall through to the anonymous catch-all (got {key:?})"
             );
             let policy = c.lookup_resource(evasion).expect("policy resolves");
             assert_eq!(
                 policy.auth,
-                AuthLevel::User,
-                "evasion {evasion:?} must resolve the User auth gate, not Anon"
+                RequiredPrincipal::User,
+                "evasion {evasion:?} must resolve the User auth gate, not Anonymous"
             );
         }
     }
@@ -1040,7 +1044,7 @@ mod tests {
         resources.insert(
             "*".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::Admin),
+                auth: Some(RequiredPrincipal::User),
                 ..Default::default()
             },
         );
@@ -1055,18 +1059,18 @@ mod tests {
         };
         let c = CompiledManifest::compile(&m);
         let p = c.lookup_resource("/__zeroship/v1/todos.list").expect("matches");
-        assert_eq!(p.auth, AuthLevel::Admin, "inherits root admin");
+        assert_eq!(p.auth, RequiredPrincipal::User, "inherits root user");
         assert_eq!(p.kind, Some(ProcedureKind::Query));
     }
 
     #[test]
     fn effective_policy_stricter_auth_wins_along_chain() {
         let mut resources = HashMap::new();
-        // Root: anon, parent: user, child: doesn't override → user wins.
+        // Root: anonymous, parent: user, child: doesn't override → user wins.
         resources.insert(
             "*".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::Anon),
+                auth: Some(RequiredPrincipal::Anonymous),
                 publicly_accessible: Some(true),
                 ..Default::default()
             },
@@ -1074,7 +1078,7 @@ mod tests {
         resources.insert(
             "rpc:todos".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::User),
+                auth: Some(RequiredPrincipal::User),
                 r#override: vec!["auth".into(), "publicly_accessible".into()],
                 publicly_accessible: Some(false),
                 ..Default::default()
@@ -1091,13 +1095,13 @@ mod tests {
         };
         let c = CompiledManifest::compile(&m);
         let p = c.lookup_resource("/__zeroship/v1/todos.list").expect("matches");
-        assert_eq!(p.auth, AuthLevel::User, "stricter user beats root anon");
+        assert_eq!(p.auth, RequiredPrincipal::User, "stricter user beats root anonymous");
     }
 
     /// SEC-5 fail-closed default: an RPC procedure whose entire inheritance
-    /// chain declares NO `auth` must resolve to `User`, never the silent `Anon`
+    /// chain declares NO `auth` must resolve to `User`, never the silent `Anonymous`
     /// that turned a forgotten/typo'd policy into an unauthenticated exposure.
-    /// Pre-flip this resolved to `Anon` → RED.
+    /// Pre-flip this resolved to `Anonymous` → RED.
     #[test]
     fn rpc_procedure_defaults_to_user_when_no_auth_declared() {
         let mut resources = HashMap::new();
@@ -1113,8 +1117,8 @@ mod tests {
             .expect("matches");
         assert_eq!(
             p.auth,
-            AuthLevel::User,
-            "an undeclared rpc procedure must fail closed to user, not anon"
+            RequiredPrincipal::User,
+            "an undeclared rpc procedure must fail closed to user, not anonymous"
         );
         assert!(
             !p.publicly_accessible,
@@ -1123,7 +1127,7 @@ mod tests {
     }
 
     /// The web surface keeps the public-by-default norm — only the `rpc:` API
-    /// flips. A URL/SSR resource with no declared auth stays `Anon` so a
+    /// flips. A URL/SSR resource with no declared auth stays `Anonymous` so a
     /// creator's blog/landing/static assets remain readable without login.
     #[test]
     fn url_resource_keeps_public_default_when_no_auth_declared() {
@@ -1138,22 +1142,22 @@ mod tests {
         let p = c.lookup_resource("/blog").expect("matches");
         assert_eq!(
             p.auth,
-            AuthLevel::Anon,
+            RequiredPrincipal::Anonymous,
             "url/web resources keep public-by-default"
         );
     }
 
-    /// A deliberately public procedure (its family declares `auth: anon` +
-    /// `publicly_accessible: true`) stays `Anon`. The fail-closed default only
+    /// A deliberately public procedure (its family declares `auth: anonymous` +
+    /// `publicly_accessible: true`) stays `Anonymous`. The fail-closed default only
     /// fires when NOTHING in the chain declares auth, so an explicit public
     /// opt-in is preserved.
     #[test]
-    fn rpc_procedure_explicit_public_stays_anon() {
+    fn rpc_procedure_explicit_public_stays_anonymous() {
         let mut resources = HashMap::new();
         resources.insert(
             "rpc:wizard".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::Anon),
+                auth: Some(RequiredPrincipal::Anonymous),
                 publicly_accessible: Some(true),
                 ..Default::default()
             },
@@ -1170,8 +1174,8 @@ mod tests {
             .expect("matches");
         assert_eq!(
             p.auth,
-            AuthLevel::Anon,
-            "explicit anon+publicly_accessible family keeps the procedure public"
+            RequiredPrincipal::Anonymous,
+            "explicit anonymous+publicly_accessible family keeps the procedure public"
         );
         assert!(p.publicly_accessible);
     }
@@ -1182,7 +1186,7 @@ mod tests {
         resources.insert(
             "*".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::Admin),
+                auth: Some(RequiredPrincipal::User),
                 rate_limit: Some(RateLimit {
                     rpm: Some(600),
                     rps: None,
@@ -1255,7 +1259,7 @@ mod tests {
         resources.insert(
             "*".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::Admin),
+                auth: Some(RequiredPrincipal::User),
                 middleware: vec!["audit".into()],
                 ..Default::default()
             },
@@ -1316,7 +1320,7 @@ mod tests {
             "rpc:billing.read".into(),
             ResourceEntry {
                 kind: Some(ProcedureKind::Query),
-                auth: Some(AuthLevel::User),
+                auth: Some(RequiredPrincipal::User),
                 required_scopes: vec!["read:billing".into()],
                 ..Default::default()
             },
@@ -1329,7 +1333,7 @@ mod tests {
         let c = CompiledManifest::compile(&m);
         let p = c.lookup_resource("/__zeroship/v1/billing.read").expect("matches");
         assert_eq!(p.required_scopes, vec!["read:billing".to_string()]);
-        assert_eq!(p.auth, AuthLevel::User);
+        assert_eq!(p.auth, RequiredPrincipal::User);
     }
 
     #[test]
@@ -1341,7 +1345,7 @@ mod tests {
         resources.insert(
             "*".into(),
             ResourceEntry {
-                auth: Some(AuthLevel::User),
+                auth: Some(RequiredPrincipal::User),
                 required_scopes: vec!["openid".into()],
                 ..Default::default()
             },

@@ -2,7 +2,8 @@ use std::collections::HashMap;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
 use zeroship_bundle::{
-    AuthLevel, Manifest, ProcedureKind, RateLimit, RateLimitPer, ResourceEntry, StaticAction,
+    Manifest, ProcedureKind, RateLimit, RateLimitPer, RequiredPrincipal, ResourceEntry,
+    StaticAction,
 };
 use zeroship_gateway::compiled::CompiledManifest;
 
@@ -21,7 +22,7 @@ fn rate_limit(rpm: u32) -> RateLimit {
 
 fn resource_entry(rpm: u32) -> ResourceEntry {
     ResourceEntry {
-        auth: Some(AuthLevel::Anon),
+        auth: Some(RequiredPrincipal::Anonymous),
         publicly_accessible: Some(true),
         rate_limit: Some(rate_limit(rpm)),
         ..Default::default()
@@ -34,7 +35,7 @@ fn compiled_manifest() -> CompiledManifest {
     resources.insert(
         "*".to_string(),
         ResourceEntry {
-            auth: Some(AuthLevel::Anon),
+            auth: Some(RequiredPrincipal::Anonymous),
             publicly_accessible: Some(true),
             ..Default::default()
         },
