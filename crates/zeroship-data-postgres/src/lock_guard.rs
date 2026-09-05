@@ -30,29 +30,40 @@
 //! # Why not full RAII?
 //!
 //! `Drop::drop` is sync; the unlock SQL is async. The guard therefore
-//! has three exit modes:
+//! has two exit modes:
 //!
 //! 1. **Normal release** — `let client = guard.release().await?;`
 //!    Issues `pg_advisory_unlock` and hands the now-unlocked client
 //!    back to the caller (so it can be parked or reused).
-//! 2. **Hand-off** — `let client = guard.into_held();` The guard exits
-//!    its scope, but the lock is intentionally still held by the
-//!    returned client. The next stage owns the release responsibility.
-//! 3. **Panic / catastrophic propagation** — `Drop` runs, logs an
+//! 2. **Panic / catastrophic propagation** — `Drop` runs, logs an
 //!    error, closes the pooled client so the backend session dies,
 //!    and lets the now-closed entry fall out of the pool on the next
 //!    checkout. That tears down the session-scoped advisory lock even
 //!    though `Drop` cannot await `pg_advisory_unlock`. This is still a
-//!    fallback only; production code should always reach `release()`
-//!    or `into_held()`.
+//!    fallback only; production code should always reach `release()`.
+//!
+//! # There was a third exit mode, and what it was for still applies
+//!
+//! `into_held()` was a HAND-OFF: it took the client out and flipped
+//! `released` without unlocking, so the lock stayed held and the next
+//! stage owned the release. It was deleted on 2026-09-04 with zero
+//! callers in any cfg - not even a test called it; the test named after
+//! it hand-wrote the two field assignments instead, because the return
+//! type cannot be constructed off a live pool.
+//!
+//! ITS RATIONALE IS KEPT BECAUSE IT IS A RULE FOR THE NEXT PERSON, not a
+//! description of code: a caller that needs to thread the still-locked
+//! client into an API which does not accept `LockGuard` should add the
+//! hand-off back HERE, at the guard boundary, so the release obligation
+//! stays codified in one place - rather than open-coding another unlock
+//! sequence at the call site, which is what this module exists to stop.
 //!
 //! # Internal representation
 //!
 //! The guard stores the client as `Option<OwnedPooledClient>` so
-//! `release()` and `into_held()` can safely move it out without
-//! `mem::replace` / `ManuallyDrop` gymnastics. After either call, the
-//! `Option` is `None` and `released` is `true`, so subsequent `Drop`
-//! is a no-op (idempotent).
+//! `release()` can move it out without `mem::replace` / `ManuallyDrop`
+//! gymnastics. After that call the `Option` is `None` and `released` is
+//! `true`, so subsequent `Drop` is a no-op (idempotent).
 
 use compio_postgres::OwnedPooledClient;
 
@@ -66,18 +77,18 @@ use zeroship_data_core::error::DbError;
 /// Session-scoped advisory-lock guard. See module docs for the lifecycle
 /// contract.
 ///
-/// **Must be consumed via `release().await` or `into_held()`.**
+/// **Must be consumed via `release().await`.**
 /// `Drop` cannot await the unlock SQL, so a guard dropped without
-/// one of those calls leaks the session-scoped advisory lock until
+/// that call leaks the session-scoped advisory lock until
 /// the PG session ends (typically when the pool recycles the
 /// connection — could be tens of seconds to minutes). The
 /// `#[must_use]` annotation surfaces accidental drops as compile-time
 /// warnings on common patterns (e.g. `let _ = acquire(...).await`).
-#[must_use = "LockGuard must be released via .release().await or .into_held(); \
+#[must_use = "LockGuard must be released via .release().await; \
               dropping it leaks the session-scoped advisory lock"]
 pub struct LockGuard {
     /// The pooled client that holds the advisory lock at session
-    /// scope. `None` after `release()` or `into_held()` has moved it
+    /// scope. `None` after `release()` has moved it
     /// out; `Drop` then becomes a no-op.
     client: Option<OwnedPooledClient>,
     /// First key passed to `pg_advisory_lock(hashtext($1), hashtext($2))`,
@@ -103,9 +114,7 @@ impl LockGuard {
     /// On Err the lock was never acquired and the client is returned
     /// to the pool by virtue of being dropped at the error site.
     ///
-    /// The caller chooses how to release: `release().await` (normal
-    /// exit) or `into_held()` (hand off to a downstream stage that
-    /// will release later).
+    /// The caller releases with `release().await`.
     ///
     /// Takes a [`LockScope`] rather than a raw
     /// `(key: String, tag: &'static str)` pair. The
@@ -126,7 +135,7 @@ impl LockGuard {
     /// which would give any app that held its own lock a within-app DoS lever
     /// against subsequent operations using the same scope. The guard's lifecycle invariants
     /// are unaffected: on `Ok` the lock is held by `self.client` and
-    /// will be released via [`Self::release`] / [`Self::into_held`];
+    /// will be released via [`Self::release`];
     /// on `Err` no lock is held and `client` drops back to the pool.
     pub async fn acquire<B: LockManager<Client = compio_postgres::OwnedPooledClient>>(
         backend: &B,
@@ -200,31 +209,6 @@ impl LockGuard {
         Ok(self.client.take())
     }
 
-    /// Hand off the still-locked client to the caller. The guard's
-    /// `Drop` will NOT release on subsequent drop — the caller has
-    /// taken on the release responsibility.
-    ///
-    /// In the current pipeline the bootstrap → apply boundary keeps the
-    /// guard itself in scope (no need to drop down to the raw
-    /// `OwnedPooledClient`). This method exists for future callers that need
-    /// to thread the locked client into an API that doesn't accept the
-    /// guard type — flag it `dead_code` until that arrives so the
-    /// invariant stays codified at the guard boundary rather than
-    /// re-discovered as another open-coded unlock sequence.
-    #[allow(dead_code)]
-    pub fn into_held(mut self) -> OwnedPooledClient {
-        self.released = true;
-        // SAFETY-ish: by construction, a guard returned from
-        // `acquire()` always has `client = Some(_)`; the only way to
-        // produce `client = None` is via `release()` / `into_held()`
-        // themselves, and both flip `released = true` first. So if
-        // `released` was false on entry the `Option` must be `Some`.
-        // Test-only constructors that bypass `acquire()` document this
-        // contract.
-        self.client
-            .take()
-            .expect("LockGuard::into_held called on guard with no client")
-    }
 }
 
 impl Drop for LockGuard {
@@ -238,19 +222,19 @@ impl Drop for LockGuard {
             //
             // This branch is the catastrophic-path fallback (panic
             // unwind, missed `release()` call). Production code should
-            // always reach `release()` or `into_held()`.
+            // always reach `release()`.
             if let Some(client) = self.client.as_mut() {
                 client.__private_api_close();
             }
             tracing::error!(
                 key = %self.key,
                 tag = %self.tag,
-                "leak: LockGuard dropped without release()/into_held(); \
+                "leak: LockGuard dropped without release(); \
                  closed the pooled client so the PG session will terminate and \
                  release its session-scoped pg_advisory_lock instead of leaking \
                  it into the pool. Either an async-cancellation hit the \
                  release().await, a panic unwound the call stack, or a code path \
-                 forgot to call release()/into_held() — investigate."
+                 forgot to call release() — investigate."
             );
         }
     }
@@ -292,26 +276,14 @@ mod tests {
         );
     }
 
-    #[test]
-    fn into_held_flips_released_flag() {
-        // `into_held()` returns the raw OwnedPooledClient - we can't
-        // construct one in a unit test (it has a private field +
-        // pool back-reference), so we simulate the post-call state
-        // directly: after `into_held()` the guard has
-        // `released = true` and `client = None`, which is exactly
-        // what the impl does before `.expect()`-ing the client out.
-        // This test pins the *flag transition* that suppresses
-        // Drop's warning.
-        let mut guard = LockGuard::for_test_no_client("zs_reg:app_43", "snapshot_restore");
-        assert!(!guard.released);
-        // Manually mirror the prefix of `into_held`'s body:
-        guard.released = true;
-        // The remaining `client.take().expect(...)` would panic in
-        // this no-client test; verify the prefix completes cleanly.
-        assert!(guard.released);
-        // Subsequent Drop must be a no-op (no warning branch).
-        drop(guard);
-    }
+    // `into_held_flips_released_flag` stood here and went with
+    // `into_held` on 2026-09-04. It never called the method: the return
+    // type cannot be constructed off a live pool, so the body hand-wrote
+    // `guard.released = true` and said so. It was a name-only witness -
+    // `rg into_held` hit the test and read as coverage, `rg -w into_held`
+    // missed it entirely, and only the body settled which was right. What
+    // it actually asserted (Drop is a no-op once `released` is set) is
+    // `drop_with_released_true_does_not_warn` below, which survives.
 
     #[test]
     fn drop_with_released_true_does_not_warn() {
