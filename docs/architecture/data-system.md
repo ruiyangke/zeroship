@@ -347,7 +347,7 @@ forever.
 compares the observed epoch against the expected one and returns `Verdict::ReResolve` - retryable,
 distinct from the terminal denials above it. What has no input is `expected_authority` at
 `crates/zeroship-data-engine/src/transaction/driver.rs:142-148`, which mints `SchemaEpoch::new(0)`, and
-`observation_for` at `:158-165`, which echoes it back; the doc comment at `:140-141` says so outright:
+`observation_for` at `:157-167`, which echoes it back; the doc comment at `:140-141` says so outright:
 "The wiring is real; the *input* is not yet." Building the epoch is supplying one input to a
 classifier that already ships.
 
