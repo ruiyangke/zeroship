@@ -581,4 +581,66 @@ mod tests {
             );
         }
     }
+
+    /// Minting must refuse an app id that is not a legal schema name.
+    ///
+    /// `binding_for_isolate` stamps the app id into a `DbBinding` with no
+    /// validation at all, so a name `zeroship_schema::query::validate_schema`
+    /// (crates/zeroship-schema/src/query.rs:1027) rejects survives the mint. The
+    /// refusal surfaces only LATER and only PER OPERATION, inside the query
+    /// builder, as `QueryError::InvalidCollection` -- so an isolate can hold a
+    /// live `env.db` whose every operation is doomed, and nothing said so at the
+    /// moment the binding was created.
+    ///
+    /// That deferral is what makes the app-id/schema-name conflation invisible.
+    /// One string is today both the tenant identity and the physical schema
+    /// name; the mint is the one place that can refuse a value which is illegal
+    /// as a SCHEMA while perfectly legal as a TENANT id. Validating at the mint
+    /// is what forces the two meanings apart.
+    ///
+    /// WHAT THIS DOES NOT CATCH: it pins the refusal, not the channel. If the
+    /// mint later reports the refusal by some route other than `None`, this test
+    /// needs rewriting rather than deleting.
+    #[test]
+    fn mint_refuses_an_app_id_that_is_not_a_legal_schema_name() {
+        // A double quote is the character that makes `quote_ident`'s escaping
+        // load-bearing, so it is the one whose acceptance matters most.
+        const ILLEGAL: &str = "app\"; DROP SCHEMA public; --";
+
+        // CONTROL, differing in one variable: the fixture really is a name the
+        // shared validator rejects, so the arm below is not asserting against an
+        // arbitrary string. This call is also the deferred refusal itself -- the
+        // per-operation `InvalidCollection` that is the ONLY place the illegal
+        // name is caught today.
+        let deferred = zeroship_schema::query::build_find_with_schema(
+            ILLEGAL,
+            "users",
+            &json!({}),
+            None,
+            None,
+            None,
+            None,
+            &json!({}),
+        );
+        assert!(
+            matches!(
+                deferred,
+                Err(zeroship_schema::query::QueryError::InvalidCollection(_))
+            ),
+            "control: the fixture must be a name validate_schema rejects, got {deferred:?}"
+        );
+
+        // THE PROPERTY: the mint refuses it, rather than handing back a binding
+        // that only fails one operation at a time.
+        crate::reset_context_for_tests();
+        let runtime = runtime_for_deploy(ILLEGAL, "deploy_mint_refusal");
+        let minted = runtime.with_scope(|scope| super::mint_db(scope, ILLEGAL).is_some());
+        runtime.exit_isolate();
+
+        assert!(
+            !minted,
+            "mint_db handed back an env.db binding for an app id that is not a legal \
+             schema name; the refusal is still deferred to per-operation query building"
+        );
+    }
 }
