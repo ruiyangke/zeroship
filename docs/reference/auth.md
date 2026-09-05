@@ -284,7 +284,8 @@ challenge.
 ## Data Model
 
 The auth tables live in the `zeroship` PostgreSQL schema and are created by the
-platform corpus applied through `zeroship-platform-migrate`:
+platform corpus in `db/migrations-ts/`, applied by the `zero-migrate` CLI
+(`deploy/ops/db-migrate.sh` is the sanctioned wrapper):
 
 | Table | Purpose |
 |---|---|
@@ -342,19 +343,26 @@ at minimum:
 Run platform migrations before booting services:
 
 ```bash
-cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
-umask 077 && printf '%s' "$DATABASE_URL" > ./migrate-dsn
-./target/release/zeroship-platform-migrate \
-  --database-url-file ./migrate-dsn \
-  --migrations-dir ./db/migrations-ts \
-  --project-schema zeroship \
-  --project-id zeroship
-rm -f ./migrate-dsn
+pnpm install && pnpm build
+ZEROSHIP_MIGRATE_DSN="$DATABASE_URL" deploy/ops/db-migrate.sh
 ```
 
-The DSN is supplied as an owner-only file, never as an argument: there is no
-`--database-url` value flag, and the reader refuses a file with any bit set in
-`0o077`.
+The DSN never reaches an argument list. `db-migrate.sh` writes it into a
+per-run `zero-migrate.toml` under a `mktemp -d` directory at mode 0700/0600 and
+passes `--config <path>`; the file is removed by an EXIT trap. The CLI does
+advertise a `--database-url <value>` flag and this path deliberately does not
+use it, because argv is readable through `ps` and `/proc/<pid>/cmdline` by every
+process of that user. The owner-only requirement is enforced by the reader, not
+the wrapper: `enforceOwnerOnly` in `packages/zero-migrate-cli/src/config.ts`
+refuses a config supplying a literal `url` with any bit set in `0o077`.
+
+THIS BLOCK WAS BROKEN UNTIL 2026-09-04. It built
+`-p zeroship-migrate-adapter --bin zeroship-platform-migrate`; that crate was
+deleted on 2026-08-28 and neither the package nor the binary has existed since,
+so the first line failed and nothing after it ran. The `--project-schema` /
+`--project-id` pair went with it - the CLI derives its advisory-lock key and
+journal project from the schema alone, which the corpus spells itself, so there
+is nothing left for a second name to select.
 
 Then start `zeroship-auth` with the variables above. On boot it publishes the
 active public JWK metadata from `AUTH_SIGNING_KEY_FILE` into Postgres and serves

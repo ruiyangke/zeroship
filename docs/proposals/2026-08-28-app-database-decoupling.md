@@ -427,6 +427,15 @@ alias; the dedup key becomes the database id. Three fidelity gaps, all owed to
   fence is the Rust resolution layer only.
 - **The schema epoch has no carrier**, since it rides a role name. A dev-tier equivalent is
   owed and is not specified here.
+  **THIS IS LIVE DISAGREEMENT, FLAGGED 2026-09-04, NOT AN OVERSIGHT.**
+  `docs/proposals/2026-08-26-sc4-dev-and-hmr-mechanism.md` reaches the opposite conclusion
+  under the heading "No dev epoch, and no dev authority domain": "There is nothing here to
+  specify." Both documents are live and neither cited the other. The disagreement must be
+  settled rather than inherited, and it cannot be settled by deferring to sc4's evidence:
+  sc4 rests on `docs/reviews/2026-08-28-sqlite-authority-row.md`, whose "the carrier already
+  exists" subsection was found FALSE on the same day - `__zeroship_migrations.schema_version`
+  and `next_schema_version` were deleted with the data plane's last DDL, so there is no
+  carrier on either tier.
 - **One writer per file**, so a shared database behaves *worse* in dev than in production -
   the inverse of the usual direction, and the one that gets filed as a bug.
 
@@ -812,7 +821,14 @@ Do-not notes, each recording something that was tried or specified and broke:
   door.
 - **Do not add a Rust epoch comparison on the SQLite arm only.** A fence that exists on one
   tier and not the other is how a divergence becomes a surprise; whatever the dev-tier
-  equivalent is, it belongs in `docs/reference/sqlite-divergences.md` beside the grants entry.
+  equivalent is, it belongs in `docs/reference/sqlite-divergences.md` alongside the grants
+  divergence.
+  **CORRECTED 2026-09-04: THERE IS NO GRANTS ENTRY TO SIT BESIDE.** This line said "beside
+  the grants entry" as though one existed; all 21 rows of that table were enumerated and none
+  is about grants. The grants row is one of the three this proposal itself proposes to ADD
+  (see the list above) and it has not been filed, so this instruction pointed an implementer
+  at a landmark that does not exist. File the grants row first, or drop the positional
+  reference.
 - **Do not write "publish the mask sibling, exclude the parent".** The masking storage flip
   deleted the `_masked` sibling: the field's own column now holds the mask and `__zs_raw__<f>`
   holds the plaintext. Anything written against the old layout is inverted and would publish

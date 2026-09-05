@@ -158,19 +158,25 @@ or base64url encoded.
 1. **Run platform migrations** before any service starts:
 
    ```bash
-   cargo build --release -p zeroship-migrate-adapter --features platform-cli --bin zeroship-platform-migrate
-   umask 077 && printf '%s' "$PLATFORM_ADMIN_DATABASE_URL" > ./migrate-dsn
-   ./target/release/zeroship-platform-migrate \
-     --database-url-file ./migrate-dsn \
-     --migrations-dir ./db/migrations-ts \
-     --project-schema zeroship \
-     --project-id zeroship
-   rm -f ./migrate-dsn
+   pnpm install && pnpm build
+   ZEROSHIP_MIGRATE_DSN="$PLATFORM_ADMIN_DATABASE_URL" deploy/ops/db-migrate.sh
    ```
 
-   The admin DSN goes in a file, not in the argument list, and the file must be
-   owner-only: there is no `--database-url` value flag, and the reader refuses
-   any mode with a bit set in `0o077`.
+   The admin DSN never lands in an argument list. `db-migrate.sh` writes it into
+   a per-run `zero-migrate.toml` under a `mktemp -d` directory at mode 0700/0600
+   and passes `--config <path>`, removing the file on an EXIT trap. The CLI does
+   advertise `--database-url <value>`; this path deliberately does not use it,
+   because argv is readable through `ps` for every process of that user. The
+   owner-only mode is enforced by the reader - `enforceOwnerOnly` in
+   `packages/zero-migrate-cli/src/config.ts` refuses a config that supplies a
+   literal `url` with any bit set in `0o077`.
+
+   THIS BLOCK WAS BROKEN UNTIL 2026-09-04, and it was step 1 of first boot. It
+   built `-p zeroship-migrate-adapter --bin zeroship-platform-migrate`; that
+   crate was deleted on 2026-08-28, so the build failed and no migration ran.
+   `--project-schema` / `--project-id` went with the binary: the CLI derives
+   both its advisory-lock key and its journal project from the schema, which the
+   corpus spells itself.
 
 2. **Verify the auth role can connect**:
 

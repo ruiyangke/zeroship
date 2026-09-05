@@ -207,6 +207,19 @@ than never having written it.
 
 ## No dev epoch, and no dev authority domain
 
+**CONTESTED, FLAGGED 2026-09-04.** `docs/proposals/2026-08-28-app-database-decoupling.md`
+says the opposite - "A dev-tier equivalent is owed and is not specified here" - and until
+today neither document cited the other. Worse for the argument below: the review it leans on,
+`docs/reviews/2026-08-28-sqlite-authority-row.md`, closed with "if the epoch's question ever
+returns, the carrier already exists", and that is now FALSE. The carrier it named,
+`__zeroship_migrations.schema_version`, was deleted along with `next_schema_version` and the
+whole audit-table capability when the data plane's last DDL was removed. So "nothing to
+specify" can no longer rest on "a carrier is already there if we need one".
+
+The rest of this section is the original argument, which stands on its own terms - the
+runtime descriptor really is the sole schema authority on this tier - but it is one side of
+an open disagreement, not a settled conclusion.
+
 There is nothing here to specify. SC-2 states that on this tier there is **no
 `__zeroship_state` row, no epoch, and no `AuthorityRead` command**; the runtime
 descriptor is the sole schema authority (SC-2, "No database-resident authority

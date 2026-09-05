@@ -15,9 +15,20 @@ import { role, raw, revoke } from "@zeroship/migrate";
 // held inside 20260702000900 (deny first, then re-grant) - the deny is last
 // overall instead of first within one file, and the end state is identical
 // because nothing between the two grants the worker anything this does not
-// revoke. That is asserted, not assumed: crates/zeroship-migrate-adapter/tests/
-// platform_migrate.rs checks the worker holds no write privilege on ANY
-// relation in `zeroship` after the whole corpus runs.
+// revoke.
+//
+// THAT USED TO SAY "asserted, not assumed", citing
+// crates/zeroship-migrate-adapter/tests/platform_migrate.rs (DELETED 2026-08-28
+// in ccda4bb42), which checked the worker holds no write privilege on ANY
+// relation in `zeroship` after the whole corpus runs. The check went with the
+// crate, so NOTHING ASSERTS THIS TODAY - the end-state argument above is
+// reasoning, not a measurement. The claim is stated as unproven rather than
+// repointed at a test that does not check the same thing.
+//
+// (The citation survived the 2026-09-04 sweep that repaired its two siblings
+// because it WRAPPED ACROSS TWO LINES, and both citation gates extract per line.
+// tests/doc_citation_gate.sh arm 7 now unwraps `//` continuations for exactly
+// this reason.)
 
 export default {
   name: "worker_database_authority",

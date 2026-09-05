@@ -219,6 +219,7 @@ crates/zeroship-testkit/src/fingerprint.rs:crates/zeroship-migrate-adapter/src/p
 db/migrations-ts/20260811000400_rate_limits_write_grants.ts:crates/auth/src/store/ratelimit.rs
 db/migrations-ts/20260816000100_service_assertion_replay.ts:crates/zeroship-migrate-adapter/tests/platform_migrate.rs
 db/migrations-ts/20260818000000_auth_principal_grants_select.ts:crates/zeroship-migrate-adapter/src/platform.rs
+db/migrations-ts/20260818000200_worker_database_authority.ts:crates/zeroship-migrate-adapter/tests/platform_migrate.rs
 NOTES-s31.md:crates/zeroship-migrate-adapter/tests/platform_migrate.rs
 NOTES-s40.md:crates/zeroship-migrate-adapter/src/platform.rs
 NOTES-s40.md:crates/zeroship-migrate-adapter/tests/platform_migrate.rs

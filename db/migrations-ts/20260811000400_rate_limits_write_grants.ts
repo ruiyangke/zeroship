@@ -11,8 +11,11 @@ import { grant } from "@zeroship/migrate";
 // was `control: shared rate-limit consume failed ... ratelimit consume
 // control:admin:ip:...: db error`.
 //
-// The store ran ONE statement (crates/auth/src/store/ratelimit.rs, since
-// DELETED -- no ratelimit.rs and no `bucket_key` SQL is in the tree today):
+// The store ran ONE statement (crates/auth/src/store/ratelimit.rs -- DELETED,
+// and the path is doubly stale: `crates/auth` became `crates/zeroship-auth` in
+// the 2026-08-26 rename, so it names a directory that has not existed under
+// that spelling for weeks. No ratelimit.rs and no `bucket_key` SQL is in the
+// tree today under either name):
 //     INSERT INTO zeroship.rate_limits ... ON CONFLICT (bucket_key) DO UPDATE ...
 // which PostgreSQL requires BOTH insert AND update privileges for. It checks
 // the update privilege for the DO UPDATE clause at plan time, so the denial
