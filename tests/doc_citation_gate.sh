@@ -25,6 +25,38 @@
 # not pretend otherwise. The path is the durable claim; the line is a courtesy.
 # If a citation's line matters to an argument, quote the code instead.
 #
+# RE-MEASURED AND RE-REJECTED 2026-09-04, on a much worse failure than the one
+# above. AGENTS.md's schema-epoch paragraph carried TEN line citations and SEVEN
+# were wrong; docs/architecture/data-system.md carried four over the same code
+# and three were wrong, DIFFERENTLY - two documents drifting independently, not
+# one copy-paste. Every one passed this gate.
+#
+# The past-EOF check did not catch a single one, and could not have: all seven
+# named a line INSIDE the file. Do not propose it as the fix - it already ships.
+#
+# SYMBOL ADJACENCY WOULD HAVE CAUGHT 3 OF 4 of the ones with a backticked
+# identifier beside them, which is a better hit rate than the 2026-08-29 note
+# implies. It is still rejected, on the ARM CONTRACT rather than the hit rate:
+# only 5 of 94 path:line citations put a backticked identifier adjacent, so an
+# arm built on it rules on ~5 items and can carry a floor of at most 2. A floor
+# of 2 does not separate "clean" from "did not look" - one reworded sentence
+# takes it to 3, then to 1, then someone lowers the floor. That is precisely the
+# decay tests/lib/gate_arms.sh exists to prevent. The paragraph that motivated it
+# is also unrepresentative BECAUSE someone was arguing from it, so it is densely
+# symbol-annotated; sizing a gate on it means sizing on the best-written prose in
+# the tree.
+#
+# The fourth citation had no adjacent symbol at all - it is followed by a FENCED
+# QUOTE - and a "the fence must appear in the cited range" rule is defeated here
+# anyway: rustfmt has since wrapped one of those three "verbatim" lines across
+# three lines. A verbatim-quote check goes red on reformatting.
+#
+# RESOLVING A BARE `:NNN` AGAINST THE LAST FULL PATH IS ALSO REJECTED, and it is
+# the worse idea of the two. Measured on that same paragraph: `:1015` follows a
+# `reducer/tests.rs:1679` citation, so last-path-wins binds it to tests.rs while
+# the author meant reducer/mod.rs. A gate that confidently names the wrong file
+# is how gates get switched off.
+#
 # THE FAILURE THIS EXISTS FOR, measured 2026-08-28. The zeroship- crate rename
 # moved every crate to a `zeroship-` prefix and nothing re-read the prose that
 # pointed at them. 1082 of 1497 distinct code paths named under docs/ resolved
@@ -147,6 +179,64 @@ gate_arm agents_md_paths "$agents_examined" 40 || FAILED=1
 # Extract the whole path-shaped token before selecting repository roots. A
 # regex that begins at `schema/` also finds that suffix inside the shorthand
 # `zeroship-schema/src/query.rs`; that is not a repository-root citation.
+# How a file's text is fed to the extractor. Default: verbatim.
+#
+# `CITE_SOURCE` exists because the extractor is LINE-BASED and one class of
+# citation is not. See `unwrap_comment_continuations` below; a caller sets this
+# for one arm and resets it, so no other arm's counts can move underneath it.
+CITE_SOURCE=cat
+
+# Rejoin a `//` comment citation that WRAPPED ACROSS TWO LINES.
+#
+# THIS IS NOT A CONVENIENCE. On 2026-09-04 a sweep repaired two of three dead
+# `crates/zeroship-migrate-adapter/...` citations in db/migrations-ts/ and missed
+# the third - the one asserting a SECURITY property, that the worker holds no
+# write privilege in `zeroship`. It survived because its path breaks after
+# `.../tests/` and continues `platform_migrate.rs` on the next line. Both this
+# gate and tests/source_citation_gate.sh extract per line, so the head has no
+# extension (no match) and the tail has no repository-root prefix (filtered out):
+# the file yields ZERO citations while its two siblings yield theirs.
+#
+# THE JOIN SET IS `/` AND `_` ONLY, and the exclusion of `-` is deliberate: `--`
+# is this repo's ASCII em-dash substitute and ends comment lines legitimately.
+# Measured 2026-09-04 over all 37 files / 3233 lines of db/migrations-ts: THREE
+# join sites. Two are real wrapped citations; the third is prose ("the two
+# lookups every disable / anonymize /") which joins to a token carrying no
+# repository-root prefix and so yields no citation.
+#
+# The join adds NO separator, because a path is being reassembled, not a
+# sentence. The continuation's `// ` prefix is stripped first.
+#
+# IT IS STRICTLY ADDITIVE - the raw file FIRST, then the joined lines - and that
+# is a correction, not a flourish. The first version emitted ONLY the joined
+# text and HID FIVE CITATIONS that resolve today, among them
+# `crates/zeroship-auth/src/cron/token_sweep.rs:125`. Joining with no separator
+# glues the previous line's tail onto the path, so a token that began `crates/`
+# now begins `...something/crates/` and fails the repository-root prefix test.
+# Measured 2026-09-04: raw 28 citations, join-only 23, ADDED by the join 0,
+# HIDDEN by it 5 - all five present on disk. It replaced coverage rather than
+# extending it, and because all five still resolved the arm stayed green while
+# quietly ceasing to watch them. Emitting both makes the pre-pass incapable of
+# subtracting; duplicate citations are harmless, the caller sorts unique.
+unwrap_comment_continuations() {
+  cat "$1"
+  awk '
+    /^[[:space:]]*\/\// {
+      line = $0
+      if (held != "") {
+        sub(/^[[:space:]]*\/\/[[:space:]]?/, "", line)
+        line = held line
+        held = ""
+      }
+      if (line ~ /[\/_]$/) { held = line; next }
+      print line
+      next
+    }
+    { if (held != "") { print held; held = "" } print }
+    END { if (held != "") print held }
+  ' "$1"
+}
+
 check_citations() {
   cites_examined=0
   cites_bad=0
@@ -159,14 +249,20 @@ check_citations() {
       docs/decisions/*|docs/archive/*) continue ;;
     esac
     [ -f "$f" ] || continue
-    for cite in $(grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+(:[0-9]+)?' "$f" \
+    for cite in $("$CITE_SOURCE" "$f" \
+                  | grep -oE '[A-Za-z0-9_./-]+\.[A-Za-z0-9]+(:[0-9]+(-[0-9]+)?)?' \
                   | sed -E 's#^((\.\.?)/)+##' \
-                  | grep -E '^(crates|libs|sdks|tests|db|deploy|policies|schema|examples|docs)/[A-Za-z0-9_./-]+\.(tsx|jsx|jsonc|mjs|cjs|json|rs|ts|js|sh|toml|md)(:[0-9]+)?$' \
+                  | grep -E '^(crates|libs|sdks|tests|db|deploy|policies|schema|examples|docs)/[A-Za-z0-9_./-]+\.(tsx|jsx|jsonc|mjs|cjs|json|rs|ts|js|sh|toml|md)(:[0-9]+(-[0-9]+)?)?$' \
                   | sort -u); do
       case "$cite" in
         *:[0-9]*)
           path="${cite%:*}"
           line="${cite##*:}"
+          # A RANGE IS TESTED AT ITS END, not its start. `(:[0-9]+(-[0-9]+)?)?`
+          # captures `:325-327` whole; taking only 325 would pass a citation
+          # whose END is past EOF, which is the half that misleads - the reader
+          # believes the whole quoted span is anchored.
+          line="${line##*-}"
           ;;
         *)
           path="$cite"
@@ -177,8 +273,13 @@ check_citations() {
 
       # Every occurrence must say DELETED on its own line. One historical use
       # must not exempt a second, live use of the same path elsewhere in a doc.
-      if grep -F "$cite" "$f" >/dev/null \
-          && ! grep -F "$cite" "$f" | grep -qv 'DELETED'; then
+      #
+      # Read through CITE_SOURCE, not the raw file: a citation that only EXISTS
+      # after unwrapping has no raw line to carry its DELETED, so checking the
+      # raw file here would make the escape unreachable for exactly the citations
+      # the unwrap exists to surface.
+      if "$CITE_SOURCE" "$f" | grep -F "$cite" >/dev/null \
+          && ! "$CITE_SOURCE" "$f" | grep -F "$cite" | grep -qv 'DELETED'; then
         continue
       fi
 
@@ -198,6 +299,39 @@ check_citations() {
     done
   done
 }
+
+# ---------------------------------------------------------------------------
+# Arm 1b - AGENTS.md's `path:LINE` citations.
+#
+# ARM 1 DISCARDS THE LINE NUMBER. Its extractor's character class
+# `[A-Za-z0-9_./{},*-]` contains no `:`, so `identity.rs:265-267` is truncated to
+# `identity.rs` and only the path is ruled on. AGENTS.md was also in none of the
+# `check_citations` calls. So the file every agent loads first got NO line check
+# of any kind - not even the past-EOF one every other live document gets.
+#
+# BE HONEST ABOUT WHAT THIS BUYS. It is four lines and it would have caught NONE
+# of the seven wrong citations corrected in AGENTS.md's schema-epoch paragraph on
+# 2026-09-04: all seven named a real file and a line INSIDE it, they just named
+# the wrong line. Do not read this arm as closing that hole - if the next drift
+# is met with "but we gated that", this arm has done net harm. The header above
+# explains why the arm that WOULD close it was measured and rejected, twice.
+#
+# COUNT AND FLOOR. Measured 2026-09-04: 77 citations, of which SEVEN carry a
+# line. The seven are the genuinely new coverage; the other 70 are paths, which
+# arm 1 also rules on under a different predicate (`-e`, and a wider root and
+# brace-form set) - overlap, not duplication.
+#
+# The arm is named for what it COUNTS, which is all 77. An earlier draft called
+# it `agents_md_line_citations` and gave it a floor of 3, having sized the floor
+# against the seven while the number it declared was 77 - a floor a one-step
+# collapse clears twenty times over, which is the exact defect found and fixed
+# elsewhere in this tree today. 30 is in family with the ratios arms 2b, 6 and 3
+# already use (205/40, 170/50, 589/200).
+# ---------------------------------------------------------------------------
+check_citations AGENTS.md
+gate_arm agents_md_citations "$cites_examined" 30 || FAILED=1
+[ "$cites_bad" -eq 0 ] || FAILED=1
+agents_line_cites=$cites_examined
 
 check_citations docs/proposals/2026-08-26-*.md \
                 docs/proposals/2026-08-31-*.md \
@@ -290,6 +424,59 @@ gate_arm reference_citations "$cites_examined" 50 || FAILED=1
 [ "$cites_bad" -eq 0 ] || FAILED=1
 reference_cites=$cites_examined
 
+# ---------------------------------------------------------------------------
+# Arm 7 - db/migrations-ts/ comment prose.
+#
+# WHY A MIGRATION'S COMMENTS ARE A LIVE DOCUMENT. These files carry the
+# reasoning for privilege boundaries, and they cite the code that ENFORCES those
+# boundaries. `20260818000200_worker_database_authority.ts` said outright "That
+# is asserted, not assumed:" and named a test - which had been deleted, so the
+# security property was unproven and the file said the opposite. That is a
+# stronger failure than a dead path in a design note: the reader is being told
+# evidence exists.
+#
+# `.ts` WAS OUTSIDE EVERY ARM OF THIS GATE. `db` is already in check_citations'
+# root allowlist and `ts` already in its extension alternation, so the arm is a
+# call, not a new scanner - the gap was scope, not capability.
+#
+# tests/source_citation_gate.sh DOES scan this directory (its ROOTS) and DID
+# catch two of the three; both are ALLOW rows there with a written rationale.
+# What neither gate could see was the WRAPPED one, which is what the
+# CITE_SOURCE pre-pass above is for.
+#
+# EDITING THESE FILES IS SAFE, and it was measured rather than assumed before
+# the repair that made this arm green. The recorded digest is `Checksum::of_ir`
+# over the canonical OP LIST plus flags/owner_app/depends_on/supersedes/
+# preconditions (crates/zeroship-migrate-ir/src/migration.rs), and the journal
+# key is derived from owner_app and the migration NAME with content deliberately
+# excluded (crates/zeroship-migrate-core/src/render/lower.rs). A `//` comment
+# produces no op. Driving the real recorder over this file, 2026-09-04: a
+# comment edit left the op list byte-identical, while the CONTROL - one `reason:`
+# string inside a `raw({...})` op value - moved it. So comment repairs here are
+# free; an edit to any op VALUE, or to the exported `name:`, is not.
+# ---------------------------------------------------------------------------
+CITE_SOURCE=unwrap_comment_continuations
+check_citations db/migrations-ts/*.ts
+CITE_SOURCE=cat
+# FLOOR. Measured 2026-09-04 across 37 files by THIS gate, not by a scratch
+# reimplementation: 28 citations. On the committed tree the additive pre-pass
+# adds nothing, because the one wrapped citation was repaired in the same commit
+# that added this arm - so its value here is prospective, and it is proven by
+# mutation rather than by a number: re-wrap any citation and the arm goes red;
+# point CITE_SOURCE back at plain `cat` with that same file in place and it goes
+# GREEN, blind again.
+#
+# 12 is a little under half. It has to survive deleting a migration or two (each
+# carries 0-3 citations) while catching the collapse that matters: the extractor
+# ceasing to match, the glob going empty, or CITE_SOURCE being left pointing at
+# something that emits nothing. Deliberately NOT set near 28 - a floor a
+# one-step collapse can clear is not a floor, and this tree found exactly that
+# defect today in another gate, where a floor of 25 against a population of 77
+# was cleared by a collapse to 27.
+gate_arm migration_prose_citations "$cites_examined" 12 || FAILED=1
+[ "$cites_bad" -eq 0 ] || FAILED=1
+migration_cites=$cites_examined
+
 gate_arms_finish || FAILED=1
 
 if [ "$FAILED" -ne 0 ]; then
@@ -298,4 +485,4 @@ if [ "$FAILED" -ne 0 ]; then
   exit 1
 fi
 
-echo "doc citations: $agents_examined AGENTS.md paths, $proposal_cites proposal citations, $design_cites design-set citations, $feature_map_cites feature-map citations, $runbook_cites runbook citations, $golden_path_cites golden-path citations, $reference_cites reference citations, all resolve"
+echo "doc citations: $agents_examined AGENTS.md paths, $agents_line_cites AGENTS.md citations, $proposal_cites proposal citations, $design_cites design-set citations, $feature_map_cites feature-map citations, $runbook_cites runbook citations, $golden_path_cites golden-path citations, $reference_cites reference citations, $migration_cites migration-prose citations, all resolve"
