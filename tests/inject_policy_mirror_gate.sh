@@ -192,25 +192,39 @@ SELF="tests/inject_policy_mirror_gate.sh"
 # that adapts to whatever it finds cannot tell "nothing was added" from
 # "something was added and I adjusted".
 #
-# The five Rust consumers are the deployed ceiling
+# The six Rust consumers are the deployed ceiling
 # (crates/zeroship-migrate-server/src/policy.rs), two adapter PG tests, the
-# production-charter collation integration test, and the worker's own compiled-in
-# charter (crates/zeroship-data-engine/src/system_shape_charter.rs). Three of
-# those are tests, but consuming the shared fragment is the point: none is an
-# inert copy of the platform shape.
+# production-charter collation integration test, the worker's own compiled-in
+# charter (crates/zeroship-data-engine/src/system_shape_charter.rs), and the napi
+# generation-path fence
+# (crates/zeroship-migrate-node/tests/gen_artifacts_reserved_identifiers.rs).
+# Four of those are tests, but consuming the shared fragment is the point: none
+# is an inert copy of the platform shape.
 #
-# THIS SAID FIVE UNTIL 2026-09-01, then SIX, and is five again as of 2026-09-04.
-# The six was never real. `system_shape_charter.rs` landed in 27f4d5f45
-# ("feat(db): compile the operator charter into the worker") and IS a consumer,
-# so the count went up correctly - but the file it displaced was never checked,
-# and `crates/zeroship-plugin-db/tests/distributed_live.rs` was only ever matched
-# because the scan ANDed two unrelated file-level greps (see arm 2). It names the
-# policy in a doc comment and `include_str!`s something else entirely. The count
-# and the prose above it rotted together in the same direction twice: the
-# sentence naming the five was not re-read when the sixth landed, and the sixth
-# was not opened when it was written down.
+# THIS SAID FIVE UNTIL 2026-09-01, then SIX, then five again on 2026-09-04, and
+# is SIX again - by a different file, for a real reason. Read both transitions
+# before touching the number, because they are opposites.
+#
+# The 2026-09-01 six was never real. `system_shape_charter.rs` landed in
+# 27f4d5f45 ("feat(db): compile the operator charter into the worker") and IS a
+# consumer, so the count went up correctly - but the file it displaced was never
+# checked, and `crates/zeroship-plugin-db/tests/distributed_live.rs` was only
+# ever matched because the scan ANDed two unrelated file-level greps (see arm
+# 2). It names the policy in a doc comment and `include_str!`s something else
+# entirely. The count and the prose above it rotted together in the same
+# direction twice: the sentence naming the five was not re-read when the sixth
+# landed, and the sixth was not opened when it was written down.
+#
+# This one IS real, and was opened before it was written down: line 47 of
+# gen_artifacts_reserved_identifiers.rs is a literal
+# `include_str!("../../../policies/confined-system-shape.inject.toml")`, the
+# fragment itself, not a doc-comment mention. It arrived with the fix that wired
+# the reserved-identifier refusal into the generation path, which had been
+# compiled into the binary and never called. The distinction that matters is the
+# one the phantom failed: a consumer `include_str!`s the fragment; a mention
+# names it.
 EXPECTED_INERT=19
-EXPECTED_RUST_CONSUMERS=5
+EXPECTED_RUST_CONSUMERS=6
 EXPECTED_TS_CONSUMERS=2
 
 # ---------------------------------------------------------------------------
