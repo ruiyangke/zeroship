@@ -435,6 +435,15 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 tracing::warn!(app_id = %local_id, "worker-sync: env cache missing before app load");
                                 continue;
                             };
+                            // The manifest is always `Some` here: the
+                            // `worker_entry_hash` resolution above `continue`d
+                            // on `None`, so an app with no manifest never
+                            // reaches this load. The fallback exists so the
+                            // declared policy is EMPTY rather than absent if
+                            // that ever stops holding - an empty tree declares
+                            // nothing and refuses nothing, which is the same
+                            // posture the worker had before it enforced at all.
+                            let declared = info.manifest.clone().unwrap_or_default();
                             match cache::load_app(
                                 *local_id,
                                 &bytes,
@@ -442,6 +451,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                                 info.net_policy.clone(),
                                 info.deploy_hash.as_deref(),
                                 descriptor_json.as_deref(),
+                                &declared,
                                 &env_entry.snapshot,
                             ) {
                                 Ok(()) => {
@@ -958,6 +968,7 @@ mod tests {
                 AppNetPolicy::default(),
                 None,
                 None,
+                &zeroship_bundle::Manifest::default(),
                 &env_v1.snapshot,
             )
             .expect("app loads");

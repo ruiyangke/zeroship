@@ -10,8 +10,9 @@
 //!
 //! TWO tiers resolve the declared policy, and they must reach the same answer
 //! for the same request or the second one is worse than useless. The gateway
-//! gates a request before it forwards; the worker is about to gate it again
-//! before the creator's handler is entered, because a caller with direct
+//! gates a request before it forwards; the worker gates it again before the
+//! creator's handler is entered
+//! (`crates/zeroship-worker/src/policy.rs`), because a caller with direct
 //! network access to a worker never passes through the gateway at all - the
 //! threat the signed `ZeroShip-User` header was built for.
 //!
@@ -449,7 +450,105 @@ impl CompiledManifest {
         }
         None
     }
+
+    /// Whether this manifest declares any resource at all.
+    ///
+    /// An empty resource tree is a legal `Manifest` (`validate` only walks
+    /// `resources` when it is non-empty) but nothing about it is dispatchable:
+    /// the gateway answers every path `404 no resource matched`. An enforcer
+    /// uses this to tell "the deploy declared nothing" apart from "the deploy
+    /// declared a tree and this request fell outside it" — two situations that
+    /// both produce a `None` from a lookup and deserve different answers.
+    pub fn declares_no_resource(&self) -> bool {
+        self.effective_policies.is_empty()
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Admission — ruling the declared policy on one request
+// ---------------------------------------------------------------------------
+
+/// What the declared policy says about a request whose principal has already
+/// been resolved by the calling tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Admission {
+    /// The declared policy admits this request.
+    Admit,
+    /// The resource requires an authenticated user and none was presented.
+    NoPrincipal,
+    /// A user was presented, but its granted scopes do not cover the
+    /// resource's `required_scopes`.
+    MissingScopes { required: Vec<String> },
+}
+
+/// Rule `policy` on a request carrying `user_json` — the resolved principal in
+/// the one wire shape every tier already speaks.
+///
+/// `user_json` is the VERIFIED `ZeroShip-User` payload: `Some` means the
+/// calling tier resolved and trusted a principal, `None` means it did not.
+/// That is deliberately the same predicate `resolve_auth` uses in the gateway
+/// (`session_user_header.is_some()`), and it is what lets the dev tier satisfy
+/// this function without a special case: `dev_auth::resolve_dev_user_json`
+/// produces the same shape from the dev session cookie, so a dev identity is
+/// an identity here for exactly the same reason a gateway-signed one is.
+/// Nothing in this function reads a signature or a key — verification belongs
+/// to whoever produced the payload, and each tier does it its own way.
+///
+/// The scope gate fires ONLY on `User` resources, matching the gateway's
+/// `resolve_auth`. An `Anonymous` resource is part of the app's PUBLIC surface
+/// and must never 403 a signed-in visitor over a scope inherited from a broad
+/// `*` parent — that would make being logged in strictly worse than being
+/// logged out on public pages.
+pub fn admit(policy: &EffectivePolicy, user_json: Option<&str>) -> Admission {
+    if matches!(policy.auth, RequiredPrincipal::User) && user_json.is_none() {
+        return Admission::NoPrincipal;
+    }
+    if policy.required_scopes.is_empty() || matches!(policy.auth, RequiredPrincipal::Anonymous) {
+        return Admission::Admit;
+    }
+    // Only reached on a `User` route that declares scopes, so the parse is off
+    // the hot path for every route that declares none.
+    let granted = user_json.map(granted_scopes).unwrap_or_default();
+    if scopes_satisfied(&granted, &policy.required_scopes) {
+        Admission::Admit
+    } else {
+        Admission::MissingScopes {
+            required: policy.required_scopes.clone(),
+        }
+    }
+}
+
+/// Recover the `scopes` array from a resolved `ZeroShip-User` payload.
+///
+/// An unparseable payload, or one with no `scopes` array, yields `[]`, which
+/// fails the scope gate closed: a resource demanding a scope refuses an
+/// unreadable principal rather than waving it through. `WorkerUser` documents
+/// `scopes` as always present (empty when the credential carries none), so an
+/// absent array is a malformed payload, not a normal one.
+fn granted_scopes(user_json: &str) -> Vec<String> {
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(user_json) else {
+        return Vec::new();
+    };
+    value
+        .get("scopes")
+        .and_then(|s| s.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Whether `granted` is a superset of every scope in `required`. Empty
+/// `required` ⇒ trivially satisfied (no scope gate). Exact string match per
+/// scope (OAuth scopes are opaque tokens; no hierarchy, no wildcards).
+pub fn scopes_satisfied(granted: &[String], required: &[String]) -> bool {
+    required
+        .iter()
+        .all(|need| granted.iter().any(|have| have == need))
+}
+
 // ---------------------------------------------------------------------------
 // Resource-tree compilation
 // ---------------------------------------------------------------------------
@@ -800,11 +899,11 @@ fn compile_glob(pattern: &str) -> CompiledGlob {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
     use crate::{
         Manifest, ProcedureKind, RateLimit, RateLimitPer, RedirectAction, RequiredPrincipal,
         ResourceEntry, StaticAction,
     };
+    use std::collections::HashMap;
 
     fn rpc_entry(kind: ProcedureKind) -> ResourceEntry {
         ResourceEntry {
@@ -1471,3 +1570,127 @@ mod tests {
     }
 }
 
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    use crate::{RequiredPrincipal, ResourceEntry};
+    use std::collections::HashMap;
+
+    fn policy(auth: RequiredPrincipal, required_scopes: &[&str]) -> EffectivePolicy {
+        let key = "rpc:probe".to_string();
+        let mut resources: HashMap<String, ResourceEntry> = HashMap::new();
+        resources.insert(
+            key.clone(),
+            ResourceEntry {
+                auth: Some(auth),
+                required_scopes: required_scopes.iter().map(|s| s.to_string()).collect(),
+                ..Default::default()
+            },
+        );
+        // Built through the real compiler rather than by hand, so an
+        // inheritance or fail-closed rule that changes reaches these arms.
+        resolve_effective_policy(&key, &resources)
+    }
+
+    #[test]
+    fn an_anonymous_resource_admits_a_request_with_no_principal() {
+        assert_eq!(
+            admit(&policy(RequiredPrincipal::Anonymous, &[]), None),
+            Admission::Admit
+        );
+    }
+
+    #[test]
+    fn a_user_resource_refuses_a_request_with_no_principal() {
+        assert_eq!(
+            admit(&policy(RequiredPrincipal::User, &[]), None),
+            Admission::NoPrincipal
+        );
+    }
+
+    #[test]
+    fn a_user_resource_admits_any_resolved_principal_when_no_scopes_are_declared() {
+        assert_eq!(
+            admit(
+                &policy(RequiredPrincipal::User, &[]),
+                Some(r#"{"id":"pws_a","scopes":[]}"#)
+            ),
+            Admission::Admit
+        );
+    }
+
+    #[test]
+    fn a_scoped_user_resource_needs_every_declared_scope() {
+        let p = policy(RequiredPrincipal::User, &["read:billing", "write:projects"]);
+        assert_eq!(
+            admit(&p, Some(r#"{"id":"a","scopes":["read:billing"]}"#)),
+            Admission::MissingScopes {
+                required: vec!["read:billing".to_string(), "write:projects".to_string()]
+            }
+        );
+        assert_eq!(
+            admit(
+                &p,
+                Some(r#"{"id":"a","scopes":["write:projects","read:billing","extra"]}"#)
+            ),
+            Admission::Admit,
+            "a superset satisfies the gate"
+        );
+    }
+
+    /// The gateway's `resolve_auth` fires the scope gate ONLY on `User`
+    /// resources, so that a logged-in browser is never worse off than a
+    /// logged-out one on a public page whose `*` parent declared a scope.
+    /// This function must agree, or the two tiers answer differently on
+    /// exactly the request that footgun produces.
+    #[test]
+    fn an_anonymous_resource_never_scope_gates_a_signed_in_visitor() {
+        assert_eq!(
+            admit(
+                &policy(RequiredPrincipal::Anonymous, &["read:billing"]),
+                Some(r#"{"id":"a","scopes":[]}"#)
+            ),
+            Admission::Admit
+        );
+    }
+
+    /// A payload that cannot be read yields no scopes, so a scoped resource
+    /// refuses it rather than waving it through.
+    #[test]
+    fn an_unreadable_principal_fails_the_scope_gate_closed() {
+        let p = policy(RequiredPrincipal::User, &["read:billing"]);
+        for payload in ["not json", "{}", r#"{"scopes":"read:billing"}"#] {
+            assert_eq!(
+                admit(&p, Some(payload)),
+                Admission::MissingScopes {
+                    required: vec!["read:billing".to_string()]
+                },
+                "payload {payload:?} must not satisfy a scope gate"
+            );
+        }
+    }
+
+    #[test]
+    fn scopes_satisfied_is_exact_match_with_no_hierarchy() {
+        let granted = vec!["read:billing".to_string()];
+        assert!(scopes_satisfied(&granted, &[]));
+        assert!(scopes_satisfied(&granted, &["read:billing".to_string()]));
+        assert!(
+            !scopes_satisfied(&granted, &["read".to_string()]),
+            "a prefix is not a grant"
+        );
+        assert!(
+            !scopes_satisfied(&granted, &["read:billing:extra".to_string()]),
+            "an extension is not a grant"
+        );
+    }
+
+    #[test]
+    fn an_empty_resource_tree_is_reported_as_declaring_nothing() {
+        assert!(CompiledManifest::compile(&Manifest::default()).declares_no_resource());
+        assert!(
+            !CompiledManifest::compile(&Manifest::passthrough()).declares_no_resource(),
+            "the `*` root is a declaration even though it never dispatches itself"
+        );
+    }
+}
