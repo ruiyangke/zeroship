@@ -286,6 +286,33 @@ pub async fn dispatch(
         }
     }
 
+    // The DECLARED route policy, enforced in Rust before anything reaches V8.
+    //
+    // Placed HERE deliberately, and the position is the point:
+    //
+    //   * AFTER the on-demand load, because the policy arrives with the deploy
+    //     - there is nothing to consult until the app is resident.
+    //   * BEFORE `get_runtime` and the isolate lease, so a refused request
+    //     neither stamps the app's LRU recency nor holds an isolate.
+    //   * BEFORE `call_fetch_handler_with_user`, which is the whole reason it
+    //     exists: `env.auth.requireUser()` runs INSIDE creator code and only
+    //     when the creator remembers to call it, so it cannot be the fence.
+    //
+    // `user_json` here is the HMAC-verified `ZeroShip-User` payload resolved at
+    // the top of this function, or `None` when the request carried no verified
+    // identity at all. The scope half duplicates a check the gateway already
+    // makes; that is defence in depth, not redundancy - see `policy.rs`, which
+    // states the threat the duplication answers.
+    if let Some(declared) = cache::get_declared_policy(&app_id) {
+        if let Err(refusal) = crate::policy::enforce(&declared, &metadata.url, user_json.as_deref())
+        {
+            refusal.log(&app_id, &metadata.method, &metadata.url);
+            let response = refusal.response();
+            record_reject(&response, request_body.len() as u64);
+            return response;
+        }
+    }
+
     let runtime = match cache::get_runtime(&app_id) {
         Some(r) => r,
         None => {
@@ -1455,6 +1482,7 @@ async fn load_on_demand(
         app_version.net_policy.clone(),
         app_version.deploy_hash.as_deref(),
         descriptor_json.as_deref(),
+        manifest,
         &env_entry.snapshot,
     )
     .map_err(|e| {
@@ -1550,6 +1578,7 @@ async fn load_pinned_workflow_on_demand(
         runtime_limits,
         net_policy,
         descriptor_json.as_deref(),
+        &manifest,
         &env_entry.snapshot,
     )
     .map_err(|e| format!("failed to load pinned bundle: {e}"))?;
@@ -1786,6 +1815,7 @@ mod tests {
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None,
+                &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
             )
             .expect("app loads");
@@ -2261,6 +2291,7 @@ mod tests {
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None,
+                &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
             )
             .expect("app loads");
@@ -2346,15 +2377,15 @@ mod tests {
     // an arm that only asserted the refusal would also pass on a worker that
     // 401s everything.
     //
-    // WHY THEY EXIST. `RequiredPrincipal` occurs ZERO times in this crate and zero
-    // times in `zeroship-runtime`; the gateway is the only tier that reads
-    // the declared policy. The worker's own dispatch path handles identity
+    // WHY THEY EXIST. `RequiredPrincipal` occurred ZERO times in this crate and
+    // zero times in `zeroship-runtime`; the gateway was the only tier that read
+    // the declared policy. The worker's own dispatch path handled identity
     // exactly once - `verified_user_json` above, which HMAC-verifies a
     // `ZeroShip-User` header when one is present and returns `Ok(None)` when
-    // it is not. `None` is then passed on and the handler runs. So a request
-    // that arrives with no identity is served on a route declared `user`
+    // it is not. `None` was then passed on and the handler ran. So a request
+    // that arrived with no identity was served on a route declared `user`
     // unless the creator's own JS remembered to call `env.auth.requireUser()`
-    // - a creator-called, optional gate. A creator who forgets has no fence
+    // - a creator-called, optional gate. A creator who forgot had no fence
     // at all.
     //
     // `router/dispatch.rs` states the assumption in prose: "Resource-tree
@@ -2363,15 +2394,15 @@ mod tests {
     // current behaviour, not an invariant the worker enforces, and it is the
     // thing these tests refuse to accept on trust.
     //
-    // WHAT IS MISSING, EXACTLY. Not the policy - the manifest already reaches
+    // WHAT WAS MISSING, EXACTLY. Not the policy - the manifest already reached
     // this crate. `zeroship_core::types` carries `manifest: Option<Manifest>`
     // in the version feed and `sync.rs` reads it on every reload
-    // (`worker_entry_hash`, `runtime_descriptor_json`). What is missing is the
-    // hand-off: `cache::load_app` takes limits, a net policy, a deploy hash, a
-    // runtime descriptor and an env snapshot, and NOT the resource policy - so
-    // by the time `dispatch` runs there is nothing to consult. The fixture
-    // below therefore builds the declaration, asserts it really says what it
-    // claims, and dispatches; the fix has to carry it the last hop.
+    // (`worker_entry_hash`, `runtime_descriptor_json`). What was missing was
+    // the hand-off: `cache::load_app` took limits, a net policy, a deploy hash,
+    // a runtime descriptor and an env snapshot, and NOT the resource policy -
+    // so by the time `dispatch` ran there was nothing to consult. It now takes
+    // the manifest, compiles it once per load, and `crate::policy::enforce`
+    // reads it per dispatch.
     //
     // NOTE ON THE FIXTURE MANIFEST. It is a real `zeroship_bundle::Manifest`
     // parsed from the wire JSON, not a hand-built struct, so a change to the
@@ -2445,9 +2476,8 @@ mod tests {
                 meter: std::sync::Arc::new(zeroship_metering::Meter::new()),
             },
         );
-        // The declared policy stops here. `load_app` has no parameter that
-        // can carry `manifest`, which is the defect these tests name.
-        let _declared_policy = manifest;
+        // The declared policy travels the last hop with the bundle it belongs
+        // to, so what the fixture declared above is what `dispatch` rules on.
         crate::cache::load_app(
             app_id,
             AUTH_OBLIVIOUS_APP,
@@ -2455,6 +2485,7 @@ mod tests {
             zeroship_core::types::AppNetPolicy::default(),
             None,
             None,
+            manifest,
             &EnvSnapshot::empty(),
         )
         .expect("app loads");
@@ -2579,6 +2610,7 @@ mod tests {
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None,
+                &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
             )
             .expect("app loads");
@@ -2683,6 +2715,7 @@ mod tests {
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None,
+                &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
             )
             .expect("app loads");
@@ -2802,6 +2835,7 @@ mod tests {
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None,
+                &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
             )
             .expect("app loads");
@@ -2997,6 +3031,7 @@ mod tests {
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None,
+                &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
             )
             .expect("app loads");
@@ -3358,6 +3393,7 @@ mod tests {
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None,
+                &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
             )
             .expect("app A loads");
@@ -3425,6 +3461,7 @@ mod tests {
                 zeroship_core::types::AppNetPolicy::default(),
                 None,
                 None,
+                &zeroship_bundle::Manifest::default(),
                 &EnvSnapshot::empty(),
             );
 

@@ -1,10 +1,13 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use uuid::Uuid;
 
+use zeroship_bundle::compiled::CompiledManifest;
+use zeroship_bundle::Manifest;
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_plugin_storage::StorageBackendConfig;
 use zeroship_core::net_policy::{EgressRule, Verdict};
@@ -16,6 +19,17 @@ struct IsolateEntry {
     runtime: Runtime,
     last_used: std::time::Instant,
     app_id: String,
+    /// The deploy's DECLARED route policy, compiled once at load.
+    ///
+    /// It lives on the isolate entry rather than in a map of its own so its
+    /// lifetime is the isolate's by construction: an eviction or a reload
+    /// cannot leave a stale policy behind for the next deploy to be judged
+    /// against, because there is no separate map to forget to clean.
+    ///
+    /// `Rc` because `handler::dispatch` reads it out of the thread-local
+    /// borrow and then holds it across the isolate entry; cloning the compiled
+    /// tables per request would put the whole resource map on the hot path.
+    policy: Rc<CompiledManifest>,
 }
 
 struct AppCache {
@@ -538,6 +552,18 @@ fn build_runtime(
 /// (today's only shape) become a one-element `modules` vector tagged
 /// `index.js`; multi-module deploys will pass a richer slice once the
 /// V8 module-resolve callback lands.
+///
+/// `manifest` is the deploy's own manifest, and it is what makes the worker a
+/// real enforcer of the declared route policy rather than a tier that trusts
+/// the gateway to have gated already: it is compiled here, once per load, and
+/// consulted per dispatch by `crate::policy::enforce`. Callers that hold no
+/// manifest pass `&Manifest::default()`, whose empty resource tree declares
+/// nothing and therefore refuses nothing.
+// Eight arguments. Bundling them into a params struct would touch every
+// caller and every test fixture for no behaviour, and the eighth is the one
+// this crate exists to start honouring - so it is named here rather than
+// smuggled in through a struct nobody reads.
+#[allow(clippy::too_many_arguments)]
 pub fn load_app(
     app_id: Uuid,
     bundle_bytes: &[u8],
@@ -545,6 +571,7 @@ pub fn load_app(
     app_net_policy: AppNetPolicy,
     deploy_hash: Option<&str>,
     runtime_descriptor: Option<&str>,
+    manifest: &Manifest,
     env: &EnvSnapshot,
 ) -> Result<(), String> {
     let (runtime, app_id_string) = build_runtime(
@@ -556,6 +583,7 @@ pub fn load_app(
         runtime_descriptor,
         env,
     )?;
+    let policy = Rc::new(CompiledManifest::compile(manifest));
 
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
@@ -584,6 +612,7 @@ pub fn load_app(
                 runtime,
                 last_used: std::time::Instant::now(),
                 app_id: app_id_string,
+                policy,
             },
         );
 
@@ -591,6 +620,31 @@ pub fn load_app(
     })
 }
 
+/// The declared route policy of the deploy this thread has resident, WITHOUT
+/// marking the app recently used.
+///
+/// Not a dispatch in itself - the caller may refuse the request on what this
+/// returns, and a refused request must not count as traffic for eviction
+/// purposes any more than the reconcile loop's metadata reads do
+/// (`get_limits` above carries the same property, for the same reason).
+pub fn get_declared_policy(app_id: &Uuid) -> Option<Rc<CompiledManifest>> {
+    CACHE.with(|c| {
+        let cache = c.borrow();
+        Some(cache.as_ref()?.isolates.get(app_id)?.policy.clone())
+    })
+}
+
+/// Load the deploy-pinned isolate a durable workflow replays against.
+///
+/// `manifest` is the PINNED deploy's manifest - the one fetched by deploy hash
+/// in `handler::load_pinned_workflow_on_demand`, not the app's current one -
+/// so the entry carries the policy of the code it actually runs. Nothing
+/// consults it yet: workflow replay arrives over
+/// `/workflow-advance-unsigned/{app_id}`, which is not a creator route and
+/// carries no `RequiredPrincipal`. It is compiled anyway so the two isolate
+/// maps hold the same shape; an entry whose policy could be absent invites a
+/// future dispatch path to reach for one and find `None`.
+#[allow(clippy::too_many_arguments)]
 pub fn load_pinned_workflow_app(
     app_id: Uuid,
     deploy_hash: &str,
@@ -598,6 +652,7 @@ pub fn load_pinned_workflow_app(
     app_limits: AppRuntimeLimits,
     app_net_policy: AppNetPolicy,
     runtime_descriptor: Option<&str>,
+    manifest: &Manifest,
     env: &EnvSnapshot,
 ) -> Result<(), String> {
     let key = PinnedWorkflowKey::new(app_id, deploy_hash);
@@ -610,6 +665,7 @@ pub fn load_pinned_workflow_app(
         runtime_descriptor,
         env,
     )?;
+    let policy = Rc::new(CompiledManifest::compile(manifest));
 
     CACHE.with(|c| {
         let mut cache = c.borrow_mut();
@@ -639,6 +695,7 @@ pub fn load_pinned_workflow_app(
                 runtime,
                 last_used: std::time::Instant::now(),
                 app_id: app_id_string,
+                policy,
             },
         );
 
@@ -1004,6 +1061,10 @@ mod tests {
             runtime,
             last_used,
             app_id: app_id.to_string(),
+            // These fixtures exercise eviction and recency, never policy. An
+            // empty resource tree declares nothing, so it cannot make an
+            // eviction arm pass or fail for an auth reason.
+            policy: Rc::new(CompiledManifest::compile(&Manifest::default())),
         }
     }
 
@@ -1704,6 +1765,7 @@ mod tests {
                     },
                     None,
                     None,
+                    &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
                 )
                 .expect("app loads");
@@ -1758,6 +1820,7 @@ mod tests {
                     AppNetPolicy::default(),
                     Some("deploy-good"),
                     None,
+                    &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
                 )
                 .expect("initial app loads");
@@ -1780,6 +1843,7 @@ mod tests {
                         // descriptor went to v2 and these fixtures did not.
                         r#"{"version":2,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
                     ),
+                    &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
                 )
                 .expect_err("corrupt descriptor must fail the reload");
@@ -1836,6 +1900,7 @@ mod tests {
                         // descriptor went to v2 and these fixtures did not.
                         r#"{"version":2,"collections":{"notes":{"fields":{"title":{"type":"string"}},"options":{"softDelete":false,"versioning":false},"indexes":[{"name":"bad","fields":[123]}]}}}"#,
                     ),
+                    &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
                 )
                 .expect_err("first corrupt descriptor load must hard-error");
@@ -1878,6 +1943,7 @@ mod tests {
                     AppNetPolicy::default(),
                     None,
                     None,
+                    &zeroship_bundle::Manifest::default(),
                     &EnvSnapshot::empty(),
                 )
                 .expect("app loads");

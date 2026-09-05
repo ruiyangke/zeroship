@@ -11,6 +11,7 @@ mod sync;
 mod cache;
 mod metrics;
 mod logs;
+mod policy;
 mod slot_reaper;
 
 use std::future::Future;

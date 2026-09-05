@@ -218,14 +218,12 @@ pub(crate) async fn resolve_auth(
     outcome
 }
 
-/// Whether `granted` is a superset of every scope in `required`. Empty
-/// `required` ⇒ trivially satisfied (no scope gate). Exact string match
-/// per scope (OAuth scopes are opaque tokens; no hierarchy / wildcards).
-fn scopes_satisfied(granted: &[String], required: &[String]) -> bool {
-    required
-        .iter()
-        .all(|need| granted.iter().any(|have| have == need))
-}
+/// The superset check, shared with the worker's second enforcement point.
+///
+/// It lives beside `EffectivePolicy` in `zeroship_bundle::compiled` because
+/// both tiers rule on the same `required_scopes`, and two tiers computing
+/// "covered" differently is the failure this arrangement exists to prevent.
+use zeroship_bundle::compiled::scopes_satisfied;
 
 /// Recover the `scopes` vector from a freshly-built `ZeroShip-User`
 /// header, the scope source of truth set by whichever arm authenticated.
