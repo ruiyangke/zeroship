@@ -1877,7 +1877,7 @@ mod backup_sqlite {
 
     use super::SqliteBackend;
     use zeroship_data_core::capability::{
-        BusyPolicy, LockScope, PitrTarget, SNAPSHOT_RESTORE_LOCK_TAG, SnapshotHandle, SnapshotOpts,
+        BusyPolicy, LockScope, SNAPSHOT_RESTORE_LOCK_TAG, SnapshotHandle, SnapshotOpts,
     };
     use zeroship_data_core::error::DbError;
 
