@@ -168,6 +168,9 @@ pub fn transaction_dispatch<'s>(
     binding: DbBinding,
 ) -> v8::Local<'s, v8::Promise> {
     let app_id = binding.app_id().to_string();
+    // SCHEMA: the PostgreSQL session this BEGIN opens narrows to the role
+    // derived from it. `app_id` above stays the SC-1 admission key.
+    let schema = binding.schema().clone();
     let state = runtime_state(scope);
 
     // Outer promise — returned to JS now; settled by the commit/rollback
@@ -265,7 +268,7 @@ pub fn transaction_dispatch<'s>(
         // to admission timing, not a refactor.
         let began = match crate::tx_scope::ensure_backend().await {
             Ok(backend) => {
-                exec_begin_or_savepoint(nested, isolation_level, &app_id, backend).await
+                exec_begin_or_savepoint(nested, isolation_level, &app_id, schema, backend).await
             }
             Err(e) => Err(e),
         };

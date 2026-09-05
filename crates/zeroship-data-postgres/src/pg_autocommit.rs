@@ -41,6 +41,7 @@ use serde_json::Value;
 
 use crate::pg_error;
 use crate::pg_session_sql::autocommit_local_session_setup_sql;
+use zeroship_schema::SchemaName;
 use zeroship_data_core::error::DbError;
 
 // `ScalarRead` is a shared return type - SQLite returns it too, now that the
@@ -49,7 +50,8 @@ use zeroship_data_core::error::DbError;
 // because this module's own signatures return it.
 pub use zeroship_data_core::capability::ScalarRead;
 
-/// Run `sql` on a pooled connection narrowed to `app_id`'s role, returning the
+/// Run `sql` on a pooled connection narrowed to `schema`'s runtime role,
+/// returning the
 /// raw driver rows.
 ///
 /// This is the primitive the rest of the module is built on, and the one
@@ -62,7 +64,7 @@ pub use zeroship_data_core::capability::ScalarRead;
 /// per-app session setup, the statement itself, or the `COMMIT` fails.
 pub async fn roled_rows(
     pool: &Rc<compio_postgres::Pool>,
-    app_id: &str,
+    schema: &SchemaName,
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<compio_postgres::Row>, DbError> {
@@ -88,9 +90,9 @@ pub async fn roled_rows(
         err
     })?;
 
-    let setup_sql = autocommit_local_session_setup_sql(app_id)?;
+    let setup_sql = autocommit_local_session_setup_sql(schema)?;
     tx.simple_query(&setup_sql).await.map_err(|e| {
-        let mut classified = pg_error::classify_pg_per_app_session_setup(&e, app_id);
+        let mut classified = pg_error::classify_pg_per_app_session_setup(&e, schema);
         zeroship_data_core::error::prefix_message(classified.error_mut(), "db: per-app session setup: ");
         classified.into_db_error()
     })?;
@@ -123,11 +125,11 @@ pub async fn roled_rows(
 /// Propagates any error from [`roled_rows`].
 pub(crate) async fn roled_json(
     pool: &Rc<compio_postgres::Pool>,
-    app_id: &str,
+    schema: &SchemaName,
     sql: &str,
     params: &[&str],
 ) -> Result<Vec<Value>, DbError> {
-    let rows = roled_rows(pool, app_id, sql, params).await?;
+    let rows = roled_rows(pool, schema, sql, params).await?;
     Ok(crate::pg_row_json::rows_to_json_value(&rows))
 }
 
@@ -144,11 +146,11 @@ pub(crate) async fn roled_json(
 /// column 0 is not a byte-typed column.
 pub(crate) async fn roled_scalar_bytes(
     pool: &Rc<compio_postgres::Pool>,
-    app_id: &str,
+    schema: &SchemaName,
     sql: &str,
     params: &[&str],
 ) -> Result<ScalarRead<Vec<u8>>, DbError> {
-    scalar_bytes(&roled_rows(pool, app_id, sql, params).await?)
+    scalar_bytes(&roled_rows(pool, schema, sql, params).await?)
 }
 
 /// Decode column 0 of the first row as raw bytes.
@@ -190,11 +192,11 @@ pub fn scalar_bytes(rows: &[compio_postgres::Row]) -> Result<ScalarRead<Vec<u8>>
 /// [`roled_scalar_bytes`] there.
 pub(crate) async fn roled_scalar_text(
     pool: &Rc<compio_postgres::Pool>,
-    app_id: &str,
+    schema: &SchemaName,
     sql: &str,
     params: &[&str],
 ) -> Result<ScalarRead<String>, DbError> {
-    scalar_text(&roled_rows(pool, app_id, sql, params).await?)
+    scalar_text(&roled_rows(pool, schema, sql, params).await?)
 }
 
 /// Decode column 0 of the first row as text.
@@ -225,10 +227,10 @@ pub fn scalar_text(rows: &[compio_postgres::Row]) -> Result<ScalarRead<String>, 
 /// Propagates any error from [`roled_rows`].
 pub(crate) async fn roled_statement(
     pool: &Rc<compio_postgres::Pool>,
-    app_id: &str,
+    schema: &SchemaName,
     sql: &str,
     params: &[&str],
 ) -> Result<(), DbError> {
-    roled_rows(pool, app_id, sql, params).await?;
+    roled_rows(pool, schema, sql, params).await?;
     Ok(())
 }

@@ -325,7 +325,7 @@ impl MaskedValue {
         // `row.ssn.unmask()` inside a `db.transaction(fn)` callback over a row
         // that transaction just wrote has to issue it on the transaction's
         // connection.
-        let route = crate::tx_scope::capture_route(scope, binding.app_id());
+        let route = crate::tx_scope::capture_route(scope, &binding);
 
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
             // A failure here folds into the SAME error arm below rather than
@@ -447,7 +447,7 @@ impl MaskedValue {
         let row_pk = self.row_pk.clone();
         // Captured adapter-side, exactly as in
         // [`MaskedValue::dispatch_unmask_single`] above.
-        let route = crate::tx_scope::capture_route(scope, binding.app_id());
+        let route = crate::tx_scope::capture_route(scope, &binding);
 
         state.borrow_mut().spawned_ops.push(Box::pin(async move {
             // Bound adapter-side and folded into the error arm, exactly as

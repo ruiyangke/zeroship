@@ -66,6 +66,7 @@
 
 use crate::backend::BackendHandle;
 use crate::query::SqlDialect;
+use zeroship_schema::SchemaName;
 
 /// The routing decision, frozen at the dispatch frame and not yet bound to a
 /// backend.
@@ -78,6 +79,12 @@ use crate::query::SqlDialect;
 #[derive(Debug)]
 pub struct CapturedRoute {
     app_id: String,
+    /// The PHYSICAL SCHEMA this dispatch qualifies its tables with and derives
+    /// its PostgreSQL role from. Separate from `app_id`, which is the TENANT:
+    /// the transaction-lane key, the SQLite ATTACH alias, the metering subject
+    /// and the CDC stamp. They hold the same characters today; carrying them
+    /// apart is what forces each consumer to say which one it means.
+    schema: SchemaName,
     /// `true` iff this dispatch is lexically-and-asynchronously inside a
     /// `db.transaction(fn)` callback **for this same app**.
     in_tx: bool,
@@ -117,6 +124,7 @@ pub struct CapturedRoute {
 #[derive(Debug)]
 pub struct TxRoute {
     app_id: String,
+    schema: SchemaName,
     in_tx: bool,
     backend: BackendHandle,
     dialect: SqlDialect,
@@ -152,14 +160,24 @@ impl CapturedRoute {
     pub fn capture(
         current_tx_app: Option<&str>,
         app_id: &str,
+        schema: SchemaName,
         dialect: SqlDialect,
     ) -> Self {
+        // SEC-1 compares TENANT against TENANT. The schema rides along; it is
+        // never the admission key, because two apps sharing one database would
+        // share a schema and must still not share a transaction frame.
         let in_tx = current_tx_app == Some(app_id);
         Self {
             app_id: app_id.to_string(),
+            schema,
             in_tx,
             dialect,
         }
+    }
+
+    /// The physical schema this dispatch qualifies its tables with.
+    pub fn schema(&self) -> &SchemaName {
+        &self.schema
     }
 
     /// The app whose schema/role/metering this dispatch runs under.
@@ -200,6 +218,7 @@ impl CapturedRoute {
     pub fn bind(self, backend: BackendHandle) -> TxRoute {
         TxRoute {
             app_id: self.app_id,
+            schema: self.schema,
             in_tx: self.in_tx,
             backend,
             dialect: self.dialect,
@@ -232,6 +251,7 @@ impl CapturedRoute {
     pub fn pool_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
         Self {
             app_id: app_id.to_string(),
+            schema: SchemaName::new(app_id).expect("test app ids are legal schema names"),
             in_tx: false,
             dialect,
         }
@@ -247,6 +267,7 @@ impl CapturedRoute {
     pub fn tx_for_tests(app_id: &str, dialect: SqlDialect) -> Self {
         Self {
             app_id: app_id.to_string(),
+            schema: SchemaName::new(app_id).expect("test app ids are legal schema names"),
             in_tx: true,
             dialect,
         }
@@ -254,9 +275,19 @@ impl CapturedRoute {
 }
 
 impl TxRoute {
-    /// The app whose schema/role/metering this dispatch runs under.
+    /// The TENANT this dispatch runs for: the transaction-lane key, the SQLite
+    /// ATTACH alias, the metering subject, the CDC stamp.
+    ///
+    /// NOT the schema. Use [`Self::schema`] to qualify a table or to derive the
+    /// PostgreSQL runtime role.
     pub fn app_id(&self) -> &str {
         &self.app_id
+    }
+
+    /// The PHYSICAL SCHEMA this dispatch qualifies its tables with, and the one
+    /// the per-app PostgreSQL role is derived from.
+    pub fn schema(&self) -> &SchemaName {
+        &self.schema
     }
 
     /// The backend this dispatch's SQL runs on.

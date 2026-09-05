@@ -19,9 +19,31 @@
 //! must never happen is the reverse.
 
 use zeroship_core::database_role::per_app_role_name;
+use zeroship_schema::SchemaName;
 
 use zeroship_data_core::budgets::{DB_IDLE_IN_TX_TIMEOUT_MS, DB_LOCK_TIMEOUT_MS, DB_STATEMENT_TIMEOUT_MS};
 use zeroship_data_core::error::DbError;
+
+/// Compose the per-app role from the SCHEMA, the way the migration service does.
+///
+/// Both builders below go through this rather than calling
+/// [`per_app_role_name`] on whatever they were handed, so the two data-plane
+/// spellings cannot drift from each other - and neither can drift from
+/// `zeroship_migrate_server::apply::runtime_role_provisioning_sql`, which takes
+/// the same [`SchemaName`] type.
+///
+/// **The parameter's identity is the whole point.** The migration service
+/// creates the role from the schema it created. A `&str` here would accept the
+/// tenant id just as happily, and while the two are the same string that is
+/// invisible; the day they diverge, `SET LOCAL ROLE` names a role nobody ever
+/// created, every transaction fails at session setup, and
+/// `pg_error::is_missing_per_app_session_role` stops matching - which turns an
+/// actionable SCHEMA_NOT_PROVISIONED into a generic failure.
+fn quoted_per_app_role(schema: &SchemaName) -> Result<String, DbError> {
+    Ok(zeroship_schema::query::quote_ident(&per_app_role_name(
+        schema.as_str(),
+    )?))
+}
 
 /// Combined per-transaction client setup: `SET LOCAL ROLE` + the DB-1 timeout
 /// guards, as one simple-query batch run right after `BEGIN`. All `SET LOCAL`,
@@ -33,8 +55,8 @@ use zeroship_data_core::error::DbError;
 ///
 /// Returns a typed database error if the complete role name exceeds
 /// PostgreSQL's identifier limit.
-pub fn tx_session_setup_sql(app_id: &str) -> Result<String, DbError> {
-    let role = zeroship_schema::query::quote_ident(&per_app_role_name(app_id)?);
+pub fn tx_session_setup_sql(schema: &SchemaName) -> Result<String, DbError> {
+    let role = quoted_per_app_role(schema)?;
     Ok(format!(
         "SET LOCAL ROLE {role}; \
          SET LOCAL statement_timeout = {DB_STATEMENT_TIMEOUT_MS}; \
@@ -60,8 +82,8 @@ pub fn tx_session_setup_sql(app_id: &str) -> Result<String, DbError> {
 ///
 /// Returns a typed database error if the complete role name exceeds
 /// PostgreSQL's identifier limit.
-pub(crate) fn autocommit_local_session_setup_sql(app_id: &str) -> Result<String, DbError> {
-    let role = zeroship_schema::query::quote_ident(&per_app_role_name(app_id)?);
+pub(crate) fn autocommit_local_session_setup_sql(schema: &SchemaName) -> Result<String, DbError> {
+    let role = quoted_per_app_role(schema)?;
     Ok(format!(
         "SET LOCAL ROLE {role}; \
          SET LOCAL statement_timeout = {DB_STATEMENT_TIMEOUT_MS}; \
@@ -77,6 +99,10 @@ mod tests {
     // functions they cover, on 2026-09-01. A test that stays behind when its
     // subject moves is how a module ends up asserting things it no longer owns.
 
+    fn demo_schema() -> SchemaName {
+        SchemaName::new("app_demo").expect("fixture schema name")
+    }
+
     #[test]
     fn tx_session_setup_bounds_hold_and_statement_time() {
         // DB-1: every dedicated transaction client must SET LOCAL the timeout
@@ -84,7 +110,7 @@ mod tests {
         // long a statement may run — the defense against one tenant exhausting
         // the shared Postgres connection pool fleet-wide. SET LOCAL so they
         // revert at COMMIT/ROLLBACK.
-        let sql = tx_session_setup_sql("app_demo").unwrap();
+        let sql = tx_session_setup_sql(&demo_schema()).unwrap();
         assert!(
             sql.contains(r#"SET LOCAL ROLE "app_app_demo_role""#),
             "{sql}"
@@ -106,7 +132,7 @@ mod tests {
         // COMMIT/ROLLBACK (including rollback-on-drop on cancellation) and can
         // never leak to the next checkout. No idle-in-tx guard — the wrapping
         // transaction commits around a single statement and never sits idle.
-        let setup = autocommit_local_session_setup_sql("app_demo").unwrap();
+        let setup = autocommit_local_session_setup_sql(&demo_schema()).unwrap();
         assert!(
             setup.contains(r#"SET LOCAL ROLE "app_app_demo_role""#),
             "{setup}"
@@ -127,10 +153,14 @@ mod tests {
 
     #[test]
     fn both_session_setup_batches_refuse_overlong_role_names() {
-        let app_id = "a".repeat(55);
+        // 55 characters of `a` is a legal schema name and an ILLEGAL role name:
+        // `app_` + 55 + `_role` is 64 bytes, one over PostgreSQL's limit. The
+        // two validations are separate on purpose, so `SchemaName` accepting it
+        // is not the composer accepting it.
+        let schema = SchemaName::new(&"a".repeat(55)).expect("55 chars is a legal schema name");
         for result in [
-            tx_session_setup_sql(&app_id),
-            autocommit_local_session_setup_sql(&app_id),
+            tx_session_setup_sql(&schema),
+            autocommit_local_session_setup_sql(&schema),
         ] {
             let error = result.expect_err("64-byte role names must be refused");
             assert!(
@@ -146,8 +176,8 @@ mod tests {
     #[test]
     fn every_setting_is_transaction_scoped() {
         for sql in [
-            tx_session_setup_sql("app_demo").unwrap(),
-            autocommit_local_session_setup_sql("app_demo").unwrap(),
+            tx_session_setup_sql(&demo_schema()).unwrap(),
+            autocommit_local_session_setup_sql(&demo_schema()).unwrap(),
         ] {
             for stmt in sql.split(';') {
                 let stmt = stmt.trim();

@@ -236,6 +236,13 @@ pub struct StepConfig {
     /// `Clone` nor `Default` (`crate::tx_route`), which this struct is both,
     /// and `deadline_fired` runs on a timer with no V8 scope to capture from.
     pub backend: Option<crate::backend::BackendHandle>,
+
+    /// The physical schema [`Action::IssueBegin`] narrows the session to.
+    ///
+    /// `Option` for exactly the reason `backend` is: the seven
+    /// `StepConfig::default()` paths drive events that cannot emit `IssueBegin`.
+    /// [`begin_top_level`] always supplies `Some`.
+    pub schema: Option<zeroship_schema::SchemaName>,
 }
 
 /// Admit a top-level transaction, then drive it to `Idle`.
@@ -251,6 +258,7 @@ pub struct StepConfig {
 /// held. The orchestrator no longer has to remember to release it per-arm.
 pub async fn begin_top_level(
     app_id: &str,
+    schema: zeroship_schema::SchemaName,
     isolation_level: Option<IsolationLevel>,
     backend: crate::backend::BackendHandle,
 ) -> Result<Driven, DbError> {
@@ -259,6 +267,7 @@ pub async fn begin_top_level(
     let config = StepConfig {
         begin,
         backend: Some(backend),
+        schema: Some(schema),
     };
     // The admission actions are only ever `ScheduleTimer`; run them through the
     // same interpreter so no action has a second, quieter implementation.
@@ -519,7 +528,17 @@ async fn run(app_id: &str, actions: Vec<Action>, config: &StepConfig) -> Driven 
                     queue.push_back(Action::Reply(Err(TxProtocolError::TransactionNotReady)));
                     continue;
                 };
-                let outcome = match open_session(app_id, config.begin, backend).await {
+                // `IssueBegin` reaches here only from `begin_top_level`, which sets
+                // both `backend` and `schema`; the absent arm is the same
+                // internal error as the missing backend above.
+                let Some(schema) = config.schema.as_ref() else {
+                    driven.error = Some(DbError::internal(
+                        "db.transaction: begin was issued without a schema",
+                    ));
+                    queue.push_back(Action::Reply(Err(TxProtocolError::TransactionNotReady)));
+                    continue;
+                };
+                let outcome = match open_session(app_id, schema, config.begin, backend).await {
                     Ok(()) => BeginOutcome::Opened(BackendGeneration(generation)),
                     Err(OpenSessionError::Failed(error)) => {
                         driven.error = Some(error);
@@ -732,10 +751,11 @@ fn current_frame(app_id: &str) -> Option<FrameId> {
 /// to lose if the worker role stops inheriting app roles.
 async fn open_session(
     app_id: &str,
+    schema: &zeroship_schema::SchemaName,
     begin: BeginIntent,
     backend: &crate::backend::BackendHandle,
 ) -> Result<(), OpenSessionError> {
-    install(app_id, backend.open_tx_session(app_id, begin).await?);
+    install(app_id, backend.open_tx_session(app_id, schema, begin).await?);
     // Drop any broker residue from an interrupted prior run so it cannot leak
     // into this transaction's drain.
     clear_pending_emits(app_id);
