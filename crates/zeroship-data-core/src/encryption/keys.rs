@@ -93,6 +93,8 @@ use crate::error::DbError;
 #[derive(Default)]
 pub struct SuppliedRootKeys {
     keys: RefCell<HashMap<String, Zeroizing<[u8; 32]>>>,
+    /// Read by the `Debug` impl below in every build, and by the
+    /// `consultations()` accessor under `cfg(test)`.
     consultations: Cell<u64>,
 }
 
@@ -147,8 +149,17 @@ impl SuppliedRootKeys {
             .is_some()
     }
 
-    /// How many times a [`KeyStore`] has asked this source for bytes,
-    /// hit or miss. Every [`Self::lookup`] bumps it.
+    /// How many times a [`KeyStore`] has asked this source for bytes, hit or
+    /// miss. Every [`Self::lookup`] bumps it.
+    ///
+    /// TEST-ONLY, AND GATED SO THAT FACT IS STRUCTURAL. Its four callers are
+    /// all in this file's own `#[cfg(test)] mod tests`, where they prove the
+    /// `KeyStore` cache stops re-consulting the source. A default-features
+    /// `cargo check` therefore reported it "never used", and on 2026-09-04 it
+    /// was deleted on that evidence and restored ten minutes later when
+    /// `cargo test -p zeroship-data-core` failed to compile. A dead_code
+    /// warning means "no consumer IN THIS cfg", never "no consumer".
+    #[cfg(test)]
     #[must_use]
     pub(crate) fn consultations(&self) -> u64 {
         self.consultations.get()
