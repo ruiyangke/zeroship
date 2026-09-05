@@ -408,8 +408,15 @@ things in. It is reinstated for exactly one row shape and nothing else.
 
 ## Change streams
 
-One publication per database, membership excluding the reserved `__zeroship_` namespace so platform
-journals never enter the worker-visible WAL feed.
+One shared publication per DATASTORE, membership excluding the reserved `__zeroship_` namespace so
+platform journals never enter the worker-visible WAL feed.
+
+**This sentence said "per database" until 2026-09-04, contradicting the bullet nineteen lines below
+that states the opposite in bold.** The detail was corrected and the topic sentence was not, so the
+first line a reader met under this heading was the wrong cardinality and the correction was reachable
+only by reading on. That is the same failure this section already documents one bullet down, where a
+wrong catalog name supporting a right conclusion reached the decision log and two agent briefs. A
+heading sentence is what gets quoted; correct it in the same edit as the reasoning under it.
 
 **Publications and slots sit at different scopes, and the difference decides what has to be
 rationed.** Measured on PostgreSQL 18.4:
