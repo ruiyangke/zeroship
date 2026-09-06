@@ -31,7 +31,6 @@ pub mod env_handlers;
 pub mod env_store;
 pub mod fee_policy;
 pub mod http_util;
-pub mod identity_bridge;
 pub mod internal;
 pub mod invoice_payments;
 pub mod metering;

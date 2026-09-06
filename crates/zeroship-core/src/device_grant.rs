@@ -8,8 +8,9 @@
 //! [`PLATFORM_PROVIDER`] named the control plane's parallel deploy-token
 //! grant, which was deleted once `zeroship login` moved onto the OP's
 //! endpoints. The spelling survives because `zeroship.identity_links` still
-//! uses it to mark a platform-native principal (see
-//! `crates/zeroship-control/src/identity_bridge.rs`); nothing writes a
+//! uses it to mark a platform-native principal (written by
+//! `zeroship_authn::platform_cli::materialize_default_grants`, which is where
+//! control's DELETED `identity_bridge` module used to do it); nothing writes a
 //! `device_grants` row with it.
 //!
 //! The auth service also reconciles a first-party [`PLATFORM_CLI_CLIENT_ID`]

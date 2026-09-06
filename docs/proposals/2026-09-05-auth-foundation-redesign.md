@@ -1274,9 +1274,28 @@ By path and symbol. Pre-launch, so each is a deletion, not a deprecation.
   `crates/zeroship-control/src/api.rs`; `hash_api_key` and `validate_api_key` in
   `crates/zeroship-core/src/auth/mod.rs`. A plaintext secret column stored beside
   its own hash, gating nothing.
-- `crates/zeroship-control/src/identity_bridge.rs` - the whole module.
-  `provision_or_link` has only test callers and a header claiming it sits on the
-  bearer read path.
+- `crates/zeroship-control/src/identity_bridge.rs` - the whole module. DELETED
+  at step 1, with `crates/zeroship-control/tests/identity_bridge_test.rs`, its
+  only caller. `provision_or_link` had test callers only; `fetch_email_verified`
+  and its URL helper had NO caller at all, not even a test, so the module was
+  deader than this bullet first said. Its header claimed the function sits on
+  the bearer read path; what actually does is
+  `zeroship_authn::platform_cli::materialize_default_grants`, called from
+  `crates/zeroship-control/src/authz_guard.rs` and
+  `crates/zeroship-migrate-server/src/auth.rs`, and the header's reasoning moved
+  onto that function.
+
+  Two records the deletion would otherwise have taken with it, kept here because
+  no surviving code site is theirs. **`fetch_email_verified` was deliberately
+  fail-closed**: it returned `Ok(false)` on transport failure, timeout, non-2xx,
+  body-read failure AND malformed JSON, so that an unavailable admin API could
+  never enable email-based account merge - the bool fed straight into
+  `provision_or_link`'s merge decision. And it was the tree's only written record
+  of the **GoTrue admin-API email-confirmation contract**: `GET
+  <supabase>/auth/v1/admin/users/<subject>` under both an `authorization` bearer
+  and an `apikey` header, with confirmation read as "the `email_confirmed_at`
+  field is present and not null". If Supabase consumption is ever revisited,
+  that is how it was read and why the failure arm was chosen.
 - `crates/zeroship-gateway/src/sessions.rs` - the whole module, including
   `validate` (no production caller) and `IDLE_MINUTES` / `ABSOLUTE_HOURS`.
   Note this is the GATEWAY's module; the auth store's same-named function has
