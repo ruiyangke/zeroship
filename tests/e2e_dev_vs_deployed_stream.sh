@@ -177,16 +177,15 @@ zs_check_binary_freshness "$ROOT" "$BIN" \
 # curl emit each chunk as it arrives; without it curl aggregates and every
 # line appears at the end, which is the mutation.
 drive() {
-  local url="$1" key="${2:-}" out="$3"
-  local hdr=() nflag=(-N)
-  [ -n "$key" ] && hdr=(-H "X-Api-Key: $key")
+  local url="$1" out="$2"
+  local nflag=(-N)
   [ "$MUTATE_BUFFERED" = "1" ] && nflag=()
   local start; start=$(date +%s%N)
   # `-D` captures the RESPONSE HEADERS to a sidecar file. They are the other
   # half of the buffering question: a clock says when bytes arrived, a
   # `content-length` says the whole body was known before the first one was.
   curl -sS "${nflag[@]}" -D "$out.hdr" -m 25 -X POST -H 'content-type: application/json' \
-    -H 'accept: text/event-stream' "${hdr[@]}" "$url" -d '{"json":{}}' 2>&1 \
+    -H 'accept: text/event-stream' "$url" -d '{"json":{}}' 2>&1 \
   | while IFS= read -r line; do
       local now; now=$(date +%s%N)
       printf '%s %s\n' $(( (now - start) / 1000000 )) "$line"
@@ -328,7 +327,7 @@ else
   no "dev app never became ready -- see the diagnosis and log tail above"
   exit 1
 fi
-drive "http://localhost:$DEV_PORT/__zeroship/v1/probe.ticks" "" "$WORK/dev.txt"
+drive "http://localhost:$DEV_PORT/__zeroship/v1/probe.ticks" "$WORK/dev.txt"
 judge "dev" "$WORK/dev.txt"
 frames "dev" "$WORK/dev.txt"
 headers "dev" "$WORK/dev.txt.hdr"
@@ -358,13 +357,13 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null && ok "stac
   || { no "stack did not come up"; tail -20 "$WORK/gate.log"; exit 1; }
 
 OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
-KEY=$(echo "$OUT" | awk -F= '$1=="api_key"{print $2}')
-[ -n "$KEY" ] && ok "deployed stream-probe" || { no "provision: $OUT"; exit 1; }
+APP_ID=$(echo "$OUT" | awk -F= '$1=="app_id"{print $2}')
+[ -n "$APP_ID" ] && ok "deployed stream-probe" || { no "provision: $OUT"; exit 1; }
 sleep 6
-curl -sf -o /dev/null -m 10 -X POST -H 'content-type: application/json' -H "X-Api-Key: $KEY" \
+curl -sf -o /dev/null -m 10 -X POST -H 'content-type: application/json' \
   "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/probe.ping" -d '{"json":{}}' \
   && ok "deployed app reachable" || no "deployed app did not answer ping"
-drive "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/probe.ticks" "$KEY" "$WORK/deployed.txt"
+drive "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/probe.ticks" "$WORK/deployed.txt"
 judge "deployed" "$WORK/deployed.txt"
 frames "deployed" "$WORK/deployed.txt"
 headers "deployed" "$WORK/deployed.txt.hdr"

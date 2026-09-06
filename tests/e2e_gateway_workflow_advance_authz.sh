@@ -344,7 +344,6 @@ echo "=== deploy + enable workflows ==="
   --zship "$WORK/workflow.zship" > "$WORK/provision.out" 2>&1 \
   || { fail "dev-provision failed"; cat "$WORK/provision.out"; exit 1; }
 APP_ID="$(awk -F= '/^app_id=/{print $2}' "$WORK/provision.out")"
-API_KEY="$(awk -F= '/^api_key=/{print $2}' "$WORK/provision.out")"
 [ -n "$APP_ID" ] || { fail "no app_id from dev-provision"; cat "$WORK/provision.out"; exit 1; }
 note "provisioned app_id=$APP_ID name=$APP_NAME"
 
@@ -364,7 +363,7 @@ sleep 3
 # workflow but no default.fetch, so the HTTP code is irrelevant. What matters is
 # that the request reaches the worker (route present). Non-fatal by design.
 WARM_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
-  "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY")"
+  "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H)"
 note "warmup GET /apps/$APP_NAME/ -> HTTP $WARM_CODE (forces route+deploy sync)"
 # Confirm the gateway actually holds a route for this app before the exploit,
 # by checking that C2's negative control (unknown app) differs from a known app.
@@ -477,7 +476,7 @@ start_worker ""   # no --workflow-advance-unsigned
 echo $! >> "$PIDFILE"
 wait_health gateway "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" "$WORK/gate2.log"
 sleep 3
-curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" >/dev/null || true
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" >/dev/null || true
 
 RID_P2="$(create_run)" || { fail "Phase2 create_run failed"; exit 1; }
 BODY_P2="{\"runId\":\"$RID_P2\",\"appId\":\"$APP_ID\"}"

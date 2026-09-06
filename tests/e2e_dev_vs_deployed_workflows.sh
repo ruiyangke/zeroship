@@ -188,10 +188,9 @@ echo "=== dev vs deployed (workflow-probe) ==="
 # The loop is identical for both URLs, so the two sides still see the same
 # sequence of operations at the same cadence.
 probe() {
-  local url="$1" hdr="${2:-}" rpc="$1/__zeroship/v1"
-  local h=(); [ -n "$hdr" ] && h=(-H "$hdr")
+  local url="$1" rpc="$1/__zeroship/v1"
   call() {
-    curl -sS -m 20 -X POST -H 'content-type: application/json' "${h[@]}" \
+    curl -sS -m 20 -X POST -H 'content-type: application/json' \
       "$rpc/$1" -d "{\"json\":${2:-{\}}}" 2>&1
   }
   # One case: start, then poll status once a second until terminal. The `signal`
@@ -371,9 +370,8 @@ done
 pass "control + worker + gateway healthy"
 
 OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
-API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
 APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
-[ -n "$API_KEY" ] && [ -n "$APP_ID" ] && pass "deployed $APP_NAME" || { fail "provision: $OUT"; exit 1; }
+[ -n "$APP_ID" ] && pass "deployed $APP_NAME" || { fail "provision: $OUT"; exit 1; }
 
 # Durable workflows are behind an operator rollout gate, not a creator switch:
 # `apps.workflows_enabled` AND `plans.workflows_allowed` must both be true
@@ -397,7 +395,7 @@ pass "workflows enabled for $APP_NAME (operator gate, not creator-settable)"
 sleep 5   # gateway route-sync poll
 
 OBSFILE="$WORK/deployed.obs"; : > "$OBSFILE"
-probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WORK/deployed.txt" 2>&1
+probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" > "$WORK/deployed.txt" 2>&1
 grep -q '"ok":true' "$WORK/deployed.txt" && pass "deployed app answered the probe" \
   || { fail "deployed app never answered"; head -5 "$WORK/deployed.txt"; tail -5 "$WORK/worker.log"; }
 

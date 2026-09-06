@@ -331,8 +331,8 @@ VALUES ('pln_whlive','wh-live',0,0,1000000000000,'{"cpu_limit_ms":5000,"wall_tim
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CREATOR', 'whlive-$CREATOR@zeroship.test'::citext, 'WH-Live Creator', NOW());
-INSERT INTO zeroship.apps (id, name, plan_id, api_key)
-VALUES ('$CLOSED_APP', 'whlive-app-$CLOSED_APP', 'pln_whlive', '$CLOSED_APP');
+INSERT INTO zeroship.apps (id, name, plan_id)
+VALUES ('$CLOSED_APP', 'whlive-app-$CLOSED_APP', 'pln_whlive');
 INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$CLOSED_APP', '$CREATOR', 'owner');
 INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CREATOR') ON CONFLICT DO NOTHING;
 INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)
