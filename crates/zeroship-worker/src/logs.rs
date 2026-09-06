@@ -4,6 +4,8 @@ use std::sync::{Arc, RwLock};
 use ntex::web::{self, HttpRequest, HttpResponse};
 use uuid::Uuid;
 
+use zeroship_core::app_id::AppId;
+
 use crate::handler::check_worker_auth;
 use crate::WorkerConfig;
 
@@ -55,8 +57,14 @@ pub async fn get_logs(
         return resp;
     }
 
-    let app_id = match path.parse::<Uuid>() {
-        Ok(id) => id,
+    // The path segment is a typed app id, the same as `/dispatch/{app_id}`,
+    // and for the same reason: the caller and this process have to agree about
+    // the RENDERING of the identity, and only one of the two spellings parses.
+    // The store below is keyed by the uuid the control plane serves, so the id
+    // is unwrapped here rather than carried - the transitional conversion
+    // `handler::dispatch` documents in full.
+    let app_id = match AppId::parse(path.as_str()) {
+        Ok(id) => id.uuid(),
         Err(_) => {
             return HttpResponse::BadRequest()
                 .json(&serde_json::json!({"error": "invalid app_id"}));
@@ -90,5 +98,31 @@ mod tests {
     fn empty_app_returns_empty_lines() {
         let store = new_store();
         assert!(get(&store, &Uuid::new_v4()).is_empty());
+    }
+
+    /// The log path segment is the SAME identity as the dispatch path segment,
+    /// and it has to be refused on the same terms.
+    ///
+    /// The two endpoints have different callers - the gateway dispatches, the
+    /// control plane reads logs - so a slice that tightened only one of them
+    /// would leave the two halves of the worker's public surface disagreeing
+    /// about what an app id is. This binds them to one answer without needing
+    /// a server: the pair below is exactly what the handler branches on.
+    #[test]
+    fn the_log_path_accepts_one_rendering_of_an_app_id_and_refuses_the_other() {
+        let raw = Uuid::new_v4();
+
+        assert!(
+            AppId::parse(&raw.to_string()).is_err(),
+            "a uuid rendering must not be readable as an app id"
+        );
+
+        let canonical = zeroship_core::app_id::canonical_app_id_for(&raw);
+        let parsed = AppId::parse(canonical.as_str()).expect("the canonical rendering parses");
+        assert_eq!(
+            parsed.uuid(),
+            raw,
+            "and it must unwrap to the uuid the store is keyed by"
+        );
     }
 }
