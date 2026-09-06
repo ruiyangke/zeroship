@@ -201,9 +201,9 @@ run_psql -d "$TEST_DB" -v ON_ERROR_STOP=1 \
         (id, name, runtime_limits_json, assignable_by_creator) \
       VALUES ('free', 'Free', '{}'::jsonb, TRUE) \
       ON CONFLICT (id) DO NOTHING;" \
-  -c "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) \
+  -c "INSERT INTO zeroship.apps (id, name, api_key) \
       VALUES ('${CONSENT_APP_ID}', 'auth UI consent fixture', \
-              'auth-ui-consent-key', 'auth-ui-consent-key-hash');" \
+              'auth-ui-consent-key');" \
   -c "INSERT INTO zeroship.oauth_clients \
         (client_id, client_name, redirect_uris, scopes, skip_consent) \
       VALUES ('${CONSENT_CLIENT_ID}', 'Auth UI consent fixture', \

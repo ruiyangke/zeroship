@@ -274,8 +274,8 @@ VALUES ('$PLAN_ID','stripe-e2e',0,0,1000000000000,
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CREATOR', 'e2e-$CREATOR@zeroship.test'::citext, 'E2E Stripe Creator', NOW());
-INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash)
-VALUES ('$CLOSED_APP', 'stripe-e2e-app-$CLOSED_APP', '$PLAN_ID', '$CLOSED_APP', '');
+INSERT INTO zeroship.apps (id, name, plan_id, api_key)
+VALUES ('$CLOSED_APP', 'stripe-e2e-app-$CLOSED_APP', '$PLAN_ID', '$CLOSED_APP');
 INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$CLOSED_APP', '$CREATOR', 'owner');
 -- The customer id lives in the side table billing_customer_refs (relocated off
 -- creator_billing). Create the FK-parent identity row, then map the cus_.

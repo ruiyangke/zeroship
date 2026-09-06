@@ -363,7 +363,7 @@ async fn get_routes_fanout_picks_most_restrictive_account_state() {
     let app_rows = f
         .pg
         .query(
-            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
+            "INSERT INTO zeroship.apps (name, plan_id, api_key) \
              VALUES ($1, $2, $3, '') RETURNING id",
             &[
                 &format!("fanout-{}", Uuid::new_v4().simple()),

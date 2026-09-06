@@ -381,9 +381,9 @@ impl Fixture {
             // A membership row requires the FK-referenced `apps` row to exist.
             let app_name = format!("authz-{label}-{}", Uuid::new_v4().simple());
             pg.execute(
-                "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) \
-                 VALUES ($1, $2, $3, $4)",
-                &[&app_db_id, &app_name, &"test-api-key", &"test-api-key-hash"],
+                "INSERT INTO zeroship.apps (id, name, api_key) \
+                 VALUES ($1, $2, $3)",
+                &[&app_db_id, &app_name, &"test-api-key"],
             )
             .await
             .expect("insert app");
@@ -428,12 +428,11 @@ impl Fixture {
         // (SqlState 42P01), two tests red, on a cluster whose only difference
         // was that nobody had ever run that ALTER by hand.
         pg.execute(
-            "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3)",
             &[
                 &app_db_id,
                 &app_name,
                 &"test-api-key",
-                &"test-api-key-hash",
             ],
         )
         .await

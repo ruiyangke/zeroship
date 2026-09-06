@@ -5157,7 +5157,6 @@ mod tests {
         zeroship_core::types::RouteEntry {
             name: "spend-app.zeroship.localhost".to_string(),
             plan_id: "free".to_string(),
-            api_key_hash: "h".to_string(),
             deploy_hash: None,
             manifest: zeroship_bundle::Manifest::passthrough(),
             oauth_client_id: None,
@@ -5193,7 +5192,6 @@ mod tests {
         zeroship_core::types::RouteEntry {
             name: "spend-app.zeroship.localhost".to_string(),
             plan_id: "free".to_string(),
-            api_key_hash: "h".to_string(),
             deploy_hash: None,
             manifest,
             oauth_client_id: None,
@@ -5231,7 +5229,6 @@ mod tests {
         zeroship_core::types::RouteEntry {
             name: "static-spend-app.zeroship.localhost".to_string(),
             plan_id: "free".to_string(),
-            api_key_hash: "h".to_string(),
             deploy_hash: None,
             manifest,
             oauth_client_id: None,
@@ -5604,7 +5601,6 @@ mod tests {
         zeroship_core::types::RouteEntry {
             name: "spend-app.zeroship.localhost".to_string(),
             plan_id: "free".to_string(),
-            api_key_hash: "h".to_string(),
             deploy_hash: None,
             manifest,
             oauth_client_id: None,
@@ -6095,7 +6091,6 @@ mod tests {
         zeroship_core::types::RouteEntry {
             name: "idem-app.zeroship.localhost".to_string(),
             plan_id: "free".to_string(),
-            api_key_hash: "h".to_string(),
             deploy_hash: None,
             manifest: zeroship_bundle::Manifest {
                 version: 1,
@@ -6543,7 +6538,6 @@ mod tests {
         zeroship_core::types::RouteEntry {
             name: host.to_string(),
             plan_id: "free".to_string(),
-            api_key_hash: "h".to_string(),
             deploy_hash: None,
             manifest: zeroship_bundle::Manifest {
                 version: 1,

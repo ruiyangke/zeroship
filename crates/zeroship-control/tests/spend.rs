@@ -82,7 +82,7 @@ async fn make_app_on_priced_plan(
     let name = format!("spend-test-{}", Uuid::new_v4());
     let rows = client
         .query(
-            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
+            "INSERT INTO zeroship.apps (name, plan_id, api_key) \
              VALUES ($1, $2, $3, '') RETURNING id",
             &[&name, &plan_id, &Uuid::new_v4().to_string()],
         )
@@ -391,7 +391,7 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
     let name = format!("ovf-test-{}", Uuid::new_v4());
     let app: Uuid = client
         .query(
-            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
+            "INSERT INTO zeroship.apps (name, plan_id, api_key) \
              VALUES ($1, $2, $3, '') RETURNING id",
             &[&name, &plan_id, &Uuid::new_v4().to_string()],
         )

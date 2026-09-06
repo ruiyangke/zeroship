@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
-use zeroship_core::auth::hash_api_key;
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
     GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry, RouteEntry,
@@ -264,7 +263,6 @@ impl Registry {
         }
 
         let api_key = Uuid::new_v4().to_string();
-        let key_hash = hash_api_key(&api_key);
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
 
@@ -277,11 +275,11 @@ impl Registry {
 
         let rows = tx
             .query(
-                "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
-                 VALUES ($1, $2, $3, $4) \
+                "INSERT INTO zeroship.apps (name, plan_id, api_key) \
+                 VALUES ($1, $2, $3) \
                  RETURNING id, name, plan_id, deploy_hash, api_key, \
                            archived_at::text, created_at::text, updated_at::text",
-                &[&name, &plan_id, &api_key, &key_hash],
+                &[&name, &plan_id, &api_key],
             )
             .await?;
         let record = rows
@@ -837,7 +835,7 @@ impl Registry {
         // mirrors the reconciler's `DISTINCT ON (app_id)` owner collapse.
         let rows = conn
             .query(
-                "SELECT a.id, a.name, a.plan_id, a.api_key_hash, a.deploy_hash, \
+                "SELECT a.id, a.name, a.plan_id, a.deploy_hash, \
                         a.manifest_json, c.client_id AS oauth_client_id, \
                         c.sector_identifier, s.state AS spend_state, \
                         acct.account_state \
@@ -902,7 +900,6 @@ impl Registry {
                 RouteEntry {
                     name: row.get("name"),
                     plan_id: row.get("plan_id"),
-                    api_key_hash: row.get("api_key_hash"),
                     deploy_hash: row.get("deploy_hash"),
                     manifest,
                     // OAuth identity fields, populated by the LEFT JOIN on

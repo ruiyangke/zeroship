@@ -151,8 +151,8 @@ async fn insert_app(
         .control_pg
         .execute(
             &format!(
-                "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash, system, created_at) \
-                 VALUES ($1, $2, $5, $3, '', $4, NOW() - INTERVAL '{created_age}')"
+                "INSERT INTO zeroship.apps (id, name, plan_id, api_key, system, created_at) \
+                 VALUES ($1, $2, $5, $3, $4, NOW() - INTERVAL '{created_age}')"
             ),
             &[id, &name, &api_key, &system, &free],
         )

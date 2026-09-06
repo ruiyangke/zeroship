@@ -50,10 +50,28 @@ use zeroship_gateway::{
     enforce, idempotency,
     oidc_rp::OidcRp,
     proxy::HashRing,
-    sessions::{create, revoke_app_sessions_for_user, validate, NewSession},
+    sessions::{create, revoke_app_sessions_for_user, NewSession},
     sync::RouteCache,
     GateConfig, GateState,
 };
+
+/// The test's own oracle for "is this audit row still live", replacing the
+/// crate's deleted `sessions::validate`. Nothing on the request path ever
+/// called that function - revocation is enforced by the per-app family marker
+/// the hot path reads - but the per-app SCOPE assertions below are real, so the
+/// read stays here rather than going with it.
+async fn is_live(client: &compio_postgres::Client, id: Uuid, app_id: Uuid) -> bool {
+    !client
+        .query(
+            "SELECT id FROM zeroship.gateway_sessions \
+             WHERE id = $1 AND app_id = $2 AND revoked_at IS NULL \
+               AND idle_expires_at > NOW() AND abs_expires_at > NOW()",
+            &[&id, &app_id],
+        )
+        .await
+        .expect("read gateway_sessions row")
+        .is_empty()
+}
 
 #[compio::test]
 async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
@@ -137,19 +155,10 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
     .await
     .expect("create s_other");
 
-    // Sanity: all three validate before we revoke.
-    assert!(validate(&mut client, s_a.id, app_a)
-        .await
-        .expect("pre validate s_a")
-        .is_some());
-    assert!(validate(&mut client, s_b.id, app_b)
-        .await
-        .expect("pre validate s_b")
-        .is_some());
-    assert!(validate(&mut client, s_other.id, app_a)
-        .await
-        .expect("pre validate s_other")
-        .is_some());
+    // Sanity: all three rows are live before we revoke.
+    assert!(is_live(&client, s_a.id, app_a).await);
+    assert!(is_live(&client, s_b.id, app_b).await);
+    assert!(is_live(&client, s_other.id, app_a).await);
 
     // Revoke the target user's sessions AT app_a only.
     let count = revoke_app_sessions_for_user(&mut client, app_a, &target_user)
@@ -159,28 +168,19 @@ async fn revoke_app_sessions_for_user_revokes_only_the_target_app_and_user() {
 
     // The target session at app_a must now fail validation.
     assert!(
-        validate(&mut client, s_a.id, app_a)
-            .await
-            .expect("post validate s_a")
-            .is_none(),
+        !is_live(&client, s_a.id, app_a).await,
         "s_a (target user @ app_a) must be revoked"
     );
 
     // The SAME user's session at app_b must STILL validate (per-app scope).
     assert!(
-        validate(&mut client, s_b.id, app_b)
-            .await
-            .expect("post validate s_b")
-            .is_some(),
+        is_live(&client, s_b.id, app_b).await,
         "s_b (same user @ app_b) must NOT be revoked by a per-app BCL at app_a"
     );
 
     // The unrelated user's session at app_a must still validate.
     assert!(
-        validate(&mut client, s_other.id, app_a)
-            .await
-            .expect("post validate s_other")
-            .is_some(),
+        is_live(&client, s_other.id, app_a).await,
         "unrelated user's session must NOT be revoked"
     );
 
@@ -224,13 +224,12 @@ async fn insert_user(client: &Client, label: &str) -> Uuid {
 async fn seed_app(client: &Client, app_id: Uuid, name: &str) {
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
-             VALUES ($1, $2, 'free', $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) \
+             VALUES ($1, $2, 'free', $3)",
             &[
                 &app_id,
                 &name,
                 &format!("key-{}", Uuid::new_v4().simple()),
-                &format!("hash-{}", Uuid::new_v4().simple()),
             ],
         )
         .await
@@ -537,7 +536,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     })
     .detach();
     // `db` (single client) drives the test's direct seed/assert/cleanup
-    // helpers; the RLS-scoped store fns (`create`/`validate`) need `&mut Client`,
+    // helpers; the RLS-scoped store fn `create` needs `&mut Client`,
     // so it is bound `mut`. `db_cfg` backs the handler's `GateState`, which now
     // holds a `DbConfig` (the handler builds its own per-thread pool from it).
     // Both point at the same rows.
@@ -617,10 +616,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
     let first_resp = test::call_service(&app, first).await;
     assert_eq!(first_resp.status(), StatusCode::OK);
     assert!(
-        validate(&mut db, session.id, app_id)
-            .await
-            .expect("validate after first logout")
-            .is_none(),
+        !is_live(&db, session.id, app_id).await,
         "first logout_token must revoke the session"
     );
     assert_eq!(
@@ -629,7 +625,7 @@ async fn handler_accepts_replay_idempotently_without_duplicate_revocation_audit(
         "first logout_token must emit one revocation audit row"
     );
     // The per-app BCL's REAL effects are the session revocation asserted above
-    // (the `validate(...) is_none()` check) plus the `(client_id, pws_)`
+    // (the `is_live(...)` check) plus the `(client_id, pws_)`
     // token-family marker (covered by `per_app_bcl_writes_token_family_marker`).
     // Here we focus on replay-idempotency of the audit row.
 
@@ -784,10 +780,7 @@ async fn concurrent_same_jti_logout_token_runs_side_effects_once() {
     assert_eq!(resp_a.status(), StatusCode::OK);
     assert_eq!(resp_b.status(), StatusCode::OK);
     assert!(
-        validate(&mut db, session.id, app_id)
-            .await
-            .expect("validate after concurrent logout")
-            .is_none(),
+        !is_live(&db, session.id, app_id).await,
         "one accepted logout_token must revoke the session"
     );
     assert_eq!(
@@ -925,10 +918,7 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
         "failed BCL processing must not burn the logout_token jti"
     );
     assert!(
-        validate(&mut db, session.id, app_id)
-            .await
-            .expect("validate after failed logout")
-            .is_some(),
+        is_live(&db, session.id, app_id).await,
         "failed BCL processing must not silently revoke zero rows as success"
     );
     assert_eq!(
@@ -972,10 +962,7 @@ async fn handler_db_failure_returns_5xx_without_burning_jti_retry_succeeds() {
         "same logout_token jti must be reusable after retryable failure"
     );
     assert!(
-        validate(&mut db, session.id, app_id)
-            .await
-            .expect("validate after retry")
-            .is_none(),
+        !is_live(&db, session.id, app_id).await,
         "retry must perform the revocation"
     );
     assert_eq!(
@@ -1116,17 +1103,11 @@ async fn handler_valid_logout_token_revokes_matching_sid_only() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
-        validate(&mut db, target_session.id, app_id)
-            .await
-            .expect("validate target sid after BCL")
-            .is_none(),
+        !is_live(&db, target_session.id, app_id).await,
         "valid logout_token.sid must revoke the matching gateway session"
     );
     assert!(
-        validate(&mut db, other_session.id, app_id)
-            .await
-            .expect("validate other sid after BCL")
-            .is_some(),
+        is_live(&db, other_session.id, app_id).await,
         "valid logout_token.sid must not revoke another session for the same user/app"
     );
 
@@ -1269,17 +1250,11 @@ async fn handler_sid_miss_falls_back_to_app_scoped_sub_revoke() {
     let resp = test::call_service(&app, req).await;
     assert_eq!(resp.status(), StatusCode::OK);
     assert!(
-        validate(&mut db, target_session.id, app_id)
-            .await
-            .expect("validate target after sid-miss fallback")
-            .is_none(),
+        !is_live(&db, target_session.id, app_id).await,
         "sid miss must fall back to sub and revoke the target app session"
     );
     assert!(
-        validate(&mut db, other_app_session.id, other_app_id)
-            .await
-            .expect("validate other app after sid-miss fallback")
-            .is_some(),
+        is_live(&db, other_app_session.id, other_app_id).await,
         "sid-miss fallback must remain scoped to the logout_token aud app"
     );
     assert!(
@@ -1442,10 +1417,7 @@ async fn handler_sid_miss_without_sub_returns_5xx_without_burning_jti_retry_succ
         "same sid-only logout_token must be reusable after retryable zero-row failure"
     );
     assert!(
-        validate(&mut db, session.id, app_id)
-            .await
-            .expect("validate retry session")
-            .is_none(),
+        !is_live(&db, session.id, app_id).await,
         "retry must revoke the later matching sid session"
     );
     assert_eq!(
@@ -1595,10 +1567,7 @@ async fn handler_rejects_invalid_logout_tokens_without_revoking_session() {
             "{label} logout_token must be rejected"
         );
         assert!(
-            validate(&mut db, session.id, app_id)
-                .await
-                .unwrap_or_else(|e| panic!("validate after {label}: {e}"))
-                .is_some(),
+            is_live(&db, session.id, app_id).await,
             "{label} logout_token must not revoke the live session"
         );
     }
@@ -1696,7 +1665,6 @@ fn build_handler_state_with_route(
         zeroship_core::types::RouteEntry {
             name: name.to_string(),
             plan_id: "free".to_string(),
-            api_key_hash: "h".to_string(),
             deploy_hash: None,
             manifest: zeroship_bundle::Manifest::passthrough(),
             oauth_client_id: Some(oauth_client_id.to_string()),

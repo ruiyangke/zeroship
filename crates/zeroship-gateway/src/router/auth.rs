@@ -2874,7 +2874,6 @@ mod tests {
             zeroship_core::types::RouteEntry {
                 name: host.to_string(),
                 plan_id: "free".to_string(),
-                api_key_hash: "hash".to_string(),
                 deploy_hash: None,
                 manifest: zeroship_bundle::Manifest::passthrough(),
                 oauth_client_id: Some(client_id.clone()),
@@ -3031,7 +3030,6 @@ mod tests {
             zeroship_core::types::RouteEntry {
                 name: host.to_string(),
                 plan_id: "free".to_string(),
-                api_key_hash: "hash".to_string(),
                 deploy_hash: None,
                 manifest: zeroship_bundle::Manifest::passthrough(),
                 oauth_client_id: Some(client_id.to_string()),

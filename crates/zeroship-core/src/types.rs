@@ -213,7 +213,6 @@ pub enum AccountState {
 pub struct RouteEntry {
     pub name: String,
     pub plan_id: String,
-    pub api_key_hash: String,
     pub deploy_hash: Option<String>,
     /// Per-app routing manifest. Always present — apps that haven't
     /// shipped a manifest get [`Manifest::passthrough`] synthesized at

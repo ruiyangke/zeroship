@@ -405,7 +405,6 @@ mod tests {
         RouteEntry {
             name: name.to_string(),
             plan_id: "free".to_string(),
-            api_key_hash: "h".to_string(),
             deploy_hash: None,
             manifest: Manifest::passthrough(),
             oauth_client_id: oauth_client_id.map(str::to_string),
@@ -781,7 +780,6 @@ mod tests {
             RouteEntry {
                 name: "billing-app.zeroship.localhost".to_string(),
                 plan_id: "free".to_string(),
-                api_key_hash: "h".to_string(),
                 deploy_hash: None,
                 manifest: parsed,
                 oauth_client_id: Some("oac_billing".to_string()),
