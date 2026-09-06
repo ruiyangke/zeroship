@@ -57,7 +57,7 @@ use uuid::Uuid;
 use zeroship_core::auth::hash_api_key;
 use zeroship_authz::Scope;
 use zeroship_bundle::ScopeDef;
-use zeroship_core::typed_id::{app_oauth_client_id, APP_OAUTH_CLIENT_PREFIX};
+use zeroship_core::typed_id::app_oauth_client_id;
 
 /// Per-app custom-domain cap (default 50). With 2 redirect_uris per host
 /// (popup-callback + callback) the redirect_uri array is bounded at
@@ -72,13 +72,6 @@ pub const MAX_REDIRECT_URIS: usize = MAX_HOSTS * 2;
 /// scopes are appended to it; the baseline always includes
 /// `openid` + `offline_access` (refresh tokens) + `profile` + `email`.
 pub const BASE_SCOPE: &str = "openid offline_access profile email";
-
-/// The OAuth `client_id` prefix for per-app clients. Re-exported from
-/// `zeroship_core::typed_id` — the SINGLE source of truth shared with the auth
-/// consent classifier's decoder, so the two can never drift.
-/// Distinct from the `app_` *entity* typed_id namespace on purpose: the OAuth
-/// `client_id` is a derived identifier, not a typed_id.
-pub const APP_CLIENT_PREFIX: &str = APP_OAUTH_CLIENT_PREFIX;
 
 // ---------------------------------------------------------------------------
 // Errors
@@ -271,11 +264,19 @@ pub fn backchannel_logout_uri(scheme: &str, apex_host: &str) -> String {
     format!("{scheme}://{apex_host}/oidc/backchannel-logout")
 }
 
-/// The per-app `post_logout_redirect_uris` (spec §1.1): the apex origin root.
-#[must_use]
-pub fn post_logout_redirect_uris(scheme: &str, apex_host: &str) -> Vec<String> {
-    vec![format!("{scheme}://{apex_host}/")]
-}
+// RP-INITIATED LOGOUT IS UNBUILT, NOT REMOVED. `post_logout_redirect_uris`
+// used to be computed here (the apex origin root, spec §1.1) and had nowhere to
+// go: `zeroship.oauth_clients` has a `backchannel_logout_uri` column and no
+// `post_logout_redirect_uris` column, and nothing read the function. It is
+// deleted rather than wired, because the capability it belonged to was never
+// built.
+//
+// What the deletion must not take with it is the guard that capability owes.
+// `docs/proposals/2026-06-30-op-p0-spec-threat-model.md` specifies it: a
+// supplied `post_logout_redirect_uri` MUST exact-match a registered entry for
+// the resolved `client_id`, and on no match the OP renders a local 400 logout
+// confirmation page rather than redirecting to an unvalidated URI. Whoever adds
+// RP-initiated logout adds that check with it, or reintroduces an open redirect.
 
 /// Redirect reconciliation core (spec §1.1). Compare the client's current
 /// redirect_uris against the desired set and return `Some(desired)` only when
