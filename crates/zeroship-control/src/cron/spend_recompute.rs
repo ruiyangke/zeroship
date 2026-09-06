@@ -661,9 +661,9 @@ mod live_db_tests {
         let name = format!("{label}-{}", Uuid::new_v4());
         client
             .query(
-                "INSERT INTO zeroship.apps (name, plan_id, api_key) \
-                 VALUES ($1, $2, $3, '') RETURNING id",
-                &[&name, &plan_id, &Uuid::new_v4().to_string()],
+                "INSERT INTO zeroship.apps (name, plan_id) \
+                 VALUES ($1, $2) RETURNING id",
+                &[&name, &plan_id],
             )
             .await
             .expect("insert app")[0]

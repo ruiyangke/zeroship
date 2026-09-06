@@ -116,8 +116,8 @@ impl ConsentTestApp {
 
             let app_name = format!("consent-app-{}", seed_app_id.simple());
             pg.execute(
-                "INSERT INTO zeroship.apps (id, name, plan_id, api_key) \
-                 VALUES ($1, $2, $3, 'test-key')",
+                "INSERT INTO zeroship.apps (id, name, plan_id) \
+                 VALUES ($1, $2, $3)",
                 &[&seed_app_id, &app_name, &plan_id],
             )
             .await

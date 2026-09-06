@@ -143,7 +143,6 @@ async fn insert_app(
     system: bool,
     created_age: &str,
 ) {
-    let api_key = format!("k-{}", id.simple());
     // plan_id is an FK into zeroship.plans — use the built-in free-plan
     // catalog id (seeded by `seed_plans` in the test setup).
     let free = zeroship_control::plan_catalog::free_plan_id();
@@ -151,10 +150,10 @@ async fn insert_app(
         .control_pg
         .execute(
             &format!(
-                "INSERT INTO zeroship.apps (id, name, plan_id, api_key, system, created_at) \
-                 VALUES ($1, $2, $5, $3, $4, NOW() - INTERVAL '{created_age}')"
+                "INSERT INTO zeroship.apps (id, name, plan_id, system, created_at) \
+                 VALUES ($1, $2, $4, $3, NOW() - INTERVAL '{created_age}')"
             ),
-            &[id, &name, &api_key, &system, &free],
+            &[id, &name, &system, &free],
         )
         .await
         .expect("insert app");
