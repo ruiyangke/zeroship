@@ -33,8 +33,8 @@ fn is_authorized_anywhere_with_app_membership_reads_uuid_app_id() {
         .await
         .expect("insert user");
         pg.execute(
-            "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) VALUES ($1, $2, $3, $4)",
-            &[&app_uuid, &app_name, &"test-api-key", &"test-api-key-hash"],
+            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3)",
+            &[&app_uuid, &app_name, &"test-api-key"],
         )
         .await
         .expect("insert app");

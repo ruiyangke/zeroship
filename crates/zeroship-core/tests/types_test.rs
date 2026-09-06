@@ -72,7 +72,6 @@ fn route_entry_roundtrip() {
     let entry = RouteEntry {
         name: "my-app".to_string(),
         plan_id: "pro".to_string(),
-        api_key_hash: "deadbeef".repeat(8),
         deploy_hash: Some("abc123".to_string()),
         manifest: Manifest::passthrough(),
         oauth_client_id: Some("oac_myapp".to_string()),
@@ -111,7 +110,6 @@ fn route_entry_oauth_fields_none_round_trip() {
     let entry = RouteEntry {
         name: "unprovisioned".to_string(),
         plan_id: "free".to_string(),
-        api_key_hash: "h".to_string(),
         deploy_hash: None,
         manifest: Manifest::passthrough(),
         oauth_client_id: None,
@@ -134,7 +132,6 @@ fn route_entry_missing_manifest_field_synthesizes_passthrough() {
     let json = r#"{
         "name": "legacy-app",
         "plan_id": "free",
-        "api_key_hash": "h",
         "deploy_hash": null
     }"#;
     let decoded: RouteEntry = serde_json::from_str(json).unwrap();
@@ -200,7 +197,6 @@ fn route_entry_mixed_default_deserializes() {
     let json = r#"{
         "name": "mixed-default-app",
         "plan_id": "free",
-        "api_key_hash": "h",
         "deploy_hash": null
     }"#;
     let decoded: RouteEntry = serde_json::from_str(json).unwrap();

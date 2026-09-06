@@ -739,7 +739,7 @@ async fn seed_app(client: &compio_postgres::Client) -> Uuid {
         .expect("seed plan");
     client
         .query(
-            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
+            "INSERT INTO zeroship.apps (name, plan_id, api_key) \
              VALUES ($1, $2, $3, '') RETURNING id",
             &[
                 &format!("f1-{}", Uuid::new_v4().simple()),

@@ -3805,8 +3805,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         // makes all but the first fail on contact.
         let app_name = format!("worker-workflow-test-app-{app_id}");
         conn.execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash, workflows_enabled) \
-             VALUES ($1, $3, $2, 'worker-test-key', '', true) \
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, workflows_enabled) \
+             VALUES ($1, $3, $2, 'worker-test-key', true) \
              ON CONFLICT (id) DO UPDATE SET plan_id = EXCLUDED.plan_id, workflows_enabled = true",
             &[app_id, &WORKFLOW_TEST_PLAN, &app_name],
         )

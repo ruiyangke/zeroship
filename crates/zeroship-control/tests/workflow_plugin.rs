@@ -211,8 +211,8 @@ async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
     let app_name = format!("wf-plugin-{}", Uuid::new_v4().simple());
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash, workflows_enabled) \
-             VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash', true)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, workflows_enabled) \
+             VALUES ($1, $2, $3, 'test-api-key', true)",
             &[
                 &app_id,
                 &app_name,

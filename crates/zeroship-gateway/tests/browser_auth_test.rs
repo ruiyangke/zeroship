@@ -232,7 +232,6 @@ fn build_route_map(provisioned: bool) -> zeroship_core::types::RouteMap {
         RouteEntry {
             name: APP_NAME.into(),
             plan_id: "free".into(),
-            api_key_hash: String::new(),
             deploy_hash: None,
             manifest: zeroship_bundle::Manifest::passthrough(),
             oauth_client_id: provisioned.then(|| CLIENT_ID.to_string()),

@@ -248,8 +248,8 @@ seed_creator() {
   psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { echo "FAILDB"; return 1; }
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$creator', 'demo-$label-$creator@zeroship.test'::citext, 'Demo $label creator', NOW());
-INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash)
-VALUES ('$app', 'demo-$label-app', '$plan_id', '$app', '');
+INSERT INTO zeroship.apps (id, name, plan_id, api_key)
+VALUES ('$app', 'demo-$label-app', '$plan_id', '$app');
 INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$app', '$creator', 'owner');
 INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$creator') ON CONFLICT DO NOTHING;
 INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)

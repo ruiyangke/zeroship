@@ -620,7 +620,6 @@ fn build_route_map_for(
         RouteEntry {
             name: app_name.into(),
             plan_id: "free".into(),
-            api_key_hash: String::new(),
             deploy_hash: None,
             manifest: zeroship_bundle::Manifest::passthrough(),
             oauth_client_id: Some(client_id.into()),

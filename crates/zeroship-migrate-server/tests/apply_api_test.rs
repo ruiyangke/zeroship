@@ -338,8 +338,8 @@ async fn seed_app(conn: &Client, app_id: Uuid, owner_id: Uuid) {
     .expect("seed user");
     let name = format!("migrated-{}", app_id.simple());
     conn.execute(
-        "INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash) \
-         VALUES ($1, $2, $3, 'test-api-key', 'test-api-key-hash')",
+        "INSERT INTO zeroship.apps (id, name, plan_id, api_key) \
+         VALUES ($1, $2, $3, 'test-api-key')",
         &[&app_id, &name, &plan_id],
     )
     .await

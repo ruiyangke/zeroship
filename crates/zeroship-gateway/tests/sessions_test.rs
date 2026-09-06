@@ -15,7 +15,40 @@
 
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
-use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, validate, NewSession};
+use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, NewSession};
+
+/// The test's OWN oracle for "is this audit row still live". It replaces the
+/// crate's deleted `sessions::validate`, which nothing in the request path ever
+/// called: revocation is enforced by the per-app family marker the hot path
+/// reads, not by reading this table. Keeping the read here keeps the assertion
+/// that a revoke really wrote `revoked_at` without keeping a production-facing
+/// function that reads like the gate and is not one.
+///
+/// Unlike the deleted function this is a pure SELECT: nothing slides
+/// `idle_expires_at` any more, so nothing here should either.
+async fn live_session(
+    client: &compio_postgres::Client,
+    id: Uuid,
+    app_id: Uuid,
+) -> Option<compio_postgres::Row> {
+    client
+        .query(
+            "SELECT id, user_id, app_id, email::text AS email, name, avatar_url, \
+                    email_verified, granted_scopes, auth_time, amr, sid, \
+                    idle_expires_at, abs_expires_at \
+             FROM zeroship.gateway_sessions \
+             WHERE id = $1 \
+               AND app_id = $2 \
+               AND revoked_at IS NULL \
+               AND idle_expires_at > NOW() \
+               AND abs_expires_at > NOW()",
+            &[&id, &app_id],
+        )
+        .await
+        .expect("read gateway_sessions row")
+        .into_iter()
+        .next()
+}
 
 #[compio::test]
 async fn create_validate_revoke_roundtrip() {
@@ -76,48 +109,49 @@ async fn create_validate_revoke_roundtrip() {
     );
     assert_eq!(session.amr, vec!["pwd".to_string()], "amr must round-trip");
 
-    // Sliding-window assertion: validate must return Some immediately
-    // after creation, and the returned idle_expires_at should be
-    // >= the value we got from create() (NOW() advanced between the
-    // two statements, so the inequality is non-strict).
-    let valid = validate(&mut client, session.id, app_id)
+    // The row is live immediately after creation, and its idle window is the
+    // one `create` stamped. NOTHING SLIDES IT: the read-and-slide function this
+    // test used to call is deleted, so equality here is the assertion, not the
+    // `>=` a sliding window would need.
+    let live = live_session(&client, session.id, app_id)
         .await
-        .expect("validate");
-    let valid = valid.expect("session must validate immediately after creation");
-    assert!(
-        valid.idle_expires_at >= session.idle_expires_at,
-        "validate must slide idle_expires_at forward, not backward"
+        .expect("session row must be live immediately after creation");
+    let live_idle: chrono::DateTime<chrono::Utc> = live.get("idle_expires_at");
+    assert_eq!(
+        live_idle, session.idle_expires_at,
+        "the idle window is stamped once at create and never bumped"
     );
-    // validate() returns auth_time/amr off the same row the per-request
-    // projection reads (BFF redesign §2.2 step 5b).
-    assert_eq!(valid.auth_time.map(|t| t.timestamp()), Some(1_700_000_000));
-    assert_eq!(valid.amr, vec!["pwd".to_string()]);
+    // auth_time/amr sit on the same row the per-request projection reads
+    // (BFF redesign §2.2 step 5b).
+    let live_auth_time: Option<chrono::DateTime<chrono::Utc>> = live.try_get("auth_time").ok();
+    assert_eq!(live_auth_time.map(|t| t.timestamp()), Some(1_700_000_000));
+    let live_amr: Vec<String> = live.try_get("amr").unwrap_or_default();
+    assert_eq!(live_amr, vec!["pwd".to_string()]);
 
-    // Wrong app_id → None (defends against confused-deputy across apps
+    // Wrong app_id → no row (defends against confused-deputy across apps
     // sharing the gateway PG instance).
-    let invalid = validate(&mut client, session.id, Uuid::new_v4())
-        .await
-        .expect("validate wrong app");
-    assert!(invalid.is_none(), "app mismatch must fail validation");
+    assert!(
+        live_session(&client, session.id, Uuid::new_v4())
+            .await
+            .is_none(),
+        "app mismatch must not resolve a row"
+    );
 
-    // Wrong session id → None.
-    let bogus = validate(&mut client, Uuid::new_v4(), app_id)
-        .await
-        .expect("validate bogus id");
-    assert!(bogus.is_none(), "unknown id must fail validation");
+    // Wrong session id → no row.
+    assert!(
+        live_session(&client, Uuid::new_v4(), app_id).await.is_none(),
+        "unknown id must not resolve a row"
+    );
 
-    // Revoke (per-app, the only revoke path under RLS) and confirm validate
-    // now returns None.
+    // Revoke (per-app, the only revoke path under RLS) and confirm the row
+    // stops resolving, which is what says `revoked_at` was written.
     let revoked = revoke_app_sessions_for_user(&mut client, app_id, &user_id_text)
         .await
         .expect("revoke");
     assert_eq!(revoked, 1, "exactly the one session for (app_id, user) is revoked");
-    let post_revoke = validate(&mut client, session.id, app_id)
-        .await
-        .expect("validate post revoke");
     assert!(
-        post_revoke.is_none(),
-        "revoked session must not validate"
+        live_session(&client, session.id, app_id).await.is_none(),
+        "a revoked session must not resolve as live"
     );
 
     // Cleanup (best effort — failure here doesn't fail the test).
@@ -151,13 +185,12 @@ async fn insert_app(client: &compio_postgres::Client, app_id: Uuid) {
         .expect("insert free plan");
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, api_key) \
+             VALUES ($1, $2, $3)",
             &[
                 &app_id,
                 &format!("gateway-session-app-{}", app_id.simple()),
                 &format!("api-{app_id}"),
-                &format!("hash-{app_id}"),
             ],
         )
         .await

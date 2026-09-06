@@ -29,9 +29,36 @@ use zeroship_gateway::enforce;
 use zeroship_gateway::idempotency;
 use zeroship_gateway::oidc_rp::{BrokerSecret, BrowserAuthorizeParams, OidcRp, TokenSet};
 use zeroship_gateway::proxy::HashRing;
-use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, validate, NewSession};
+use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, NewSession};
 use zeroship_gateway::sync::RouteCache;
 use zeroship_gateway::{session_token, GateConfig, GateState};
+
+/// The test's own oracle for "is this audit row still live", replacing the
+/// crate's deleted `sessions::validate`. That function had no production
+/// caller: revocation is enforced by the per-app family marker the request path
+/// reads, never by reading this table. A pure SELECT, because nothing slides
+/// `idle_expires_at` any more.
+async fn live_session(
+    client: &compio_postgres::Client,
+    id: Uuid,
+    app_id: Uuid,
+) -> Option<compio_postgres::Row> {
+    client
+        .query(
+            "SELECT id, user_id, app_id, granted_scopes \
+             FROM zeroship.gateway_sessions \
+             WHERE id = $1 \
+               AND app_id = $2 \
+               AND revoked_at IS NULL \
+               AND idle_expires_at > NOW() \
+               AND abs_expires_at > NOW()",
+            &[&id, &app_id],
+        )
+        .await
+        .expect("read gateway_sessions row")
+        .into_iter()
+        .next()
+}
 
 const ISSUER: &str = "https://auth.zeroship.ai/oauth2";
 const REDIRECT_URI: &str = "http://127.0.0.1:9999/__zeroship/auth/callback";
@@ -415,7 +442,6 @@ fn build_gateway_state(
         zeroship_core::types::RouteEntry {
             name: APP_NAME.to_string(),
             plan_id: "free".to_string(),
-            api_key_hash: "unused".to_string(),
             deploy_hash: None,
             manifest,
             oauth_client_id: Some(client_id.to_string()),
@@ -671,13 +697,12 @@ async fn seed_user_client(
     .await
     .expect("seed free plan");
     db.execute(
-        "INSERT INTO zeroship.apps (id, name, api_key, api_key_hash) \
-         VALUES ($1, $2, $3, $4)",
+        "INSERT INTO zeroship.apps (id, name, api_key) \
+         VALUES ($1, $2, $3)",
         &[
             &app_id,
             &format!("gateway-e2e-app-{}", app_id.simple()),
             &format!("api-{app_id}"),
-            &format!("hash-{app_id}"),
         ],
     )
     .await
@@ -1105,20 +1130,21 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     .await
     .expect("session create");
 
-    let validated = validate(&mut sess_client, session.id, app_id)
+    let live = live_session(&sess_client, session.id, app_id)
         .await
-        .expect("validate")
-        .expect("session validates");
-    assert_eq!(validated.user_id, claims.sub);
-    assert_eq!(validated.granted_scopes, granted_scopes);
+        .expect("session row must be live after create");
+    let live_user: Uuid = live.get("user_id");
+    assert_eq!(live_user.to_string(), claims.sub);
+    let live_scopes: Vec<String> = live.try_get("granted_scopes").unwrap_or_default();
+    assert_eq!(live_scopes, granted_scopes);
 
     revoke_app_sessions_for_user(&mut sess_client, app_id, &claims.sub)
         .await
         .expect("revoke");
-    let after_revoke = validate(&mut sess_client, session.id, app_id)
-        .await
-        .expect("validate post-revoke");
-    assert!(after_revoke.is_none(), "session must not validate after revoke");
+    assert!(
+        live_session(&sess_client, session.id, app_id).await.is_none(),
+        "a revoked session must not resolve as live"
+    );
 
     cleanup(&pg_client, user_id, app_id, &client_id).await;
     compio::time::sleep(Duration::from_millis(50)).await;

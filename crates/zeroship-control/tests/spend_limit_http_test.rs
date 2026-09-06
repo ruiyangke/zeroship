@@ -137,7 +137,7 @@ async fn make_app_with_plan_default(
     let app_id: Uuid = state
         .control_pg
         .query(
-            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
+            "INSERT INTO zeroship.apps (name, plan_id, api_key) \
              VALUES ($1, $2, $3, '') RETURNING id",
             &[&format!("sl-{}", Uuid::new_v4()), &plan_id, &Uuid::new_v4().to_string()],
         )

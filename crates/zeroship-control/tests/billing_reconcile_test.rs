@@ -870,7 +870,7 @@ async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     let rows = state
         .control_pg
         .query(
-            "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
+            "INSERT INTO zeroship.apps (name, plan_id, api_key) \
              VALUES ($1, $2, $3, '') RETURNING id",
             &[&name, &plan_id, &Uuid::new_v4().to_string()],
         )
@@ -1746,7 +1746,7 @@ async fn reconcile_groups_apps_by_owner_via_app_members() {
             .state
             .control_pg
             .query(
-                "INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) \
+                "INSERT INTO zeroship.apps (name, plan_id, api_key) \
                  VALUES ($1, $2, $3, '') RETURNING id",
                 &[&name, &plan, &Uuid::new_v4().to_string()],
             )

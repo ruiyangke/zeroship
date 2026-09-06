@@ -2768,11 +2768,11 @@ present avatar to null.
 
 VERIFIED items, each paired with a positive live path or complete scoped search:
 
-- Legacy `check_api_key` has no production caller. `rg 'check_api_key'` finds its
-  definition, a feature-map admission, and tests only
-  (`crates/zeroship-gateway/src/auth.rs:1-27`, `docs/feature-map.md:519`). Gateway's
-  non-JWT bearer fallback explicitly remains reserved and returns 401
-  (`crates/zeroship-gateway/src/router/auth.rs:822-824`).
+- Legacy `check_api_key` had no production caller and is now DELETED, along with
+  the `RouteEntry.api_key_hash` it read and the `zeroship.apps.api_key_hash`
+  column behind it. What it is NOT is the gateway's non-JWT bearer fallback,
+  which explicitly remains reserved and returns 401
+  (`crates/zeroship-gateway/src/router/auth.rs`) — that arm is live and stays.
 - `verification::redeem` consumes without marking verified, while the live UI
   uses `redeem_and_mark_verified`
   (`crates/zeroship-auth/src/identity/verification.rs:127-151`,

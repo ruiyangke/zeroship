@@ -835,8 +835,8 @@ process.stdout.write(String(Math.floor(Date.UTC(y,m,1,0,0,0)/1000)));
 if psql_exec >/dev/null <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CLOSED_CREATOR', 'e2e-closed-$CLOSED_CREATOR@zeroship.test'::citext, 'Closed-Period Creator', NOW());
-INSERT INTO zeroship.apps (id, name, plan_id, api_key, api_key_hash)
-VALUES ('$CLOSED_APP', 'closed-period-app-$CLOSED_APP', '$PLAN_ID', '$CLOSED_APP', '');
+INSERT INTO zeroship.apps (id, name, plan_id, api_key)
+VALUES ('$CLOSED_APP', 'closed-period-app-$CLOSED_APP', '$PLAN_ID', '$CLOSED_APP');
 INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$CLOSED_APP', '$CLOSED_CREATOR', 'owner');
 -- The creator must have a saved platform Stripe Customer or the reconciler skips
 -- them. The customer lives in billing_customer_refs (provider='stripe'); the

@@ -445,10 +445,11 @@ fi
 # SSR was open by design. RPC v1 replaced the key check with the compiled
 # per-resource `EffectivePolicy` (`auth: anonymous|user`), and deleted the
 # only call site. `crates/zeroship-gateway/src/auth.rs::check_api_key` and
-# `RouteEntry.api_key_hash` are still there but nothing calls them
-# (grep: the sole match in non-test gateway code is the definition), so a
-# request carrying a wrong X-Api-Key is not rejected — there is no key gate
-# left to reject it. The old assertions here "passed" regardless: they ran
+# `RouteEntry.api_key_hash` outlived that call site by months, uncalled; both
+# are DELETED as of the auth foundation redesign's first step, so the
+# X-Api-Key headers this harness and its siblings still send are inert
+# residue. A request carrying a wrong X-Api-Key is not rejected — there is no
+# key gate left to reject it. The old assertions here "passed" regardless: they ran
 # `curl -sf ... || echo rejected` and then grepped for "rejected", so any
 # failure — including a gateway that was not running — satisfied them.
 #
