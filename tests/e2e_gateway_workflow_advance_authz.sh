@@ -363,7 +363,7 @@ sleep 3
 # workflow but no default.fetch, so the HTTP code is irrelevant. What matters is
 # that the request reaches the worker (route present). Non-fatal by design.
 WARM_CODE="$(curl -s -o /dev/null -w '%{http_code}' \
-  "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H)"
+  "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/")"
 note "warmup GET /apps/$APP_NAME/ -> HTTP $WARM_CODE (forces route+deploy sync)"
 # Confirm the gateway actually holds a route for this app before the exploit,
 # by checking that C2's negative control (unknown app) differs from a known app.

@@ -1415,7 +1415,7 @@ echo "$INDEX" | grep -qi "<!doctype html" && pass "GET / serves the app index.ht
 # the hashed JS asset referenced by index.html
 ASSET=$(echo "$INDEX" | grep -oE '/assets/[A-Za-z0-9._-]+\.js' | head -1)
 if [ -n "$ASSET" ]; then
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME$ASSET" -H)
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME$ASSET")
   [ "$code" = "200" ] && pass "client JS asset served ($ASSET → 200)" || fail "asset $ASSET → $code"
 fi
 
@@ -1577,13 +1577,13 @@ BODYCAP_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v
 DEV_413=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary "@$BODYCAP_TMP/over1mib.bin" \
   -H 'Content-Type: application/octet-stream' "http://localhost:$DEV_RT_PORT/" 2>/dev/null)
 DEP_1MIB=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary "@$BODYCAP_TMP/over1mib.bin" \
-  -H 'Content-Type: application/octet-stream' -H "$BODYCAP_URL" 2>/dev/null)
+  -H 'Content-Type: application/octet-stream' "$BODYCAP_URL" 2>/dev/null)
 
 # POSITIVE CONTROL for the deployed leg: the SAME url with a tiny body. Without
 # it, a 404/500 from a broken route would make the size verdict below read as a
 # pass, which is the trap the $APP_ID version fell into.
 DEP_OK=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary '{"json":{}}' \
-  -H 'Content-Type: application/json' -H "$BODYCAP_URL" 2>/dev/null)
+  -H 'Content-Type: application/json' "$BODYCAP_URL" 2>/dev/null)
 
 echo "    body cap: dev(1MiB+1) -> $DEV_413   deployed(1MiB+1) -> $DEP_1MIB   deployed(tiny) -> $DEP_OK"
 
@@ -1624,11 +1624,11 @@ echo "    body cap: dev(1MiB+1) -> $DEV_413   deployed(1MiB+1) -> $DEP_1MIB   de
 # resource arm, not this one.
 head -c 4194305 /dev/zero | tr '\0' 'a' > "$BODYCAP_TMP/over4mib.bin"
 DEP_4MIB=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary "@$BODYCAP_TMP/over4mib.bin" \
-  -H 'Content-Type: application/octet-stream' -H "$BODYCAP_URL" 2>/dev/null)
+  -H 'Content-Type: application/octet-stream' "$BODYCAP_URL" 2>/dev/null)
 DEP_4MIB_BODY=$(curl -s -X POST --data-binary "@$BODYCAP_TMP/over4mib.bin" \
-  -H 'Content-Type: application/octet-stream' -H "$BODYCAP_URL" 2>/dev/null | head -c 120)
+  -H 'Content-Type: application/octet-stream' "$BODYCAP_URL" 2>/dev/null | head -c 120)
 DEP_1MIB_BODY=$(curl -s -X POST --data-binary "@$BODYCAP_TMP/over1mib.bin" \
-  -H 'Content-Type: application/octet-stream' -H "$BODYCAP_URL" 2>/dev/null | head -c 120)
+  -H 'Content-Type: application/octet-stream' "$BODYCAP_URL" 2>/dev/null | head -c 120)
 
 echo "    body cap: deployed(4MiB+1) -> $DEP_4MIB  body=[$DEP_4MIB_BODY]"
 echo "    body cap: deployed(1MiB+1) body=[$DEP_1MIB_BODY]"
@@ -2220,14 +2220,14 @@ fi
 # Runs LAST because it stops the worker.
 step 8 "Deployed tier: the same RPC when the app's runtime is unavailable"
 DEP_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages"
-DEP_OK_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$DEP_URL" -H)
+DEP_OK_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$DEP_URL")
 # Kill the worker BY PID. Freeing the port by listener is the safer idiom for
 # dev ports, but here the gateway is a CLIENT of this port and an over-broad
 # match takes it down too -- which replaces the platform's answer with a
 # connection failure and makes this step measure nothing.
 kill -9 "$WORKER_PID" 2>/dev/null || true
 sleep 3
-DEP_DOWN_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$DEP_URL" -H)
+DEP_DOWN_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$DEP_URL")
 DEP_DOWN_BODY=$(curl -s -m 10 "$DEP_URL" 2>/dev/null)
 echo "    deployed, worker up   : HTTP $DEP_OK_CODE"
 echo "    deployed, worker down : HTTP $DEP_DOWN_CODE  body: ${DEP_DOWN_BODY:0:160}"
@@ -2724,7 +2724,7 @@ else
 fi
 
 DB9_BASE="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$DB9_APP"
-db9_call() { curl -sS -m 10 -X POST -H 'content-type: application/json' -H "$DB9_BASE/__zeroship/v1/$1" -d "{\"json\":$2}"; }
+db9_call() { curl -sS -m 10 -X POST -H 'content-type: application/json' "$DB9_BASE/__zeroship/v1/$1" -d "{\"json\":$2}"; }
 
 DEP_INSERT_VERDICT="not-run"
 DEP_JOIN_VERDICT="not-run"
