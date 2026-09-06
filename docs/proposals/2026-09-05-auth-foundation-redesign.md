@@ -94,6 +94,13 @@ powerful symmetric key, which is exactly why `workflow_advance_internal` in
 carries `TODO(DW-signed-transport)`, and then signs the worker hop with
 `worker_key`.
 
+**Read the uniformity as the defect, not as the remedy.** What is wrong is that
+every hop borrows the SAME root, not that every hop needs the same credential
+profile. Those are different claims, and only the first is established by the
+evidence above. Carried into section 8 unqualified, this paragraph reads as
+licence for one credential shape everywhere, and section 8 records what that
+reading produced.
+
 **P4. There is no session or grant object, so teardown is a hand-written
 enumeration over stores, re-derived per event.** Correctness of a teardown is a
 property of the author's enumeration at the time of writing, so every new
@@ -494,7 +501,8 @@ Each row answers: what distinction does it carry, and what enforces it?
 |---|---|---|---|
 | **Session secret** `zss_` | opaque CSPRNG, stored as versioned keyed HMAC on the session row, rotates on use with reuse detection | this browser or device is this session | the validating UPDATE on `zeroship.sessions`; reuse kills the row |
 | **Access assertion** | Ed25519 JWT, `typ: zs-access+jwt`, claims `iss, aud, sub, sid, epoch, iat, exp, scopes, amr, auth_time` plus profile projection | hot-path presentation with no database read; `aud` separates Platform from `Project(pid)` | local signature plus `aud` equality; `sid` and `epoch` are the revocation handles |
-| **Service assertion** | the existing `crates/zeroship-core/src/service_assertion.rs`: per-service Ed25519, `svc-assertion+jwt`, mandatory single-use `jti` | which *service* is calling | peer JWKS by `kid` plus the replay store in `crates/zeroship-authn/src/service_replay.rs` |
+| **Service assertion, full profile** | the existing `crates/zeroship-core/src/service_assertion.rs`: per-service Ed25519, `svc-assertion+jwt`, mandatory single-use `jti` | which *service* is calling, on an edge that must also be unreplayable | peer JWKS by `kid` plus the replay store in `crates/zeroship-authn/src/service_replay.rs` |
+| **Service assertion, transport only** | the same per-service Ed25519 keypair, the same `svc-assertion+jwt` shape and the same `kid` resolution against the same peer JWKS, with no `jti` claimed and no store consulted | which *service* is calling | peer JWKS by `kid` |
 | **Identity envelope** `ZeroShip-User` | JSON plus signature, bound to the dispatch request id and an issuance window | gateway-asserted end-user identity on the worker hop | the gateway's Ed25519 private key, verified under its public half |
 | **Flow envelope** `__Host-zs_flow` | HMAC, purpose-tagged, `iat`/`exp` inside the payload | this browser started this flow | one decode with constant-time compare and server-side expiry |
 | **One-time secret** | CSPRNG, hashed at rest, purpose-tagged row | which flow may redeem it | the consume UPDATE's `WHERE purpose = $2 AND consumed_at IS NULL AND expires_at > now()` |
@@ -502,6 +510,27 @@ Each row answers: what distinction does it carry, and what enforces it?
 | **Credential epoch / session epoch** | not credentials, columns | everything issued before this moment is void | the join in every session validate |
 
 That is the entire inventory. Everything else in the tree is deleted or merged.
+
+**Why the service assertion is inventoried as distinct profiles rather than as
+one credential.** The single-use claim is not free and is not local: the module
+doc of `crates/zeroship-core/src/service_assertion.rs` describes it as an atomic
+put-if-absent into a store shared by every replica of the callee, and the
+statement that performs it is in `crates/zeroship-authn/src/service_replay.rs`.
+So an edge carrying the full profile pays a shared-store WRITE per call, and the
+write is on the request's critical path because the claim must win before the
+call is admitted. That cost buys unreplayability and is worth spending where an
+edge needs it. It must be chosen per edge and never inherited by default, which
+is what a single row would have caused: section 8 assigns each edge its profile
+by call rate, and section 11 records what the unsplit row produced before this
+revision. The `kid` resolution, the trust bundle and the keypair are the same
+under each profile, so a peer that can verify one can verify the other.
+
+**The identity envelope's binding is why the dispatch hop can take the
+transport-only profile.** Binding the envelope to the dispatch request id and to
+an issuance window is itself a replay bound on that hop: an envelope replayed
+outside its window or against a different request id does not verify. That is a
+design decision recorded here, not a caveat - F5 in section 6 states the same
+premise from the fence side, and section 8's dispatch tier depends on it.
 
 **The cookie split at an app origin survives the merge prior.**
 `__Host-zs_session` (HttpOnly, Secure, SameSite=Strict, long) carries the session
@@ -589,6 +618,39 @@ adds recency and applies no age filter. One feed with a cursor and a fail-closed
 bound has each property and needs no ordering coincidence between separate
 literals.
 
+### 3.6 The network premise, and the half it does not buy
+
+**Stated operator premise:** the platform's own services run inside a private
+network. Nothing in this design derives a security property from that premise
+without saying so here.
+
+**What the premise buys.** Confidentiality on internal hops does not require
+mutual TLS, and replay protection is unnecessary on the dispatch hop. Record
+what dropping mTLS actually is, so a later reader does not file it as a flag
+somebody declined to set: neither `crates/zeroship-gateway/Cargo.toml` nor
+`crates/zeroship-worker/Cargo.toml` declares rustls. Each reaches TLS only
+transitively, through the `cyper` feature selection in the root `Cargo.toml`. So
+mutual TLS between those processes would be new transport work in each crate,
+not configuration, and the premise is what makes not doing that work legitimate.
+
+**What the premise does NOT buy, and this is the load-bearing half.** A private
+network treats every process inside it as equally trusted. `zeroship-worker`
+executes arbitrary creator code and is inside the perimeter by construction, so
+the perimeter's trust assumption is false for the one process whose code the
+platform does not write. The boundary that matters is therefore
+worker-to-everything, and the network does not hold it. What holds it is
+`crates/zeroship-runtime/src/transport/ssrf.rs`: `validate_url` fences at the
+string level, `SsrfResolver` fences at the DNS level after resolution, and each
+consults `is_blocked_ip` through `is_blocked_ip_under_dev` so the blocklist has
+a single source of truth rather than a copy per layer.
+
+**So internal auth still has a job under the premise.** The job is stopping a
+compromised worker from impersonating the gateway to auth or to control. That
+job needs asymmetric keys - a credential the worker verifies but cannot mint -
+which is step 3. It does not need replay defence, because impersonation is a
+forgery question and not a repetition question. The premise narrows what
+internal auth is FOR; it does not remove it.
+
 ---
 
 ## 4. The flows
@@ -658,6 +720,7 @@ BROWSER (app origin)          GATEWAY (app origin)            AUTH (auth origin)
                                      read __Host-zs_flow, check nonce
                                      POST auth /internal/session/bootstrap
                                        Authorization: svc-assertion+jwt
+                                         FULL PROFILE - rate: per login
                                        body {code, nonce}
                                      --------------------------------->
                                                                     [8] verify the service
@@ -681,6 +744,14 @@ BROWSER (app origin)          GATEWAY (app origin)            AUTH (auth origin)
 The landing code is bound to an HttpOnly, origin-locked nonce cookie the page
 cannot read. That is a stronger binding than a `sessionStorage` verifier and it
 needs no HMAC key at the edge and no server-side stash.
+
+Step [8]'s mechanism is unchanged by the profile split and keeps the single-use
+`jti`. The rate is what makes it affordable, so the rate is written at the step
+rather than left to be inferred: this edge fires per login, so its store write is
+proportional to logins. Note also, for the route census in F6 and for the set
+discussion in step 2, that `/internal/session/bootstrap` is an `/internal/`
+route on the AUTH service. The prefix spans services, so a census taken over the
+control plane alone does not see this route at all.
 
 The top-level redirect leg differs only in [1] and [9]: a full-page 302 rather
 than a popup, landing on the original path instead of posting a message. **It
@@ -708,11 +779,25 @@ Steady state, every dispatched request, with no database read in any process:
                                --> WORKER
                                      verify the envelope under the GATEWAY PUBLIC
                                        key (a key the worker cannot mint with)
-                                     verify the transport under the same JWKS
+                                     verify the transport under the same JWKS,
+                                       SIGNATURE ONLY: no jti, no replay store
                                      own feed check, independently
                                      policy::enforce BEFORE the isolate lease
                                      --> creator code, env.auth principal
 ```
+
+**The transport credential on that hop is signature only, and the block above is
+why.** A single-use `jti` is a WRITE into the store shared by every replica of
+the callee, so claiming one here would put a shared-store write on the
+per-request path and contradict this block's own "no database read in any
+process" in the more expensive direction. Note the asymmetry that makes the
+substitution unavailable: a read can be cached, or served from a replica; a
+single-use claim cannot be cached, because caching it is exactly what defeats
+the property it exists for. The replay bound this hop needs is already supplied
+by the identity envelope's request-id and issuance-window binding, per 3.3.
+Signature only is the floor here, not an option - a credential-free hop would
+leave the worker accepting any caller that can reach it, and section 6's F5 has
+nothing to present.
 
 Refresh, the only path that touches the database:
 
@@ -746,6 +831,15 @@ Refresh, the only path that touches the database:
 Note what is absent: no anchor, no marker consulted, no `rotation_started_at`
 comparison, no rows-affected gate after the fact. There is one read, it is the
 authority, and the mint is downstream of it.
+
+**The rate on the gateway-to-auth leg of that block is per refresh, so per
+session per access-assertion TTL, and it carries the full profile.** That makes
+it the highest-rate full-profile edge this design ships, and it is the one place
+the assertion TTL leaves operations and enters the store's load budget. Open
+decision 4 describes that TTL as the mint-load and partition-tolerance knob; it
+is also the replay-store write-rate knob, and shortening it to buy recency buys
+store writes at the same ratio. Read those effects together when the value is
+chosen.
 
 Note also what the same read does with the suspension: the account predicate is
 person-scoped and the status predicate is audience-scoped, and they are in ONE
@@ -901,6 +995,16 @@ Columns: **A** platform session secret. **B** project session secret.
 Where `W = min(the access-assertion TTL, the revocation feed staleness budget
 plus one poll interval)`.
 
+**Column F covers each service-assertion profile, and the split in 3.3 leaves
+its row unchanged.** Recall is the assertion lifetime plus the `kid` leaving the
+peer JWKS under either profile, because that is what the key withdrawal acts on.
+State the negative explicitly, because the row invites an improvement that would
+be false: **the replay store is not a revocation lever.** It refuses a repeated
+`jti` and says nothing whatsoever about a withdrawn key, so adding it to this row
+while tiering the profiles would claim a property it does not have and would make
+the full-profile edges look recallable faster than the transport-only ones. They
+are not.
+
 **The suspend rows follow decision D-E, and no row here is provisional.** Column A
 is the platform session - the person's own deploy authority - and column B is the
 project session, the person as an end user. A suspension in a project touches
@@ -1041,7 +1145,12 @@ configured gateway public key the worker refuses to start.
 
 *Mechanism:* the transport is a service assertion verified under the caller's
 published key; the identity is verified under the OP's published key. Neither
-private half is in the worker, and neither is the other.
+private half is in the worker, and neither is the other. **On the dispatch hop
+the transport rides the transport-only profile of 3.3** - signature verified
+under the peer JWKS, no `jti` claimed. Signature only, never credential-free:
+the red test below has to present a transport credential, so a hop with no
+transport credential makes this fence unwritable and leaves the worker accepting
+any caller that reaches it.
 
 *Red:* a test presenting a valid transport credential together with an identity
 envelope signed by the transport key, asserting refusal. When this passes, the
@@ -1050,30 +1159,66 @@ rustdoc on `encode_user_header` becomes accurate and
 request-id and issuance-window binding still buys is replay bounding; say only
 that.
 
-**F6. Every internal endpoint has a caller check.**
+**F6. Every internal edge has a peer-verified caller check, and the profile is
+chosen by rate.**
 
-*Mechanism:* service assertions with single-use `jti` on `/internal/*`, on the
-gateway-to-worker hop, and on `workflow_advance_internal`.
+*Title note:* this fence used to be titled "every internal endpoint", and the
+mechanism reached the gateway-to-worker hop. That hop is not an internal
+endpoint - it is the app data path - so the old title contradicted the old
+mechanism, and one of them had to be wrong. The edge is what the fence ranges
+over.
 
-*Red:* a route census arm enumerating every registered route on every service
-from its router builder and requiring each to name a guard. This is the family
-instrument, not the instance fix - `workflow_advance_internal` is the instance,
-and the tree already has a harness that drives it,
-`tests/e2e_gateway_workflow_advance_authz.sh`, whose exploit arm must flip from
-advance to refusal.
+*Mechanism:* peer-verified asymmetric transport on every internal edge, with the
+single-use `jti` claimed only where the call rate is proportional to app loads
+or control-plane events rather than to end-user traffic. Step 2 in section 8
+assigns each edge its profile and states the rate the assignment rests on.
+
+*Red:* a route census arm enumerating every registered route on every service and
+requiring each to name a guard **of the right kind**. What makes the arm bind
+rather than decorate:
+
+- It rules on the guard KIND per route, not merely that a guard is named. An arm
+  satisfied by the existence of a guard passes a route wearing a shared bearer,
+  which is exactly what `check_auth` in
+  `crates/zeroship-control/src/internal.rs` is today - so the arm would print
+  full coverage over the defect this design exists to remove.
+- It reads every router builder on a service, not one. At control the
+  `/internal/` prefix is registered in `crates/zeroship-control/src/main.rs` AND
+  by `configure` in `crates/zeroship-control/src/workflow_instance_api.rs`, which
+  is where `/internal/workflows/signals/ingress` lives; the auth service has its
+  own builder carrying `/internal/session/bootstrap`, per 4.1. An arm written
+  against one builder per service sees neither route and prints exactly what full
+  coverage prints.
+
+This is the family instrument, not the instance fix -
+`workflow_advance_internal` is the instance, and the tree already has a harness
+that drives it, `tests/e2e_gateway_workflow_advance_authz.sh`, whose exploit arm
+must flip from advance to refusal. That arm exercises the CALLER-side check, so
+it flips only if the guard lands on that handler's inbound edge; see step 2 for
+why the handler's inbound and forwarding edges take different profiles.
 
 **F7. The worker cannot read another app's decrypted environment by credential.**
 
-*Mechanism:* control decides. The worker presents a service assertion naming
-itself plus an app id; control checks its own placement view - which the worker
-cannot write - that the app is assigned to that node. The narrowing is computed
-by the party that is not being narrowed.
+*Mechanism:* control decides, and what it hands over is a LEASE. The worker
+presents only its own service identity; control consults its own placement view -
+which the worker cannot write - and issues the environment for an app only if
+that app is assigned to that node. The narrowing is computed by the party that is
+not being narrowed. The lease is scoped to the app it names and bounded in time.
 
-*Red:* an integration arm in which node N presents a valid assertion for an app
-assigned elsewhere and receives a refusal. Impossible to write today, because the
-worker holds `control_key` and every env request succeeds. Enumerate every
-enforcement point before treating one mutation as refuting the guard: the
-placement equality and the `jti` single-use. Bounded honestly by G7.
+*Red:* an integration arm in which node N holds a valid service identity and the
+app is assigned elsewhere, and the environment is refused. Impossible to write
+today, because the worker holds `control_key` and every env request succeeds.
+
+*Enumerate every enforcement point before treating one mutation as refuting the
+guard, and note that the enumeration is direction-independent by construction.*
+The **placement equality** is the invariant whichever way the lease travels - it
+is the fence, and it is present under a pulled lease and under a pushed one. The
+**`jti` single-use** rides whichever direction carries the request, so which
+process presents the assertion follows from step 4's open lease-direction
+question rather than being fixed here. Do not read this entry as presuming the
+worker presents an app id; under a pushed lease that presentation does not
+happen, and an enumeration written around it would name an enforcement point the
+chosen direction does not have. Bounded honestly by G7.
 
 **F8. A revoked session cannot be presented after `W`, and cannot be re-minted at
 all.**
@@ -1503,18 +1648,40 @@ such a configuration.
 
 ### 7.4 Shared symmetric roots
 
+**Each deletion below names its replacement.** A deletion list that says what
+goes and not what arrives is how a hop ends up unauthenticated between steps,
+with the deletion section and the sequence section each looking correct on its
+own.
+
 - `control_key`: `check_auth` in `crates/zeroship-control/src/internal.rs`, the
   worker's use, the gateway setting, and the environment twin.
+  *Replaced by:* the full profile on the privileged control routes, plus the
+  lease inversion in step 4 for the environment specifically.
 - `worker_key`: `check_worker_auth` and `verified_user_json` in
   `crates/zeroship-worker/src/handler.rs`, the settings on gateway, worker and
   control, and the environment twin.
+  *Replaced by:* on the dispatch hop, the transport-only peer credential of 3.3
+  for `check_worker_auth`'s job, and the asymmetric `ZeroShip-User` envelope of
+  step 3 for `verified_user_json`'s job. Those are separate replacements for
+  separate jobs, which is the whole content of F5.
 - `derive_app_scoped_control_token` and `verify_app_scoped_control_token` in
   `crates/zeroship-core/src/auth/mod.rs`, and the bespoke HMAC arm of
   `check_app_scoped_auth` in
   `crates/zeroship-control/src/workflow_instance_api.rs`.
+  *Replaced by:* the placement decision in step 4. A narrowing computed by the
+  narrowed party is replaced by a decision taken by the other party, not by
+  another derivation.
 - The unauthenticated arm and its `TODO(DW-signed-transport)` in
   `crates/zeroship-gateway/src/router/dispatch.rs`, and
   `workflow_advance_unsigned` on the worker.
+  *Replaced by, and the edges take different profiles:* the INBOUND edge of
+  `workflow_advance_internal` - which is where that `TODO` sits, and which checks
+  no caller credential at all today - takes the full profile, because its rate is
+  per advance. Its OUTBOUND leg is the ordinary dispatch hop: the handler
+  forwards through `proxy::forward_workflow_advance` over the hash ring, signing
+  with `worker_key` today, and it takes the transport-only profile like every
+  other dispatch. Applying one sentence to the handler rather than to its edges
+  re-imports the store write onto the forwarding path.
 - The `ZeroShip-User` HMAC family in `crates/zeroship-core/src/auth/mod.rs`,
   replaced by Ed25519. `derive_pairwise`, `derive_pairwise_salt`,
   `constant_time_eq` and `extract_bearer` are KEPT.
@@ -1591,6 +1758,21 @@ such a configuration.
   `crates/zeroship-authn/src/service_replay.rs` are NOT deleted. They are wired.
   Do not invent a fourth HMAC scheme. **Their backing table is already
   provisioned** - see section 11.
+- **The replay store is wired on the full-profile edges only.** Which edges those
+  are is section 8's step 2, and the reason is the store write it costs per call.
+- **The transport-only profile is a CODE CHANGE to
+  `crates/zeroship-core/src/service_assertion.rs`, not a wiring choice, and the
+  obvious implementation is the one that module was written against.** Its own
+  doc states that every check is a hard rejection, with no warn-and-continue arm
+  and no configuration that turns one off, citing CVE-2020-15222 and the Keycloak
+  `cache-embedded-mtls-enabled` case where an optional hardening flag silently did
+  nothing across version lines. So the variant ships as a separately NAMED profile
+  with its own verifier entry point, on the same Ed25519 mechanism and the same
+  peer JWKS - never as a flag on the existing verifier, because a flag is
+  precisely the failure that module exists to refuse, and a flag would weaken
+  every edge that keeps the full profile. The instruction above not to invent
+  another HMAC scheme still binds and is not weakened by this: the mechanism is
+  unchanged, only the claim set differs.
 - `users.account_status` and `grants.subject_status` each get a production writer.
 - The manifest refusal for `Anonymous` carrying scopes gets built.
 
@@ -1618,25 +1800,117 @@ key-shaped column and that the returned record round-trips, so nothing is being
 withheld from the response - plus a gate arm refusing a plaintext secret column
 stored beside its own hash. No premise.
 
-**Step 2. Wire service assertions on every internal edge.** `/internal/*` at
-control, the gateway-to-worker hop, and `workflow_advance_internal`. Land the
-route census arm (F6) in the same change.
+**Step 2. Wire peer-verified service identity on every internal edge, with the
+profile chosen by RATE rather than by URL prefix.** Land the route census arm
+(F6) in the same change.
+
+The tiers, and the measured rate each rests on:
+
+- **DISPATCH - the gateway-to-worker hop, per request.** Asymmetric signature
+  only: the transport-only profile of 3.3, no `jti`, no shared store, ever. The
+  replay property is not what that hop needs, and the identity envelope is
+  already bound to the dispatch request id and an issuance window. This tier is
+  what keeps 4.1's steady-state block true.
+- **POLLED - `/internal/routes` per poll per gateway, `/internal/versions` per
+  poll per worker.** These sit on a replacement path owned by
+  `docs/proposals/2026-09-05-app-metadata-distribution.md`, whose shape is not
+  settled there and which that document does not describe as a deletion of these
+  endpoints. **Step 2 therefore specifies no credential profile for them and
+  depends on none.** Whatever survives that work inherits the POLLED reasoning:
+  the rate is per poll per process, so a single-use claim is proportional to
+  pollers rather than to traffic, and the tier is affordable if it is still
+  needed at all.
+- **RARE AND PRIVILEGED - the full profile, signed plus single-use `jti`.**
+  `/internal/apps/{app_id}/env` is the privileged one and fires per app load:
+  `load_on_demand` in `crates/zeroship-worker/src/handler.rs` reaching
+  `fetch_app_env` in `crates/zeroship-worker/src/sync.rs`, plus a refetch on a
+  version change during reconcile. `/internal/apps/{app_id}` is the same rate,
+  through `fetch_app_version`. `/internal/workflows/signals/ingress` is per
+  signal. `workflow_advance_internal`'s INBOUND edge is per advance, and it
+  checks no caller credential at all today - the `TODO(DW-signed-transport)` in
+  `crates/zeroship-gateway/src/router/dispatch.rs` sits inside that handler. The
+  handler's outbound leg is the dispatch hop and takes the dispatch tier; see
+  7.4.
+
+Store writes are then proportional to app loads, signals and advances rather
+than to end-user traffic.
+
+**What step 2 still owes the dispatch hop.** Only the `jti` and replay half
+leaves that hop; the key-distribution half stays here and is what step 3
+consumes: enrolling the gateway's public key with the worker, resolving it by
+`kid`, and rotating it. Read the tiering as removing a claim from that hop, never
+as removing the hop from this step - step 3's premise and F4's "absent a
+configured gateway public key the worker refuses to start" have no supplier
+otherwise.
+
 *Premise:* the replay store's backing table is provisioned - it is; see section
 11 - and the assertion round-trip test in `crates/zeroship-core/tests/` is green.
 *Red test:* `tests/e2e_gateway_workflow_advance_authz.sh`'s exploit arm flips
 from advance to refusal, and a control test refusing a shared-secret bearer on
 the environment endpoint.
 
+**What "every internal edge" does NOT range over, and why the URL prefix is the
+wrong census.** Of the routes registered under `/internal/` at control in
+`crates/zeroship-control/src/main.rs`: the polled ones are on the replacement
+path above. Workflow-advance is not among them at all - it is registered at the
+GATEWAY, under `/__zeroship/internal/workflow-advance` in
+`crates/zeroship-gateway/src/router/dispatch.rs`, and it is a proxy rather than
+an API, so it is inventoried by edge above and in 7.4. That is the prefix
+spanning services again, in the other direction from
+`/internal/session/bootstrap` at auth. `/internal/billing/reconcile` and
+`/internal/spend/reconcile` are cron triggers exposed as HTTP; they are named
+here as OUT OF SCOPE for step 2 rather than redesigned, because what they need is
+a decision about how cron reaches a service, and this step is not the place to
+take it. And `/internal/webhooks/stripe` is **externally reachable and
+Stripe-signed**: it is registered in the same `/internal/` block, but its guard
+is `verify_stripe_signature` in
+`crates/zeroship-control/src/stripe_handlers.rs`, not `check_auth` in
+`crates/zeroship-control/src/internal.rs`. It is on the internal prefix and it is
+not internal. **Note the misplacement explicitly**, because anyone writing a
+network policy or a firewall rule off that prefix gets it wrong in the direction
+that breaks Stripe delivery. Do not move that route here, and do not extend the
+service assertion to it: implemented as "also accept a service assertion", that
+sentence adds an additional accepted credential to an externally reachable
+route, which is worse than the delivery outage it was trying to avoid.
+
 **Step 3. Make the identity envelope asymmetric.** The gateway signs with its own
 Ed25519 private key; the worker verifies under the public half; the empty-key
 escape is deleted and a missing public key refuses startup.
-*Premise:* step 2, for peer key distribution.
+*Premise:* step 2, for peer key distribution - specifically the enrolment of the
+gateway's public key with the worker, its resolution by `kid`, and its rotation.
+Step 2's dispatch tier drops the `jti` and the replay store from that hop and
+keeps exactly this half, which is what this step consumes.
 *Red test:* F4's worker-side forgery test, which cannot even be written today.
 This step alone makes the `encode_user_header` rustdoc true.
 
-**Step 4. Control decides the environment fetch.** The worker presents a service
-assertion; control checks its own placement view. `control_key` and the app-scoped
-derivation are deleted.
+**Step 4. The environment becomes a lease control grants, not a fetch the worker
+performs.** `control_key` and the app-scoped derivation are deleted.
+
+*The inversion, stated plainly, because it is the content of the step.* Today the
+worker presents a root credential and control complies: `fetch_app_env` in
+`crates/zeroship-worker/src/sync.rs` passes `config.control_key`, so the worker
+asserts its own entitlement and control has nothing to check it against. After,
+the worker presents only its own service identity, and CONTROL consults its own
+placement view - which the worker cannot write - to decide whether that worker
+should hold that app's environment.
+
+*Why a lease and not a fetch result.* A lease is scoped to the app it names and
+bounded in time. A fetch result is neither: it lives in worker memory until the
+process dies, so a placement change has no effect on environment already handed
+over. The process-ownership table in 3.4 already lists env leases and placement
+decisions under what `zeroship-control` MAY MINT, so this step aligns the
+sequence with the model rather than adding to it.
+
+*Open decision, NOT decided here: whether the lease is PULLED or PUSHED.* Pulled
+means the worker asks on app load; pushed means control hands the environment
+over when it assigns the app. Push is the stronger property, because a process
+that cannot request secrets cannot be tricked into requesting the wrong ones.
+Pull matches today's flow and is the smaller change. **Step 4 works either way;
+the placement-decides inversion is what matters, and it is what this step
+delivers.** Recorded in 10.2 so the decision has a register entry rather than
+living only here, and F7's enforcement enumeration is written to be
+direction-independent for the same reason.
+
 *Premise:* steps 2 and 3.
 *Red test:* F7's cross-node refusal arm.
 
@@ -1971,12 +2245,25 @@ from the foreign key every other session carries. See the `grant_id` paragraph i
    used to carry a provisional marking are listed in D-E and now name the decision
    instead. The number is kept as a pointer, per the rule above.
 
+9. **Is the environment lease PULLED by the worker on app load, or PUSHED by
+   control when it assigns the app?** OPEN, and deliberately not decided in step
+   4. Push is the stronger property: a process that cannot request secrets cannot
+   be tricked into requesting the wrong ones. Pull matches today's flow and is the
+   smaller change. Step 4's placement-decides inversion holds under either, which
+   is why the step does not wait on this. What DOES depend on it is which process
+   presents an assertion on that edge, so F7's enforcement enumeration is written
+   direction-independently: the placement equality is the invariant either way,
+   and the `jti` claim rides whichever direction carries the request. Appended
+   rather than inserted, per the numbering rule above.
+
 ---
 
 ## 11. Corrections
 
 Claims made during this investigation that turned out wrong, and what is true.
 Each was established by reading the working tree today. Nothing was executed.
+C8 is a different kind of entry and is marked as such: it records an error in
+what this document PRESCRIBED, not in what it observed.
 
 **C1. The service-assertion replay table IS provisioned. Earlier write-ups said it
 exists only as a DDL string inside a test, and that claim was published carrying a
@@ -2040,6 +2327,46 @@ the push window and the sweep retention "agree by coincidence". They do, and the
 finding is worse: each is shorter than `ANCHOR_ABS_DAYS`, so for a teardown that
 writes a marker without deleting the anchor, the marker is swept
 while the capability it was written against is still alive.
+
+**C8. A DESIGN ERROR IN THIS DOCUMENT'S OWN PRESCRIPTION, caught before
+implementation.** Every entry above is a claim about the tree; this one is a
+claim this document made about what to build, and it was wrong.
+
+Step 2 read "wire service assertions on every internal edge", naming the
+gateway-to-worker dispatch hop among them, and F6 named the same set with a
+single-use `jti`. **As written that put a shared-store WRITE on the per-request
+path.** `crates/zeroship-core/src/service_assertion.rs` makes `jti` REQUIRED and
+single use a MUST - its module doc cites CVE-2020-15222 - and admits no per-edge
+opt-out, no warn-and-continue arm and no configuration that turns a check off.
+The claim is a write against a table shared by every replica of the callee:
+`crates/zeroship-authn/src/service_replay.rs`, backed by
+`db/migrations-ts/20260816000100_service_assertion_replay.ts`. So a faithful
+implementer would have built exactly that, and would have been right to - the
+profile admits no opt-out and the step said every edge.
+
+The corroborating evidence, recorded rather than only the verdict:
+
+- **It contradicted this document.** 4.1's steady-state block claims "no database
+  read in any process" for every dispatched request, and the prescription would
+  have added a write to that same path.
+- **It pointed opposite to a sibling proposal from the same effort.**
+  `docs/proposals/2026-09-05-gateway-central-database-decoupling.md`'s step 1
+  deletes the family-revocation READ from the gateway's dispatch path. The
+  redesign would have replaced a read a sibling proposal is removing with a
+  heavier write on the same path.
+- **The asymmetry is what makes it worse than the read it would have replaced.**
+  A read can be cached, or served from a replica. A single-use claim cannot be
+  cached, because caching it is what defeats the property. So the mitigation
+  available to the mechanism being deleted is unavailable to the mechanism that
+  would have replaced it.
+
+*What changed:* 3.3 inventories the service assertion as a full profile and a
+transport-only profile on the same mechanism; 3.6 states the network premise the
+tiering rests on and the half it does not buy; step 2 assigns each edge a profile
+by call rate and rules on the membership of the `/internal/` family; F6 is
+restated by edge and by guard kind; step 4 becomes a lease. The security
+properties are unchanged - this is a revision of which mechanism carries which
+property on which edge.
 
 **Still UNVERIFIED, with the experiment for each.**
 
