@@ -1,4 +1,6 @@
-use zeroship_core::auth::{constant_time_eq, extract_bearer, hash_api_key, validate_api_key};
+use zeroship_core::auth::{
+    constant_time_eq, extract_bearer, hash_client_secret, validate_client_secret,
+};
 
 #[test]
 fn control_key_valid() {
@@ -20,21 +22,21 @@ fn control_key_empty() {
 }
 
 #[test]
-fn api_key_roundtrip() {
-    let key = "super-secret-api-key";
-    let stored = hash_api_key(key);
+fn client_secret_roundtrip() {
+    let secret = "super-secret-client-secret";
+    let stored = hash_client_secret(secret);
     // Hash must be a 64-char hex SHA-256.
     assert_eq!(stored.len(), 64);
     assert!(stored.chars().all(|c| c.is_ascii_hexdigit()));
     // Validation against the correct hash must succeed.
-    assert!(validate_api_key(key, &stored));
+    assert!(validate_client_secret(secret, &stored));
 }
 
 #[test]
-fn api_key_wrong() {
-    let key = "correct-key";
-    let stored = hash_api_key(key);
-    assert!(!validate_api_key("wrong-key", &stored));
+fn client_secret_wrong() {
+    let secret = "correct-secret";
+    let stored = hash_client_secret(secret);
+    assert!(!validate_client_secret("wrong-secret", &stored));
 }
 
 #[test]

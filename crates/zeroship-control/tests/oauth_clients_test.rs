@@ -18,7 +18,7 @@ use std::collections::HashSet;
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_control::oauth_clients::reconcile_oauth_clients;
-use zeroship_core::auth::hash_api_key;
+use zeroship_core::auth::hash_client_secret;
 use zeroship_core::config::OauthClientRegistration;
 use zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID;
 
@@ -112,7 +112,10 @@ async fn a_configured_registration_lands_hashed_and_reconciles_idempotently() {
     // The overlay's plaintext never reaches a column; only its hash does.
     let stored: Option<String> = row.get("client_secret_hash");
     let stored = stored.expect("a confidential client stores a hash");
-    assert_eq!(stored, hash_api_key("s3cr3t-from-the-mounted-overlay"));
+    assert_eq!(
+        stored,
+        hash_client_secret("s3cr3t-from-the-mounted-overlay")
+    );
     assert_ne!(stored, "s3cr3t-from-the-mounted-overlay");
 
     // Config is the source of truth, so a boot after an EDIT carries the edit

@@ -1293,6 +1293,17 @@ real caller set was somewhere else.
   and `crates/zeroship-auth/src/oidc/refresh.rs`. Deleting them here breaks two
   crates; they belong to 7.2's dependency, not to step 1.
 
+  **KEPT, then RENAMED, and the rename is what that reasoning was always asking
+  for.** Every one of those production callers hashes or verifies an OAuth
+  client secret and nothing else, so the names were describing a credential the
+  functions never handled. Once the app-level key was deleted they became the
+  only "api key" symbols left in the auth path, and a reader looking for the app
+  key would find them and wire up a client-secret check - the same class of
+  defect this whole step removes. They are now `hash_client_secret` and
+  `validate_client_secret`, hashing and comparison unchanged. The auth crate's
+  `client_secret_hash` wrapper went with them: it had no callers, and after the
+  rename it was a second spelling of the function it forwarded to.
+
   **THAT "KEPT" IS REVERSED, and the reversal is the more useful record.** Step 1
   kept `AppRecord::api_key` and `zeroship.apps.api_key` on the grounds that the
   field had "two production readers". Re-measured before deleting them, that

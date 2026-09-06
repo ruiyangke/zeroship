@@ -146,7 +146,7 @@ async fn bootstrap_inserts_builder_client_first_run() {
         .get::<_, Option<String>>("client_secret_hash")
         .expect("client_secret_hash");
     assert!(
-        zeroship_core::auth::validate_api_key(&secret, &hash),
+        zeroship_core::auth::validate_client_secret(&secret, &hash),
         "stored hash validates the generated builder secret"
     );
 
