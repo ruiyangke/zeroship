@@ -517,7 +517,6 @@ are internally accessed; end-users hit it indirectly via HTTP.
 | Static asset serving (tiered cache) | 🟢 | internal | `crates/zeroship-gateway/src/router/static_serve.rs`, `blob_cache.rs`, `router/variants.rs`, `conditional.rs` | `docs/architecture/gateway-routing.md` | — | mem→disk→BlobStore; br/gzip; 304/206. |
 | Redirect and rewrite actions | 🟢 | internal | `crates/zeroship-bundle/src/compiled.rs`, `router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-bundle/src/compiled.rs` | Recursive rewrites unsupported. |
 | WS subscription affinity routing | 🟡 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | — | Affinity runs; WS proxy returns 501 (use zeroship serve). |
-| API key validation (legacy) | 🟡 | internal | `crates/zeroship-gateway/src/auth.rs` | — | — | check_api_key not called from main dispatch. |
 | Native OP client with circuit breaker | 🟢 | internal | `crates/zeroship-gateway/src/op_client.rs`, `oidc_rp.rs` | — | `crates/zeroship-gateway/tests/op_breaker_test.rs` | 4xx doesn't trip; only transport/timeouts. |
 | Per-app anchor store (reload-recovery) | 🟢 | internal | `crates/zeroship-gateway/src/anchors.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/auth_token_anchors_test.rs` | 30-day; single-flight per anchor. |
 | Gateway sessions store (audit/revocation) | 🟢 | internal | `crates/zeroship-gateway/src/sessions.rs` | `docs/reference/auth.md` | `crates/zeroship-gateway/tests/sessions_test.rs` | Not read on hot path (R1b). |

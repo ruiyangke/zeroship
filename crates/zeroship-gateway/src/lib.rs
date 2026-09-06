@@ -21,7 +21,6 @@
 //! the same reason: tests construct fixtures directly.
 
 pub mod anchors;
-pub mod auth;
 pub mod auth_token;
 pub mod backchannel_logout;
 pub mod blob_cache;
