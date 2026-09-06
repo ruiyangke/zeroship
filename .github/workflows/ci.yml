@@ -556,6 +556,8 @@ jobs:
         run: tests/noop_cfg_pair_gate.sh
       - name: Compose ships a finite max_slot_wal_keep_size
         run: tests/compose_db_posture_gate.sh
+      - name: No platform column is stored beside its own hash
+        run: tests/secret_beside_its_hash_gate.sh
       # Arm 2 of this one was RED on main the whole time it was unwired:
       # ZEROSHIP_SESSION_SECRET sat in its inventory and in
       # docs/reference/env-vars.md's "surviving test-only names" with no reader
