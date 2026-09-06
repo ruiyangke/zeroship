@@ -54,7 +54,7 @@
 use compio_postgres::Client;
 use rand::RngCore as _;
 use uuid::Uuid;
-use zeroship_core::auth::hash_api_key;
+use zeroship_core::auth::hash_client_secret;
 use zeroship_authz::Scope;
 use zeroship_bundle::ScopeDef;
 use zeroship_core::typed_id::app_oauth_client_id;
@@ -344,7 +344,7 @@ async fn existing_client(pg: &Client, client_id: &str) -> Result<Option<Existing
 fn generate_client_secret_hash() -> String {
     let mut bytes = [0_u8; 32];
     rand::rngs::OsRng.fill_bytes(&mut bytes);
-    hash_api_key(&hex::encode(bytes))
+    hash_client_secret(&hex::encode(bytes))
 }
 
 // ---------------------------------------------------------------------------

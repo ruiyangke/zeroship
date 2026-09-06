@@ -26,7 +26,7 @@ use zeroship_auth::oidc::{BrokerSecrets, Issuer};
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
-use zeroship_core::auth::hash_api_key;
+use zeroship_core::auth::hash_client_secret;
 
 use common::{location, pkce_challenge_s256, pkce_verifier, test_auth_config};
 
@@ -57,7 +57,7 @@ impl ClientKind {
     }
 
     fn secret_hash(self) -> Option<String> {
-        matches!(self, Self::ConfidentialNonBrokered).then(|| hash_api_key(CLIENT_SECRET))
+        matches!(self, Self::ConfidentialNonBrokered).then(|| hash_client_secret(CLIENT_SECRET))
     }
 
     fn is_brokered(self) -> bool {

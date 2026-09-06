@@ -1920,7 +1920,7 @@ operations; the registration-method mismatch is Finding 19
 VERIFIED: there is no runtime registration API and no administrator in this
 flow. Control reads `[auth] oauth_clients` from the config overlay at boot,
 validates each registration against the closed scope vocabulary and the
-redirect-URI rules, and persists only `hash_api_key(secret)`; the plaintext
+redirect-URI rules, and persists only `hash_client_secret(secret)`; the plaintext
 never reaches a column and is never returned by an endpoint
 (`crates/zeroship-control/src/oauth_clients.rs`).
 

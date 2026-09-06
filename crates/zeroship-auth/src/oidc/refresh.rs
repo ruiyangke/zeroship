@@ -15,7 +15,7 @@ use ntex::web::{self, HttpRequest, HttpResponse};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
-use zeroship_core::auth::{hash_api_key, hmac_sha256, validate_api_key};
+use zeroship_core::auth::{hmac_sha256, validate_client_secret};
 use zeroship_core::crypto;
 use zeroship_core::typed_id;
 
@@ -1071,7 +1071,7 @@ fn verify_client_secret(client: &OAuthClient, client_auth: &ClientAuth) -> Resul
     let Some(secret) = client_auth.client_secret.as_deref() else {
         return Err(OAuthError::invalid_client("client secret is required"));
     };
-    if validate_api_key(secret, stored_hash) {
+    if validate_client_secret(secret, stored_hash) {
         Ok(())
     } else {
         Err(OAuthError::invalid_client("client authentication failed"))
@@ -1658,11 +1658,6 @@ fn reject_insecure_permissions(path: &Path, label: &str) -> Result<(), String> {
 #[cfg(not(unix))]
 fn reject_insecure_permissions(_path: &Path, _label: &str) -> Result<(), String> {
     Ok(())
-}
-
-#[must_use]
-pub fn client_secret_hash(secret: &str) -> String {
-    hash_api_key(secret)
 }
 
 #[cfg(test)]

@@ -1222,7 +1222,7 @@ MEASURED, each from the definition named:
   design decision.
 - **A digest is hex in every store and on every wire we have.** `ingest` computes
   `deploy_hash = sha256_hex(&canonical_omit)`
-  (`crates/zeroship-bundle/src/unpack.rs`) and `hash_api_key`
+  (`crates/zeroship-bundle/src/unpack.rs`) and `hash_client_secret`
   (`crates/zeroship-core/src/auth/mod.rs`) is `hex::encode(hasher.finalize())`.
   Both columns are `t.text()`. Packing them raw rather than as hex is where the
   largest single share of the JSON encoding's cost goes.
