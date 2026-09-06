@@ -217,6 +217,12 @@ pub fn from_uuid_string(prefix: &str, uuid_str: &str) -> Result<String, String> 
 // ---------------------------------------------------------------------------
 
 pub const USER_PREFIX: &str = "usr";
+/// App entity typed-id prefix. There is no `new_app_id` free function beside
+/// the other `new_*_id` minters: an app id's ONLY minter is
+/// [`crate::app_id::AppId::mint`], because the value seeds the per-app schema
+/// name, both role names, the publication digest, the encryption salt and the
+/// app-secret AAD, and a `String` returned from here would reach all of them
+/// with no type to say which rendering each one wanted.
 pub const APP_PREFIX: &str = "app";
 pub const SESSION_PREFIX: &str = "ses";
 /// Wake-job typed-id prefix. Three chars to preserve the common
@@ -351,11 +357,6 @@ pub fn app_id_from_oauth_client_id(client_id: &str) -> Option<uuid::Uuid> {
 /// Generate a new user ID: `usr_{base62(uuidv7)}`
 pub fn new_user_id() -> String {
     generate(USER_PREFIX)
-}
-
-/// Generate a new app ID: `app_{base62(uuidv7)}`
-pub fn new_app_id() -> String {
-    generate(APP_PREFIX)
 }
 
 /// Generate a new session ID: `ses_{base62(uuidv7)}`
@@ -792,12 +793,15 @@ mod tests {
     #[test]
     fn all_prefixes() {
         let u = new_user_id();
-        let a = new_app_id();
+        // The app id has no `new_app_id` free function; its one minter is the
+        // typed `AppId`. Swept here anyway so the registry arm stays complete
+        // and so APP_PREFIX keeps a caller that proves what it spells.
+        let a = crate::app_id::AppId::mint();
         let s = new_session_id();
         let w = new_wake_id();
         let p = new_plan_id();
         assert!(u.starts_with("usr_"));
-        assert!(a.starts_with("app_"));
+        assert!(a.as_str().starts_with("app_"));
         assert!(s.starts_with("ses_"));
         assert!(w.starts_with("wak_"));
         assert!(p.starts_with("pln_"));
