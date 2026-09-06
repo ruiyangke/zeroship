@@ -2103,7 +2103,11 @@ INFERRED consequences appear only where explicitly labeled in FINDINGS.
 | Workflow signal capability `wst_` | Control per-app HMAC signer | Control | At most 24h; run once per allowed type, topic once total | No general revoke; run epoch may stale on deploy-changing restart | Post an allowed signal to one bound run or topic (`crates/zeroship-core/src/typed_id.rs:526-622`, `crates/zeroship-control/src/workflow_instance_api.rs:2350-2587`, `crates/zeroship-control/src/workflow_instance_api.rs:2746-2757`, `crates/zeroship-control/src/workflow_instance_api.rs:2852-2888`) |
 | Broker-derived client secret | Gateway derives from master | Auth re-derives | Master lifetime with current/previous overlap | Yes, master rotation | Per-client code, refresh, introspection, and revoke authentication (`crates/zeroship-core/src/auth/mod.rs:83-96`, `crates/zeroship-auth/src/oidc/issuer.rs:853-860`, `crates/zeroship-auth/src/oidc/introspect.rs:58-66`) |
 | Registered OAuth client secret | Control random generator | Auth stored-hash verifier | Until client deletion or replacement | Yes, delete or replace client | Confidential-client code, refresh, introspection, and revoke authentication (`crates/zeroship-control/src/oauth_clients.rs`, `crates/zeroship-auth/src/oidc/refresh.rs:910-958`) |
-| Legacy `X-Api-Key` | Route configuration | Unwired Gateway helper | Config lifetime | Yes, route change | Nothing on current dispatch path; see Finding 28 (`crates/zeroship-gateway/src/auth.rs:1-27`) |
+There is deliberately no app-level API key row in this table. One existed and is
+DELETED - see Finding 28 and
+`db/migrations-ts/20260905000200_drop_app_api_key.ts` for why the platform does
+not own such a credential and what a future programmatic-access grant would have
+to look like instead.
 
 ## Trust-boundary summary
 
@@ -2770,7 +2774,12 @@ VERIFIED items, each paired with a positive live path or complete scoped search:
 
 - Legacy `check_api_key` had no production caller and is now DELETED, along with
   the `RouteEntry.api_key_hash` it read and the `zeroship.apps.api_key_hash`
-  column behind it. What it is NOT is the gateway's non-JWT bearer fallback,
+  column behind it. THE WHOLE APP-LEVEL KEY IS NOW GONE, not just the hash: the
+  plaintext `zeroship.apps.api_key`, `AppRecord::api_key`, the mint in
+  `Registry::create_app`, the `dev_provision` print and every `X-Api-Key` header
+  the harnesses used to send went with it
+  (`db/migrations-ts/20260905000200_drop_app_api_key.ts`, which records why the
+  platform owns no such credential). What it is NOT is the gateway's non-JWT bearer fallback,
   which explicitly remains reserved and returns 401
   (`crates/zeroship-gateway/src/router/auth.rs`) — that arm is live and stays.
 - `verification::redeem` consumes without marking verified, while the live UI

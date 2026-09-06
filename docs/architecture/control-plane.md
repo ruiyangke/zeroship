@@ -74,14 +74,17 @@ apps(
   name text not null unique,
   plan_id text not null default 'free',
   deploy_hash text,
-  api_key text not null,
-  api_key_hash text not null default '',
   env_version bigint not null default 0,
   manifest_json text,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now()
 )
 ```
+
+There is NO app-level API key here, and that is a decision rather than an
+omission: `db/migrations-ts/20260905000200_drop_app_api_key.ts` records why the
+platform does not own one, and what shape long-lived programmatic access would
+have to take if it becomes a feature.
 
 The schema is owned by the platform migration corpus (`db/migrations-ts/`,
 especially `20260702000200_control_tables.ts`) and applied by
