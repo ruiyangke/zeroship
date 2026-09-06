@@ -444,8 +444,9 @@ fi
 # gateway called `auth::check_api_key` for `WorkerMode::Rpc` requests and
 # SSR was open by design. RPC v1 replaced the key check with the compiled
 # per-resource `EffectivePolicy` (`auth: anonymous|user`), and deleted the
-# only call site. `crates/zeroship-gateway/src/auth.rs::check_api_key` and
-# `RouteEntry.api_key_hash` outlived that call site by months, uncalled. The
+# only call site. The gateway's own `auth` module and the
+# `RouteEntry.api_key_hash` it read outlived that call site by months, uncalled;
+# both are deleted, so neither has a path left to cite. The
 # whole app-level key is now gone - the checker, the hash, the plaintext
 # `zeroship.apps.api_key`, `AppRecord::api_key`, the mint, and the `X-Api-Key`
 # headers this harness and its siblings used to send. Nothing reads such a
