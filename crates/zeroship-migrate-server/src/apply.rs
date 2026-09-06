@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
+use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
 use zeroship_schema::SchemaName;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
@@ -293,7 +295,12 @@ pub async fn apply_ir_documents(
     // hyphens, so `SchemaName::new` cannot refuse it today; the refusal is
     // handled rather than unwrapped because the day the schema stops being the
     // app id, this line is where the new derivation - and its failure - lands.
-    let schema_text = app_id.to_string();
+    //
+    // THE NEW DERIVATION HAS LANDED, and this is it. `schema_name` returns
+    // `app_id.to_string()` today - the byte-for-byte spelling this line carried
+    // - and it is now the SAME function the rest of the tree will ask, rather
+    // than one of several sites that happen to agree.
+    let schema_text = app_derivation::schema_name(&AppId::from_uuid(app_id));
     let schema =
         SchemaName::new(&schema_text).map_err(|reason| ApplyRequestError::SchemaName {
             schema: schema_text.clone(),
