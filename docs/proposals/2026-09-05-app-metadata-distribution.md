@@ -2429,7 +2429,10 @@ example.
 insert omits `id` entirely (`Registry::create_app`), so the database default
 supplies it. `new_app_id()` exists in `crates/zeroship-core/src/typed_id.rs` and
 mints `app_<base62(uuidv7)>`, but grep finds no caller outside that module's own
-test. So the identity flowing through every wire type carries no time ordering and
+test. That function has since been DELETED, on the strength of this measurement:
+the app id's one minter is now `AppId::mint` in `crates/zeroship-core/src/app_id.rs`,
+which is typed and still unwired, so the observation above stands unchanged as a
+statement about the column. So the identity flowing through every wire type carries no time ordering and
 no locality hint, and `oac_<base62>` inherits that. Relevant to chunking only in
 that it rules out any scheme keyed on id locality.
 
