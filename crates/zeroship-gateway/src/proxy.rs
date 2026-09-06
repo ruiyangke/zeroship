@@ -14,6 +14,8 @@ use compio::buf::BufResult;
 use compio::net::{TcpStream, UnixStream};
 use ntex::web::HttpResponse;
 use uuid::Uuid;
+use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 
 // ---------------------------------------------------------------------------
 // Stream abstraction (TCP or Unix)
@@ -76,8 +78,20 @@ impl HashRing {
         Self { ring, workers: worker_urls, active, max_per_worker }
     }
 
+    /// Place an app on a worker.
+    ///
+    /// The ring position comes from
+    /// [`zeroship_core::app_derivation::ring_key`], which returns the app id's
+    /// EMBEDDED bits and nothing else. This read `app_id.as_bytes()` until the
+    /// derivation seam landed, and that spelling was a trap rather than a
+    /// shorthand: `Uuid::as_bytes` and `str::as_bytes` both coerce to `&[u8]`,
+    /// so the day the id becomes a typed string this line would have kept
+    /// compiling and quietly hashed the printed form instead - rehashing the
+    /// whole ring and evicting every warm isolate in the fleet at once. Going
+    /// through a function that returns `[u8; 16]` makes that substitution
+    /// impossible to make by accident.
     pub fn select(&self, app_id: &Uuid) -> (usize, &str) {
-        let hash = hash_bytes(app_id.as_bytes());
+        let hash = hash_bytes(&app_derivation::ring_key(&AppId::from_uuid(app_id)));
         for (_, &idx) in self.ring.range(hash..).chain(self.ring.iter()) {
             if self.active[idx].load(Ordering::Relaxed) < self.max_per_worker {
                 return (idx, &self.workers[idx]);
@@ -100,7 +114,9 @@ impl HashRing {
     /// capacity.
     pub fn select_with_affinity(&self, app_id: &Uuid, affinity: &str) -> (usize, &str) {
         let mut combined = Vec::with_capacity(16 + affinity.len() + 1);
-        combined.extend_from_slice(app_id.as_bytes());
+        // The app half is the EMBEDDED bits, for the reason spelled out on
+        // [`Self::select`].
+        combined.extend_from_slice(&app_derivation::ring_key(&AppId::from_uuid(app_id)));
         combined.push(b':');
         combined.extend_from_slice(affinity.as_bytes());
         let hash = hash_bytes(&combined);
