@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
+use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
     GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry, RouteEntry,
@@ -367,10 +369,8 @@ impl Registry {
         // form of this lock. Once archive returns, no claim can have crossed
         // the marker; work admitted before it may still finish.
         tx.query_one(
-            "SELECT pg_advisory_xact_lock( \
-                 hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
-             )",
-            &[id],
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&app_derivation::lifecycle_lock_seed(&AppId::from_uuid(id))],
         )
         .await?;
         let rows = tx
@@ -396,10 +396,8 @@ impl Registry {
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
         tx.query_one(
-            "SELECT pg_advisory_xact_lock( \
-                 hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
-             )",
-            &[id],
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&app_derivation::lifecycle_lock_seed(&AppId::from_uuid(id))],
         )
         .await?;
         let state = tx
