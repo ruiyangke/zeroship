@@ -339,19 +339,17 @@ pub(crate) mod infrastructure_error_test_support {
 /// It is exactly the serialized [`zeroship_core::types::AppRecord`], and the
 /// point of naming the function is that the "exactly" is now enforceable.
 ///
-/// THE CREATE RESPONSE NO LONGER HANDS OUT AN API KEY. It used to: the field is
-/// `#[serde(skip_serializing)]` on the struct, and this site re-added it by hand
-/// so the caller got the plaintext key back. Nothing ever validated that key.
-/// The gateway's `check_api_key` was the only code that could have, it lost its
-/// call site when RPC v1 replaced it with the compiled per-resource
-/// `EffectivePolicy`, and both it and the hash it compared against are deleted.
-/// Handing a caller a credential no request path consults is worse than handing
-/// them nothing: it reads as an authentication mechanism.
+/// THERE IS NO APP-LEVEL API KEY TO HAND OUT. The response once carried a
+/// plaintext key this site re-added by hand past the struct's
+/// `#[serde(skip_serializing)]`; nothing ever validated it, and handing a caller
+/// a credential no request path consults is worse than handing them nothing,
+/// because it reads as an authentication mechanism. The response stopped
+/// carrying it first, and the field, the column and the mint that produced it
+/// are now gone too - `db/migrations-ts/20260905000200_drop_app_api_key.ts`
+/// records why the platform does not own such a key at all.
 ///
-/// `AppRecord::api_key` and the `zeroship.apps.api_key` column both still
-/// exist - this crate's `dev_provision` binary prints the value and a dozen
-/// shell harnesses parse that line - so this stops the key leaving over HTTP
-/// without pretending the column is gone.
+/// So this function has no field to withhold, which is what makes the "exactly"
+/// above enforceable in both directions: the body is the whole record.
 fn create_app_response_body(record: &zeroship_core::types::AppRecord) -> serde_json::Value {
     serde_json::to_value(record).unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -367,16 +365,17 @@ mod create_app_response_tests {
             plan_id: "free".to_string(),
             deploy_hash: None,
             archived_at: None,
-            api_key: "plaintext-key-that-must-not-be-returned".to_string(),
             created_at: "2026-09-05T00:00:00Z".to_string(),
             updated_at: "2026-09-05T00:00:00Z".to_string(),
         }
     }
 
     /// The create response must not carry an api-key field under ANY spelling,
-    /// and must not carry the key's value under some other name either. The
-    /// second half matters: an assertion on the key name alone would pass
-    /// against a body that renamed the field and kept leaking the secret.
+    /// and must not be withholding one either. The second half is the durable
+    /// assertion: a name check alone passes against a struct that keeps the
+    /// secret and hides it behind `skip_serializing`, which is exactly the state
+    /// this replaced. A body that deserializes back into the type that produced
+    /// it cannot be hiding a field, because hiding one is what breaks that.
     #[test]
     fn create_response_carries_no_api_key() {
         let body = create_app_response_body(&record());
@@ -389,12 +388,8 @@ mod create_app_response_tests {
             );
         }
 
-        assert!(
-            !serde_json::to_string(&body)
-                .expect("serialize create response")
-                .contains("plaintext-key-that-must-not-be-returned"),
-            "the create-app response must not carry the plaintext key under any name"
-        );
+        serde_json::from_value::<zeroship_core::types::AppRecord>(body)
+            .expect("the create-app response must round-trip: nothing is withheld from it");
     }
 
     /// CONTROL for the assertion above: the same body must still carry the
