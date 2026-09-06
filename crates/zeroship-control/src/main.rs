@@ -302,8 +302,8 @@ fn empty_string_as_none(value: &str) -> Option<String> {
 }
 
 fn main() -> std::io::Result<()> {
-    // Control uses cyper for provider/admin calls (Supabase identity bridge,
-    // Stripe reconciliation). Install the workspace's selected rustls provider
+    // Control uses cyper for provider/admin calls (Stripe reconciliation,
+    // OpenMeter, workflow dispatch). Install the workspace's selected rustls provider
     // before any outbound client can be constructed.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 

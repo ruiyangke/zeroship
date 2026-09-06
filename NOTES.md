@@ -196,10 +196,18 @@ depend on `migrated` being able to write. Under the fallback it does not.
 
 ### 4.2 Write - control only, once per principal
 
-Keep `identity_bridge::ensure_platform_creator_grants` exactly as it is, marker
-semantics and all (section 2a). Move only its CALL SITE, from control's
-`/api/device/token` to control's single bearer convergence point,
-`crates/zeroship-control/src/authz_guard.rs:173`.
+SHIPPED, AND NOT UNDER THIS NAME. `ensure_platform_creator_grants` never
+existed in the tree under that spelling, so this instruction was already
+describing a module that had changed under it. What carries the marker
+semantics is `zeroship_authn::platform_cli::materialize_default_grants`, called
+from `crates/zeroship-control/src/authz_guard.rs` and
+`crates/zeroship-migrate-server/src/auth.rs`. `identity_bridge` itself is
+DELETED - it had test callers only. Read the rest of this section as the
+reasoning behind that outcome, never as a live instruction.
+
+Keep the marker semantics exactly as they are (section 2a). The CALL SITE moved
+from control's `/api/device/token` to control's single bearer convergence point,
+`crates/zeroship-control/src/authz_guard.rs`.
 
 Why that site: once login leaves control, a platform-native principal's first
 bearer request is the first and only moment control sees it. There is no

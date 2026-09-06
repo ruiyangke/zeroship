@@ -79,7 +79,6 @@ mod deploy_test;
 mod device_handlers_test;
 mod egress_rules_test;
 mod env_store;
-mod identity_bridge_test;
 mod oauth_clients_test;
 mod oauth_grants_handlers_test;
 mod orphaned_app_reaper_test;
