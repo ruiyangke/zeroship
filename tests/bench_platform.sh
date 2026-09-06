@@ -112,11 +112,6 @@ APP=$(curl -sf -X POST http://localhost:9090/api/apps \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -d '{"name":"bench"}')
 APP_ID=$(echo "$APP" | jq -r '.id')
-# The create response no longer carries an api key and no request path ever
-# validated one. The X-Api-Key headers below are inert; they stay only so the
-# benchmarked request shape is unchanged from earlier runs.
-API_KEY=""
-
 mkdir -p /tmp/zeroship-bench-app
 echo 'export function ping() { return "pong"; }' > /tmp/zeroship-bench-app/index.js
 "$BIN/zeroship" deploy /tmp/zeroship-bench-app/index.js --app="$APP_ID" \
@@ -157,7 +152,6 @@ warmed=0
 for i in $(seq 1 15); do
     if curl -sf -X POST http://localhost:8000/apps/bench/rpc \
         -H 'Content-Type: application/json' \
-        -H "X-Api-Key: $API_KEY" \
         -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' > /dev/null 2>&1; then
         warmed=1
         break
@@ -168,7 +162,6 @@ if [ "$warmed" -ne 1 ]; then
     code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -X POST \
         http://localhost:8000/apps/bench/rpc \
         -H 'Content-Type: application/json' \
-        -H "X-Api-Key: $API_KEY" \
         -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo 000)
     echo "FAIL: warmup never succeeded against /apps/bench/rpc (last status ${code})." >&2
     echo "      The gateway leg is NOT serving this request, so any throughput" >&2
@@ -192,7 +185,6 @@ cat > "$LUA_GATE" << EOF
 wrk.method = "POST"
 wrk.body = '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}'
 wrk.headers["Content-Type"] = "application/json"
-wrk.headers["X-Api-Key"] = "$API_KEY"
 EOF
 
 # wrk ALREADY TELLS YOU when it is timing failures; this harness used to throw

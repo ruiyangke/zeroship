@@ -123,7 +123,6 @@ echo ""
 echo "=== Test 2: Create + Deploy 20 apps ==="
 DEPLOYED=0
 declare -A IDS
-declare -A KEYS
 for i in $(seq 1 20); do
     name="dkr-$(printf '%02d' $i)"
     result=$(curl -sf -X POST "$CONTROL/api/apps" \
@@ -131,10 +130,6 @@ for i in $(seq 1 20); do
         -H "Authorization: Bearer $ADMIN_TOKEN" \
         -d "{\"name\":\"$name\"}")
     IDS[$name]=$(echo "$result" | jq -r '.id')
-    # The create response no longer carries an api key, and nothing on the
-    # request path ever validated one. Kept as an empty string so the header
-    # sends below keep their shape.
-    KEYS[$name]=""
 
     # Deploy via control container
     if [ -n "${IDS[$name]}" ] && [ "${IDS[$name]}" != "null" ] \
@@ -163,7 +158,6 @@ for i in $(seq 1 20); do
     name="dkr-$(printf '%02d' $i)"
     result=$(curl -sf -X POST "$GATE/apps/$name/rpc" \
         -H 'Content-Type: application/json' \
-        -H "X-Api-Key: ${KEYS[$name]}" \
         -d '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}' 2>/dev/null || echo "")
     returned=$(echo "$result" | jq -r '.result // empty')
     [ "$returned" = "I am $name" ] && ID_OK=$((ID_OK + 1))
@@ -200,7 +194,7 @@ case "$code" in
     *)       fail "no key: expected 401/403, got HTTP $code" ;;
 esac
 
-code=$(http_status POST "$GATE/apps/nonexistent/rpc" -H 'Content-Type: application/json' -H 'X-Api-Key: any' -d '{}')
+code=$(http_status POST "$GATE/apps/nonexistent/rpc" -H 'Content-Type: application/json' -d '{}')
 case "$code" in
     404) pass "unknown app rejected (HTTP 404)" ;;
     000) fail "unknown app: gateway never answered (HTTP 000) - this used to PASS" ;;

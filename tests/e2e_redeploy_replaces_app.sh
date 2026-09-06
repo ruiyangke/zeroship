@@ -133,7 +133,7 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null && ok "stac
   || { no "stack did not come up"; tail -20 "$WORK/gate.log"; exit 1; }
 
 rpc() {
-  curl -sS -m 15 -X POST -H 'content-type: application/json' -H "X-Api-Key: $KEY" \
+  curl -sS -m 15 -X POST -H 'content-type: application/json' \
     "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/$1" -d '{"json":{}}' 2>&1
 }
 # An unknown procedure is refused by the GATEWAY at routing off the manifest,
@@ -150,9 +150,8 @@ absent() { printf '%s' "$1" | grep -qE "Method not found|no resource matched"; }
 
 echo "=== deploy A"
 OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_A" 2>&1)
-KEY=$(echo "$OUT" | awk -F= '$1=="api_key"{print $2}')
 APPID=$(echo "$OUT" | awk -F= '$1=="app_id"{print $2}')
-[ -n "$KEY" ] && ok "deployed A (app_id=$APPID)" || { no "provision A: $OUT"; exit 1; }
+[ -n "$APPID" ] && ok "deployed A (app_id=$APPID)" || { no "provision A: $OUT"; exit 1; }
 sleep 6
 A_VISIT=$(rpc kv.visit); A_MSGS=$(rpc getMessages)
 # Values are printed BEFORE they are asserted on. An assertion whose pattern is
@@ -175,15 +174,14 @@ absent "$A_MSGS" && ok "A: getMessages absent, as expected" || no "A: getMessage
 # write -- would report "redeploy breaks in-flight requests" out of a perfectly
 # healthy run. A dropped connection or a 5xx is wrong on EITHER bundle, so that
 # is what is asserted. Every code seen is printed regardless, so a wave of 401s
-# (see the api-key note below) shows itself instead of hiding inside "not 5xx".
-KEY_A="$KEY"
+# shows itself instead of hiding inside "not 5xx".
 TRAF="$WORK/traffic.tsv"; : > "$TRAF"
 STOPFILE="$WORK/traffic.stop"; rm -f "$STOPFILE"
 (
   while [ ! -f "$STOPFILE" ]; do
     _s=$(date +%s%3N)
     _c=$(curl -sS -m 15 -o /dev/null -w '%{http_code}' -X POST \
-      -H 'content-type: application/json' -H "X-Api-Key: $KEY_A" \
+      -H 'content-type: application/json' \
       "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/kv.visit" \
       -d '{"json":{}}' 2>/dev/null)
     _rc=$?
@@ -196,7 +194,6 @@ echo "=== redeploy B under the SAME name"
 DEPLOY_T0=$(date +%s%3N)
 OUT2=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP_B" 2>&1)
 APPID2=$(echo "$OUT2" | awk -F= '$1=="app_id"{print $2}')
-KEY=$(echo "$OUT2" | awk -F= '$1=="api_key"{print $2}')
 [ -n "$APPID2" ] && ok "redeployed B (app_id=$APPID2)" || { no "provision B: $OUT2"; exit 1; }
 [ "$APPID" = "$APPID2" ] && ok "same app id reused, so this is a redeploy not a create" \
   || no "app id changed $APPID -> $APPID2, which is a create not a redeploy"
@@ -214,7 +211,6 @@ TR_OVER=$(awk -F'\t' -v a="$DEPLOY_T0" -v b="$DEPLOY_T1" '$1<=b && $2>=a' "$TRAF
 TR_BAD=$(awk -F'\t' '$4!=0 || $3 ~ /^5/' "$TRAF" | wc -l | tr -d ' ')
 echo "    traffic: $TR_TOTAL requests, $TR_OVER overlapping the ${DEPLOY_T0}..${DEPLOY_T1} window"
 echo "    codes:   $(awk -F'\t' '{print $3}' "$TRAF" | sort | uniq -c | tr '\n' ' ')"
-[ "$KEY_A" = "$KEY" ] || echo "    NOTE: the api key ROTATED on redeploy, so 401s below are the old key, not a fault"
 # DISCRIMINATION GUARD, and the first version of it WAS VACUOUS -- kept as a
 # warning because it looked like the careful thing to write. It asserted
 # TR_OVER > 0, but the traffic loop starts just before DEPLOY_T0 and is stopped
