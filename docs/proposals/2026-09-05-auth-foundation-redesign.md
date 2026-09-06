@@ -144,15 +144,22 @@ produces non-colliding subjects, so revocations write markers nobody presents an
 the system reports "nothing to revoke" rather than "salt mismatch". The
 instrument reads clean precisely because the thing it measures is broken.
 
-**P9. Granularity is wrong at both ends.** Too fine: the sector is the app apex,
-so no cross-app subject exists to revoke and two apps sharing a database cannot
-agree who a user is (task #72). Too coarse: one users namespace serves creators
-and app end users, and `disabled_at` - the one column meaning "suspended, not
-deleted" - is read across the auth store, the identity paths, the OIDC endpoints,
-`zeroship-authn` and `crates/zeroship-control/src/registry.rs`, and written only
-from test targets. A distinction the model fails to carry means abuse response
-has one destructive lever; a distinction it carries but never writes means every
-reader believes a dead branch is live.
+**P9. The sector is too fine, and suspension has neither a scope nor a writer.**
+Too fine: the sector is the app apex, so no cross-app subject exists to revoke and
+two apps sharing a database cannot agree who a user is (task #72).
+
+The single `users` namespace serving creators and app end users is **not** the
+defect - decision D-D settles that one account per human is correct, and an
+earlier draft of this paragraph filed the shared namespace as a granularity error.
+Two findings that rode on that clause survive it. First, the model carries no
+SCOPE for a suspension: with one namespace and no per-role handle, the only lever
+abuse response has is person-wide and destructive. What that scope should be is
+open decision 8; this paragraph does not answer it. Second, the lever is unwired -
+`disabled_at`, the one column meaning "suspended, not deleted", is read across the
+auth store, the identity paths, the OIDC endpoints, `zeroship-authn` and
+`crates/zeroship-control/src/registry.rs`, and written only from test targets. A
+column that is read everywhere and never written means every reader believes a
+dead branch is live.
 
 **P10. One fact, several hand-copied spellings, pinned by tests that assert a
 literal against themselves.** The identity upsert is byte-identical in
@@ -207,8 +214,19 @@ implementer can check it survived.
   session secret and service-key rotation.
 - **The stateless session cookie with kid rotation** and local verify on the hot
   path. The problem is the revocation model around it, not the cookie.
-- **Mandatory PKCE for every client including confidential ones, mandatory
-  nonce, exact `redirect_uri` match, RFC 9207 `iss`.**
+- **Mandatory by construction rather than by configuration** - the property
+  under today's mandatory PKCE for every client including confidential ones,
+  mandatory nonce, exact `redirect_uri` match and RFC 9207 `iss`. Reconciled
+  against 7.2 under D-A, which removes the client population rather than the
+  property: the `iss` rejection survives at flow step [7]; the nonce and the
+  exact-redirect binding move onto `__Host-zs_flow`, enforced server-side rather
+  than advertised in metadata. PKCE has no client left to protect and is retired
+  with them - `crates/zeroship-core/src/pkce.rs` and
+  `crates/zeroship-auth/src/oidc/authorization_code.rs` as an OAuth grant both go
+  in 7.2 - and the leg it protected becomes a redemption over the authenticated
+  service channel, where the redeemer proves an identity rather than proving it
+  once held a random string. Retiring the mechanism is authorised; weakening
+  "mandatory by construction" is not.
 - **Header hygiene at the dispatch boundary**: stripping inbound
   `zeroship-user`, `authorization`, `x-app-id` and the `x-zs-` family in
   `collect_forwarded_headers` / `is_reserved_header`, plus the request-id and
@@ -217,9 +235,14 @@ implementer can check it survived.
 - **`policy::enforce` running before the isolate lease**, so
   `env.auth.requireUser` is not the fence, and the SEC-2 canonical-path agreement
   so the gateway's gate and the worker's re-parse cannot disagree.
-- **`load_client` failing closed** on a decode error rather than defaulting, and
-  `register_signed_token` refusing to release a token whose key row is no longer
-  active or retiring.
+- **Failing closed on a decode error rather than defaulting.** `load_client` is
+  where that property lives today, inside
+  `crates/zeroship-auth/src/oidc/authorization_code.rs`, which 7.2 deletes under
+  D-A. The function has no survivor; the property is not retired with it, and
+  carries forward as an obligation on every decode the session and grant paths
+  replace it with. `register_signed_token` refusing to release a token whose key
+  row is no longer active or retiring is the same property on the key path, and
+  it survives unchanged.
 - **The static nonce-CSP relay page** (`popup_callback_html` / `popup_csp` in
   `crates/zeroship-gateway/src/browser_auth.rs`) and its pinning test. The only
   interpolation is the server nonce.
@@ -249,12 +272,33 @@ Section 6 states how this is bound. It is not a check; it is a type.
 Four, each justified by what breaks without it.
 
 **PERSON** - `zeroship.users`, typed id `usr_`. One namespace for every human.
-"Creator" is not an identity kind; it is a membership edge on a project. Carries
-`credential_epoch` (the generalised `credential_version`) and `subject_status`,
-one column with a real state machine over `active`, `suspended`,
-`deletion_scheduled` and `anonymized`, replacing the separate lifecycle columns
-that today are read everywhere and written from tests. One column, one predicate,
-one feed field, and a variant with a production writer.
+"Creator" is not an identity kind; it is a membership edge on a project.
+
+**Settled by the operator as decision D-D** (section 10): one account per human,
+serving the creator and the end user, confirmed rather than assumed. Recorded at
+the point of definition so it is not reopened later as taste. Two facts land with
+it. It is **UNVERIFIED** that the namespaces are shared in the tree TODAY - that
+marker stands as a measurement, its experiment is in section 11, and its answer
+tells step 5 whether it adopts an existing shared namespace or has to merge two.
+And the membership edge the settled model names does not exist at the project
+level: the corpus has `zeroship.app_members` with roles owner, editor and viewer
+in `db/migrations-ts/20260702000200_control_tables.ts`, which is APP-scoped. "A
+membership edge on a project" therefore implies moving that edge onto D-B's unit,
+and neither decision performs that move. It is also the per-role handle open
+decision 8 would need.
+
+Carries `credential_epoch` (the generalised `credential_version`) and
+`subject_status`, one column with a real state machine over `active`,
+`suspended`, `deletion_scheduled` and `anonymized`, replacing the separate
+lifecycle columns that today are read everywhere and written from tests. One
+column, one predicate, one feed field, and a variant with a production writer.
+
+**The SCOPE of the `suspended` variant is open decision 8, not settled here.**
+The column as drawn is person-scoped, which is the GLOBAL answer to a question
+the operator did not answer; D-D settles the account namespace and nothing more.
+`deletion_scheduled` and `anonymized` are legitimately person-scoped - an account
+is deleted as an account, and D-D confirms that. If decision 8 lands per role,
+`suspended` needs a scope this single column cannot carry.
 
 The table keeps its current name. A rename to `people` was considered and
 rejected: it is churn across the auth crate that binds nothing. The typed id
@@ -268,12 +312,36 @@ AGENTS.md typed_id invariant.
 unit a subject and a grant are scoped to, and it replaces `sector_identifier`,
 the per-app OAuth `client_id`, and the CLI pseudo-client with one value.
 
-`Project`, not `App`. That is task #72, and it is a premise of this design
-rather than a follow-up: with app-scoped sectors there is no unit between "one
-app" and "the platform", so cross-app teardown has no object.
+**Settled by the operator as decision D-B** (section 10): the audience unit is the
+Project, with no organization container above it for now, and task #82 stays
+deferred. The sum's two variants are a decision, not a design premise. **The
+choice is recoverable, and that is why the sum can be closed now:** a later
+organization layer would be a NEW audience variant rather than a re-derivation of
+the sum.
+
+`Project`, not `App`. That is task #72, and the unit is settled rather than
+contingent: with app-scoped sectors there is no unit between "one app" and "the
+platform", so cross-app teardown has no object.
+
+**This design CREATES the Project entity.** `db/migrations-ts/` contains no
+projects table. The only project shape in the corpus is a `project_id` text
+column under a `prj_` regular-expression check on the sandbox table in
+`db/migrations-ts/20260702000500_sandbox_tables.ts`, belonging to a subsystem
+extracted to a sibling repository. Read every `projects.id` foreign key in the
+sketches below as pointing at a table this design introduces, and reconcile the
+id spelling against `prj_` when it is introduced; nothing in the corpus supplies
+it today.
 
 *Without it:* subjects are either global, so apps correlate users across the
 platform, or per-app, so a project's apps cannot agree on a user.
+
+*What the unit enables later, recorded and deliberately not designed here:*
+per-project external identity - "this project's users authenticate against this
+customer's own provider". It does not exist today: provider configuration is
+platform-level and `db/migrations-ts/` contains no per-app or per-project
+provider table. The Project is the natural place to hang such a configuration,
+and without a project unit there would be no correct place for it. D-B makes that
+feature cheap; this document stops there.
 
 **SUBJECT** - a pure derivation computed in one process:
 
@@ -311,6 +379,11 @@ idem_expires_at
 amr, acr, auth_time, scopes, label
 created_at, idle_expires_at, absolute_expires_at, revoked_at
 ```
+
+`projects.id` here, and on the grant row below, is the entity this design creates
+- see AUDIENCE above. Nothing in `db/migrations-ts/` supplies it today, so the
+foreign key is an obligation of step 9 rather than a reference to something that
+already exists.
 
 One table replaces `idp_sessions`, `gateway_sessions`, `app_session_anchors`,
 `oauth_refresh_tokens`, `device_grants` and `token_revocations`.
@@ -355,6 +428,28 @@ ceases to exist.
 *authentication method*, kept as such under the person), the CLI client
 registration, provider discriminators. Every one is a spelling of Audience or
 Session.
+
+That list is only correct because the third-party OIDC provider capability is
+going away, which decision D-A settles (section 10). While it was open, `oac_`
+client ids might have had to become a real concept with a real registration. The
+operator's reasoning is why they do not: a per-app client id today is an
+auto-provisioned side effect of `zeroship deploy` rather than a registration, so
+it is a spelling rather than a concept.
+
+**D-A deletes one DIRECTION, and the two are easy to confuse.** What goes is the
+OUTWARD direction - a creator app or the platform acting as an OIDC provider TO a
+third-party relying party. CONSUMING external identity providers is untouched,
+and the classification above is exactly that shape: a federated identity is an
+authentication method under the person. The live arms are kept -
+`crates/zeroship-auth/src/identity/oauth/google.rs`,
+`crates/zeroship-auth/src/identity/oauth/github.rs`,
+`crates/zeroship-auth/src/ui/oauth_google.rs`,
+`crates/zeroship-auth/src/ui/oauth_github.rs`, and the link step in
+`crates/zeroship-auth/src/identity/linker.rs` - and 7.6 MERGES their stashes in
+`crates/zeroship-auth/src/ui/oauth_stash.rs` rather than deleting them. There is
+no SAML anywhere in the tree, so "SSO" here means those OAuth arms and nothing
+more. Flow step [4]'s "password / magic / federation / TOTP" is the same
+statement in the flow, and does not contradict this.
 
 ### 3.3 Credentials
 
@@ -424,6 +519,13 @@ process whose whole job is rendering a login form.** The gateway becomes *unable
 to mint an end-user identity, because it holds no key that produces one. Section
 9 states honestly how far that goes and what it costs.
 
+Read the auth row as the concrete form of decision D-C (section 10): **the master
+signing key lives in the auth process, and there is no external signer.** That is
+the arrangement the operator decided on, stated here so a reader of section 3
+alone cannot mistake it for provisional or add a signer row later believing one
+was always intended. Section 9 records the risk this accepts and the one
+condition that reopens it.
+
 ### 3.5 Distribution: one feed shape, on the transport that already exists
 
 Verifiers need three facts they do not own: routes, revocations, and public keys.
@@ -461,6 +563,10 @@ edge, no stash cookie, no per-app OAuth client, no broker secret, no id_token, n
 landing code is redeemed over the authenticated service channel - strictly
 stronger than PKCE, because the redeemer proves an identity rather than proving
 it once held a random string.
+
+That the handshake is between two of our own processes is the operator's stated
+reasoning for decision D-A, which authorises 7.2's deletion outright rather than
+conditionally.
 
 ```
 BROWSER (app origin)          GATEWAY (app origin)            AUTH (auth origin)
@@ -697,6 +803,13 @@ pub async fn bump_epoch(tx, sel: Selector, cause: Cause) -> Vec<SessionId>;
 There is no second spelling of the revocation write, and no path that writes a
 session row without its feed entry.
 
+`PersonEverywhere` makes global teardown a first-class verb. That is correct for
+deletion and anonymisation, which are person-scoped by nature. **Which selector a
+suspension calls is open decision 8**, and D-D settles the account namespace
+without touching it - do not read the settled account model as having chosen this
+selector for suspension. The recommendation on record, offered and NOT yet
+accepted, is to suspend per role rather than globally.
+
 Columns: **A** platform session secret. **B** project session secret.
 **C** access assertion, already presented. **D** one-time secrets.
 **E** relay alias. **F** service assertions. **G** `wst_` signal tokens.
@@ -713,7 +826,7 @@ Columns: **A** platform session secret. **B** project session secret.
 | Narrow scopes without revoking | intact | intact | `<= W` (epoch bump) | untouched | intact | n/a | n/a |
 | Password change or reset | IMMEDIATE (epoch) | IMMEDIATE (epoch) | `<= W` | reset and magic purged | intact | n/a | n/a |
 | TOTP enrol or remove | intact | intact | intact | untouched | intact | n/a | n/a (G1) |
-| Suspend the person | IMMEDIATE | IMMEDIATE | `<= W` | all purged | suppressed | n/a | n/a |
+| Suspend the person (PROVISIONAL - open decision 8) | IMMEDIATE | IMMEDIATE | `<= W` | all purged | suppressed | n/a | n/a |
 | Deletion requested | IMMEDIATE | IMMEDIATE | `<= W` | all purged | GONE (grants cascade) | n/a | n/a |
 | Reaper anonymise or hard delete | IMMEDIATE | IMMEDIATE | `<= W` | GONE (FK) | GONE (FK) | n/a | n/a |
 | CLI logout | IMMEDIATE | intact (separate tree) | `<= W` | untouched | intact | n/a | n/a |
@@ -726,6 +839,15 @@ Columns: **A** platform session secret. **B** project session secret.
 
 Where `W = min(the access-assertion TTL, the revocation feed staleness budget
 plus one poll interval)`.
+
+**The suspend row is PROVISIONAL and no other row is.** Column A is the platform
+session - the person's own deploy authority - and column B is the project session,
+the person as an end user. IMMEDIATE in both is the GLOBAL answer to open decision
+8, written here so the row is not blank, not because the question is closed. If
+decision 8 lands per role, one of those two columns becomes `intact`. An
+implementer building from this table must read decision 8 before implementing this
+row. **The deletion and anonymise rows are not provisional** - an account is
+deleted as an account, and D-D confirms that; do not spread the marking to them.
 
 **Every IMMEDIATE above is one statement, and every one is the same statement
 family**: a row update keyed on the session tree, or a `DELETE` whose foreign
@@ -906,12 +1028,19 @@ the revoke is a `DELETE`. PostgreSQL enforces it; no application code enumerates
 *Red:* an arm that revokes a grant and then attempts a refresh with the project
 session secret, asserting refusal. Today that sequence succeeds.
 
-**F10. A password change, suspension or deletion request ends every session
-without enumerating them.**
+**F10. A password change or deletion request ends every session without
+enumerating them. A suspension does too, but only under the global answer to open
+decision 8.**
 
 *Mechanism:* `credential_epoch`, joined in the same UPDATE that slides the idle
 window. This is `crates/zeroship-auth/src/store/sessions.rs` generalised to all
 audiences.
+
+*Scope, stated here so the fence table does not decide the question:* password
+change and deletion are covered unconditionally - both are person-scoped by
+nature. Suspension is folded into the same person-scoped epoch only if decision 8
+lands globally. A per-role answer cannot be expressed by one person-scoped epoch,
+and this fence's mechanism changes shape rather than merely narrowing.
 
 *Red:* an arm per lifecycle transition that bumps the epoch and asserts a refresh
 on an older session is refused. Mutation: delete the equality predicate and the
@@ -921,6 +1050,13 @@ arm must fail.
 
 *Mechanism:* a control-plane suspend and reinstate endpoint that stamps the
 status and bumps the credential epoch in one statement.
+
+*What is settled and what is not, kept apart so the gate can be built now.* The
+REQUIREMENT - every variant has a non-test writer - holds under either answer to
+open decision 8, and the arm below can be built today. The endpoint's SIGNATURE
+is not settled: as written it takes a person, which presumes the global answer;
+a per-role answer makes it take a (person, audience) pair. Build the variant
+gate; do not freeze the scope with it.
 
 *Red:* a gate arm ruling on the variant set - floor declared beside the enum -
 requiring at least one non-test writer per variant. This is the family fix for
@@ -1037,7 +1173,10 @@ every fresh cluster.
 **Fences deliberately NOT claimed.** Intra-worker environment isolation (G7).
 Correlation resistance against a party that observes both the auth origin and an
 app origin - the platform can always correlate; the guarantee is that *projects*
-cannot. Protection against a compromised `zeroship-auth` (section 9).
+cannot. Protection against a compromised `zeroship-auth` - and that is now an
+ACCEPTED RISK taken by the operator under decision D-C, not an open question
+awaiting an external signer. Section 9 records the risk and names the one
+condition that reopens it: the platform holding regulated data.
 
 ---
 
@@ -1069,6 +1208,9 @@ By path and symbol. Pre-launch, so each is a deletion, not a deprecation.
   - a public function with no production caller and no column to write into.
 
 ### 7.2 The OAuth apparatus between two of our own processes
+
+**AUTHORISED by the operator as decision D-A** (section 10). This subsection is
+not conditional on anything; the reasoning is recorded at its close and in D-A.
 
 The largest deletion, and P7 is why. Client authentication for the one
 server-to-server redemption that remains is the gateway node's service assertion:
@@ -1109,9 +1251,18 @@ derived shared secret.
   `sdks/auth/src/internal/pkce.ts` and the verifier storage in
   `sdks/auth/src/internal/transaction.ts`.
 - `crates/zeroship-control/src/app_oauth_client.rs`,
-  `crates/zeroship-control/src/oauth_clients.rs` (the per-app half),
   `crates/zeroship-control/src/oauth_grants_handlers.rs` and
   `crates/zeroship-control/src/device_handlers.rs`.
+- `crates/zeroship-control/src/oauth_clients.rs` - the WHOLE module. An earlier
+  draft of this list wrote "the per-app half"; the module has no halves.
+  `reconcile_oauth_clients` is its only public entry, it is boot-time
+  reconciliation of FIRST-PARTY clients from configuration, and per-app `oac_`
+  clients appear in it only as an exclusion inside the private `prune`. Under D-A
+  no first-party relying party of the platform OP survives either - the gateway
+  stops being an RP above, and the platform CLI client id goes in 7.5 - so
+  nothing is left for the module to reconcile. Deleting only a "per-app half"
+  would leave a boot-time registrar for relying parties whose
+  client-authentication story this subsection has removed.
 - `derive_broker_secret` in `crates/zeroship-core/src/auth/mod.rs`,
   `verify_broker_secret` in `crates/zeroship-auth/src/oidc/issuer.rs`, and the
   broker secret settings on both sides.
@@ -1123,8 +1274,26 @@ derived shared secret.
 **The capability this removes, stated plainly:** a creator app can no longer act
 as an OIDC provider to a third-party relying party. Nothing depends on that
 today. If it becomes a product it is a first-class feature with real registration
-and real secrets, not an auto-provisioned side effect of `zeroship deploy`. See
-open decision 5.
+and real secrets, not an auto-provisioned side effect of `zeroship deploy`.
+
+**The reasoning, which is the durable part of the decision.** What exists today is
+not the feature: there is no registration, no third-party consent, no scope model
+and no documentation. It is OAuth ceremony between two of our own processes, and
+the third-party capability falls out only because that plumbing hands every app a
+client id. Keeping the side door open does not get the platform closer to the
+feature; it only keeps the plumbing complicated.
+
+**Deleted direction: OUTWARD only.** Consuming external identity providers is
+unaffected and is KEPT - the Google and GitHub arms under
+`crates/zeroship-auth/src/identity/oauth/` and `crates/zeroship-auth/src/ui/`, and
+the link step in `crates/zeroship-auth/src/identity/linker.rs`; 7.6 MERGES their
+stashes in `crates/zeroship-auth/src/ui/oauth_stash.rs` rather than deleting them,
+and there is no SAML anywhere in the tree. An editor sweeping the word OAuth out
+of the auth crate under D-A deletes the wrong direction. Per-project external
+identity, where a project's users authenticate against that customer's own
+provider, does not exist today and is not designed here; it is a future feature
+that D-B's Project unit makes cheap, by supplying the first correct place to hang
+such a configuration.
 
 ### 7.3 The marker primitive and its unlinked constants
 
@@ -1289,7 +1458,12 @@ compile-level check: removing the `ValidatedSession` parameter fails the build.
 a verifier and a relay; the anchor, the stash, the RP module and the gateway's
 database credential go.
 *Premise:* step 5, and the revocation feed with its fail-closed staleness gate
-must land in the SAME change - see section 9.
+must land in the SAME change - see section 9. **The RP deletion itself no longer
+waits on a decision:** D-A authorises it, and the blocker that stood here while
+old decision 5 was open is gone. What still bears on this step is open decision 7
+- if the platform session cookie does not attach across the SDK's same-site
+iframe leg, this step ships the popup and top-level shapes only. That is a shape
+constraint on the step, not a condition on the deletion.
 *Red test:* an interactive redirect login followed by signout, asserting a
 subsequent request is refused. Today that is a no-op because the anchor is
 absent. Second arm: the dependency-closure gate (F3) refuses a database driver in
@@ -1302,12 +1476,20 @@ whole marker family go; the derived retention constant lands.
 recomputation arm. This closes task #209 by deletion.
 
 **Step 8. `subject_status`, its writer, and its variant gate.**
-*Premise:* step 5, for the epoch join.
+*Premise:* step 5, for the epoch join; and **open decision 8 for the refusal arm
+only.** That arm has two different shapes - every session of the person refused,
+or only the suspended role's - and writing it either way settles the decision by
+construction. The variant gate does not wait on decision 8; the refusal arm does.
 *Red test:* F11's variant-writer arm, red today; plus a suspend-then-refresh
-refusal arm.
+refusal arm whose scope decision 8 fixes.
 
-**Step 9. Audience becomes the project.** Task #72.
-*Premise:* step 5 and step 7, because the sector is stored on the grant row.
+**Step 9. Audience becomes the project.** Task #72. The unit is settled by D-B,
+so this step carries no decision blocker; it carries two ENTITY blockers instead,
+and settling the unit is what makes them load-bearing rather than academic.
+*Premise:* step 5 and step 7, because the sector is stored on the grant row; plus
+creating the Project entity, which `db/migrations-ts/` does not have, and moving
+the membership edge off the app-scoped `zeroship.app_members` in
+`db/migrations-ts/20260702000200_control_tables.ts` onto the project.
 *Red test:* a pair differing in one variable - two apps of one project produce
 equal subjects, two projects produce unequal ones. Moving the sector back to the
 app apex fails both halves.
@@ -1351,13 +1533,26 @@ no routing, no proxying and no bundle execution. Smaller surface, larger prize.
 **That is a bet, not a proof**, and if it is wrong the failure is worse than
 today's.
 
-The successor step is named so it is not rediscovered: a signing service only
-auth can reach, minting from a `ValidatedSession` with a keep-out interface.
-Sharpened by an observation from the investigation - **the minter also owns the
-revocation store, so a compromised minter can erase the record of what it
-minted.** The keep-out interface must therefore be mint-with-witness only, no key
-export AND no revocation write. The design is shaped so this is one seam behind
-one type, not a rewrite.
+**The operator has taken that bet.** Decision D-C (section 10): no external
+signer, the master signing key lives in the auth process. The sentence above does
+not soften; its STATUS changes. It was the tiebreaker of an open question and it
+is now a live ACCEPTED RISK, and the paragraph above it - the salt permanent and
+unrotatable by construction, the signing key, the keyring, the TOTP at-rest key,
+write access to users, sessions and grants - is the reasoning for accepting it,
+not decoration around something resolved. **What REOPENS it is the design's own
+tiebreaker: the platform holding regulated data.** At that point the question
+stops being engineering taste and is decided by the data. A risk with no stated
+reopening condition is a risk nobody ever re-examines, which is why the condition
+is written here rather than left to judgement.
+
+**The successor step is the REOPENING PATH**, named so it is not rediscovered and
+so a reopening does not start from scratch: a signing service only auth can reach,
+minting from a `ValidatedSession` with a keep-out interface. Sharpened by an
+observation from the investigation - **the minter also owns the revocation store,
+so a compromised minter can erase the record of what it minted.** The keep-out
+interface must therefore be mint-with-witness only, no key export AND no
+revocation write. The design is shaped so this is one seam behind one type, not a
+rewrite. Nothing here is scheduled; this is what the reopening condition builds.
 
 **Fail-closed revocation converts an auth outage into an authentication
 outage.** Once a verifier's feed is older than the staleness budget it refuses
@@ -1398,9 +1593,18 @@ purpose at a call site, which is why the purpose is a typed enum and not a
 string.
 
 **Deleting back-channel logout is correct only while no relying party holds
-session state.** True for zeroship-hosted apps by construction. It stops being
-true the moment the platform federates outward. If that is on the roadmap the
-decision should be taken now, not after this lands (open decision 5).
+session state.** True for zeroship-hosted apps by construction. It would stop
+being true if the platform acted as an identity PROVIDER to third-party relying
+parties that keep their own sessions - the OUTWARD direction. **That decision has
+been taken: D-A deletes the capability, outward provision is not a roadmap item,
+and the deletion is authorised rather than conditional.**
+
+Read "outward" strictly, because this is the most confusable phrase in the
+document and it sits beside mechanisms that are kept. It says nothing about
+CONSUMING external providers, which is the opposite direction, is unaffected by
+D-A, and gives no third party a session of ours to receive a logout for. If
+outward provision is ever revived, back-channel logout is part of that feature's
+design, not a regression against this one.
 
 **Two roles in one process is not a boundary.** F16 is defence-in-depth against a
 route-confusion bug in the OP. It is written here with that caveat attached so
@@ -1408,48 +1612,133 @@ nobody repeats it without one.
 
 ---
 
-## 10. Open decisions for the operator
+## 10. Decisions
 
-1. **Do creators and app end users share one person namespace, and should a
-   suspension in one role kill the other?** The design assumes one namespace,
-   which the tree appears to have already, but `subject_status` is person-scoped,
-   so an abuse suspension against an app end user would also stop that human
-   deploying. The alternative is status per (person, audience), which costs the
-   simplicity of one predicate. UNVERIFIED that the namespaces are shared today;
-   the experiment is in section 11.
+Settled ones are recorded in 10.1 as D-A through D-D, each with what was decided,
+who decided it, and why. The rest stay open in 10.2, which **keeps its original
+numbering**: sections 7.2, 7.7, 9 and 11 address these items by number, nothing in
+the tree checks that a cross-reference resolves, and renumbering would silently
+re-point them. Settled items therefore keep their numbers as pointers rather than
+being removed, and the suspension-scope question - which the operator did NOT
+answer - takes a NEW number rather than inheriting item 1's.
 
-2. **Does the assertion signing key stay in the auth process, or move behind an
-   external signer now?** Section 9 states the bet. The external signer buys
-   "the salt and the signing key are unreachable from any process handling an
-   internet request" and costs a process, a deployment and a failure mode. If the
-   platform will hold regulated data, this is decided by that rather than by
-   engineering taste.
+### 10.1 Settled by the operator
 
-3. **Is `Project` the right sector unit, or does an organization container sit
-   above it?** Task #82 is deferred. This design commits to project-scoped
-   subjects; a later organization layer would be a new audience variant rather
-   than a re-derivation, but the choice affects whether subjects are stable
-   across a project reparent.
+**D-A. The third-party OIDC provider capability is DELETED.** Decided by the
+operator. Section 7.2 is AUTHORISED, not conditional.
 
-4. **The access-assertion TTL and the feed staleness budget.** The first is the
-   mint-load and partition-tolerance knob; the second is the recall bound. They
-   are separate symbols in this design deliberately, but both need values, and
-   both belong to operations rather than to this document.
+*Why, and this reasoning is the durable part.* What exists today is not the
+feature. It is OAuth ceremony between two of OUR OWN processes, gateway and auth,
+and because that plumbing gives every app a client id, the third-party
+capability falls out as an auto-provisioned side effect of deploy. There is no
+registration, no third-party consent, no scope model, no documentation. Keeping
+the side door open does not get the platform closer to the feature; it only keeps
+the plumbing complicated. If an integration ecosystem becomes a product it is
+built as a first-class feature with real registration and real secrets.
 
-5. **Will a creator app ever need to be an OIDC provider to a third-party relying
-   party?** If yes, per-app clients and back-channel logout should be redesigned
-   as a first-class feature now rather than deleted and re-added. If no, section
-   7.2 stands.
+*Direction, recorded because the two are easy to confuse and the confusion could
+later be read as "the redesign deleted SSO".* D-A deletes the OUTWARD direction
+only: the platform or a creator app acting as an OIDC provider TO a third-party
+relying party. **Consuming external identity providers is unaffected.** The design
+already classifies a federated identity as an authentication method under the
+person, which is the adapter shape the operator asked about. The live arms stay:
+`crates/zeroship-auth/src/identity/oauth/google.rs`,
+`crates/zeroship-auth/src/identity/oauth/github.rs`,
+`crates/zeroship-auth/src/ui/oauth_google.rs`,
+`crates/zeroship-auth/src/ui/oauth_github.rs`, and the link step in
+`crates/zeroship-auth/src/identity/linker.rs`. There is no SAML anywhere in the
+tree, so "SSO" here means those OAuth arms and nothing more.
 
-6. **Does `zeroship_worker` keep REPLICATION?** This design removes BYPASSRLS
-   from that role. REPLICATION is on the same migration and is a data-plane
-   question tied to CDC ownership, which is out of scope here.
+**D-B. The audience unit is the Project.** Decided by the operator: project level,
+with no organization container above it for now, and task #82 stays deferred.
+
+*Why the choice is recoverable, which is the reason it can be settled now:* a
+later organization layer would be a NEW audience variant rather than a
+re-derivation of the closed sum. *What the settlement does NOT answer:* whether
+subjects are stable across a project reparent. That consequence is an unresolved
+design question, not a decision, and nothing else in this document states it.
+
+*What the unit enables, recorded and deliberately not designed here.* Per-project
+external identity - "this project's users authenticate against this customer's own
+provider" - does NOT exist today: provider configuration is platform-level, and
+`db/migrations-ts/` contains no per-app or per-project provider table. The Project
+is the natural place to hang such a configuration, and without a project unit
+there would be no correct place for it. D-B makes it cheap; that is the whole
+record.
+
+**D-C. The master signing key lives in the auth process.** Decided by the
+operator: no external signer.
+
+*What the rejected alternative bought and cost:* an external signer buys "the salt
+and the signing key are unreachable from any process handling an internet
+request", and costs a process, a deployment and a failure mode. *Status:* section
+9's statement of the bet stands and is not softened - it is now a live ACCEPTED
+RISK rather than an open question. *What REOPENS it:* the design's own tiebreaker,
+the platform holding regulated data. Section 9 names the successor step, which is
+what a reopening builds.
+
+**D-D. One account per human.** Decided by the operator: one account serves both
+the creator and the end user. "Creator" is a membership edge, not an identity
+kind. The design already assumed this; it is now confirmed rather than assumed.
+
+*Still UNVERIFIED, and the marker stands:* whether the namespaces are shared in
+the tree TODAY. That is a measurement, its experiment is in section 11, and its
+answer tells step 5 whether it adopts an existing shared namespace or has to merge
+two. *What D-D does NOT settle:* the scope of a suspension. That is item 8 below,
+split out so the account answer cannot be read as answering it.
+
+### 10.2 The numbered items, settled ones marked in place
+
+1. **SETTLED as D-D, account half only.** The suspension half of this item was
+   NOT answered and is now item 8. The number is kept rather than reclaimed, so
+   that nothing after it shifts.
+
+2. **SETTLED as D-C.** No external signer; the reopening condition is recorded in
+   D-C and in section 9.
+
+3. **SETTLED as D-B.** Project level, no organization container for now, task #82
+   deferred. The reparent-stability consequence recorded under D-B is still
+   unresolved.
+
+4. **The access-assertion TTL and the feed staleness budget.** OPEN, and
+   deferrable to when step 6 is written. The first is the mint-load and
+   partition-tolerance knob; the second is the recall bound. They are separate
+   symbols in this design deliberately, but both need values, and both belong to
+   operations rather than to this document.
+
+5. **SETTLED as D-A.** Section 7.2 stands and is authorised.
+
+6. **Does `zeroship_worker` keep REPLICATION?** OPEN, and out of scope here. This
+   design removes BYPASSRLS from that role. REPLICATION is on the same migration
+   and is a data-plane question tied to CDC ownership. Section 7.7 addresses this
+   item by number.
 
 7. **Does the platform session cookie remain readable across the same-site
-   iframe leg the SDK uses?** The design assumes it does (same registrable
-   domain, hence same-site). UNVERIFIED; the experiment is in section 11. If it
-   does not, step 6's popup and top-level shapes are the only two entries and the
+   iframe leg the SDK uses?** OPEN. The design assumes it does (same registrable
+   domain, hence same-site). UNVERIFIED - a measurement nobody has taken; the
+   experiment is in section 11, which addresses this item by number. If it does
+   not, step 6's popup and top-level shapes are the only two entries and the
    iframe leg is dropped.
+
+8. **Does a suspension of a person acting as an end user also stop that person
+   deploying their own apps?** OPEN, and NEW - split out of item 1, which the
+   operator answered only for the account namespace. `subject_status` as drawn in
+   3.2 is person-scoped, so an abuse suspension against an app end user would also
+   stop that human deploying. The alternative is status per (person, audience),
+   which costs the simplicity of one predicate and needs a per-role handle the
+   corpus does not have at the project level - `zeroship.app_members` in
+   `db/migrations-ts/20260702000200_control_tables.ts` is app-scoped.
+
+   **RECOMMENDATION, offered and NOT yet accepted - this is not a decision:**
+   suspend per role rather than globally, because tightening later is easy and the
+   reverse means explaining why an unrelated complaint cut off a paying creator's
+   livelihood.
+
+   Where this question is already answered IMPLICITLY, and what has to be re-read
+   if it lands per role: the revocation matrix's suspend row and the `Selector`
+   enum in section 5, F10 and F11 in section 6, and step 8 in section 8. Each is
+   marked at its site. Those are what an implementer builds from, so a decision
+   made only there is a decision nobody knows was made.
 
 ---
 
@@ -1533,8 +1822,11 @@ while the capability it was written against is still alive.
   only select on the users table and reaches principals through the link and
   grant tables, which is consistent with one table for both, but nothing states
   it. Experiment: check whether a principal id in the identity-link table can
-  also appear as the global user id on an app identity row. This decides open
-  decision 1.
+  also appear as the global user id on an app identity row. This no longer
+  DECIDES anything - D-D settles the design - but it verifies whether today's
+  tree already satisfies the settled account model, which is what tells step 5
+  whether it adopts an existing shared namespace or has to merge two. The
+  UNVERIFIED marker stands until it is run.
 - *Whether the browser attaches the platform session cookie for the SDK's
   same-site iframe leg with third-party cookies blocked.* Same registrable domain
   means same-site, so Lax should apply, but I did not exercise it. Experiment: an
