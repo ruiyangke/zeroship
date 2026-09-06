@@ -112,7 +112,10 @@ APP=$(curl -sf -X POST http://localhost:9090/api/apps \
     -H "Authorization: Bearer $ADMIN_TOKEN" \
     -d '{"name":"bench"}')
 APP_ID=$(echo "$APP" | jq -r '.id')
-API_KEY=$(echo "$APP" | jq -r '.api_key')
+# The create response no longer carries an api key and no request path ever
+# validated one. The X-Api-Key headers below are inert; they stay only so the
+# benchmarked request shape is unchanged from earlier runs.
+API_KEY=""
 
 mkdir -p /tmp/zeroship-bench-app
 echo 'export function ping() { return "pong"; }' > /tmp/zeroship-bench-app/index.js

@@ -131,7 +131,10 @@ for i in $(seq 1 20); do
         -H "Authorization: Bearer $ADMIN_TOKEN" \
         -d "{\"name\":\"$name\"}")
     IDS[$name]=$(echo "$result" | jq -r '.id')
-    KEYS[$name]=$(echo "$result" | jq -r '.api_key')
+    # The create response no longer carries an api key, and nothing on the
+    # request path ever validated one. Kept as an empty string so the header
+    # sends below keep their shape.
+    KEYS[$name]=""
 
     # Deploy via control container
     if [ -n "${IDS[$name]}" ] && [ "${IDS[$name]}" != "null" ] \

@@ -80,8 +80,6 @@ export interface AppRecord {
   deploy_hash: string | null;
   /** Non-null while the app is out of service; null while it is active. */
   archived_at: string | null;
-  /** Present on create/admin get responses; intentionally omitted from public list responses. */
-  api_key?: string;
   created_at: string;
   updated_at: string;
 }
