@@ -1278,7 +1278,7 @@ real caller set was somewhere else.
   DIFFERENT module, also declared `pub mod auth;`, and it owns the whole
   per-request identity arm. A sweep keyed on the module name deletes the wrong
   one.
-- The api-key family, PARTLY. Deleted at step 1: `api_key_hash` on `RouteEntry`
+- The api-key family. Deleted at step 1: `api_key_hash` on `RouteEntry`
   in `crates/zeroship-core/src/types.rs`, the hash half of the mint in
   `crates/zeroship-control/src/registry.rs`, `zeroship.apps.api_key_hash` (by
   `db/migrations-ts/20260905000100_drop_app_api_key_hash.ts`, following the
@@ -1293,20 +1293,33 @@ real caller set was somewhere else.
   and `crates/zeroship-auth/src/oidc/refresh.rs`. Deleting them here breaks two
   crates; they belong to 7.2's dependency, not to step 1.
 
-  `AppRecord::api_key` and the `zeroship.apps.api_key` column are also KEPT,
-  because this subsection named only one of the field's two production readers.
-  The other is `println!("api_key={}", app.api_key)` in
-  `crates/zeroship-control/src/bin/dev_provision.rs`, and roughly a dozen shell
-  harnesses parse that line - several treating an empty value as a hard failure.
-  Removing the field is compile-clean and harness-breaking, so it is its own
-  change with its own consumers to re-plumb. What step 1 did instead is stop the
-  key leaving over HTTP, which is the half that needed no re-plumbing.
+  **THAT "KEPT" IS REVERSED, and the reversal is the more useful record.** Step 1
+  kept `AppRecord::api_key` and `zeroship.apps.api_key` on the grounds that the
+  field had "two production readers". Re-measured before deleting them, that
+  phrase was doing far more work than the facts support. There is no branch
+  anywhere on the value: `Registry::create_app` mints it, `row_to_record` copies
+  it into the struct, `dev_provision` prints it, and one `#[cfg(test)]` fixture
+  builds a record with a placeholder. No comparison, no policy lookup, no
+  refusal. Nothing can even present such a credential - no `X-Api-Key` reader
+  exists in any Rust or TypeScript source - and the value never leaves the
+  process, because `#[serde(skip_serializing)]` plus the create-response test
+  keep it out of the only body that serializes an `AppRecord`. So "production
+  readers" meant a `println!` in a dev-provisioning tool plus a struct field
+  nothing consumes, and a dozen harnesses scraping that printed line back into a
+  header no server reads.
 
-  So the shape this bullet named - a plaintext secret column stored beside its
-  own hash - is gone, and `tests/secret_beside_its_hash_gate.sh` refuses its
-  return. That gate rules on the PAIR and says so: a plaintext column with no
-  hash sibling is invisible to it, and `zeroship.apps.api_key` is exactly that
-  until `AppRecord::api_key` goes.
+  The whole family is therefore DELETED: the column (by
+  `db/migrations-ts/20260905000200_drop_app_api_key.ts`, whose header carries the
+  reasoning for owning no app-level key at all), the struct field, the mint, the
+  six SELECT lists, the `dev_provision` print, every fixture INSERT and every
+  inert `X-Api-Key` header. The harness gates that keyed on a non-empty key were
+  cut rather than adapted - they asserted on a value that proved nothing - and
+  replaced where a real signal was wanted by a gate on the app's own id.
+
+  `tests/secret_beside_its_hash_gate.sh` still refuses the pair-shape this bullet
+  named. Its stated caveat - that a plaintext column with NO hash sibling is
+  invisible to it - is unchanged and still true; it simply no longer has
+  `zeroship.apps.api_key` as its live example.
 - `crates/zeroship-control/src/identity_bridge.rs` - the whole module. DELETED
   at step 1, with `crates/zeroship-control/tests/identity_bridge_test.rs`, its
   only caller. `provision_or_link` had test callers only; `fetch_email_verified`
@@ -1588,9 +1601,11 @@ fences and the others are not.
 **Step 1. Delete what binds nothing.** `check_api_key` and the api-key columns,
 `identity_bridge`, the gateway's `sessions::validate`, `jwk_key_state`, the
 orphan public function in the app OAuth client module.
-*Red test:* a control-plane test asserting the create-app response carries no
-api-key field, plus a gate arm refusing a plaintext secret column stored beside
-its own hash. No premise.
+*Red test:* a control-plane test asserting the create-app path neither RETURNS
+an app-level key nor STORES one - a live-PG assertion that `zeroship.apps` has no
+key-shaped column and that the returned record round-trips, so nothing is being
+withheld from the response - plus a gate arm refusing a plaintext secret column
+stored beside its own hash. No premise.
 
 **Step 2. Wire service assertions on every internal edge.** `/internal/*` at
 control, the gateway-to-worker hop, and `workflow_advance_internal`. Land the
