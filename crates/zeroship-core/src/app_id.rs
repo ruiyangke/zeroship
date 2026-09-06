@@ -44,6 +44,15 @@
 //! - **No `From<&str>`, no `From<String>`, no `new_unchecked`, no public
 //!   field.** Construction is [`AppId::mint`] or the fallible [`AppId::parse`].
 //!   There is no third way in.
+//!
+//!   **THERE IS NOW EXACTLY ONE THIRD WAY IN, AND IT IS DATED.**
+//!   [`AppId::from_uuid`] wraps the `Uuid` the `zeroship.apps.id` column still
+//!   holds, producing a NON-CANONICAL id whose printed form is the hyphenated
+//!   uuid. It exists so [`crate::app_derivation`] can become the one producer
+//!   of every derived identifier while the column is unchanged, and it is
+//!   deleted in the slice that flips the column. The sentence above is kept
+//!   rather than rewritten because it states the end state this type is
+//!   travelling back to, not a description of the constructor list today.
 //! - **No `PartialEq<str>`.** Comparing against a raw string is a decision, not
 //!   a convenience.
 //!
@@ -119,6 +128,38 @@ impl AppId {
         Self {
             text: format!("{APP_PREFIX}_{}", typed_id::uuid_to_base62(&uuid)),
             uuid,
+        }
+    }
+
+    /// Wrap the `Uuid` an app id is STORED as today, so that a call site
+    /// holding one can reach [`crate::app_derivation`] without any other type
+    /// in the tree changing.
+    ///
+    /// TRANSITIONAL. This is the third way in that the module docs above say
+    /// does not exist, and that contradiction is deliberate and temporary. It
+    /// exists so the derivation seam can be introduced while `zeroship.apps.id`
+    /// is still `uuid`; it is scheduled for deletion in the slice that flips
+    /// that column, and every caller of it disappears with it.
+    ///
+    /// **The text it produces is NOT canonical, and that is the point.** A
+    /// minted id prints `app_<base62>`; this one prints the hyphenated uuid,
+    /// which is what every derived identifier in the tree is composed from
+    /// today. Passing the result to a derivation therefore returns today's
+    /// bytes, which is what makes the seam behaviour-neutral rather than a
+    /// silent re-keying of every schema, role, publication and slot.
+    ///
+    /// Two consequences follow from that, and neither is a defect:
+    ///
+    /// - `AppId::parse(AppId::from_uuid(u).as_str())` FAILS. A transitional id
+    ///   is a derivation input, not a value to round-trip.
+    /// - `from_uuid(u)` and a `mint`ed id carrying the same uuid are NOT equal,
+    ///   do not hash alike and do not order alike, because equality is derived
+    ///   over the printed text. Do not mix the two in one map.
+    #[must_use]
+    pub fn from_uuid(uuid: &uuid::Uuid) -> Self {
+        Self {
+            text: uuid.to_string(),
+            uuid: *uuid,
         }
     }
 

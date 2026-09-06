@@ -5,6 +5,8 @@
 
 use compio_postgres::GenericClient;
 use uuid::Uuid;
+use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 
 use crate::registry::RegistryError;
 
@@ -21,10 +23,10 @@ where
     // made inside a workflow mutation transaction therefore either commit
     // before archive returns or observe the archived marker afterwards.
     conn.query_one(
-        "SELECT pg_advisory_xact_lock_shared( \
-             hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
-         )",
-        &[app_id],
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
+        &[&app_derivation::lifecycle_lock_seed(&AppId::from_uuid(
+            app_id,
+        ))],
     )
     .await
     .map_err(RegistryError::from)?;
