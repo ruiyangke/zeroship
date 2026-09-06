@@ -1617,7 +1617,16 @@ async fn fetch_worker_logs(
     worker_key: &str,
     app_id: &Uuid,
 ) -> Result<Vec<String>, String> {
-    let url = format!("{}/logs/{app_id}", worker_url.trim_end_matches('/'));
+    // TRANSITIONAL. The worker reads this path segment as a typed app id and
+    // refuses a uuid rendering outright, so control renders the id the same way
+    // the gateway does. Control is the OTHER producer of a worker path - the
+    // gateway owns `/dispatch`, this owns `/logs` - and a producer that kept
+    // spelling the uuid would get a 400 on every log fetch.
+    let url = format!(
+        "{}/logs/{}",
+        worker_url.trim_end_matches('/'),
+        zeroship_core::app_id::canonical_app_id_for(app_id).as_str()
+    );
     let client = cyper::Client::new();
     let mut builder = client
         .get(&url)
