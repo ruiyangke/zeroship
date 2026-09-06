@@ -5,6 +5,7 @@
 //! skip otherwise.
 
 use compio_postgres::{connect, Client, NoTls};
+use uuid::Uuid;
 use zeroship_control::Registry;
 
 use crate::common;
@@ -71,6 +72,103 @@ async fn registry_core_tables_live_in_zeroship_schema() {
     // dropped only after the body returns - by which point the runtime is gone
     // and the socket can no longer be closed. Drop it explicitly, then wait for
     // the close to land.
+    drop(pg);
+    common::drain_pg().await;
+}
+
+/// There is no app-level API key, and the create path proves it in BOTH
+/// directions: it must neither RETURN one to its caller nor STORE one.
+///
+/// Both halves live in one test because either alone is satisfied by the wrong
+/// fix. A response with no key field is what a `#[serde(skip_serializing)]`
+/// attribute over a live column produces - that was the state this replaces,
+/// and it hid a minted secret rather than not minting one. A table with no key
+/// column says nothing about what the handler hands back. Only the pair says
+/// the key does not exist.
+///
+/// The round-trip is the second half's real assertion. A create response that
+/// deserializes back into the very type that produced it cannot be withholding
+/// a field: withholding is exactly what makes the round-trip fail. Asserting
+/// only "no field named api_key" would pass against a struct that kept the
+/// secret and renamed the field.
+#[compio::test]
+async fn create_app_neither_returns_nor_stores_an_app_level_key() {
+    let url = db_url();
+    let registry = Registry::new(&url).await.expect("registry");
+    let pg = pg(&url).await;
+
+    let owner_id = Uuid::new_v4();
+    pg.execute(
+        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
+        &[
+            &owner_id,
+            &format!("nokey-owner-{owner_id}@zeroship.test"),
+            &"nokey-owner",
+        ],
+    )
+    .await
+    .expect("seed owner user");
+    zeroship_control::plan_catalog::seed_plans(&registry)
+        .await
+        .expect("seed built-in plans");
+
+    let name = format!("nokey-{}", &Uuid::new_v4().simple().to_string()[..12]);
+    let record = registry
+        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        .await
+        .expect("create_app");
+
+    // STORES. Ask the catalog what the create path actually wrote into, not
+    // the SQL text of the statement: a column dropped from the INSERT list but
+    // left on the table is still a place a key can be put back.
+    let columns = pg
+        .query(
+            "SELECT column_name::text AS column_name \
+             FROM information_schema.columns \
+             WHERE table_schema = 'zeroship' AND table_name = 'apps'",
+            &[],
+        )
+        .await
+        .expect("read zeroship.apps columns");
+    let column_names: Vec<String> = columns
+        .iter()
+        .map(|row| row.get::<_, String>("column_name").to_ascii_lowercase())
+        .collect();
+    for column in &column_names {
+        assert!(
+            !column.contains("api_key") && !column.contains("apikey"),
+            "zeroship.apps must carry no app-level key column; found {column:?}"
+        );
+    }
+    // CONTROL for the sweep above: an empty or misspelled column list would
+    // satisfy it vacuously.
+    for expected in ["id", "name", "plan_id"] {
+        assert!(
+            column_names.iter().any(|column| column == expected),
+            "zeroship.apps must still carry {expected:?}"
+        );
+    }
+
+    // RETURNS. The create-app response body is exactly this serialized record
+    // (`create_app_response_body` in crates/zeroship-control/src/api.rs).
+    let body = serde_json::to_value(&record).expect("serialize the created record");
+    let object = body.as_object().expect("the record is a JSON object");
+    for field in object.keys() {
+        assert!(
+            !field.contains("api_key") && !field.contains("apiKey"),
+            "the create-app response must carry no app-level key field; found {field:?}"
+        );
+    }
+    // CONTROL: the identity a caller needs must survive.
+    for expected in ["id", "name", "plan_id"] {
+        assert!(
+            object.contains_key(expected),
+            "the create-app response must still carry {expected:?}"
+        );
+    }
+    serde_json::from_value::<zeroship_core::types::AppRecord>(body)
+        .expect("the create-app response must round-trip: nothing is withheld from it");
+
     drop(pg);
     common::drain_pg().await;
 }
