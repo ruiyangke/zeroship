@@ -262,7 +262,6 @@ impl Registry {
             ));
         }
 
-        let api_key = Uuid::new_v4().to_string();
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
 
@@ -275,11 +274,11 @@ impl Registry {
 
         let rows = tx
             .query(
-                "INSERT INTO zeroship.apps (name, plan_id, api_key) \
-                 VALUES ($1, $2, $3) \
-                 RETURNING id, name, plan_id, deploy_hash, api_key, \
+                "INSERT INTO zeroship.apps (name, plan_id) \
+                 VALUES ($1, $2) \
+                 RETURNING id, name, plan_id, deploy_hash, \
                            archived_at::text, created_at::text, updated_at::text",
-                &[&name, &plan_id, &api_key],
+                &[&name, &plan_id],
             )
             .await?;
         let record = rows
@@ -304,7 +303,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, archived_at::text, \
+                "SELECT id, name, plan_id, deploy_hash, archived_at::text, \
                         created_at::text, updated_at::text \
                  FROM zeroship.apps WHERE id = $1",
                 &[id],
@@ -318,7 +317,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, archived_at::text, \
+                "SELECT id, name, plan_id, deploy_hash, archived_at::text, \
                         created_at::text, updated_at::text \
                  FROM zeroship.apps WHERE name = $1",
                 &[&name],
@@ -340,7 +339,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT a.id, a.name, a.plan_id, a.deploy_hash, a.api_key, \
+                "SELECT a.id, a.name, a.plan_id, a.deploy_hash, \
                         a.archived_at::text, a.created_at::text, a.updated_at::text \
                  FROM zeroship.apps a \
                  JOIN zeroship.app_members m ON m.app_id = a.id \
@@ -380,7 +379,7 @@ impl Registry {
                     SET archived_at = COALESCE(archived_at, NOW()), \
                         updated_at = CASE WHEN archived_at IS NULL THEN NOW() ELSE updated_at END \
                   WHERE id = $1 \
-                  RETURNING id, name, plan_id, deploy_hash, api_key, \
+                  RETURNING id, name, plan_id, deploy_hash, \
                             archived_at::text, created_at::text, updated_at::text",
                 &[id],
             )
@@ -478,7 +477,7 @@ impl Registry {
                     SET archived_at = NULL, \
                         updated_at = CASE WHEN archived_at IS NOT NULL THEN NOW() ELSE updated_at END \
                   WHERE id = $1 \
-                  RETURNING id, name, plan_id, deploy_hash, api_key, \
+                  RETURNING id, name, plan_id, deploy_hash, \
                             archived_at::text, created_at::text, updated_at::text",
                 &[id],
             )
@@ -1066,8 +1065,7 @@ fn net_policy_limits_from_catalog(
 /// Convert a query row into an `AppRecord`.
 ///
 /// Columns: id (UUID), name (TEXT), plan_id (UUID), deploy_hash (TEXT | NULL),
-///          api_key (TEXT), archived_at (TEXT | NULL), created_at (TEXT),
-///          updated_at (TEXT).
+///          archived_at (TEXT | NULL), created_at (TEXT), updated_at (TEXT).
 fn row_to_record(row: &compio_postgres::Row) -> AppRecord {
     AppRecord {
         id: row.get("id"),
@@ -1075,7 +1073,6 @@ fn row_to_record(row: &compio_postgres::Row) -> AppRecord {
         plan_id: row.get("plan_id"),
         deploy_hash: row.get("deploy_hash"),
         archived_at: row.get("archived_at"),
-        api_key: row.get("api_key"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }

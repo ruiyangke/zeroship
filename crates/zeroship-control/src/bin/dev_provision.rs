@@ -69,7 +69,7 @@ struct Cli {
     /// row. So a schema-carrying app is provisioned in two dev-provision calls
     /// with two explicit database operations between them:
     ///
-    ///   dev-provision --defer-deploy ...   # app_id + api_key, nothing live
+    ///   dev-provision --defer-deploy ...   # app_id + name, nothing live
     ///   POST /v1/databases/<app_id>
     ///   <apply migrations through zeroship-migrate-server>
     ///   dev-provision ...                  # same command, now activates
@@ -104,7 +104,6 @@ async fn main() -> ExitCode {
         Ok(app) => {
             println!("app_id={}", app.id);
             println!("name={}", app.name);
-            println!("api_key={}", app.api_key);
             ExitCode::SUCCESS
         }
         Err(e) => {
