@@ -90,8 +90,8 @@ impl HashRing {
     /// whole ring and evicting every warm isolate in the fleet at once. Going
     /// through a function that returns `[u8; 16]` makes that substitution
     /// impossible to make by accident.
-    pub fn select(&self, app_id: &Uuid) -> (usize, &str) {
-        let hash = hash_bytes(&app_derivation::ring_key(&AppId::from_uuid(app_id)));
+    pub fn select(&self, app_id: &AppId) -> (usize, &str) {
+        let hash = hash_bytes(&app_derivation::ring_key(app_id));
         for (_, &idx) in self.ring.range(hash..).chain(self.ring.iter()) {
             if self.active[idx].load(Ordering::Relaxed) < self.max_per_worker {
                 return (idx, &self.workers[idx]);
@@ -112,11 +112,11 @@ impl HashRing {
     /// to the next viable slot. This is a "sticky bit" in CHWBL
     /// terminology — affinity steers the choice but does not override
     /// capacity.
-    pub fn select_with_affinity(&self, app_id: &Uuid, affinity: &str) -> (usize, &str) {
+    pub fn select_with_affinity(&self, app_id: &AppId, affinity: &str) -> (usize, &str) {
         let mut combined = Vec::with_capacity(16 + affinity.len() + 1);
         // The app half is the EMBEDDED bits, for the reason spelled out on
         // [`Self::select`].
-        combined.extend_from_slice(&app_derivation::ring_key(&AppId::from_uuid(app_id)));
+        combined.extend_from_slice(&app_derivation::ring_key(app_id));
         combined.push(b':');
         combined.extend_from_slice(affinity.as_bytes());
         let hash = hash_bytes(&combined);
@@ -224,7 +224,7 @@ fn pool_key(worker_url: &str) -> String {
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_dispatch(
     ring: &HashRing,
-    app_id: &Uuid,
+    app_id: &AppId,
     plan_id: &str,
     request_id: &Uuid,
     method: &str,
@@ -258,7 +258,7 @@ pub async fn forward_dispatch(
 /// gateway→worker workflow transport is a later hardening task.
 pub async fn forward_workflow_advance(
     ring: &HashRing,
-    app_id: &Uuid,
+    app_id: &AppId,
     plan_id: &str,
     request_id: &Uuid,
     body: &[u8],
@@ -270,7 +270,7 @@ pub async fn forward_workflow_advance(
 
     let (idx, worker_url) = ring.select(app_id);
     ring.acquire(idx);
-    let path = format!("/workflow-advance-unsigned/{app_id}");
+    let path = format!("/workflow-advance-unsigned/{}", app_id.as_str());
     let result = forward_to_worker_path(
         worker_url,
         &path,
@@ -292,14 +292,14 @@ const WORKER_TIMEOUT: Duration = Duration::from_secs(30);
 /// Forward the HTTP envelope to a worker at `/dispatch/{app_id}`.
 async fn forward_to_worker_dispatch(
     worker_url: &str,
-    app_id: &Uuid,
+    app_id: &AppId,
     plan_id: &str,
     request_id: &Uuid,
     body: &[u8],
     user_header: Option<&str>,
     worker_key: &str,
 ) -> Result<HttpResponse, String> {
-    let path = format!("/dispatch/{app_id}");
+    let path = format!("/dispatch/{}", app_id.as_str());
 
     forward_to_worker_path(
         worker_url,
@@ -319,7 +319,7 @@ async fn forward_to_worker_dispatch(
 async fn forward_to_worker_path(
     worker_url: &str,
     path: &str,
-    app_id: &Uuid,
+    app_id: &AppId,
     plan_id: &str,
     request_id: &Uuid,
     body: &[u8],
@@ -548,7 +548,7 @@ fn strip_cookie_domain(set_cookie: &str) -> String {
 fn build_request(
     path: &str,
     host: &str,
-    app_id: &Uuid,
+    app_id: &AppId,
     plan_id: &str,
     request_id: &Uuid,
     body: &[u8],
@@ -569,14 +569,15 @@ fn build_request(
          Host: {host}\r\n\
          Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
-         X-App-Id: {app_id}\r\n\
+         X-App-Id: {}\r\n\
          X-Plan-Id: {plan_id}\r\n\
          X-Request-Id: {request_id}\r\n\
          {auth_line}\
          {user_line}\
          Connection: keep-alive\r\n\
          \r\n",
-        body.len()
+        body.len(),
+        app_id.as_str()
     );
     let mut bytes = header.into_bytes();
     bytes.extend_from_slice(body);
@@ -1276,7 +1277,7 @@ mod pooled_retry_tests {
     }
 
     async fn dispatch(worker_url: &str) -> Result<HttpResponse, String> {
-        let app_id = Uuid::new_v4();
+        let app_id = zeroship_core::app_id::canonical_app_id_for(&Uuid::new_v4());
         let request_id = Uuid::new_v4();
         forward_to_worker_path(
             worker_url,
