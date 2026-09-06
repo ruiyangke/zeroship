@@ -37,5 +37,6 @@
   { "file": "20260831000000_archive_apps.ts", "name": "archive_apps", "opCount": 3 },
   { "file": "20260831000001_sortable_entity_id_collations.ts", "name": "sortable_entity_id_collations", "opCount": 37 },
   { "file": "20260905000000_drop_jwk_key_state.ts", "name": "drop_jwk_key_state", "opCount": 1 },
-  { "file": "20260905000100_drop_app_api_key_hash.ts", "name": "drop_app_api_key_hash", "opCount": 1 }
+  { "file": "20260905000100_drop_app_api_key_hash.ts", "name": "drop_app_api_key_hash", "opCount": 1 },
+  { "file": "20260906000000_organization_entity_model.ts", "name": "organization_entity_model", "opCount": 56 }
 ]

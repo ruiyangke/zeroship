@@ -264,7 +264,9 @@ async fn cleanup_app(conn: &Client, app_id: &Uuid) {
         .await;
     let _ = conn
         .execute(
-            "DELETE FROM zeroship.app_members WHERE app_id = $1",
+            "DELETE FROM zeroship.organization_members om \
+                 USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
+                 WHERE om.organization_id = p.organization_id AND a.id = $1",
             &[app_id],
         )
         .await;
@@ -294,7 +296,7 @@ async fn cleanup_user(conn: &Client, user_id: &Uuid) {
         .await;
     let _ = conn
         .execute(
-            "DELETE FROM zeroship.app_members WHERE user_id = $1",
+            "DELETE FROM zeroship.organization_members WHERE user_id = $1",
             &[user_id],
         )
         .await;
@@ -345,7 +347,10 @@ async fn seed_app(conn: &Client, app_id: Uuid, owner_id: Uuid) {
     .await
     .expect("seed app");
     conn.execute(
-        "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
+        "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+             SELECT p.organization_id, $2, 'owner' FROM zeroship.apps a \
+               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
+             ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
         &[&app_id, &owner_id],
     )
     .await

@@ -40,10 +40,14 @@
 //!
 //! The reaper runs on the auth service's DB connection. It must be able to
 //! `UPDATE`/`DELETE` `zeroship.users` AND `SET NULL` the attribution FK columns
-//! in control-owned tables (`app_members.added_by`, `oauth_clients.created_by`)
-//! — all in the one shared `zeroship` schema. Verify the `zeroship_auth` role's grants cover
-//! these cross-table writes in any RLS / least-privilege hardening pass
-//! (`0025_roles_rls.sql`).
+//! in control-owned tables that do not clear themselves
+//! (`oauth_clients.created_by`) — all in the one shared `zeroship` schema.
+//! Verify the `zeroship_auth` role's grants cover these cross-table writes in
+//! any RLS / least-privilege hardening pass (`0025_roles_rls.sql`).
+//!
+//! The organization and project membership tables need no such grant: their
+//! users edges are declared `ON DELETE SET NULL` / `ON DELETE CASCADE`, so the
+//! DELETE of the user row does the work. See [`ATTRIBUTION_FKS`].
 
 use std::time::Duration;
 
@@ -62,19 +66,29 @@ pub const GRACE_DAYS: i64 = 30;
 /// `token_sweep`'s cadence.
 const INTERVAL_SECS: u64 = 60 * 60;
 
-/// The NON-cascade attribution FK columns pointing at `zeroship.users(id)`.
+/// The attribution FK columns pointing at `zeroship.users(id)` that PostgreSQL
+/// does NOT clear by itself.
+///
 /// A hard `DELETE` of an erased user is BLOCKED while any of these still
 /// reference it, so the reaper `SET NULL`s them first. Kept as data so the set
-/// is auditable in one place (and the test that asserts SET-NULL behaviour and
-/// this list can't silently drift apart).
+/// is auditable in one place (and so the test asserting SET-NULL behaviour and
+/// this list cannot silently drift apart).
 ///
-/// `(table, column)`. Sourced from the schema FK inventory (0003/0004):
-///   - `app_members.added_by`
-///   - `oauth_clients.created_by`
-const ATTRIBUTION_FKS: &[(&str, &str)] = &[
-    ("zeroship.app_members", "added_by"),
-    ("zeroship.oauth_clients", "created_by"),
-];
+/// # Why the organization tables are absent, and why that is not an oversight
+///
+/// `zeroship.app_members.added_by` used to be here. That table is deleted, and
+/// its replacements - `organization_members`, `project_members`,
+/// `organizations`, `projects`, `organization_invites` - declare EVERY
+/// attribution edge onto `users` as `ON DELETE SET NULL` and every identity
+/// edge as `ON DELETE CASCADE`. PostgreSQL therefore clears them itself, so
+/// listing them here would be a second mechanism doing the database's work, and
+/// an entry naming a table with a SET NULL edge would be indistinguishable from
+/// one naming a table that genuinely blocks.
+///
+/// The rule for a future editor is the edge, not the column name: a users FK
+/// with `NO ACTION` or `RESTRICT` belongs here; one with `SET NULL` or
+/// `CASCADE` must not.
+const ATTRIBUTION_FKS: &[(&str, &str)] = &[("zeroship.oauth_clients", "created_by")];
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ReaperReport {
@@ -344,16 +358,41 @@ async fn anonymize_user(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Re
 mod tests {
     use super::*;
 
+    /// The list is exactly the users FKs that BLOCK a delete. Asserting the
+    /// whole set rather than its size is the point: a size check passes when
+    /// one entry is swapped for another, and the failure this guards is a new
+    /// blocking FK reaching production unlisted, where it strands the reaper on
+    /// a foreign-key violation rather than on anything a log line explains.
     #[test]
-    fn attribution_fk_list_matches_schema_inventory() {
-        // The five NON-cascade FKs to zeroship.users are: the four attribution
-        // columns (here) plus creator_accounts.creator_id (handled by the
-        // anonymize/retain branch, NOT nulled). If a new attribution FK is
-        // added to the schema, it MUST be added here or a hard DELETE will be
-        // blocked — this assertion is the reminder.
-        assert_eq!(ATTRIBUTION_FKS.len(), 2);
-        assert!(ATTRIBUTION_FKS.contains(&("zeroship.app_members", "added_by")));
-        assert!(ATTRIBUTION_FKS.contains(&("zeroship.oauth_clients", "created_by")));
+    fn attribution_fk_list_is_exactly_the_blocking_edges() {
+        assert_eq!(
+            ATTRIBUTION_FKS,
+            &[("zeroship.oauth_clients", "created_by")],
+            "a users FK with NO ACTION or RESTRICT belongs here; one with SET NULL or CASCADE \
+             must not"
+        );
+        // `zeroship.app_members` is DELETED. An entry naming it would make
+        // every hard delete fail on an undefined table, and the failure would
+        // read as a permissions problem.
+        assert!(
+            !ATTRIBUTION_FKS.iter().any(|(table, _)| table.contains("app_members")),
+            "app_members no longer exists"
+        );
+        // The organization tables declare SET NULL / CASCADE, so PostgreSQL
+        // clears them. Listing one would be a second mechanism doing the
+        // database's work.
+        for table in [
+            "organization_members",
+            "project_members",
+            "organizations",
+            "projects",
+            "organization_invites",
+        ] {
+            assert!(
+                !ATTRIBUTION_FKS.iter().any(|(listed, _)| listed.contains(table)),
+                "{table} clears its own users edges; listing it here duplicates the schema"
+            );
+        }
     }
 
     #[test]

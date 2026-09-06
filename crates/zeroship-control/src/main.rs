@@ -1171,6 +1171,11 @@ fn main() -> std::io::Result<()> {
             // rule grammar bound what they may write, and an app with no
             // accept rule stays default-deny.
             .configure(zeroship_control::egress_rules::configure)
+            // Organizations, projects, membership and invites - the ownership
+            // root and the per-project narrowing. Mounted as one block because
+            // every route in it authorizes against the same closed rank ladder
+            // and every mutation shares one lock discipline.
+            .configure(zeroship_control::organizations::configure)
             // --- Auth (resource server) ---
             // No console OIDC RP and no console back-channel-logout endpoint:
             // the console is now a gateway-fronted regular app authenticated

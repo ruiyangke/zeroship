@@ -793,7 +793,10 @@ async fn make_spend_app_owned_by(
         .expect("insert app");
     let app_id: Uuid = rows[0].get("id");
     pg.execute(
-        "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
+        "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+             SELECT p.organization_id, $2, 'owner' FROM zeroship.apps a \
+               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
+             ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
         &[&app_id, &creator],
     )
     .await

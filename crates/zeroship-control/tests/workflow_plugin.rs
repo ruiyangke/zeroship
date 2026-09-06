@@ -209,14 +209,18 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
     let app_id = Uuid::new_v4();
     let app_name = format!("wf-plugin-{}", Uuid::new_v4().simple());
+    // This case is about the V8 binding, not about who owns the app.
+    let project = common::unowned_project(fx.pg.as_ref()).await;
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, workflows_enabled) \
-             VALUES ($1, $2, $3, 'test-api-key', true)",
+            "INSERT INTO zeroship.apps \
+                 (id, name, plan_id, api_key, workflows_enabled, project_id) \
+             VALUES ($1, $2, $3, 'test-api-key', true, $4)",
             &[
                 &app_id,
                 &app_name,
                 &zeroship_control::plan_catalog::free_plan_id(),
+                &project,
             ],
         )
         .await

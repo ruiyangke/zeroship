@@ -74,6 +74,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# `zeroship.app_members` is deleted; an app reaches the people who answer for it
+# through its project's organization. `seat_app_owner_sql` emits that join AND a
+# check that raises when it matches nothing - an INSERT ... SELECT over no rows
+# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
+# surfaces far from here.
+source "$ROOT/tests/lib/organization_fixture.sh"
 STRICT="${STRICT:-0}"
 
 # Load the gitignored repo-root .env (Stripe TEST keys) when the vars aren't
@@ -266,6 +272,10 @@ if(m===0){y-=1;m=11;}else{m-=1;}
 process.stdout.write(String(Math.floor(Date.UTC(y,m,1,0,0,0)/1000)));
 ' "$NOW_UNIX")"
 
+# The app needs a project, and the project an organization: that chain is the
+# only path from an app to the party it is billed to. Set the ids here, in this
+# shell, because the emitter below runs in a subshell.
+organization_fixture_ids "stripe-e2e-$CREATOR"
 psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "seed failed"; exit 1; }
 INSERT INTO zeroship.plans (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit,
    runtime_limits_json, spend_limit_default_cents)
@@ -274,9 +284,10 @@ VALUES ('$PLAN_ID','stripe-e2e',0,0,1000000000000,
 ON CONFLICT (id) DO NOTHING;
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CREATOR', 'e2e-$CREATOR@zeroship.test'::citext, 'E2E Stripe Creator', NOW());
-INSERT INTO zeroship.apps (id, name, plan_id, api_key)
-VALUES ('$CLOSED_APP', 'stripe-e2e-app-$CLOSED_APP', '$PLAN_ID', '$CLOSED_APP');
-INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$CLOSED_APP', '$CREATOR', 'owner');
+$(organization_fixture_sql "stripe-e2e-$CREATOR" "e2e-$CREATOR@zeroship.test")
+INSERT INTO zeroship.apps (id, name, plan_id, api_key, project_id)
+VALUES ('$CLOSED_APP', 'stripe-e2e-app-$CLOSED_APP', '$PLAN_ID', '$CLOSED_APP', '$ZS_FIXTURE_PROJECT_ID');
+$(seat_app_owner_sql "$CLOSED_APP" "$CREATOR")
 -- The customer id lives in the side table billing_customer_refs (relocated off
 -- creator_billing). Create the FK-parent identity row, then map the cus_.
 INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CREATOR') ON CONFLICT DO NOTHING;

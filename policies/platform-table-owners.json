@@ -96,5 +96,11 @@
   "workflow_scheduler_timers": "zeroship_platform",
   "workflow_scheduler_inflight": "zeroship_platform",
   "service_assertion_replay": "zeroship_platform",
-  "app_egress_rules": "zeroship_platform"
+  "app_egress_rules": "zeroship_platform",
+  "organization_roles": "zeroship_platform",
+  "organizations": "zeroship_platform",
+  "organization_members": "zeroship_platform",
+  "organization_invites": "zeroship_platform",
+  "projects": "zeroship_platform",
+  "project_members": "zeroship_platform"
 }

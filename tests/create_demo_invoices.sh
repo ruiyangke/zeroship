@@ -54,6 +54,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# `zeroship.app_members` is deleted; an app reaches the people who answer for it
+# through its project's organization. `seat_app_owner_sql` emits that join AND a
+# check that raises when it matches nothing - an INSERT ... SELECT over no rows
+# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
+# surfaces far from here.
+source "$ROOT/tests/lib/organization_fixture.sh"
 
 PASS=0; FAIL=0
 pass() { PASS=$((PASS+1)); echo "  ✓ $1"; }
@@ -245,12 +251,18 @@ seed_creator() {
   pm="$(spost payment_methods/pm_card_visa/attach -d "customer=$cus" | jget id)"
   case "$pm" in pm_*) ;; *) echo "FAILPM"; return 1;; esac
   spost "customers/$cus" -d "invoice_settings[default_payment_method]=$pm" -o /dev/null
+  # One organization per seeded creator, so each demo invoice has a distinct
+  # billing subject. It has to run HERE, in this function's own shell: the
+  # emitter below is expanded in a subshell and could not hand the project id
+  # back to the `apps` row that needs it.
+  organization_fixture_ids "demo-$label-$creator"
   psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { echo "FAILDB"; return 1; }
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$creator', 'demo-$label-$creator@zeroship.test'::citext, 'Demo $label creator', NOW());
-INSERT INTO zeroship.apps (id, name, plan_id, api_key)
-VALUES ('$app', 'demo-$label-app', '$plan_id', '$app');
-INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$app', '$creator', 'owner');
+$(organization_fixture_sql "demo-$label-$creator" "demo-$label-$creator@zeroship.test")
+INSERT INTO zeroship.apps (id, name, plan_id, api_key, project_id)
+VALUES ('$app', 'demo-$label-app', '$plan_id', '$app', '$ZS_FIXTURE_PROJECT_ID');
+$(seat_app_owner_sql "$app" "$creator")
 INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$creator') ON CONFLICT DO NOTHING;
 INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)
 VALUES ('$creator', 'stripe', '$cus')

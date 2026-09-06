@@ -245,14 +245,16 @@ pub enum EventForwarderError {
 /// Resolves the OWNING creator for an app so the forwarder can attribute usage
 /// events to the right provider customer. The worker producer only has the
 /// server-injected `app_id` and stamps `subject.creator = nil`; the control
-/// plane owns the app→creator mapping (`app_members` role='owner'), so it must
-/// enrich the creator here before forwarding to a per-creator provider.
+/// plane owns the app→creator mapping (the app's project, its organization, and
+/// that organization's owner), so it must enrich the creator here before
+/// forwarding to a per-creator provider.
 #[async_trait::async_trait(?Send)]
 pub trait CreatorResolver: Send + Sync {
     async fn creator_for_app(&self, app_id: Uuid) -> Result<Option<Uuid>, EventForwarderError>;
 }
 
-/// Postgres-backed [`CreatorResolver`] (`app_members` role='owner').
+/// Postgres-backed [`CreatorResolver`], over
+/// [`crate::organizations::app_owner_lateral`].
 pub struct PgCreatorResolver {
     conn: Arc<compio_postgres::Client>,
 }
@@ -276,13 +278,15 @@ impl CreatorResolver for PgCreatorResolver {
         let rows = self
             .conn
             .query(
-                "SELECT user_id FROM zeroship.app_members \
-                 WHERE app_id = $1 AND role = 'owner' LIMIT 1",
+                &format!(
+                    "SELECT app_owner.user_id FROM zeroship.apps a {lateral} WHERE a.id = $1",
+                    lateral = crate::organizations::app_owner_lateral(),
+                ),
                 &[&app_id],
             )
             .await
             .map_err(|e| EventForwarderError::DeadLetter(format!("creator resolve: {e}")))?;
-        Ok(rows.first().map(|r| r.get::<_, Uuid>("user_id")))
+        Ok(rows.first().and_then(|r| r.get::<_, Option<Uuid>>("user_id")))
     }
 }
 

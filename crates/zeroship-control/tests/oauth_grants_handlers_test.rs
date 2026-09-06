@@ -673,6 +673,8 @@ async fn revoke_cascade_revokes_relay_alias_so_inbound_bounces() {
 /// first. Returns the seeded `app_id` so the caller can clean it up.
 async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str) -> Uuid {
     let app_id = Uuid::new_v4();
+    // This case is about the OAuth client row, not about who owns the app.
+    let project = common::unowned_project(&state.control_pg).await;
     // `apps.plan_id` FKs `zeroship.plans`; the column default is the literal
     // string 'free', but the catalog's built-in free tier is keyed by the
     // derived `pln_<base62>` id (`free_plan_id()`), NOT 'free'. Seed it
@@ -681,12 +683,14 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
     state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, project_id) \
+             VALUES ($1, $2, $3, $4, $5)",
             &[
                 &app_id,
                 &format!("app-{}", app_id.simple()),
                 &zeroship_control::plan_catalog::free_plan_id(),
                 &format!("ak_{}", Uuid::new_v4().simple()),
+                &project,
             ],
         )
         .await
@@ -1207,6 +1211,7 @@ async fn app_archive_returns_200_with_retained_record() {
             &app_name,
             &zeroship_control::plan_catalog::free_plan_id(),
             &caller.user_id,
+            None,
         )
         .await
         .expect("create app");

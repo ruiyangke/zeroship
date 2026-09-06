@@ -48,17 +48,29 @@ fn action_cedar_ids_are_canonical() {
         (Action::AppsRead, "apps:read"),
         (Action::AppsWrite, "apps:write"),
         (Action::AppsDeploy, "apps:deploy"),
+        (Action::AppsApproveMigration, "migrations:approve"),
         (Action::AppsArchive, "apps:archive"),
         (Action::DeploymentsRead, "deployments:read"),
-        (Action::DeploymentsRollback, "deployments:rollback"),
         (Action::EnvRead, "env:read"),
         (Action::EnvWrite, "env:write"),
         (Action::SecretsRead, "secrets:read"),
         (Action::SecretsWrite, "secrets:write"),
         (Action::BillingRead, "billing:read"),
         (Action::BillingWrite, "billing:write"),
-        (Action::TeamRead, "team:read"),
-        (Action::TeamWrite, "team:write"),
+        (Action::OrganizationCreate, "organization:create"),
+        (Action::OrganizationRead, "organization:read"),
+        (Action::OrganizationWrite, "organization:write"),
+        (Action::OrganizationAdmin, "organization:admin"),
+        (Action::OrganizationMembersRead, "organization:members:read"),
+        (
+            Action::OrganizationMembersWrite,
+            "organization:members:write",
+        ),
+        (Action::ProjectCreate, "project:create"),
+        (Action::ProjectRead, "project:read"),
+        (Action::ProjectWrite, "project:write"),
+        (Action::ProjectMembersRead, "project:members:read"),
+        (Action::ProjectMembersWrite, "project:members:write"),
         (Action::AccountRead, "account:read"),
         (Action::AccountWrite, "account:write"),
     ];
@@ -66,6 +78,9 @@ fn action_cedar_ids_are_canonical() {
     for (action, cedar_id) in cases {
         assert_eq!(action.cedar_id(), cedar_id);
     }
+    // The list above must be the WHOLE vocabulary, not a sample of it: a new
+    // action with no canonical id asserted here would otherwise ship unpinned.
+    assert_eq!(cases.len(), Action::all().len());
 }
 
 #[test]
@@ -76,6 +91,20 @@ fn resource_cedar_uids_are_canonical() {
         }
         .cedar_uid(),
         "App::\"blog\""
+    );
+    assert_eq!(
+        Resource::Project {
+            id: "prj_0123456789abcdefghijkl".to_owned()
+        }
+        .cedar_uid(),
+        "Project::\"prj_0123456789abcdefghijkl\""
+    );
+    assert_eq!(
+        Resource::Organization {
+            id: "org_0123456789abcdefghijkl".to_owned()
+        }
+        .cedar_uid(),
+        "Organization::\"org_0123456789abcdefghijkl\""
     );
     assert_eq!(Resource::Any.cedar_uid(), "*");
 }

@@ -38,6 +38,7 @@ pub mod egress_rules;
 pub mod notify;
 pub mod oauth_grants_handlers;
 pub mod oauth_clients;
+pub mod organizations;
 pub mod openmeter_client;
 pub mod plan_catalog;
 pub mod pricing;

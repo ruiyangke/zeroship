@@ -67,11 +67,23 @@ pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 /// asks for a refresh token) but confers no resource authority, and folding it
 /// in here would let it through that intersection as though
 /// it did.
-pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 5] = [
+pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 7] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    // `organization:create` and `organization:read` are the ZERO-CONFIG FIRST
+    // DEPLOY. An app belongs to a project and a project belongs to an
+    // organization, so `zeroship deploy` on a fresh account has to be able to
+    // mint the creator's personal organization before it can create anything.
+    // Without them the very first deploy is refused - `apps:write` alone can no
+    // longer name a place to put the app.
+    //
+    // Neither confers authority over anything that ALREADY exists: the
+    // self-service band grants both at `Resource::Any` only, and reading or
+    // writing a CONCRETE organization needs a rank the band cannot supply.
+    "organization:create",
+    "organization:read",
     "secrets:read",
 ];
 
@@ -84,11 +96,13 @@ pub const OFFLINE_ACCESS_SCOPE: &str = "offline_access";
 /// REGISTRATION, so a scope missing here is refused with `invalid_scope`
 /// before anything else happens. `offline_access` therefore has to be listed
 /// even though it grants no authority.
-pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 6] = [
+pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 8] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "organization:create",
+    "organization:read",
     "secrets:read",
     OFFLINE_ACCESS_SCOPE,
 ];

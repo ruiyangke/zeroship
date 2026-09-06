@@ -408,26 +408,25 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     // (The row stores both endpoints — 0041 DDL — so no prior-state derivation is needed.)
     //
     // Unlike the other (creator-keyed) kinds, the spend source is PER-APP, so we resolve the
-    // creator via the ownership join (`app_members` role='owner', DISTINCT ON the app so a
-    // fan-out of owner rows never double-notifies). The tiebreaker is `ORDER BY m.app_id,
-    // m.user_id` — IDENTICAL to the authoritative billed-owner resolution in
-    // `cron/billing_reconcile.rs` and `cron/metering_export.rs` — so the spend notice reaches
-    // the SAME creator who is billed (a stable `added_at`-based pick could diverge under a
-    // multi-owner fan-out). An app with no owner row, or an owner with no `creator_billing`
-    // identity (the `billing_notifications` FK target), is skipped (the INNER JOINs drop it).
-    // The app NAME + the effective limit are formatted into the body (frozen at the
-    // transition; never re-priced here).
+    // creator through `crate::organizations::app_owner_map` — the app's project, its
+    // organization, and that organization's longest-standing owner, collapsed to one row per
+    // app so a multi-owner organization never double-notifies. The tiebreak is that function's
+    // and no longer a copy: it was previously spelled here, in `cron/billing_reconcile.rs` and
+    // in `cron/metering_export.rs`, each with a comment asking the next editor to keep the
+    // three matching. The spend notice reaches the SAME creator who is billed because there is
+    // one rule, not three that agree. An app whose organization has no owner, or an owner with
+    // no `creator_billing` identity (the `billing_notifications` FK target), is skipped (the
+    // INNER JOINs drop it). The app NAME + the effective limit are formatted into the body
+    // (frozen at the transition; never re-priced here).
     let rows = conn
         .query(
+            &format!(
             "SELECT h.id, h.to_state, h.spend_cents, h.limit_cents, a.name AS app_name, \
                     o.creator_id \
                FROM zeroship.spend_state_history h \
                JOIN zeroship.apps a ON a.id = h.app_id \
-               JOIN ( \
-                     SELECT DISTINCT ON (m.app_id) m.app_id, m.user_id AS creator_id \
-                       FROM zeroship.app_members m \
-                      WHERE m.role = 'owner' \
-                      ORDER BY m.app_id, m.user_id \
+               JOIN ( SELECT owner_map.app_id, owner_map.user_id AS creator_id \
+                        FROM {owner_map} owner_map \
                ) o ON o.app_id = h.app_id \
                JOIN zeroship.creator_billing cb ON cb.creator_id = o.creator_id \
                LEFT JOIN zeroship.billing_notifications n \
@@ -445,6 +444,8 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
                                       WHEN 'degrade' THEN 2 WHEN 'block' THEN 3 END \
                 AND ( n.status IS NULL \
                    OR (n.status = 'pending' AND n.claimed_at < NOW() - make_interval(secs => $2::double precision)) )",
+                owner_map = crate::organizations::app_owner_map(),
+            ),
             &[&NOTIFY_SCAN_WINDOW, &(horizon_secs as f64)],
         )
         .await

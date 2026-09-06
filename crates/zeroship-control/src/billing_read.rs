@@ -601,16 +601,24 @@ pub async fn billing_status(
     let conn = registry.conn().await?;
     let rows = conn
         .query(
-            "SELECT a.plan_id, \
-                    l.spend_limit_cents AS override_cents, \
-                    COALESCE(s.state, 'allow')   AS spend_state, \
-                    COALESCE(cbs.state, 'active') AS account_state \
-             FROM zeroship.apps a \
-             LEFT JOIN zeroship.app_spend_limit l ON l.app_id = a.id \
-             LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
-             LEFT JOIN zeroship.app_members m ON m.app_id = a.id AND m.role = 'owner' \
-             LEFT JOIN zeroship.creator_billing_status cbs ON cbs.creator_id = m.user_id \
-             WHERE a.id = $1",
+            // The account state is CREATOR-keyed and reached through the app's
+            // organization. The lateral collapses a multi-owner organization to
+            // one row, so this read cannot fan out and report two states for
+            // one app.
+            &format!(
+                "SELECT a.plan_id, \
+                        l.spend_limit_cents AS override_cents, \
+                        COALESCE(s.state, 'allow')   AS spend_state, \
+                        COALESCE(cbs.state, 'active') AS account_state \
+                 FROM zeroship.apps a \
+                 LEFT JOIN zeroship.app_spend_limit l ON l.app_id = a.id \
+                 LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
+                 {lateral} \
+                 LEFT JOIN zeroship.creator_billing_status cbs \
+                        ON cbs.creator_id = app_owner.user_id \
+                 WHERE a.id = $1",
+                lateral = crate::organizations::app_owner_lateral(),
+            ),
             &[app_id],
         )
         .await?;

@@ -880,7 +880,10 @@ async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
+            "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+             SELECT p.organization_id, $2, 'owner' FROM zeroship.apps a \
+               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
+             ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
             &[&app_id, &owner],
         )
         .await
@@ -1726,7 +1729,7 @@ async fn setup_session_creates_customer_once() {
 // See the allow on `reconcile_creates_invoice_items_per_app_from_real_aggregates` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
-async fn reconcile_groups_apps_by_owner_via_app_members() {
+async fn reconcile_groups_apps_by_owner_via_the_organization() {
     let url = db_url();
     let fx = build_fixture(&url, "owner").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);

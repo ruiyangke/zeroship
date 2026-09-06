@@ -234,6 +234,7 @@ async fn deploy_round_trip() {
             &name,
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
+            None,
         )
         .await
         .expect("create");

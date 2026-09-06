@@ -236,6 +236,7 @@ impl Fixture {
                 &format!("{label}-{}", Uuid::new_v4().simple()),
                 &zeroship_control::plan_catalog::free_plan_id(),
                 &owner_id,
+                None,
             )
             .await
             .expect("create owned app");
@@ -258,7 +259,9 @@ impl Fixture {
             let _ = self
                 .state
                 .control_pg
-                .execute("DELETE FROM zeroship.app_members WHERE app_id = $1", &[app_id])
+                .execute("DELETE FROM zeroship.organization_members om \
+                 USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
+                 WHERE om.organization_id = p.organization_id AND a.id = $1", &[app_id])
                 .await;
             let _ = self
                 .state

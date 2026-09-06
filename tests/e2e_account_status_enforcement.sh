@@ -8,7 +8,10 @@
 # Suspended creator's apps 402 `ACCOUNT_SUSPENDED` regardless of spend headroom.
 # State is CREATOR-keyed (`zeroship.creator_billing_status.state` ∈
 # active|past_due|suspended), surfaced per-app on the pulled `RouteEntry` via the
-# app's `app_members(role='owner')` (registry.rs). Default (no row) = Active.
+# app's project -> organization -> the organization's `owner` members
+# (registry.rs). Default (no row) = Active. An organization may hold several
+# owners, so the lateral collapses them to one and the MOST RESTRICTIVE state
+# wins: adding an owner whose card is good can never relax enforcement.
 #
 #   Active     → 200
 #   PastDue    → 200   (dunning GRACE window — still served)
@@ -25,6 +28,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# `zeroship.app_members` is deleted; an app reaches the people who answer for it
+# through its project's organization. `seat_app_owner_sql` emits that join AND a
+# check that raises when it matches nothing - an INSERT ... SELECT over no rows
+# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
+# surfaces far from here.
+source "$ROOT/tests/lib/organization_fixture.sh"
 # shellcheck source=tests/lib/usage_producer.sh
 source "$ROOT/tests/lib/usage_producer.sh"
 PASS=0; FAIL=0
@@ -186,7 +195,7 @@ ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
 APP="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d "{\"name\":\"acct-probe\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
 [ -n "$APP" ] && pass "created app $APP" || { fail "create app"; exit 1; }
 psql_exec >/dev/null 2>&1 <<SQL
-INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP','$CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
+$(seat_app_owner_sql "$APP" "$CREATOR")
 SQL
 CREATE_CODE="$(curl -sS -o "$WORK/create-database-response.json" -w '%{http_code}' \
   -X POST "$MIGRATE_SERVER_URL/v1/databases/$APP" \

@@ -25,6 +25,7 @@ use zeroship_runtime::{ModuleEntry, NativePlugin};
 mod auth;
 mod dev;
 mod migrate;
+mod organizations;
 mod parent_death;
 mod project_config;
 mod secrets;
@@ -65,6 +66,7 @@ fn main() {
         "logout" => exit_on_error("logout", auth::cmd_logout()),
         "whoami" => exit_on_error("whoami", auth::cmd_whoami()),
         "dev" => exit_on_error("dev", dev::cmd_dev(&args)),
+        "organization" => exit_on_error("organization", organizations::cmd_organization(&args)),
         "secret" => secrets::cmd_secret(&args),
         "var" => secrets::cmd_var(&args),
         _ => print_usage(),
@@ -1064,6 +1066,10 @@ fn print_usage() {
     );
     eprintln!("  zeroship dev init [--secrets-dir=PATH] [--env-file=PATH]");
     eprintln!("                   Provision stable, strong local platform secrets.");
+    eprintln!("  zeroship organization create|list|show|use|members|invite|revoke|join|role|remove|transfer|projects");
+    eprintln!("                   The organization owns your projects and is the billed party.");
+    eprintln!("                   `use <org_...>` records which one, so the other subcommands");
+    eprintln!("                   need --organization= only to override it.");
     eprintln!("  zeroship secret   set|list|rm|expose|unexpose|expose-list  --app=<uuid> [--control=URL] [--token=TOKEN]");
     eprintln!("                   Encrypted at rest. Always readable as env.KEY; reaches");
     eprintln!("                   process.env (where any npm dependency can read it) only");

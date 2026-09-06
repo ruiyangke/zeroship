@@ -288,6 +288,172 @@ export interface WorkflowTopicBroadcastResult {
   topic: string;
 }
 
+/**
+ * An organization: the root that owns projects, and the party that is billed.
+ *
+ * `id` is a typed id (`org_...`), never the slug. Every path below takes the
+ * id; a slug sent where an id belongs resolves to no membership at all and is
+ * refused with nothing useful to read.
+ */
+export interface OrganizationRecord {
+  id: string;
+  slug: string;
+  name: string;
+  billing_email: string;
+  /**
+   * Set only on a personal organization - the one minted for a creator on
+   * their first deploy. No read path branches on it; it is reported so a
+   * console can label the row, and so clearing it (which is what transferring
+   * ownership does) is visible as the personal-to-shared conversion it is.
+   */
+  personal_owner_id: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface CreateOrganizationInput {
+  name: string;
+  /** Derived from the name when absent. Globally unique. */
+  slug?: string;
+  /** Seeded from the caller's own address when absent. */
+  billing_email?: string;
+}
+
+export interface UpdateOrganizationInput {
+  name?: string;
+  slug?: string;
+  billing_email?: string;
+}
+
+export interface ListOrganizationsResult {
+  organizations: OrganizationRecord[];
+}
+
+/**
+ * One seat. `role` is a row in the platform's role ladder, and the two integers
+ * beside it are the whole authority model: `rank` orders app and organization
+ * authority, `billing_rank` orders money authority, and an actor may act on a
+ * target only when `actor.rank > target.rank` AND
+ * `actor.billing_rank >= target.billing_rank`.
+ *
+ * They are reported rather than derived here on purpose. The ladder is data in
+ * `zeroship.organization_roles`, so a client that hard-coded the numbers would
+ * disagree with the server the day a migration moves one.
+ */
+export interface OrganizationMemberRecord {
+  organization_id: string;
+  user_id: string;
+  email: string;
+  name: string;
+  role: string;
+  rank: number;
+  billing_rank: number;
+  added_at: string;
+}
+
+export interface ListOrganizationMembersResult {
+  members: OrganizationMemberRecord[];
+}
+
+export interface AddOrganizationMemberInput {
+  user_id: string;
+  role: string;
+}
+
+export interface ChangeOrganizationRoleInput {
+  role: string;
+}
+
+export interface TransferOrganizationOwnershipInput {
+  /**
+   * The member who becomes owner. They must already hold a seat: transfer
+   * re-roles an existing member, it does not admit a new one.
+   */
+  user_id: string;
+}
+
+/**
+ * A pending or spent invitation. It carries NO token: only the digest is
+ * stored, so the secret exists exactly once, in the response to `createInvite`.
+ */
+export interface InviteRecord {
+  id: string;
+  organization_id: string;
+  email: string;
+  role: string;
+  issued_at: string;
+  expires_at: string;
+  consumed_at: string | null;
+}
+
+export interface ListInvitesResult {
+  invites: InviteRecord[];
+}
+
+export interface CreateInviteInput {
+  email: string;
+  role: string;
+}
+
+/**
+ * The only response that carries an invitation token.
+ *
+ * The server stores a digest and nothing else, so this value cannot be read
+ * back by any later call. A client that does not surface or deliver `token`
+ * here has lost the invitation, and the remedy is `revokeInvite` followed by a
+ * new `createInvite`.
+ */
+export interface CreatedInvite {
+  invite: InviteRecord;
+  token: string;
+}
+
+export interface RedeemInviteInput {
+  token: string;
+}
+
+export interface ProjectRecord {
+  id: string;
+  organization_id: string;
+  slug: string;
+  name: string;
+  created_at: string;
+}
+
+export interface ListProjectsResult {
+  projects: ProjectRecord[];
+}
+
+export interface CreateProjectInput {
+  name: string;
+  /** Derived from the name when absent. Unique within the organization. */
+  slug?: string;
+}
+
+/**
+ * A project seat. It NARROWS and never widens: a member's authority on a
+ * project is `min(organization rank, project rank)`, and a member at admin rank
+ * or above reaches every project in the organization with no row here at all.
+ *
+ * There is no billing dimension, because there is no per-project invoice.
+ */
+export interface ProjectMemberRecord {
+  project_id: string;
+  user_id: string;
+  email: string;
+  role: string;
+  added_at: string;
+}
+
+export interface ListProjectMembersResult {
+  members: ProjectMemberRecord[];
+}
+
+export interface AddProjectMemberInput {
+  user_id: string;
+  role: string;
+}
+
 export class ControlClient {
   readonly #options: ControlClientOptions;
   readonly #fetch: typeof fetch;
@@ -405,6 +571,154 @@ export class ControlClient {
         body: input,
         parseAs: "void",
       }),
+  };
+
+  /**
+   * Organizations, their members, their invitations and their projects.
+   *
+   * THE LAYERING IS ONE PATH AND IT IS NOT NEGOTIABLE HERE: an organization
+   * owns projects, a project owns apps, and an app reaches its organization
+   * only through its project. There is no `organization_id` on an app and no
+   * per-app membership; a call that wants "who answers for this app" resolves
+   * the app's project, then that project's organization.
+   *
+   * AUTHORITY IS RESOLVED SERVER-SIDE, PER REQUEST, AND IS NEVER CACHED. Do not
+   * cache a member's rank in a client and decide from it: the server re-reads
+   * the seat inside the statement that performs each effect, which is what
+   * makes a revocation take effect immediately and with no invalidation signal
+   * to miss.
+   *
+   * Every id in these paths is a typed id (`org_...`, `prj_...`, `ivt_...`)
+   * except `user_id`, which is the user's UUID.
+   */
+  readonly organizations = {
+    /** The organizations the caller holds a seat in. */
+    list: (): Promise<ListOrganizationsResult> => this.request("/api/organizations"),
+    /** Mint one and seat the caller as its owner. */
+    create: (input: CreateOrganizationInput): Promise<OrganizationRecord> =>
+      this.request("/api/organizations", { method: "POST", body: input }),
+    get: (organizationId: string): Promise<OrganizationRecord> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}`),
+    /** Rename, re-slug, or change the billed contact. Owner only. */
+    update: (
+      organizationId: string,
+      input: UpdateOrganizationInput,
+    ): Promise<OrganizationRecord> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}`, {
+        method: "PATCH",
+        body: input,
+      }),
+
+    members: (organizationId: string): Promise<ListOrganizationMembersResult> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}/members`),
+    addMember: (
+      organizationId: string,
+      input: AddOrganizationMemberInput,
+    ): Promise<OrganizationMemberRecord> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}/members`, {
+        method: "POST",
+        body: input,
+      }),
+    changeMemberRole: (
+      organizationId: string,
+      userId: string,
+      input: ChangeOrganizationRoleInput,
+    ): Promise<OrganizationMemberRecord> =>
+      this.request(
+        `/api/organizations/${pathPart(organizationId)}/members/${pathPart(userId)}`,
+        { method: "PATCH", body: input },
+      ),
+    removeMember: (organizationId: string, userId: string): Promise<void> =>
+      this.request(
+        `/api/organizations/${pathPart(organizationId)}/members/${pathPart(userId)}`,
+        { method: "DELETE", parseAs: "void" },
+      ),
+    /**
+     * Move the owner seat to another member. It MOVES rather than duplicates:
+     * every membership write requires the actor to strictly outrank the target
+     * and nothing outranks an owner, so a second owner is not reachable through
+     * this API and the caller stops being one.
+     */
+    transferOwnership: (
+      organizationId: string,
+      input: TransferOrganizationOwnershipInput,
+    ): Promise<void> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}/transfer`, {
+        method: "POST",
+        body: input,
+        parseAs: "void",
+      }),
+
+    invites: (organizationId: string): Promise<ListInvitesResult> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}/invites`),
+    /** The one call that returns a token. See {@link CreatedInvite}. */
+    createInvite: (
+      organizationId: string,
+      input: CreateInviteInput,
+    ): Promise<CreatedInvite> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}/invites`, {
+        method: "POST",
+        body: input,
+      }),
+    revokeInvite: (organizationId: string, inviteId: string): Promise<void> =>
+      this.request(
+        `/api/organizations/${pathPart(organizationId)}/invites/${pathPart(inviteId)}`,
+        { method: "DELETE", parseAs: "void" },
+      ),
+    /**
+     * Accept an invitation. Not organization-scoped, because the redeemer holds
+     * no seat yet - the token is the capability, and the organization it names
+     * comes back in the response.
+     *
+     * The server re-derives the INVITER's live authority at redemption, so an
+     * invitation from someone since demoted is refused even though it was valid
+     * when issued.
+     */
+    redeemInvite: (input: RedeemInviteInput): Promise<OrganizationRecord> =>
+      this.request("/api/organization-invites/redeem", {
+        method: "POST",
+        body: input,
+      }),
+
+    /** The projects of this organization the caller can reach. */
+    projects: (organizationId: string): Promise<ListProjectsResult> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}/projects`),
+    createProject: (
+      organizationId: string,
+      input: CreateProjectInput,
+    ): Promise<ProjectRecord> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}/projects`, {
+        method: "POST",
+        body: input,
+      }),
+  };
+
+  /**
+   * A project: what an app actually belongs to, and the only place authority
+   * can be narrowed below the organization seat.
+   *
+   * These are the `/api/projects/*` routes. Creating one is
+   * `organizations.createProject`, because a project cannot exist without
+   * naming the organization it belongs to.
+   */
+  readonly projects = {
+    get: (projectId: string): Promise<ProjectRecord> =>
+      this.request(`/api/projects/${pathPart(projectId)}`),
+    members: (projectId: string): Promise<ListProjectMembersResult> =>
+      this.request(`/api/projects/${pathPart(projectId)}/members`),
+    addMember: (
+      projectId: string,
+      input: AddProjectMemberInput,
+    ): Promise<ProjectMemberRecord> =>
+      this.request(`/api/projects/${pathPart(projectId)}/members`, {
+        method: "POST",
+        body: input,
+      }),
+    removeMember: (projectId: string, userId: string): Promise<void> =>
+      this.request(
+        `/api/projects/${pathPart(projectId)}/members/${pathPart(userId)}`,
+        { method: "DELETE", parseAs: "void" },
+      ),
   };
 
   readonly workflows = {

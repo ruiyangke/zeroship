@@ -79,6 +79,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# `zeroship.app_members` is deleted; an app reaches the people who answer for it
+# through its project's organization. `seat_app_owner_sql` emits that join AND a
+# check that raises when it matches nothing - an INSERT ... SELECT over no rows
+# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
+# surfaces far from here.
+source "$ROOT/tests/lib/organization_fixture.sh"
 STRICT="${STRICT:-0}"
 
 # --- ports (offset from e2e_platform.sh to avoid colliding with a dev stack)
@@ -256,7 +262,7 @@ echo "=== Stage 3: mint admin platform bearer (offline) ==="
 # The scope string is the deleted permission_tokens policy's action list,
 # one-for-one: it becomes the token policy control intersects with the
 # owner's own authority (TOKEN and USER).
-SCOPE="apps:read apps:write apps:deploy apps:archive deployments:read deployments:rollback env:read env:write secrets:read secrets:write"
+SCOPE="apps:read apps:write apps:deploy apps:archive deployments:read env:read env:write secrets:read secrets:write"
 
 OWNER="$(node -e 'console.log(require("crypto").randomUUID())')"
 
@@ -286,8 +292,7 @@ echo "$DEP" | grep -q "deploy_hash" && pass "deployed db-todos .zship" || fail "
 # (crates/zeroship-migrate-server/src/auth.rs, `requires_app_owner`). A platform admin with no
 # membership row can therefore deploy an app and be refused when migrating it.
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$APP_ID', '$OWNER', 'owner')
-ON CONFLICT (app_id, user_id) DO UPDATE SET role = 'owner';
+$(seat_app_owner_sql "$APP_ID" "$OWNER")
 SQL
 
 # Build a worker dispatch frame for the pre-migrate diagnostic probes.

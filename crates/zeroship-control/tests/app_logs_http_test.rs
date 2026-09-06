@@ -145,6 +145,7 @@ async fn app_logs_route_proxies_worker_lines() {
             &format!("logs-{}", &Uuid::new_v4().simple().to_string()[..10]),
             &zeroship_control::plan_catalog::free_plan_id(),
             &pat.user_id,
+            None,
         )
         .await
         .expect("create app")

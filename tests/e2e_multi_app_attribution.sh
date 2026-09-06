@@ -29,6 +29,12 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# `zeroship.app_members` is deleted; an app reaches the people who answer for it
+# through its project's organization. `seat_app_owner_sql` emits that join AND a
+# check that raises when it matches nothing - an INSERT ... SELECT over no rows
+# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
+# surfaces far from here.
+source "$ROOT/tests/lib/organization_fixture.sh"
 # shellcheck source=tests/lib/usage_producer.sh
 source "$ROOT/tests/lib/usage_producer.sh"
 PASS=0; FAIL=0
@@ -238,8 +244,7 @@ create_deploy(){ # $1=slug  $2=owner_creator
   fi
   "$BIN/zeroship" deploy "$PROBE" --app="$id" --control="$CONTROL_URL" --token="$ADMIN_TOKEN" 2>&1 | grep -q deploy_hash || { fail "deploy $slug"; exit 1; }
   psql_exec >/dev/null 2>&1 <<SQL
-DELETE FROM zeroship.app_members WHERE app_id='$id';
-INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$id','$owner','owner');
+$(seat_app_owner_sql "$id" "$owner")
 SQL
   APPID[$slug]="$id"
   echo "    $slug = $id  (owner $owner)"

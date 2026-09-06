@@ -147,14 +147,18 @@ async fn insert_app(
     // plan_id is an FK into zeroship.plans — use the built-in free-plan
     // catalog id (seeded by `seed_plans` in the test setup).
     let free = zeroship_control::plan_catalog::free_plan_id();
+    // An OWNER-LESS project: this reaper's whole subject is an app whose
+    // organization has no owner, so the fixture has to be able to build one.
+    let project = common::unowned_project(&state.control_pg).await;
     state
         .control_pg
         .execute(
             &format!(
-                "INSERT INTO zeroship.apps (id, name, plan_id, api_key, system, created_at) \
-                 VALUES ($1, $2, $5, $3, $4, NOW() - INTERVAL '{created_age}')"
+                "INSERT INTO zeroship.apps \
+                     (id, name, plan_id, api_key, system, created_at, project_id) \
+                 VALUES ($1, $2, $5, $3, $4, NOW() - INTERVAL '{created_age}', $6)"
             ),
-            &[id, &name, &api_key, &system, &free],
+            &[id, &name, &api_key, &system, &free, &project],
         )
         .await
         .expect("insert app");
@@ -283,7 +287,7 @@ async fn reaper_leaves_owned_app_untouched() {
     // create_app seeds the owner membership atomically.
     let app = state
         .registry
-        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner)
+        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner, None)
         .await
         .expect("create_app")
         .id;

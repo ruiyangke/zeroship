@@ -90,12 +90,16 @@ impl AuthzGuard {
         }
     }
 
-    /// Whether this caller can perform `action` ANYWHERE they control:
-    /// platform-wide (`Resource::Any`) OR owner/member of at least one app
-    /// carrying the grant.
-    /// The self-scope gate for the creator-keyed billing reads (the caller
-    /// reading their OWN creator data must be a billing-capable creator, not
-    /// merely any authenticated token), via [`authz::is_authorized_anywhere`].
+    /// Whether this caller can perform `action` ANYWHERE they hold authority:
+    /// platform-wide (`Resource::Any`), at any organization they hold a seat
+    /// in, or at any project their seat reaches. `zeroship_authz` resolves the
+    /// probe set and the rank at each probed resource; nothing here supplies
+    /// either.
+    ///
+    /// This is the self-scope gate for the creator-keyed billing reads - the
+    /// caller reading their OWN creator data must hold billing authority
+    /// somewhere, not merely be an authenticated token - via
+    /// [`authz::is_authorized_anywhere`].
     pub async fn can_act_anywhere(
         &self,
         action: Action,

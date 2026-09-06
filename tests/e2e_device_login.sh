@@ -592,8 +592,9 @@ step "Migrate the same app with the same login credential"
 # credential `zeroship login` produced -- an OAuth device-flow bearer carrying
 # the full CLI scope asserted above is accepted all the way
 # through migrated's independent verification, Cedar decision, and
-# `app_members` owner-row check (the row was created by
-# `POST /api/apps` above, not seeded here). Nothing else in the suite drives
+# organization-owner check (the seat was created by
+# `POST /api/apps` above, which mints the caller's personal organization on
+# first use; nothing is seeded here). Nothing else in the suite drives
 # that token type into the migration service.
 #
 # It does NOT cover this app's own schema: `examples/auth-probe` has no
@@ -635,7 +636,8 @@ else
   # own.
   #
   # This direct loopback call proves migrate-server's own gate: it re-verifies
-  # the bearer and additionally requires an `app_members` owner row
+  # the bearer and additionally requires an ORGANIZATION owner seat reached
+  # through the app's project
   # (crates/zeroship-migrate-server/src/auth.rs).
   FOREIGN_APP="$(node -e 'console.log(require("crypto").randomUUID())')"
   FOREIGN_OUT="$("$BIN/zeroship" migrate "$BORROWED_IR" --app="$FOREIGN_APP" --control="$MIGRATE_SERVER_URL" 2>&1)"

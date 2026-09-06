@@ -8,8 +8,8 @@
 //! projects into every runtime (`Registry::get_versions`). This module is the
 //! only writer of that table, and the creator who owns the app is the author:
 //! `GET`/`POST`/`DELETE /api/apps/{app_id}/egress-rules`, authorized as
-//! `env:read`/`env:write` on `Resource::App` through the same `app_members`
-//! path as vars and secrets.
+//! `env:read`/`env:write` on `Resource::App` through the same organization
+//! seat, narrowed by the app's project, as vars and secrets.
 //!
 //! A rule is a **verdict**, a **destination** and a **port**. The destination
 //! is an exact DNS name or an address range, and which one it is comes from the

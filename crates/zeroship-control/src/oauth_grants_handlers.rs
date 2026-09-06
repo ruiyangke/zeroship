@@ -7,7 +7,7 @@ use ntex::web;
 use ntex::web::types::{Path, State};
 use serde::Serialize;
 use serde_json::json;
-use zeroship_authz::{Action, EntityCache, Resource};
+use zeroship_authz::{Action, Resource};
 
 use crate::auth_audit;
 use crate::authz_guard::AuthzGuard;
@@ -136,7 +136,6 @@ pub async fn revoke_grant(
     if deleted == 0 {
         return web::HttpResponse::NotFound().json(&json!({"error": "oauth_grant_not_found"}));
     }
-    EntityCache::invalidate(authz.principal_id);
 
     if let Err(resp) = auth_audit::emit_guard_event(
         &state,

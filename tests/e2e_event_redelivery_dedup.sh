@@ -148,7 +148,7 @@ zs_platform_migrate "$DBURL" \
 # A creator + its Lago customer/subscription (external_id = creator UUID = the
 # subject the forwarder posts under). An app UUID for the event subject. The
 # events carry a NON-NIL creator, so the forwarder attributes them directly and
-# never touches the app→creator resolver — no app_members/apps rows needed.
+# never touches the app→creator resolver — no organization/project/apps rows needed.
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
 APP_UUID="$(node -e 'console.log(require("crypto").randomUUID())')"
 psql_exec >/dev/null 2>&1 <<SQL && pass "seeded creator user" || { fail "seed creator"; exit 1; }

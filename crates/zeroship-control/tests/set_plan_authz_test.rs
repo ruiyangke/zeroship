@@ -232,7 +232,7 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
     let app = fx
         .state
         .registry
-        .create_app(&format!("setplan-{}", Uuid::new_v4().simple()), &start.id, &owner)
+        .create_app(&format!("setplan-{}", Uuid::new_v4().simple()), &start.id, &owner, None)
         .await
         .expect("create app");
 
@@ -311,7 +311,9 @@ async fn creator_cannot_self_assign_non_assignable_plan_operator_can() {
 
     // Cleanup (best-effort; FK order: spend state, members, app, tokens, roles).
     let _ = pg.execute("DELETE FROM zeroship.app_spend_state WHERE app_id = $1", &[&app.id]).await;
-    let _ = pg.execute("DELETE FROM zeroship.app_members WHERE app_id = $1", &[&app.id]).await;
+    let _ = pg.execute("DELETE FROM zeroship.organization_members om \
+                 USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
+                 WHERE om.organization_id = p.organization_id AND a.id = $1", &[&app.id]).await;
     let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app.id]).await;
     for caller in [&creator_caller, &operator_caller] {
         let _ = pg
@@ -365,7 +367,7 @@ async fn assigning_an_archived_plan_is_refused_and_not_reported_as_a_missing_app
     let app = fx
         .state
         .registry
-        .create_app(&format!("setplan-arch-{}", Uuid::new_v4().simple()), &start.id, &owner)
+        .create_app(&format!("setplan-arch-{}", Uuid::new_v4().simple()), &start.id, &owner, None)
         .await
         .expect("create app");
 

@@ -225,6 +225,34 @@ pub const USER_PREFIX: &str = "usr";
 /// with no type to say which rendering each one wanted.
 pub const APP_PREFIX: &str = "app";
 pub const SESSION_PREFIX: &str = "ses";
+
+/// Organization entity typed-id prefix: the ownership root and the billing
+/// subject. Three chars like every other prefix, and deliberately the
+/// abbreviation even though the COLUMN name is spelled out in full
+/// (`organization_id`, never `org_id`): the abbreviation lives inside an opaque
+/// value nobody reads as a word, while a column name is prose read constantly.
+///
+/// Minted only by [`crate::organization_id::OrganizationId::mint`]; there is no
+/// `new_organization_id` free function, for the reason [`APP_PREFIX`] gives.
+pub const ORGANIZATION_PREFIX: &str = "org";
+
+/// Project entity typed-id prefix: the shared-infrastructure boundary and, under
+/// the auth foundation's audience sum, the unit an end-user subject is scoped
+/// to.
+///
+/// `zeroship.sandboxes.project_id` carries a `^prj_` CHECK for a DERIVED dedup
+/// key minted by the extracted `zeroship-sandbox` controller - usually an app id
+/// re-tagged - which is NOT this entity and has no foreign key to it. That
+/// column is being retired so this prefix has one meaning per schema; until it
+/// is, do not join the two.
+///
+/// Minted only by [`crate::project_id::ProjectId::mint`].
+pub const PROJECT_PREFIX: &str = "prj";
+
+/// Organization-invite typed-id prefix. The invite row is addressed by this id;
+/// the SECRET a recipient presents is a separate high-entropy token stored only
+/// as a hash, never this value.
+pub const INVITE_PREFIX: &str = "ivt";
 /// Wake-job typed-id prefix. Three chars to preserve the common
 /// `^[a-z]{3}_[A-Za-z0-9]{22}$` shape. The PostgreSQL
 /// `wake_jobs.wake_id` column stores the full typed-id string

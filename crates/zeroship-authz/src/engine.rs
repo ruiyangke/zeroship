@@ -5,19 +5,30 @@ use sha2::{Digest, Sha256};
 
 use crate::{lower, AuthzError, Policy};
 
-/// The whole shipped policy set. There is no platform STAFF policy in it any
-/// more: `admin` / `support` / `billing` / `readonly` each permitted an
-/// unconstrained `resource`, so every one of them was a cross-tenant grant, and
-/// `admin` was a literal universal allow. A hosting vendor's staff permission
-/// model belongs to the vendor's own portal, against its own copy of the data.
+/// The whole shipped policy set: the self-service baseline, plus one file per
+/// authority band of the organization role ladder.
 ///
-/// What is left is exactly two families: the self-scoped creator baseline, and
-/// the `app_members`-bound per-app roles.
+/// There is no platform STAFF policy in it: `admin` / `support` / `billing` /
+/// `readonly` each permitted an unconstrained `resource`, so every one of them
+/// was a cross-tenant grant, and `admin` was a literal universal allow. A
+/// hosting vendor's staff permission model belongs to the vendor's own portal,
+/// against its own copy of the data.
+///
+/// The three `app_members`-bound files (`app_owner` / `app_editor` /
+/// `app_viewer`) are deleted with the table that backed them.
+///
+/// **THIS LIST IS THE ONLY THING THAT LOADS A POLICY.** `build.rs` walks
+/// `deploy/policies/` and parse-checks every `.cedar` file it finds, but it
+/// LOADS none of them - so a policy file that is committed, reviewed and absent
+/// from this array is syntactically valid and authorizes exactly nothing. A
+/// crate test reconciles the two: every `.cedar` file on disk must appear here.
 const PLATFORM_POLICY_SOURCES: &[&str] = &[
     include_str!("../../../deploy/policies/platform/self_service.cedar"),
-    include_str!("../../../deploy/policies/creator/app_owner.cedar"),
-    include_str!("../../../deploy/policies/creator/app_editor.cedar"),
-    include_str!("../../../deploy/policies/creator/app_viewer.cedar"),
+    include_str!("../../../deploy/policies/creator/organization_read.cedar"),
+    include_str!("../../../deploy/policies/creator/organization_develop.cedar"),
+    include_str!("../../../deploy/policies/creator/organization_administer.cedar"),
+    include_str!("../../../deploy/policies/creator/organization_own.cedar"),
+    include_str!("../../../deploy/policies/creator/organization_billing.cedar"),
 ];
 
 #[derive(Debug)]
@@ -126,5 +137,77 @@ fn canonical_json(value: &serde_json::Value) -> String {
 
             format!("{{{entries}}}")
         }
+    }
+}
+
+/// Every `.cedar` file under `deploy/policies/`, found by walking the tree the
+/// same way `build.rs` does.
+#[cfg(test)]
+fn policy_files_on_disk() -> Vec<std::path::PathBuf> {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).expect("read policies directory") {
+            let path = entry.expect("read policies directory entry").path();
+            if path.is_dir() {
+                walk(&path, out);
+            } else if path.extension().is_some_and(|ext| ext == "cedar") {
+                out.push(path);
+            }
+        }
+    }
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/policies");
+    let mut files = Vec::new();
+    walk(&root, &mut files);
+    files.sort();
+    files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{load_platform_policies, policy_files_on_disk, PLATFORM_POLICY_SOURCES};
+
+    /// `build.rs` parse-checks the policy directory and LOADS nothing, so a
+    /// committed `.cedar` file missing from `PLATFORM_POLICY_SOURCES` is valid
+    /// Cedar that authorizes nothing - and the failure is invisible: the build
+    /// is green, the review passes, and every request that policy was written
+    /// for is denied with no matched policy to name.
+    ///
+    /// This arm rules on every `.cedar` file on disk. The floor is 2: one
+    /// platform baseline and at least one creator band. A run that found fewer
+    /// found the wrong directory.
+    #[test]
+    fn every_policy_file_on_disk_is_wired_into_the_loaded_set() {
+        let files = policy_files_on_disk();
+        assert!(
+            files.len() >= 2,
+            "ruled on {} policy files, expected at least 2 - the walk found the wrong directory",
+            files.len()
+        );
+        for path in &files {
+            let source = std::fs::read_to_string(path).expect("read .cedar file");
+            assert!(
+                PLATFORM_POLICY_SOURCES.contains(&source.as_str()),
+                "{} is committed but absent from PLATFORM_POLICY_SOURCES, so it authorizes nothing",
+                path.display()
+            );
+        }
+        assert_eq!(
+            files.len(),
+            PLATFORM_POLICY_SOURCES.len(),
+            "PLATFORM_POLICY_SOURCES names an entry with no file on disk"
+        );
+    }
+
+    /// The loaded set must parse as one Cedar policy set, and every statement
+    /// in it must survive as a distinct policy. A file whose statements
+    /// collapsed would silently drop a band.
+    #[test]
+    fn the_loaded_set_parses_into_one_policy_per_statement() {
+        let policies = load_platform_policies().expect("bundled policies parse");
+        let statements: usize = PLATFORM_POLICY_SOURCES
+            .iter()
+            .map(|source| source.matches("permit (").count())
+            .sum();
+        assert!(statements >= 2, "ruled on {statements} permit statements");
+        assert_eq!(policies.policies().count(), statements);
     }
 }

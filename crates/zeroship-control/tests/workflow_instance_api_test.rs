@@ -167,11 +167,15 @@ async fn seed_app_on_plan(
 ) -> (Uuid, String) {
     let app_id = Uuid::new_v4();
     let app_name = format!("wf-api-{label}-{}", Uuid::new_v4().simple());
+    // These cases are about workflow admission, not about who owns the app, so
+    // the app just needs a home. See `common::unowned_project`.
+    let project = common::unowned_project(fx.pg.as_ref()).await;
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, workflows_enabled) \
-             VALUES ($1, $2, $3, 'test-api-key', true)",
-            &[&app_id, &app_name, &plan_id],
+            "INSERT INTO zeroship.apps \
+                 (id, name, plan_id, api_key, workflows_enabled, project_id) \
+             VALUES ($1, $2, $3, 'test-api-key', true, $4)",
+            &[&app_id, &app_name, &plan_id, &project],
         )
         .await
         .expect("insert app");
@@ -239,14 +243,17 @@ async fn pg_json_size(fx: &Fixture, value: &Value) -> i64 {
 
 async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
     let app_id = Uuid::new_v4();
+    let project = common::unowned_project(fx.pg.as_ref()).await;
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, workflows_enabled) \
-             VALUES ($1, $2, $3, 'test-api-key', true)",
+            "INSERT INTO zeroship.apps \
+                 (id, name, plan_id, api_key, workflows_enabled, project_id) \
+             VALUES ($1, $2, $3, 'test-api-key', true, $4)",
             &[
                 &app_id,
                 &format!("wf-api-nodeploy-{label}-{}", Uuid::new_v4().simple()),
                 &zeroship_control::plan_catalog::free_plan_id(),
+                &project,
             ],
         )
         .await

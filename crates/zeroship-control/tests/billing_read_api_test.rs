@@ -212,26 +212,37 @@ async fn seed_plan(
     id
 }
 
-/// Create an app owned by `owner` (writes the `app_members(owner)` row).
+/// Create an app in `owner`'s personal organization (minted on demand).
 async fn make_app(registry: &Registry, plan_id: &str, owner: &Uuid) -> Uuid {
     registry
-        .create_app(&format!("read-{}", Uuid::new_v4().simple()), plan_id, owner)
+        .create_app(&format!("read-{}", Uuid::new_v4().simple()), plan_id, owner, None)
         .await
         .expect("create app")
         .id
 }
 
-/// Add `user` as a NON-owner member (e.g. `viewer`/`editor`) of `app`. Used to
-/// model the cross-creator hole: a victim-creator who is merely a viewer on the
-/// attacker's app appears in the attacker's role-AGNOSTIC `list_apps_for_owner`.
+/// Seat `user` at a NON-owner role in the ORGANIZATION that owns `app`'s
+/// project. Used to model the cross-creator hole: a victim-creator who is
+/// merely a viewer of the attacker's app appears in the attacker's
+/// role-AGNOSTIC `list_apps_for_owner`.
+///
+/// App-level membership is gone; an app's authority is its organization seat,
+/// reached through `apps.project_id -> projects.organization_id`. That makes
+/// the hole this models WIDER, not narrower: seating a viewer now exposes every
+/// app of the organization rather than one, which is exactly what the assertion
+/// downstream has to keep refusing.
 async fn add_member(pg: &Client, app: &Uuid, user: &Uuid, role: &str) {
     pg.execute(
-        "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, $3) \
-         ON CONFLICT DO NOTHING",
+        "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+         SELECT p.organization_id, $2, $3 \
+           FROM zeroship.apps a \
+           JOIN zeroship.projects p ON p.id = a.project_id \
+          WHERE a.id = $1 \
+         ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
         &[app, user, &role],
     )
     .await
-    .expect("add non-owner member");
+    .expect("seat non-owner organization member");
 }
 
 /// Ensure a `creator_billing` row exists (the FK target for invoices/credit).
@@ -391,7 +402,7 @@ async fn cleanup(pg: &Client, creator_ids: &[Uuid], app_ids: &[Uuid], callers: &
         let _ = pg.execute("DELETE FROM zeroship.invoice_lines WHERE app_id = $1", &[app]).await;
         let _ = pg.execute("DELETE FROM zeroship.app_spend_state WHERE app_id = $1", &[app]).await;
         let _ = pg.execute("DELETE FROM zeroship.app_spend_limit WHERE app_id = $1", &[app]).await;
-        let _ = pg.execute("DELETE FROM zeroship.app_members WHERE app_id = $1", &[app]).await;
+        let _ = pg.execute("DELETE FROM zeroship.organization_members om USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id WHERE om.organization_id = p.organization_id AND a.id = $1", &[app]).await;
     }
     for creator in creator_ids {
         // Invoices reference lines (RESTRICT) — lines were dropped above by app_id,
@@ -1127,15 +1138,24 @@ async fn invoice_read_denied_via_shared_app_membership() {
 }
 
 // ==========================================================================
-// (over-disclosure): a NON-OWNER member of the owner's app must NOT read the
-// owner's cross-app invoice HISTORY via `GET /api/apps/{ownerApp}/invoices`.
+// (over-disclosure): a NON-OWNER member of the owner's organization must NOT
+// read the owner's cross-app invoice HISTORY via
+// `GET /api/apps/{ownerApp}/invoices`.
 //
-// The owner O owns app O. A VIEWER V is a member of app O — the viewer creator
-// policy DOES grant `billing:read` on the app (deploy/policies/creator/app_viewer.cedar),
-// so V clears the `BillingRead on App{O}` gate, but V is NOT the owner. Pre-fix
-// the handler gated ONLY that capability and returned
+// The owner O owns app O. A BOOKKEEPER V holds the `billing` seat in O's
+// organization - rank 10, billing_rank 20 - so V clears the `billing:read`
+// gate outright while holding no app authority at all. Pre-fix the handler
+// gated ONLY that capability and returned
 // `list_invoices_for_creator(owner_of_app(O))` = O's whole history, so V saw O's
-// billing envelope. The fix requires owner==principal || operator → V gets 403.
+// billing envelope. The fix requires owner == principal, so V gets 403.
+//
+// THE SEAT USED TO BE `viewer` AND HAD TO CHANGE. Billing authority is now the
+// SECOND integer on the ladder, and a viewer carries billing_rank 0, so a
+// viewer is refused at the capability gate itself. That would still produce a
+// 403 - and would make this test pass for the wrong reason, proving nothing
+// about the owner-grain check it exists for. `billing` is the seat that clears
+// the capability and is still not the owner, which is exactly the shape the
+// over-disclosure needs.
 // ==========================================================================
 
 #[compio::test]
@@ -1152,9 +1172,9 @@ async fn app_invoice_history_denied_to_non_owner_member() {
     ensure_creator_billing(&pg, &owner, false).await;
     let app_o = make_app(&fx.state.registry, &plan, &owner).await;
 
-    // Viewer V is a non-owner member of app O; the viewer policy grants
-    // billing:read on the app, so V clears the per-app gate but is not the owner.
-    add_member(&pg, &app_o, &viewer, "viewer").await;
+    // V holds the `billing` seat in O's organization: full money authority,
+    // no app authority, not the owner.
+    add_member(&pg, &app_o, &viewer, "billing").await;
 
     let price = PlanPrice {
         base_fee_cents: 100,
@@ -1211,7 +1231,7 @@ async fn app_invoice_history_denied_to_non_owner_member() {
     assert_eq!(
         status,
         StatusCode::OK,
-        "sanity: viewer DOES hold BillingRead on app O (clears the per-app gate)",
+        "sanity: the bookkeeper DOES clear the billing:read gate on O's organization",
     );
 
     // Non-owner viewer V (BillingRead on app O) → 403 on the OWNER's invoice

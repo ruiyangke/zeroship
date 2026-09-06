@@ -107,6 +107,40 @@ pub enum Action {
     /// An end-user's Connect checkout charge FAILED (`payment_intent.payment_failed`,
     /// webhook follow-up). Informational; audited with the creator / PI / amount.
     CheckoutFailed,
+    // -- Authority changes -------------------------------------------------
+    //
+    // Every entry below is written by `crate::organizations` INSIDE the
+    // transaction that performs the effect, through [`log_in_tx`], and carries
+    // the organization's typed id in `resource` with `app_id` NULL. They are
+    // the durable answer to "who holds authority here, and who granted it" -
+    // the one question a membership system exists to answer after the fact.
+    /// An organization was minted, seating its creator as the first owner.
+    OrganizationCreated,
+    /// An organization's name, slug or billing address changed.
+    OrganizationUpdated,
+    /// A member was seated in an organization.
+    OrganizationMemberAdded,
+    /// A member's organization role changed. The detail carries `from` and `to`.
+    OrganizationMemberRoleChanged,
+    /// A member was removed from an organization.
+    OrganizationMemberRemoved,
+    /// Ownership moved to another member and the previous owner stepped down.
+    /// `became_shared` records whether this also converted a personal
+    /// organization into a shared one.
+    OrganizationOwnershipTransferred,
+    /// An invitation was issued. The token is NEVER in the detail - only its
+    /// digest is stored anywhere, and this row names the invite by its typed id.
+    OrganizationInviteCreated,
+    /// An unconsumed invitation was revoked.
+    OrganizationInviteRevoked,
+    /// An invitation was redeemed and the redeemer seated.
+    OrganizationInviteRedeemed,
+    /// A project was created inside an organization.
+    ProjectCreated,
+    /// A member was seated on one project (the per-project narrowing grant).
+    ProjectMemberAdded,
+    /// A project seat was withdrawn.
+    ProjectMemberRemoved,
 }
 
 impl Action {
@@ -139,6 +173,18 @@ impl Action {
             Self::RefundFailed => "refund_failed",
             Self::PayoutFailed => "payout_failed",
             Self::CheckoutFailed => "checkout_failed",
+            Self::OrganizationCreated => "organization_created",
+            Self::OrganizationUpdated => "organization_updated",
+            Self::OrganizationMemberAdded => "organization_member_added",
+            Self::OrganizationMemberRoleChanged => "organization_member_role_changed",
+            Self::OrganizationMemberRemoved => "organization_member_removed",
+            Self::OrganizationOwnershipTransferred => "organization_ownership_transferred",
+            Self::OrganizationInviteCreated => "organization_invite_created",
+            Self::OrganizationInviteRevoked => "organization_invite_revoked",
+            Self::OrganizationInviteRedeemed => "organization_invite_redeemed",
+            Self::ProjectCreated => "project_created",
+            Self::ProjectMemberAdded => "project_member_added",
+            Self::ProjectMemberRemoved => "project_member_removed",
         }
     }
 }
@@ -223,6 +269,71 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
         .await;
     if let Err(e) = result {
         tracing::warn!(action = entry.action.as_str(), error = %e, "audit: insert failed");
+    }
+}
+
+/// Write one audit row on the caller's OWN connection or transaction.
+///
+/// # Why this exists beside [`log_with_detail`], which opens its own connection
+///
+/// The two placements answer different questions and neither is right for both.
+///
+/// An env or Stripe mutation is audited AFTER it commits, on a separate
+/// connection, because the trail must survive even when the mutation's own
+/// transaction is long gone - and because those paths have no transaction to
+/// join. That is [`log`] and [`log_with_detail`], and their header describes the
+/// window they leave open.
+///
+/// An AUTHORITY CHANGE is the opposite case. "Who was made an owner" is only
+/// true if the row that made them one committed, so the audit row must share
+/// that fate: an effect that rolled back did not happen, and a trail claiming
+/// otherwise is worse than no trail at all. Passing the caller's `Transaction`
+/// here is what ties the two together.
+///
+/// The DECISION row is a third thing and goes the other way again -
+/// `zeroship_authz::enforce` writes `zeroship.authz_decisions` on the shared
+/// client, because a refused mutation rolls back and would take the record of
+/// its own refusal with it.
+///
+/// Still best-effort: a failed insert warns rather than failing the caller's
+/// mutation. The difference from [`log_with_detail`] is placement, not
+/// severity.
+pub async fn log_in_tx<C: compio_postgres::GenericClient + Sync>(
+    conn: &C,
+    entry: AuditEntry<'_>,
+    detail: &Value,
+) {
+    let stdout_payload = json!({
+        "app_id": entry.app_id,
+        "creator_id": entry.creator_id,
+        "actor_user_id": entry.actor_user_id,
+        "action": entry.action.as_str(),
+        "resource": entry.resource,
+        "source_ip": entry.source_ip,
+        "detail": detail,
+    });
+    tracing::info!(target: "control.audit", payload = %stdout_payload, "authority change");
+
+    let result = conn
+        .execute(
+            // `$6::text::inet` for the reason `log_with_detail` states: binding
+            // an `Option<&str>` against an inferred `inet` OID fails at
+            // serialize time.
+            "INSERT INTO zeroship.app_audit(app_id, creator_id, actor_user_id, action, resource, source_ip, detail)
+             VALUES($1, $2, $3, $4, $5, $6::text::inet, $7)",
+            &[
+                &entry.app_id,
+                &entry.creator_id,
+                &entry.actor_user_id,
+                &entry.action.as_str(),
+                &entry.resource,
+                &entry.source_ip,
+                &detail,
+            ],
+        )
+        .await;
+    if let Err(e) = result {
+        tracing::warn!(action = entry.action.as_str(), error = %e, "audit: in-transaction insert failed");
     }
 }
 

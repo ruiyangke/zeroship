@@ -42,7 +42,7 @@ async fn create_test_app(registry: &Registry) -> Uuid {
     // Generate a unique name to survive parallel test runs.
     let name = format!("test-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let rec = registry
-        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
         .await
         .expect("create_app");
     rec.id
