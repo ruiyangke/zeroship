@@ -1265,15 +1265,48 @@ By path and symbol. Pre-launch, so each is a deletion, not a deprecation.
 
 ### 7.1 Mechanisms verified to bind nothing
 
+**LANDED, AND THIS SUBSECTION WAS WRONG IN THREE PLACES.** Step 1 executed it
+against the tree; where the tree disagreed, the tree won and the correction is
+recorded inline below rather than silently applied. The pattern in all three is
+the same: an item was named by the family it LOOKED like it belonged to, and its
+real caller set was somewhere else.
+
 - `crates/zeroship-gateway/src/auth.rs` - the whole module (`check_api_key`).
-  Verified: no caller, production or test.
-- `zeroship.apps.api_key` and `apps.api_key_hash` in
-  `db/migrations-ts/20260702000200_control_tables.ts`; `api_key_hash` on
-  `RouteEntry` in `crates/zeroship-core/src/types.rs`; the mint in
-  `crates/zeroship-control/src/registry.rs`; the create-response injection in
-  `crates/zeroship-control/src/api.rs`; `hash_api_key` and `validate_api_key` in
-  `crates/zeroship-core/src/auth/mod.rs`. A plaintext secret column stored beside
-  its own hash, gating nothing.
+  Verified: no caller, production or test. DELETED at step 1, with the
+  `pub mod auth;` in `crates/zeroship-gateway/src/lib.rs`. Note the trap the
+  deletion had to avoid: `crates/zeroship-gateway/src/router/auth.rs` is a
+  DIFFERENT module, also declared `pub mod auth;`, and it owns the whole
+  per-request identity arm. A sweep keyed on the module name deletes the wrong
+  one.
+- The api-key family, PARTLY. Deleted at step 1: `api_key_hash` on `RouteEntry`
+  in `crates/zeroship-core/src/types.rs`, the hash half of the mint in
+  `crates/zeroship-control/src/registry.rs`, `zeroship.apps.api_key_hash` (by
+  `db/migrations-ts/20260905000100_drop_app_api_key_hash.ts`, following the
+  corpus convention of a new drop migration rather than an edit to an applied
+  file), the create-response injection in `crates/zeroship-control/src/api.rs`,
+  and the field from the published `AppRecord` in `sdks/control/src/index.ts`.
+
+  **KEPT, and this is the correction.** `hash_api_key` and `validate_api_key` in
+  `crates/zeroship-core/src/auth/mod.rs` are NOT api-key-only: they are the
+  shared OAuth client-secret hashing primitives, with production callers in
+  `crates/zeroship-control/src/{bootstrap_builder,oauth_clients,app_oauth_client}.rs`
+  and `crates/zeroship-auth/src/oidc/refresh.rs`. Deleting them here breaks two
+  crates; they belong to 7.2's dependency, not to step 1.
+
+  `AppRecord::api_key` and the `zeroship.apps.api_key` column are also KEPT,
+  because this subsection named only one of the field's two production readers.
+  The other is `println!("api_key={}", app.api_key)` in
+  `crates/zeroship-control/src/bin/dev_provision.rs`, and roughly a dozen shell
+  harnesses parse that line - several treating an empty value as a hard failure.
+  Removing the field is compile-clean and harness-breaking, so it is its own
+  change with its own consumers to re-plumb. What step 1 did instead is stop the
+  key leaving over HTTP, which is the half that needed no re-plumbing.
+
+  So the shape this bullet named - a plaintext secret column stored beside its
+  own hash - is gone, and `tests/secret_beside_its_hash_gate.sh` refuses its
+  return. That gate rules on the PAIR and says so: a plaintext column with no
+  hash sibling is invisible to it, and `zeroship.apps.api_key` is exactly that
+  until `AppRecord::api_key` goes.
 - `crates/zeroship-control/src/identity_bridge.rs` - the whole module. DELETED
   at step 1, with `crates/zeroship-control/tests/identity_bridge_test.rs`, its
   only caller. `provision_or_link` had test callers only; `fetch_email_verified`
@@ -1296,14 +1329,52 @@ By path and symbol. Pre-launch, so each is a deletion, not a deprecation.
   and an `apikey` header, with confirmation read as "the `email_confirmed_at`
   field is present and not null". If Supabase consumption is ever revisited,
   that is how it was read and why the failure arm was chosen.
-- `crates/zeroship-gateway/src/sessions.rs` - the whole module, including
-  `validate` (no production caller) and `IDLE_MINUTES` / `ABSOLUTE_HOURS`.
-  Note this is the GATEWAY's module; the auth store's same-named function has
-  real production callers and is kept.
+- `crates/zeroship-gateway/src/sessions.rs` - **NOT the whole module, and this is
+  the second correction.** `validate` was production-dead and is DELETED, with
+  its rustdoc rehomed as a note in the same file so the refutation it carried
+  survives the function: finding a revocation check uncalled is not finding the
+  property missing, and the enforcement truth is the per-app family marker the
+  request path reads. Its three gateway integration tests kept their assertions
+  and now read the row themselves.
+
+  Five other public items in that module DO have production callers - `create`
+  and `NewSession` (`crates/zeroship-gateway/src/auth_token.rs` and
+  `handle_auth_callback` in `crates/zeroship-gateway/src/router/dispatch.rs`),
+  `latest_sid_for_user` (`auth_token.rs`), and both revoke helpers
+  (`crates/zeroship-gateway/src/backchannel_logout.rs`). `IDLE_MINUTES` and
+  `ABSOLUTE_HOURS` are consumed by `create`. The module becomes deletable after
+  7.2 removes the OIDC RP, the back-channel-logout handler and
+  `handle_auth_callback`; not before.
+
+  One consequence to carry: with `validate` gone, NOTHING slides
+  `idle_expires_at`. It is stamped at `create` and never bumped, and
+  `IDLE_MINUTES`' doc now says so instead of describing a sliding window that no
+  longer exists.
 - `zeroship.jwk_key_state` in `db/migrations-ts/20260702000300_auth_oauth_tables.ts`
-  - no reader, no writer.
+  - no reader, no writer. Confirmed by a case-insensitive whole-tree search:
+  zero Rust hits of any kind, and no fixture INSERT. DROPPED at step 1 by
+  `db/migrations-ts/20260905000000_drop_jwk_key_state.ts`, whose comment carries
+  what the table bought (per-key `created_at`, so JWK retirement could age keys
+  individually) and what replaced it (`zeroship.signing_keys`, which shipped as
+  an ADDITION rather than the planned rename, leaving this as residue).
+  Following the corpus's existing drop convention, the CREATE, the grant in
+  `db/migrations-ts/20260702000900_grants.ts` and the owner-registry entry in
+  `policies/platform-table-owners.json` are left in place: they run before the
+  drop, and the prior `drop_*` migrations in this corpus did the same.
 - `post_logout_redirect_uris` in `crates/zeroship-control/src/app_oauth_client.rs`
   - a public function with no production caller and no column to write into.
+  DELETED at step 1, along with `APP_CLIENT_PREFIX` in the same module - an
+  additional dead `pub const` alias this subsection did not name, found by
+  enumerating the module's whole public surface. It is the kind of item rustc's
+  dead-code lint cannot see, which is why it survived.
+
+  A comment at the deletion site carries the obligation the removal must not
+  take with it: `docs/proposals/2026-06-30-op-p0-spec-threat-model.md` specifies
+  an open-redirect guard for RP-initiated logout - a supplied
+  `post_logout_redirect_uri` must exact-match a registered entry for the
+  resolved `client_id`, and on no match the OP renders a local 400 rather than
+  redirecting. The capability was never built. Deleting the function without
+  recording that is how the next author rebuilds it without the check.
 
 ### 7.2 The OAuth apparatus between our own processes
 
