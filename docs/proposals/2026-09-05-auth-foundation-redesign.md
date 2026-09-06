@@ -43,8 +43,8 @@ same change.
 
 Zeroship has a strong set of authentication *mechanisms* and no *model* under
 them. Identity is a pure derivation nobody arbitrates, revocation is a marker
-primitive with no object it revokes, and the trust root sits inside the two
-processes that face the internet and run creator code.
+primitive with no object it revokes, and the trust root sits inside the processes
+that face the internet and run creator code.
 
 That last fact is why the defects recur rather than accumulate randomly. A
 reviewer asking "does this check bind?" must answer "against whom?", and for
@@ -74,10 +74,11 @@ app's decrypted environment over HTTP, and `worker_key`, which mints identity.
 `check_app_scoped_auth` - and it is computed, inside the worker, from the root
 the worker holds. A narrowing computed by the party being narrowed is
 appearance. Its production callers are `crates/zeroship-worker/src/handler.rs`
-and `crates/zeroship-plugin-workflow/src/client.rs`, both inside the worker.
+and `crates/zeroship-plugin-workflow/src/client.rs`, each inside the worker.
 
 **P3. There is no service identity, so every internal hop borrows a shared
-symmetric root, and one root does two unrelated jobs.** In
+symmetric root, and that root authenticates the hop as well as signing
+identity.** In
 `crates/zeroship-worker/src/handler.rs`, `check_worker_auth` compares the bearer
 against `config.worker_key` and `verified_user_json` passes the same value as the
 MAC key over `ZeroShip-User`. The rustdoc on `encode_user_header` in
@@ -103,8 +104,8 @@ sharpest evidence: `anchors::create`'s only production caller is
 anchor and the interactive redirect login does not, while
 `crates/zeroship-gateway/src/browser_auth.rs`'s `signout` resolves the user from
 the anchor cookie and returns `signout_cleared` before touching the database when
-it is absent. One verb, two entry paths, two meanings, and no place in the model
-where "a session" is a thing both paths produce.
+it is absent. One verb, divergent entry paths, divergent meanings, and no place in
+the model where "a session" is a thing every path produces.
 
 **P5. Revocation records gate presentation; nothing gates minting.** The marker
 in `token_revocations` is compared against a credential's `iat`, and in
@@ -123,9 +124,9 @@ credential lifetime`. The push window is a bare SQL `INTERVAL` literal in
 `WRAPPER_REVOCATION_RETENTION_HOURS` in
 `crates/zeroship-authz/src/wrapper_revocation.rs`; the longest recallable
 capability is `ANCHOR_ABS_DAYS` in `crates/zeroship-gateway/src/anchors.rs`, and
-it is longer than either. For the one teardown that writes a marker without
-deleting the anchor, the marker is swept while the capability it was written
-against is still alive. Task #209 as worded understates its own finding.
+it is longer than either. For a teardown that writes a marker without deleting the
+anchor, the marker is swept while the capability it was written against is still
+alive. Task #209 as worded understates its own finding.
 
 **P7. OAuth client authentication is a distinction the model carries and nothing
 enforces.** Per-app clients are brokered, and the gateway derives the secret for
@@ -134,7 +135,7 @@ to an app more strongly than it can attribute it to the gateway, so per-app
 clients are a naming scheme, not an isolation boundary, and every control built
 on client identity inherits that ceiling silently.
 
-**P8. Identity is a derivation replicated across processes with two supply
+**P8. Identity is a derivation replicated across processes with divergent supply
 shapes and no agreement check.** `derive_pairwise` is called independently in
 auth, the gateway and control. The salt reaches auth as raw file bytes and
 reaches the others through the config `Secret` layer, whose file loader strips a
@@ -146,25 +147,26 @@ instrument reads clean precisely because the thing it measures is broken.
 
 **P9. The sector is too fine, and suspension has neither a scope nor a writer.**
 Too fine: the sector is the app apex, so no cross-app subject exists to revoke and
-two apps sharing a database cannot agree who a user is (task #72).
+apps sharing a database cannot agree who a user is (task #72).
 
 The single `users` namespace serving creators and app end users is **not** the
 defect - decision D-D settles that one account per human is correct, and an
 earlier draft of this paragraph filed the shared namespace as a granularity error.
-Two findings that rode on that clause survive it. First, the model carries no
-SCOPE for a suspension: with one namespace and no per-role handle, the only lever
+Findings that rode on that clause survive it. First, the model carries no SCOPE
+for a suspension: with one namespace and no per-audience handle, the only lever
 abuse response has is person-wide and destructive. What that scope should be is
-open decision 8; this paragraph does not answer it. Second, the lever is unwired -
+settled as decision D-E - per project - and section 3.2 states where it hangs.
+Second, the lever is unwired -
 `disabled_at`, the one column meaning "suspended, not deleted", is read across the
 auth store, the identity paths, the OIDC endpoints, `zeroship-authn` and
 `crates/zeroship-control/src/registry.rs`, and written only from test targets. A
 column that is read everywhere and never written means every reader believes a
 dead branch is live.
 
-**P10. One fact, several hand-copied spellings, pinned by tests that assert a
-literal against themselves.** The identity upsert is byte-identical in
+**P10. One fact, hand-copied spellings, pinned by tests that assert a literal
+against themselves.** The identity upsert is byte-identical in
 `crates/zeroship-gateway/src/identities.rs` and the auth store; the registered
-callback path sets exist in both the gateway and
+callback path sets exist in the gateway and in
 `crates/zeroship-control/src/app_oauth_client.rs`; the marker upsert is spelled
 by hand in auth, control and the gateway's shared helper. A test asserting a
 literal against its own copy measures nothing about a cross-file invariant, so
@@ -173,8 +175,8 @@ the instrument is green in exactly the state the invariant is violated.
 **P11. Stores and columns shaped like enforcement that enforce nothing.**
 `gateway_sessions.revoked_at` is written by back-channel logout and read only by
 `crates/zeroship-gateway/src/sessions.rs`'s `validate`, which has no production
-caller and two doc comments elsewhere saying the request path deliberately does
-not use it. `check_api_key` in `crates/zeroship-gateway/src/auth.rs` is defined
+caller, and doc comments elsewhere say the request path deliberately does not use
+it. `check_api_key` in `crates/zeroship-gateway/src/auth.rs` is defined
 and never called, beside a plaintext `apps.api_key` column stored next to its own
 hash. `crates/zeroship-control/src/identity_bridge.rs`'s `provision_or_link` has
 only test callers and a header claiming it sits on the bearer read path. Each is
@@ -210,8 +212,8 @@ implementer can check it survived.
   sign-with-newest), rotation with reuse detection and family kill, AEAD-sealed
   single-retry idempotency with AAD bound to the predecessor hash and family id,
   in `crates/zeroship-auth/src/oidc/refresh.rs`. It is the only credential in the
-  tree with a real rotation story and it becomes the template for both the
-  session secret and service-key rotation.
+  tree with a real rotation story and it becomes the template for the session
+  secret and for service-key rotation.
 - **The stateless session cookie with kid rotation** and local verify on the hot
   path. The problem is the revocation model around it, not the cookie.
 - **Mandatory by construction rather than by configuration** - the property
@@ -222,8 +224,8 @@ implementer can check it survived.
   exact-redirect binding move onto `__Host-zs_flow`, enforced server-side rather
   than advertised in metadata. PKCE has no client left to protect and is retired
   with them - `crates/zeroship-core/src/pkce.rs` and
-  `crates/zeroship-auth/src/oidc/authorization_code.rs` as an OAuth grant both go
-  in 7.2 - and the leg it protected becomes a redemption over the authenticated
+  `crates/zeroship-auth/src/oidc/authorization_code.rs` as an OAuth grant go in
+  7.2 - and the leg it protected becomes a redemption over the authenticated
   service channel, where the redeemer proves an identity rather than proving it
   once held a random string. Retiring the mechanism is authorised; weakening
   "mandatory by construction" is not.
@@ -269,36 +271,48 @@ Section 6 states how this is bound. It is not a check; it is a type.
 
 ### 3.2 Identity concepts
 
-Four, each justified by what breaks without it.
+Each is justified by what breaks without it.
 
 **PERSON** - `zeroship.users`, typed id `usr_`. One namespace for every human.
 "Creator" is not an identity kind; it is a membership edge on a project.
 
 **Settled by the operator as decision D-D** (section 10): one account per human,
 serving the creator and the end user, confirmed rather than assumed. Recorded at
-the point of definition so it is not reopened later as taste. Two facts land with
-it. It is **UNVERIFIED** that the namespaces are shared in the tree TODAY - that
+the point of definition so it is not reopened later as taste. What lands with it:
+it is **UNVERIFIED** that the namespaces are shared in the tree TODAY - that
 marker stands as a measurement, its experiment is in section 11, and its answer
-tells step 5 whether it adopts an existing shared namespace or has to merge two.
-And the membership edge the settled model names does not exist at the project
-level: the corpus has `zeroship.app_members` with roles owner, editor and viewer
-in `db/migrations-ts/20260702000200_control_tables.ts`, which is APP-scoped. "A
-membership edge on a project" therefore implies moving that edge onto D-B's unit,
-and neither decision performs that move. It is also the per-role handle open
-decision 8 would need.
+tells step 5 whether it adopts an existing shared namespace or has to merge
+separate ones. And the membership edge the settled model names does not exist at
+the project level: the corpus has `zeroship.app_members` with roles owner, editor
+and viewer in `db/migrations-ts/20260702000200_control_tables.ts`, which is
+APP-scoped. "A membership edge on a project" therefore implies moving that edge
+onto D-B's unit, and neither decision performs that move. That move is
+independent of D-E: an audience-scoped suspension reads the grant row, not a
+membership edge, so it needs no per-role handle.
 
 Carries `credential_epoch` (the generalised `credential_version`) and
-`subject_status`, one column with a real state machine over `active`,
-`suspended`, `deletion_scheduled` and `anonymized`, replacing the separate
-lifecycle columns that today are read everywhere and written from tests. One
-column, one predicate, one feed field, and a variant with a production writer.
+`account_status`, a state machine over `active`, `deletion_scheduled` and
+`anonymized`, replacing the separate lifecycle columns that today are read
+everywhere and written from tests. One column for the account lifecycle, one
+predicate, one feed field, and a production writer for every variant.
 
-**The SCOPE of the `suspended` variant is open decision 8, not settled here.**
-The column as drawn is person-scoped, which is the GLOBAL answer to a question
-the operator did not answer; D-D settles the account namespace and nothing more.
-`deletion_scheduled` and `anonymized` are legitimately person-scoped - an account
-is deleted as an account, and D-D confirms that. If decision 8 lands per role,
-`suspended` needs a scope this single column cannot carry.
+**`suspended` is NOT a variant of that column.** Under decision D-E (section 10) a
+suspension is scoped to an audience, so it hangs off the GRANT row as
+`subject_status` over `active` and `suspended` - one row per (person, audience),
+which is per project for a project audience. The grant is where the subject
+itself is stored, so the status OF a subject is stored beside it, and it is
+enforced by the same validating read that already requires the grant to exist.
+No second enforcement path, which is D-E's whole reason for choosing this scope.
+
+**Why the variants differ in scope, stated so a reader does not "fix" them back
+into one uniform column.** `deletion_scheduled` and `anonymized` are person-scoped
+because an account is deleted as an account: there is no coherent reading of
+"delete this person in project P only" while the same person keeps the account,
+and D-D confirms that. A suspension is an abuse response to conduct, the conduct
+happens inside one audience, and D-E scopes the response to where the conduct
+was. A person-scoped column cannot express an audience-scoped suspension, and a
+per-audience row cannot express an account deletion, so the states live on
+different rows rather than sharing one enum by reflex.
 
 The table keeps its current name. A rename to `people` was considered and
 rejected: it is churn across the auth crate that binds nothing. The typed id
@@ -314,7 +328,7 @@ the per-app OAuth `client_id`, and the CLI pseudo-client with one value.
 
 **Settled by the operator as decision D-B** (section 10): the audience unit is the
 Project, with no organization container above it for now, and task #82 stays
-deferred. The sum's two variants are a decision, not a design premise. **The
+deferred. The sum's variants are a decision, not a design premise. **The
 choice is recoverable, and that is why the sum can be closed now:** a later
 organization layer would be a NEW audience variant rather than a re-derivation of
 the sum.
@@ -330,7 +344,7 @@ column under a `prj_` regular-expression check on the sandbox table in
 extracted to a sibling repository. Read every `projects.id` foreign key in the
 sketches below as pointing at a table this design introduces, and reconcile the
 id spelling against `prj_` when it is introduced; nothing in the corpus supplies
-it today.
+it today. Creating the entity is tracked as task #210 and is not designed here.
 
 *Without it:* subjects are either global, so apps correlate users across the
 platform, or per-app, so a project's apps cannot agree on a user.
@@ -388,7 +402,7 @@ already exists.
 One table replaces `idp_sessions`, `gateway_sessions`, `app_session_anchors`,
 `oauth_refresh_tokens`, `device_grants` and `token_revocations`.
 
-Three columns earn their place individually. `parent_session_id` makes "log this
+Columns that earn their place individually. `parent_session_id` makes "log this
 human out of everything they reached from this login" a tree delete instead of an
 HTTP fan-out, which is what deletes back-channel logout. `credential_epoch` makes
 "a password change kills every session" a data dependency rather than an
@@ -406,9 +420,17 @@ redemption, denial, or an expiry noticed during a poll.
 
 ```
 id, person_id, audience_kind, project_id, subject, scopes, relay_email,
+subject_status  'active' | 'suspended'        -- audience-scoped, decision D-E
+suspended_at, suspended_cause
 first_consented_at, updated_at
 UNIQUE (person_id, audience_kind, project_id)
 ```
+
+`subject_status` is here rather than on the person because decision D-E scopes a
+suspension to the audience. The unique key IS the scope: for a project audience
+the row is per project, and the platform-audience row is what a suspension of the
+person's own deploy authority names - a separate act from suspending them as an
+end user in someone else's project.
 
 **No `revoked_at`.** Revocation is `DELETE`, and sessions cascade off it. That
 single choice is the fix for the whole P5 family: the object that could re-mint
@@ -436,11 +458,11 @@ operator's reasoning is why they do not: a per-app client id today is an
 auto-provisioned side effect of `zeroship deploy` rather than a registration, so
 it is a spelling rather than a concept.
 
-**D-A deletes one DIRECTION, and the two are easy to confuse.** What goes is the
-OUTWARD direction - a creator app or the platform acting as an OIDC provider TO a
-third-party relying party. CONSUMING external identity providers is untouched,
-and the classification above is exactly that shape: a federated identity is an
-authentication method under the person. The live arms are kept -
+**D-A deletes one DIRECTION, and the directions are easy to confuse.** What goes
+is the OUTWARD direction - a creator app or the platform acting as an OIDC
+provider TO a third-party relying party. CONSUMING external identity providers is
+untouched, and the classification above is exactly that shape: a federated
+identity is an authentication method under the person. The live arms are kept -
 `crates/zeroship-auth/src/identity/oauth/google.rs`,
 `crates/zeroship-auth/src/identity/oauth/github.rs`,
 `crates/zeroship-auth/src/ui/oauth_google.rs`,
@@ -468,10 +490,10 @@ Each row answers: what distinction does it carry, and what enforces it?
 
 That is the entire inventory. Everything else in the tree is deleted or merged.
 
-**Two cookies at an app origin, and the split survives the merge prior.**
+**The cookie split at an app origin survives the merge prior.**
 `__Host-zs_session` (HttpOnly, Secure, SameSite=Strict, long) carries the session
 secret; `__Host-zs_access` (HttpOnly, Secure, SameSite=Lax, short) carries the
-access assertion. They are one credential kind in two roles: a **minting**
+access assertion. They are one credential kind in distinct roles: a **minting**
 capability that always costs a database read, and a **presenting** capability
 that never does. Collapsing them one way costs a database read per request;
 collapsing them the other makes the hot-path credential a minting capability,
@@ -494,7 +516,7 @@ unconditional, so it optimises nothing that is not already covered.
                   upstream federation client secrets
                   own service Ed25519 private key
                   --- SOLE WRITER of users / sessions / grants ---
-                  two database roles, see 6.9
+                  the split database roles, see F16
 
   zeroship-gateway  own service Ed25519 private key             ZeroShip-User envelopes
                     peer JWKS (auth, control, worker publics)     (nothing else)
@@ -528,43 +550,46 @@ condition that reopens it.
 
 ### 3.5 Distribution: one feed shape, on the transport that already exists
 
-Verifiers need three facts they do not own: routes, revocations, and public keys.
+Verifiers need facts they do not own: routes, revocations, and public keys.
 
 The gateway already pulls the route table on a sleep loop in
 `crates/zeroship-gateway/src/sync.rs`, and
 `zeroship_core::readiness::staleness_budget` already expresses "this pulled fact
 is too old to act on". **This design adds one feed to that shape and invents no
 new transport.** The revocation feed is an append-only, monotonically sequenced
-table owned by auth, carrying session revocations, epoch floors and person-status
-changes; verifiers hold a cursor and a last-success instant. JWKS rides the same
-poll.
+table owned by auth, carrying session revocations, epoch floors, account-status
+changes and per-audience suspensions; verifiers hold a cursor and a last-success
+instant. A suspension entry names the audience it applies to, because under D-E
+that is its scope, and a verifier that could not tell which audience was
+suspended would have to fall back to a global refusal. JWKS rides the same poll.
 
 **Fail-closed rule.** A verifier whose feed has not advanced within the staleness
 budget refuses to authenticate. `RequiredPrincipal::User` routes answer 503;
 `Anonymous` routes still serve. This mirrors the freshness gate the route table
 already has, which is one of the things the current tree gets right.
 
-This replaces **both** current revocation mechanisms - the pushed snapshot in
+This replaces **every** current revocation mechanism - the pushed snapshot in
 `crates/zeroship-control/src/registry.rs` and the polled cache in
 `crates/zeroship-authz/src/wrapper_revocation.rs`. Neither dominates the other
 today: the pushed one adds coverage and the staleness refusal, the polled one
 adds recency and applies no age filter. One feed with a cursor and a fail-closed
-bound has both properties and needs no ordering coincidence between two literals.
+bound has each property and needs no ordering coincidence between separate
+literals.
 
 ---
 
-## 4. The two flows
+## 4. The flows
 
 ### 4.1 End-user app login
 
 The gateway is no longer an OIDC Relying Party. There is no PKCE verifier at the
 edge, no stash cookie, no per-app OAuth client, no broker secret, no id_token, no
-`at_hash`. The handshake is first-party between two of our own processes, and the
+`at_hash`. The handshake is first-party between our own processes, and the
 landing code is redeemed over the authenticated service channel - strictly
 stronger than PKCE, because the redeemer proves an identity rather than proving
 it once held a random string.
 
-That the handshake is between two of our own processes is the operator's stated
+That the handshake is between our own processes is the operator's stated
 reasoning for decision D-A, which authorises 7.2's deletion outright rather than
 conditionally.
 
@@ -642,7 +667,7 @@ needs no HMAC key at the edge and no server-side stash.
 
 The top-level redirect leg differs only in [1] and [9]: a full-page 302 rather
 than a popup, landing on the original path instead of posting a message. **It
-produces the same session row and the same two cookies.** That is the fix for
+produces the same session row and the same cookies.** That is the fix for
 P4's sharpest instance - today one login shape mints an anchor and the other does
 not, and signout keys off the anchor.
 
@@ -654,7 +679,10 @@ Steady state, every dispatched request, with no database read in any process:
                                  aud == this route's project_id
                                  revocation feed: fresh within the staleness
                                    budget, else DENY; sid not revoked after iat;
-                                   epoch >= epoch floor; person status active
+                                   epoch >= epoch floor; the account is live AND
+                                   the subject is not suspended in THIS aud
+                                   (D-E: suspension is scoped to the audience,
+                                    so the check is too)
                                  route policy: RequiredPrincipal, scopes
                                  CSRF: unsafe method requires exact Origin
                                  strip reserved headers and reserved cookies
@@ -678,12 +706,15 @@ Refresh, the only path that touches the database:
                                                                WHERE hash matches
                                                                  AND revoked_at IS NULL
                                                                  AND idle/absolute live
-                                                                 AND users.subject_status
+                                                                 AND users.account_status
                                                                      = 'active'
                                                                  AND users.credential_epoch
                                                                      = sessions.credential_epoch
-                                                                 AND the grant row still
-                                                                     exists (FK)
+                                                                 AND the grant row for THIS
+                                                                     session's audience still
+                                                                     exists (FK) AND its
+                                                                     subject_status
+                                                                     = 'active'
                                                                RETURNING successor, epoch,
                                                                  scopes
                                                              zero rows -> login_required,
@@ -692,16 +723,23 @@ Refresh, the only path that touches the database:
                                                                outside the idem window
                                                                -> REVOKE the session
                                                              else mint the assertion
- BROWSER <--both cookies------- GATEWAY <-------------------
+ BROWSER <--the cookies------- GATEWAY <-------------------
 ```
 
 Note what is absent: no anchor, no marker consulted, no `rotation_started_at`
 comparison, no rows-affected gate after the fact. There is one read, it is the
 authority, and the mint is downstream of it.
 
+Note also what the same read does with the suspension: the account predicate is
+person-scoped and the status predicate is audience-scoped, and they are in ONE
+statement. That is why decision D-E chose the audience as the scope - a suspension
+is enforced by the statement MINT-READS-ROW already requires, so the design gains
+no second enforcement path. A per-app scope could not have been enforced here at
+all: the mint does not know which app the person visits next.
+
 ### 4.2 Creator CLI login
 
-RFC 8628 device authorization is kept - it is a genuine two-device handshake and
+RFC 8628 device authorization is kept - it is a genuine cross-device handshake and
 the standard is the right shape. What is discarded is its OAuth *output*:
 redemption yields a session, not a token pair, and `offline_access` ceases to
 exist because the session is the refresh credential.
@@ -768,12 +806,12 @@ Steps [6] and [8] are where the current CLI is weakest. Today `cmd_logout` in
 `crates/zeroship-cli/src/auth.rs` contacts no server and refuses to run at all on
 a file it cannot parse, so a copy of the credential file taken beforehand is a
 live self-renewing session. Today the bearer is handed to `curl` as an argv
-element from several CLI modules, in the same file whose `post_form_with_headers`
+element from CLI modules, in the same file whose `post_form_with_headers`
 already pipes the body through stdin specifically to keep secrets off argv. Today
 `whoami` decodes the payload locally without verifying the signature and makes no
 network call while unexpired.
 
-Two further changes with no new mechanism. `control` and `migrate-server` get
+Further changes with no new mechanism. `control` and `migrate-server` get
 **distinct audiences**; today they bind the same shared audience key with the
 same default, so `aud` separates nothing and any future narrowing that assumed it
 did would be wrong. And the scope set a `zeroship login` token can obtain must
@@ -804,11 +842,11 @@ There is no second spelling of the revocation write, and no path that writes a
 session row without its feed entry.
 
 `PersonEverywhere` makes global teardown a first-class verb. That is correct for
-deletion and anonymisation, which are person-scoped by nature. **Which selector a
-suspension calls is open decision 8**, and D-D settles the account namespace
-without touching it - do not read the settled account model as having chosen this
-selector for suspension. The recommendation on record, offered and NOT yet
-accepted, is to suspend per role rather than globally.
+deletion and anonymisation, which are person-scoped by nature. **A suspension
+calls `PersonInProject`**, settled as decision D-E: the status is audience-scoped,
+so the teardown that accompanies it is audience-scoped as well. Do not reach for
+`PersonEverywhere` here - that selector is for the account lifecycle, and using it
+for a suspension re-creates the global answer D-E rejected.
 
 Columns: **A** platform session secret. **B** project session secret.
 **C** access assertion, already presented. **D** one-time secrets.
@@ -826,7 +864,8 @@ Columns: **A** platform session secret. **B** project session secret.
 | Narrow scopes without revoking | intact | intact | `<= W` (epoch bump) | untouched | intact | n/a | n/a |
 | Password change or reset | IMMEDIATE (epoch) | IMMEDIATE (epoch) | `<= W` | reset and magic purged | intact | n/a | n/a |
 | TOTP enrol or remove | intact | intact | intact | untouched | intact | n/a | n/a (G1) |
-| Suspend the person (PROVISIONAL - open decision 8) | IMMEDIATE | IMMEDIATE | `<= W` | all purged | suppressed | n/a | n/a |
+| Suspend a person in a project (D-E) | intact | IMMEDIATE (that project) | `<= W` | project-scoped purge | suppressed | n/a | n/a |
+| Suspend a person's platform audience | IMMEDIATE | intact | `<= W` | purpose-scoped purge | intact | n/a | n/a |
 | Deletion requested | IMMEDIATE | IMMEDIATE | `<= W` | all purged | GONE (grants cascade) | n/a | n/a |
 | Reaper anonymise or hard delete | IMMEDIATE | IMMEDIATE | `<= W` | GONE (FK) | GONE (FK) | n/a | n/a |
 | CLI logout | IMMEDIATE | intact (separate tree) | `<= W` | untouched | intact | n/a | n/a |
@@ -840,14 +879,16 @@ Columns: **A** platform session secret. **B** project session secret.
 Where `W = min(the access-assertion TTL, the revocation feed staleness budget
 plus one poll interval)`.
 
-**The suspend row is PROVISIONAL and no other row is.** Column A is the platform
-session - the person's own deploy authority - and column B is the project session,
-the person as an end user. IMMEDIATE in both is the GLOBAL answer to open decision
-8, written here so the row is not blank, not because the question is closed. If
-decision 8 lands per role, one of those two columns becomes `intact`. An
-implementer building from this table must read decision 8 before implementing this
-row. **The deletion and anonymise rows are not provisional** - an account is
-deleted as an account, and D-D confirms that; do not spread the marking to them.
+**The suspend rows follow decision D-E, and no row here is provisional.** Column A
+is the platform session - the person's own deploy authority - and column B is the
+project session, the person as an end user. A suspension in a project touches
+column B for THAT project and leaves column A alone, which is the whole content of
+D-E: a report against a person acting as an end user in someone else's project
+must not stop that person deploying their own apps. Stopping deployment is the
+separate act on the platform audience, which is why it has its own row rather than
+being folded in. **The deletion and anonymise rows stay person-scoped** - an
+account is deleted as an account, and D-D confirms that; the audience scoping does
+not spread to them.
 
 **Every IMMEDIATE above is one statement, and every one is the same statement
 family**: a row update keyed on the session tree, or a `DELETE` whose foreign
@@ -865,7 +906,7 @@ blank row is not read as an omission.
 **G2 - relay-alias abuse suppresses forwarding without ending sessions.** Apps
 holding a live assertion keep seeing the alias *string* until the next mint;
 forwarding stops immediately because alias resolution is a fresh read at the OP.
-No real inbox is ever projected on any path. Both alias readers become one
+No real inbox is ever projected on any path. The alias readers become one
 function - today the gateway's lookup omits the grant-existence half of the auth
 store's predicate.
 
@@ -894,7 +935,7 @@ wall-clock budget, which is a runtime limit, not a security symbol.
 **G7 - intra-worker isolation is not a credential property.** Removing
 `control_key` stops a worker from fetching an arbitrary app's environment *by
 credential*. It does not stop app A's code from reaching app B's environment if
-V8 is escaped, because both are resident in one process. This design does not
+V8 is escaped, because they are resident in one process. This design does not
 claim that property. Naming it is the point: today's app-scoped token reads as
 though it were that boundary.
 
@@ -1005,14 +1046,14 @@ by the party that is not being narrowed.
 
 *Red:* an integration arm in which node N presents a valid assertion for an app
 assigned elsewhere and receives a refusal. Impossible to write today, because the
-worker holds `control_key` and every env request succeeds. Enumerate both
-enforcement points before treating one mutation as refuting the guard: the
+worker holds `control_key` and every env request succeeds. Enumerate every
+enforcement point before treating one mutation as refuting the guard: the
 placement equality and the `jti` single-use. Bounded honestly by G7.
 
 **F8. A revoked session cannot be presented after `W`, and cannot be re-minted at
 all.**
 
-*Mechanism:* two, independent. The assertion `exp` bounds presentation
+*Mechanism:* independent bounds. The assertion `exp` bounds presentation
 unconditionally; the feed lowers it, and the staleness budget makes a dead feed
 deny rather than admit.
 
@@ -1029,37 +1070,39 @@ the revoke is a `DELETE`. PostgreSQL enforces it; no application code enumerates
 session secret, asserting refusal. Today that sequence succeeds.
 
 **F10. A password change or deletion request ends every session without
-enumerating them. A suspension does too, but only under the global answer to open
-decision 8.**
+enumerating them. A suspension ends the suspended audience's sessions, and only
+those.**
 
 *Mechanism:* `credential_epoch`, joined in the same UPDATE that slides the idle
-window. This is `crates/zeroship-auth/src/store/sessions.rs` generalised to all
-audiences.
+window. This is `crates/zeroship-auth/src/store/sessions.rs` generalised to every
+audience. A suspension is NOT an epoch bump: under D-E it is `subject_status` on
+the grant row, and the same validating UPDATE that resolves the grant reads its
+status. Different column, same statement, no second enforcement path.
 
-*Scope, stated here so the fence table does not decide the question:* password
-change and deletion are covered unconditionally - both are person-scoped by
-nature. Suspension is folded into the same person-scoped epoch only if decision 8
-lands globally. A per-role answer cannot be expressed by one person-scoped epoch,
-and this fence's mechanism changes shape rather than merely narrowing.
+*Scope, stated here so the fence is not read as uniform:* password change and
+deletion are person-scoped by nature and are covered unconditionally. Suspension
+is audience-scoped by D-E and deliberately cannot be folded into the person-scoped
+epoch, because an epoch that is person-scoped cannot leave one audience's sessions
+alive.
 
 *Red:* an arm per lifecycle transition that bumps the epoch and asserts a refresh
-on an older session is refused. Mutation: delete the equality predicate and the
-arm must fail.
+on an older session is refused, plus a paired arm that suspends one audience and
+asserts the OTHER audience's session still refreshes. Mutation: delete the epoch
+equality predicate and the first arm must fail; delete the grant-status predicate
+and the suspended half of the pair must fail.
 
-**F11. `subject_status` has a production writer for every variant.**
+**F11. Every status variant has a production writer.**
 
-*Mechanism:* a control-plane suspend and reinstate endpoint that stamps the
-status and bumps the credential epoch in one statement.
+*Mechanism:* a control-plane suspend and reinstate endpoint taking a (person,
+audience) pair - the signature D-E settles - which stamps `grants.subject_status`
+and revokes that audience's sessions in one statement; plus the account-lifecycle
+writer for `users.account_status`.
 
-*What is settled and what is not, kept apart so the gate can be built now.* The
-REQUIREMENT - every variant has a non-test writer - holds under either answer to
-open decision 8, and the arm below can be built today. The endpoint's SIGNATURE
-is not settled: as written it takes a person, which presumes the global answer;
-a per-role answer makes it take a (person, audience) pair. Build the variant
-gate; do not freeze the scope with it.
-
-*Red:* a gate arm ruling on the variant set - floor declared beside the enum -
-requiring at least one non-test writer per variant. This is the family fix for
+*Red:* a gate arm ruling on the variant set of each status enum - floor declared
+beside the enum it rules on - requiring at least one non-test writer per variant.
+An audience-scoped status makes the arm stronger rather than weaker: a writer that
+stamps every audience at once fails the pairing arm in F10. This is the family fix
+for
 `disabled_at`: today the column is read across the auth store, the identity
 paths, the OIDC endpoints and control's registry, and written only from tests.
 
@@ -1088,8 +1131,8 @@ duplicated callback path sets - all achieved by deletion, not by a second copy.
 
 *Red:* a gate arm refusing a `const` SQL string in one crate that is a substring
 of a `const` SQL string in another. A test asserting a literal against its own
-copy is refused in review. Today the two identity upserts are byte-identical in
-two crates, each pinned by a test asserting a substring of itself.
+copy is refused in review. Today the identity upserts are byte-identical across
+crates, each pinned by a test asserting a substring of itself.
 
 **F15. Every forced-RLS policy in the corpus binds something.**
 
@@ -1122,8 +1165,9 @@ attempts a write for another; PostgreSQL refuses. Mutation: grant that role
 BYPASSRLS and the arm goes green, which proves the fence is the role attribute
 and not the SQL.
 
-*Honest caveat, stated in the design rather than discovered later:* two roles in
-one process is defence-in-depth against a route-confusion bug, **not** a boundary
+*Honest caveat, stated in the design rather than discovered later:* splitting the
+role inside one process is defence-in-depth against a route-confusion bug,
+**not** a boundary
 against a compromised OP. That is precisely the claim the current tree makes
 dishonestly.
 
@@ -1152,7 +1196,7 @@ the scope gate.
 
 **F19. App code cannot present a platform cookie or forge an identity header.**
 
-*Mechanism:* one reserved-name list consumed by both the header strip and a new
+*Mechanism:* one reserved-name list consumed by the header strip and by a new
 cookie strip in `collect_forwarded_headers`.
 
 *Red:* a gate arm iterating the reserved list, dispatching with each name set,
@@ -1171,7 +1215,7 @@ that way, and `ifNotExists` means the exposure is at first provisioning, which i
 every fresh cluster.
 
 **Fences deliberately NOT claimed.** Intra-worker environment isolation (G7).
-Correlation resistance against a party that observes both the auth origin and an
+Correlation resistance against a party that observes the auth origin and an
 app origin - the platform can always correlate; the guarantee is that *projects*
 cannot. Protection against a compromised `zeroship-auth` - and that is now an
 ACCEPTED RISK taken by the operator under decision D-C, not an open question
@@ -1207,7 +1251,7 @@ By path and symbol. Pre-launch, so each is a deletion, not a deprecation.
 - `post_logout_redirect_uris` in `crates/zeroship-control/src/app_oauth_client.rs`
   - a public function with no production caller and no column to write into.
 
-### 7.2 The OAuth apparatus between two of our own processes
+### 7.2 The OAuth apparatus between our own processes
 
 **AUTHORISED by the operator as decision D-A** (section 10). This subsection is
 not conditional on anything; the reasoning is recorded at its close and in D-A.
@@ -1265,7 +1309,7 @@ derived shared secret.
   client-authentication story this subsection has removed.
 - `derive_broker_secret` in `crates/zeroship-core/src/auth/mod.rs`,
   `verify_broker_secret` in `crates/zeroship-auth/src/oidc/issuer.rs`, and the
-  broker secret settings on both sides.
+  broker secret settings on each side.
 - Tables: `oauth_clients`, `oauth_grants`, `oauth_authorization_codes`,
   `oauth_refresh_tokens`, `app_oauth_clients`, `app_user_identities`,
   `idp_sessions`, `gateway_sessions`, `identity_links`, `device_grants`, and the
@@ -1278,7 +1322,7 @@ and real secrets, not an auto-provisioned side effect of `zeroship deploy`.
 
 **The reasoning, which is the durable part of the decision.** What exists today is
 not the feature: there is no registration, no third-party consent, no scope model
-and no documentation. It is OAuth ceremony between two of our own processes, and
+and no documentation. It is OAuth ceremony between our own processes, and
 the third-party capability falls out only because that plumbing hands every app a
 client id. Keeping the side door open does not get the platform closer to the
 feature; it only keeps the plumbing complicated.
@@ -1329,7 +1373,7 @@ such a configuration.
 ### 7.5 CLI
 
 - The Supabase arm in `crates/zeroship-cli/src/auth.rs` and the corresponding
-  provider variant in the verifier: `cmd_login` routes both variants into one
+  provider variant in the verifier: `cmd_login` routes every variant into one
   device flow that hardcodes the platform provider, so the arm is reachable only
   from a hand-edited credential file.
 - `userinfo_from_platform_token`, replaced by a verified call.
@@ -1347,10 +1391,10 @@ such a configuration.
 
 ### 7.6 Merges within the surviving surface
 
-- Five signed or random browser cookies become one `__Host-zs_flow`: the CSRF
+- The signed or random browser cookies become one `__Host-zs_flow`: the CSRF
   double-submit in `crates/zeroship-auth/src/csrf.rs`, the magic-link CSRF
   cookie, the TOTP challenge cookie in
-  `crates/zeroship-auth/src/sessions/totp_challenge.rs`, and both provider
+  `crates/zeroship-auth/src/sessions/totp_challenge.rs`, and the provider
   stashes in `crates/zeroship-auth/src/ui/oauth_stash.rs`. Keep the stash's
   shape - it embeds `iat` and `exp` and enforces them server-side, where the
   gateway's stash carries no time claim at all and delegates its lifetime to the
@@ -1385,8 +1429,8 @@ such a configuration.
 - In `db/migrations-ts/20260702000800_policies_rls.ts`: the forced-RLS policies
   on the spend and secrets family, which bind no role; and the policies on the
   session, anchor and identity tables, whose tables cease to exist or become
-  single-writer at auth. **Read section 11 before touching these** - two of them
-  genuinely bind today.
+  single-writer at auth. **Read section 11 before touching these** - the session,
+  anchor and identity policies genuinely bind today.
 - The control-plane grants on `zeroship.device_grants` in
   `db/migrations-ts/20260702000900_grants.ts`; control's device flow is already
   gone and the grant is the residue with teeth.
@@ -1398,7 +1442,7 @@ such a configuration.
   `crates/zeroship-authn/src/service_replay.rs` are NOT deleted. They are wired.
   Do not invent a fourth HMAC scheme. **Their backing table is already
   provisioned** - see section 11.
-- `subject_status` gets a production writer.
+- `users.account_status` and `grants.subject_status` each get a production writer.
 - The manifest refusal for `Anonymous` carrying scopes gets built.
 
 ---
@@ -1413,8 +1457,8 @@ disruption. Each names the RED TEST that fails before and passes after. A
 under `tests/` and run it as a measurement. It goes red today. Do not delete a
 single RLS policy before this gate exists and its verdict per table is recorded.
 *Red test:* the gate itself, red on the spend and secrets family and green on the
-session, anchor and identity tables - which is the evidence that those three are
-live fences and the others are not.
+session, anchor and identity tables - which is the evidence that those are live
+fences and the others are not.
 
 **Step 1. Delete what binds nothing.** `check_api_key` and the api-key columns,
 `identity_bridge`, the gateway's `sessions::validate`, `jwk_key_state`, the
@@ -1448,8 +1492,8 @@ derivation are deleted.
 **Step 5. The session object, and MINT-READS-ROW.** Create `zeroship.sessions`
 and `zeroship.grants`, move the refresh-family rotation algorithm onto the session
 row unchanged, introduce `ValidatedSession`, and make auth the sole minter.
-*Premise:* step 0's verdict is recorded, because this step is what makes two of
-the three live RLS fences unnecessary rather than merely removed.
+*Premise:* step 0's verdict is recorded, because this step is what makes the live
+RLS fences unnecessary rather than merely removed.
 *Red test:* revoke a session, then attempt a mint, and assert refusal; mutation -
 delete the `revoked_at IS NULL` predicate and the test must fail. Plus the
 compile-level check: removing the `ValidatedSession` parameter fails the build.
@@ -1475,24 +1519,26 @@ whole marker family go; the derived retention constant lands.
 *Red test:* F9's grant-revoke-then-refresh arm, which today succeeds; plus F17's
 recomputation arm. This closes task #209 by deletion.
 
-**Step 8. `subject_status`, its writer, and its variant gate.**
-*Premise:* step 5, for the epoch join; and **open decision 8 for the refusal arm
-only.** That arm has two different shapes - every session of the person refused,
-or only the suspended role's - and writing it either way settles the decision by
-construction. The variant gate does not wait on decision 8; the refusal arm does.
-*Red test:* F11's variant-writer arm, red today; plus a suspend-then-refresh
-refusal arm whose scope decision 8 fixes.
+**Step 8. The status columns, their writers, and the variant gate.**
+*Premise:* step 5, which creates the person row's `account_status` as well as the
+grant row the audience-scoped `subject_status` hangs on. D-E settles the scope, so
+this step carries no decision blocker; the refusal arm has one shape and it is the
+paired one.
+*Red test:* F11's variant-writer arm, red today; plus F10's pair - suspend a
+person in one project, assert that project's session is refused and the platform
+session still refreshes. Writing only the refused half would pass under a global
+suspension too, so the allowed half is what binds the scope.
 
 **Step 9. Audience becomes the project.** Task #72. The unit is settled by D-B,
-so this step carries no decision blocker; it carries two ENTITY blockers instead,
+so this step carries no decision blocker; it carries ENTITY blockers instead,
 and settling the unit is what makes them load-bearing rather than academic.
 *Premise:* step 5 and step 7, because the sector is stored on the grant row; plus
 creating the Project entity, which `db/migrations-ts/` does not have, and moving
 the membership edge off the app-scoped `zeroship.app_members` in
 `db/migrations-ts/20260702000200_control_tables.ts` onto the project.
-*Red test:* a pair differing in one variable - two apps of one project produce
-equal subjects, two projects produce unequal ones. Moving the sector back to the
-app apex fails both halves.
+*Red test:* a control differing in one variable - apps of one project produce
+equal subjects, distinct projects produce unequal ones. Moving the sector back to
+the app apex fails each half.
 
 **Step 10. The auth role split and the RLS cleanup.** `zeroship_auth_rt` without
 BYPASSRLS on the per-request path, `zeroship_auth_admin` for lifecycle; delete
@@ -1559,8 +1605,8 @@ outage.** Once a verifier's feed is older than the staleness budget it refuses
 every authenticated route. A partition between a zone and auth takes every
 `RequiredPrincipal::User` route in that zone to 503 after that interval;
 anonymous routes keep serving. There is no configuration in which the revocation
-bound and the outage tolerance are both large, because after the feed budget the
-next bound is the assertion TTL and that is also the mint-load knob. This is
+bound and the outage tolerance are large together, because after the feed budget
+the next bound is the assertion TTL and that is also the mint-load knob. This is
 stated rather than hidden behind a cached fallback, because a cached fallback is
 precisely how the tree ended up with a marker that expires before the capability
 it revokes.
@@ -1568,7 +1614,7 @@ it revokes.
 **Step 6 is the one place this trades fail-closed for fail-open if it is split.**
 Today the gateway can fall back to a live database read on a revocation cache
 miss. If the gateway's database credential is removed BEFORE the feed's
-fail-closed staleness gate is in place, the window between those two changes is a
+fail-closed staleness gate is in place, the window between those changes is a
 period in which a stale or absent revocation view admits rather than denies.
 **The feed, its cursor and its staleness refusal must land in the same change
 that removes the database credential.** Do not sequence them apart for
@@ -1606,21 +1652,22 @@ D-A, and gives no third party a session of ours to receive a logout for. If
 outward provision is ever revived, back-channel logout is part of that feature's
 design, not a regression against this one.
 
-**Two roles in one process is not a boundary.** F16 is defence-in-depth against a
-route-confusion bug in the OP. It is written here with that caveat attached so
-nobody repeats it without one.
+**A role split inside one process is not a boundary.** F16 is defence-in-depth
+against a route-confusion bug in the OP. It is written here with that caveat
+attached so nobody repeats it without one.
 
 ---
 
 ## 10. Decisions
 
-Settled ones are recorded in 10.1 as D-A through D-D, each with what was decided,
+Settled ones are recorded in 10.1 as D-A through D-E, each with what was decided,
 who decided it, and why. The rest stay open in 10.2, which **keeps its original
 numbering**: sections 7.2, 7.7, 9 and 11 address these items by number, nothing in
 the tree checks that a cross-reference resolves, and renumbering would silently
 re-point them. Settled items therefore keep their numbers as pointers rather than
-being removed, and the suspension-scope question - which the operator did NOT
-answer - takes a NEW number rather than inheriting item 1's.
+being removed. The suspension-scope question was split out of item 1 as item 8
+because the operator had not answered it then; it is answered now, as D-E, and
+item 8 survives only as a pointer to that entry.
 
 ### 10.1 Settled by the operator
 
@@ -1628,7 +1675,7 @@ answer - takes a NEW number rather than inheriting item 1's.
 operator. Section 7.2 is AUTHORISED, not conditional.
 
 *Why, and this reasoning is the durable part.* What exists today is not the
-feature. It is OAuth ceremony between two of OUR OWN processes, gateway and auth,
+feature. It is OAuth ceremony between OUR OWN processes, gateway and auth,
 and because that plumbing gives every app a client id, the third-party
 capability falls out as an auto-provisioned side effect of deploy. There is no
 registration, no third-party consent, no scope model, no documentation. Keeping
@@ -1636,12 +1683,13 @@ the side door open does not get the platform closer to the feature; it only keep
 the plumbing complicated. If an integration ecosystem becomes a product it is
 built as a first-class feature with real registration and real secrets.
 
-*Direction, recorded because the two are easy to confuse and the confusion could
-later be read as "the redesign deleted SSO".* D-A deletes the OUTWARD direction
-only: the platform or a creator app acting as an OIDC provider TO a third-party
-relying party. **Consuming external identity providers is unaffected.** The design
-already classifies a federated identity as an authentication method under the
-person, which is the adapter shape the operator asked about. The live arms stay:
+*Direction, recorded because the directions are easy to confuse and the
+confusion could later be read as "the redesign deleted SSO".* D-A deletes the
+OUTWARD direction only: the platform or a creator app acting as an OIDC provider
+TO a third-party relying party. **Consuming external identity providers is
+unaffected.** The design already classifies a federated identity as an
+authentication method under the person, which is the adapter shape the operator
+asked about. The live arms stay:
 `crates/zeroship-auth/src/identity/oauth/google.rs`,
 `crates/zeroship-auth/src/identity/oauth/github.rs`,
 `crates/zeroship-auth/src/ui/oauth_google.rs`,
@@ -1677,21 +1725,54 @@ RISK rather than an open question. *What REOPENS it:* the design's own tiebreake
 the platform holding regulated data. Section 9 names the successor step, which is
 what a reopening builds.
 
-**D-D. One account per human.** Decided by the operator: one account serves both
-the creator and the end user. "Creator" is a membership edge, not an identity
+**D-D. One account per human.** Decided by the operator: one account serves the
+creator and the end user alike. "Creator" is a membership edge, not an identity
 kind. The design already assumed this; it is now confirmed rather than assumed.
 
 *Still UNVERIFIED, and the marker stands:* whether the namespaces are shared in
 the tree TODAY. That is a measurement, its experiment is in section 11, and its
 answer tells step 5 whether it adopts an existing shared namespace or has to merge
-two. *What D-D does NOT settle:* the scope of a suspension. That is item 8 below,
-split out so the account answer cannot be read as answering it.
+separate ones. *What D-D does NOT settle:* the scope of a suspension. That was
+split out as item 8 so the account answer could not be read as answering it, and
+it is settled separately as D-E.
+
+**D-E. A suspension is PROJECT-SCOPED.** Decided by the operator: the platform
+suspends a person within a project - not globally, and not per app.
+
+*Why, and this reasoning is the durable part.* Everything else in the model is
+already project-scoped. Audience is `Platform | Project(pid)`, the subject is
+derived per project, the grant is one row per (person, audience), and the session
+hangs off the grant. Scoping a suspension the same way means it is enforced by THE
+SAME validating read as everything else, under MINT-READS-ROW: `subject_status` on
+the grant row is a predicate in the statement that already resolves the grant. No
+second enforcement path is created, and none has to be built.
+
+*Per-APP was considered and rejected.* The model has no app-level object to hang a
+status on, and a per-app status could not be enforced at mint at all, because the
+mint does not know which app the person will visit next. Enforcing it would need a
+dispatch-time mechanism consulted per request - a second enforcement path, and
+precisely the shape this redesign exists to remove.
+
+*Global was considered and rejected earlier.* One status per person means a report
+against a person acting as an end user in someone else's project would stop that
+person deploying their own apps.
+
+*The consequence to state explicitly, because it will be asked.* A creator banning
+a user from the creator's OWN app is not platform state. It is the creator's app
+data under the creator's rules, written like any other app data. The platform
+holds nothing for it - which is why nothing finer than a project needs to exist.
+
+*Where this lands, so the decision is not made only in one place:*
+`grants.subject_status` in 3.2 and the grant sketch, the feed's per-audience
+suspension entry in 3.5, the gateway verify list and the refresh statement in 4.1,
+the `PersonInProject` selector and the suspend rows in 5, F10 and F11 in 6, and
+step 8 in 8. Each of those names D-E.
 
 ### 10.2 The numbered items, settled ones marked in place
 
 1. **SETTLED as D-D, account half only.** The suspension half of this item was
-   NOT answered and is now item 8. The number is kept rather than reclaimed, so
-   that nothing after it shifts.
+   split out as item 8 and is settled separately as D-E. The number is kept rather
+   than reclaimed, so that nothing after it shifts.
 
 2. **SETTLED as D-C.** No external signer; the reopening condition is recorded in
    D-C and in section 9.
@@ -1703,8 +1784,8 @@ split out so the account answer cannot be read as answering it.
 4. **The access-assertion TTL and the feed staleness budget.** OPEN, and
    deferrable to when step 6 is written. The first is the mint-load and
    partition-tolerance knob; the second is the recall bound. They are separate
-   symbols in this design deliberately, but both need values, and both belong to
-   operations rather than to this document.
+   symbols in this design deliberately, but each needs a value, and each belongs
+   to operations rather than to this document.
 
 5. **SETTLED as D-A.** Section 7.2 stands and is authorised.
 
@@ -1717,28 +1798,15 @@ split out so the account answer cannot be read as answering it.
    iframe leg the SDK uses?** OPEN. The design assumes it does (same registrable
    domain, hence same-site). UNVERIFIED - a measurement nobody has taken; the
    experiment is in section 11, which addresses this item by number. If it does
-   not, step 6's popup and top-level shapes are the only two entries and the
-   iframe leg is dropped.
+   not, step 6's popup and top-level shapes are the only entries and the iframe
+   leg is dropped.
 
-8. **Does a suspension of a person acting as an end user also stop that person
-   deploying their own apps?** OPEN, and NEW - split out of item 1, which the
-   operator answered only for the account namespace. `subject_status` as drawn in
-   3.2 is person-scoped, so an abuse suspension against an app end user would also
-   stop that human deploying. The alternative is status per (person, audience),
-   which costs the simplicity of one predicate and needs a per-role handle the
-   corpus does not have at the project level - `zeroship.app_members` in
-   `db/migrations-ts/20260702000200_control_tables.ts` is app-scoped.
-
-   **RECOMMENDATION, offered and NOT yet accepted - this is not a decision:**
-   suspend per role rather than globally, because tightening later is easy and the
-   reverse means explaining why an unrelated complaint cut off a paying creator's
-   livelihood.
-
-   Where this question is already answered IMPLICITLY, and what has to be re-read
-   if it lands per role: the revocation matrix's suspend row and the `Selector`
-   enum in section 5, F10 and F11 in section 6, and step 8 in section 8. Each is
-   marked at its site. Those are what an implementer builds from, so a decision
-   made only there is a decision nobody knows was made.
+8. **SETTLED as D-E.** A suspension is project-scoped: it stops the person as an
+   end user in the project it names, and does not stop that person deploying their
+   own apps. The status moved off the person and onto the grant row, so the answer
+   is carried by the model rather than by a marking at each site; the sites that
+   used to carry a provisional marking are listed in D-E and now name the decision
+   instead. The number is kept as a pointer, per the rule above.
 
 ---
 
@@ -1747,9 +1815,9 @@ split out so the account answer cannot be read as answering it.
 Claims made during this investigation that turned out wrong, and what is true.
 Each was established by reading the working tree today. Nothing was executed.
 
-**C1. The service-assertion replay table IS provisioned. Three separate
-write-ups said it exists only as a DDL string inside a test, and one of them
-marked that claim as verified.** It is created, indexed and granted by
+**C1. The service-assertion replay table IS provisioned. Earlier write-ups said it
+exists only as a DDL string inside a test, and that claim was published carrying a
+verification badge.** It is created, indexed and granted by
 `db/migrations-ts/20260816000100_service_assertion_replay.ts`, which establishes
 the `service_authn` schema, the `service_assertion_replay` table and its expiry
 index, and grants select, insert, update and delete on it to the control,
@@ -1766,34 +1834,35 @@ spend and secrets family bind nothing, because those tables are reachable only b
 a role created with `bypassRls` in
 `db/migrations-ts/20260702000100_schema_roles_extensions.ts`. But the policies on
 `app_session_anchors`, `gateway_sessions` and `app_user_identities` DO bind: the
-gateway role is created WITHOUT `bypassRls`, holds grants on all three in
+gateway role is created WITHOUT `bypassRls`, holds grants on each in
 `db/migrations-ts/20260702000900_grants.ts`, and sets the matching
 transaction-local GUCs in `crates/zeroship-gateway/src/rls.rs`. **Those are real
 fences.** This design removes them, and the removal is legitimate only by the
-argument made table by table: two of the three tables cease to exist, and the
-third becomes single-writer at auth with no second tenant to isolate. That
+argument made table by table: the anchor and gateway-session tables cease to
+exist, and the identity table becomes single-writer at auth with no other tenant
+to isolate. That
 argument has to be made, not assumed - which is why step 0 exists.
 
 **C3. The revocation sweep is not missing a DELETE grant.** An earlier note said
-it would fail for lack of one;
+it would fail for lack of that grant;
 `db/migrations-ts/20260811000000_auth_token_revocations_delete.ts` grants it. The
 base grants file omits it, which is why the claim looked right.
 
-**C4. `sessions::validate` is two different functions and only one is
-unwired.** The GATEWAY's `crates/zeroship-gateway/src/sessions.rs` version has no
-production caller, and two doc comments in
-`crates/zeroship-gateway/src/auth_token.rs` and
+**C4. `sessions::validate` names distinct functions in distinct crates, and only
+the gateway's is unwired.** The GATEWAY's
+`crates/zeroship-gateway/src/sessions.rs` version has no production caller, and
+doc comments in `crates/zeroship-gateway/src/auth_token.rs` and
 `crates/zeroship-gateway/src/router/auth.rs` say the request path deliberately
 does not use it. The AUTH store's same-named function in
-`crates/zeroship-auth/src/store/sessions.rs` has several production callers under
+`crates/zeroship-auth/src/store/sessions.rs` has production callers under
 `crates/zeroship-auth/src/ui/`. Earlier write-ups blurred them, which would have
 deleted a live function.
 
-**C5. The app-scoped control token has more than one production caller, and both
-are inside the worker.** `crates/zeroship-worker/src/handler.rs` and
+**C5. The app-scoped control token has production callers, and every one of them
+is inside the worker.** `crates/zeroship-worker/src/handler.rs` and
 `crates/zeroship-plugin-workflow/src/client.rs`. The conclusion is unchanged and
-slightly stronger: the plugin runs inside the worker process, so both derivations
-are computed from a root the deriving process holds.
+slightly stronger: the plugin runs inside the worker process, so each derivation
+is computed from a root the deriving process holds.
 
 **C6. The workflow-advance reachability question already has an instrument.**
 Earlier write-ups listed "is this edge reachable from the public internet" as
@@ -1805,28 +1874,28 @@ read the harness, I did not run it.
 
 **C7. The retention ordering is inverted, not merely unlinked.** Task #209 says
 the push window and the sweep retention "agree by coincidence". They do, and the
-finding is worse: both are shorter than `ANCHOR_ABS_DAYS`, so for the one
-teardown that writes a marker without deleting the anchor, the marker is swept
+finding is worse: each is shorter than `ANCHOR_ABS_DAYS`, so for a teardown that
+writes a marker without deleting the anchor, the marker is swept
 while the capability it was written against is still alive.
 
 **Still UNVERIFIED, with the experiment for each.**
 
 - *Whether the secret-write and env CLI verbs return 403 under a `zeroship login`
-  token.* Derived from three reads - the CLI's requested scope, the required
+  token.* Derived from reads - the CLI's requested scope, the required
   action in `crates/zeroship-control/src/env_handlers.rs`, and the ceiling
   evaluation in `crates/zeroship-authz/src/eval.rs` - not observed. Experiment:
   against a live control plane run a secret list (expect allow) and a secret set
-  (expect deny) and read both statuses. One variable apart, so it is an oracle
+  (expect deny) and read each status. One variable apart, so it is an oracle
   rather than an anecdote.
 - *Whether creators and app end users share one person namespace.* Control holds
   only select on the users table and reaches principals through the link and
-  grant tables, which is consistent with one table for both, but nothing states
-  it. Experiment: check whether a principal id in the identity-link table can
-  also appear as the global user id on an app identity row. This no longer
+  grant tables, which is consistent with one table serving each, but nothing
+  states it. Experiment: check whether a principal id in the identity-link table
+  can also appear as the global user id on an app identity row. This no longer
   DECIDES anything - D-D settles the design - but it verifies whether today's
   tree already satisfies the settled account model, which is what tells step 5
-  whether it adopts an existing shared namespace or has to merge two. The
-  UNVERIFIED marker stands until it is run.
+  whether it adopts an existing shared namespace or has to merge separate ones.
+  The UNVERIFIED marker stands until it is run.
 - *Whether the browser attaches the platform session cookie for the SDK's
   same-site iframe leg with third-party cookies blocked.* Same registrable domain
   means same-site, so Lax should apply, but I did not exercise it. Experiment: an
