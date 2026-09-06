@@ -1407,8 +1407,7 @@ else
   GP_ARM_PASS_DELTA=4
   OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$APP_NAME" --zship "$ZSHIP")
   APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
-  API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
-  [ -n "$APP_ID" ] && [ -n "$API_KEY" ] \
+  [ -n "$APP_ID" ] \
     && pass "dev-provisioned app ($APP_ID) -- THE DEPLOY CLI DID NOT RUN" \
     || { fail "dev-provision: $OUT"; exit 1; }
 fi
@@ -1416,13 +1415,13 @@ sleep 4  # gateway route-sync poll
 
 # --- 4. The chain works: gateway serves the deployed app ---
 step 4 "Live: gateway serves the deployed app"
-INDEX=$(curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" 2>/dev/null || echo "")
+INDEX=$(curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" 2>/dev/null || echo "")
 echo "$INDEX" | grep -qi "<!doctype html" && pass "GET / serves the app index.html" || fail "index.html not served (got: ${INDEX:0:80})"
 
 # the hashed JS asset referenced by index.html
 ASSET=$(echo "$INDEX" | grep -oE '/assets/[A-Za-z0-9._-]+\.js' | head -1)
 if [ -n "$ASSET" ]; then
-  code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME$ASSET" -H "X-Api-Key: $API_KEY")
+  code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME$ASSET")
   [ "$code" = "200" ] && pass "client JS asset served ($ASSET → 200)" || fail "asset $ASSET → $code"
 fi
 
@@ -1432,7 +1431,7 @@ fi
 # /apps/<name>/__zeroship/v1/<wireId>. getMessages takes no input.
 step 5 "RPC round-trip (server function executes)"
 RPC=$(curl -s "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages" \
-  -H "X-Api-Key: $API_KEY" 2>/dev/null || echo "")
+  2>/dev/null || echo "")
 # Assert the SHAPE, not one substring. `grep -q "Build locally"` passed on any
 # response that happened to contain that text -- an error envelope quoting the
 # seed data, a truncated array, a single message, an object instead of a list.
@@ -1584,13 +1583,13 @@ BODYCAP_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v
 DEV_413=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary "@$BODYCAP_TMP/over1mib.bin" \
   -H 'Content-Type: application/octet-stream' "http://localhost:$DEV_RT_PORT/" 2>/dev/null)
 DEP_1MIB=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary "@$BODYCAP_TMP/over1mib.bin" \
-  -H 'Content-Type: application/octet-stream' -H "X-Api-Key: $API_KEY" "$BODYCAP_URL" 2>/dev/null)
+  -H 'Content-Type: application/octet-stream' "$BODYCAP_URL" 2>/dev/null)
 
 # POSITIVE CONTROL for the deployed leg: the SAME url with a tiny body. Without
 # it, a 404/500 from a broken route would make the size verdict below read as a
 # pass, which is the trap the $APP_ID version fell into.
 DEP_OK=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary '{"json":{}}' \
-  -H 'Content-Type: application/json' -H "X-Api-Key: $API_KEY" "$BODYCAP_URL" 2>/dev/null)
+  -H 'Content-Type: application/json' "$BODYCAP_URL" 2>/dev/null)
 
 echo "    body cap: dev(1MiB+1) -> $DEV_413   deployed(1MiB+1) -> $DEP_1MIB   deployed(tiny) -> $DEP_OK"
 
@@ -1631,11 +1630,11 @@ echo "    body cap: dev(1MiB+1) -> $DEV_413   deployed(1MiB+1) -> $DEP_1MIB   de
 # resource arm, not this one.
 head -c 4194305 /dev/zero | tr '\0' 'a' > "$BODYCAP_TMP/over4mib.bin"
 DEP_4MIB=$(curl -s -o /dev/null -w '%{http_code}' -X POST --data-binary "@$BODYCAP_TMP/over4mib.bin" \
-  -H 'Content-Type: application/octet-stream' -H "X-Api-Key: $API_KEY" "$BODYCAP_URL" 2>/dev/null)
+  -H 'Content-Type: application/octet-stream' "$BODYCAP_URL" 2>/dev/null)
 DEP_4MIB_BODY=$(curl -s -X POST --data-binary "@$BODYCAP_TMP/over4mib.bin" \
-  -H 'Content-Type: application/octet-stream' -H "X-Api-Key: $API_KEY" "$BODYCAP_URL" 2>/dev/null | head -c 120)
+  -H 'Content-Type: application/octet-stream' "$BODYCAP_URL" 2>/dev/null | head -c 120)
 DEP_1MIB_BODY=$(curl -s -X POST --data-binary "@$BODYCAP_TMP/over1mib.bin" \
-  -H 'Content-Type: application/octet-stream' -H "X-Api-Key: $API_KEY" "$BODYCAP_URL" 2>/dev/null | head -c 120)
+  -H 'Content-Type: application/octet-stream' "$BODYCAP_URL" 2>/dev/null | head -c 120)
 
 echo "    body cap: deployed(4MiB+1) -> $DEP_4MIB  body=[$DEP_4MIB_BODY]"
 echo "    body cap: deployed(1MiB+1) body=[$DEP_1MIB_BODY]"
@@ -2227,15 +2226,15 @@ fi
 # Runs LAST because it stops the worker.
 step 8 "Deployed tier: the same RPC when the app's runtime is unavailable"
 DEP_URL="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages"
-DEP_OK_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$DEP_URL" -H "X-Api-Key: $API_KEY")
+DEP_OK_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 5 "$DEP_URL")
 # Kill the worker BY PID. Freeing the port by listener is the safer idiom for
 # dev ports, but here the gateway is a CLIENT of this port and an over-broad
 # match takes it down too -- which replaces the platform's answer with a
 # connection failure and makes this step measure nothing.
 kill -9 "$WORKER_PID" 2>/dev/null || true
 sleep 3
-DEP_DOWN_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$DEP_URL" -H "X-Api-Key: $API_KEY")
-DEP_DOWN_BODY=$(curl -s -m 10 "$DEP_URL" -H "X-Api-Key: $API_KEY" 2>/dev/null)
+DEP_DOWN_CODE=$(curl -s -o /dev/null -w '%{http_code}' -m 10 "$DEP_URL")
+DEP_DOWN_BODY=$(curl -s -m 10 "$DEP_URL" 2>/dev/null)
 echo "    deployed, worker up   : HTTP $DEP_OK_CODE"
 echo "    deployed, worker down : HTTP $DEP_DOWN_CODE  body: ${DEP_DOWN_BODY:0:160}"
 echo "    dev, runtime down     : HTTP $SUP_CODE  body: ${SUP_BODY:0:160}"
@@ -2666,8 +2665,7 @@ if [ "$DB9_BUILD_RC" = "0" ] && [ -f "$TODOS/dist/app.zship" ]; then
   # created here and activated after the apply below.
   DB9_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB9_APP" --zship "$TODOS/dist/app.zship" --defer-deploy 2>&1)
   DB9_APP_ID=$(echo "$DB9_OUT" | awk -F= '$1 == "app_id" { print $2 }')
-  DB9_API_KEY=$(echo "$DB9_OUT" | awk -F= '$1 == "api_key" { print $2 }')
-  if [ -z "$DB9_APP_ID" ] || [ -z "$DB9_API_KEY" ]; then
+  if [ -z "$DB9_APP_ID" ]; then
     fail "could not provision db-todos for the deployed leg: ${DB9_OUT:0:200}"
   else
     # Mint a platform-admin bearer from the harness's own issuer, following
@@ -2732,7 +2730,7 @@ else
 fi
 
 DB9_BASE="http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$DB9_APP"
-db9_call() { curl -sS -m 10 -X POST -H 'content-type: application/json' -H "X-Api-Key: $DB9_API_KEY" "$DB9_BASE/__zeroship/v1/$1" -d "{\"json\":$2}"; }
+db9_call() { curl -sS -m 10 -X POST -H 'content-type: application/json' "$DB9_BASE/__zeroship/v1/$1" -d "{\"json\":$2}"; }
 
 DEP_INSERT_VERDICT="not-run"
 DEP_JOIN_VERDICT="not-run"
@@ -3037,9 +3035,8 @@ fi
 # them, so app creation, database creation, apply, and activation stay distinct.
 SC_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$SC_APP" --zship "$SC_ZSHIP" --defer-deploy 2>&1)
 SC_APP_ID=$(echo "$SC_OUT" | awk -F= '$1 == "app_id" { print $2 }')
-SC_API_KEY=$(echo "$SC_OUT" | awk -F= '$1 == "api_key" { print $2 }')
 SC_READY=0
-if [ -z "$SC_APP_ID" ] || [ -z "$SC_API_KEY" ]; then
+if [ -z "$SC_APP_ID" ]; then
   fail "could not provision the scaffold app: ${SC_OUT:0:200}"
 else
   # Mint a platform-admin bearer from the harness's own issuer, signed with the
@@ -3157,7 +3154,7 @@ else
   else
     pass "the scaffold runs under \`pnpm dev\` and answers its own RPCs"
     sc_tier "$SC_DEV_BASE" ""                        /tmp/gp-scaffold-dev.tsv
-    sc_tier "$SC_DEP_BASE" "X-Api-Key: $SC_API_KEY"  /tmp/gp-scaffold-dep.tsv
+    sc_tier "$SC_DEP_BASE"  /tmp/gp-scaffold-dep.tsv
 
     # THE COMPARISON. Statuses are compared exactly; bodies are not, because the
     # two tiers run different databases (SQLite vs Postgres) and every id and
@@ -3225,7 +3222,7 @@ else
        && "$BIN/zeroship" deploy "$SC_ZSHIP" --app="$SC_APP_ID" \
             --control="http://localhost:$ZEROSHIP_CONTROL_PORT" --token="$SC_TOKEN" >/tmp/gp-scaffold-ctldeploy.log 2>&1; then
       sleep 6
-      sc_tier "$SC_DEP_BASE" "X-Api-Key: $SC_API_KEY" /tmp/gp-scaffold-ctl.tsv
+      sc_tier "$SC_DEP_BASE" /tmp/gp-scaffold-ctl.tsv
       SC_BEFORE="$(cut -f2 /tmp/gp-scaffold-dep.tsv | cut -d' ' -f1 | paste -sd, -)"
       SC_AFTER="$(cut -f2 /tmp/gp-scaffold-ctl.tsv | cut -d' ' -f1 | paste -sd, -)"
       # "The answers moved" is NOT enough, and asserting only that is how this
@@ -3417,8 +3414,7 @@ else
   # matching migrations are applied.
   DB_OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store /tmp/gp-bundles --name "$DB_APP" --zship "$DB_ZSHIP" --defer-deploy 2>&1)
   DB_APP_ID=$(echo "$DB_OUT" | awk -F= '$1 == "app_id" { print $2 }')
-  DB_API_KEY=$(echo "$DB_OUT" | awk -F= '$1 == "api_key" { print $2 }')
-  if [ -z "$DB_APP_ID" ] || [ -z "$DB_API_KEY" ]; then
+  if [ -z "$DB_APP_ID" ]; then
     fail "could not provision db-todos: ${DB_OUT:0:200}"
   else
     # Same creator as step 10, so the bearer already minted is accepted; only the
@@ -3610,7 +3606,7 @@ fi
 if [ "$DB_DEP_READY" -ne 1 ]; then
   fail "db-todos never became drivable through the gateway; the deployed half of the ordering check did not run"
 else
-  ord_tier dep "$ORD_DEP_BASE" "X-Api-Key: $DB_API_KEY" /tmp/gp-ord-dep.verdict
+  ord_tier dep "$ORD_DEP_BASE" /tmp/gp-ord-dep.verdict
   ORD_DEP_V="$(cat /tmp/gp-ord-dep.verdict)"
   echo "  deployed : $ORD_DEP_V"
   case "$ORD_DEP_V" in
@@ -3799,7 +3795,7 @@ SQL
 
   curl -s -o /dev/null --max-time 15 \
     "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages" \
-    -H "X-Api-Key: $API_KEY" 2>/dev/null || true
+    2>/dev/null || true
   command sleep 2
 
   LOG_CODE_B=$(curl -s -o /tmp/gp-logs-b.json -w '%{http_code}' --max-time 20 \
@@ -3845,7 +3841,7 @@ SQL
   # no arm, so the status now gates the reading below.
   LOG_ERR_CODE=$(curl -s -o /tmp/gp-err-resp.json -w '%{http_code}' --max-time 15 \
     "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/getMessages?input=%7Bnot-json" \
-    -H "X-Api-Key: $API_KEY" 2>/dev/null)
+    2>/dev/null)
   command sleep 2
   curl -s -o /tmp/gp-logs-e.json --max-time 20 "$LOG_URL" \
     -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null || true
@@ -3911,7 +3907,7 @@ SQL
   # handler throw through the framework rail and that is worth understanding.
   LOG_BOOM_CODE=$(curl -s -o /tmp/gp-boom-resp.json -w '%{http_code}' --max-time 15 \
     "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/boom" \
-    -H "X-Api-Key: $API_KEY" 2>/dev/null)
+    2>/dev/null)
   command sleep 2
   curl -s -o /tmp/gp-logs-boom.json --max-time 20 "$LOG_URL" \
     -H "Authorization: Bearer $SC_TOKEN" 2>/dev/null || true
@@ -4215,7 +4211,7 @@ else
        when pg_has_role('zeroship_worker', '$ARC_ROLE', 'MEMBER')
         and has_schema_privilege('$ARC_ROLE', '$SC_APP_ID', 'USAGE') then 1
        else 0 end" 2>/dev/null | tr -d ' ')
-  ARC_SRV_PRE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10     "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
+  ARC_SRV_PRE=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10     "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" 2>/dev/null)
   echo "  before archive: row=$ARC_ROW_PRE name=$ARC_NAME_PRE manifests=$ARC_MAN_PRE schemas=$ARC_NSP_PRE tables=$ARC_TBL_PRE ledger=$ARC_LEDGER_PRE runtime_role=$ARC_ROLE_PRE gateway=$ARC_SRV_PRE"
 
   if [ "$ARC_ROW_PRE" = "1" ]       && [ "$ARC_NAME_PRE" = "$SC_APP" ]       && [ "${ARC_MAN_PRE:-0}" -ge 1 ] 2>/dev/null       && [ "${ARC_NSP_PRE:-0}" -ge 1 ] 2>/dev/null       && [ "${ARC_TBL_PRE:-0}" -ge 1 ] 2>/dev/null       && [ "${ARC_LEDGER_PRE:-0}" -ge 1 ] 2>/dev/null       && [ "$ARC_ROLE_PRE" = "1" ]       && [ "$ARC_SRV_PRE" = "200" ]; then
@@ -4253,7 +4249,7 @@ else
 
   ARC_SRV_POST=""
   for _i in $(seq 1 30); do
-    ARC_SRV_POST=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5       "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
+    ARC_SRV_POST=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5       "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" 2>/dev/null)
     [ "$ARC_SRV_POST" = "200" ] || break
     command sleep 1
   done
@@ -4316,7 +4312,7 @@ else
 
   RST_SRV=""
   for _i in $(seq 1 30); do
-    RST_SRV=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5       "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" -H "X-Api-Key: $SC_API_KEY" 2>/dev/null)
+    RST_SRV=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5       "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$SC_APP/" 2>/dev/null)
     [ "$RST_SRV" = "200" ] && break
     command sleep 1
   done

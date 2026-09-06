@@ -591,8 +591,9 @@ be written first.
 - **Same-id recurrence is not offered by the creator API, and that does not
   generalise.** App ids are database-minted (`id: t.uuid().notNull().default(uuidV4())`,
   `db/migrations-ts/20260702000200_control_tables.ts:152`), creation supplies no id
-  (`INSERT INTO zeroship.apps (name, plan_id, api_key, api_key_hash) ... RETURNING
-  id`, `crates/zeroship-control/src/registry.rs:279-284`), and retirement is an
+  (`INSERT INTO zeroship.apps (name, plan_id) ... RETURNING
+  id` in `Registry::create_app`, `crates/zeroship-control/src/registry.rs`; the
+  two api-key columns this line used to name are deleted), and retirement is an
   archive that never removes the row. But operator tooling, direct provisioning, test
   fixtures that insert explicit ids, and above all PITR sit outside that path. PITR
   is this proposal's own threat model: a tombstone written into a rewindable table is

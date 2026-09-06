@@ -6,8 +6,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::collections::HashSet;
 
 use ntex::web::HttpResponse;
-use uuid::Uuid;
 use zeroship_bundle::{RateLimit, RateLimitPer};
+use zeroship_core::app_id::AppId;
 use zeroship_core::types::{AccountState, SpendState};
 
 /// Throttle multiplier applied to a Degraded app: its effective concurrency
@@ -126,12 +126,12 @@ impl std::fmt::Debug for RateLimitRegistry {
 }
 
 pub struct RateLimitRegistry {
-    buckets: RwLock<HashMap<Uuid, Arc<TokenBucket>>>,
+    buckets: RwLock<HashMap<AppId, Arc<TokenBucket>>>,
     /// Apps in spend-Degrade. A request from a degraded app consumes
     /// `DEGRADE_FACTOR` tokens instead of 1 (a `1/DEGRADE_FACTOR` throughput
     /// cut) against the SAME immutable bucket — no rebuild, instant recovery
     /// on `clear_degraded`.
-    degraded: RwLock<HashSet<Uuid>>,
+    degraded: RwLock<HashSet<AppId>>,
     default_rate: u32,
     default_burst: u32,
 }
@@ -146,7 +146,7 @@ impl RateLimitRegistry {
         }
     }
 
-    fn get_or_create(&self, app_id: &Uuid) -> Arc<TokenBucket> {
+    fn get_or_create(&self, app_id: &AppId) -> Arc<TokenBucket> {
         {
             let r = self.buckets.read().unwrap();
             if let Some(b) = r.get(app_id) {
@@ -154,16 +154,16 @@ impl RateLimitRegistry {
             }
         }
         let mut w = self.buckets.write().unwrap();
-        w.entry(*app_id)
+        w.entry(app_id.clone())
             .or_insert_with(|| Arc::new(TokenBucket::new(self.default_rate, self.default_burst)))
             .clone()
     }
 
     /// Mark `app_id` degraded (`on = true`) or clear it. Idempotent.
-    pub fn set_degraded(&self, app_id: &Uuid, on: bool) {
+    pub fn set_degraded(&self, app_id: &AppId, on: bool) {
         let mut w = self.degraded.write().unwrap();
         if on {
-            w.insert(*app_id);
+            w.insert(app_id.clone());
         } else {
             w.remove(app_id);
         }
@@ -171,19 +171,19 @@ impl RateLimitRegistry {
 
     /// Convenience: clear `app_id`'s degraded flag. Recovery is instant — the
     /// bucket was never rebuilt, so it serves at its normal rate immediately.
-    pub fn clear_degraded(&self, app_id: &Uuid) {
+    pub fn clear_degraded(&self, app_id: &AppId) {
         self.set_degraded(app_id, false);
     }
 
     #[must_use]
-    pub fn is_degraded(&self, app_id: &Uuid) -> bool {
+    pub fn is_degraded(&self, app_id: &AppId) -> bool {
         self.degraded.read().unwrap().contains(app_id)
     }
 }
 
 pub fn check_rate_limit(
     registry: &RateLimitRegistry,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<(), HttpResponse> {
     let bucket = registry.get_or_create(app_id);
     // A spend-Degraded app pays DEGRADE_FACTOR tokens per request.
@@ -220,7 +220,7 @@ pub fn check_rate_limit(
 /// in the same app, different IP/session) get their own buckets.
 #[derive(Hash, PartialEq, Eq, Debug, Clone)]
 pub struct PerRuleKey {
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub rule_idx: u32,
     /// Bucket discriminator derived from `RateLimitPer`:
     /// * `Ip` → request's client IP string
@@ -296,7 +296,7 @@ impl PerRuleRateLimitRegistry {
     /// `rate_limit: None` (no `rps` and no `rpm`) is a pass-through.
     pub fn check(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         rule_idx: u32,
         _per: RateLimitPer,
         bucket_id: &str,
@@ -307,7 +307,7 @@ impl PerRuleRateLimitRegistry {
             return Ok(());
         };
         let key = PerRuleKey {
-            app_id: *app_id,
+            app_id: app_id.clone(),
             rule_idx,
             bucket: bucket_id.to_string(),
         };
@@ -331,12 +331,12 @@ impl std::fmt::Debug for ConcurrencyRegistry {
 }
 
 pub struct ConcurrencyRegistry {
-    gauges: RwLock<HashMap<Uuid, Arc<AtomicU32>>>,
+    gauges: RwLock<HashMap<AppId, Arc<AtomicU32>>>,
     /// Apps in spend-Degrade. A degraded app's EFFECTIVE ceiling is
     /// `(limit / DEGRADE_FACTOR).max(1)` instead of `limit` — the same gauge
     /// is compared against a smaller ceiling (no rebuild, instant recovery on
     /// `clear_degraded`).
-    degraded: RwLock<HashSet<Uuid>>,
+    degraded: RwLock<HashSet<AppId>>,
     limit: u32,
 }
 
@@ -349,7 +349,7 @@ impl ConcurrencyRegistry {
         }
     }
 
-    fn get_or_create(&self, app_id: &Uuid) -> Arc<AtomicU32> {
+    fn get_or_create(&self, app_id: &AppId) -> Arc<AtomicU32> {
         {
             let r = self.gauges.read().unwrap();
             if let Some(g) = r.get(app_id) {
@@ -357,35 +357,35 @@ impl ConcurrencyRegistry {
             }
         }
         let mut w = self.gauges.write().unwrap();
-        w.entry(*app_id)
+        w.entry(app_id.clone())
             .or_insert_with(|| Arc::new(AtomicU32::new(0)))
             .clone()
     }
 
     /// Mark `app_id` degraded (`on = true`) or clear it. Idempotent.
-    pub fn set_degraded(&self, app_id: &Uuid, on: bool) {
+    pub fn set_degraded(&self, app_id: &AppId, on: bool) {
         let mut w = self.degraded.write().unwrap();
         if on {
-            w.insert(*app_id);
+            w.insert(app_id.clone());
         } else {
             w.remove(app_id);
         }
     }
 
     /// Convenience: clear `app_id`'s degraded flag (instant recovery).
-    pub fn clear_degraded(&self, app_id: &Uuid) {
+    pub fn clear_degraded(&self, app_id: &AppId) {
         self.set_degraded(app_id, false);
     }
 
     #[must_use]
-    pub fn is_degraded(&self, app_id: &Uuid) -> bool {
+    pub fn is_degraded(&self, app_id: &AppId) -> bool {
         self.degraded.read().unwrap().contains(app_id)
     }
 
     /// Effective ceiling for `app_id`: the tightened `(limit /
     /// DEGRADE_FACTOR).max(1)` when degraded, else the global `limit`.
     #[must_use]
-    fn effective_limit(&self, app_id: &Uuid) -> u32 {
+    fn effective_limit(&self, app_id: &AppId) -> u32 {
         if self.is_degraded(app_id) {
             (self.limit / DEGRADE_FACTOR).max(1)
         } else {
@@ -406,7 +406,7 @@ impl Drop for ConcurrencyGuard {
 
 pub fn acquire_concurrency(
     registry: &ConcurrencyRegistry,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<ConcurrencyGuard, HttpResponse> {
     let gauge = registry.get_or_create(app_id);
     let ceiling = registry.effective_limit(app_id);
@@ -432,6 +432,7 @@ pub fn acquire_concurrency(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
     fn rl(rps: Option<u32>, rpm: Option<u32>, per: RateLimitPer) -> RateLimit {
         RateLimit { rps, rpm, per }
@@ -442,7 +443,7 @@ mod tests {
         // rps=2 → bucket capacity 2, refill 2/s. 5 rapid requests:
         // first 2 succeed (drain the burst), the rest 429 until refill.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = Uuid::nil();
+        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
         let lim = rl(Some(2), None, RateLimitPer::App);
         // First two within the burst succeed.
         assert!(reg.check(&app, 0, lim.per, "app", &lim).is_ok());
@@ -468,7 +469,7 @@ mod tests {
         // rpm=60, rps=None → 1 rps internally. Burst=1, so the first
         // request succeeds and the second within the same second 429s.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = Uuid::nil();
+        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
         let lim = rl(None, Some(60), RateLimitPer::App);
         assert!(reg.check(&app, 0, lim.per, "app", &lim).is_ok());
         let err = reg
@@ -482,7 +483,7 @@ mod tests {
         // Two requests from different IPs with rps=1 each. Both within
         // their own burst → both succeed even though aggregate is 2.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = Uuid::nil();
+        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
         let lim = rl(Some(1), None, RateLimitPer::Ip);
         assert!(reg.check(&app, 0, lim.per, "1.1.1.1", &lim).is_ok());
         assert!(reg.check(&app, 0, lim.per, "2.2.2.2", &lim).is_ok());
@@ -500,7 +501,7 @@ mod tests {
         // Different `__Host-zeroship_app_session` values → independent buckets even
         // when the request comes from the same machine.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = Uuid::nil();
+        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
         let lim = rl(Some(1), None, RateLimitPer::Session);
         assert!(reg.check(&app, 0, lim.per, "session-aaa", &lim).is_ok());
         assert!(reg.check(&app, 0, lim.per, "session-bbb", &lim).is_ok());
@@ -517,7 +518,7 @@ mod tests {
         // same bucket. The router uses "app" verbatim regardless of
         // IP/session, so we feed "app" here too.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = Uuid::nil();
+        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
         let lim = rl(Some(1), None, RateLimitPer::App);
         assert!(reg.check(&app, 0, lim.per, "app", &lim).is_ok());
         // Even an "unrelated" caller (different IP, different session)
@@ -533,7 +534,7 @@ mod tests {
     fn per_rule_no_limit_passes_through() {
         // rate_limit with both fields None → no enforcement, ever.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = Uuid::nil();
+        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
         let lim = rl(None, None, RateLimitPer::Ip);
         for _ in 0..1000 {
             assert!(reg.check(&app, 0, lim.per, "1.1.1.1", &lim).is_ok());
@@ -550,7 +551,7 @@ mod tests {
     fn degraded_tiny_burst_still_admits_some_requests() {
         // rate=1, burst=1 → capacity 1 logical token, far below DEGRADE_FACTOR.
         let reg = RateLimitRegistry::new(1, 1);
-        let app = Uuid::nil();
+        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
         reg.set_degraded(&app, true);
         assert!(
             reg.is_degraded(&app),
@@ -591,7 +592,7 @@ mod tests {
         // Same shape (rps=1, App), same app, different rule_idx →
         // independent buckets. A rule-0 burst doesn't drain rule-1.
         let reg = PerRuleRateLimitRegistry::new();
-        let app = Uuid::nil();
+        let app = zeroship_core::app_id::canonical_app_id_for(&Uuid::nil());
         let lim = rl(Some(1), None, RateLimitPer::App);
         assert!(reg.check(&app, 0, lim.per, "app", &lim).is_ok());
         // Rule 1's bucket is fresh.

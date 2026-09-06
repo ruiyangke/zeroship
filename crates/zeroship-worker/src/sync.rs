@@ -880,7 +880,13 @@ mod tests {
         )
         .expect("dispatch frame");
         test::TestRequest::post()
-            .uri(&format!("/dispatch/{app_id}"))
+            // The route takes the app id in its printed, typed form; this test
+            // holds the uuid the version feed serves, so it renders it the way
+            // the gateway does rather than spelling the uuid into the URL.
+            .uri(&format!(
+                "/dispatch/{}",
+                zeroship_core::app_id::canonical_app_id_for(app_id).as_str()
+            ))
             .set_payload(frame)
             .to_request()
     }

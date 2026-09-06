@@ -121,7 +121,10 @@ pub(crate) fn resolve_route(req: &HttpRequest, state: &GateState) -> Result<Rout
 
     let sector_identifier = route.entry.sector_identifier.clone();
 
-    Ok(RouteCtx { app_name, app_id, host, client_id, sector_identifier })
+    // `RouteCtx::app_id` is the DATABASE key for the gateway-session and
+    // anchor rows, whose `app_id` columns are UUID and bound natively, so the
+    // typed id the route table now carries is unwrapped once, here.
+    Ok(RouteCtx { app_name, app_id: app_id.uuid(), host, client_id, sector_identifier })
 }
 
 /// Derive the per-app pairwise subject (`pws_…`) the identity projection

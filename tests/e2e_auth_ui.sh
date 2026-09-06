@@ -216,9 +216,9 @@ run_psql -d "$TEST_DB" -v ON_ERROR_STOP=1 \
       VALUES ('${ZS_FIXTURE_PROJECT_ID}', '${ZS_FIXTURE_ORGANIZATION_ID}', \
               'default', 'Default') \
       ON CONFLICT (id) DO NOTHING;" \
-  -c "INSERT INTO zeroship.apps (id, name, api_key, project_id) \
+  -c "INSERT INTO zeroship.apps (id, name, project_id) \
       VALUES ('${CONSENT_APP_ID}', 'auth UI consent fixture', \
-              'auth-ui-consent-key', '${ZS_FIXTURE_PROJECT_ID}');" \
+              '${ZS_FIXTURE_PROJECT_ID}');" \
   -c "INSERT INTO zeroship.oauth_clients \
         (client_id, client_name, redirect_uris, scopes, skip_consent) \
       VALUES ('${CONSENT_CLIENT_ID}', 'Auth UI consent fixture', \

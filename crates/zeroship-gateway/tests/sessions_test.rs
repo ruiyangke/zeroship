@@ -185,12 +185,11 @@ async fn insert_app(client: &compio_postgres::Client, app_id: Uuid) {
         .expect("insert free plan");
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, api_key) \
-             VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.apps (id, name) \
+             VALUES ($1, $2)",
             &[
                 &app_id,
-                &format!("gateway-session-app-{}", app_id.simple()),
-                &format!("api-{app_id}"),
+                &format!("gateway-session-app-{}", app_id.simple())
             ],
         )
         .await

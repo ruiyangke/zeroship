@@ -14,13 +14,18 @@
 # columns, so a reader arriving later found what looked like an authentication
 # mechanism and was wrong twice over.
 #
-# WHAT THIS ARM DOES NOT RULE ON, and it matters here more than usual.
-# `zeroship.apps.api_key` IS STILL IN THE CORPUS. Only the hash beside it is
-# gone. This gate refuses the PAIR, and a plaintext column with no hash sibling
-# is invisible to it - so a green here is not a statement that the platform
-# stores no plaintext secrets. Removing `apps.api_key` needs `AppRecord::api_key`
-# to go first, which has production readers; until then, read this gate as
-# "no column is decorated with a hash that contradicts it", nothing wider.
+# WHAT THIS ARM DOES NOT RULE ON. This gate refuses the PAIR. A plaintext
+# column with NO hash sibling is invisible to it, so a green here is not a
+# statement that the platform stores no plaintext secrets - read it as "no
+# column is decorated with a hash that contradicts it", nothing wider.
+#
+# The example that made that caveat concrete is gone: `apps.api_key` outlived
+# its hash by one migration and is now dropped too, along with the struct field,
+# the mint and every fixture that supplied it. The reasoning for having no
+# app-level key at all - and for what shape a future one would have to take - is
+# in `db/migrations-ts/20260905000200_drop_app_api_key.ts`. The caveat above is
+# unchanged by that: it was always about the detector's shape, never about which
+# column happened to illustrate it.
 #
 # HOW IT DECIDES. The corpus is the authority, applied in file order: columns
 # enter through a `create` block or `.column(x).add(...)`, and leave through

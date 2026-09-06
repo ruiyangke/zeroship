@@ -209,10 +209,9 @@ jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{con
 # Postgres, and the comment says how.
 # ---------------------------------------------------------------------------
 probe() {
-  local base="$1" hdr="${2:-}" rpc="$1/__zeroship/v1"
-  local h=(); [ -n "$hdr" ] && h=(-H "$hdr")
+  local base="$1" rpc="$1/__zeroship/v1"
   call() {
-    curl -sS -m 30 -X POST -H 'content-type: application/json' "${h[@]}" \
+    curl -sS -m 30 -X POST -H 'content-type: application/json' \
       "$rpc/$1" -d "{\"json\":${2:-{\}}}" 2>&1
   }
   row() { printf '%-10s %s\n' "$1" "$(call "$2" "${3:-}")" >> "$RAWFILE"; }
@@ -505,10 +504,9 @@ probe() {
 # Its own user, so `cxTotal` stays an exact count.
 # ---------------------------------------------------------------------------
 scope_probe() {
-  local base="$1" hdr="${2:-}" rpc="$1/__zeroship/v1"
-  local h=(); [ -n "$hdr" ] && h=(-H "$hdr")
+  local base="$1" rpc="$1/__zeroship/v1"
   call() {
-    curl -sS -m 30 -X POST -H 'content-type: application/json' "${h[@]}" \
+    curl -sS -m 30 -X POST -H 'content-type: application/json' \
       "$rpc/$1" -d "{\"json\":${2:-{\}}}" 2>&1
   }
   row() { printf '%-10s %s\n' "$1" "$(call "$2" "${3:-}")" >> "$RAWFILE"; }
@@ -546,14 +544,12 @@ scope_probe() {
 # One run of a race is worthless -- races are probabilistic. Each call fires
 # RACE_N pairs and prints a tally, so a rare interleaving is visible as a count
 # rather than as a coin toss.
-race() { # <base> <outfile> [header]
-  RACE_BASE="$1" RACE_HDR="${3:-}" RACE_N="${RACE_N:-16}" \
+race() { # <base> <outfile>
+  RACE_BASE="$1" RACE_N="${RACE_N:-16}" \
     node --input-type=module - > "$2" 2>&1 <<'NODE'
 const base = process.env.RACE_BASE;
 const N = Number(process.env.RACE_N), holdMs = 400;
 const headers = { "content-type": "application/json" };
-const hdr = process.env.RACE_HDR;
-if (hdr) { const i = hdr.indexOf(":"); headers[hdr.slice(0, i)] = hdr.slice(i + 1).trim(); }
 const call = async (proc, json) => {
   const r = await fetch(`${base}/__zeroship/v1/${proc}`, {
     method: "POST", headers, body: JSON.stringify({ json }) });
@@ -870,8 +866,7 @@ curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/readyz" >/dev/null 2>&1 \
 OUT=$("$BIN/dev-provision" --db "$DBURL" --blob-store "$WORK/bundles" \
   --name "$APP_NAME" --zship "$ZSHIP" --defer-deploy 2>&1)
 APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
-API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
-[ -n "$API_KEY" ] || { fail "provision: $OUT"; exit 1; }
+[ -n "$APP_ID" ] || { fail "provision: $OUT"; exit 1; }
 
 # --- apply the creator's recorded migration IR through zeroship-migrate-server ---
 # Same mechanism as tests/e2e_db_app_end_to_end.sh: the .zship carries the
@@ -934,19 +929,19 @@ LIVE=$(psql_exec -tAc "select coalesce(deploy_hash,'') from zeroship.apps where 
 sleep 6   # gateway route-sync poll
 
 RAWFILE="$WORK/deployed.raw"; : > "$RAWFILE"
-probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY"
+probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME"
 grep -q '^seedA .*"id":"user_' "$WORK/deployed.raw" && pass "deployed app answered the probe" \
   || { fail "deployed app never answered"; head -4 "$WORK/deployed.raw"; tail -20 "$WORK/worker.log"; }
 
 # --- 3b. deployed: the cross-REQUEST race -----------------------------------
-race "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "$WORK/deployed.race" "X-Api-Key: $API_KEY"
+race "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "$WORK/deployed.race"
 grep -q '^runs=[1-9]' "$WORK/deployed.race" \
   && pass "deployed ran the concurrent-writer race ($(head -1 "$WORK/deployed.race"))" \
   || { fail "deployed race produced no runs"; head -5 "$WORK/deployed.race" | sed 's/^/    /'; }
 
 # --- 3c. deployed: the transaction-scope probes (destructive; see scope_probe) ---
 RAWFILE="$WORK/deployed.raw"
-scope_probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY"
+scope_probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME"
 
 # Rendered AFTER the scope probes so their rows reach the section-5 diff.
 render "$WORK/deployed.raw" "$WORK/deployed.txt"

@@ -16,6 +16,15 @@ import { table } from "@zeroship/migrate";
 // is inert: no code hashes it, compares it, or refuses a request because of it.
 // Until it goes, treat an `X-Api-Key` header anywhere in this repository's
 // harnesses as decoration.
+//
+// SUPERSEDED. The paragraph above is kept because its claim is the instructive
+// part, not because it is still true. `apps.api_key` is dropped by
+// 20260905000200_drop_app_api_key.ts, and "production readers" turned out to
+// mean a `println!` in a dev-provisioning binary plus a struct field nothing
+// consumes - no branch, no comparison, no refusal, and no way to present such a
+// credential at all. Read the successor's header for the measurement and for
+// why the platform owns no app-level key. The `schema()` below is unchanged and
+// still drops only the hash: this file is already applied.
 export default {
   name: "drop_app_api_key_hash",
   schema() {

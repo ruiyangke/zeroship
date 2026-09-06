@@ -374,8 +374,8 @@ mod tests {
         let app_name = format!("schema-apply-{}", app_id.simple());
         client
             .execute(
-                "INSERT INTO zeroship.apps (id, name, plan_id, api_key) \
-                 VALUES ($1, $2, $3, 'test-api-key')",
+                "INSERT INTO zeroship.apps (id, name, plan_id) \
+                 VALUES ($1, $2, $3)",
                 &[&app_id, &app_name, &plan_id],
             )
             .await

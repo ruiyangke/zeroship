@@ -4,7 +4,7 @@ use compio_postgres::{Client, GenericClient, NoTls};
 use serde_json::Value;
 use std::collections::BTreeSet;
 use uuid::Uuid;
-use zeroship_core::{database_role::per_app_role_name, typed_id};
+use zeroship_core::{app_derivation, app_id::AppId, database_role::per_app_role_name, typed_id};
 
 use crate::engine::{
     cap_exceeded, child_dedup_key, child_signal_type, state_cap_error, RunUpdate, StepCheckpoint,
@@ -343,12 +343,18 @@ where
 
 fn reassert_table_revokes_sql(tables: &WorkflowTables) -> Result<String, WorkflowError> {
     let all_tables = tables.all().join(", ");
-    let app_id = tables.app_id.as_hyphenated().to_string();
-    let app_role = per_app_role_name(&app_id).map_err(|error| {
-        WorkflowError::Db(format!(
-            "workflow journal per-app role name refused: {error}"
-        ))
-    })?;
+    // TWO ROLES, TWO IDENTITIES, and the revoke has to name both because either
+    // could be the one that exists. The first is derived from the TENANT and so
+    // goes through the seam; the second is derived from the SCHEMA, which is
+    // what `zeroship_migrate_server::apply::runtime_role_provisioning_sql`
+    // composes from, and which the seam cannot express while a schema is a
+    // `&str` that may legally not be an app id at all.
+    let app_role =
+        app_derivation::role_name(&AppId::from_uuid(&tables.app_id)).map_err(|error| {
+            WorkflowError::Db(format!(
+                "workflow journal per-app role name refused: {error}"
+            ))
+        })?;
     let schema_role = per_app_role_name(&tables.app_schema).map_err(|error| {
         WorkflowError::Db(format!(
             "workflow journal per-app role name refused: {error}"

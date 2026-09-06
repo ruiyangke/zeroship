@@ -235,9 +235,9 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
     .await
     .unwrap();
     db.execute(
-        "INSERT INTO zeroship.apps (id, name, plan_id, api_key) \
-         VALUES ($1, $2, 'free', $3)",
-        &[&app_id, &format!("acctdel-app-{tag}"), &"key"],
+        "INSERT INTO zeroship.apps (id, name, plan_id) \
+         VALUES ($1, $2, 'free')",
+        &[&app_id, &format!("acctdel-app-{tag}")],
     )
     .await
     .unwrap();

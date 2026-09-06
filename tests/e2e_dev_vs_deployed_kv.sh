@@ -168,10 +168,9 @@ echo "  mutation: $MUTATE"
 #             contracts invisible to the diff, so section 4 must not read the
 #             scrubbed text.
 probe() {
-  local url="$1" hdr="${2:-}" rpc="$1/__zeroship/v1"
-  local h=(); [ -n "$hdr" ] && h=(-H "$hdr")
+  local url="$1" rpc="$1/__zeroship/v1"
   raw_call() {
-    curl -sS -m 20 -X POST -H 'content-type: application/json' "${h[@]}" \
+    curl -sS -m 20 -X POST -H 'content-type: application/json' \
       "$rpc/$1" -d "{\"json\":${2:-{\}}}" 2>&1
   }
   scrub() {
@@ -368,12 +367,12 @@ done
 pass "control + worker + gateway healthy"
 
 OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
-API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
-[ -n "$API_KEY" ] && pass "deployed $APP_NAME" || { fail "provision: $OUT"; exit 1; }
+APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
+[ -n "$APP_ID" ] && pass "deployed $APP_NAME" || { fail "provision: $OUT"; exit 1; }
 sleep 5   # gateway route-sync poll
 
 RAWFILE="$WORK/deployed.raw"; : > "$RAWFILE"
-probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WORK/deployed.txt" 2>&1
+probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" > "$WORK/deployed.txt" 2>&1
 grep -q '"visits":1' "$WORK/deployed.txt" && pass "deployed app answered the probe" \
   || { fail "deployed app never answered"; head -5 "$WORK/deployed.txt"; tail -5 "$WORK/worker.log"; }
 

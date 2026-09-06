@@ -49,12 +49,11 @@ async fn seed_app(client: &Client) -> Uuid {
         .expect("seed session visibility test plan");
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, plan_id) VALUES ($1, $2, $3)",
             &[
                 &app_id,
                 &format!("iss10-app-{}", app_id.simple()),
-                &plan_id,
-                &format!("k-{}", app_id.simple()),
+                &plan_id
             ],
         )
         .await

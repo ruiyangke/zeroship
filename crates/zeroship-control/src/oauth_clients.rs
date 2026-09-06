@@ -26,7 +26,7 @@ use std::collections::HashSet;
 
 use compio_postgres::Client;
 use zeroship_authz::Scope;
-use zeroship_core::auth::hash_api_key;
+use zeroship_core::auth::hash_client_secret;
 use zeroship_core::config::OauthClientRegistration;
 use zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID;
 use zeroship_core::typed_id::app_id_from_oauth_client_id;
@@ -93,7 +93,10 @@ async fn upsert(
 ) -> Result<(), String> {
     let scopes = validate(registration)?;
     let skip_consent = trusted.contains(&registration.client_id);
-    let client_secret_hash = registration.client_secret.as_deref().map(hash_api_key);
+    let client_secret_hash = registration
+        .client_secret
+        .as_deref()
+        .map(hash_client_secret);
     let redirect_uris: Vec<&str> = registration
         .redirect_uris
         .iter()
