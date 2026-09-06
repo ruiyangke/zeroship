@@ -522,8 +522,8 @@ async fn seed_app_and_deploy_on_plan(
     let name = format!("wf-{label}-{}", Uuid::new_v4().simple());
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, workflows_enabled) \
-             VALUES ($1, $2, $3, 'test-api-key', true)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled) \
+             VALUES ($1, $2, $3, true)",
             &[&app_id, &name, &plan_id],
         )
         .await

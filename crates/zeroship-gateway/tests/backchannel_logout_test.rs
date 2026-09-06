@@ -224,12 +224,11 @@ async fn insert_user(client: &Client, label: &str) -> Uuid {
 async fn seed_app(client: &Client, app_id: Uuid, name: &str) {
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) \
-             VALUES ($1, $2, 'free', $3)",
+            "INSERT INTO zeroship.apps (id, name, plan_id) \
+             VALUES ($1, $2, 'free')",
             &[
                 &app_id,
-                &name,
-                &format!("key-{}", Uuid::new_v4().simple()),
+                &name
             ],
         )
         .await

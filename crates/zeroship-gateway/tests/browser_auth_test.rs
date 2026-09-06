@@ -704,12 +704,11 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
         .expect("seed oauth client");
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3) \
+            "INSERT INTO zeroship.apps (id, name) VALUES ($1, $2) \
              ON CONFLICT (id) DO NOTHING",
             &[
                 &Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
-                &format!("browser-auth-{APP_NAME}"),
-                &"k",
+                &format!("browser-auth-{APP_NAME}")
             ],
         )
         .await

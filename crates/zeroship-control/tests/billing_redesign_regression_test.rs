@@ -72,9 +72,9 @@ async fn seed_creator_app(client: &compio_postgres::Client) -> (Uuid, Uuid) {
         .expect("seed plan");
     let app: Uuid = client
         .query(
-            "INSERT INTO zeroship.apps (name, plan_id, api_key) \
-             VALUES ($1, $2, $3, '') RETURNING id",
-            &[&format!("rd-{}", Uuid::new_v4()), &plan_id, &Uuid::new_v4().to_string()],
+            "INSERT INTO zeroship.apps (name, plan_id) \
+             VALUES ($1, $2) RETURNING id",
+            &[&format!("rd-{}", Uuid::new_v4()), &plan_id],
         )
         .await
         .expect("insert app")[0]

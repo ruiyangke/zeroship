@@ -1225,12 +1225,11 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
         .expect("seed oauth client");
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3) \
+            "INSERT INTO zeroship.apps (id, name) VALUES ($1, $2) \
              ON CONFLICT (id) DO NOTHING",
             &[
                 &Uuid::parse_str(APP_UUID).expect("app uuid"),
-                &format!("anchor-test-{APP_NAME}"),
-                &"k",
+                &format!("anchor-test-{APP_NAME}")
             ],
         )
         .await
@@ -2374,12 +2373,11 @@ async fn seed_app_and_client_for(
         .expect("seed oauth client");
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, api_key) VALUES ($1, $2, $3) \
+            "INSERT INTO zeroship.apps (id, name) VALUES ($1, $2) \
              ON CONFLICT (id) DO NOTHING",
             &[
                 &Uuid::parse_str(app_uuid).expect("app uuid"),
-                &format!("{app_name}-{}", user_id.simple()),
-                &"k",
+                &format!("{app_name}-{}", user_id.simple())
             ],
         )
         .await
