@@ -379,7 +379,7 @@ id                 ses_...
 person_id          -> users.id            ON DELETE CASCADE
 audience_kind      'platform' | 'project'
 project_id         -> projects.id NULL    ON DELETE CASCADE  (NULL iff platform)
-grant_id           -> grants.id  NULL     ON DELETE CASCADE  (NULL iff platform)
+grant_id           -> grants.id  NOT NULL ON DELETE CASCADE
 parent_session_id  -> sessions.id NULL    ON DELETE CASCADE
 kind               'browser' | 'cli' | 'device_pending'
 epoch              bigint, per-session
@@ -398,6 +398,19 @@ created_at, idle_expires_at, absolute_expires_at, revoked_at
 - see AUDIENCE above. Nothing in `db/migrations-ts/` supplies it today, so the
 foreign key is an obligation of step 9 rather than a reference to something that
 already exists.
+
+**`grant_id` is NOT NULL, and stating why is the point of this paragraph.** Every
+audience has a grant row, Platform included: the grant is one row per (person,
+audience), and Platform IS an audience under the closed sum above. So the platform
+session hangs off a platform grant exactly as the project session hangs off a
+project grant. An earlier draft of this sketch made the column nullable and
+annotated it "NULL iff platform". Nothing justified that special case, and it cost
+the design the property every other row buys - the suspension predicate rides the
+statement that already resolves the grant, so a NULL there left that predicate
+vacuous for precisely the audience that governs deploying. Removing the NULL
+**removes a nullable column and a special case; it adds no mechanism**, and that is
+the whole argument for it. A later reader who reintroduces the NULL for the
+platform case will be reintroducing that hole, not repairing an oversight.
 
 One table replaces `idp_sessions`, `gateway_sessions`, `app_session_anchors`,
 `oauth_refresh_tokens`, `device_grants` and `token_revocations`.
@@ -617,8 +630,12 @@ BROWSER (app origin)          GATEWAY (app origin)            AUTH (auth origin)
                                                                          + expiry)
                                                                     [4] if none: password /
                                                                         magic / federation
-                                                                        / TOTP, creating the
-                                                                        PLATFORM session
+                                                                        / TOTP, then resolve
+                                                                        or create the grant
+                                                                        for (person, Platform)
+                                                                        and INSERT the PLATFORM
+                                                                        session with
+                                                                          grant_id = that grant
                                                                     [5] grant for (person,
                                                                         Project(p))?
                                                                         no  -> consent
@@ -769,6 +786,7 @@ CLI                        CONTROL                   AUTH                    BRO
                                        eligibility check
                                        APPROVE: kind='cli', person, amr,
                                          auth_time, credential_epoch,
+                                         grant_id = the (person, Platform) grant
                                          parent = the approving session
 
  [4] POST auth /device/token   (poll, honours slow_down)
@@ -830,7 +848,7 @@ feed entries in **one transaction**:
 pub enum Selector {
     Session(SessionId),
     Tree(SessionId),                                  // and every descendant
-    PersonInProject { person: PersonId, project: ProjectId },
+    PersonInAudience { person: PersonId, audience: Audience },
     PersonEverywhere(PersonId),
     Project(ProjectId),
 }
@@ -843,8 +861,12 @@ session row without its feed entry.
 
 `PersonEverywhere` makes global teardown a first-class verb. That is correct for
 deletion and anonymisation, which are person-scoped by nature. **A suspension
-calls `PersonInProject`**, settled as decision D-E: the status is audience-scoped,
-so the teardown that accompanies it is audience-scoped as well. Do not reach for
+calls `PersonInAudience` with the audience it names** - `Project(pid)` for the
+end-user act, `Platform` for the deploy-authority act - settled as decision D-E:
+the status is audience-scoped, so the teardown that accompanies it is
+audience-scoped as well. `Platform` is an ordinary value of that field, not a case
+the selector has to be widened for, because a platform session hangs off a
+platform grant like any other. Do not reach for
 `PersonEverywhere` here - that selector is for the account lifecycle, and using it
 for a suspension re-creates the global answer D-E rejected.
 
@@ -864,8 +886,8 @@ Columns: **A** platform session secret. **B** project session secret.
 | Narrow scopes without revoking | intact | intact | `<= W` (epoch bump) | untouched | intact | n/a | n/a |
 | Password change or reset | IMMEDIATE (epoch) | IMMEDIATE (epoch) | `<= W` | reset and magic purged | intact | n/a | n/a |
 | TOTP enrol or remove | intact | intact | intact | untouched | intact | n/a | n/a (G1) |
-| Suspend a person in a project (D-E) | intact | IMMEDIATE (that project) | `<= W` | project-scoped purge | suppressed | n/a | n/a |
-| Suspend a person's platform audience | IMMEDIATE | intact | `<= W` | purpose-scoped purge | intact | n/a | n/a |
+| Suspend a person in a project - `PersonInAudience{Project(pid)}` (D-E) | intact | IMMEDIATE (that project) | `<= W` | project-scoped purge | suppressed | n/a | n/a |
+| Suspend a person's platform audience - `PersonInAudience{Platform}` | IMMEDIATE | intact | `<= W` | purpose-scoped purge | intact | n/a | n/a |
 | Deletion requested | IMMEDIATE | IMMEDIATE | `<= W` | all purged | GONE (grants cascade) | n/a | n/a |
 | Reaper anonymise or hard delete | IMMEDIATE | IMMEDIATE | `<= W` | GONE (FK) | GONE (FK) | n/a | n/a |
 | CLI logout | IMMEDIATE | intact (separate tree) | `<= W` | untouched | intact | n/a | n/a |
@@ -886,7 +908,10 @@ column B for THAT project and leaves column A alone, which is the whole content 
 D-E: a report against a person acting as an end user in someone else's project
 must not stop that person deploying their own apps. Stopping deployment is the
 separate act on the platform audience, which is why it has its own row rather than
-being folded in. **The deletion and anonymise rows stay person-scoped** - an
+being folded in. **That row names the same call with a different audience value**,
+so it has a writer rather than describing an effect nothing in this section
+produces - which is what it did while the selector could not name `Platform`.
+**The deletion and anonymise rows stay person-scoped** - an
 account is deleted as an account, and D-D confirms that; the audience scoping does
 not spread to them.
 
@@ -1077,7 +1102,10 @@ those.**
 window. This is `crates/zeroship-auth/src/store/sessions.rs` generalised to every
 audience. A suspension is NOT an epoch bump: under D-E it is `subject_status` on
 the grant row, and the same validating UPDATE that resolves the grant reads its
-status. Different column, same statement, no second enforcement path.
+status. Different column, same statement, no second enforcement path. This holds
+for the platform audience as well as a project one, and only because `grant_id` is
+NOT NULL: a platform session resolves a platform grant, so the predicate is a
+predicate there too rather than a comparison against a missing row.
 
 *Scope, stated here so the fence is not read as uniform:* password change and
 deletion are person-scoped by nature and are covered unconditionally. Suspension
@@ -1087,16 +1115,23 @@ alive.
 
 *Red:* an arm per lifecycle transition that bumps the epoch and asserts a refresh
 on an older session is refused, plus a paired arm that suspends one audience and
-asserts the OTHER audience's session still refreshes. Mutation: delete the epoch
+asserts the OTHER audience's session still refreshes. That pair runs in each
+direction - suspend `Project(pid)` and the platform session must still refresh;
+suspend `Platform` and the project session must still refresh while deploying is
+refused. Running only the project direction leaves the deploy-authority act
+unbound, which is the state this fence was in while `grant_id` was nullable.
+Mutation: delete the epoch
 equality predicate and the first arm must fail; delete the grant-status predicate
-and the suspended half of the pair must fail.
+and the suspended half of each pair must fail.
 
 **F11. Every status variant has a production writer.**
 
 *Mechanism:* a control-plane suspend and reinstate endpoint taking a (person,
 audience) pair - the signature D-E settles - which stamps `grants.subject_status`
-and revokes that audience's sessions in one statement; plus the account-lifecycle
-writer for `users.account_status`.
+and revokes that audience's sessions in one statement, calling `PersonInAudience`
+with the audience it was handed; plus the account-lifecycle writer for
+`users.account_status`. `Platform` is an ordinary value of that argument, so the
+platform-audience suspend row is written by this endpoint and not by a second one.
 
 *Red:* a gate arm ruling on the variant set of each status enum - floor declared
 beside the enum it rules on - requiring at least one non-test writer per variant.
@@ -1527,7 +1562,10 @@ paired one.
 *Red test:* F11's variant-writer arm, red today; plus F10's pair - suspend a
 person in one project, assert that project's session is refused and the platform
 session still refreshes. Writing only the refused half would pass under a global
-suspension too, so the allowed half is what binds the scope.
+suspension too, so the allowed half is what binds the scope. Then the mirror:
+suspend the platform audience, assert the platform session is refused and the
+project session still refreshes. That direction is what proves the deploy-authority
+act has a writer, and it is unwritable unless `grant_id` is NOT NULL.
 
 **Step 9. Audience becomes the project.** Task #72. The unit is settled by D-B,
 so this step carries no decision blocker; it carries ENTITY blockers instead,
@@ -1763,10 +1801,19 @@ data under the creator's rules, written like any other app data. The platform
 holds nothing for it - which is why nothing finer than a project needs to exist.
 
 *Where this lands, so the decision is not made only in one place:*
-`grants.subject_status` in 3.2 and the grant sketch, the feed's per-audience
+`grants.subject_status` in 3.2 and the grant sketch, the NOT NULL `sessions.grant_id`
+that makes the status a live predicate for the platform audience as well, the
+feed's per-audience
 suspension entry in 3.5, the gateway verify list and the refresh statement in 4.1,
-the `PersonInProject` selector and the suspend rows in 5, F10 and F11 in 6, and
+the `PersonInAudience` selector and the suspend rows in 5, F10 and F11 in 6, and
 step 8 in 8. Each of those names D-E.
+
+*What the audience scope forced, recorded because it reads as an addition and is
+not one:* naming `Platform` as a suspendable audience deleted a nullable column and
+a special case rather than introducing a mechanism. The selector stopped being able
+to name only a project, and the session row stopped exempting the platform case
+from the foreign key every other session carries. See the `grant_id` paragraph in
+3.2 for why the exemption was the defect.
 
 ### 10.2 The numbered items, settled ones marked in place
 
