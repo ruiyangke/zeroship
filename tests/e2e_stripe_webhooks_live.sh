@@ -342,8 +342,8 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CREATOR', 'whlive-$CREATOR@zeroship.test'::citext, 'WH-Live Creator', NOW());
 $(organization_fixture_sql "whlive-$CREATOR" "whlive-$CREATOR@zeroship.test")
-INSERT INTO zeroship.apps (id, name, plan_id, api_key, project_id)
-VALUES ('$CLOSED_APP', 'whlive-app-$CLOSED_APP', 'pln_whlive', '$CLOSED_APP', '$ZS_FIXTURE_PROJECT_ID');
+INSERT INTO zeroship.apps (id, name, plan_id, project_id)
+VALUES ('$CLOSED_APP', 'whlive-app-$CLOSED_APP', 'pln_whlive', '$ZS_FIXTURE_PROJECT_ID');
 $(seat_app_owner_sql "$CLOSED_APP" "$CREATOR")
 INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CREATOR') ON CONFLICT DO NOTHING;
 INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)

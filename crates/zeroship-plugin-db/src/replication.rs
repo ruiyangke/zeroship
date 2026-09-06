@@ -902,4 +902,39 @@ mod tests {
         let wildcard = worker_slot_name_prefix("%").unwrap();
         assert!(!wildcard.contains('%'));
     }
+
+    /// The seam's replication names are this module's, byte for byte.
+    ///
+    /// `zeroship_core::app_derivation` composes the publication and the slot
+    /// over a typed `AppId`; these functions compose them over a `&str` and
+    /// keep doing so because their callers - the WAL consumer, the watchdog,
+    /// the reaper - carry an app id as a string. The two spellings must not
+    /// drift: a slot the seam names and a slot this module creates are the same
+    /// `PostgreSQL` object or the worker consumes from a slot nobody advances.
+    ///
+    /// THE COMPARISON LIVES HERE AND NOT IN THE SEAM because `zeroship-core` is
+    /// below this crate and cannot name it. The seam's own arm pins the same
+    /// values as frozen literals; this one proves those literals describe the
+    /// live composer rather than a copy of it.
+    #[test]
+    fn the_derivation_seam_composes_the_same_replication_names() {
+        let raw = uuid::Uuid::parse_str("0191e7a2-b3c4-4d5e-8f90-123456789abc")
+            .expect("fixture uuid parses");
+        let app = zeroship_core::app_id::AppId::from_uuid(&raw);
+        let as_str = raw.to_string();
+
+        assert_eq!(
+            zeroship_core::app_derivation::publication_name(&app),
+            publication_name(&as_str).expect("publication name composes")
+        );
+        assert_eq!(
+            zeroship_core::app_derivation::worker_slot_name(&app, "worker-a")
+                .expect("seam slot name composes"),
+            worker_slot_name(&as_str, "worker-a").expect("slot name composes")
+        );
+        assert_eq!(
+            zeroship_core::app_derivation::worker_slot_name_prefix(&app),
+            worker_slot_name_prefix(&as_str).expect("slot prefix composes")
+        );
+    }
 }

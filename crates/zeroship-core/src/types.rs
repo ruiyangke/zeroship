@@ -5,6 +5,11 @@ use uuid::Uuid;
 use zeroship_bundle::Manifest;
 
 /// A registered application record.
+///
+/// It carries NO app-level API key, and there is no field withheld from its
+/// serialized form - the record a caller receives is the whole record, which is
+/// why it round-trips through `serde_json`. The reasoning for having no such key
+/// at all is in `db/migrations-ts/20260905000200_drop_app_api_key.ts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppRecord {
     pub id: Uuid,
@@ -12,8 +17,6 @@ pub struct AppRecord {
     pub plan_id: String,
     pub deploy_hash: Option<String>,
     pub archived_at: Option<String>,
-    #[serde(skip_serializing)]
-    pub api_key: String,
     pub created_at: String,
     pub updated_at: String,
 }

@@ -260,8 +260,8 @@ seed_creator() {
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$creator', 'demo-$label-$creator@zeroship.test'::citext, 'Demo $label creator', NOW());
 $(organization_fixture_sql "demo-$label-$creator" "demo-$label-$creator@zeroship.test")
-INSERT INTO zeroship.apps (id, name, plan_id, api_key, project_id)
-VALUES ('$app', 'demo-$label-app', '$plan_id', '$app', '$ZS_FIXTURE_PROJECT_ID');
+INSERT INTO zeroship.apps (id, name, plan_id, project_id)
+VALUES ('$app', 'demo-$label-app', '$plan_id', '$ZS_FIXTURE_PROJECT_ID');
 $(seat_app_owner_sql "$app" "$creator")
 INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$creator') ON CONFLICT DO NOTHING;
 INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)

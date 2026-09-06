@@ -228,12 +228,11 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     let plan_id = seed_test_plan(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, plan_id) VALUES ($1, $2, $3)",
             &[
                 &gw_app_id,
                 &format!("reset-revoke-app-{}", gw_app_id.simple()),
-                &plan_id,
-                &"k",
+                &plan_id
             ],
         )
         .await
@@ -732,8 +731,8 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
     let plan_id = seed_test_plan(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) VALUES ($1, $2, $3, $4)",
-            &[&app_id, &format!("anchor-app-{}", app_id.simple()), &plan_id, &"k"],
+            "INSERT INTO zeroship.apps (id, name, plan_id) VALUES ($1, $2, $3)",
+            &[&app_id, &format!("anchor-app-{}", app_id.simple()), &plan_id],
         )
         .await
         .expect("insert app");
@@ -1009,8 +1008,8 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
     let plan_id = seed_test_plan(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key) VALUES ($1, $2, $3, $4)",
-            &[&app_id, &format!("refresh-app-{}", app_id.simple()), &plan_id, &"k"],
+            "INSERT INTO zeroship.apps (id, name, plan_id) VALUES ($1, $2, $3)",
+            &[&app_id, &format!("refresh-app-{}", app_id.simple()), &plan_id],
         )
         .await
         .expect("insert app");

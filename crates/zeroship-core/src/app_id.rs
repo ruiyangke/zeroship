@@ -44,6 +44,22 @@
 //! - **No `From<&str>`, no `From<String>`, no `new_unchecked`, no public
 //!   field.** Construction is [`AppId::mint`] or the fallible [`AppId::parse`].
 //!   There is no third way in.
+//!
+//!   **THERE IS NOW EXACTLY ONE THIRD WAY IN, AND IT IS DATED.**
+//!   [`AppId::from_uuid`] wraps the `Uuid` the `zeroship.apps.id` column still
+//!   holds, producing a NON-CANONICAL id whose printed form is the hyphenated
+//!   uuid. It exists so [`crate::app_derivation`] can become the one producer
+//!   of every derived identifier while the column is unchanged, and it is
+//!   deleted in the slice that flips the column. The sentence above is kept
+//!   rather than rewritten because it states the end state this type is
+//!   travelling back to, not a description of the constructor list today.
+//!
+//!   [`canonical_app_id_for`] is NOT a fourth way in, and the distinction is
+//!   the whole reason it is a free function rather than an associated one. It
+//!   composes [`crate::typed_id::uuid_to_base62`] with [`AppId::parse`], so
+//!   every id it yields is one `parse` already admits; it can construct
+//!   nothing this type could not already hold, and it cannot be handed a
+//!   string at all. Its docs carry the argument in full.
 //! - **No `PartialEq<str>`.** Comparing against a raw string is a decision, not
 //!   a convenience.
 //!
@@ -122,6 +138,38 @@ impl AppId {
         }
     }
 
+    /// Wrap the `Uuid` an app id is STORED as today, so that a call site
+    /// holding one can reach [`crate::app_derivation`] without any other type
+    /// in the tree changing.
+    ///
+    /// TRANSITIONAL. This is the third way in that the module docs above say
+    /// does not exist, and that contradiction is deliberate and temporary. It
+    /// exists so the derivation seam can be introduced while `zeroship.apps.id`
+    /// is still `uuid`; it is scheduled for deletion in the slice that flips
+    /// that column, and every caller of it disappears with it.
+    ///
+    /// **The text it produces is NOT canonical, and that is the point.** A
+    /// minted id prints `app_<base62>`; this one prints the hyphenated uuid,
+    /// which is what every derived identifier in the tree is composed from
+    /// today. Passing the result to a derivation therefore returns today's
+    /// bytes, which is what makes the seam behaviour-neutral rather than a
+    /// silent re-keying of every schema, role, publication and slot.
+    ///
+    /// Two consequences follow from that, and neither is a defect:
+    ///
+    /// - `AppId::parse(AppId::from_uuid(u).as_str())` FAILS. A transitional id
+    ///   is a derivation input, not a value to round-trip.
+    /// - `from_uuid(u)` and a `mint`ed id carrying the same uuid are NOT equal,
+    ///   do not hash alike and do not order alike, because equality is derived
+    ///   over the printed text. Do not mix the two in one map.
+    #[must_use]
+    pub fn from_uuid(uuid: &uuid::Uuid) -> Self {
+        Self {
+            text: uuid.to_string(),
+            uuid: *uuid,
+        }
+    }
+
     /// Parse a canonical app id.
     ///
     /// Delegates to [`crate::typed_id::parse_with_prefix`], so it refuses
@@ -161,6 +209,50 @@ impl AppId {
     pub const fn uuid(&self) -> uuid::Uuid {
         self.uuid
     }
+}
+
+/// The CANONICAL [`AppId`] of an app the database still stores as a `Uuid`.
+///
+/// TRANSITIONAL, and the exact pair of [`AppId::from_uuid`]. Both take the
+/// `Uuid` in `zeroship.apps.id` and both are deleted when that column flips;
+/// they differ in which of the two renderings they produce, and choosing
+/// between them is choosing which side of the migration the caller is on:
+///
+/// - [`AppId::from_uuid`] produces TODAY's bytes, the hyphenated uuid. Feed it
+///   to [`crate::app_derivation`] and every derived identifier - schema, role,
+///   publication, salt, meter key - comes back exactly as it is spelled in the
+///   live database. That is what makes the derivation seam behaviour-neutral.
+/// - This produces TOMORROW's bytes, `app_<base62>`, the id the column will
+///   hold. It is for the places that carry an app id as an IDENTITY rather than
+///   as a derivation input: the gateway-to-worker request path, where the two
+///   processes only have to agree with each other.
+///
+/// Mixing them is a bug the type system cannot catch, because both are an
+/// `AppId`. It is a LOUD bug and that is deliberate: equality is over the
+/// printed text, so a map keyed by one and probed with the other MISSES rather
+/// than silently returning a neighbour's route.
+///
+/// # This is not a fourth way into the type
+///
+/// The module docs say construction is a mint or a fallible parse and that
+/// there is no other way in. This does not add one. It takes a `Uuid`, not a
+/// string, and it funnels through [`AppId::parse`], so the set of values it can
+/// produce is a subset of what `parse` already admits - `uuid_to_base62` is a
+/// bijection onto exactly twenty-two base62 characters, so the composed id is
+/// always well-formed and always round-trips: `canonical_app_id_for(u).uuid()
+/// == u`. A free function rather than an associated one so it is not part of
+/// the type's constructor surface and so it disappears without touching it.
+///
+/// # Panics
+///
+/// Never, for any `Uuid`. The `expect` is unreachable by construction and is
+/// bound by `tests::the_canonical_conversion_round_trips_the_extreme_uuids`,
+/// which drives the two ends of the hundred-and-twenty-eight-bit range and a
+/// sweep of random ones.
+#[must_use]
+pub fn canonical_app_id_for(stored: &uuid::Uuid) -> AppId {
+    let printed = format!("{APP_PREFIX}_{}", typed_id::uuid_to_base62(stored));
+    AppId::parse(&printed).expect("uuid_to_base62 yields twenty-two base62 characters")
 }
 
 impl Serialize for AppId {
@@ -506,6 +598,62 @@ mod tests {
         assert!(
             serde_json::from_str::<BTreeMap<AppId, u8>>(uuid_keyed).is_err(),
             "a uuid-shaped key must be a decode failure, not a dropped entry"
+        );
+    }
+
+    /// The canonical conversion is total and lossless over the whole
+    /// hundred-and-twenty-eight-bit space, which is what lets its `expect` be
+    /// unreachable and what lets the worker hand the uuid back to the control
+    /// plane after the gateway sent it the printed form.
+    ///
+    /// The two ends of the range are here on purpose: `nil` is the value that
+    /// would expose a missing zero-pad (base62 of zero is one character, not
+    /// twenty-two) and `max` the one that would expose an overflow in the
+    /// divide loop. Either would be a `Malformed` panic, not a wrong answer.
+    #[test]
+    fn the_canonical_conversion_round_trips_the_extreme_uuids() {
+        let mut cases = vec![uuid::Uuid::nil(), uuid::Uuid::max()];
+        cases.extend((0..64).map(|_| uuid::Uuid::new_v4()));
+        cases.push(typed_id::new_v7());
+
+        for raw in cases {
+            let id = canonical_app_id_for(&raw);
+            assert_eq!(id.uuid(), raw, "the embedded bits must survive");
+            assert!(id.as_str().starts_with("app_"), "{}", id.as_str());
+            assert_eq!(id.as_str().len(), "app_".len() + 22);
+            assert_eq!(
+                AppId::parse(id.as_str()).expect("a canonical id parses"),
+                id,
+                "the canonical rendering must be one parse already admits"
+            );
+        }
+    }
+
+    /// The two transitional conversions produce DIFFERENT ids from the same
+    /// uuid, and nothing may quietly paper over that.
+    ///
+    /// This is the property the gateway's route map depends on: it is keyed on
+    /// the canonical rendering, so probing it with the uuid rendering has to
+    /// miss. If these two ever compared equal, a producer and a consumer that
+    /// disagreed about the rendering would silently agree instead, which is the
+    /// failure mode the whole typed id exists to remove.
+    #[test]
+    fn the_two_transitional_renderings_of_one_uuid_are_not_the_same_id() {
+        let raw = uuid::Uuid::new_v4();
+        let derivation_input = AppId::from_uuid(&raw);
+        let wire_identity = canonical_app_id_for(&raw);
+
+        assert_eq!(derivation_input.uuid(), wire_identity.uuid());
+        assert_ne!(derivation_input, wire_identity);
+        assert_ne!(derivation_input.as_str(), wire_identity.as_str());
+
+        let mut map = BTreeMap::new();
+        map.insert(wire_identity.clone(), 7u8);
+        assert_eq!(map.get(&wire_identity), Some(&7));
+        assert_eq!(
+            map.get(&derivation_input),
+            None,
+            "a rendering disagreement must be a miss, not a hit on a neighbour"
         );
     }
 

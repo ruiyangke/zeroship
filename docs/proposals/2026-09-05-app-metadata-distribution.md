@@ -147,6 +147,17 @@ code is quoted.
 
 ## `RouteEntry`: what the fields are for, and which the request path reads
 
+**STALE IN ONE FIELD, AND EVERY LATER MENTION OF IT INHERITS THAT.**
+`api_key_hash` is no longer on `RouteEntry`, `check_api_key` no longer exists,
+and neither does the plaintext `zeroship.apps.api_key` this document's cost
+argument assumed a cold app would have to check. The whole app-level key is
+deleted; `db/migrations-ts/20260905000200_drop_app_api_key.ts` records why the
+platform owns no such credential. Read every `api_key_hash` measurement below -
+the field inventory, the payload table, the cold-app `X-Api-Key` cost, and arm
+A7 - as a record of what was true when it was taken, not as a description of the
+struct. The arms that DERIVE the field set from the struct rather than from
+prose still measure the real thing; the prose does not.
+
 MEASURED. `RouteEntry` is declared in `crates/zeroship-core/src/types.rs` with
 the fields `name`, `plan_id`, `api_key_hash`, `deploy_hash`, `manifest`,
 `oauth_client_id`, `sector_identifier`, `spend_state`, `account_state`. The
@@ -1211,7 +1222,7 @@ MEASURED, each from the definition named:
   design decision.
 - **A digest is hex in every store and on every wire we have.** `ingest` computes
   `deploy_hash = sha256_hex(&canonical_omit)`
-  (`crates/zeroship-bundle/src/unpack.rs`) and `hash_api_key`
+  (`crates/zeroship-bundle/src/unpack.rs`) and `hash_client_secret`
   (`crates/zeroship-core/src/auth/mod.rs`) is `hex::encode(hasher.finalize())`.
   Both columns are `t.text()`. Packing them raw rather than as hex is where the
   largest single share of the JSON encoding's cost goes.

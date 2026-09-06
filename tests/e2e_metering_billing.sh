@@ -846,8 +846,8 @@ if psql_exec >/dev/null <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CLOSED_CREATOR', 'e2e-closed-$CLOSED_CREATOR@zeroship.test'::citext, 'Closed-Period Creator', NOW());
 $(organization_fixture_sql "closed-period-$CLOSED_CREATOR" "e2e-closed-$CLOSED_CREATOR@zeroship.test")
-INSERT INTO zeroship.apps (id, name, plan_id, api_key, project_id)
-VALUES ('$CLOSED_APP', 'closed-period-app-$CLOSED_APP', '$PLAN_ID', '$CLOSED_APP', '$ZS_FIXTURE_PROJECT_ID');
+INSERT INTO zeroship.apps (id, name, plan_id, project_id)
+VALUES ('$CLOSED_APP', 'closed-period-app-$CLOSED_APP', '$PLAN_ID', '$ZS_FIXTURE_PROJECT_ID');
 $(seat_app_owner_sql "$CLOSED_APP" "$CLOSED_CREATOR")
 -- The creator must have a saved platform Stripe Customer or the reconciler skips
 -- them. The customer lives in billing_customer_refs (provider='stripe'); the

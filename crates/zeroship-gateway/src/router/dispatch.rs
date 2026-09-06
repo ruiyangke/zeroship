@@ -27,6 +27,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use zeroship_bundle::RequiredPrincipal;
+use zeroship_core::app_id::AppId;
 
 use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
 
@@ -127,7 +128,13 @@ pub async fn workflow_advance_internal(
         }));
     }
 
-    let Some(compiled_route) = state.routes.lookup_by_app_id(&request.app_id) else {
+    // `WorkflowStepRequest` is a wire type the control plane produces, and it
+    // still carries the stored uuid. This is the second transitional
+    // conversion in this crate - the peer of the one in `sync::update` - and it
+    // uses the same canonical rendering, because it probes the very table that
+    // one builds. Rendering it any other way is a guaranteed miss.
+    let app_id = zeroship_core::app_id::canonical_app_id_for(&request.app_id);
+    let Some(compiled_route) = state.routes.lookup_by_app_id(&app_id) else {
         return HttpResponse::NotFound().json(&serde_json::json!({"error": "app route not found"}));
     };
 
@@ -152,7 +159,7 @@ pub async fn workflow_advance_internal(
     let request_id = Uuid::new_v4();
     let worker_response = match proxy::forward_workflow_advance(
         &state.hash_ring,
-        &request.app_id,
+        &app_id,
         &compiled_route.entry.plan_id,
         &request_id,
         &worker_body,
@@ -1160,7 +1167,7 @@ async fn handle_request(
 async fn execute_resource_tree(
     req: HttpRequest,
     state: web::types::State<Arc<GateState>>,
-    app_id: &Uuid,
+    app_id: &AppId,
     compiled_route: &crate::sync::CompiledRoute,
     resolved_resource: zeroship_bundle::compiled::ResolvedResource<'_>,
     dispatch_path: &str,
@@ -1643,7 +1650,7 @@ async fn execute_resource_tree(
 /// `Mutex` for the custom metric — uncontended, not literally lock-free); the
 /// flush to control runs in a detached background task, so this adds no
 /// latency to the response path.
-fn record_gateway_egress(state: &GateState, app_id: &Uuid, response: &mut HttpResponse) {
+fn record_gateway_egress(state: &GateState, app_id: &AppId, response: &mut HttpResponse) {
     use ntex::http::body::{BodySize, MessageBody};
     // A streamed-static response self-meters delivered bytes in its drain.
     // Strip the internal marker and skip the size record (no double-count).
@@ -1658,9 +1665,18 @@ fn record_gateway_egress(state: &GateState, app_id: &Uuid, response: &mut HttpRe
     }
     if let BodySize::Sized(n) = response.body().size() {
         if n > 0 {
+            // TRANSITIONAL, and it is NOT `app_derivation::meter_key`.
+            //
+            // `zeroship_metering::meter::Meter::drain` parses this key back with
+            // `Uuid::parse_str` and, on failure, SKIPS AND EVICTS the counters
+            // behind a `tracing::warn!` - so an app whose key stops parsing
+            // serves traffic and is never billed, with the log noise decaying by
+            // design. Handing it the printed typed id would do exactly that.
+            // The meter key stays the uuid until the metering slice re-keys the
+            // map, and this `.uuid()` is what says so out loud.
             state
                 .meter
-                .increment(&app_id.to_string(), "gateway_egress_bytes", n);
+                .increment(&app_id.uuid().to_string(), "gateway_egress_bytes", n);
         }
     }
 }
@@ -1920,7 +1936,7 @@ fn reject_low_entropy_anon_key(
 pub(super) async fn handle_idempotency_pre_dispatch(
     req: &HttpRequest,
     state: &Arc<GateState>,
-    app_id: &Uuid,
+    app_id: &AppId,
     dispatch_path: &str,
     policy: &zeroship_bundle::compiled::EffectivePolicy,
     user_header: Option<&str>,
@@ -1963,7 +1979,12 @@ pub(super) async fn handle_idempotency_pre_dispatch(
 
     let decision = idempotency::pre_dispatch(
         state.idempotency_store.as_ref(),
-        app_id,
+        // TRANSITIONAL. The dedupe namespace is a PERSISTED key space
+        // (`idem:{app_id}:{wire_id}:...`) with its own TTL, so its rendering is
+        // a storage decision rather than a routing one and it stays the uuid
+        // until that store is re-keyed. `capture_response` below unwraps the
+        // same way; the pair has to agree or every store misses its own read.
+        &app_id.uuid(),
         wire_id,
         principal,
         idem_key.as_deref(),
@@ -2150,7 +2171,7 @@ pub(super) enum ResponseOrigin {
 /// day.
 pub(super) async fn capture_response_for_idempotency(
     state: &GateState,
-    app_id: &Uuid,
+    app_id: &AppId,
     handle: InflightHandle,
     origin: ResponseOrigin,
     response: HttpResponse,
@@ -2197,7 +2218,9 @@ pub(super) async fn capture_response_for_idempotency(
 
     if let Err(e) = idempotency::capture_response(
         state.idempotency_store.as_ref(),
-        app_id,
+        // The write half of the pair `pre_dispatch` documents: same namespace,
+        // so necessarily the same rendering.
+        &app_id.uuid(),
         &handle.entry_key,
         &handle.lock_key,
         &handle.body_hash,
@@ -2251,7 +2274,7 @@ pub(super) async fn capture_response_for_idempotency(
 async fn handle_subscription_dispatch(
     _req: HttpRequest,
     state: &GateState,
-    app_id: &Uuid,
+    app_id: &AppId,
     _route: &zeroship_core::types::RouteEntry,
     _tail: &str,
     wall_start: std::time::Instant,
@@ -2370,7 +2393,7 @@ fn forward_url(scheme: &str, host: &str, tail: &str, query: Option<&str>) -> Str
 async fn handle_dispatch(
     req: HttpRequest,
     state: &Arc<GateState>,
-    app_id: &Uuid,
+    app_id: &AppId,
     route: &zeroship_core::types::RouteEntry,
     tail: &str,
     request_id: Uuid,
@@ -2698,7 +2721,9 @@ async fn handle_auth_callback(
         &mut conn,
         &crate::sessions::NewSession {
             user_id: &claims.sub,
-            app_id: app_uuid,
+            // `zeroship.gateway_sessions.app_id` is a UUID column bound
+            // natively, so the route table's typed id is unwrapped for it.
+            app_id: app_uuid.uuid(),
             email: claims.email.as_deref(),
             name: claims.name.as_deref(),
             avatar_url: claims.picture.as_deref(),
@@ -2898,6 +2923,16 @@ mod tests {
             b"gateway-dispatch-test-broker-master-32-bytes".to_vec(),
         )
         .expect("broker secret")
+    }
+
+    /// The typed app id for an app the control plane stores as `stored`.
+    ///
+    /// Exactly what `sync::update` mints at snapshot load, so a test that keys
+    /// a registry, the ring, or a route lookup builds the same key production
+    /// does. Spelling `AppId::from_uuid` here instead would compile and then
+    /// miss every one of them.
+    fn typed_app_id(stored: &Uuid) -> AppId {
+        zeroship_core::app_id::canonical_app_id_for(stored)
     }
 
     fn manifest_with_resources(resources: HashMap<String, ResourceEntry>) -> Manifest {
@@ -3801,7 +3836,7 @@ mod tests {
         use zeroship_bundle::RateLimit;
 
         let registry = PerRuleRateLimitRegistry::new();
-        let app = uuid::Uuid::nil();
+        let app = typed_app_id(&uuid::Uuid::nil());
         let limit = RateLimit {
             rpm: None,
             rps: Some(1),
@@ -4069,7 +4104,7 @@ mod tests {
     #[test]
     fn per_session_rule_cannot_be_evaded_by_rotating_the_cookie_value() {
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
-        let app_id = uuid::Uuid::nil();
+        let app_id = typed_app_id(&uuid::Uuid::nil());
         let rl = RateLimit {
             rps: Some(1),
             rpm: None,
@@ -4131,7 +4166,7 @@ mod tests {
         // the registry's key uses, otherwise the second call would
         // hit a fresh bucket and pass.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
-        let app_id = uuid::Uuid::nil();
+        let app_id = typed_app_id(&uuid::Uuid::nil());
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Ip };
         let req = ntex::web::test::TestRequest::default().to_http_request();
         let bucket_id = compute_bucket_id(&req, rl.per, false, true);
@@ -4151,7 +4186,7 @@ mod tests {
         // RateLimitPer::Session must hit independent buckets even when
         // the IP is the same.
         let reg = crate::enforce::PerRuleRateLimitRegistry::new();
-        let app_id = uuid::Uuid::nil();
+        let app_id = typed_app_id(&uuid::Uuid::nil());
         let rl = RateLimit { rps: Some(1), rpm: None, per: RateLimitPer::Session };
 
         let req_a = ntex::web::test::TestRequest::default()
@@ -4339,7 +4374,7 @@ mod tests {
         let outcome = handle_idempotency_pre_dispatch(
             &req,
             &state,
-            &uuid::Uuid::new_v4(),
+            &typed_app_id(&uuid::Uuid::new_v4()),
             "/__zeroship/v1/todos.add",
             &policy,
             None,
@@ -4369,7 +4404,7 @@ mod tests {
     #[compio::test]
     async fn idempotency_first_request_proceeds_holds_lock() {
         let state = make_minimal_state();
-        let app_id = uuid::Uuid::new_v4();
+        let app_id = typed_app_id(&uuid::Uuid::new_v4());
         let req = ntex::web::test::TestRequest::default()
             .header("idempotency-key", "5c7f4a1b-8d2e-4c3f-9a6b-1e2d3c4b5a60")
             .to_http_request();
@@ -4392,7 +4427,7 @@ mod tests {
                 assert_eq!(
                     handle.entry_key,
                     crate::idempotency::entry_key(
-                        &app_id,
+                        &app_id.uuid(),
                         "todos.add",
                         crate::idempotency::Principal::Anon,
                         "5c7f4a1b-8d2e-4c3f-9a6b-1e2d3c4b5a60",
@@ -4407,7 +4442,7 @@ mod tests {
     #[compio::test]
     async fn idempotency_second_same_body_replays_cached_response() {
         let state = make_minimal_state();
-        let app_id = uuid::Uuid::new_v4();
+        let app_id = typed_app_id(&uuid::Uuid::new_v4());
         let req = ntex::web::test::TestRequest::default()
             .header("idempotency-key", "7b1e9d40-3c5a-4f21-8e77-90ab12cd34ef")
             .to_http_request();
@@ -4484,7 +4519,7 @@ mod tests {
     #[compio::test]
     async fn idempotency_second_different_body_returns_409_already_exists() {
         let state = make_minimal_state();
-        let app_id = uuid::Uuid::new_v4();
+        let app_id = typed_app_id(&uuid::Uuid::new_v4());
         let req_with_key = |body_label: &str| {
             ntex::web::test::TestRequest::default()
                 .header("idempotency-key", "0e3c5a91-77bd-4d2f-b418-6c9a0f5e2d31")
@@ -4566,7 +4601,7 @@ mod tests {
     async fn idempotency_per_procedure_ttl_flows_into_handle() {
         // A mutation pinned to 48h yields handle.ttl_hours = 48.
         let state = make_minimal_state();
-        let app_id = uuid::Uuid::new_v4();
+        let app_id = typed_app_id(&uuid::Uuid::new_v4());
         let req = ntex::web::test::TestRequest::default()
             .header("idempotency-key", "7b1e9d40-3c5a-4f21-8e77-90ab12cd34ef")
             .to_http_request();
@@ -4753,7 +4788,7 @@ mod tests {
             .map(|i| format!("http://worker-{i}:8080"))
             .collect();
         let ring = crate::proxy::HashRing::new(workers, u32::MAX);
-        let app = uuid::Uuid::nil();
+        let app = typed_app_id(&uuid::Uuid::nil());
 
         let (a, _) = ring.select_with_affinity(&app, "sub:alice");
         let (b, _) = ring.select_with_affinity(&app, "sub:alice");
@@ -4775,7 +4810,7 @@ mod tests {
             .map(|i| format!("http://worker-{i}:8080"))
             .collect();
         let ring = crate::proxy::HashRing::new(workers, u32::MAX);
-        let app = uuid::Uuid::nil();
+        let app = typed_app_id(&uuid::Uuid::nil());
 
         let mut hits = std::collections::HashSet::new();
         for u in 0..32 {
@@ -5756,19 +5791,25 @@ mod tests {
         routes.insert(normal_app, normal);
 
         cache.update(routes, &rate, &concurrency);
-        assert!(concurrency.is_degraded(&degraded_app));
-        assert!(!concurrency.is_degraded(&normal_app));
+        // The route table arrives keyed by the stored uuid and the registries
+        // are keyed by the typed id `update` mints from it, so this asserts on
+        // the id the gateway actually enforces against - not on a second
+        // rendering that would silently miss every gauge.
+        let degraded_key = typed_app_id(&degraded_app);
+        let normal_key = typed_app_id(&normal_app);
+        assert!(concurrency.is_degraded(&degraded_key));
+        assert!(!concurrency.is_degraded(&normal_key));
 
-        let g1 = acquire_concurrency(&concurrency, &degraded_app).expect("first admits");
-        let r2 = acquire_concurrency(&concurrency, &degraded_app);
+        let g1 = acquire_concurrency(&concurrency, &degraded_key).expect("first admits");
+        let r2 = acquire_concurrency(&concurrency, &degraded_key);
         assert!(r2.is_err(), "degraded app's 2nd concurrent request must be rejected");
         if let Err(resp) = r2 {
             assert_eq!(resp.status(), ntex::http::StatusCode::TOO_MANY_REQUESTS);
         }
         drop(g1);
 
-        let _n1 = acquire_concurrency(&concurrency, &normal_app).expect("normal 1");
-        let _n2 = acquire_concurrency(&concurrency, &normal_app).expect("normal 2");
+        let _n1 = acquire_concurrency(&concurrency, &normal_key).expect("normal 1");
+        let _n2 = acquire_concurrency(&concurrency, &normal_key).expect("normal 2");
     }
 
     /// Degrade → Allow flipped via the REAL `RouteCache::update` restores full
@@ -5783,14 +5824,17 @@ mod tests {
         let rate = RateLimitRegistry::new(1000, 2000);
         let concurrency = ConcurrencyRegistry::new(DEGRADE_FACTOR);
         let app = Uuid::new_v4();
+        // The wire map is keyed by the stored uuid; the registry by the typed
+        // id `update` mints from it.
+        let key = typed_app_id(&app);
 
         let mut routes: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         routes.insert(app, spend_route(SpendState::Degrade));
         cache.update(routes, &rate, &concurrency);
-        assert!(concurrency.is_degraded(&app));
-        let g1 = acquire_concurrency(&concurrency, &app).expect("first admits");
+        assert!(concurrency.is_degraded(&key));
+        let g1 = acquire_concurrency(&concurrency, &key).expect("first admits");
         assert!(
-            acquire_concurrency(&concurrency, &app).is_err(),
+            acquire_concurrency(&concurrency, &key).is_err(),
             "degraded ceiling is 1",
         );
         drop(g1);
@@ -5798,11 +5842,11 @@ mod tests {
         let mut routes2: zeroship_core::types::RouteMap = std::collections::HashMap::new();
         routes2.insert(app, spend_route(SpendState::Allow));
         cache.update(routes2, &rate, &concurrency);
-        assert!(!concurrency.is_degraded(&app));
+        assert!(!concurrency.is_degraded(&key));
         let mut guards = Vec::new();
         for i in 0..DEGRADE_FACTOR {
             guards.push(
-                acquire_concurrency(&concurrency, &app)
+                acquire_concurrency(&concurrency, &key)
                     .unwrap_or_else(|_| panic!("recovered app admits request {i}")),
             );
         }
@@ -6863,7 +6907,7 @@ mod tests {
         let outcome = handle_idempotency_pre_dispatch(
             &req,
             &state,
-            &uuid::Uuid::new_v4(),
+            &typed_app_id(&uuid::Uuid::new_v4()),
             "/__zeroship/v1/todos.add",
             &policy,
             // The gate said "allowed" but handed over no header — the

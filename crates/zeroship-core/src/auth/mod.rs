@@ -66,17 +66,25 @@ fn constant_time_compare(provided: &[u8], expected: &[u8]) -> (bool, usize) {
     (diff == 0 && len_mismatch == 0, expected.len())
 }
 
-/// SHA-256 hash of `key`, returned as a lowercase hex string.
-/// Used to store API key hashes in the routing table instead of plaintext.
-pub fn hash_api_key(key: &str) -> String {
+/// SHA-256 hash of an OAuth client secret, returned as a lowercase hex string.
+/// This is what `zeroship.oauth_clients.client_secret_hash` stores, so the
+/// plaintext secret is shown to the client once at registration and never
+/// persisted.
+///
+/// **The input must be high-entropy, machine-generated material.** This is a
+/// bare unsalted digest with no work factor, which is the right construction
+/// for a 256-bit random client secret and the wrong one for anything a human
+/// chooses. A password belongs in a memory-hard KDF, never here.
+pub fn hash_client_secret(secret: &str) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(key.as_bytes());
+    hasher.update(secret.as_bytes());
     hex::encode(hasher.finalize())
 }
 
-/// Constant-time validation of a provided API key against its stored SHA-256 hash.
-pub fn validate_api_key(provided: &str, stored_hash: &str) -> bool {
-    let computed = hash_api_key(provided);
+/// Constant-time validation of a presented OAuth client secret against its
+/// stored SHA-256 hash, as produced by [`hash_client_secret`].
+pub fn validate_client_secret(provided: &str, stored_hash: &str) -> bool {
+    let computed = hash_client_secret(provided);
     constant_time_eq(&computed, stored_hash)
 }
 
@@ -760,17 +768,17 @@ mod tests {
 
     #[test]
     fn hash_is_hex_sha256() {
-        let h = hash_api_key("test");
+        let h = hash_client_secret("test");
         assert_eq!(h.len(), 64);
         assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
     #[test]
-    fn api_key_roundtrip() {
-        let key = "my-api-key";
-        let stored = hash_api_key(key);
-        assert!(validate_api_key(key, &stored));
-        assert!(!validate_api_key("wrong-key", &stored));
+    fn client_secret_roundtrip() {
+        let secret = "my-client-secret";
+        let stored = hash_client_secret(secret);
+        assert!(validate_client_secret(secret, &stored));
+        assert!(!validate_client_secret("wrong-secret", &stored));
     }
 
     #[test]

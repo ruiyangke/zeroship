@@ -349,19 +349,17 @@ pub(crate) mod infrastructure_error_test_support {
 /// It is exactly the serialized [`zeroship_core::types::AppRecord`], and the
 /// point of naming the function is that the "exactly" is now enforceable.
 ///
-/// THE CREATE RESPONSE NO LONGER HANDS OUT AN API KEY. It used to: the field is
-/// `#[serde(skip_serializing)]` on the struct, and this site re-added it by hand
-/// so the caller got the plaintext key back. Nothing ever validated that key.
-/// The gateway's `check_api_key` was the only code that could have, it lost its
-/// call site when RPC v1 replaced it with the compiled per-resource
-/// `EffectivePolicy`, and both it and the hash it compared against are deleted.
-/// Handing a caller a credential no request path consults is worse than handing
-/// them nothing: it reads as an authentication mechanism.
+/// THERE IS NO APP-LEVEL API KEY TO HAND OUT. The response once carried a
+/// plaintext key this site re-added by hand past the struct's
+/// `#[serde(skip_serializing)]`; nothing ever validated it, and handing a caller
+/// a credential no request path consults is worse than handing them nothing,
+/// because it reads as an authentication mechanism. The response stopped
+/// carrying it first, and the field, the column and the mint that produced it
+/// are now gone too - `db/migrations-ts/20260905000200_drop_app_api_key.ts`
+/// records why the platform does not own such a key at all.
 ///
-/// `AppRecord::api_key` and the `zeroship.apps.api_key` column both still
-/// exist - this crate's `dev_provision` binary prints the value and a dozen
-/// shell harnesses parse that line - so this stops the key leaving over HTTP
-/// without pretending the column is gone.
+/// So this function has no field to withhold, which is what makes the "exactly"
+/// above enforceable in both directions: the body is the whole record.
 fn create_app_response_body(record: &zeroship_core::types::AppRecord) -> serde_json::Value {
     serde_json::to_value(record).unwrap_or_else(|_| serde_json::json!({}))
 }
@@ -377,16 +375,17 @@ mod create_app_response_tests {
             plan_id: "free".to_string(),
             deploy_hash: None,
             archived_at: None,
-            api_key: "plaintext-key-that-must-not-be-returned".to_string(),
             created_at: "2026-09-05T00:00:00Z".to_string(),
             updated_at: "2026-09-05T00:00:00Z".to_string(),
         }
     }
 
     /// The create response must not carry an api-key field under ANY spelling,
-    /// and must not carry the key's value under some other name either. The
-    /// second half matters: an assertion on the key name alone would pass
-    /// against a body that renamed the field and kept leaking the secret.
+    /// and must not be withholding one either. The second half is the durable
+    /// assertion: a name check alone passes against a struct that keeps the
+    /// secret and hides it behind `skip_serializing`, which is exactly the state
+    /// this replaced. A body that deserializes back into the type that produced
+    /// it cannot be hiding a field, because hiding one is what breaks that.
     #[test]
     fn create_response_carries_no_api_key() {
         let body = create_app_response_body(&record());
@@ -399,12 +398,8 @@ mod create_app_response_tests {
             );
         }
 
-        assert!(
-            !serde_json::to_string(&body)
-                .expect("serialize create response")
-                .contains("plaintext-key-that-must-not-be-returned"),
-            "the create-app response must not carry the plaintext key under any name"
-        );
+        serde_json::from_value::<zeroship_core::types::AppRecord>(body)
+            .expect("the create-app response must round-trip: nothing is withheld from it");
     }
 
     /// CONTROL for the assertion above: the same body must still carry the
@@ -1752,12 +1747,28 @@ pub async fn get_app_logs(
     web::HttpResponse::Ok().json(&lines)
 }
 
+/// The worker URL this app's buffered logs are read from.
+///
+/// TRANSITIONAL, and named rather than inlined so it can be bound by a test
+/// that needs no worker. The worker reads this path segment as a typed app id
+/// and refuses a uuid rendering outright, so control renders the id the same
+/// way the gateway renders `/dispatch`. Control is the OTHER producer of a
+/// worker path, and a producer that kept spelling the uuid here would take a
+/// 400 on every log fetch.
+fn worker_logs_url(worker_url: &str, app_id: &Uuid) -> String {
+    format!(
+        "{}/logs/{}",
+        worker_url.trim_end_matches('/'),
+        zeroship_core::app_id::canonical_app_id_for(app_id).as_str()
+    )
+}
+
 async fn fetch_worker_logs(
     worker_url: &str,
     worker_key: &str,
     app_id: &Uuid,
 ) -> Result<Vec<String>, String> {
-    let url = format!("{}/logs/{app_id}", worker_url.trim_end_matches('/'));
+    let url = worker_logs_url(worker_url, app_id);
     let client = cyper::Client::new();
     let mut builder = client
         .get(&url)
@@ -2237,5 +2248,56 @@ mod stream_tmp_tests {
                 "the control reference must say {required:?}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod worker_log_path_tests {
+    use super::worker_logs_url;
+
+    /// Control addresses the worker's log endpoint by the TYPED app id.
+    ///
+    /// This is the arm that binds control as a producer of a worker path. The
+    /// only other one is the gateway's `/dispatch`, and the two have to agree,
+    /// because the worker parses both segments with the same
+    /// `zeroship_core::app_id::AppId::parse` and that parse refuses a uuid
+    /// rendering outright - so a producer still spelling the uuid takes a 400
+    /// on every request rather than degrading quietly.
+    ///
+    /// The live-database harness that exercises this path end to end mounts a
+    /// stub worker on `/logs/{app_id}`, which matches ANY segment, so it cannot
+    /// see the rendering at all. This is where the rendering is checked, and it
+    /// needs no worker and no database.
+    ///
+    /// MUTATION-CHECKED: rendering the uuid instead - the spelling this line
+    /// carried until the request path was typed - fails on the `AppId::parse`
+    /// call, quoting the parser's own refusal and the segment it refused, and
+    /// fails nothing else in the crate. It never reaches the `assert_ne!`,
+    /// which is there for the narrower case of a rendering that parses but is
+    /// still the uuid's own text.
+    #[test]
+    fn the_log_url_carries_a_parseable_app_id_and_never_a_uuid() {
+        let stored = uuid::Uuid::new_v4();
+        let url = worker_logs_url("http://worker.internal:8080/", &stored);
+
+        let segment = url.rsplit('/').next().expect("the url has a last segment");
+        assert!(
+            url.starts_with("http://worker.internal:8080/logs/"),
+            "the trailing slash is trimmed and the path is unchanged: {url}"
+        );
+
+        let parsed = zeroship_core::app_id::AppId::parse(segment).unwrap_or_else(|e| {
+            panic!("the worker parses this segment with AppId::parse, and it said {e}: {segment}")
+        });
+        assert_eq!(
+            parsed.uuid(),
+            stored,
+            "and it must still name the app the caller asked for"
+        );
+        assert_ne!(
+            segment,
+            stored.to_string(),
+            "the uuid rendering is what the worker refuses"
+        );
     }
 }

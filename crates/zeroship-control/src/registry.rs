@@ -5,6 +5,8 @@ use std::collections::HashMap;
 use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
+use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
     GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry, RouteEntry,
@@ -307,7 +309,6 @@ impl Registry {
             }
         };
 
-        let api_key = Uuid::new_v4().to_string();
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
 
@@ -321,19 +322,19 @@ impl Registry {
         let rows = tx
             .query(
                 &format!(
-                    "INSERT INTO zeroship.apps (name, plan_id, api_key, project_id) \
-                     SELECT $1, $2, $3, p.id \
+                    "INSERT INTO zeroship.apps (name, plan_id, project_id) \
+                     SELECT $1, $2, p.id \
                        FROM zeroship.projects p \
                        LEFT JOIN zeroship.organization_members m \
-                              ON m.organization_id = p.organization_id AND m.user_id = $5 \
+                              ON m.organization_id = p.organization_id AND m.user_id = $4 \
                        LEFT JOIN zeroship.organization_roles organization_role \
                               ON organization_role.role = m.role \
                        LEFT JOIN zeroship.project_members pm \
-                              ON pm.project_id = p.id AND pm.user_id = $5 \
+                              ON pm.project_id = p.id AND pm.user_id = $4 \
                        LEFT JOIN zeroship.organization_roles project_role \
                               ON project_role.role = pm.role \
-                      WHERE p.id = $4 AND {effective} >= {developer} \
-                     RETURNING id, name, plan_id, deploy_hash, api_key, \
+                      WHERE p.id = $3 AND {effective} >= {developer} \
+                     RETURNING id, name, plan_id, deploy_hash, \
                                archived_at::text, created_at::text, updated_at::text",
                     effective = crate::organizations::effective_project_rank_sql(
                         "organization_role.rank",
@@ -342,7 +343,7 @@ impl Registry {
                     ),
                     developer = crate::organizations::ladder_rank_of(crate::organizations::ROLE_DEVELOPER),
                 ),
-                &[&name, &plan_id, &api_key, &project_id, owner_id],
+                &[&name, &plan_id, &project_id, owner_id],
             )
             .await?;
         let record = rows.first().map(row_to_record).ok_or_else(|| {
@@ -366,7 +367,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, archived_at::text, \
+                "SELECT id, name, plan_id, deploy_hash, archived_at::text, \
                         created_at::text, updated_at::text \
                  FROM zeroship.apps WHERE id = $1",
                 &[id],
@@ -380,7 +381,7 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT id, name, plan_id, deploy_hash, api_key, archived_at::text, \
+                "SELECT id, name, plan_id, deploy_hash, archived_at::text, \
                         created_at::text, updated_at::text \
                  FROM zeroship.apps WHERE name = $1",
                 &[&name],
@@ -411,7 +412,7 @@ impl Registry {
         let rows = conn
             .query(
                 &format!(
-                    "SELECT a.id, a.name, a.plan_id, a.deploy_hash, a.api_key, \
+                    "SELECT a.id, a.name, a.plan_id, a.deploy_hash, \
                             a.archived_at::text, a.created_at::text, a.updated_at::text \
                      FROM zeroship.apps a \
                      JOIN zeroship.projects p ON p.id = a.project_id \
@@ -454,10 +455,8 @@ impl Registry {
         // form of this lock. Once archive returns, no claim can have crossed
         // the marker; work admitted before it may still finish.
         tx.query_one(
-            "SELECT pg_advisory_xact_lock( \
-                 hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
-             )",
-            &[id],
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&app_derivation::lifecycle_lock_seed(&AppId::from_uuid(id))],
         )
         .await?;
         let rows = tx
@@ -466,7 +465,7 @@ impl Registry {
                     SET archived_at = COALESCE(archived_at, NOW()), \
                         updated_at = CASE WHEN archived_at IS NULL THEN NOW() ELSE updated_at END \
                   WHERE id = $1 \
-                  RETURNING id, name, plan_id, deploy_hash, api_key, \
+                  RETURNING id, name, plan_id, deploy_hash, \
                             archived_at::text, created_at::text, updated_at::text",
                 &[id],
             )
@@ -483,10 +482,8 @@ impl Registry {
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
         tx.query_one(
-            "SELECT pg_advisory_xact_lock( \
-                 hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
-             )",
-            &[id],
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+            &[&app_derivation::lifecycle_lock_seed(&AppId::from_uuid(id))],
         )
         .await?;
         let state = tx
@@ -564,7 +561,7 @@ impl Registry {
                     SET archived_at = NULL, \
                         updated_at = CASE WHEN archived_at IS NOT NULL THEN NOW() ELSE updated_at END \
                   WHERE id = $1 \
-                  RETURNING id, name, plan_id, deploy_hash, api_key, \
+                  RETURNING id, name, plan_id, deploy_hash, \
                             archived_at::text, created_at::text, updated_at::text",
                 &[id],
             )
@@ -1154,8 +1151,7 @@ fn net_policy_limits_from_catalog(
 /// Convert a query row into an `AppRecord`.
 ///
 /// Columns: id (UUID), name (TEXT), plan_id (UUID), deploy_hash (TEXT | NULL),
-///          api_key (TEXT), archived_at (TEXT | NULL), created_at (TEXT),
-///          updated_at (TEXT).
+///          archived_at (TEXT | NULL), created_at (TEXT), updated_at (TEXT).
 fn row_to_record(row: &compio_postgres::Row) -> AppRecord {
     AppRecord {
         id: row.get("id"),
@@ -1163,7 +1159,6 @@ fn row_to_record(row: &compio_postgres::Row) -> AppRecord {
         plan_id: row.get("plan_id"),
         deploy_hash: row.get("deploy_hash"),
         archived_at: row.get("archived_at"),
-        api_key: row.get("api_key"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
     }

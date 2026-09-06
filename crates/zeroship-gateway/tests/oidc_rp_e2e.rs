@@ -697,12 +697,11 @@ async fn seed_user_client(
     .await
     .expect("seed free plan");
     db.execute(
-        "INSERT INTO zeroship.apps (id, name, api_key) \
-         VALUES ($1, $2, $3)",
+        "INSERT INTO zeroship.apps (id, name) \
+         VALUES ($1, $2)",
         &[
             &app_id,
-            &format!("gateway-e2e-app-{}", app_id.simple()),
-            &format!("api-{app_id}"),
+            &format!("gateway-e2e-app-{}", app_id.simple())
         ],
     )
     .await

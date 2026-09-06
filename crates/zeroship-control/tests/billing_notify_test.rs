@@ -785,9 +785,9 @@ async fn make_spend_app_owned_by(
     let app_name = format!("spend-notify-{}", Uuid::new_v4());
     let rows = pg
         .query(
-            "INSERT INTO zeroship.apps (name, plan_id, api_key) \
-             VALUES ($1, $2, $3, '') RETURNING id",
-            &[&app_name, &plan_id, &Uuid::new_v4().to_string()],
+            "INSERT INTO zeroship.apps (name, plan_id) \
+             VALUES ($1, $2) RETURNING id",
+            &[&app_name, &plan_id],
         )
         .await
         .expect("insert app");

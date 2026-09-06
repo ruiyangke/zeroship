@@ -2,6 +2,8 @@ use chrono::{DateTime, Utc};
 use compio_postgres::{GenericClient, NoTls};
 use serde_json::Value;
 use uuid::Uuid;
+use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 use zeroship_core::typed_id;
 
 use crate::advance::{
@@ -83,10 +85,10 @@ where
     // race. Archive takes the exclusive form before setting archived_at, so a
     // claim either commits before archive returns or observes the marker.
     tx.query_one(
-        "SELECT pg_advisory_xact_lock_shared( \
-             hashtextextended('zeroship:app-lifecycle:' || ($1::uuid)::text, 0) \
-         )",
-        &[&request.app_id],
+        "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
+        &[&app_derivation::lifecycle_lock_seed(&AppId::from_uuid(
+            &request.app_id,
+        ))],
     )
     .await?;
     let tables = WorkflowTables::for_app_id(&request.app_id);

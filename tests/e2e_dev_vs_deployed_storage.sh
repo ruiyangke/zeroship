@@ -185,10 +185,9 @@ zs_check_binary_freshness "$ROOT" "$BIN" \
 # only the page boundaries come back), no backend identifiers. Every field
 # printed below is therefore being asserted identical across LocalFs and S3.
 probe() {
-  local base="$1" hdr="${2:-}" rpc="$1/__zeroship/v1"
-  local h=(); [ -n "$hdr" ] && h=(-H "$hdr")
+  local base="$1" rpc="$1/__zeroship/v1"
   call() {
-    curl -sS -m 60 -X POST -H 'content-type: application/json' "${h[@]}" \
+    curl -sS -m 60 -X POST -H 'content-type: application/json' \
       "$rpc/$1" -d "{\"json\":${2:-{\}}}" 2>&1
   }
   echo "reset        $(call probe.reset)"
@@ -368,14 +367,14 @@ done
 pass "control + worker + gateway healthy"
 
 OUT=$("$BIN/dev-provision" --db "$DB_URL" --blob-store "$WORK/bundles" --name "$APP_NAME" --zship "$ZSHIP" 2>&1)
-API_KEY=$(echo "$OUT" | awk -F= '$1 == "api_key" { print $2 }')
-[ -n "$API_KEY" ] && pass "deployed $APP_NAME" || { fail "provision: $OUT"; exit 1; }
+APP_ID=$(echo "$OUT" | awk -F= '$1 == "app_id" { print $2 }')
+[ -n "$APP_ID" ] && pass "deployed $APP_NAME" || { fail "provision: $OUT"; exit 1; }
 sleep 6   # gateway route-sync poll
 
-curl -sf -o /dev/null -m 10 -X POST -H 'content-type: application/json' -H "X-Api-Key: $API_KEY" \
+curl -sf -o /dev/null -m 10 -X POST -H 'content-type: application/json' \
   "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/__zeroship/v1/probe.ping" -d '{"json":{}}' \
   && pass "deployed app reachable" || fail "deployed app did not answer ping"
-probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" "X-Api-Key: $API_KEY" > "$WORK/deployed.txt" 2>&1
+probe "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME" > "$WORK/deployed.txt" 2>&1
 grep -q '"textMatches":true' "$WORK/deployed.txt" && pass "deployed side answered the probe" \
   || { fail "deployed side did not round-trip text"; head -20 "$WORK/deployed.txt"; tail -10 "$WORK/worker.log"; }
 

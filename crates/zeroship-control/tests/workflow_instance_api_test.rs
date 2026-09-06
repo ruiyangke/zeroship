@@ -173,8 +173,8 @@ async fn seed_app_on_plan(
     fx.pg
         .execute(
             "INSERT INTO zeroship.apps \
-                 (id, name, plan_id, api_key, workflows_enabled, project_id) \
-             VALUES ($1, $2, $3, 'test-api-key', true, $4)",
+                 (id, name, plan_id, workflows_enabled, project_id) \
+             VALUES ($1, $2, $3, true, $4)",
             &[&app_id, &app_name, &plan_id, &project],
         )
         .await
@@ -247,8 +247,8 @@ async fn seed_app_without_deploy(fx: &Fixture, label: &str) -> Uuid {
     fx.pg
         .execute(
             "INSERT INTO zeroship.apps \
-                 (id, name, plan_id, api_key, workflows_enabled, project_id) \
-             VALUES ($1, $2, $3, 'test-api-key', true, $4)",
+                 (id, name, plan_id, workflows_enabled, project_id) \
+             VALUES ($1, $2, $3, true, $4)",
             &[
                 &app_id,
                 &format!("wf-api-nodeploy-{label}-{}", Uuid::new_v4().simple()),

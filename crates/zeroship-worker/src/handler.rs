@@ -10,6 +10,7 @@ use ntex::util::Bytes;
 use serde_json::Value;
 use uuid::Uuid;
 
+use zeroship_core::app_id::AppId;
 use zeroship_core::auth::{
     constant_time_eq, derive_app_scoped_control_token, extract_bearer,
     verify_zeroship_user_header_for_request,
@@ -223,8 +224,14 @@ pub async fn dispatch(
     // after on-demand load, so a cold start is not billed as app wall time.
     let handler_start = std::time::Instant::now();
 
-    let app_id = match path.parse::<Uuid>() {
-        Ok(id) => id,
+    let app_id = match AppId::parse(path.as_str()) {
+        // TRANSITIONAL, and the worker's ONLY conversion. Everything below this
+        // line - the isolate cache, the env cache, the version feed, the meter,
+        // the schema the app's tables live in - is keyed by the uuid the
+        // control plane stores and serves, so the typed id is unwrapped here
+        // rather than carried. Carrying it would silently re-key all of them to
+        // a rendering no database row holds.
+        Ok(id) => id.uuid(),
         Err(_) => {
             // The only reject with no app to attribute to: the id did not
             // parse, so there is no subject to meter against.
@@ -581,8 +588,11 @@ pub async fn workflow_advance_unsigned(
             .json(&serde_json::json!({"error": "workflow advance unsigned disabled"}));
     }
 
-    let app_id = match path.parse::<Uuid>() {
-        Ok(id) => id,
+    // Same shape and the same reason as `dispatch` above: the path carries the
+    // typed id, and the uuid is what the journal, the claim and the pinned
+    // isolate are keyed by.
+    let app_id = match AppId::parse(path.as_str()) {
+        Ok(id) => id.uuid(),
         Err(_) => {
             metrics::inc(&metrics::DISPATCH_REJECTED_BAD_APP_ID);
             return HttpResponse::BadRequest().body(r#"{"error":"invalid app_id"}"#);
@@ -1628,6 +1638,19 @@ mod tests {
         path
     }
 
+    /// The path segment the worker's routes take: the app id in its printed,
+    /// typed form.
+    ///
+    /// Tests hold the `Uuid` the control plane stores, and the worker's routes
+    /// no longer read that spelling - the gateway renders the typed id and so
+    /// must anything else addressing these endpoints. Spelling the uuid into
+    /// the URL here would test a door the gateway never knocks on.
+    pub(super) fn worker_app_path(app_id: &Uuid) -> String {
+        zeroship_core::app_id::canonical_app_id_for(app_id)
+            .as_str()
+            .to_owned()
+    }
+
     fn dispatch_frame(method: &str, url: &str, body: &[u8]) -> Vec<u8> {
         zeroship_core::dispatch_frame::encode_dispatch_frame(method, url, &[], body)
             .expect("dispatch frame")
@@ -1716,7 +1739,7 @@ mod tests {
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{app_id}"))
+                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
                 .set_payload(payload)
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -1727,6 +1750,108 @@ mod tests {
             let _ = std::fs::remove_dir_all(blob_root);
             MeteredDispatchResult { app_id, status, body, events }
         }))
+    }
+
+    /// Drive `dispatch` with a LITERAL path segment rather than a well-formed
+    /// id, and report the status alongside how far the bad-app-id counter
+    /// moved. The counter is the half that says WHICH refusal happened: a 400
+    /// is also what a malformed frame answers, and that arm increments a
+    /// different counter.
+    fn dispatch_path_segment(segment: &str) -> (StatusCode, u64) {
+        let runtime = compio::runtime::Runtime::new().expect("compio runtime");
+        runtime.block_on(async {
+            let meter = Arc::new(zeroship_metering::Meter::new());
+            crate::cache::init_cache(
+                10,
+                4,
+                crate::cache::KernelConfig {
+                    control_url: "http://127.0.0.1:1".to_string(),
+                    control_key: String::new(),
+                    db_service: None,
+                    kv_url: None,
+                    storage_backend: None,
+                    meter,
+                },
+            );
+
+            let envs: SharedEnvs = Arc::new(RwLock::new(HashMap::new()));
+            let logs = crate::logs::new_store();
+            let blob_root = tmpdir("dispatch-path-segment");
+            let config = test_worker_config(&blob_root);
+
+            let app = test::init_service(
+                web::App::new()
+                    .state(config)
+                    .state(envs)
+                    .state(logs)
+                    .configure(configure),
+            )
+            .await;
+
+            let before = metrics::DISPATCH_REJECTED_BAD_APP_ID
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let req = test::TestRequest::post()
+                .uri(&format!("/dispatch/{segment}"))
+                .set_payload(dispatch_frame("GET", "http://app.test/", b""))
+                .to_request();
+            let resp = test::call_service(&app, req).await;
+            let status = resp.status();
+            let after = metrics::DISPATCH_REJECTED_BAD_APP_ID
+                .load(std::sync::atomic::Ordering::Relaxed);
+
+            let _ = std::fs::remove_dir_all(blob_root);
+            (status, after - before)
+        })
+    }
+
+    /// The dispatch path segment carries an APP ID, and a uuid rendering is not
+    /// one.
+    ///
+    /// RED BEFORE THIS SLICE, and it failed on both halves: `path.parse::<Uuid>()`
+    /// accepted the hyphenated form, so the request walked on to the env lookup
+    /// and answered 503 while the counter never moved.
+    ///
+    /// The gateway is the only producer of this path, and it now renders
+    /// [`zeroship_core::app_id::AppId::as_str`]. A hyphenated uuid arriving
+    /// here is therefore a producer/consumer disagreement about the RENDERING
+    /// of the identity, which is the failure this whole migration exists to
+    /// make loud: `Uuid::parse_str` and `AppId::parse` accept disjoint strings,
+    /// so the day the two sides disagree the request is refused at the door
+    /// rather than dispatched to a tenant nobody meant.
+    #[test]
+    fn a_hyphenated_uuid_is_refused_on_the_dispatch_path() {
+        let (status, rejected) = dispatch_path_segment(&Uuid::new_v4().to_string());
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "a uuid rendering is not an app id and must not reach dispatch",
+        );
+        assert!(
+            rejected >= 1,
+            "the refusal must be attributed to the bad app id, not to the frame",
+        );
+    }
+
+    /// The control for the arm above, differing in ONE variable: the rendering.
+    ///
+    /// Same uuid, same frame, same wiring - only the printed form changes. It
+    /// must NOT be refused as a bad app id, or the arm above would pass just as
+    /// well against a door that is shut to everyone.
+    #[test]
+    fn the_canonical_rendering_of_the_same_id_passes_the_door() {
+        let raw = Uuid::new_v4();
+        let canonical = zeroship_core::app_id::canonical_app_id_for(&raw);
+        let (status, rejected) = dispatch_path_segment(canonical.as_str());
+        assert_eq!(
+            rejected, 0,
+            "the canonical rendering must not be refused as a bad app id",
+        );
+        assert_ne!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "the canonical rendering must get past the app-id check; it fails \
+             later, on the env lookup, because this app was never loaded",
+        );
     }
 
     /// A body over the cap is rejected by US, with our status and our shape.
@@ -1844,7 +1969,7 @@ mod tests {
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{app_id}"))
+                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
                 .set_payload(dispatch_frame(
                     "POST",
                     "http://example.test/generated-error",
@@ -2343,7 +2468,7 @@ mod tests {
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{app_id}"))
+                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
                 .set_payload(dispatch_frame(
                     "GET",
                     "http://example.test/from-worker-test",
@@ -2356,7 +2481,7 @@ mod tests {
             assert_eq!(&body[..], b"ok");
 
             let req = test::TestRequest::get()
-                .uri(&format!("/logs/{app_id}"))
+                .uri(&format!("/logs/{}", worker_app_path(&app_id)))
                 .to_request();
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::OK);
@@ -2510,7 +2635,7 @@ mod tests {
         // what a caller with direct network access to the worker sends, and
         // what the gateway forwards on a public route.
         let req = test::TestRequest::post()
-            .uri(&format!("/dispatch/{app_id}"))
+            .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
             .set_payload(dispatch_frame(
                 "GET",
                 &format!("http://app.test{path}"),
@@ -2659,7 +2784,7 @@ mod tests {
 
             let raw_body = [0xff, 0x00, 0xfe, 0x80];
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{app_id}"))
+                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
                 .set_payload(dispatch_frame(
                     "POST",
                     "http://example.test/binary-body",
@@ -2763,7 +2888,7 @@ mod tests {
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{app_id}"))
+                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
                 .set_payload(dispatch_frame(
                     "GET",
                     "http://example.test/binary-response",
@@ -2886,7 +3011,7 @@ mod tests {
             let req_body = "the-end-user-request-body-payload";
             let url = "http://example.test/counters-probe";
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{app_id}"))
+                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
                 .set_payload(dispatch_frame("POST", url, req_body.as_bytes()))
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -3079,7 +3204,7 @@ mod tests {
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/dispatch/{app_id}"))
+                .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
                 .set_payload(dispatch_frame(
                     "GET",
                     "http://example.test/kernel-probe",
@@ -3422,7 +3547,7 @@ mod tests {
             // Drive A's dispatch concurrently with this task.
             let dispatch = compio::runtime::spawn(async move {
                 let req = test::TestRequest::post()
-                    .uri(&format!("/dispatch/{app_a}"))
+                    .uri(&format!("/dispatch/{}", worker_app_path(&app_a)))
                     .set_payload(dispatch_frame("GET", "http://app-a.test/", b""))
                     .to_request();
                 let resp = test::call_service(&service, req).await;
@@ -3805,8 +3930,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         // makes all but the first fail on contact.
         let app_name = format!("worker-workflow-test-app-{app_id}");
         conn.execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, api_key, workflows_enabled) \
-             VALUES ($1, $3, $2, 'worker-test-key', true) \
+            "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled) \
+             VALUES ($1, $3, $2, true) \
              ON CONFLICT (id) DO UPDATE SET plan_id = EXCLUDED.plan_id, workflows_enabled = true",
             &[app_id, &WORKFLOW_TEST_PLAN, &app_name],
         )
@@ -3985,7 +4110,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
                 .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -4034,7 +4159,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
                 .set_payload(
                     serde_json::to_vec(&workflow_request_for_run(&app_id, "run_claim_lost"))
                         .unwrap(),
@@ -4084,7 +4209,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await;
 
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
                 .set_payload(
                     serde_json::to_vec(&workflow_request(&app_id))
                     .unwrap(),
@@ -4134,7 +4259,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
             let payload = serde_json::to_vec(&workflow_request(&app_id)).unwrap();
             let req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
                 .set_payload(payload.clone())
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -4205,7 +4330,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await;
 
             let first_req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
                 .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
             let first_resp = test::call_service(&app, first_req).await;
@@ -4214,7 +4339,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             assert_workflow_ack(&first_body, "run_test");
             reclaim_workflow_run(&db_url, &app_id, "run_test").await;
             let second_req = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
                 .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
             let second_resp = test::call_service(&app, second_req).await;
@@ -4265,7 +4390,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 let run_id = format!("run_test_pinned_{idx}");
                 seed_unclaimed_workflow_run(&db_url, &app_id, &run_id, "Checkout", deploy_hash).await;
                 let req = test::TestRequest::post()
-                    .uri(&format!("/workflow-advance-unsigned/{app_id}"))
+                    .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
                     .set_payload(serde_json::to_vec(&workflow_request_for_run(&app_id, &run_id)).unwrap())
                     .to_request();
                 let resp = test::call_service(&app, req).await;
@@ -4312,7 +4437,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             )
             .await;
             let req_a = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
                 .set_payload(
                     serde_json::to_vec(&workflow_request_for_run(&app_id, "run_test_lru_a"))
                     .unwrap(),
@@ -4331,7 +4456,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             )
             .await;
             let req_b = test::TestRequest::post()
-                .uri(&format!("/workflow-advance-unsigned/{app_id}"))
+                .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
                 .set_payload(
                     serde_json::to_vec(&workflow_request_for_run(&app_id, "run_test_lru_b"))
                     .unwrap(),

@@ -11,6 +11,7 @@ pub mod __private {
     pub use toml;
 }
 
+pub mod app_derivation;
 pub mod app_id;
 pub mod auth;
 pub mod auth_provider;

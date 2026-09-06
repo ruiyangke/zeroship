@@ -734,7 +734,6 @@ echo "=== DW-07 deploy ==="
   --name "$APP_NAME" \
   --zship "$WORK/workflow.zship" > "$WORK/provision.out"
 APP_ID="$(awk -F= '/^app_id=/{print $2}' "$WORK/provision.out")"
-API_KEY="$(awk -F= '/^api_key=/{print $2}' "$WORK/provision.out")"
 [ -n "$APP_ID" ] || { fail "dev-provision did not return app_id"; cat "$WORK/provision.out"; exit 1; }
 
 docker exec -i "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null <<SQL
@@ -767,7 +766,7 @@ DEPLOY_ID="$(docker exec "$PG_ADMIN_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -A
 pass "deployed app $APP_ID and pinned deploy $DEPLOY_ID"
 
 sleep 3
-curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" -H "X-Api-Key: $API_KEY" >/dev/null || {
+curl -sf "http://localhost:$ZEROSHIP_GATEWAY_PORT/apps/$APP_NAME/" >/dev/null || {
   fail "warmup request failed"
   tail -80 "$WORK/worker.log" || true
   tail -80 "$WORK/gate.log" || true

@@ -19,7 +19,7 @@ use zeroship_core::config::Operational;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 use zeroship_auth::store::users;
-use zeroship_core::auth::hash_api_key;
+use zeroship_core::auth::hash_client_secret;
 use zeroship_authz::wrapper_revocation;
 
 use common::{dedicated_test_db, location, pkce_challenge_s256, pkce_verifier, test_auth_config};
@@ -1214,18 +1214,17 @@ async fn seed_user_client(
     .await
     .expect("seed free plan");
     db.execute(
-        "INSERT INTO zeroship.apps (id, name, api_key) \
-         VALUES ($1, $2, $3)",
+        "INSERT INTO zeroship.apps (id, name) \
+         VALUES ($1, $2)",
         &[
             &app_id,
-            &app_name,
-            &format!("api-{app_id}"),
+            &app_name
         ],
     )
     .await
     .expect("seed app");
     let scope_vec = scopes.iter().map(|scope| (*scope).to_string()).collect::<Vec<_>>();
-    let secret_hash = hash_api_key(REFRESH_CLIENT_SECRET);
+    let secret_hash = hash_client_secret(REFRESH_CLIENT_SECRET);
     db.execute(
         "INSERT INTO zeroship.oauth_clients \
             (client_id, client_name, redirect_uris, scopes, skip_consent, \

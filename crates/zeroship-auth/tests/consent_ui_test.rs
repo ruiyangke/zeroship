@@ -141,8 +141,8 @@ impl ConsentTestApp {
             .await
             .expect("insert consent test project");
             pg.execute(
-                "INSERT INTO zeroship.apps (id, name, plan_id, api_key, project_id) \
-                 VALUES ($1, $2, $3, 'test-key', $4)",
+                "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
+                 VALUES ($1, $2, $3, $4)",
                 &[&seed_app_id, &app_name, &plan_id, &project_id],
             )
             .await
