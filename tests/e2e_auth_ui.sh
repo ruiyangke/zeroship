@@ -21,6 +21,13 @@ CONSENT_REDIRECT_URI="http://127.0.0.1:9999/native-cb"
 # shellcheck source=tests/lib/measurement_integrity.sh
 . "$ROOT/tests/lib/measurement_integrity.sh"
 
+# `zeroship.apps.project_id` is NOT NULL: an app belongs to a project and a
+# project to an organization. This fixture writes its app row by hand, so it
+# has to write those two as well.
+# shellcheck source=tests/lib/organization_fixture.sh
+. "$ROOT/tests/lib/organization_fixture.sh"
+organization_fixture_ids "auth-ui-consent"
+
 WORK=""
 AUTH_PID=""
 PSQL="${PSQL:-}"
@@ -201,9 +208,17 @@ run_psql -d "$TEST_DB" -v ON_ERROR_STOP=1 \
         (id, name, runtime_limits_json, assignable_by_creator) \
       VALUES ('free', 'Free', '{}'::jsonb, TRUE) \
       ON CONFLICT (id) DO NOTHING;" \
-  -c "INSERT INTO zeroship.apps (id, name, api_key) \
+  -c "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+      VALUES ('${ZS_FIXTURE_ORGANIZATION_ID}', 'auth-ui-consent', \
+              'Auth UI consent fixture', 'auth-ui@zeroship.test') \
+      ON CONFLICT (id) DO NOTHING;" \
+  -c "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
+      VALUES ('${ZS_FIXTURE_PROJECT_ID}', '${ZS_FIXTURE_ORGANIZATION_ID}', \
+              'default', 'Default') \
+      ON CONFLICT (id) DO NOTHING;" \
+  -c "INSERT INTO zeroship.apps (id, name, api_key, project_id) \
       VALUES ('${CONSENT_APP_ID}', 'auth UI consent fixture', \
-              'auth-ui-consent-key');" \
+              'auth-ui-consent-key', '${ZS_FIXTURE_PROJECT_ID}');" \
   -c "INSERT INTO zeroship.oauth_clients \
         (client_id, client_name, redirect_uris, scopes, skip_consent) \
       VALUES ('${CONSENT_CLIENT_ID}', 'Auth UI consent fixture', \

@@ -54,7 +54,7 @@ async fn app_audit_is_append_only_but_retention_sweep_deletes_old() {
     .expect("seed owner user");
     let name = format!("ret-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let app = registry
-        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
         .await
         .expect("create_app")
         .id;

@@ -80,21 +80,33 @@ impl Fixture {
             )
             .await;
         if let Some(app_id) = self.app_id {
-            let app_id_text = app_id.to_string();
-            let _ = self
-                .state
-                .control_pg
-                .execute(
-                    "DELETE FROM zeroship.app_members WHERE app_id = $1 OR user_id = $2",
-                    &[&app_id_text, &self.user_id],
-                )
-                .await;
+            // The app must go BEFORE the project that owns it: `apps.project_id`
+            // is ON DELETE RESTRICT, so deleting the organization first would be
+            // refused and leave the whole fixture behind.
             let _ = self
                 .state
                 .control_pg
                 .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&app_id])
                 .await;
         }
+        let _ = self
+            .state
+            .control_pg
+            .execute(
+                "DELETE FROM zeroship.projects p \
+                  USING zeroship.organizations o \
+                  WHERE o.id = p.organization_id AND o.personal_owner_id = $1",
+                &[&self.user_id],
+            )
+            .await;
+        let _ = self
+            .state
+            .control_pg
+            .execute(
+                "DELETE FROM zeroship.organizations WHERE personal_owner_id = $1",
+                &[&self.user_id],
+            )
+            .await;
         let _ = self
             .state
             .control_pg
@@ -229,24 +241,39 @@ async fn create_app_owned_by(fx: &mut Fixture, label: &str, owner_id: Uuid) -> U
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
         .await
         .expect("create app");
     fx.app_id = Some(record.id);
     record.id
 }
 
-async fn grant_app_member(state: &AppState, app_id: Uuid, user_id: Uuid, role: &str) {
-    // app_members.app_id is a uuid column — bind the Uuid directly (binding a
-    // String panics with WrongType against the uuid column).
+/// Seat `user_id` in the ORGANIZATION that owns `app_id`'s project.
+///
+/// There is no app-level membership any more: authority over an app is the
+/// organization seat, narrowed by the app's project. So "make this principal a
+/// viewer of that app" is now "seat them in that app's organization", reached
+/// through the one path an app has - `apps.project_id ->
+/// projects.organization_id`.
+///
+/// The row is written directly rather than through
+/// `zeroship_control::organizations::add_member`, because these cases seat a
+/// role on behalf of no particular actor. The rank fence is tested where it
+/// lives, in `organizations_test.rs`, not here.
+async fn grant_organization_member(state: &AppState, app_id: Uuid, user_id: Uuid, role: &str) {
     state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+             SELECT p.organization_id, $2, $3 \
+               FROM zeroship.apps a \
+               JOIN zeroship.projects p ON p.id = a.project_id \
+              WHERE a.id = $1 \
+             ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
             &[&app_id, &user_id, &role],
         )
         .await
-        .expect("insert app member");
+        .expect("seat organization member");
 }
 
 macro_rules! init_control {
@@ -1201,6 +1228,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
             &format!("otherapp-{}", Uuid::new_v4().simple()),
             &zeroship_control::plan_catalog::free_plan_id(),
             &other_owner,
+            None,
         )
         .await
         .expect("create other-owner app");
@@ -1211,7 +1239,14 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
     let create_name = format!("mine-{}", Uuid::new_v4().simple());
     let req = test::TestRequest::post()
         .uri("/api/apps")
-        .header("authorization", bearer_for_scope(user_id, "apps:write apps:read"))
+        // `organization:create` rides along because an app now needs a place to
+        // live: with no project named, the handler mints the caller's personal
+        // organization first. A token narrowed to `apps:write` alone can create
+        // an app INSIDE a project it already reaches, and nothing else.
+        .header(
+            "authorization",
+            bearer_for_scope(user_id, "apps:write apps:read organization:create"),
+        )
         .set_json(&json!({ "name": create_name }))
         .to_request();
     let resp = test::call_service(&app, req).await;
@@ -1256,7 +1291,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
         .state
         .control_pg
         .execute(
-            "DELETE FROM zeroship.app_members WHERE app_id = $1",
+            "DELETE FROM zeroship.organization_members om USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id WHERE om.organization_id = p.organization_id AND a.id = $1",
             &[&other_app.id],
         )
         .await;
@@ -1580,15 +1615,17 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
         "an unseeded principal's first CLI token was narrowed to nothing"
     );
 
+    // Read the CEILING rather than transcribing it: a transcribed list is a
+    // second definition, and the one thing this assertion must not do is pass
+    // because somebody updated the copy instead of the constant.
     assert_eq!(
         stored_grants(&fx.state, user_id).await,
-        vec![
-            "apps:archive",
-            "apps:deploy",
-            "apps:read",
-            "apps:write",
-            "secrets:read",
-        ],
+        {
+            let mut expected: Vec<&str> =
+                zeroship_core::device_grant::PLATFORM_CLI_ISSUABLE_SCOPES.to_vec();
+            expected.sort_unstable();
+            expected
+        },
         "the default CLI grants were not materialized, so an operator has no row to delete"
     );
     assert_eq!(
@@ -1678,7 +1715,7 @@ async fn viewer_role_cannot_use_granted_apps_archive_scope() {
     // must NOT be the creator for this "viewer-only" scenario.)
     let owner_id = Uuid::new_v4();
     let app_id = create_app_owned_by(&mut fx, "user-subset", owner_id).await;
-    grant_app_member(&fx.state, app_id, user_id, "viewer").await;
+    grant_organization_member(&fx.state, app_id, user_id, "viewer").await;
     // The principal is entitled to `apps:archive` and the token carries it, so
     // the 403 below is the ROLE check refusing a viewer. Seed the grant
     // explicitly so the assertion does not depend on just-in-time default CLI

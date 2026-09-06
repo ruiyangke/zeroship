@@ -87,7 +87,7 @@ async fn provision_asserts_native_db_scopes_routes_and_redirect_sync() {
     let owner_id = seed_owner(&raw, "oac-owner").await;
     let app_name = format!("zs-1d-{}", Uuid::new_v4().simple());
     let app = registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
         .await
         .expect("create app");
     let app_id = app.id;
@@ -361,6 +361,7 @@ async fn appstate_origin_scheme_provisions_urls_then_archive_preserves_oauth_row
             &app_name,
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
+            None,
         )
         .await
         .expect("create app");

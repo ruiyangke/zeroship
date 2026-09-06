@@ -140,8 +140,16 @@ async fn run(cli: Cli) -> Result<zeroship_core::types::AppRecord, DevProvisionEr
     let owner_id = cli.owner.unwrap_or_else(default_owner_id);
     ensure_owner_exists(&cli.db, &owner_id).await?;
 
+    // `None` puts the app in the dev owner's personal organization's default
+    // project, minted on demand - the same zero-config landing place a
+    // creator's first deploy gets. A dev-only shortcut here would be a second
+    // answer to "where does an un-placed app go", and the rows it produced
+    // would not be the rows production reads.
     let plan_id = free_plan_id();
-    let app = match registry.create_app(&cli.name, &plan_id, &owner_id).await {
+    let app = match registry
+        .create_app(&cli.name, &plan_id, &owner_id, None)
+        .await
+    {
         Ok(app) => app,
         Err(RegistryError::AlreadyExists(_)) => registry
             .get_app_by_name(&cli.name)

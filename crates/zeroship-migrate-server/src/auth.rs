@@ -104,8 +104,13 @@ impl ControlPlaneAuthenticator {
             Err(err) => return Err(AuthError::Infrastructure(err.to_string())),
         }
 
-        if requires_app_owner(required_action)
-            && !caller_owns_app(&self.control_pg, seed.principal_id, app_id).await?
+        if requires_organization_owner(required_action)
+            && !caller_holds_organization_ownership(
+                &self.control_pg,
+                seed.principal_id,
+                app_id,
+            )
+            .await?
         {
             return Err(AuthError::Forbidden);
         }
@@ -178,19 +183,49 @@ struct VerifiedSeed {
     mfa_age_seconds: Option<u32>,
 }
 
-async fn caller_owns_app(pg: &Client, principal_id: Uuid, app_id: Uuid) -> Result<bool, AuthError> {
+/// The second fence, beside Cedar: applying a migration needs OWNER authority
+/// in the organization that owns the app's project.
+///
+/// # It reads the ladder rather than the word "owner"
+///
+/// `zeroship.app_members` had exactly one privileged role and this asked for it
+/// by name. Organization authority is two integers on a closed ladder, so the
+/// question is now "does the caller's rank reach the owner rank" - which stays
+/// true if a migration ever moves `owner` up or down, and which a hardcoded
+/// number would not.
+///
+/// # There is no per-project narrowing here, and that is deliberate
+///
+/// A migration rewrites the app's schema, which is the least reversible thing
+/// the platform lets a creator do. Narrowing would let a project seat reach it;
+/// requiring the ORGANIZATION rank means only somebody who answers for the whole
+/// organization can. Read this as the ceiling being organization-level on
+/// purpose, not as an oversight about `project_members`.
+async fn caller_holds_organization_ownership(
+    pg: &Client,
+    principal_id: Uuid,
+    app_id: Uuid,
+) -> Result<bool, AuthError> {
     let rows = pg
         .query(
-            "SELECT 1 FROM zeroship.app_members \
-             WHERE app_id = $1 AND user_id = $2 AND role = 'owner'",
+            "SELECT 1 \
+               FROM zeroship.apps a \
+               JOIN zeroship.projects p ON p.id = a.project_id \
+               JOIN zeroship.organization_members m \
+                    ON m.organization_id = p.organization_id AND m.user_id = $2 \
+               JOIN zeroship.organization_roles r ON r.role = m.role \
+              WHERE a.id = $1 \
+                AND r.rank >= (SELECT rank FROM zeroship.organization_roles WHERE role = 'owner')",
             &[&app_id, &principal_id],
         )
         .await
-        .map_err(|err| AuthError::Infrastructure(format!("app ownership lookup failed: {err}")))?;
+        .map_err(|err| {
+            AuthError::Infrastructure(format!("organization ownership lookup failed: {err}"))
+        })?;
     Ok(!rows.is_empty())
 }
 
-fn requires_app_owner(action: Action) -> bool {
+fn requires_organization_owner(action: Action) -> bool {
     !matches!(action, Action::AppsApproveMigration)
 }
 

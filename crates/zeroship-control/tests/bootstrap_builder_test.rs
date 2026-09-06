@@ -132,7 +132,6 @@ async fn bootstrap_inserts_builder_client_first_run() {
             "secrets:read",
             "secrets:write",
             "deployments:read",
-            "deployments:rollback",
         ]
     );
     assert!(rows[0].get::<_, bool>("skip_consent"));

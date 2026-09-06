@@ -90,6 +90,7 @@ async fn archive_preserves_finalized_invoice_history() {
             &format!("archive-inv-{}", Uuid::new_v4().simple()),
             &plan_id,
             &owner,
+            None,
         )
         .await
         .expect("create app");
@@ -159,6 +160,7 @@ async fn archive_preserves_custom_metric_and_usage() {
             &format!("archive-use-{}", Uuid::new_v4().simple()),
             &plan_id,
             &owner,
+            None,
         )
         .await
         .expect("create app");
@@ -207,7 +209,7 @@ async fn archive_with_plan_change_history_is_idempotent_and_reversible() {
     let (owner, plan_id) = seed_owner_and_plan(&client).await;
     let name = format!("archive-pce-{}", Uuid::new_v4().simple());
     let app = registry
-        .create_app(&name, &plan_id, &owner)
+        .create_app(&name, &plan_id, &owner, None)
         .await
         .expect("create app");
     let event_id = format!("pce_{}", Uuid::new_v4().simple());
@@ -254,7 +256,7 @@ async fn archive_with_plan_change_history_is_idempotent_and_reversible() {
     );
     assert!(
         matches!(
-            registry.create_app(&name, &plan_id, &owner).await,
+            registry.create_app(&name, &plan_id, &owner, None).await,
             Err(RegistryError::AlreadyExists(_))
         ),
         "an archived app retains its routable name"
@@ -288,6 +290,7 @@ async fn archived_app_can_stage_a_deploy_without_becoming_routable() {
             &format!("archive-stage-{}", Uuid::new_v4().simple()),
             &plan_id,
             &owner,
+            None,
         )
         .await
         .expect("create app");
@@ -375,6 +378,7 @@ async fn restore_requires_a_staged_deploy_matching_the_latest_applied_schema() {
             &format!("archive-schema-{}", Uuid::new_v4().simple()),
             &plan_id,
             &owner,
+            None,
         )
         .await
         .expect("create app");

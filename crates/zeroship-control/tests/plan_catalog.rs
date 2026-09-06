@@ -136,7 +136,7 @@ async fn create_app_with_unknown_plan_id_is_rejected() {
     let name = format!("ct-a1-{}", Uuid::new_v4().simple());
     let bogus = "enterprise"; // free-text id that is NOT a catalog plan
     let err = registry
-        .create_app(&name, bogus, &owner)
+        .create_app(&name, bogus, &owner, None)
         .await
         .expect_err("unknown plan must be rejected");
     match err {
@@ -169,7 +169,7 @@ async fn create_app_with_real_plan_id_succeeds() {
 
     let name = format!("ok-{}", Uuid::new_v4().simple());
     let record = registry
-        .create_app(&name, &plan.id, &owner)
+        .create_app(&name, &plan.id, &owner, None)
         .await
         .expect("create with a real plan succeeds");
     assert_eq!(record.plan_id, plan.id);
@@ -195,7 +195,7 @@ async fn set_plan_to_archived_plan_is_rejected() {
 
     let name = format!("setplan-{}", Uuid::new_v4().simple());
     let app = registry
-        .create_app(&name, &live.id, &owner)
+        .create_app(&name, &live.id, &owner, None)
         .await
         .expect("create on live plan");
 
@@ -245,7 +245,7 @@ async fn get_versions_derives_limits_from_catalog_not_hardcode() {
 
     let name = format!("limits-{}", Uuid::new_v4().simple());
     let app = registry
-        .create_app(&name, &plan.id, &owner)
+        .create_app(&name, &plan.id, &owner, None)
         .await
         .expect("create");
 
@@ -287,7 +287,7 @@ async fn get_versions_projects_app_egress_rules_with_plan_caps() {
 
     let name = format!("egress-rule-{}", Uuid::new_v4().simple());
     let app = registry
-        .create_app(&name, &plan.id, &owner)
+        .create_app(&name, &plan.id, &owner, None)
         .await
         .expect("create");
 
@@ -484,7 +484,7 @@ async fn set_plan_guards_archive_in_one_statement() {
     let live = seed_plan(&catalog, "live-8").await;
     let target = seed_plan(&catalog, "target-8").await;
     let name = format!("toctou-{}", Uuid::new_v4().simple());
-    let app = registry.create_app(&name, &live.id, &owner).await.expect("create");
+    let app = registry.create_app(&name, &live.id, &owner, None).await.expect("create");
 
     // Archive the target, then attempt to assign it: the guarded UPDATE matches
     // 0 rows and the disambiguation returns InvalidInput("archived").
@@ -613,7 +613,7 @@ async fn charge_from_real_aggregates_uses_weight_table() {
     // Plan: base 500c, 1M CU included, FX = 1 cent/CU (explicit).
     let plan = seed_plan(&catalog, "charge").await;
     let name = format!("charge-{}", Uuid::new_v4().simple());
-    let app = registry.create_app(&name, &plan.id, &owner).await.expect("create");
+    let app = registry.create_app(&name, &plan.id, &owner, None).await.expect("create");
 
     // Write 1.5M requests into the current period, then read it back through the
     // real Metering aggregate reader.

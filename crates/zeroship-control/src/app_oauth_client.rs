@@ -861,12 +861,18 @@ mod tests {
     fn validate_rejects_every_closed_platform_scope() {
         // Every member of the closed vocabulary must be rejected — pins the
         // disjointness invariant against the full set, not just one example.
-        for id in [
-            "apps:read", "apps:write", "apps:deploy", "apps:archive", "env:read", "env:write",
-            "secrets:read", "secrets:write", "billing:read", "billing:write", "team:read",
-            "team:write", "account:read", "account:write", "deployments:read",
-            "deployments:rollback",
-        ] {
+        //
+        // The set is READ FROM `Scope::ALL` rather than transcribed. A copied
+        // list is a census, and a census goes stale silently: a scope added
+        // after this test was written would be absent here, and the arm would
+        // keep printing exactly what a complete run prints.
+        assert!(
+            Scope::ALL.len() >= 2,
+            "ruled on {} scopes - the vocabulary cannot have shrunk to this",
+            Scope::ALL.len()
+        );
+        for scope in Scope::ALL {
+            let id = scope.as_str();
             let scopes = vec![ScopeDef { id: id.to_string(), label: "x".into(), description: None }];
             assert!(
                 validate_app_scopes(&scopes).is_err(),

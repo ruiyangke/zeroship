@@ -299,6 +299,286 @@ test("ControlError ignores a non-string trace_id", async () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// organizations / projects
+// ---------------------------------------------------------------------------
+
+const ORG = "org_0123456789abcdefghijkl";
+const PRJ = "prj_0123456789abcdefghijkl";
+const IVT = "ivt_0123456789abcdefghijkl";
+const USER = "11111111-2222-3333-4444-555555555555";
+
+/**
+ * The whole organization/project surface, stated as the request each method
+ * makes. Method, path and body are the three things a mistake here sends
+ * somewhere else, and every path segment carries a typed id or a UUID - the
+ * server parses those before authorization runs, so a slug sent here is a 400
+ * rather than a silent denial.
+ *
+ * Written as one table rather than one test per method so that the coverage
+ * assertion below can rule on the SET: a method added to the client and
+ * forgotten here fails, instead of being tested by nothing while every named
+ * case still passes.
+ */
+const ORGANIZATION_CALLS: Array<{
+  name: string;
+  send: (client: ReturnType<typeof createControlClient>) => Promise<unknown>;
+  method: string;
+  path: string;
+  body?: unknown;
+}> = [
+  {
+    name: "organizations.list",
+    send: (c) => c.organizations.list(),
+    method: "GET",
+    path: "/api/organizations",
+  },
+  {
+    name: "organizations.create",
+    send: (c) => c.organizations.create({ name: "Acme" }),
+    method: "POST",
+    path: "/api/organizations",
+    body: { name: "Acme" },
+  },
+  {
+    name: "organizations.get",
+    send: (c) => c.organizations.get(ORG),
+    method: "GET",
+    path: `/api/organizations/${ORG}`,
+  },
+  {
+    name: "organizations.update",
+    send: (c) => c.organizations.update(ORG, { name: "Acme Inc" }),
+    method: "PATCH",
+    path: `/api/organizations/${ORG}`,
+    body: { name: "Acme Inc" },
+  },
+  {
+    name: "organizations.members",
+    send: (c) => c.organizations.members(ORG),
+    method: "GET",
+    path: `/api/organizations/${ORG}/members`,
+  },
+  {
+    name: "organizations.addMember",
+    send: (c) => c.organizations.addMember(ORG, { user_id: USER, role: "developer" }),
+    method: "POST",
+    path: `/api/organizations/${ORG}/members`,
+    body: { user_id: USER, role: "developer" },
+  },
+  {
+    name: "organizations.changeMemberRole",
+    send: (c) => c.organizations.changeMemberRole(ORG, USER, { role: "admin" }),
+    method: "PATCH",
+    path: `/api/organizations/${ORG}/members/${USER}`,
+    body: { role: "admin" },
+  },
+  {
+    name: "organizations.removeMember",
+    send: (c) => c.organizations.removeMember(ORG, USER),
+    method: "DELETE",
+    path: `/api/organizations/${ORG}/members/${USER}`,
+  },
+  {
+    name: "organizations.transferOwnership",
+    send: (c) => c.organizations.transferOwnership(ORG, { user_id: USER }),
+    method: "POST",
+    path: `/api/organizations/${ORG}/transfer`,
+    body: { user_id: USER },
+  },
+  {
+    name: "organizations.invites",
+    send: (c) => c.organizations.invites(ORG),
+    method: "GET",
+    path: `/api/organizations/${ORG}/invites`,
+  },
+  {
+    name: "organizations.createInvite",
+    send: (c) =>
+      c.organizations.createInvite(ORG, { email: "a@b.test", role: "viewer" }),
+    method: "POST",
+    path: `/api/organizations/${ORG}/invites`,
+    body: { email: "a@b.test", role: "viewer" },
+  },
+  {
+    name: "organizations.revokeInvite",
+    send: (c) => c.organizations.revokeInvite(ORG, IVT),
+    method: "DELETE",
+    path: `/api/organizations/${ORG}/invites/${IVT}`,
+  },
+  {
+    name: "organizations.redeemInvite",
+    send: (c) => c.organizations.redeemInvite({ token: "tok" }),
+    method: "POST",
+    path: "/api/organization-invites/redeem",
+    body: { token: "tok" },
+  },
+  {
+    name: "organizations.projects",
+    send: (c) => c.organizations.projects(ORG),
+    method: "GET",
+    path: `/api/organizations/${ORG}/projects`,
+  },
+  {
+    name: "organizations.createProject",
+    send: (c) => c.organizations.createProject(ORG, { name: "Checkout" }),
+    method: "POST",
+    path: `/api/organizations/${ORG}/projects`,
+    body: { name: "Checkout" },
+  },
+  {
+    name: "projects.get",
+    send: (c) => c.projects.get(PRJ),
+    method: "GET",
+    path: `/api/projects/${PRJ}`,
+  },
+  {
+    name: "projects.members",
+    send: (c) => c.projects.members(PRJ),
+    method: "GET",
+    path: `/api/projects/${PRJ}/members`,
+  },
+  {
+    name: "projects.addMember",
+    send: (c) => c.projects.addMember(PRJ, { user_id: USER, role: "developer" }),
+    method: "POST",
+    path: `/api/projects/${PRJ}/members`,
+    body: { user_id: USER, role: "developer" },
+  },
+  {
+    name: "projects.removeMember",
+    send: (c) => c.projects.removeMember(PRJ, USER),
+    method: "DELETE",
+    path: `/api/projects/${PRJ}/members/${USER}`,
+  },
+];
+
+test("every organization and project method targets its route", async () => {
+  for (const call of ORGANIZATION_CALLS) {
+    const seen: Request[] = [];
+    const client = createControlClient({
+      baseUrl: "http://control.local",
+      fetch: async (input, init) => {
+        seen.push(new Request(input, init));
+        // 204 is what every void-returning route answers with, and JSON for
+        // the rest; both parse through the same `request`.
+        return call.method === "DELETE" || call.path.endsWith("/transfer")
+          ? new Response(null, { status: 204 })
+          : json({ id: ORG });
+      },
+    });
+
+    await call.send(client);
+
+    assert.equal(seen.length, 1, `${call.name} made ${seen.length} requests`);
+    const request = seen[0]!;
+    assert.equal(request.method, call.method, `${call.name} method`);
+    assert.equal(new URL(request.url).pathname, call.path, `${call.name} path`);
+    if (call.body === undefined) {
+      assert.equal(request.body, null, `${call.name} sent a body`);
+    } else {
+      assert.deepEqual(await request.json(), call.body, `${call.name} body`);
+    }
+  }
+});
+
+test("the routing table covers every organization and project method", () => {
+  // Without this, a method added to the client and forgotten above is exercised
+  // by nothing while the table still passes - a check that examined the wrong
+  // set and a clean result print the same thing.
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async () => json({}),
+  });
+  const declared = [
+    ...Object.keys(client.organizations).map((key) => `organizations.${key}`),
+    ...Object.keys(client.projects).map((key) => `projects.${key}`),
+  ].sort();
+  const covered = ORGANIZATION_CALLS.map((call) => call.name).sort();
+  assert.deepEqual(covered, declared);
+});
+
+test("a listed invite carries no token and the created one does", async () => {
+  // The token exists exactly once, in the create response. A client that does
+  // not surface it there has lost the invitation, so this pins both halves:
+  // create returns it, and the list shape has no field to hold it.
+  const invite = {
+    id: IVT,
+    organization_id: ORG,
+    email: "a@b.test",
+    role: "viewer",
+    issued_at: "2026-09-06T00:00:00Z",
+    expires_at: "2026-09-13T00:00:00Z",
+    consumed_at: null,
+  };
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      return request.method === "POST"
+        ? json({ invite, token: "one-time-secret" }, 201)
+        : json({ invites: [invite] });
+    },
+  });
+
+  const created = await client.organizations.createInvite(ORG, {
+    email: "a@b.test",
+    role: "viewer",
+  });
+  assert.equal(created.token, "one-time-secret");
+
+  const listed = await client.organizations.invites(ORG);
+  assert.deepEqual(Object.keys(listed.invites[0]!).sort(), Object.keys(invite).sort());
+  assert.ok(!("token" in listed.invites[0]!));
+});
+
+test("organization ids are percent-encoded into the path", async () => {
+  // Nothing should ever send one of these - the server parses the typed id
+  // first - which is exactly why the encoding has to hold: the day a caller
+  // passes a slug or a path fragment, the URL must still be the URL they named
+  // rather than a different route.
+  const seen: string[] = [];
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async (input, init) => {
+      seen.push(new Request(input, init).url);
+      return new Response(null, { status: 204 });
+    },
+  });
+
+  await client.organizations.removeMember("org/../apps", "user?x#y");
+
+  assert.equal(
+    seen[0],
+    "http://control.local/api/organizations/org%2F..%2Fapps/members/user%3Fx%23y",
+  );
+});
+
+test("a refused membership change surfaces the server's reason", async () => {
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async () =>
+      json(
+        {
+          error: "insufficient authority",
+          detail:
+            "granting \"owner\" needs a strictly higher rank and at least equal billing authority",
+        },
+        403,
+      ),
+  });
+
+  await assert.rejects(
+    client.organizations.addMember(ORG, { user_id: USER, role: "owner" }),
+    (error: unknown) => {
+      assert.ok(error instanceof ControlError);
+      assert.equal(error.status, 403);
+      assert.equal(error.message, "insufficient authority");
+      return true;
+    },
+  );
+});
+
 function json(
   body: unknown,
   status = 200,

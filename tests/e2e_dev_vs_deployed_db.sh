@@ -90,6 +90,12 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# `zeroship.app_members` is deleted; an app reaches the people who answer for it
+# through its project's organization. `seat_app_owner_sql` emits that join AND a
+# check that raises when it matches nothing - an INSERT ... SELECT over no rows
+# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
+# surfaces far from here.
+source "$ROOT/tests/lib/organization_fixture.sh"
 APP="$ROOT/examples/db-todos"
 ZSHIP="$APP/dist/app.zship"
 WORK="$(mktemp -d -t zs-devdeploy-db-XXXXXX)"
@@ -878,7 +884,7 @@ SCOPE="apps:read apps:write apps:deploy billing:read billing:write"
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$CREATOR','devdeploy-db-$CREATOR@zeroship.test'::citext,'DevDeploy DB',NOW());
-INSERT INTO zeroship.app_members (app_id,user_id,role) VALUES ('$APP_ID','$CREATOR','owner') ON CONFLICT (app_id,user_id) DO UPDATE SET role='owner';
+$(seat_app_owner_sql "$APP_ID" "$CREATOR")
 SQL
 ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
 [ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer" || { fail "bearer mint"; exit 1; }

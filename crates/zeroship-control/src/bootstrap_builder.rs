@@ -31,7 +31,6 @@ const BUILDER_SCOPES: &[Scope] = &[
     Scope::SecretsRead,
     Scope::SecretsWrite,
     Scope::DeploymentsRead,
-    Scope::DeploymentsRollback,
 ];
 
 #[derive(Clone, Debug)]

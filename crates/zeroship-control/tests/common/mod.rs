@@ -296,6 +296,71 @@ pub async fn ensure_builtin_plans(registry: &Registry) {
         .expect("seed built-in plans for test");
 }
 
+/// The project a fixture's `zeroship.apps` row belongs to.
+///
+/// `apps.project_id` is NOT NULL against a RESTRICT foreign key, so a fixture
+/// that INSERTs an app row directly has to name one. This mints (or finds) the
+/// owner's PERSONAL organization and its default project through the same
+/// production function the zero-config create path uses, so a fixture cannot
+/// seed a shape production would never write - which is the failure mode a
+/// hand-rolled `INSERT INTO zeroship.organizations` fixture would have.
+///
+/// Idempotent per owner: call it once per fixture app or once per owner, the
+/// answer is the same project.
+///
+/// A test that needs the app to sit somewhere ELSE - a shared organization, or
+/// a project the owner reaches only through a `project_members` row - must NOT
+/// use this. It should build that shape explicitly, because the placement is
+/// then the thing under test.
+#[allow(dead_code)]
+pub async fn personal_project_for(registry: &Registry, owner: Uuid) -> String {
+    zeroship_control::organizations::ensure_personal_project(registry, owner)
+        .await
+        .unwrap_or_else(|err| panic!("provision personal project for {owner}: {err:?}"))
+        .as_str()
+        .to_string()
+}
+
+/// A project for a fixture app whose OWNERSHIP is not what the test is about.
+///
+/// Seeds an organization with NO members and a project inside it. An app placed
+/// here is owner-less by construction, which is the right shape for two kinds of
+/// test and the wrong shape for a third:
+///
+/// - RIGHT for a test about something other than authority (workflow admission,
+///   OAuth client provisioning): the app needs a home, not a creator.
+/// - RIGHT for the orphaned-app reaper, whose whole subject IS an owner-less
+///   app - it is the state the reaper exists to find.
+/// - WRONG for anything asserting an authorization outcome. Use
+///   [`personal_project_for`] and seat members through
+///   `zeroship_control::organizations`, so the fixture goes through the same
+///   rank fence production does.
+///
+/// It writes the rows directly rather than through the module, because
+/// `create_organization` necessarily seats its caller as owner and an
+/// owner-less organization is precisely what this is for.
+#[allow(dead_code)]
+pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
+    let organization_id = zeroship_core::typed_id::generate("org");
+    let project_id = zeroship_core::typed_id::generate("prj");
+    let slug = format!("fixture-{}", Uuid::new_v4().simple());
+    pg.execute(
+        "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+         VALUES ($1, $2, 'Fixture Organization', 'fixture@zeroship.test')",
+        &[&organization_id, &slug],
+    )
+    .await
+    .expect("seed fixture organization");
+    pg.execute(
+        "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
+         VALUES ($1, $2, 'default', 'Default')",
+        &[&project_id, &organization_id],
+    )
+    .await
+    .expect("seed fixture project");
+    project_id
+}
+
 #[allow(dead_code)]
 pub async fn seed_usage_total(
     pg: &compio_postgres::Client,

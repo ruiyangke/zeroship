@@ -246,8 +246,12 @@ pub struct RouteEntry {
     #[serde(default)]
     pub spend_state: SpendState,
     /// Current payment/account-enforcement state for the app's CREATOR (billing
-    /// G2), JOINed from `zeroship.creator_billing_status` via the app's
-    /// `app_members(role='owner')` row by the control-plane registry. The
+    /// G2), JOINed from `zeroship.creator_billing_status` by the control-plane
+    /// registry via the app's one path to a human: its project, that project's
+    /// organization, and that organization's owner. An organization may hold
+    /// several owners, so the registry collapses them and the MOST RESTRICTIVE
+    /// state wins - adding an owner whose card is good can never un-suspend an
+    /// app. The
     /// gateway gates on this BEFORE spend (an outer AND): `Suspended` → 402
     /// `ACCOUNT_SUSPENDED`; `PastDue`/`Active` pass (PastDue is the grace
     /// window). `#[serde(default)]` ⇒ `Active` for an app whose creator has no

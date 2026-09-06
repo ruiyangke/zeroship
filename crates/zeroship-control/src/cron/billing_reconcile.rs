@@ -7,11 +7,20 @@
 //! (`cus_…`), then create + finalize the invoice. Infra-cost billing ONLY — no
 //! Connect, no `application_fee` (those belong to the separate app-payment flow).
 //!
-//! Creator→app resolution: there is NO `apps.creator_id` column; ownership
-//! flows through `zeroship.app_members WHERE role='owner'`. We
-//! group owned apps by `user_id` ⇒ that user_id is the `creator_id`. Apps with
-//! no owner row (e.g. the system console) have no
-//! billable creator and are SKIPPED.
+//! Creator→app resolution: there is NO `apps.creator_id` column and no
+//! `apps.organization_id` either. Ownership flows along the one path an app has
+//! to a human - `apps.project_id -> projects.organization_id -> the
+//! organization's owners` - collapsed to the longest-standing owner by
+//! [`crate::organizations::app_owner_map`]. We group owned apps by `user_id` ⇒
+//! that user_id is the `creator_id`. An app whose organization has no owner
+//! (e.g. the system console) has no billable creator and is SKIPPED.
+//!
+//! THE ORGANIZATION IS THE BILLING SUBJECT IN THE DESIGN, AND IT IS NOT ONE
+//! HERE YET. This module still bills a USER, because moving the subscription to
+//! `organizations.plan_id` is a separate change with its own Stripe-side
+//! consumers. What has changed is only how that user is found. Read
+//! `creator_id` as "the owner who answers for this organization's bill", not as
+//! "the entity the platform bills".
 //!
 //! Idempotency — three airtight layers under at-least-once delivery (mapped onto
 //! the provider-agnostic invoice model: `invoices` + `invoice_lines` +
@@ -462,20 +471,24 @@ async fn sweep<S: StripeApi>(
     _stripe: &S,
     period_start: i64,
 ) -> Result<usize, RegistryError> {
-    // Creator→apps via ownership (H1): app_members WHERE role='owner'. Apps with
-    // no owner row are absent here and thus skipped. One owner per app by
-    // construction (0031), but we group defensively in case of fan-out.
+    // Creator→apps via ownership (H1): the app's project, its organization, and
+    // that organization's longest-standing owner
+    // (`crate::organizations::app_owner_map`). An app whose organization has no
+    // owner is absent here and thus skipped.
     let conn = state.registry.conn().await?;
-    // DISTINCT ON (app_id): an app must map to AT MOST ONE owner row so a
-    // (data-integrity) fan-out of multiple role='owner' rows can never bill the
-    // same app twice (MINOR-9). One owner per app by construction (0031); the
-    // DISTINCT ON makes that defensive rather than load-bearing.
+    // The collapse to one row per app is NO LONGER DEFENSIVE. Under
+    // `app_members` a second owner row was a data-integrity fault; an
+    // ORGANIZATION legitimately holds several owners, so without the collapse
+    // an ordinary two-owner organization would bill each of its apps twice.
+    // The rule lives in one function so the sweep, the spend notifier and the
+    // per-creator slice cannot pick different owners for one app.
     let owner_rows = conn
         .query(
-            "SELECT DISTINCT ON (m.app_id) m.user_id AS creator_id, m.app_id \
-             FROM zeroship.app_members m \
-             WHERE m.role = 'owner' \
-             ORDER BY m.app_id, m.user_id",
+            &format!(
+                "SELECT owner_map.user_id AS creator_id, owner_map.app_id FROM {owner_map} \
+                 owner_map",
+                owner_map = crate::organizations::app_owner_map(),
+            ),
             &[],
         )
         .await?;
@@ -764,13 +777,16 @@ pub async fn reconcile_pass_for_meter(
     let mut subjects: HashMap<(Uuid, Uuid), SubjectPeriodTotals> = HashMap::new();
     let local_rows = conn
         .query(
-            "SELECT DISTINCT ON (u.app_id) m.user_id AS creator_id, u.app_id, \
-                    SUM(u.total)::bigint AS witness_quantity \
-             FROM zeroship.usage_aggregates u \
-             JOIN zeroship.app_members m ON m.app_id = u.app_id AND m.role = 'owner' \
-             WHERE u.period = $1::date AND u.metric = $2 \
-             GROUP BY u.app_id, m.user_id \
-             ORDER BY u.app_id, m.user_id",
+            &format!(
+                "SELECT owner_map.user_id AS creator_id, u.app_id, \
+                        SUM(u.total)::bigint AS witness_quantity \
+                 FROM zeroship.usage_aggregates u \
+                 JOIN {owner_map} owner_map ON owner_map.app_id = u.app_id \
+                 WHERE u.period = $1::date AND u.metric = $2 \
+                 GROUP BY u.app_id, owner_map.user_id \
+                 ORDER BY u.app_id",
+                owner_map = crate::organizations::app_owner_map(),
+            ),
             &[&period_date, &meter_name],
         )
         .await?;
@@ -2054,11 +2070,14 @@ fn build_invoice_item_enrichment(
     (description, metadata)
 }
 
-/// Resolve the apps owned by ONE creator (the per-creator slice of the same
-/// `app_members WHERE role='owner'` ownership query `sweep` runs fleet-wide).
+/// Resolve the apps owned by ONE creator: the per-creator slice of the SAME
+/// [`crate::organizations::app_owner_map`] the fleet-wide `sweep` reads.
+///
 /// Used by [`crate::metering::provider::native::NativeProvider::invoice`] so the
-/// per-creator provider verb bills exactly the creator's owned apps. Behaviour
-/// matches `sweep`'s grouping (DISTINCT ON keeps an app at most once).
+/// per-creator provider verb bills exactly the creator's owned apps. It matches
+/// `sweep`'s grouping by construction rather than by agreement - it is the same
+/// subquery with a `WHERE` on the owner - so an app can no longer be in one
+/// answer and out of the other.
 #[allow(clippy::future_not_send)]
 pub(crate) async fn owned_app_ids(
     state: &AppState,
@@ -2075,10 +2094,11 @@ pub(crate) async fn owned_app_ids_for_registry(
     let conn = registry.conn().await?;
     let rows = conn
         .query(
-            "SELECT DISTINCT ON (m.app_id) m.app_id \
-             FROM zeroship.app_members m \
-             WHERE m.role = 'owner' AND m.user_id = $1 \
-             ORDER BY m.app_id, m.user_id",
+            &format!(
+                "SELECT owner_map.app_id FROM {owner_map} owner_map \
+                  WHERE owner_map.user_id = $1 ORDER BY owner_map.app_id",
+                owner_map = crate::organizations::app_owner_map(),
+            ),
             &[creator_id],
         )
         .await?;

@@ -222,16 +222,41 @@ impl Registry {
 
     // -- App CRUD -----------------------------------------------------------
 
-    /// Create a new application owned by `owner_id`. Returns the created
+    /// Create a new application inside `project_id`. Returns the created
     /// `AppRecord`.
     ///
-    /// The `zeroship.apps` row and the creator's `zeroship.app_members(owner)`
-    /// row are written in ONE transaction, so the principal is bound to their
-    /// own app atomically — the app is never visible (or routable) without its
-    /// owner membership. That owner row is what authorizes the creator for every
-    /// per-app action through the `app_owner` Cedar policy; without it a
-    /// default-role creator would be locked out of the app they just created
-    /// (finding F3 / C1 over-restriction).
+    /// # No membership row is written here any more
+    ///
+    /// `zeroship.app_members` is deleted. An app carries no membership of its
+    /// own: authority over it is the caller's ORGANIZATION seat, narrowed by
+    /// the project the app sits in, and `apps.project_id -> projects.
+    /// organization_id` is the only path between the two. Writing an app-level
+    /// row would be writing a second answer to a question that now has one.
+    ///
+    /// # The rank predicate is in the INSERT
+    ///
+    /// The caller's authority is not taken on trust from the handler that
+    /// already ran Cedar. The INSERT's `SELECT` joins the caller's live
+    /// organization seat and, when they are below admin, their project seat -
+    /// and applies the SAME narrowing rule
+    /// [`zeroship_authz::effective_project_rank`] applies. A caller removed
+    /// from the project between the Cedar call and this statement inserts
+    /// nothing, and zero rows IS the refusal.
+    ///
+    /// # `project_id: None` is the zero-config path, not a default
+    ///
+    /// `None` means "wherever this owner's own apps go": their personal
+    /// organization's default project, minted on demand by
+    /// [`crate::organizations::ensure_personal_project`]. A creator's first
+    /// deploy must stay ONE step, and the alternative - make them create an
+    /// organization, then a project, then an app - is three round trips of
+    /// decisions they have no information to make yet.
+    ///
+    /// It is an `Option` rather than a separate method so there is exactly one
+    /// implementation of that rule, reached by production and by every fixture.
+    /// The HTTP handler still resolves the project explicitly before it calls
+    /// this, because the Cedar gate has to NAME the project it is authorizing
+    /// against - so on that path this argument is always `Some`.
     ///
     /// Runs on a DEDICATED owned connection so the RAII `transaction()` guard
     /// owns it and an aborted txn never poisons a shared handle.
@@ -240,6 +265,7 @@ impl Registry {
         name: &str,
         plan_id: &str,
         owner_id: &Uuid,
+        project_id: Option<&str>,
     ) -> Result<AppRecord, RegistryError> {
         if name.is_empty()
             || name.len() > 64
@@ -262,6 +288,25 @@ impl Registry {
             ));
         }
 
+        // Resolve the landing place BEFORE the app transaction opens.
+        // `ensure_personal_project` runs its own transaction and is idempotent,
+        // so holding one open across it would be a nested lock for no gain.
+        let personal_project;
+        let project_id = match project_id {
+            Some(project_id) => project_id,
+            None => {
+                personal_project =
+                    crate::organizations::ensure_personal_project(self, *owner_id)
+                        .await
+                        .map_err(|err| {
+                            RegistryError::Database(format!(
+                                "provision personal project for {owner_id}: {err:?}"
+                            ))
+                        })?;
+                personal_project.as_str()
+            }
+        };
+
         let api_key = Uuid::new_v4().to_string();
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
@@ -269,31 +314,48 @@ impl Registry {
         // Server-side plan gate: the plan must exist and be
         // unarchived in the catalog. Checked inside the txn before the INSERT
         // so an invalid plan returns a clean InvalidInput AND never leaves a
-        // half-written app/owner pair (the FK would also reject it, but this
-        // gives a typed error and an archived-plan check the FK can't).
+        // half-written app row (the FK would also reject it, but this gives a
+        // typed error and an archived-plan check the FK can't).
         Self::validate_plan(&tx, plan_id).await?;
 
         let rows = tx
             .query(
-                "INSERT INTO zeroship.apps (name, plan_id, api_key) \
-                 VALUES ($1, $2, $3) \
-                 RETURNING id, name, plan_id, deploy_hash, api_key, \
-                           archived_at::text, created_at::text, updated_at::text",
-                &[&name, &plan_id, &api_key],
+                &format!(
+                    "INSERT INTO zeroship.apps (name, plan_id, api_key, project_id) \
+                     SELECT $1, $2, $3, p.id \
+                       FROM zeroship.projects p \
+                       LEFT JOIN zeroship.organization_members m \
+                              ON m.organization_id = p.organization_id AND m.user_id = $5 \
+                       LEFT JOIN zeroship.organization_roles organization_role \
+                              ON organization_role.role = m.role \
+                       LEFT JOIN zeroship.project_members pm \
+                              ON pm.project_id = p.id AND pm.user_id = $5 \
+                       LEFT JOIN zeroship.organization_roles project_role \
+                              ON project_role.role = pm.role \
+                      WHERE p.id = $4 AND {effective} >= {developer} \
+                     RETURNING id, name, plan_id, deploy_hash, api_key, \
+                               archived_at::text, created_at::text, updated_at::text",
+                    effective = crate::organizations::effective_project_rank_sql(
+                        "organization_role.rank",
+                        "project_role.rank",
+                        &crate::organizations::ladder_rank_of(crate::organizations::ROLE_ADMIN),
+                    ),
+                    developer = crate::organizations::ladder_rank_of(crate::organizations::ROLE_DEVELOPER),
+                ),
+                &[&name, &plan_id, &api_key, &project_id, owner_id],
             )
             .await?;
-        let record = rows
-            .first()
-            .map(row_to_record)
-            .ok_or_else(|| RegistryError::Database("insert ok but read-back failed".into()))?;
-
-        // Bind the creating principal as the app's owner in the SAME txn.
-        // `app_members.app_id` is a `uuid` column — bind the `Uuid` directly.
-        tx.execute(
-            "INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ($1, $2, 'owner')",
-            &[&record.id, owner_id],
-        )
-        .await?;
+        let record = rows.first().map(row_to_record).ok_or_else(|| {
+            // Zero rows means the project does not exist or the caller's
+            // narrowed rank does not reach `developer` there. Both are the
+            // caller's problem, so neither may be reported as a database
+            // failure - `RegistryError::Database` would surface as a 500 and
+            // send them looking at the platform instead of at their seat.
+            RegistryError::Conflict(format!(
+                "cannot create an app in project {project_id}: it does not exist, or you do not \
+                 hold developer authority there"
+            ))
+        })?;
 
         tx.commit().await?;
         Ok(record)
@@ -327,12 +389,20 @@ impl Registry {
         Ok(rows.first().map(row_to_record))
     }
 
-    /// List the apps `owner_id` is a member of (any role), ordered by name.
+    /// List the apps `owner_id` can reach, ordered by name.
     ///
     /// This is the creator-facing listing: the `/api/apps` GET grants every
     /// creator `apps:read` on the platform surface (self-service policy), but
-    /// the data it returns MUST be scoped to apps the principal actually belongs
-    /// to — otherwise the broadened gate becomes a fleet-wide cross-tenant read.
+    /// the data it returns MUST be scoped to apps the principal actually
+    /// reaches — otherwise the broadened gate becomes a fleet-wide cross-tenant
+    /// read.
+    ///
+    /// "Reaches" is now the narrowing rule rather than a membership row: the
+    /// caller's organization seat, ceilinged by their project seat when they
+    /// are below admin, must clear `viewer`. An organization developer with no
+    /// row on a project sees none of that project's apps — which is the whole
+    /// point of per-project narrowing, and is a behaviour the old app-level
+    /// membership could not express.
     pub async fn list_apps_for_owner(
         &self,
         owner_id: &Uuid,
@@ -340,12 +410,28 @@ impl Registry {
         let conn = self.conn().await?;
         let rows = conn
             .query(
-                "SELECT a.id, a.name, a.plan_id, a.deploy_hash, a.api_key, \
-                        a.archived_at::text, a.created_at::text, a.updated_at::text \
-                 FROM zeroship.apps a \
-                 JOIN zeroship.app_members m ON m.app_id = a.id \
-                 WHERE m.user_id = $1 \
-                 ORDER BY a.name",
+                &format!(
+                    "SELECT a.id, a.name, a.plan_id, a.deploy_hash, a.api_key, \
+                            a.archived_at::text, a.created_at::text, a.updated_at::text \
+                     FROM zeroship.apps a \
+                     JOIN zeroship.projects p ON p.id = a.project_id \
+                     LEFT JOIN zeroship.organization_members m \
+                            ON m.organization_id = p.organization_id AND m.user_id = $1 \
+                     LEFT JOIN zeroship.organization_roles organization_role \
+                            ON organization_role.role = m.role \
+                     LEFT JOIN zeroship.project_members pm \
+                            ON pm.project_id = p.id AND pm.user_id = $1 \
+                     LEFT JOIN zeroship.organization_roles project_role \
+                            ON project_role.role = pm.role \
+                     WHERE {effective} >= {viewer} \
+                     ORDER BY a.name",
+                    effective = crate::organizations::effective_project_rank_sql(
+                        "organization_role.rank",
+                        "project_role.rank",
+                        &crate::organizations::ladder_rank_of(crate::organizations::ROLE_ADMIN),
+                    ),
+                    viewer = crate::organizations::ladder_rank_of(crate::organizations::ROLE_VIEWER),
+                ),
                 &[owner_id],
             )
             .await?;
@@ -817,22 +903,22 @@ impl Registry {
         //
         // LEFT JOIN zeroship.creator_billing_status: payment/account state
         // is CREATOR-keyed (one row per creator), so we surface it per-app via
-        // the app's `app_members(role='owner')` row — the same owner mapping the
-        // billing reconciler uses (there is no apps.creator_id column). An app
-        // whose creator has no status row (free/cardless, the common case) yields
-        // NULL ⇒ default `AccountState::Active`. The gateway gates dispatch on
-        // this pulled value as an OUTER AND with spend (Suspended → 402 before
-        // spend is even consulted).
+        // the app's ORGANIZATION owners, reached through its project — the same
+        // mapping the billing reconciler uses (there is no apps.creator_id
+        // column and no apps.organization_id either; the project is the only
+        // path). An app whose organization has no status row (free/cardless,
+        // the common case) yields NULL ⇒ default `AccountState::Active`. The
+        // gateway gates dispatch on this pulled value as an OUTER AND with
+        // spend (Suspended → 402 before spend is even consulted).
         //
-        // FAN-OUT SAFETY: normal app creation writes one owner, but the schema
-        // permits multiple `role='owner'` rows. Such a fan-out would make
-        // a plain join non-deterministic — `map.insert(id, …)` is last-write-wins,
-        // so `account_state` (and every other RouteEntry field) could flip
-        // arbitrarily, even un-suspending a suspended creator. `acct` collapses the
-        // owner→status join to AT MOST ONE row per app via `DISTINCT ON (app_id)`,
-        // and ORDERs so the MOST-RESTRICTIVE state wins on a fan-out (suspended >
-        // past_due > active > none) — a fan-out can never relax enforcement. This
-        // mirrors the reconciler's `DISTINCT ON (app_id)` owner collapse.
+        // FAN-OUT SAFETY, AND IT MATTERS MORE NOW THAN IT DID. Under
+        // `app_members` a fan-out needed a second owner row on one app, which
+        // ordinary creation never wrote. An ORGANIZATION legitimately holds
+        // several owners, so the fan-out is now the expected case rather than
+        // the anomalous one. `acct` collapses it to AT MOST ONE row per app and
+        // ORDERs so the MOST-RESTRICTIVE state wins (suspended > past_due >
+        // active > none) — enforcement can never be relaxed by adding an owner
+        // whose card is good. This mirrors the reconciler's collapse.
         let rows = conn
             .query(
                 "SELECT a.id, a.name, a.plan_id, a.deploy_hash, \
@@ -843,17 +929,19 @@ impl Registry {
                  LEFT JOIN zeroship.app_oauth_clients c ON c.app_id = a.id \
                  LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
                  LEFT JOIN LATERAL ( \
-                     SELECT DISTINCT ON (m.app_id) cbs.state AS account_state \
-                     FROM zeroship.app_members m \
+                     SELECT cbs.state AS account_state \
+                     FROM zeroship.projects p \
+                     JOIN zeroship.organization_members m \
+                          ON m.organization_id = p.organization_id AND m.role = 'owner' \
                      LEFT JOIN zeroship.creator_billing_status cbs ON cbs.creator_id = m.user_id \
-                     WHERE m.app_id = a.id AND m.role = 'owner' \
-                     ORDER BY m.app_id, \
-                              CASE cbs.state \
+                     WHERE p.id = a.project_id \
+                     ORDER BY CASE cbs.state \
                                   WHEN 'suspended' THEN 0 \
                                   WHEN 'past_due'  THEN 1 \
                                   WHEN 'active'    THEN 2 \
                                   ELSE 3 END, \
                               m.user_id \
+                     LIMIT 1 \
                  ) acct ON TRUE \
                  WHERE a.archived_at IS NULL",
                 &[],

@@ -115,18 +115,48 @@ impl ConsentTestApp {
             .expect("insert consent test plan");
 
             let app_name = format!("consent-app-{}", seed_app_id.simple());
+            // Every app belongs to a project, and the project belongs to an
+            // organization: that chain is the app's only path to a human, so a
+            // fixture app needs both rows before it can exist at all. The
+            // organization is left member-less here and the seat is written
+            // separately below, because this fixture's whole subject is which
+            // ROLE the consenting user holds.
+            let organization_id = zeroship_core::typed_id::generate("org");
+            let project_id = zeroship_core::typed_id::generate("prj");
             pg.execute(
-                "INSERT INTO zeroship.apps (id, name, plan_id, api_key) \
-                 VALUES ($1, $2, $3, 'test-key')",
-                &[&seed_app_id, &app_name, &plan_id],
+                "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+                 VALUES ($1, $2, 'Consent Test Organization', 'consent@zeroship.test')",
+                &[
+                    &organization_id,
+                    &format!("consent-{}", seed_app_id.simple()),
+                ],
+            )
+            .await
+            .expect("insert consent test organization");
+            pg.execute(
+                "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
+                 VALUES ($1, $2, 'default', 'Default')",
+                &[&project_id, &organization_id],
+            )
+            .await
+            .expect("insert consent test project");
+            pg.execute(
+                "INSERT INTO zeroship.apps (id, name, plan_id, api_key, project_id) \
+                 VALUES ($1, $2, $3, 'test-key', $4)",
+                &[&seed_app_id, &app_name, &plan_id, &project_id],
             )
             .await
             .expect("insert zeroship.apps");
         }
         if let Some(role) = app_role {
             pg.execute(
-                "INSERT INTO zeroship.app_members (app_id, user_id, role, added_by) \
-                 VALUES ($1, $2, $3, $2)",
+                // App-level membership is gone: authority over an app is the
+                // ORGANIZATION seat behind its project.
+                "INSERT INTO zeroship.organization_members \
+                     (organization_id, user_id, role, added_by) \
+                 SELECT p.organization_id, $2, $3, $2 FROM zeroship.apps a \
+                   JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
+                 ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
                 &[&app_id, &user_id, &role],
             )
             .await
@@ -192,7 +222,10 @@ impl ConsentTestApp {
         let _ = self
             .pg
             .execute(
-                "DELETE FROM zeroship.app_members WHERE app_id = $1 AND user_id = $2",
+                "DELETE FROM zeroship.organization_members om \
+                 USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
+                 WHERE om.organization_id = p.organization_id AND a.id = $1 \
+                   AND om.user_id = $2",
                 &[&self.app_id, &self.user_id],
             )
             .await;

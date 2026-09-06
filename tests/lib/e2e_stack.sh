@@ -329,8 +329,12 @@ stack_up() {
 #                   and refuses a missing or lifecycle-disabled row. There is no
 #                   platform role to seed any more: the staff roles and their
 #                   universal-allow policy are deleted, so this principal's
-#                   authority is the self-service baseline plus the `app_members`
-#                   rows it gains by CREATING the apps the harness then drives.
+#                   authority is the self-service baseline plus the ORGANIZATION
+#                   seat it gains by CREATING the apps the harness then drives:
+#                   the first `POST /api/apps` on a principal with no
+#                   organization mints their personal one and seats them as its
+#                   owner, and every app they then create lives in its default
+#                   project.
 #   the token       an `at+jwt` from the harness OP. `scope` becomes the token
 #                   policy, which is intersected with the owner's authority, so
 #                   this is the ceiling on what the harness may do.
@@ -338,7 +342,7 @@ stack_up() {
 # The scope list is one scope string per Cedar action. Billing is NOT in it; a
 # harness that needs `billing:*` passes its own list as the first argument.
 mint_creator_bearer() {
-  local scope="${1:-apps:read apps:write apps:deploy apps:archive deployments:read deployments:rollback env:read env:write secrets:read secrets:write}"
+  local scope="${1:-apps:read apps:write apps:deploy apps:archive deployments:read env:read env:write secrets:read secrets:write}"
   local owner pg_database
   pg_database="${E2E_PG_DATABASE:-zeroship}"
   owner="$(node -e 'console.log(require("crypto").randomUUID())')"

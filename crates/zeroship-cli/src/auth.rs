@@ -531,7 +531,13 @@ fn base64_url_decode(value: &str) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
-fn credentials_path() -> Result<PathBuf, String> {
+/// The directory this CLI keeps its per-user state in.
+///
+/// One definition, because a second resolution of the same three environment
+/// names would be a second answer: `zeroship logout` deleting a file from one
+/// directory while `zeroship organization use` wrote its selection into another
+/// is the failure this being shared prevents.
+pub(crate) fn state_dir() -> Result<PathBuf, String> {
     // `var_os`, not `var`: these are filesystem paths, where a non-Unicode
     // value is legitimate on Unix and dropping it would silently relocate the
     // credentials file. `XDG_CONFIG_HOME` and `HOME` are external contracts;
@@ -555,7 +561,11 @@ fn credentials_path() -> Result<PathBuf, String> {
     } else {
         return Err("HOME is not set".into());
     };
-    Ok(base.join("zeroship").join("token.json"))
+    Ok(base.join("zeroship"))
+}
+
+fn credentials_path() -> Result<PathBuf, String> {
+    Ok(state_dir()?.join("token.json"))
 }
 
 #[cfg(unix)]
@@ -719,9 +729,16 @@ mod tests {
         // Spelled out rather than rebuilt from the same constant the code
         // reads, so this measures the request instead of restating it. A
         // missing entry here is a `zeroship deploy` that 403s on one verb.
+        //
+        // The two organization scopes are the ZERO-CONFIG FIRST DEPLOY: an app
+        // belongs to a project and a project to an organization, so a token
+        // carrying `apps:write` alone can no longer name a place to put the
+        // app. Their absence here is a first deploy that is refused, which is
+        // exactly the failure this literal exists to make visible.
         assert_eq!(
             requested_scope(),
-            "apps:archive apps:deploy apps:read apps:write secrets:read offline_access"
+            "apps:archive apps:deploy apps:read apps:write organization:create \
+             organization:read secrets:read offline_access"
         );
     }
 

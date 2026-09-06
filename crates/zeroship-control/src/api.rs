@@ -10,7 +10,7 @@ use ntex::web;
 use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
 use uuid::Uuid;
-use zeroship_authz::{Action, EntityCache, Resource};
+use zeroship_authz::{Action, Resource};
 
 use crate::app_oauth_client;
 use crate::authz_guard::AuthzGuard;
@@ -27,6 +27,16 @@ pub struct CreateAppBody {
     pub name: String,
     #[serde(default = "default_plan")]
     pub plan_id: String,
+    /// The project the app belongs to. `apps.project_id` is NOT NULL, so every
+    /// app has one.
+    ///
+    /// OPTIONAL, and the absence is the zero-config path rather than a default
+    /// buried in a constant: with no project named, control mints (or finds)
+    /// the caller's PERSONAL organization and its default project and puts the
+    /// app there. A creator's first deploy therefore stays one call, and a
+    /// creator who has outgrown that names a project explicitly.
+    #[serde(default)]
+    pub project_id: Option<String>,
 }
 
 /// Default plan for a `create_app` with no explicit `plan_id`: the built-in
@@ -422,20 +432,77 @@ pub async fn create_app(
     if let Some(resp) = crate::env_handlers::admin_rate_limit(&req, &state).await {
         return resp;
     }
-    if let Err(resp) = authz.require(Action::AppsWrite, Resource::Any, &state).await {
+    // WHICH PROJECT, AND THEREFORE WHICH RESOURCE THE GATE NAMES.
+    //
+    // An app is created INSIDE a project, so `apps:write` is authorized at
+    // `Resource::Project` and never at `Resource::Any` - the self-service
+    // baseline deliberately no longer carries `apps:write`, because a permit
+    // there would let any authenticated principal create an app with no
+    // organization behind it.
+    //
+    // With no project named, the caller gets their own. Minting a PERSONAL
+    // organization is `organization:create` at `Resource::Any`, which the
+    // self-service baseline does grant and which confers authority over nothing
+    // that already exists. The caller comes out of it as that organization's
+    // owner, so the project gate below then passes on its own merits rather
+    // than being skipped.
+    let project_id = match body.project_id.as_deref().map(str::trim) {
+        Some(project_id) if !project_id.is_empty() => {
+            match zeroship_core::project_id::ProjectId::parse(project_id) {
+                Ok(parsed) => parsed.as_str().to_string(),
+                Err(_) => {
+                    return web::HttpResponse::BadRequest()
+                        .json(&serde_json::json!({"error": "bad project_id"}))
+                }
+            }
+        }
+        _ => {
+            if let Err(resp) = authz
+                .require(Action::OrganizationCreate, Resource::Any, &state)
+                .await
+            {
+                return resp;
+            }
+            match crate::organizations::ensure_personal_project(
+                &state.registry,
+                authz.principal_id,
+            )
+            .await
+            {
+                Ok(project) => project.as_str().to_string(),
+                Err(e) => return e.into_response(),
+            }
+        }
+    };
+
+    if let Err(resp) = authz
+        .require(
+            Action::AppsWrite,
+            Resource::Project {
+                id: project_id.clone(),
+            },
+            &state,
+        )
+        .await
+    {
         return resp;
     }
     match state
         .registry
-        .create_app(&body.name, &body.plan_id, &authz.principal_id)
+        .create_app(
+            &body.name,
+            &body.plan_id,
+            &authz.principal_id,
+            Some(project_id.as_str()),
+        )
         .await
     {
         Ok(record) => {
-            // The create bound the principal as the app's owner. Invalidate the
-            // principal's entity-cache so the very next request (e.g. a deploy
-            // of the app just created) sees the fresh owner membership instead
-            // of a stale "no memberships" snapshot.
-            EntityCache::invalidate(authz.principal_id);
+            // No cache to invalidate: `zeroship_authz` re-derives the caller's
+            // rank from `organization_members` on every request, so the very
+            // next call (a deploy of the app just created, say) already sees
+            // whatever authority the create established.
+            //
             // Provision the per-app public PKCE OAuth client immediately after
             // creating the app. This is best-effort relative to the create
             // response: a DB hiccup here is logged + metered, and the next
@@ -987,8 +1054,12 @@ pub async fn set_plan(
     // wrapper with the static set, so no token could reach it either - and it
     // is gone with it. Operator-only tiers are now assigned by editing the
     // catalog row, not by holding a cross-tenant grant.
+    let billing_scope = match billing_resource(&state, uid).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     if let Err(resp) = authz
-        .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::BillingWrite, billing_scope, &state)
         .await
     {
         return resp;
@@ -1058,12 +1129,15 @@ pub async fn set_plan(
     }
     let owner: Option<Uuid> = match conn
         .query(
-            "SELECT user_id FROM zeroship.app_members WHERE app_id = $1 AND role = 'owner' LIMIT 1",
+            &format!(
+                "SELECT app_owner.user_id FROM zeroship.apps a {lateral} WHERE a.id = $1",
+                lateral = crate::organizations::app_owner_lateral(),
+            ),
             &[&uid],
         )
         .await
     {
-        Ok(rows) => rows.first().map(|r| r.get::<_, Uuid>("user_id")),
+        Ok(rows) => rows.first().and_then(|r| r.get::<_, Option<Uuid>>("user_id")),
         Err(e) => return error_response(RegistryError::Database(e.to_string())),
     };
     drop(conn);
@@ -1136,8 +1210,12 @@ pub async fn set_spend_limit(
                 .json(&serde_json::json!({"error": "invalid uuid"}))
         }
     };
+    let billing_scope = match billing_resource(&state, uid).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     if let Err(resp) = authz
-        .require(Action::BillingWrite, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::BillingWrite, billing_scope, &state)
         .await
     {
         return resp;
@@ -1200,8 +1278,12 @@ pub async fn get_spend_limit(
                 .json(&serde_json::json!({"error": "invalid uuid"}))
         }
     };
+    let billing_scope = match billing_resource(&state, uid).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     if let Err(resp) = authz
-        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::BillingRead, billing_scope, &state)
         .await
     {
         return resp;
@@ -1281,18 +1363,55 @@ pub struct CreatorScopeQuery {
     pub creator_id: Option<Uuid>,
 }
 
-/// Resolve the OWNING creator (`app_members.role='owner'`) for an app, or `None`
-/// when the app has no owner row (a system app) / does not exist.
+/// The resource a BILLING action on `app_id` must name.
+///
+/// # Why an app-scoped billing gate cannot work any more
+///
+/// The ORGANIZATION is the billing subject, so both statements in
+/// `deploy/policies/creator/organization_billing.cedar` are scoped
+/// `resource is Organization`. A `billing:read` or `billing:write` request
+/// carrying `Resource::App` matches NO band and is denied at every billing
+/// rank, silently, because Cedar records a non-match rather than an error.
+/// Passing the app here would therefore look like a working gate and refuse
+/// everyone.
+///
+/// Resolving the organization is also what makes the money axis mean something:
+/// `billing_rank` is organization-level by construction (there is no per-project
+/// or per-app invoice), so the only resource that can carry it is the one it is
+/// defined on.
+///
+/// A missing app is a 404, not a denial: the caller is told the app does not
+/// exist rather than that they may not read it, which is the honest answer for
+/// a resource that has no owner to be denied by.
+async fn billing_resource(state: &AppState, app_id: Uuid) -> Result<Resource, web::HttpResponse> {
+    match crate::organizations::organization_of_app(state.control_pg.as_ref(), app_id).await {
+        Ok(Some(id)) => Ok(Resource::Organization { id }),
+        Ok(None) => Err(web::HttpResponse::NotFound()
+            .json(&serde_json::json!({"error": "app not found"}))),
+        Err(e) => Err(e.into_response()),
+    }
+}
+
+/// Resolve the creator who answers for an app, or `None` when the app does not
+/// exist or its organization holds no owner.
+///
+/// The join is [`crate::organizations::app_owner_lateral`] - through the
+/// project to the organization, longest-standing owner first - and it is that
+/// one definition rather than a copy so this and the billing crons cannot come
+/// to disagree about who is billed.
 async fn owner_of_app(state: &AppState, app_id: &Uuid) -> Result<Option<Uuid>, RegistryError> {
     let conn = state.registry.conn().await?;
     let rows = conn
         .query(
-            "SELECT user_id FROM zeroship.app_members WHERE app_id = $1 AND role = 'owner' LIMIT 1",
+            &format!(
+                "SELECT app_owner.user_id FROM zeroship.apps a {lateral} WHERE a.id = $1",
+                lateral = crate::organizations::app_owner_lateral(),
+            ),
             &[app_id],
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
-    Ok(rows.first().map(|r| r.get::<_, Uuid>("user_id")))
+    Ok(rows.first().and_then(|r| r.get::<_, Option<Uuid>>("user_id")))
 }
 
 /// `GET /api/apps/{id}/invoices` — invoice history for the OWNER of app `{id}`,
@@ -1322,8 +1441,12 @@ pub async fn list_app_invoices(
                 .json(&serde_json::json!({"error": "invalid uuid"}))
         }
     };
+    let billing_scope = match billing_resource(&state, uid).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     if let Err(resp) = authz
-        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::BillingRead, billing_scope, &state)
         .await
     {
         return resp;
@@ -1407,8 +1530,12 @@ pub async fn get_projected_charge(
                 .json(&serde_json::json!({"error": "invalid uuid"}))
         }
     };
+    let billing_scope = match billing_resource(&state, uid).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     if let Err(resp) = authz
-        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::BillingRead, billing_scope, &state)
         .await
     {
         return resp;
@@ -1477,8 +1604,12 @@ pub async fn get_billing_status(
                 .json(&serde_json::json!({"error": "invalid uuid"}))
         }
     };
+    let billing_scope = match billing_resource(&state, uid).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     if let Err(resp) = authz
-        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::BillingRead, billing_scope, &state)
         .await
     {
         return resp;
@@ -1554,8 +1685,12 @@ pub async fn get_usage(
                 .json(&serde_json::json!({"error":"invalid uuid"}))
         }
     };
+    let billing_scope = match billing_resource(&state, uid).await {
+        Ok(scope) => scope,
+        Err(resp) => return resp,
+    };
     if let Err(resp) = authz
-        .require(Action::BillingRead, Resource::App { id: uid.to_string() }, &state)
+        .require(Action::BillingRead, billing_scope, &state)
         .await
     {
         return resp;

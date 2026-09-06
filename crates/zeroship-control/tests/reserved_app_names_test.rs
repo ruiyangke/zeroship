@@ -220,7 +220,9 @@ async fn cleanup_app(fx: &Fixture, id: Uuid) {
     let _ = fx
         .state
         .control_pg
-        .execute("DELETE FROM zeroship.app_members WHERE app_id = $1", &[&id])
+        .execute("DELETE FROM zeroship.organization_members om \
+                 USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id \
+                 WHERE om.organization_id = p.organization_id AND a.id = $1", &[&id])
         .await;
     let _ = fx
         .state
@@ -383,7 +385,7 @@ async fn registry_refuses_a_reserved_name_directly() {
     let err = fx
         .state
         .registry
-        .create_app("api", &plan, &creator.user_id)
+        .create_app("api", &plan, &creator.user_id, None)
         .await
         .expect_err("the registry itself must refuse a reserved name");
     assert!(
@@ -397,7 +399,7 @@ async fn registry_refuses_a_reserved_name_directly() {
     let record = fx
         .state
         .registry
-        .create_app(&ordinary, &plan, &creator.user_id)
+        .create_app(&ordinary, &plan, &creator.user_id, None)
         .await
         .expect("an unreserved name is created by the same call");
 

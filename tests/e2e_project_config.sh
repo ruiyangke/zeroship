@@ -62,6 +62,12 @@ fail() { FAIL=$((FAIL+1)); echo "  FAIL $1"; }
 jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# `zeroship.app_members` is deleted; an app reaches the people who answer for it
+# through its project's organization. `seat_app_owner_sql` emits that join AND a
+# check that raises when it matches nothing - an INSERT ... SELECT over no rows
+# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
+# surfaces far from here.
+source "$ROOT/tests/lib/organization_fixture.sh"
 
 cleanup() {
   for p in "${PIDS[@]:-}"; do kill "$p" 2>/dev/null || true; done
@@ -187,7 +193,7 @@ echo "=== mint an admin platform bearer and create its app ==="
 # The scope string is the deleted permission_tokens policy's action list,
 # one-for-one: it becomes the token policy control intersects with the
 # owner's own authority.
-SCOPE="apps:read apps:write apps:deploy apps:archive deployments:read deployments:rollback env:read env:write secrets:read secrets:write"
+SCOPE="apps:read apps:write apps:deploy apps:archive deployments:read env:read env:write secrets:read secrets:write"
 OWNER="$(node -e 'console.log(require("crypto").randomUUID())')"
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
@@ -201,8 +207,7 @@ APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
 APP_ID="$(echo "$APP_JSON" | jget '.id')"
 [ -n "$APP_ID" ] && pass "created app projcfg-e2e ($APP_ID)" || { fail "create app: $APP_JSON"; exit 1; }
 docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$APP_ID', '$OWNER', 'owner')
-ON CONFLICT (app_id, user_id) DO UPDATE SET role = 'owner';
+$(seat_app_owner_sql "$APP_ID" "$OWNER")
 SQL
 
 # ---------------------------------------------------------------------------

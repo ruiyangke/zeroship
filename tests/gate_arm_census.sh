@@ -107,7 +107,13 @@ usage() {
 # adding a gate moves one number and not two - the second of two pins is the
 # one that gets forgotten, and a forgotten pin is the stale census both scripts
 # warn about.
-GATE_FILE_FLOOR=43
+#
+# IT DRIFTED AGAIN, A FIFTH TIME, AND THE ORGANIZATION WORK IS WHERE IT WAS
+# NOTICED: five gates landed across the schema, authority and client phases and
+# none of them moved this line, so the pin sat five behind a glob it is supposed
+# to pin exactly. Re-measure it, do not reason about it:
+#   find tests -maxdepth 1 -name '*_gate.sh' | wc -l
+GATE_FILE_FLOOR=48
 
 DIR=""
 RUN=()

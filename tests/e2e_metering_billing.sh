@@ -71,6 +71,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# `zeroship.app_members` is deleted; an app reaches the people who answer for it
+# through its project's organization. `seat_app_owner_sql` emits that join AND a
+# check that raises when it matches nothing - an INSERT ... SELECT over no rows
+# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
+# surfaces far from here.
+source "$ROOT/tests/lib/organization_fixture.sh"
 # shellcheck source=tests/lib/usage_producer.sh
 source "$ROOT/tests/lib/usage_producer.sh"
 STRICT="${STRICT:-0}"
@@ -462,7 +468,7 @@ echo "=== Stage 2: mint admin platform bearer (offline) + create creator + deplo
 # The scope string is the deleted permission_tokens policy's action list,
 # one-for-one: it becomes the token policy control intersects with the
 # owner's own authority.
-SCOPE="apps:read apps:write apps:deploy apps:archive deployments:read deployments:rollback env:read env:write secrets:read secrets:write billing:read billing:write"
+SCOPE="apps:read apps:write apps:deploy apps:archive deployments:read env:read env:write secrets:read secrets:write billing:read billing:write"
 # The bearer's subject is ALSO the creator that owns the deployed app (so the
 # billing reconciler groups the app under this creator).
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
@@ -479,12 +485,12 @@ APP_JSON="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: applicatio
 APP="$(echo "$APP_JSON" | jget '.id')"
 [ -n "$APP" ] && pass "created app metering-probe → $APP (plan=$PLAN_ID)" || { fail "create-app failed: $APP_JSON"; exit 1; }
 
-# The bearer's principal owns the app (app_members role='owner') so the billing
-# reconciler groups it under this creator. control's create-app may already do
-# this for the principal; make it explicit + idempotent.
+# The bearer's principal owns the app's ORGANIZATION, so the billing reconciler
+# groups it under this creator. control's create-app already mints the
+# principal's personal organization and seats them; this makes it explicit and
+# idempotent, and fails loudly if the app somehow has no project.
 psql_exec >/dev/null 2>&1 <<SQL
-INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$APP', '$CREATOR', 'owner')
-ON CONFLICT (app_id, user_id) DO UPDATE SET role='owner';
+$(seat_app_owner_sql "$APP" "$CREATOR")
 SQL
 
 # DATABASE CREATE, THEN MIGRATIONS, THEN DEPLOY. Control refuses a deploy whose
@@ -832,12 +838,17 @@ if(m===0){y-=1;m=11;}else{m-=1;}
 process.stdout.write(String(Math.floor(Date.UTC(y,m,1,0,0,0)/1000)));
 ' "$NOW_UNIX")"
 
+# The app needs a project, and the project an organization: that chain is the
+# only path from an app to the party it is billed to. Set the ids here, in this
+# shell, because the emitter below runs in a subshell.
+organization_fixture_ids "closed-period-$CLOSED_CREATOR"
 if psql_exec >/dev/null <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CLOSED_CREATOR', 'e2e-closed-$CLOSED_CREATOR@zeroship.test'::citext, 'Closed-Period Creator', NOW());
-INSERT INTO zeroship.apps (id, name, plan_id, api_key)
-VALUES ('$CLOSED_APP', 'closed-period-app-$CLOSED_APP', '$PLAN_ID', '$CLOSED_APP');
-INSERT INTO zeroship.app_members (app_id, user_id, role) VALUES ('$CLOSED_APP', '$CLOSED_CREATOR', 'owner');
+$(organization_fixture_sql "closed-period-$CLOSED_CREATOR" "e2e-closed-$CLOSED_CREATOR@zeroship.test")
+INSERT INTO zeroship.apps (id, name, plan_id, api_key, project_id)
+VALUES ('$CLOSED_APP', 'closed-period-app-$CLOSED_APP', '$PLAN_ID', '$CLOSED_APP', '$ZS_FIXTURE_PROJECT_ID');
+$(seat_app_owner_sql "$CLOSED_APP" "$CLOSED_CREATOR")
 -- The creator must have a saved platform Stripe Customer or the reconciler skips
 -- them. The customer lives in billing_customer_refs (provider='stripe'); the
 -- creator_billing identity row backs the notify-cron FK.

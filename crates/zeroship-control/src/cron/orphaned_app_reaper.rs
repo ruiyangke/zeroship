@@ -2,11 +2,20 @@
 //! reaper left behind.
 //!
 //! When the auth service hard-deletes an erased user (`auth::cron::
-//! account_reaper`), the `zeroship.app_members` owner link cascade-deletes — but
-//! `zeroship.apps` has NO FK to `zeroship.users`, so the user's apps are left
-//! OWNER-LESS. Auth has no call path to control and no access to the blob store,
-//! so the orphaned app would otherwise keep serving. This control-side cron
-//! applies the same archive marker as the creator-facing lifecycle route.
+//! account_reaper`), their `zeroship.organization_members` rows cascade-delete
+//! — but `zeroship.apps` has NO FK to `zeroship.users`, so an app whose
+//! organization is left with no owner is OWNER-LESS. Auth has no call path to
+//! control and no access to the blob store, so the orphaned app would otherwise
+//! keep serving. This control-side cron applies the same archive marker as the
+//! creator-facing lifecycle route.
+//!
+//! WHAT "OWNER-LESS" NOW MEANS, AND WHY THE REAPER GOT NARROWER. Under
+//! `app_members` an erased user's apps were orphaned one for one. An app now
+//! reaches its owner through `apps.project_id -> projects.organization_id`, so
+//! erasing ONE owner of a shared organization orphans nothing: the remaining
+//! owners still answer for every app in it. Only an organization that loses its
+//! LAST owner produces reap candidates - which for a personal organization is
+//! the same event as before, and for a shared one is a much rarer one.
 //! The erased owner cannot authorize a restore, so these rows and their names
 //! remain retained until a future operator-owned database lifecycle handles
 //! them. This reaper does not silently substitute privileged teardown.
@@ -17,16 +26,19 @@
 //!
 //! ## The platform-console-safety guarantee
 //!
-//! A system-owned app can exist in `zeroship.apps` with NO
-//! `app_members` owner row — the console is **owner-less by construction**. A
-//! naive "delete owner-less apps" sweep would DELETE THE PLATFORM'S OWN CONSOLE.
-//! The console seed sets `system = true`; this reaper's detection query excludes
-//! `system = true`, so a platform-owned app is never a reap candidate.
+//! A system-owned app can sit in a project whose organization has no owner —
+//! the console is **owner-less by construction**. A naive "delete owner-less
+//! apps" sweep would DELETE THE PLATFORM'S OWN CONSOLE. The console seed sets
+//! `system = true`; this reaper's detection query excludes `system = true`, so a
+//! platform-owned app is never a reap candidate.
 //!
-//! The grace window (`created_at < NOW() - 5 minutes`) is defensive insurance:
-//! `create_app` seeds the owner membership in the SAME transaction as the apps
-//! row, so an owner-less app is never a transient state — but the grace costs
-//! nothing and guards against any future create path that isn't atomic.
+//! The grace window (`created_at < NOW() - 5 minutes`) is defensive insurance.
+//! `create_app` can no longer write an app whose project does not exist -
+//! `apps.project_id` is NOT NULL against a RESTRICT foreign key - and the
+//! zero-config path seats the caller as their personal organization's owner
+//! before it creates anything. So an owner-less app is still never a transient
+//! state, but the grace costs nothing and guards a future create path that is
+//! not atomic.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -124,14 +136,14 @@ async fn find_orphaned_apps(state: &AppState) -> Result<Vec<Uuid>, RegistryError
     let conn = state.registry.conn().await?;
     let rows = conn
         .query(
-            "SELECT a.id FROM zeroship.apps a \
-             WHERE a.system = false \
-               AND a.archived_at IS NULL \
-               AND a.created_at < NOW() - ($1::text)::interval \
-               AND NOT EXISTS ( \
-                   SELECT 1 FROM zeroship.app_members m \
-                   WHERE m.app_id = a.id AND m.role = 'owner' \
-               )",
+            &format!(
+                "SELECT a.id FROM zeroship.apps a {lateral} \
+                 WHERE a.system = false \
+                   AND a.archived_at IS NULL \
+                   AND a.created_at < NOW() - ($1::text)::interval \
+                   AND app_owner.user_id IS NULL",
+                lateral = crate::organizations::app_owner_lateral(),
+            ),
             &[&GRACE_INTERVAL],
         )
         .await

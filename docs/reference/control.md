@@ -9,7 +9,8 @@ Creator apps should not import this package. Creator-facing app code talks to
 runtime SDKs such as `@zeroship/db`, `@zeroship/kv`, `@zeroship/auth`, and
 `@zeroship/rpc`; the control plane is an operator/admin surface.
 
-The Rust API lives in `crates/zeroship-control/src/{api,env_handlers}.rs`.
+The Rust API lives in `crates/zeroship-control/src/{api,env_handlers}.rs`, and
+the organization surface in `crates/zeroship-control/src/organizations.rs`.
 The TypeScript client lives in `sdks/control/src/index.ts`.
 
 ## Client setup
@@ -46,6 +47,14 @@ const control = createControlClient({
 The public API is grouped by control-plane domain:
 
 ```ts
+await control.organizations.create({ name: "Acme" });
+await control.organizations.addMember(organizationId, {
+  user_id: userId,
+  role: "developer",
+});
+await control.organizations.createProject(organizationId, { name: "Checkout" });
+await control.projects.addMember(projectId, { user_id: userId, role: "viewer" });
+
 await control.apps.create({ name: "demo", plan_id: "free" });
 await control.apps.deploy(appId, zshipBytes);
 await control.apps.setPlan(appId, { plan_id: "pro" });
@@ -66,6 +75,104 @@ await control.egressRules.set(appId, {
 await control.egressRules.list(appId);
 await control.egressRules.remove(appId, { destination: "db.example.com", port: 5432 });
 ```
+
+### `organizations` and `projects`: who owns what, and who may change it
+
+An **organization** owns projects, a **project** owns apps, and the organization
+is the party that is billed. An app reaches its organization only through its
+project: there is no `organization_id` on an app and no per-app membership, so
+the path is `apps.project_id -> projects.organization_id` and there is exactly
+one of it.
+
+A creator who has never thought about any of this still has all three. The first
+deploy on a fresh account mints a **personal organization** and a default
+project behind the scenes. A personal organization is an ordinary row with a
+`personal_owner_id` set; nothing reads differently because of it, and
+transferring ownership clears the pointer, which *is* the conversion from
+personal to shared.
+
+Ids are typed and are what these methods take. `org_...`, `prj_...`, `ivt_...`,
+and a member's `user_id`, which is a UUID. A **slug is not an id**: the server
+parses the typed id before it authorizes anything, so a slug in a path is a
+`400`, and a well-formed id for an organization you have no seat in is a `403`
+with nothing in it to tell the two apart. That is deliberate.
+
+#### The two integers
+
+Every seat carries a role, and every role carries two ranks:
+
+| role | rank | billing_rank |
+| --- | --- | --- |
+| viewer | 10 | 0 |
+| developer | 20 | 0 |
+| billing | 10 | 20 |
+| admin | 30 | 10 |
+| owner | 40 | 20 |
+
+`rank` orders authority over apps and the organization; `billing_rank` orders
+authority over money. They are independent on purpose: a bookkeeper reads apps
+and cannot deploy, and an admin reads the invoice and cannot change the payout
+account. One number could express neither seat.
+
+**An actor may act on a target only when `actor.rank > target.rank` AND
+`actor.billing_rank >= target.billing_rank`.** The comparison runs inside the
+statement that performs the change, not in a check before it, so a demotion that
+commits while a request is in flight refuses that request rather than racing it.
+A refusal is a `403` whose `detail` names which of the two comparisons failed.
+
+The ranks are reported on every `OrganizationMemberRecord` and are **not** to be
+hard-coded in a client. They are rows in the platform's role ladder; a client
+that copied the table above would disagree with the server the day a migration
+moves one.
+
+Two consequences a UI will meet:
+
+- **The inequality is strict, so an organization has one owner.** Nothing
+  outranks rank 40, so `addMember` and `changeMemberRole` both refuse the owner
+  role and `transferOwnership` MOVES the seat rather than duplicating it. An
+  owner list will always show one row.
+- **There is no "leave organization".** An actor never outranks themselves, so
+  no member can remove their own seat. There is no route for it to call.
+
+#### Projects narrow; they never widen
+
+A member at **admin rank or above holds authority over every project** in the
+organization, with no `project_members` row anywhere. A member **below admin**
+holds authority only on projects they have a row for, and their authority there
+is `min(organization rank, project rank)`.
+
+So a project seat is a grant and a ceiling. Seating an organization `developer`
+(rank 20) as a project `owner` gives them rank 20 on that project, not 40.
+
+`billing_rank` is organization-level and is never narrowed: there is no
+per-project invoice, and `project_members` carries no billing dimension.
+
+`organizations.projects(id)` returns the projects the caller can *reach*, not
+every project of the organization. That filter is the point: listing them all
+would hand a below-admin member the names of projects they cannot open.
+
+#### Invitations, and the one time the token exists
+
+`createInvite` is the only response that carries a `token`. The server stores a
+digest of it and nothing else, so no later read can return it — an
+`InviteRecord` has no field to hold one. **Surface or deliver it at create time
+or the invitation is lost**, and the remedy is `revokeInvite` followed by a new
+`createInvite`.
+
+`redeemInvite` is not organization-scoped, because the redeemer holds no seat
+yet: the token is the capability and the organization comes back in the
+response. Redemption re-derives the **inviter's live authority** at that moment,
+so an invitation from an admin who has since been demoted is refused even though
+it was valid when issued. Every unredeemable case — expired, already used, wrong
+address, lapsed inviter — is the same `403` with the same body, so the endpoint
+cannot be used to learn about other people's invitations.
+
+#### Authority is resolved per request, and is never cached
+
+The server re-reads the caller's seat on every request. Do not cache a rank, a
+role or a decision in a client and act on it: the entity cache that used to sit
+in front of this was deleted so that revoking a seat takes effect immediately
+with no invalidation signal to miss. Ask again.
 
 ### App archive lifecycle
 

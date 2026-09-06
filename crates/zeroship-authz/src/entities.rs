@@ -1,248 +1,91 @@
 use std::collections::{HashMap, HashSet};
-use std::num::NonZeroUsize;
 use std::str::FromStr;
-use std::sync::{LazyLock, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
 
 use cedar_policy::{Entities, Entity, EntityUid, RestrictedExpression};
-use compio_postgres::Client;
-use lru::LruCache;
-use uuid::Uuid;
 
-use crate::{Action, AuthzError, Resource};
+use crate::authority::Authority;
+use crate::{AuthzError, Resource};
 
-const ENTITY_CACHE_TTL: Duration = Duration::from_secs(30);
-const ENTITY_CACHE_CAPACITY: usize = 1024;
-
-static ENTITY_CACHE: LazyLock<Mutex<LruCache<EntityCacheKey, CacheEntry>>> =
-    LazyLock::new(|| {
-        Mutex::new(LruCache::new(
-            NonZeroUsize::new(ENTITY_CACHE_CAPACITY).expect("non-zero cache capacity"),
-        ))
-    });
-
-fn lock_entity_cache() -> MutexGuard<'static, LruCache<EntityCacheKey, CacheEntry>> {
-    ENTITY_CACHE.lock().unwrap_or_else(|poisoned| {
-        tracing::error!("authz entity cache mutex poisoned; recovering cache");
-        poisoned.into_inner()
-    })
-}
-
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
-struct EntityCacheKey {
-    principal_id: Uuid,
-    resource_key: String,
-}
-
-#[derive(Clone)]
-struct CacheEntry {
-    inserted_at: Instant,
-    entities: Entities,
-}
-
-#[derive(Debug)]
-pub struct EntityCache;
-
-impl EntityCache {
-    pub fn invalidate(principal_id: Uuid) {
-        let mut cache = lock_entity_cache();
-        let keys = cache
-            .iter()
-            .filter(|(key, _)| key.principal_id == principal_id)
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        for key in keys {
-            cache.pop(&key);
-        }
-    }
-
-    pub fn invalidate_resource(resource: &Resource) {
-        let resource_key = resource_cache_key(resource);
-        let mut cache = lock_entity_cache();
-        let keys = cache
-            .iter()
-            .filter(|(key, _)| key.resource_key == resource_key)
-            .map(|(key, _)| key.clone())
-            .collect::<Vec<_>>();
-        for key in keys {
-            cache.pop(&key);
-        }
-    }
-}
-
-#[derive(Default)]
-struct Memberships {
-    owner: Vec<String>,
-    editor: Vec<String>,
-    viewer: Vec<String>,
-}
-
-/// Assemble Cedar entities for a principal/resource authorization request.
+/// Assemble the Cedar entity store for one authorization request.
 ///
-/// The store contains the principal `User`, all app membership targets, the
-/// requested resource entity.
-pub async fn assemble_entities(
-    pg: &Client,
-    principal_id: Uuid,
-    _action: Action,
-    resource: Resource,
+/// **The store no longer carries membership, and there is no cache in front of
+/// it.** It holds exactly two entities: the principal `User`, whose attributes
+/// come from `zeroship.users` alone, and the request's own resource, which
+/// exists so `resource is App` / `is Project` / `is Organization` has something
+/// to bind to.
+///
+/// The authority that decides the request rides in the request CONTEXT
+/// ([`crate::eval`]), not here. Two properties follow, and both are the reason:
+///
+/// - **A missing membership denies at a comparison, auditably.** `build_context`
+///   always supplies every key it declares, so a principal with no seat carries
+///   rank zero and each band's `context.effective_rank >= N` evaluates to false.
+///   Carrying the rank as an entity ATTRIBUTE would instead make Cedar SKIP any
+///   policy dereferencing it, with an evaluation error that
+///   `matched_policy_ids` never records - a deny indistinguishable from a clean
+///   no-match.
+/// - **The store stops growing with organization size.** The old shape
+///   enumerated every app the principal could reach, per request, to build
+///   `app_owner_of` / `app_editor_of` / `app_viewer_of` sets.
+///
+/// There is no parent hierarchy and no nested organizations, so
+/// `Entities::from_entities`' duplicate-uid and transitive-closure failures -
+/// each of which surfaces as a 500 on every request for the affected principal
+/// rather than a Deny - are unreachable by construction rather than guarded.
+///
+/// # Errors
+///
+/// Returns [`AuthzError::CedarEntities`] when Cedar rejects a uid or the store.
+pub fn assemble_entities(
+    principal_id: uuid::Uuid,
+    authority: &Authority,
+    resource: &Resource,
 ) -> Result<Entities, AuthzError> {
-    let key = EntityCacheKey {
-        principal_id,
-        resource_key: resource_cache_key(&resource),
-    };
-
-    if let Some(entities) = cache_get(&key) {
-        return Ok(entities);
-    }
-
-    let user = load_user(pg, principal_id).await?;
-    let memberships = load_memberships(pg, principal_id).await?;
-    let mut app_ids = memberships
-        .owner
-        .iter()
-        .chain(memberships.editor.iter())
-        .chain(memberships.viewer.iter())
-        .cloned()
-        .collect::<HashSet<_>>();
-    if let Resource::App { id } = &resource {
-        app_ids.insert(id.clone());
-    }
-
-    let mut entities = Vec::new();
-    entities.push(user_entity(principal_id, &user, &memberships)?);
-
-    // The `App` entity carries no attributes: the only two it ever had were the
-    // `suspended` and `audit_locked` freeze flags, and both are gone with the
-    // operator routes that were their sole writers. It exists so `resource is
-    // App` and the membership-set policies have an entity to bind to.
-    for app_id in app_ids {
-        entities.push(empty_entity("App", &app_id)?);
-    }
-
-    let entities = Entities::from_entities(entities, None)
-        .map_err(|err| AuthzError::CedarEntities(err.to_string()))?;
-    cache_put(key, entities.clone());
-    Ok(entities)
-}
-
-struct UserAttrs {
-    email_verified: bool,
-    account_locked: bool,
-}
-
-/// Load the principal's Cedar attributes.
-///
-/// There is no `platform_role` any more, and with it goes the LEFT JOIN onto
-/// `zeroship.platform_admin_roles` this query used to carry: the staff roles it
-/// fed were cross-tenant grants and are deleted. A creator is authorized SOLELY
-/// through the self-scoped baseline and their `app_members`-bound per-app
-/// policies, which is what the zero-privilege default role was approximating.
-async fn load_user(pg: &Client, principal_id: Uuid) -> Result<UserAttrs, AuthzError> {
-    let rows = pg
-        .query(
-            "SELECT \
-                u.email_verified_at IS NOT NULL AS email_verified, \
-                (u.locked_until IS NOT NULL AND u.locked_until > NOW()) AS account_locked \
-             FROM zeroship.users u \
-             WHERE u.id = $1",
-            &[&principal_id],
-        )
-        .await
-        .map_err(|err| AuthzError::Db(format!("load user entities: {err}")))?;
-
-    let row = rows
-        .first()
-        .ok_or_else(|| AuthzError::Validation(format!("principal not found: {principal_id}")))?;
-
-    Ok(UserAttrs {
-        email_verified: row.get("email_verified"),
-        account_locked: row.get("account_locked"),
-    })
-}
-
-async fn load_memberships(pg: &Client, principal_id: Uuid) -> Result<Memberships, AuthzError> {
-    let rows = pg
-        .query(
-            "SELECT app_id, role FROM zeroship.app_members WHERE user_id = $1",
-            &[&principal_id],
-        )
-        .await
-        .map_err(|err| AuthzError::Db(format!("load app memberships: {err}")))?;
-
-    let mut memberships = Memberships::default();
-    for row in rows {
-        // `app_members.app_id` is a `uuid` column (0004_control.sql) — read it
-        // as Uuid, then stringify. Reading it directly as String panics
-        // (WrongType) the moment any membership row exists; this went undetected
-        // because the only covering test is env-gated and never run in CI.
-        let app_id: Uuid = row.get("app_id");
-        let app_id = app_id.to_string();
-        let role: String = row.get("role");
-        match role.as_str() {
-            "owner" => memberships.owner.push(app_id),
-            "editor" => memberships.editor.push(app_id),
-            "viewer" => memberships.viewer.push(app_id),
-            other => {
-                return Err(AuthzError::Validation(format!(
-                    "unknown app member role: {other}"
-                )))
-            }
-        }
-    }
-    Ok(memberships)
-}
-
-fn user_entity(
-    principal_id: Uuid,
-    user: &UserAttrs,
-    memberships: &Memberships,
-) -> Result<Entity, AuthzError> {
-    let attrs = HashMap::from([
-        (
-            "email_verified".to_owned(),
-            restricted_bool(user.email_verified)?,
-        ),
-        (
-            "account_locked".to_owned(),
-            restricted_bool(user.account_locked)?,
-        ),
-        (
-            "app_owner_of".to_owned(),
-            restricted_app_set(&memberships.owner)?,
-        ),
-        (
-            "app_editor_of".to_owned(),
-            restricted_app_set(&memberships.editor)?,
-        ),
-        (
-            "app_viewer_of".to_owned(),
-            restricted_app_set(&memberships.viewer)?,
-        ),
-    ]);
-    Entity::new(uid("User", &principal_id.to_string())?, attrs, HashSet::new())
+    let entities = vec![
+        user_entity(principal_id, authority)?,
+        Entity::new_no_attrs(resource_entity_uid(resource)?, HashSet::new()),
+    ];
+    Entities::from_entities(entities, None)
         .map_err(|err| AuthzError::CedarEntities(err.to_string()))
 }
 
-fn empty_entity(entity_type: &str, id: &str) -> Result<Entity, AuthzError> {
-    Ok(Entity::new_no_attrs(uid(entity_type, id)?, HashSet::new()))
+fn user_entity(principal_id: uuid::Uuid, authority: &Authority) -> Result<Entity, AuthzError> {
+    let attrs = HashMap::from([
+        (
+            "email_verified".to_owned(),
+            restricted_bool(authority.email_verified)?,
+        ),
+        (
+            "account_locked".to_owned(),
+            restricted_bool(authority.account_locked)?,
+        ),
+    ]);
+    Entity::new(
+        uid("User", &principal_id.to_string())?,
+        attrs,
+        HashSet::new(),
+    )
+    .map_err(|err| AuthzError::CedarEntities(err.to_string()))
 }
 
-fn restricted_app_set(app_ids: &[String]) -> Result<RestrictedExpression, AuthzError> {
-    let apps = app_ids
-        .iter()
-        .map(|id| format!("App::{}", cedar_string(id)))
-        .collect::<Vec<_>>()
-        .join(", ");
-    restricted(&format!("[{apps}]"))
+/// The Cedar uid of a request's resource. ONE definition, used to build both
+/// the entity and the request, so the store and the request can never name
+/// different entities for the same resource.
+///
+/// # Errors
+///
+/// Returns [`AuthzError::CedarEntities`] when Cedar rejects the uid.
+pub(crate) fn resource_entity_uid(resource: &Resource) -> Result<EntityUid, AuthzError> {
+    match resource {
+        Resource::App { id } | Resource::Project { id } | Resource::Organization { id } => {
+            uid(resource.cedar_type(), id)
+        }
+        Resource::Any => uid(resource.cedar_type(), "*"),
+    }
 }
 
 fn restricted_bool(value: bool) -> Result<RestrictedExpression, AuthzError> {
-    restricted(if value { "true" } else { "false" })
-}
-
-fn restricted(source: &str) -> Result<RestrictedExpression, AuthzError> {
-    RestrictedExpression::from_str(source)
+    RestrictedExpression::from_str(if value { "true" } else { "false" })
         .map_err(|err| AuthzError::CedarEntities(err.to_string()))
 }
 
@@ -268,48 +111,60 @@ pub(crate) fn cedar_string(value: &str) -> String {
     escaped
 }
 
-fn resource_cache_key(resource: &Resource) -> String {
-    match resource {
-        Resource::App { id } => format!("app:{id}"),
-        Resource::Any => "any:*".to_owned(),
-    }
-}
-
-fn cache_get(key: &EntityCacheKey) -> Option<Entities> {
-    let mut cache = lock_entity_cache();
-    let entry = cache.get(key)?;
-    if entry.inserted_at.elapsed() <= ENTITY_CACHE_TTL {
-        Some(entry.entities.clone())
-    } else {
-        cache.pop(key);
-        None
-    }
-}
-
-fn cache_put(key: EntityCacheKey, entities: Entities) {
-    let mut cache = lock_entity_cache();
-    cache.put(
-        key,
-        CacheEntry {
-            inserted_at: Instant::now(),
-            entities,
-        },
-    );
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use uuid::Uuid;
 
+    fn authority() -> Authority {
+        Authority {
+            email_verified: true,
+            account_locked: false,
+            effective_rank: 40,
+            billing_rank: 20,
+        }
+    }
+
+    /// The store is exactly two entities regardless of how much authority the
+    /// principal holds. This is the property the membership sets used to break:
+    /// it grew with the number of apps a principal could reach.
     #[test]
-    fn entity_cache_invalidation_recovers_after_poison() {
-        let poisoned = std::panic::catch_unwind(|| {
-            let _guard = ENTITY_CACHE.lock().unwrap();
-            panic!("poison entity cache");
-        });
-        assert!(poisoned.is_err());
+    fn the_store_is_bounded_at_two_entities() {
+        for resource in [
+            Resource::Any,
+            Resource::App {
+                id: Uuid::nil().to_string(),
+            },
+            Resource::Project {
+                id: "prj_0123456789abcdefghijkl".to_owned(),
+            },
+            Resource::Organization {
+                id: "org_0123456789abcdefghijkl".to_owned(),
+            },
+        ] {
+            let entities = assemble_entities(Uuid::nil(), &authority(), &resource)
+                .expect("entities should assemble");
+            assert_eq!(entities.iter().count(), 2, "{resource:?}");
+        }
+    }
 
-        EntityCache::invalidate(Uuid::new_v4());
-        EntityCache::invalidate_resource(&Resource::Any);
+    /// Rank must NOT appear on the principal. If it ever does, a policy could
+    /// be written against the attribute, and a principal missing it would be
+    /// skipped with an unrecorded evaluation error instead of denied at a
+    /// comparison.
+    #[test]
+    fn the_user_entity_carries_no_rank_attribute() {
+        let entities = assemble_entities(Uuid::nil(), &authority(), &Resource::Any)
+            .expect("entities should assemble");
+        let user = entities
+            .get(&uid("User", &Uuid::nil().to_string()).expect("uid"))
+            .expect("user entity present");
+        let json = user.to_json_value().expect("entity json").to_string();
+        assert!(json.contains("email_verified"), "{json}");
+        assert!(
+            !json.contains("rank"),
+            "rank must not ride on the principal: {json}"
+        );
+        assert!(!json.contains("app_owner_of"), "{json}");
     }
 }

@@ -354,7 +354,7 @@ async fn deploy_happy_path_returns_200_with_deploy_hash() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -469,6 +469,7 @@ async fn deploy_wrong_content_type_returns_415_without_consuming_body() {
             &format!("ct-{}", &Uuid::new_v4().simple().to_string()[..10]),
             &zeroship_control::plan_catalog::free_plan_id(),
             &pat.user_id,
+            None,
         )
         .await
         .expect("create app");
@@ -583,7 +584,7 @@ async fn deploy_manifest_not_first_returns_400() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -661,7 +662,7 @@ async fn deploy_colliding_scope_returns_400_invalid_scope() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -754,7 +755,7 @@ async fn deploy_noncolliding_scope_returns_200() {
     let record = fx
         .state
         .registry
-        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        .create_app(&app_name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id, None)
         .await
         .expect("create app");
     let app_id = record.id;
@@ -897,6 +898,7 @@ async fn deploy_rejects_legacy_migration_approval_query() {
             &format!("legacy-query-{}", &Uuid::new_v4().simple().to_string()[..10]),
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
+            None,
         )
         .await
         .expect("create app");
@@ -943,6 +945,7 @@ async fn deploy_rejects_legacy_manifest_migrations_and_runs_no_migration() {
             &format!("legacy-manifest-{}", &Uuid::new_v4().simple().to_string()[..10]),
             &zeroship_control::plan_catalog::free_plan_id(),
             &owner_id,
+            None,
         )
         .await
         .expect("create app");
@@ -1273,6 +1276,7 @@ async fn create_labelled_app(state: &AppState, label: &str, owner_id: &Uuid) -> 
             &format!("{label}-{}", &Uuid::new_v4().simple().to_string()[..10]),
             &zeroship_control::plan_catalog::free_plan_id(),
             owner_id,
+            None,
         )
         .await
         .expect("create app")

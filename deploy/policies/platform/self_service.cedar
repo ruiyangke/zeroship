@@ -1,29 +1,41 @@
-// Self-service creator baseline - every authenticated User, regardless of
-// platform role (including the zero-privilege DEFAULT_PLATFORM_ROLE "none"),
-// may manage their OWN account and operate the platform-level, self-scoped
-// surfaces:
+// The self-service baseline: what every authenticated User may do WITHOUT
+// holding a seat in any organization.
 //
-//   - apps:write   create a new app (the creator is bound as its owner)
-//   - apps:read    list THEIR apps (the list handler filters to owned apps for
-//                  non-admins; this grant only authorizes the platform-level
-//                  list/create surface, never a concrete foreign App)
-//   - account:read / account:write  view + revoke their own OAuth grants
+// This is the ONLY policy matching `Resource::Any` (the synthetic
+// `Resource::"*"` entity), and that makes it the only fence against the
+// wrapper. `scopes_to_policy` always emits `Resource::Any`, which
+// `lower_resources` renders as a bare `resource` matching EVERY resource type,
+// so a bearer token narrows the ACTION and nothing else. A rank-free permit for
+// an organization action landing in this file would therefore hand that action
+// to every bearer carrying its scope, at every organization in the fleet.
 //
-// CRITICAL: this is scoped to `resource is Resource` - the synthetic
-// `Resource::"*"` entity that backs `Resource::Any`. It does NOT match a
-// concrete `App` resource, so it grants ZERO authority over any specific app
-// (foreign or owned). Per-app authority still flows exclusively through the
-// `app_members`-bound creator policies (app_owner / app_editor / app_viewer).
-// The C1 cross-tenant DENY (an un-roled creator reading a non-member App) is
-// therefore preserved: those requests carry a concrete `App` resource, which
-// this policy cannot match.
+// Each action here confers authority over NOTHING that already exists:
+//
+//   - organization:create  mints a new organization and seats the caller as its
+//                          owner. It cannot touch an existing one.
+//   - organization:read    on Resource::Any is "list the organizations I belong
+//                          to". The handler resolves that list from
+//                          organization_members; reading a CONCRETE organization
+//                          is organization_read.cedar, which needs rank >= 10.
+//   - apps:read            is the platform-level list surface, filtered by the
+//                          handler to apps the caller can reach. Reading a
+//                          concrete App needs a rank.
+//   - account:read/write   the caller's own profile and OAuth grants.
+//
+// `apps:write` USED TO BE HERE AND IS DELETED. Creating an app is now
+// project-scoped - an app must name the project that owns it - so app creation
+// is gated on `apps:write` at `Resource::Project`, where the developer band
+// requires rank >= 20. Leaving it here would have let any authenticated
+// principal create an app with no organization behind it.
+//
+// It is scoped to `resource is Resource`, so it matches NO concrete App,
+// Project or Organization. The cross-tenant read that this scoping prevents -
+// an un-seated creator reading someone else's app - stays prevented, because
+// those requests carry a concrete resource type this policy cannot match.
 permit (
   principal is User,
-  action,
+  action in [Action::"apps:read", Action::"organization:read",
+             Action::"organization:create", Action::"account:read",
+             Action::"account:write"],
   resource is Resource
-) when {
-  action == Action::"apps:read"
-   || action == Action::"apps:write"
-   || action == Action::"account:read"
-   || action == Action::"account:write"
-};
+);

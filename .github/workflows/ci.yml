@@ -422,6 +422,23 @@ jobs:
         run: tests/cli_command_index_gate.sh
       - name: The two [[inject]] ceilings agree
         run: tests/inject_policy_mirror_gate.sh
+      # The organization ownership model, in three gates. Each runs its own
+      # extractors against a positive and a one-variable control FIRST and
+      # refuses if they disagree, because every one of the three is an ABSENCE
+      # check over a corpus and an absence check that cannot read its corpus is
+      # the cleanest green there is - the ownership gate found exactly that in
+      # itself on its first run, a `grep --include` placed after `--` where grep
+      # reads it as a filename.
+      - name: An app reaches its owner only through its project
+        run: tests/organization_ownership_path_gate.sh --self-test
+      - name: One ownership path, and no cached authority
+        run: tests/organization_ownership_path_gate.sh
+      - name: Route and lock extractors discriminate
+        run: tests/organization_route_authorization_gate.sh --self-test
+      - name: Every mutating organization route is guarded and locks first
+        run: tests/organization_route_authorization_gate.sh
+      - name: The role ladder and the Cedar bands name the same ranks
+        run: tests/organization_policy_ladder_gate.sh
       # tests/lib/skip_census.sh counts skips by one token, so a test that
       # skips WITHOUT printing it is invisible to the census whose whole job is
       # to stop a suite quietly covering less than it claims. 49 lines across
