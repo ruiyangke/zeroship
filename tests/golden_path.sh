@@ -1285,8 +1285,11 @@ SQL
     -H "Authorization: Bearer $GP3_TOKEN" -d "{\"name\":\"$APP_NAME\"}")
   gp3_json_str() { printf '%s' "$2" | grep -oE "\"$1\"[[:space:]]*:[[:space:]]*\"[^\"]+\"" | head -1 | sed 's/.*"\([^"]*\)"$/\1/'; }
   APP_ID=$(gp3_json_str id "$APP")
-  API_KEY=$(gp3_json_str api_key "$APP")
-  if [ -n "$APP_ID" ] && [ -n "$API_KEY" ]; then
+  # The create response used to carry `api_key` and this arm asserted it was
+  # non-empty. It never proved anything about authentication: nothing on any
+  # request path ever validated that value. The response no longer carries it,
+  # so `APP_ID` alone is what says the create succeeded.
+  if [ -n "$APP_ID" ]; then
     pass "created app ($APP_ID) through POST /api/apps with a harness-minted bearer"
   else
     fail "create app: ${APP:0:300}"

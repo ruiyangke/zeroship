@@ -334,6 +334,85 @@ pub(crate) mod infrastructure_error_test_support {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// The JSON body of a successful create-app response.
+///
+/// It is exactly the serialized [`zeroship_core::types::AppRecord`], and the
+/// point of naming the function is that the "exactly" is now enforceable.
+///
+/// THE CREATE RESPONSE NO LONGER HANDS OUT AN API KEY. It used to: the field is
+/// `#[serde(skip_serializing)]` on the struct, and this site re-added it by hand
+/// so the caller got the plaintext key back. Nothing ever validated that key.
+/// The gateway's `check_api_key` was the only code that could have, it lost its
+/// call site when RPC v1 replaced it with the compiled per-resource
+/// `EffectivePolicy`, and both it and the hash it compared against are deleted.
+/// Handing a caller a credential no request path consults is worse than handing
+/// them nothing: it reads as an authentication mechanism.
+///
+/// `AppRecord::api_key` and the `zeroship.apps.api_key` column both still
+/// exist - this crate's `dev_provision` binary prints the value and a dozen
+/// shell harnesses parse that line - so this stops the key leaving over HTTP
+/// without pretending the column is gone.
+fn create_app_response_body(record: &zeroship_core::types::AppRecord) -> serde_json::Value {
+    serde_json::to_value(record).unwrap_or_else(|_| serde_json::json!({}))
+}
+
+#[cfg(test)]
+mod create_app_response_tests {
+    use super::create_app_response_body;
+
+    fn record() -> zeroship_core::types::AppRecord {
+        zeroship_core::types::AppRecord {
+            id: uuid::Uuid::nil(),
+            name: "sample".to_string(),
+            plan_id: "free".to_string(),
+            deploy_hash: None,
+            archived_at: None,
+            api_key: "plaintext-key-that-must-not-be-returned".to_string(),
+            created_at: "2026-09-05T00:00:00Z".to_string(),
+            updated_at: "2026-09-05T00:00:00Z".to_string(),
+        }
+    }
+
+    /// The create response must not carry an api-key field under ANY spelling,
+    /// and must not carry the key's value under some other name either. The
+    /// second half matters: an assertion on the key name alone would pass
+    /// against a body that renamed the field and kept leaking the secret.
+    #[test]
+    fn create_response_carries_no_api_key() {
+        let body = create_app_response_body(&record());
+        let object = body.as_object().expect("create response is a JSON object");
+
+        for key in object.keys() {
+            assert!(
+                !key.contains("api_key") && !key.contains("apiKey"),
+                "the create-app response must not carry an api-key field; found {key:?}"
+            );
+        }
+
+        assert!(
+            !serde_json::to_string(&body)
+                .expect("serialize create response")
+                .contains("plaintext-key-that-must-not-be-returned"),
+            "the create-app response must not carry the plaintext key under any name"
+        );
+    }
+
+    /// CONTROL for the assertion above: the same body must still carry the
+    /// fields a caller needs, so "no api key" cannot be satisfied by an empty
+    /// object. Without this, `create_app_response_body` returning `json!({})`
+    /// would pass the test it exists to fail.
+    #[test]
+    fn create_response_still_carries_the_app_identity() {
+        let body = create_app_response_body(&record());
+        for key in ["id", "name", "plan_id", "created_at", "updated_at"] {
+            assert!(
+                body.get(key).is_some(),
+                "the create-app response must still carry {key:?}"
+            );
+        }
+    }
+}
+
 pub async fn create_app(
     req: web::HttpRequest,
     authz: AuthzGuard,
@@ -376,10 +455,7 @@ pub async fn create_app(
                     "control: per-app OAuth client provisioning failed on create (will retry on deploy)"
                 );
             }
-            // Include api_key in the create response (it's skipped from normal serialization)
-            let mut json = serde_json::to_value(&record).unwrap();
-            json["api_key"] = serde_json::Value::String(record.api_key.clone());
-            web::HttpResponse::Created().json(&json)
+            web::HttpResponse::Created().json(&create_app_response_body(&record))
         }
         Err(e) => error_response(e),
     }
