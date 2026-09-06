@@ -3,12 +3,14 @@
 //!
 //! Lifecycle:
 //!   - `create(...)` after a successful OIDC exchange or anchor refresh
-//!   - `validate(...)` for an explicit database-row check; successful checks
-//!     slide `idle_expires_at` forward (request authentication does not use it)
 //!   - the revoke helpers on signout and back-channel logout
 //!
-//! Stored-row lifetime limits:
-//!   - 30 min sliding idle
+//! There is no read-and-check entry point: request authentication never used
+//! one, and the `validate(...)` that offered it is deleted. See the note beside
+//! the revoke helpers for what enforces revocation instead.
+//!
+//! Stored-row lifetime limits, both stamped at `create` and never bumped:
+//!   - 30 min idle
 //!   - 12 h absolute
 //!
 //! This module is a leaf; request handlers own orchestration and pass database
@@ -74,9 +76,13 @@ pub struct NewSession<'a> {
     pub amr: &'a [String],
 }
 
-/// Sliding idle timeout. After this many minutes of inactivity the
-/// cookie stops validating; any successful `validate` call resets
-/// `idle_expires_at` to `NOW() + IDLE_MINUTES`.
+/// Idle window stamped on the audit row at `create`, as `NOW() + IDLE_MINUTES`.
+///
+/// IT NO LONGER SLIDES. It used to be the sliding half of the pair, reset by
+/// each successful `validate` call - and `validate` had no production caller
+/// and is deleted, so nothing bumps this. The row simply carries the window it
+/// was created with. See the deletion note further down for where revocation is
+/// actually enforced; this constant is a record on an audit row, not a fence.
 pub const IDLE_MINUTES: i64 = 30;
 
 /// Hard absolute lifetime. After this many hours the session is dead
@@ -142,66 +148,31 @@ pub async fn create(conn: &mut Client, params: &NewSession<'_>) -> Result<AppSes
     Ok(session)
 }
 
-/// Validate a session by id+app. Returns the row if valid, `None`
-/// otherwise. Slides `idle_expires_at` forward on every successful
-/// validation.
-///
-/// "Valid" means: row exists, `app_id` matches, not revoked, idle and
-/// absolute expiries both in the future. The check + slide is one
-/// atomic `UPDATE ... RETURNING` so concurrent requests can't race the
-/// sliding window.
-///
-/// **NOT the request path, and not what enforces revocation.** This has no
-/// production caller: since slice R1b the per-request identity check verifies
-/// the signed stateless cookie locally and gates it on the per-app family
-/// marker (`is_family_revoked_since(client_id, pws_, iat)`, an uncached
-/// `SELECT EXISTS` on every request — see
-/// `crate::router::auth::resolve_app_session_user_header_inner`).
-/// `gateway_sessions` is the AUDIT and visibility record; the family marker is
-/// the enforcement truth. Every caller of this function is a gateway
-/// integration test using it as an oracle to assert that a revoke actually
-/// wrote `revoked_at`.
-///
-/// Stated because the wording above invites the opposite reading. "Valid means
-/// ... not revoked" on a function named `validate` reads like THE revocation
-/// gate, and reading it that way is how you conclude the gate is missing when
-/// this turns out to be uncalled — the absence of THIS mechanism is not the
-/// absence of the property. Both revoke paths (`revoke_app_sessions_for_sid`
-/// and `revoke_app_sessions_for_user`) feed `teardown_per_app_user`, which
-/// records the family marker the hot path actually reads.
-///
-/// # Errors
-///
-/// [`GatewayError::Db`] on PG failure.
-pub async fn validate(conn: &mut Client, id: Uuid, app_id: Uuid) -> Result<Option<AppSession>> {
-    let tx = conn
-        .transaction()
-        .await
-        .map_err(|e| GatewayError::Db(format!("gateway_sessions validate begin: {e}")))?;
-    rls::set_tenant_app(&tx, app_id).await?;
-    let rows = tx
-        .query(
-            "UPDATE zeroship.gateway_sessions \
-             SET idle_expires_at = NOW() + ($3::text || ' minutes')::interval \
-             WHERE id = $1 \
-               AND app_id = $2 \
-               AND revoked_at IS NULL \
-               AND idle_expires_at > NOW() \
-               AND abs_expires_at > NOW() \
-             RETURNING id, user_id, app_id, email::text AS email, name, avatar_url, \
-                       email_verified, granted_scopes, auth_time, amr, sid, \
-                       idle_expires_at, abs_expires_at",
-            &[&id, &app_id, &IDLE_MINUTES.to_string()],
-        )
-        .await
-        .map_err(|e| GatewayError::Db(format!("gateway_sessions validate: {e}")))?;
-
-    let session = rows.first().map(row_to_session);
-    tx.commit()
-        .await
-        .map_err(|e| GatewayError::Db(format!("gateway_sessions validate commit: {e}")))?;
-    Ok(session)
-}
+// NOTE (validate, deleted): a `validate(conn, id, app_id)` used to live here.
+// It read the row, checked `revoked_at IS NULL` and both expiries, and slid
+// `idle_expires_at` forward in the same `UPDATE ... RETURNING`. It had NO
+// production caller, and its every caller was a gateway integration test using
+// it as an oracle to assert that a revoke had written `revoked_at`. Those tests
+// now read the row themselves.
+//
+// THE REASON THIS NOTE EXISTS is that the deletion invites exactly the wrong
+// conclusion. "Valid means not revoked", on a function named `validate`, reads
+// like THE revocation gate - so finding it uncalled reads like the gate is
+// missing, and the next author rebuilds it. THE ABSENCE OF THIS MECHANISM IS
+// NOT THE ABSENCE OF THE PROPERTY.
+//
+// Where the property actually lives: since slice R1b the per-request identity
+// check verifies the signed stateless cookie locally and gates it on the
+// per-app family marker - `is_family_revoked_since(client_id, pws_, iat)`, an
+// uncached `SELECT EXISTS` on every request, in
+// `crate::router::auth::resolve_app_session_user_header_inner`. This table is
+// the AUDIT and visibility record; the family marker is the enforcement truth.
+// Both revoke paths below (`revoke_app_sessions_for_sid` and
+// `revoke_app_sessions_for_user`) feed `teardown_per_app_user`, which records
+// the marker the hot path reads.
+//
+// The idle window is therefore set once, at `create`, and nothing bumps it -
+// see [`IDLE_MINUTES`].
 
 // NOTE (RLS, changeset 0025): the former `revoke(conn, id)` (revoke-one by id,
 // no app scope) and `revoke_all_for_user(conn, user_id)` (CROSS-TENANT

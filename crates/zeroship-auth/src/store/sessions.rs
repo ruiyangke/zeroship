@@ -104,7 +104,13 @@ pub async fn create(conn: &Client, params: &CreateSession<'_>) -> Result<Session
 /// "Valid" means: row exists, not revoked, idle and absolute expiries
 /// both in the future. The check + slide is one atomic
 /// `UPDATE ... RETURNING` so concurrent requests can't race the sliding
-/// window. Mirrors `gateway::sessions::validate`.
+/// window.
+///
+/// THIS ONE IS LIVE. It used to say it mirrored the gateway's same-named
+/// function, which invited the two being read as one mechanism: they were
+/// distinct functions in distinct crates and only this one had production
+/// callers (under `crates/zeroship-auth/src/ui/`). The gateway's was uncalled
+/// and is DELETED. Nothing mirrors this.
 ///
 /// # Errors
 ///
