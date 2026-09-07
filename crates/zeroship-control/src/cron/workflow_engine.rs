@@ -2171,6 +2171,32 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// A control-plane identity for fixtures that drive a STUB gateway.
+    ///
+    /// It MINTS and verifies nobody: the bundle is empty on purpose, because the
+    /// stub these tests point at does no verification and a fixture that pretended
+    /// otherwise would be asserting against itself. What it does bind is that the
+    /// dispatcher can produce a credential at all - an unconfigured `ServiceAuth`
+    /// turns every advance into backpressure, so without this the fixtures would
+    /// measure the mint failing rather than the workflow advancing.
+    fn test_control_service_auth() -> std::sync::Arc<zeroship_core::service_peers::ServiceAuth> {
+        use zeroship_core::service_assertion::{
+            ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
+        };
+        use zeroship_core::service_peers::{
+            service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME,
+        };
+    
+        let issuer = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+        let key = ServiceSigningKey::generate();
+        let keyring = ServiceKeyring::from_parts(issuer, &key, ServiceTrustBundle::new())
+            .expect("control keyring");
+        std::sync::Arc::new(ServiceAuth::new(
+            keyring,
+            std::sync::Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+        ))
+    }
+
     use super::*;
     use ntex::web::{self, test};
     use serde_json::Value;
@@ -2308,7 +2334,7 @@ mod tests {
         .await;
 
         let request = test_dispatch_request();
-        let dispatcher = GatewayStepDispatcher::new(gateway.url(""));
+        let dispatcher = GatewayStepDispatcher::new(gateway.url(""), test_control_service_auth());
         let outcome = dispatcher.dispatch(request.clone()).await;
         let DispatchOutcome::Completed(result) = outcome else {
             panic!("expected completed dispatch outcome");
@@ -2340,7 +2366,7 @@ mod tests {
         .await;
 
         let request = test_dispatch_request();
-        let dispatcher = GatewayStepDispatcher::new(gateway.url(""));
+        let dispatcher = GatewayStepDispatcher::new(gateway.url(""), test_control_service_auth());
         let outcome = dispatcher.dispatch(request.clone()).await;
         let DispatchOutcome::Backpressure { run_id, reason } = outcome
         else {
