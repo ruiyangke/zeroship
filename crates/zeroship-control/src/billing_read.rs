@@ -10,11 +10,18 @@
 //!
 //! SECURITY: nothing here leaks a raw Stripe id, another organization's data, or an
 //! internal-only column — the DTOs are hand-shaped projections, never `SELECT *`.
+//!
+//! It also holds [`outstanding_billing`], the ONE answer to "what does this
+//! organization still owe". That question is a billing read, it is asked from
+//! three places that destroy something, and a second spelling of it would be a
+//! second policy. See that function's header for the arms and for what each one
+//! deliberately does not count.
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use chrono::NaiveDate;
+use compio_postgres::GenericClient;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -647,6 +654,292 @@ pub async fn billing_status(
     }))
 }
 
+// ---------------------------------------------------------------------------
+// What an organization still owes — the ONE deletion predicate
+// ---------------------------------------------------------------------------
+
+/// Whether the configured invoicer writes into `zeroship.invoices`.
+///
+/// `lago` and `stripe_meters` implement `close_period` as an `InvoiceRef(None)`
+/// and write NO local invoice row, so under them `zeroship.invoices` is empty by
+/// construction. "Usage in a closed period with no invoice" then describes every
+/// organization that ever served a request, and a refusal built on it would
+/// block every deletion forever with nothing anyone could do. The
+/// unbilled-usage arm is therefore asked only when the invoicer owns the local
+/// rail (`BillingStack::invoicer_owns_local_invoice`, true for `lite` and
+/// `stripe_invoice`).
+///
+/// The UNPAID-INVOICE arm is deliberately NOT conditioned on this. A finalized
+/// invoice row that is short of cash is a debt whoever wrote it, and a
+/// deployment moved from `lite` to `lago` leaves exactly those rows standing;
+/// skipping them under the new stack would write them off silently. Under a
+/// non-local invoicer the arm reads an empty table and costs one indexed scan.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LocalInvoicing {
+    Yes,
+    No,
+}
+
+impl LocalInvoicing {
+    /// Derived from the running stack, in ONE place, so the three enforcement
+    /// points cannot disagree about which provider they are asking about.
+    #[must_use]
+    pub fn of(stack: &crate::metering::provider::BillingStack) -> Self {
+        if stack.invoicer_owns_local_invoice() {
+            Self::Yes
+        } else {
+            Self::No
+        }
+    }
+
+    const fn asks_about_unbilled_usage(self) -> bool {
+        matches!(self, Self::Yes)
+    }
+}
+
+/// One finalized invoice with cash still owing on it.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnpaidInvoice {
+    pub invoice_id: String,
+    pub period: String,
+    pub currency: String,
+    /// Already NET of credit — the `invoice_total_balances` CHECK is
+    /// `total = subtotal - credit + tax`, so a credit lowers this number rather
+    /// than sitting beside it. There is no "nonzero total that is not owed".
+    pub total_cents: i64,
+    /// `Sum(invoice_payments.amount_cents)` — the same oracle
+    /// [`crate::invoice_payments::cash_collected`] reads, and for the same
+    /// reason: a payment is an append-only side fact because
+    /// `invoices_immutable()` makes a paid COLUMN on the frozen invoice
+    /// mechanically impossible. Dispute rows are signed, so a chargeback
+    /// lowers this and re-opens the debt.
+    pub cash_collected_cents: i64,
+    /// `total_cents - cash_collected_cents`, positive on every row that is here.
+    pub owed_cents: i64,
+}
+
+/// One CLOSED billing period whose usage never became an invoice.
+#[derive(Debug, Clone, Serialize)]
+pub struct UnbilledPeriod {
+    pub period: String,
+    pub apps: i64,
+    /// Raw metered units, NOT money. Turning units into cents means re-running
+    /// the pricing kernel over live aggregates, which is what
+    /// [`projected_charge`] does and labels `authoritative: false`; a refusal
+    /// must not quote a figure that is not a bill.
+    pub units: i64,
+}
+
+/// The one action that clears a billing blocker. Both arms name a route that
+/// exists today: attaching a default payment method is the ONLY remedy wired
+/// end to end (`credit::grant`, `refund::issue_refund` and
+/// `void_reissue::void_and_reissue` are complete and reachable only from tests),
+/// and it is also what lets the reconciler bill usage it is currently skipping
+/// for want of a Stripe Customer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BillingRemedy {
+    /// A finalized invoice is short of cash.
+    SettleInvoices,
+    /// Closed-period usage never became an invoice.
+    BillOutstandingUsage,
+}
+
+impl BillingRemedy {
+    /// One sentence a person can act on, naming the route.
+    #[must_use]
+    pub const fn instruction(self) -> &'static str {
+        match self {
+            Self::SettleInvoices => {
+                "attach a default payment method with \
+                 POST /api/organizations/{organization_id}/billing/setup; Stripe then \
+                 collects the open invoice"
+            }
+            Self::BillOutstandingUsage => {
+                "this organization has usage in a closed period that was never invoiced, \
+                 which is what happens when no Stripe Customer exists to bill; attach a \
+                 default payment method with \
+                 POST /api/organizations/{organization_id}/billing/setup so the next \
+                 billing sweep can bill and collect it"
+            }
+        }
+    }
+}
+
+/// Everything one organization still owes, as facts rather than a bool.
+///
+/// A bool cannot carry a refusal message: the person on the other end has to be
+/// told WHAT is owed and WHICH action clears it, and both are derived from the
+/// rows below rather than stored anywhere.
+#[derive(Debug, Clone, Serialize)]
+pub struct OutstandingBilling {
+    pub organization_id: String,
+    pub unpaid_invoices: Vec<UnpaidInvoice>,
+    pub unbilled_periods: Vec<UnbilledPeriod>,
+}
+
+impl OutstandingBilling {
+    /// Nothing is owed. The only clear answer.
+    #[must_use]
+    pub fn is_settled(&self) -> bool {
+        self.unpaid_invoices.is_empty() && self.unbilled_periods.is_empty()
+    }
+
+    /// Cash owed across the unpaid invoices. Unbilled usage contributes
+    /// NOTHING here on purpose — it has no price until a finalize prices it,
+    /// and a refusal that quoted a re-priced projection would be quoting a
+    /// number no invoice will ever match.
+    #[must_use]
+    pub fn owed_cents(&self) -> i64 {
+        self.unpaid_invoices.iter().map(|i| i.owed_cents).sum()
+    }
+
+    /// The currency the owed cash is denominated in, taken from the invoices
+    /// themselves; the platform default when only unbilled usage remains.
+    #[must_use]
+    pub fn currency(&self) -> &str {
+        self.unpaid_invoices
+            .first()
+            .map_or(crate::cron::billing_reconcile::BILLING_CURRENCY, |i| {
+                i.currency.as_str()
+            })
+    }
+
+    /// The action to name in the refusal. Cash already claimed outranks usage
+    /// not yet claimed: settling the invoice is concrete and immediate, while
+    /// the usage arm's remedy is the same attachment plus a wait for the sweep.
+    #[must_use]
+    pub fn remedy(&self) -> Option<BillingRemedy> {
+        if !self.unpaid_invoices.is_empty() {
+            Some(BillingRemedy::SettleInvoices)
+        } else if self.unbilled_periods.is_empty() {
+            None
+        } else {
+            Some(BillingRemedy::BillOutstandingUsage)
+        }
+    }
+}
+
+/// What `organization_id` still owes. THE predicate — every enforcement point
+/// calls this one function rather than carrying its own SQL.
+///
+/// # The two arms, and what each deliberately does not count
+///
+/// **Unpaid finalized invoices.** `total_cents > Sum(invoice_payments)`, over
+/// `status = 'finalized'` only. `draft` is excluded because `total_cents` stays
+/// zero until the finalize UPDATE writes it, so a draft is not yet a claim;
+/// `void` is excluded because voiding RELEASES the claim, which is the whole
+/// point of the one transition `invoices_immutable()` permits on a finalized
+/// row. A fully credit-covered invoice reads `total_cents` zero and records no
+/// payment row at all, so it is settled by arithmetic rather than by a special
+/// case. A chargeback appends a NEGATIVE `dispute_debit`, so it re-opens the
+/// debt, which is right.
+///
+/// A held credit BALANCE is NOT subtracted. `credit::consume_at_finalize` is
+/// the only writer of a `consumed` ledger row and it runs inside the finalize
+/// transaction, so no code path will ever apply a balance to an invoice that is
+/// already finalized. Netting it off here would forgive a debt nothing forgives.
+///
+/// A REFUND does not raise what is owed either: `cash_collected` reads
+/// `invoice_payments` and refunds live in `zeroship.refunds`, so a
+/// cash-refunded invoice reads settled. That is the tree's one oracle for
+/// collected cash and the over-refund trigger inlines the same SELECT;
+/// disagreeing with it here would make the refusal and the refund cap read
+/// different balances.
+///
+/// **Unbilled closed-period usage.** A `usage_aggregates` row with usage, in a
+/// period strictly BEFORE the current month, for which no non-void invoice
+/// exists. The current month is excluded because it always has accrued usage
+/// and never has an invoice — including it would mean no account could ever be
+/// closed. Archived apps are NOT filtered, matching the reconciler, which bills
+/// them on purpose. The arm is asked only under [`LocalInvoicing::Yes`].
+///
+/// # Errors
+///
+/// [`RegistryError::Database`] on a driver failure. There is no success value
+/// that means "could not tell": every caller treats an error as a refusal,
+/// because a deletion allowed on the strength of a check that did not run is
+/// the failure this whole predicate exists to prevent.
+pub async fn outstanding_billing<C: GenericClient + Sync>(
+    conn: &C,
+    organization_id: &str,
+    invoicing: LocalInvoicing,
+) -> Result<OutstandingBilling, RegistryError> {
+    let invoice_rows = conn
+        .query(
+            "SELECT i.id, i.period::text AS period, i.currency, i.total_cents, \
+                    cash.collected \
+               FROM zeroship.invoices i \
+               CROSS JOIN LATERAL ( \
+                     SELECT COALESCE(SUM(p.amount_cents), 0)::bigint AS collected \
+                       FROM zeroship.invoice_payments p \
+                      WHERE p.invoice_id = i.id \
+                    ) cash \
+              WHERE i.organization_id = $1 \
+                AND i.status = 'finalized' \
+                AND i.total_cents > cash.collected \
+              ORDER BY i.period, i.id",
+            &[&organization_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    let unpaid_invoices = invoice_rows
+        .iter()
+        .map(|r| {
+            let total_cents: i64 = r.get("total_cents");
+            let cash_collected_cents: i64 = r.get("collected");
+            UnpaidInvoice {
+                invoice_id: r.get("id"),
+                period: r.get("period"),
+                currency: r.get("currency"),
+                total_cents,
+                cash_collected_cents,
+                owed_cents: total_cents - cash_collected_cents,
+            }
+        })
+        .collect();
+
+    let unbilled_periods = if invoicing.asks_about_unbilled_usage() {
+        let usage_rows = conn
+            .query(
+                "SELECT u.period::text AS period, \
+                        COUNT(DISTINCT u.app_id)::bigint AS apps, \
+                        SUM(u.total)::bigint AS units \
+                   FROM zeroship.usage_aggregates u \
+                   JOIN zeroship.apps a ON a.id = u.app_id \
+                  WHERE a.organization_id = $1 \
+                    AND u.total > 0 \
+                    AND u.period < date_trunc('month', NOW())::date \
+                    AND NOT EXISTS ( \
+                          SELECT 1 FROM zeroship.invoices i \
+                           WHERE i.organization_id = a.organization_id \
+                             AND i.period = u.period \
+                             AND i.status <> 'void') \
+                  GROUP BY u.period \
+                  ORDER BY u.period",
+                &[&organization_id],
+            )
+            .await
+            .map_err(|e| RegistryError::Database(e.to_string()))?;
+        usage_rows
+            .iter()
+            .map(|r| UnbilledPeriod {
+                period: r.get("period"),
+                apps: r.get("apps"),
+                units: r.get("units"),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(OutstandingBilling {
+        organization_id: organization_id.to_string(),
+        unpaid_invoices,
+        unbilled_periods,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     // In-process cache unit tests (no DB) — peers of the DB-gated PR-7 suite.
@@ -711,5 +1004,118 @@ mod tests {
             .count();
         assert!(live <= 2, "cache respects its capacity bound");
         assert!(cache.get(&c, period, now).is_some(), "the newest insert survives");
+    }
+
+    // -----------------------------------------------------------------------
+    // The deletion predicate's derived fields (no DB; the SQL is bound by
+    // `crates/zeroship-control/tests/deletion_owes_test.rs`).
+    // -----------------------------------------------------------------------
+
+    fn invoice(owed: i64) -> UnpaidInvoice {
+        UnpaidInvoice {
+            invoice_id: "inv_x".into(),
+            period: "2026-01-01".into(),
+            currency: "usd".into(),
+            total_cents: owed,
+            cash_collected_cents: 0,
+            owed_cents: owed,
+        }
+    }
+
+    fn usage() -> UnbilledPeriod {
+        UnbilledPeriod {
+            period: "2026-01-01".into(),
+            apps: 1,
+            units: 42,
+        }
+    }
+
+    fn outstanding(invoices: Vec<UnpaidInvoice>, periods: Vec<UnbilledPeriod>) -> OutstandingBilling {
+        OutstandingBilling {
+            organization_id: "org_x".into(),
+            unpaid_invoices: invoices,
+            unbilled_periods: periods,
+        }
+    }
+
+    /// An empty pair of lists is the ONLY settled answer, and each list alone
+    /// is enough to refuse. The pairing is the point: a predicate that only
+    /// looked at invoices would clear an organization whose usage was never
+    /// billed, which is the shape a missing Stripe Customer produces.
+    #[test]
+    fn either_arm_alone_is_unsettled_and_only_both_empty_is_settled() {
+        assert!(outstanding(vec![], vec![]).is_settled());
+        assert!(!outstanding(vec![invoice(1000)], vec![]).is_settled());
+        assert!(!outstanding(vec![], vec![usage()]).is_settled());
+        assert!(!outstanding(vec![invoice(1000)], vec![usage()]).is_settled());
+    }
+
+    /// Unbilled usage carries units, never cents, so it must not move the
+    /// owed figure a refusal quotes.
+    #[test]
+    fn owed_cents_sums_invoices_only() {
+        assert_eq!(outstanding(vec![], vec![usage()]).owed_cents(), 0);
+        assert_eq!(
+            outstanding(vec![invoice(1000), invoice(250)], vec![usage()]).owed_cents(),
+            1250
+        );
+    }
+
+    /// The remedy is derived, ordered, and total. Cash already claimed wins:
+    /// sending someone to wait for a sweep while an invoice is open would name
+    /// the slower of two remedies.
+    #[test]
+    fn the_remedy_prefers_settling_claimed_cash() {
+        assert_eq!(outstanding(vec![], vec![]).remedy(), None);
+        assert_eq!(
+            outstanding(vec![invoice(1)], vec![]).remedy(),
+            Some(BillingRemedy::SettleInvoices)
+        );
+        assert_eq!(
+            outstanding(vec![invoice(1)], vec![usage()]).remedy(),
+            Some(BillingRemedy::SettleInvoices)
+        );
+        assert_eq!(
+            outstanding(vec![], vec![usage()]).remedy(),
+            Some(BillingRemedy::BillOutstandingUsage)
+        );
+    }
+
+    /// Every remedy names a route, because a refusal with no next step is a
+    /// dead end. The route named is the one that is wired end to end.
+    #[test]
+    fn every_remedy_names_a_route_that_exists() {
+        for remedy in [
+            BillingRemedy::SettleInvoices,
+            BillingRemedy::BillOutstandingUsage,
+        ] {
+            assert!(
+                remedy.instruction().contains("/billing/setup"),
+                "{remedy:?} names no reachable route"
+            );
+        }
+    }
+
+    /// The currency comes from the invoice that owes it, and falls back to the
+    /// platform's only when there is no invoice to read it from.
+    #[test]
+    fn the_currency_follows_the_invoice_that_owes() {
+        let mut eur = invoice(500);
+        eur.currency = "eur".into();
+        assert_eq!(outstanding(vec![eur], vec![]).currency(), "eur");
+        assert_eq!(
+            outstanding(vec![], vec![usage()]).currency(),
+            crate::cron::billing_reconcile::BILLING_CURRENCY
+        );
+    }
+
+    /// The unbilled-usage arm is asked only of a stack that owns the local
+    /// invoice rail. The control differing in one variable is the whole
+    /// content of this test: under `No` there is no local invoice to be
+    /// missing, so "usage without an invoice" would name every organization.
+    #[test]
+    fn only_a_local_invoicer_is_asked_about_unbilled_usage() {
+        assert!(LocalInvoicing::Yes.asks_about_unbilled_usage());
+        assert!(!LocalInvoicing::No.asks_about_unbilled_usage());
     }
 }

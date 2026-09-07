@@ -41,5 +41,7 @@
   { "file": "20260905000200_drop_app_api_key.ts", "name": "drop_app_api_key", "opCount": 1 },
   { "file": "20260906000000_organization_entity_model.ts", "name": "organization_entity_model", "opCount": 56 },
   { "file": "20260906000100_apps_organization_and_billing_subject.ts", "name": "apps_organization_and_billing_subject", "opCount": 92 },
-  { "file": "20260906000200_apps_project_ownership_key.ts", "name": "apps_project_ownership_key", "opCount": 2 }
+  { "file": "20260906000200_apps_project_ownership_key.ts", "name": "apps_project_ownership_key", "opCount": 2 },
+  { "file": "20260906000300_organization_dissolution.ts", "name": "organization_dissolution", "opCount": 5 },
+  { "file": "20260907000000_user_erasure_edges.ts", "name": "user_erasure_edges", "opCount": 11 }
 ]

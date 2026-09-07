@@ -122,8 +122,18 @@ pub enum Action {
     OrganizationMemberAdded,
     /// A member's organization role changed. The detail carries `from` and `to`.
     OrganizationMemberRoleChanged,
-    /// A member was removed from an organization.
+    /// A member was removed from an organization by someone who outranked them.
     OrganizationMemberRemoved,
+    /// A member gave up their OWN seat. Distinct from
+    /// [`Self::OrganizationMemberRemoved`] because the two answer different
+    /// questions after the fact - one says who was ejected and by whom, the
+    /// other says who walked out - and a single action name would make the
+    /// difference unrecoverable from the trail.
+    OrganizationMemberLeft,
+    /// An organization was closed. It is a soft close: the row, its members,
+    /// its invitations and its billing history all survive, and nothing about
+    /// it can be changed afterwards.
+    OrganizationDissolved,
     /// Ownership moved to another member and the previous owner stepped down.
     /// `became_shared` records whether this also converted a personal
     /// organization into a shared one.
@@ -137,8 +147,16 @@ pub enum Action {
     OrganizationInviteRedeemed,
     /// A project was created inside an organization.
     ProjectCreated,
+    /// A project's name or slug changed.
+    ProjectUpdated,
+    /// A project was deleted. Hard, unlike an organization: a project names no
+    /// money record, so nothing has to outlive it.
+    ProjectDeleted,
     /// A member was seated on one project (the per-project narrowing grant).
     ProjectMemberAdded,
+    /// A project seat moved to another role, in one statement rather than as a
+    /// removal followed by a grant.
+    ProjectMemberRoleChanged,
     /// A project seat was withdrawn.
     ProjectMemberRemoved,
 }
@@ -178,12 +196,17 @@ impl Action {
             Self::OrganizationMemberAdded => "organization_member_added",
             Self::OrganizationMemberRoleChanged => "organization_member_role_changed",
             Self::OrganizationMemberRemoved => "organization_member_removed",
+            Self::OrganizationMemberLeft => "organization_member_left",
+            Self::OrganizationDissolved => "organization_dissolved",
             Self::OrganizationOwnershipTransferred => "organization_ownership_transferred",
             Self::OrganizationInviteCreated => "organization_invite_created",
             Self::OrganizationInviteRevoked => "organization_invite_revoked",
             Self::OrganizationInviteRedeemed => "organization_invite_redeemed",
             Self::ProjectCreated => "project_created",
+            Self::ProjectUpdated => "project_updated",
+            Self::ProjectDeleted => "project_deleted",
             Self::ProjectMemberAdded => "project_member_added",
+            Self::ProjectMemberRoleChanged => "project_member_role_changed",
             Self::ProjectMemberRemoved => "project_member_removed",
         }
     }

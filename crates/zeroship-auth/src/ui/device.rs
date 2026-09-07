@@ -446,6 +446,40 @@ fn render_device_approved() -> HttpResponse {
 mod tests {
     use super::*;
 
+    /// The device screen is the consent screen's peer and must hold no copy of
+    /// its own either: a platform scope renders exactly `Scope::human_label()`.
+    ///
+    /// The two renderers are separate functions in separate files, so "the
+    /// consent screen cannot name a deleted authority" says nothing about this
+    /// one. `zeroship deploy` from a headless machine goes through HERE, which
+    /// makes it the screen a creator is most likely to be reading when they
+    /// approve a CLI - and it was the screen that would have said "Roll back
+    /// deployments" for an authority no handler ever checked.
+    #[test]
+    fn every_platform_scope_renders_its_own_human_label_and_nothing_else() {
+        let requested: Vec<String> = Scope::ALL
+            .iter()
+            .map(|scope| scope.as_str().to_owned())
+            .collect();
+        assert!(
+            requested.len() >= 10,
+            "ruled on {} scope(s) - the vocabulary extraction collapsed",
+            requested.len()
+        );
+
+        let views = device_scope_views(&requested);
+        assert_eq!(views.len(), Scope::ALL.len());
+        for (scope, view) in Scope::ALL.iter().zip(views) {
+            assert_eq!(view.scope, scope.as_str());
+            assert_eq!(
+                view.label,
+                scope.human_label(),
+                "{} renders copy the enum does not own",
+                scope.as_str()
+            );
+        }
+    }
+
     #[test]
     fn device_user_code_format_is_bounded() {
         assert!(device_token::valid_user_code("BCDF-GHJK-LMNP"));

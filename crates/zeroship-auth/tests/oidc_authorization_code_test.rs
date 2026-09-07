@@ -21,6 +21,7 @@ use zeroship_auth::oidc::{
 use zeroship_auth::server;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
+use zeroship_auth::identity::deletion_cancel;
 use zeroship_auth::store::users;
 
 use common::{dedicated_test_db, location, pkce_challenge_s256, pkce_verifier, test_auth_config};
@@ -466,14 +467,17 @@ async fn credential_bump_rejects_code_after_deletion_is_cancelled() {
     let code = query_param(&location(&authorize), "code").expect("code");
 
     let mut deletion = dedicated_test_db(&db_url().expect("test database URL")).await;
-    users::request_deletion(&mut deletion, fx.user_id, 30)
+    let deletion_request = users::request_deletion(&mut deletion, fx.user_id, 30)
         .await
         .expect("request account deletion")
         .expect("authorization code owner exists");
+    // The undo is the mailed single-use token, redeemed through the real
+    // primitive. There is no by-id cancel to call.
     assert!(
-        users::cancel_deletion(fx.db.as_ref(), fx.user_id)
+        deletion_cancel::redeem(fx.db.as_ref(), &deletion_request.cancel_token)
             .await
-            .expect("cancel account deletion"),
+            .expect("cancel account deletion")
+            .is_some(),
         "deletion request must be cancellable"
     );
 

@@ -326,6 +326,13 @@ const ORGANIZATION_CALLS: Array<{
   method: string;
   path: string;
   body?: unknown;
+  /**
+   * What the stub answers. Defaulted from the method below, because almost
+   * every DELETE here is a `204` - but `organizations.dissolve` is a DELETE
+   * that returns the closed record, so the shape cannot be derived from the
+   * verb alone.
+   */
+  returns?: "json" | "void";
 }> = [
   {
     name: "organizations.list",
@@ -378,6 +385,19 @@ const ORGANIZATION_CALLS: Array<{
     send: (c) => c.organizations.removeMember(ORG, USER),
     method: "DELETE",
     path: `/api/organizations/${ORG}/members/${USER}`,
+  },
+  {
+    name: "organizations.leave",
+    send: (c) => c.organizations.leave(ORG),
+    method: "DELETE",
+    path: `/api/organizations/${ORG}/membership`,
+  },
+  {
+    name: "organizations.dissolve",
+    send: (c) => c.organizations.dissolve(ORG),
+    method: "DELETE",
+    path: `/api/organizations/${ORG}`,
+    returns: "json",
   },
   {
     name: "organizations.transferOwnership",
@@ -433,6 +453,19 @@ const ORGANIZATION_CALLS: Array<{
     path: `/api/projects/${PRJ}`,
   },
   {
+    name: "projects.update",
+    send: (c) => c.projects.update(PRJ, { name: "Checkout" }),
+    method: "PATCH",
+    path: `/api/projects/${PRJ}`,
+    body: { name: "Checkout" },
+  },
+  {
+    name: "projects.delete",
+    send: (c) => c.projects.delete(PRJ),
+    method: "DELETE",
+    path: `/api/projects/${PRJ}`,
+  },
+  {
     name: "projects.members",
     send: (c) => c.projects.members(PRJ),
     method: "GET",
@@ -444,6 +477,13 @@ const ORGANIZATION_CALLS: Array<{
     method: "POST",
     path: `/api/projects/${PRJ}/members`,
     body: { user_id: USER, role: "developer" },
+  },
+  {
+    name: "projects.changeMemberRole",
+    send: (c) => c.projects.changeMemberRole(PRJ, USER, { role: "viewer" }),
+    method: "PATCH",
+    path: `/api/projects/${PRJ}/members/${USER}`,
+    body: { role: "viewer" },
   },
   {
     name: "projects.removeMember",
@@ -461,8 +501,15 @@ test("every organization and project method targets its route", async () => {
       fetch: async (input, init) => {
         seen.push(new Request(input, init));
         // 204 is what every void-returning route answers with, and JSON for
-        // the rest; both parse through the same `request`.
-        return call.method === "DELETE" || call.path.endsWith("/transfer")
+        // the rest; both parse through the same `request`. The verb alone does
+        // not decide it - `organizations.dissolve` is a DELETE that returns the
+        // closed record - so a call may say.
+        const returns =
+          call.returns ??
+          (call.method === "DELETE" || call.path.endsWith("/transfer")
+            ? "void"
+            : "json");
+        return returns === "void"
           ? new Response(null, { status: 204 })
           : json({ id: ORG });
       },
@@ -516,7 +563,7 @@ test("a listed invite carries no token and the created one does", async () => {
     fetch: async (input, init) => {
       const request = new Request(input, init);
       return request.method === "POST"
-        ? json({ invite, token: "one-time-secret" }, 201)
+        ? json({ invite, token: "one-time-secret", delivery: "sent" }, 201)
         : json({ invites: [invite] });
     },
   });
@@ -526,10 +573,64 @@ test("a listed invite carries no token and the created one does", async () => {
     role: "viewer",
   });
   assert.equal(created.token, "one-time-secret");
+  assert.equal(created.delivery, "sent");
 
   const listed = await client.organizations.invites(ORG);
   assert.deepEqual(Object.keys(listed.invites[0]!).sort(), Object.keys(invite).sort());
   assert.ok(!("token" in listed.invites[0]!));
+});
+
+test("every delivery outcome reaches the caller unchanged", async () => {
+  // The three outcomes drive different advice - `sent` means the recipient has
+  // it, the other two mean nobody does but this caller - so a client that
+  // dropped or coerced the field would tell a person the wrong thing at the
+  // one moment the token still exists.
+  const invite = {
+    id: IVT,
+    organization_id: ORG,
+    email: "a@b.test",
+    role: "viewer",
+    issued_at: "2026-09-06T00:00:00Z",
+    expires_at: "2026-09-13T00:00:00Z",
+    consumed_at: null,
+  };
+  for (const delivery of ["sent", "suppressed", "failed"] as const) {
+    const client = createControlClient({
+      baseUrl: "http://control.local",
+      fetch: async () => json({ invite, token: "one-time-secret", delivery }, 201),
+    });
+    const created = await client.organizations.createInvite(ORG, {
+      email: "a@b.test",
+      role: "viewer",
+    });
+    assert.equal(created.delivery, delivery);
+    // The token is present in EVERY outcome. It is the only copy when the mail
+    // did not carry it, so a client must never have to guess.
+    assert.equal(created.token, "one-time-secret");
+  }
+});
+
+test("a closed organization reports when it was closed", async () => {
+  // `dissolve` is a DELETE that answers with a body, which is unusual enough
+  // that a client parsing it as void would silently discard the one fact the
+  // call exists to report.
+  const closed = {
+    id: ORG,
+    slug: "acme",
+    name: "Acme",
+    billing_email: "pay@acme.test",
+    personal_owner_id: null,
+    created_at: "2026-09-06T00:00:00Z",
+    updated_at: "2026-09-07T00:00:00Z",
+    dissolved_at: "2026-09-07T00:00:00Z",
+  };
+  const client = createControlClient({
+    baseUrl: "http://control.local",
+    fetch: async () => json(closed),
+  });
+  const record = await client.organizations.dissolve(ORG);
+  assert.equal(record.dissolved_at, "2026-09-07T00:00:00Z");
+  assert.equal(record.slug, "acme", "closing does not rewrite the record");
 });
 
 test("organization ids are percent-encoded into the path", async () => {

@@ -439,6 +439,26 @@ jobs:
         run: tests/organization_route_authorization_gate.sh
       - name: The role ladder and the Cedar bands name the same ranks
         run: tests/organization_policy_ladder_gate.sh
+      # The Cedar schema is the only thing that makes a typo'd action id
+      # visible, and strict validation only rules on the ids the POLICIES
+      # quote. This compares the schema against the Rust vocabulary and against
+      # build_context directly, which is where the ids no band names live -
+      # `migrations:approve` among them. Both gaps it catches surface at runtime
+      # as a 500 raised before audit_decision, so nothing is written down.
+      - name: The schema, the action enum and the request context agree
+        run: tests/cedar_schema_vocabulary_gate.sh
+      # A `curl -H` whose next word is the URL sends the URL as a header and
+      # then has no URL, which most harnesses read as an empty response rather
+      # than as a malformed call. Green on this tree; it was never wired.
+      - name: Every curl -H in a harness is followed by a header
+        run: tests/curl_header_flag_gate.sh
+      # Account erasure has to stay REACHABLE: a users foreign key that blocks
+      # the delete, or an auth statement naming a table zeroship_auth holds no
+      # grant on, both surface only when a real due user is reaped under the
+      # real role - which no unit test does, because they all connect as
+      # postgres.
+      - name: A due user can actually be erased
+        run: tests/user_erasure_reachability_gate.sh
       # tests/lib/skip_census.sh counts skips by one token, so a test that
       # skips WITHOUT printing it is invisible to the census whose whole job is
       # to stop a suite quietly covering less than it claims. 49 lines across

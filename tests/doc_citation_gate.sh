@@ -273,6 +273,23 @@ check_citations() {
           line=""
           ;;
       esac
+      # A GENERATED, GITIGNORED ARTIFACT IS NOT A BROKEN CITATION, and this arm
+      # used to say it was. `is_generated_artifact` was defined for arm 1 and
+      # called from arm 1 ALONE, so the same path was skipped when AGENTS.md
+      # named it and refused when a reference doc did - one repository, two
+      # verdicts, decided by which file the citation happened to sit in.
+      #
+      # The instance that surfaced it: `docs/reference/env-vars.md` cites
+      # `deploy/ops/zeroship.test.toml`, which `tests/provision_test_backends.sh`
+      # writes and `.gitignore` covers, and the citing passage says so two
+      # paragraphs later. The DELETED escape was the only exit this arm offered
+      # and it would have been a lie - the file is generated, not deleted, and a
+      # reader following that word would go looking for the commit that removed
+      # it.
+      #
+      # Skipped BEFORE the counter so the arm does not claim to have ruled on an
+      # item it cannot fail, which is the defect arm 1's own comment records.
+      is_generated_artifact "$path" && continue
       cites_examined=$((cites_examined + 1))
 
       # Every occurrence must say DELETED on its own line. One historical use

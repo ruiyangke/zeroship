@@ -239,36 +239,42 @@ info "closed billing period = $PERIOD_LABEL (period_start unix=$PERIOD_START); p
 echo ""
 echo "=== Stage 3: seed FOUR creators + apps + Stripe customers + DIFFERENT usage ==="
 # ===========================================================================
-# seed_creator <plan_id> creates a creator + a Stripe customer with a saved test
-# card + an owned app on the given plan, and prints "CREATOR APP CUS".
+# seed_creator <plan_id> creates a creator + an organization + a Stripe customer
+# with a saved test card + an owned app on the given plan, and prints
+# "CREATOR APP CUS ORGANIZATION".
 seed_creator() {
   local plan_id="$1" label="$2"
   local creator app cus pm
   creator="$(node -e 'console.log(require("crypto").randomUUID())')"
   app="$(node -e 'console.log(require("crypto").randomUUID())')"
-  cus="$(spost customers -d "email=demo-$label-$creator@zeroship.test" -d "name=Demo $label creator" -d "metadata[creator_id]=$creator" | jget id)"
+  # One organization per seeded creator, so each demo invoice has a distinct
+  # billing subject. It has to run HERE, in this function's own shell: the
+  # emitter below is expanded in a subshell and could not hand the project id
+  # back to the `apps` row that needs it. It also has to run BEFORE the Stripe
+  # customer, because the ownership metadata the platform stamps names the
+  # ORGANIZATION and a customer created without it would be unattributable.
+  organization_fixture_ids "demo-$label-$creator"
+  cus="$(spost customers -d "email=demo-$label-$creator@zeroship.test" -d "name=Demo $label creator" -d "metadata[organization_id]=$ZS_FIXTURE_ORGANIZATION_ID" | jget id)"
   case "$cus" in cus_*) ;; *) echo "FAILCUS"; return 1;; esac
   pm="$(spost payment_methods/pm_card_visa/attach -d "customer=$cus" | jget id)"
   case "$pm" in pm_*) ;; *) echo "FAILPM"; return 1;; esac
   spost "customers/$cus" -d "invoice_settings[default_payment_method]=$pm" -o /dev/null
-  # One organization per seeded creator, so each demo invoice has a distinct
-  # billing subject. It has to run HERE, in this function's own shell: the
-  # emitter below is expanded in a subshell and could not hand the project id
-  # back to the `apps` row that needs it.
-  organization_fixture_ids "demo-$label-$creator"
   psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { echo "FAILDB"; return 1; }
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$creator', 'demo-$label-$creator@zeroship.test'::citext, 'Demo $label creator', NOW());
 $(organization_fixture_sql "demo-$label-$creator" "demo-$label-$creator@zeroship.test")
-INSERT INTO zeroship.apps (id, name, plan_id, project_id)
-VALUES ('$app', 'demo-$label-app', '$plan_id', '$ZS_FIXTURE_PROJECT_ID');
+INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id)
+VALUES ('$app', 'demo-$label-app', '$plan_id', '$ZS_FIXTURE_PROJECT_ID', '$ZS_FIXTURE_ORGANIZATION_ID');
 $(seat_app_owner_sql "$app" "$creator")
-INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$creator') ON CONFLICT DO NOTHING;
-INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)
-VALUES ('$creator', 'stripe', '$cus')
-ON CONFLICT (creator_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
+$(organization_billing_sql "$ZS_FIXTURE_ORGANIZATION_ID")
+INSERT INTO zeroship.billing_customer_refs (organization_id, provider, external_id)
+VALUES ('$ZS_FIXTURE_ORGANIZATION_ID', 'stripe', '$cus')
+ON CONFLICT (organization_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
 SQL
-  echo "$creator $app $cus"
+  # The organization comes back with the rest: every downstream lookup keys on
+  # it, and re-deriving it from the label would be a second spelling of the
+  # digest in organization_fixture_ids that could drift from the first.
+  echo "$creator $app $cus $ZS_FIXTURE_ORGANIZATION_ID"
 }
 
 # usage_row <app> <metric> <total> — seed one cumulative usage_aggregates bucket
@@ -282,7 +288,7 @@ SQL
 }
 
 # ---- (1) LIGHT app: Starter plan, modest usage -----------------------------
-read -r L_CREATOR L_APP L_CUS <<<"$(seed_creator pln_demo_starter light)"
+read -r L_CREATOR L_APP L_CUS L_ORG <<<"$(seed_creator pln_demo_starter light)"
 case "$L_CUS" in cus_*) pass "light: creator+app+customer ($L_CUS) on Starter";; *) fail "light seed failed ($L_CREATOR $L_APP $L_CUS)"; exit 1;; esac
 usage_row "$L_APP" requests     120000
 usage_row "$L_APP" cpu_us       18000000
@@ -290,7 +296,7 @@ usage_row "$L_APP" egress_bytes 9000000
 info "light usage: requests=120k cpu_us=18M egress_bytes=9MB → ~147,000 CU (+\$0.99 base)"
 
 # ---- (2) HEAVY app: Scale plan, huge usage ---------------------------------
-read -r H_CREATOR H_APP H_CUS <<<"$(seed_creator pln_demo_scale heavy)"
+read -r H_CREATOR H_APP H_CUS H_ORG <<<"$(seed_creator pln_demo_scale heavy)"
 case "$H_CUS" in cus_*) pass "heavy: creator+app+customer ($H_CUS) on Scale";; *) fail "heavy seed failed"; exit 1;; esac
 usage_row "$H_APP" requests     4200000
 usage_row "$H_APP" cpu_us       1800000000
@@ -300,7 +306,7 @@ usage_row "$H_APP" db_writes    3400000
 info "heavy usage: requests=4.2M cpu=1.8Gus egress=9.5GB db_reads=12M db_writes=3.4M → ~34.3M CU"
 
 # ---- (3) MULTI app: Pro plan, 13 metrics -----------------------------------
-read -r M_CREATOR M_APP M_CUS <<<"$(seed_creator pln_demo_pro multi)"
+read -r M_CREATOR M_APP M_CUS M_ORG <<<"$(seed_creator pln_demo_pro multi)"
 case "$M_CUS" in cus_*) pass "multi: creator+app+customer ($M_CUS) on Pro";; *) fail "multi seed failed"; exit 1;; esac
 usage_row "$M_APP" requests             650000
 usage_row "$M_APP" cpu_us               240000000
@@ -323,7 +329,7 @@ info "multi usage: 13 metrics → ~25.7M CU (+\$2.00 base) — a rich per-metric
 # and seg1 (Pro, days 15–end). usage_at_change is the CUMULATIVE snapshot at the
 # change instant = seg0's end / seg1's start; usage_aggregates is the PERIOD-END
 # cumulative total. seg0 delta = snapshot − 0; seg1 delta = period_end − snapshot.
-read -r P_CREATOR P_APP P_CUS <<<"$(seed_creator pln_demo_pro prorated)"
+read -r P_CREATOR P_APP P_CUS P_ORG <<<"$(seed_creator pln_demo_pro prorated)"
 case "$P_CUS" in cus_*) pass "prorated: creator+app+customer ($P_CUS), current plan Pro";; *) fail "prorated seed failed"; exit 1;; esac
 # Segment-0 (Starter) usage = the cumulative snapshot at the change.
 P_S0_REQ=300000;    P_S0_CPU=90000000;   P_S0_EGR=800000000
@@ -369,20 +375,23 @@ echo "=== Stage 5: PAY each invoice on REAL Stripe (clean, pristine, no refund/d
 declare -A INV_OF CUS_OF LABEL_OF
 LABEL_OF[light]="light";  LABEL_OF[heavy]="heavy"; LABEL_OF[multi]="multi"; LABEL_OF[prorated]="prorated"
 CUS_OF[light]="$L_CUS"; CUS_OF[heavy]="$H_CUS"; CUS_OF[multi]="$M_CUS"; CUS_OF[prorated]="$P_CUS"
-declare -A CREATOR_OF
-CREATOR_OF[light]="$L_CREATOR"; CREATOR_OF[heavy]="$H_CREATOR"; CREATOR_OF[multi]="$M_CREATOR"; CREATOR_OF[prorated]="$P_CREATOR"
+declare -A ORGANIZATION_OF
+# The BILLING SUBJECT is the organization, not the human who seeded it: invoices,
+# billing_customer_refs and organization_billing all key on it, so a map from the
+# creator would have to re-derive the organization at every read.
+ORGANIZATION_OF[light]="$L_ORG"; ORGANIZATION_OF[heavy]="$H_ORG"; ORGANIZATION_OF[multi]="$M_ORG"; ORGANIZATION_OF[prorated]="$P_ORG"
 
 resolve_inv() {
   psql_db -tA -c "SELECT bpr.external_id FROM zeroship.billing_provider_refs bpr \
     JOIN zeroship.invoices i ON i.id=bpr.invoice_id \
-    WHERE i.creator_id='$1' AND bpr.provider='stripe' AND bpr.ref_kind='invoice' \
+    WHERE i.organization_id='$1' AND bpr.provider='stripe' AND bpr.ref_kind='invoice' \
     ORDER BY bpr.created_at DESC LIMIT 1" 2>/dev/null | tr -d '[:space:]'
 }
 
 PAID_OK=0
 for key in light heavy multi prorated; do
-  creator="${CREATOR_OF[$key]}"
-  inv="$(resolve_inv "$creator")"
+  organization="${ORGANIZATION_OF[$key]}"
+  inv="$(resolve_inv "$organization")"
   case "$inv" in
     in_*) ;;
     *) fail "$key: no finalized Stripe invoice id resolved (got '$inv')"; continue;;
@@ -415,14 +424,14 @@ echo "  DEMO INVOICE SUMMARY (open these in the Stripe TEST dashboard)"
 echo "────────────────────────────────────────────────────────────────────────"
 for key in light heavy multi prorated; do
   inv="${INV_OF[$key]:-}"
-  creator="${CREATOR_OF[$key]}"
+  organization="${ORGANIZATION_OF[$key]}"
   [ -z "$inv" ] && { echo ""; echo "  [$key] (no invoice)"; continue; }
   inv_json="$(sget "invoices/$inv")"
   total="$(echo "$inv_json" | jget total)"
   status="$(echo "$inv_json" | jget status)"
   hosted="$(echo "$inv_json" | jget hosted_invoice_url)"
   # Our computed subtotal from the local invoice row.
-  our_total="$(psql_db -tA -c "SELECT total_cents FROM zeroship.invoices WHERE creator_id='$creator' AND status<>'void' ORDER BY created_at DESC LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
+  our_total="$(psql_db -tA -c "SELECT total_cents FROM zeroship.invoices WHERE organization_id='$organization' AND status<>'void' ORDER BY created_at DESC LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
   echo ""
   echo "  ┌─ [$key] invoice $inv"
   echo "  │   dashboard : https://dashboard.stripe.com/test/invoices/$inv"

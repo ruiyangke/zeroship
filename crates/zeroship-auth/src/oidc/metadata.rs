@@ -99,6 +99,20 @@ pub async fn jwks_document(db: &Client) -> Result<Value> {
 #[must_use]
 pub fn discovery_metadata(issuer: &str) -> Value {
     let issuer = issuer.trim_end_matches('/');
+    // The advertised scope list is DERIVED, not restated. It was a literal
+    // array until the organization vocabulary landed: `organization:create`
+    // and `organization:read` joined `PLATFORM_CLI_ISSUABLE_SCOPES` so a fresh
+    // account's first `zeroship deploy` could mint the organization it needs,
+    // this list did not move, and the discovery document went on telling every
+    // client the CLI's own scopes were not supported here.
+    //
+    // The identity scopes are separate because they are not creator authority
+    // at all - `IDENTITY_SCOPES` in the consent handler treats them as always
+    // self-grantable, and they are namespace (b) rather than (a).
+    let scopes_supported: Vec<&str> = ["openid", "profile", "email", "offline_access"]
+        .into_iter()
+        .chain(device_grant::PLATFORM_CLI_ISSUABLE_SCOPES)
+        .collect();
     json!({
         "issuer": issuer,
         "authorization_endpoint": format!("{issuer}/authorize"),
@@ -119,17 +133,7 @@ pub fn discovery_metadata(issuer: &str) -> Value {
             "refresh_token",
             "urn:ietf:params:oauth:grant-type:device_code"
         ],
-        "scopes_supported": [
-            "openid",
-            "profile",
-            "email",
-            "offline_access",
-            "apps:archive",
-            "apps:deploy",
-            "apps:read",
-            "apps:write",
-            "secrets:read"
-        ],
+        "scopes_supported": scopes_supported,
         "code_challenge_methods_supported": ["S256"],
         "token_endpoint_auth_methods_supported": [
             "none",
@@ -208,6 +212,42 @@ mod tests {
             assert!(
                 scopes.iter().any(|advertised| advertised == scope),
                 "missing CLI scope {scope}"
+            );
+        }
+    }
+
+    /// The advertised list is the identity scopes plus the CLI-issuable set and
+    /// NOTHING ELSE, so the document cannot advertise an authority the platform
+    /// does not issue.
+    ///
+    /// The test above only checks one direction, which is how this list came to
+    /// be short by two: adding a scope to `PLATFORM_CLI_ISSUABLE_SCOPES` made
+    /// that test red, but a scope removed from the vocabulary while staying in
+    /// a literal array here would have stayed green forever - an OP telling
+    /// every client it supports a scope no `Scope::parse` accepts, which is a
+    /// refused authorization at the point a creator is already waiting.
+    #[test]
+    fn discovery_advertises_nothing_beyond_identity_and_the_cli_set() {
+        let metadata = discovery_metadata("https://auth.zeroship.test/oauth2");
+        let scopes: Vec<String> = metadata["scopes_supported"]
+            .as_array()
+            .expect("scopes_supported array")
+            .iter()
+            .map(|value| value.as_str().expect("scope string").to_owned())
+            .collect();
+        assert!(
+            scopes.len() >= 5,
+            "ruled on {} advertised scope(s)",
+            scopes.len()
+        );
+
+        let identity = ["openid", "profile", "email", "offline_access"];
+        for scope in &scopes {
+            assert!(
+                identity.contains(&scope.as_str())
+                    || PLATFORM_CLI_ISSUABLE_SCOPES.contains(&scope.as_str()),
+                "{scope} is advertised and is neither an identity scope nor one \
+                 the platform CLI may be issued"
             );
         }
     }

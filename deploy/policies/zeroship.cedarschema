@@ -1,0 +1,279 @@
+// The Cedar SCHEMA for the platform authorization vocabulary.
+//
+// WHAT IT IS FOR. Cedar's parser accepts any action id, any entity type and any
+// context key, because a bare `PolicySet::from_str` has nothing to compare them
+// against. `Action::"apps:raed"` parses, loads, and denies every request it was
+// written to permit - with no diagnostic anywhere, and an audit row that reads
+// exactly like an honest non-match. This file is the thing to compare against:
+// `engine::load_platform_policies` validates the shipped bands against it under
+// `ValidationMode::Strict` and REFUSES TO RETURN on any error or warning, and
+// `eval::build_request` binds every request to it so a request whose action,
+// principal type, resource type or context shape is outside this vocabulary is
+// an error rather than a silent deny.
+//
+// A SCHEMA THAT ONLY EXISTED AT BOOT WOULD BE A NEW WAY TO FAIL. Every service
+// that authorizes anything calls `load_platform_policies` on startup, so a
+// malformed schema would take the fleet down at deploy time. `build.rs` parses
+// this file and re-runs the same strict validation over every `.cedar` file
+// under this directory, so both failures are compile errors on the developer's
+// machine instead.
+//
+// ---------------------------------------------------------------------------
+// `appliesTo` IS THE REQUEST SURFACE, NOT THE POLICY PAIRING
+// ---------------------------------------------------------------------------
+//
+// Every action lists every resource type on purpose, and the alternative was
+// measured rather than assumed. A schema whose `appliesTo` was derived from the
+// pairs the bands actually write would refuse most live requests at
+// `Request::new`: `is_authorized_anywhere` probes `Resource::Any` first, then
+// every organization the principal is seated in, then a representative project,
+// for WHATEVER action it was asked about - so the consent screen legitimately
+// asks "may this principal do `organization:members:write` at a Project?" and
+// expects the answer "no". Under a narrow schema that question is not a denial;
+// it is an `AuthzError::CedarRequest` raised before `audit_decision` runs, so
+// it surfaces as a 500 with no durable record.
+//
+// WHAT THIS COSTS, stated plainly: the schema does NOT check that an
+// organization-scoped action is paired with an `Organization` resource. Nothing
+// here would notice a band permitting `organization:admin` at `resource is App`.
+// That fence is the SCOPE of each band (`resource is Organization`, never a
+// condition in the body) and it is bound by
+// `crates/zeroship-authz/tests/platform_policies_test.rs`, which drives real
+// principals at real ranks against real resource types.
+//
+// ---------------------------------------------------------------------------
+// ENTITY ATTRIBUTES
+// ---------------------------------------------------------------------------
+//
+// `User` carries the two attributes `entities::user_entity` puts on it and
+// nothing else. Authority - the two rank integers - deliberately does NOT ride
+// here: a policy dereferencing a missing ENTITY attribute is SKIPPED with an
+// evaluation error that `matched_policy_ids` never records, which is a deny
+// indistinguishable from a clean no-match. The ranks are context keys, where a
+// missing value denies at a comparison instead. See `crates/zeroship-authz/src/
+// entities.rs`.
+//
+// `App`, `Project` and `Organization` carry no attributes because no policy
+// dereferences one. `Resource` is the synthetic platform-level type whose only
+// member is `Resource::"*"` (`Resource::Any`), the resource for surfaces that
+// name nothing: create an organization, list the ones you belong to, read your
+// own account.
+
+entity User = {
+  "email_verified": Bool,
+  "account_locked": Bool,
+};
+
+entity App;
+entity Project;
+entity Organization;
+entity Resource;
+
+// ---------------------------------------------------------------------------
+// THE REQUEST CONTEXT
+// ---------------------------------------------------------------------------
+//
+// `eval::build_context` supplies EVERY key below on EVERY request,
+// unconditionally, and supplies nothing else. Both halves are load-bearing and
+// both are gated by `tests/cedar_schema_vocabulary_gate.sh`: a key declared
+// here and not supplied makes every request fail to build, and a key supplied
+// and not declared here does the same.
+//
+//   now             wall-clock seconds. Supplied truthfully; read by no policy
+//                   and no `Condition` lowering today. It is kept - unlike the
+//                   MFA keys, which were deleted in the same sweep - because it
+//                   is a HONEST unused input rather than a falsified one: every
+//                   producer of a `VerifiedPrincipal` hardcoded
+//                   `mfa_verified: false`, so a condition reading it would have
+//                   silently never matched, while `now` is the real clock.
+//   now_minute_utc  minute of the UTC day, the input to `Condition::TimeWindow`.
+//   request_ip      the input to `Condition::IpRange`. `0.0.0.0` when the edge
+//                   did not supply one, so an IpRange condition fails closed.
+//   effective_rank  organization rank, already narrowed to
+//                   min(organization, project) for a Project- or App-scoped
+//                   request unless the caller is admin or above. Zero for a
+//                   principal with no live membership.
+//   billing_rank    the SECOND authority axis, organization-level always: there
+//                   is no per-project invoice to narrow against.
+type RequestContext = {
+  "now": Long,
+  "now_minute_utc": Long,
+  "request_ip": ipaddr,
+  "effective_rank": Long,
+  "billing_rank": Long,
+};
+
+// ---------------------------------------------------------------------------
+// THE ACTION VOCABULARY
+// ---------------------------------------------------------------------------
+//
+// This list must be exactly `zeroship_authz::Action::all()`, in both
+// directions. An action here that no `Action` variant spells is a word the
+// platform can never issue; an `Action` variant absent here is a 500 the first
+// time a route asks for it, because `Request::new` refuses an action the schema
+// does not declare. Strict validation cannot see either gap on its own - it
+// only rules on the ids the POLICIES quote - so
+// `tests/cedar_schema_vocabulary_gate.sh` compares this file against
+// `crates/zeroship-authz/src/action.rs` directly.
+//
+// `migrations:approve` is the case that makes that gate necessary rather than
+// decorative: it is operator-only, it appears in NO policy band by design, and
+// `ControlPlaneAuthenticator::authorize` issues it at a real `Resource::App` on
+// every migration go-live. Validation would stay green with it missing; the
+// route would 500.
+
+action "apps:read" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "apps:write" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "apps:deploy" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "migrations:approve" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "apps:archive" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "deployments:read" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "env:read" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "env:write" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "secrets:read" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "secrets:write" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "billing:read" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "billing:write" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "organization:create" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "organization:read" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "organization:write" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "organization:admin" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "organization:members:read" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "organization:members:write" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "organization:members:leave" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "project:create" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "project:read" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "project:write" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "project:members:read" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "project:members:write" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "account:read" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};
+
+action "account:write" appliesTo {
+  principal: [User],
+  resource: [App, Project, Organization, Resource],
+  context: RequestContext
+};

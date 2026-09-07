@@ -334,6 +334,7 @@ async fn build_fixture(
         billing_stream: None,
         tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
             zeroship_control::billing_read::ProjectedChargeCache::default(),
@@ -454,8 +455,8 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
     .await;
 }
 
-fn now_for_closed_period() -> i64 {
-    common::next_isolated_period()
+async fn now_for_closed_period() -> i64 {
+    common::next_isolated_period().await
 }
 
 fn prev_period(now: i64) -> i64 {
@@ -540,7 +541,7 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
     )
     .await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "native").await;
@@ -596,7 +597,7 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
     let fake = Arc::new(FakeTaxProvider::new(123));
     let fx = build_fixture(&url, "fake", fake.clone() as Arc<dyn TaxProvider>).await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "fake").await;
@@ -653,7 +654,7 @@ async fn fake_provider_tax_without_credit_holds_balance_check() {
     let fake = Arc::new(FakeTaxProvider::new(250));
     let fx = build_fixture(&url, "fake-nocredit", fake.clone() as Arc<dyn TaxProvider>).await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "fake-nocredit").await;
@@ -728,7 +729,7 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     // A DISTINCT far-back period so this test's permanent 'draft' leftover (the finalize
     // is intentionally never allowed to commit) can never be swept by a sibling reconcile.
-    let now = now_for_closed_period() - 200 * 86_400;
+    let now = now_for_closed_period().await - 200 * 86_400;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "tax-err").await;
@@ -811,7 +812,7 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
     )
     .await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "nocust").await;
@@ -866,7 +867,7 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
     )
     .await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "fullcredit").await;
@@ -949,7 +950,7 @@ async fn tax_computed_once_over_summed_multi_segment_subtotal() {
     let fake = Arc::new(FakeTaxProvider::new(200));
     let fx = build_fixture(&url, "tax-multiseg", fake.clone() as Arc<dyn TaxProvider>).await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "tax-multiseg").await;

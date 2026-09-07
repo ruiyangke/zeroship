@@ -26,7 +26,7 @@ pub use authority::{effective_project_rank, Authority};
 pub use cedar_policy::PolicySet;
 pub use condition::Condition;
 pub use effect::Effect;
-pub use engine::{load_platform_policies, policy_hash, Authorizer};
+pub use engine::{load_platform_policies, policy_hash, PlatformPolicies};
 pub use entities::assemble_entities;
 pub use error::{AuthzError, ValidationError};
 pub use eval::{enforce, is_authorized_anywhere, AuthzContext, AuthzDecision};

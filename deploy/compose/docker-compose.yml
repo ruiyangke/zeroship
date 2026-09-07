@@ -841,6 +841,15 @@ services:
       ZEROSHIP_AUTH_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret
       ZEROSHIP_AUTH_REFRESH_HASH_KEY_FILE: /etc/zeroship/secrets/refresh-hash-key
       ZEROSHIP_AUTH_REFRESH_IDEM_KEY_FILE: /etc/zeroship/secrets/refresh-idem-key
+      # The SHARED control-plane key, same identity control, the gateway and the
+      # worker read. Auth presents it on exactly one call: the erasure preflight
+      # (`GET /internal/principals/{id}/erasure-preflight`), which is how
+      # `/me/delete` learns whether erasing this human would strand an
+      # organization. Without it that request is REFUSED, not proceeded with.
+      ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
+      # And where to present it. The service name, not the public host: this is
+      # an internal call and must not traverse the edge.
+      ZEROSHIP_CONTROL_URL: http://control:9090
     # LOOPBACK, same reasoning as the gateway: Caddy reaches auth by service
     # name (`reverse_proxy auth:9092`, three site blocks), so this published
     # port was a second entrance to the OIDC provider that bypassed the edge.

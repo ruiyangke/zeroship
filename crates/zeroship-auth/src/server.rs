@@ -142,8 +142,13 @@ pub fn configure(
                 web::resource("/me/delete")
                     .route(web::post().to(ui::account_deletion::request)),
             )
+            // GET renders the undo form against the token in the emailed link
+            // and sets the CSRF pair; POST spends it. There is no session arm:
+            // `/me/delete` revokes every session in the same transaction that
+            // schedules the deletion, so the caller here is never signed in.
             .service(
                 web::resource("/me/delete/cancel")
+                    .route(web::get().to(ui::account_deletion::cancel_form))
                     .route(web::post().to(ui::account_deletion::cancel)),
             )
             // ISS-11: TOTP two-factor self-service. Same authenticated

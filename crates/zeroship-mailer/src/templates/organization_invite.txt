@@ -1,0 +1,11 @@
+{{ inviter }} invited you to join {{ organization }} on zeroship as {{ role }}.
+
+To accept, run:
+
+  zeroship organization join {{ token }}
+
+The invitation expires in {{ expires_in }}, and it can only be accepted by an
+account whose verified email address is this one.
+
+If you were not expecting this, ignore this email. Nothing happens until you
+accept.

@@ -5,13 +5,17 @@
 #
 # This is the OTHER gateway enforcement gate (complements the spend-state one).
 # `check_account` (crates/zeroship-gateway/src/enforce.rs) runs BEFORE `check_spend`, so a
-# Suspended creator's apps 402 `ACCOUNT_SUSPENDED` regardless of spend headroom.
-# State is CREATOR-keyed (`zeroship.creator_billing_status.state` ∈
-# active|past_due|suspended), surfaced per-app on the pulled `RouteEntry` via the
-# app's project -> organization -> the organization's `owner` members
-# (registry.rs). Default (no row) = Active. An organization may hold several
-# owners, so the lateral collapses them to one and the MOST RESTRICTIVE state
-# wins: adding an owner whose card is good can never relax enforcement.
+# suspended organization's apps 402 `ACCOUNT_SUSPENDED` regardless of spend
+# headroom. State is ORGANIZATION-keyed
+# (`zeroship.organization_billing_status.state` in active|past_due|suspended),
+# surfaced per-app on the pulled `RouteEntry` by a plain equi-join on
+# `apps.organization_id` (registry.rs). Default (no row) = Active.
+#
+# THE OWNER LATERAL IS GONE, and this header described one until the billing
+# subject stopped being a human. There is nothing left to collapse: an
+# organization is single-valued and always present, so an app has exactly one
+# account state and no "most restrictive owner wins" rule is needed to make that
+# well defined.
 #
 #   Active     → 200
 #   PastDue    → 200   (dunning GRACE window — still served)
@@ -70,10 +74,26 @@ RP_BROKERS="127.0.0.1:$RP_PORT"; USAGE_TOPIC="zeroship-usage-acct-e2e"
 WORK="$(mktemp -d -t zs-e2e-acct-XXXXXX)"; mkdir -p "$WORK/blobs" "$WORK/blob-cache"; PIDFILE="$WORK/pids"; : > "$PIDFILE"
 jget(){ node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{const o=JSON.parse(s);process.stdout.write(String(o$1??'')+'\n')}catch(e){console.log('')}})"; }
 psql_exec(){ docker exec -i "$PGC" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 "$@"; }
-set_acct(){ psql_exec >/dev/null 2>&1 <<SQL
-INSERT INTO zeroship.creator_billing_status (creator_id,state) VALUES ('$1','$2')
-  ON CONFLICT (creator_id) DO UPDATE SET state=EXCLUDED.state, updated_at=NOW();
+# set_acct <organization-id> <state>
+#
+# Drive the ORGANIZATION's account state, and refuse if the write did not land.
+# This used to redirect psql to /dev/null and ignore its status, so a rejected
+# write - a missing `organization_billing` parent, a state outside the CHECK -
+# left the previous state in place and the assertion below reported the gateway
+# serving the wrong verdict rather than the fixture never changing anything.
+set_acct(){
+  local organization="${1:?set_acct needs an organization id}" state="${2:?set_acct needs a state}" out
+  out="$(psql_exec -tA 2>&1 <<SQL
+INSERT INTO zeroship.organization_billing_status (organization_id,state) VALUES ('$organization','$state')
+  ON CONFLICT (organization_id) DO UPDATE SET state=EXCLUDED.state, updated_at=NOW();
+SELECT 'zs-acct=' || state FROM zeroship.organization_billing_status WHERE organization_id='$organization';
 SQL
+)"
+  case "$out" in *"zs-acct=$state"*) return 0;; esac
+  echo "FAIL: organization $organization was not moved to account state '$state'." >&2
+  echo "      psql said:" >&2
+  printf '%s\n' "$out" | sed 's/^/        /' >&2
+  exit 1
 }
 # GET one probe request; echo "<status> <bodycode>"
 probe_req(){ local out code body; out="$(curl -s -w $'\n%{http_code}' -H 'Host: acct-probe.localhost' "http://localhost:$ZEROSHIP_GATEWAY_PORT/probe/$1" 2>/dev/null)"; code="$(printf '%s' "$out" | tail -1)"; body="$(printf '%s' "$out" | sed '$d')"; local bc; bc="$(printf '%s' "$body" | jget '.code')"; echo "${code:-000} ${bc:-none}"; }
@@ -180,7 +200,7 @@ curl -sf "$MIGRATE_SERVER_URL/readyz" >/dev/null 2>&1 \
   && pass "zeroship-migrate-server healthy" \
   || { fail "migrate-server"; tail -30 "$WORK/migrated.log"; exit 1; }
 
-echo ""; echo "=== Stage 2: bearer + creator + app + deploy + creator_billing ==="
+echo ""; echo "=== Stage 2: bearer + creator + app + deploy + organization_billing ==="
 # The scope string is the action list the deleted permission_tokens policy
 # carried, one scope per Cedar action: control turns `scope` into the token
 # policy and intersects it with the owner's own authority.
@@ -188,13 +208,21 @@ SCOPE="apps:read apps:write apps:deploy billing:read billing:write"
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
 psql_exec >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$CREATOR','e2e-acct-$CREATOR@zeroship.test'::citext,'E2E Acct',NOW());
-INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CREATOR') ON CONFLICT (creator_id) DO NOTHING;
 SQL
 ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
-[ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer + creator_billing row (creator=$CREATOR)" || { fail "bearer mint"; exit 1; }
+[ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer (creator=$CREATOR)" || { fail "bearer mint"; exit 1; }
 APP="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d "{\"name\":\"acct-probe\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
 [ -n "$APP" ] && pass "created app $APP" || { fail "create app"; exit 1; }
 seat_app_owner "$APP" "$CREATOR" owner psql_exec
+# The billing subject is the ORGANIZATION, and it only exists once the app does:
+# `POST /api/apps` mints the caller's personal organization and default project
+# on first use. So the billing row cannot be written beside the user above - it
+# has to follow the app, and the id has to be read back rather than guessed.
+ORGANIZATION="$(app_organization "$APP" psql_exec)" || exit 1
+psql_exec >/dev/null <<SQL || { fail "organization_billing row for $ORGANIZATION"; exit 1; }
+$(organization_billing_sql "$ORGANIZATION")
+SQL
+pass "app $APP bills organization $ORGANIZATION"
 CREATE_CODE="$(curl -sS -o "$WORK/create-database-response.json" -w '%{http_code}' \
   -X POST "$MIGRATE_SERVER_URL/v1/databases/$APP" \
   -H "Authorization: Bearer $ADMIN_TOKEN")"
@@ -236,14 +264,14 @@ else
   tail -15 "$WORK/gate.log"; tail -20 "$WORK/worker.log"; exit 1
 fi
 
-echo ""; echo "=== Stage 4: walk account states (creator_billing_status.state) ==="
+echo ""; echo "=== Stage 4: walk account states (organization_billing_status.state) ==="
 # The baseline above proves the probe database. State transitions then need HTTP
 # 200 when served, or 402 AND the exact gateway body code when blocked. The gateway pulls
 # account_state on its ~2s sync, so poll until it reflects the expected result.
 matches(){ if [ "$2" = "402" ]; then [ "$3" = "$2" ] && [ "$4" = "$5" ]; else [ "$3" = "$2" ]; fi; }
 assert_acct(){ # $1=label $2=state($2="" ⇒ no row) $3=expect_code $4=expect_bodycode
   local label="$1" state="$2" want_code="$3" want_bc="$4" rr code bc
-  [ -n "$state" ] && set_acct "$CREATOR" "$state"
+  [ -n "$state" ] && set_acct "$ORGANIZATION" "$state"
   code=000; bc=none
   for _ in $(seq 1 8); do rr="$(probe_req "$label")"; code="${rr%% *}"; bc="${rr##* }"; matches "$label" "$want_code" "$code" "$bc" "$want_bc" && break; sleep 1.5; done
   matches "$label" "$want_code" "$code" "$bc" "$want_bc" \
@@ -260,7 +288,7 @@ echo ""; echo "=== Stage 5: Suspended 402s BEFORE spend is consulted (gate order
 # the 402 is ACCOUNT_SUSPENDED, proving check_account runs first (enforce.rs).
 curl -s -o /dev/null -X PUT "$CONTROL_URL/api/apps/$APP/spend-limit" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"cents":1}'
 curl -s -o /dev/null -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONTROL_URL/internal/spend/reconcile"
-set_acct "$CREATOR" suspended
+set_acct "$ORGANIZATION" suspended
 code=000; bc=none
 for _ in $(seq 1 8); do rr="$(probe_req ordering)"; code="${rr%% *}"; bc="${rr##* }"; { [ "$code" = "402" ] && [ "$bc" = "ACCOUNT_SUSPENDED" ]; } && break; sleep 1.5; done
 { [ "$code" = "402" ] && [ "$bc" = "ACCOUNT_SUSPENDED" ]; } \
@@ -272,12 +300,13 @@ echo "  Results: $PASS passed, $FAIL failed"
 echo "============================================"
 # A floor on assertions that RAN, not that PASSED. The last clean CI run measured
 # 18 assertions; migrate-server health and app migration apply add two mandatory
-# rows, so this version expects 20. PASS+FAIL because a mutation moves an outcome BETWEEN those
+# rows, and reading the app's organization back adds a third, so this version
+# expects 21. PASS+FAIL because a mutation moves an outcome BETWEEN those
 # columns; only a LOST assertion drops the sum (#285/#286). Not decorative here -
 # disabling check_account in the gateway gave 14 passed / 2 failed = 16 RAN, so the
 # denominator held while two verdicts flipped, which is exactly what a floor on
 # PASS alone would have mistaken for a smaller run.
-ACCT_MIN_RAN=20
+ACCT_MIN_RAN=21
 RAN=$((PASS + FAIL))
 rc=0
 [ "$FAIL" -eq 0 ] || rc=1

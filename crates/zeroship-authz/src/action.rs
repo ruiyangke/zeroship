@@ -44,6 +44,19 @@ pub enum Action {
     OrganizationAdmin,
     OrganizationMembersRead,
     OrganizationMembersWrite,
+    /// **Give up your OWN seat, and nobody else's.** It is a separate action
+    /// rather than a case of [`Self::OrganizationMembersWrite`] because the two
+    /// need opposite ranks: seating a member needs authority OVER the
+    /// organization (`members:write` is banded at admin and above), while
+    /// leaving one needs only a seat in it - and a viewer, who holds no
+    /// `members:write` at any rank, must be able to leave.
+    ///
+    /// Reusing `organization:read` instead would have been the other way to
+    /// reach a viewer, and it is worse: a client granted read-only consent
+    /// could then delete its holder's seat. The route it gates
+    /// (`DELETE /api/organizations/{id}/membership`) names no user at all, so
+    /// the target is the bearer by construction rather than by a check.
+    OrganizationMembersLeave,
     ProjectCreate,
     ProjectRead,
     ProjectWrite,
@@ -75,6 +88,7 @@ const ALL_ACTIONS: &[Action] = &[
     Action::OrganizationAdmin,
     Action::OrganizationMembersRead,
     Action::OrganizationMembersWrite,
+    Action::OrganizationMembersLeave,
     Action::ProjectCreate,
     Action::ProjectRead,
     Action::ProjectWrite,
@@ -112,6 +126,7 @@ impl Action {
             Self::OrganizationAdmin => "organization:admin",
             Self::OrganizationMembersRead => "organization:members:read",
             Self::OrganizationMembersWrite => "organization:members:write",
+            Self::OrganizationMembersLeave => "organization:members:leave",
             Self::ProjectCreate => "project:create",
             Self::ProjectRead => "project:read",
             Self::ProjectWrite => "project:write",

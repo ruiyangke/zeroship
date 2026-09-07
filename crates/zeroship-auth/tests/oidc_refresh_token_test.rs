@@ -18,6 +18,7 @@ use zeroship_auth::server;
 use zeroship_core::config::Operational;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
+use zeroship_auth::identity::deletion_cancel;
 use zeroship_auth::store::users;
 use zeroship_core::auth::hash_client_secret;
 use zeroship_authz::wrapper_revocation;
@@ -242,14 +243,17 @@ async fn deletion_revokes_refresh_family_even_after_cancellation() {
     let family_id = refresh_family_id(&fx).await;
 
     let mut deletion = dedicated_test_db(&db_url().expect("test database URL")).await;
-    users::request_deletion(&mut deletion, fx.user_id, 30)
+    let deletion_request = users::request_deletion(&mut deletion, fx.user_id, 30)
         .await
         .expect("request account deletion")
         .expect("refresh owner exists");
+    // The undo is the mailed single-use token, redeemed through the real
+    // primitive. There is no by-id cancel to call.
     assert!(
-        users::cancel_deletion(fx.db.as_ref(), fx.user_id)
+        deletion_cancel::redeem(fx.db.as_ref(), &deletion_request.cancel_token)
             .await
-            .expect("cancel account deletion"),
+            .expect("cancel account deletion")
+            .is_some(),
         "deletion request must be cancellable"
     );
 

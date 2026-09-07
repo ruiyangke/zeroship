@@ -169,11 +169,17 @@ while IFS= read -r file; do
        $file"
 done < <(find "$POLICY_DIR" -name '*.cedar' -print | sort)
 
+# The trailing `\b` is load-bearing and was added after it bit: `engine.rs`
+# also `include_str!`s `deploy/policies/zeroship.cedarschema`, and without the
+# boundary this pattern matched its first eleven-and-a-bit characters and
+# reported `deploy/policies/zeroship.cedar` as a path engine.rs cites and disk
+# does not have. A prefix match reported as a whole path is a phantom the gate
+# invented, not one it found.
 phantom=""
 while IFS= read -r cited; do
   [ -f "$cited" ] || phantom="$phantom
        $cited"
-done < <(grep -oE 'deploy/policies/[a-z_/]+\.cedar' "$ENGINE" | sort -u)
+done < <(grep -oE 'deploy/policies/[a-z_/]+\.cedar\b' "$ENGINE" | sort -u)
 
 # MEASURED 2026-09-06: the self-service baseline plus the organization bands.
 # Floor 4 is under that and far above zero, which is what a `find` against a

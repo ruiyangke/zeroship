@@ -95,7 +95,12 @@ pub const DEFAULT_SETTLE_WINDOW_SECS: u64 = DEFAULT_TICK_SECS + 5 * 60;
 pub const DEFAULT_SAFETY_NET_TICK_SECS: u64 = 300;
 
 /// Currency for infra-cost invoices (v1: USD only).
-const BILLING_CURRENCY: &str = "usd";
+///
+/// Visible to the crate because [`crate::billing_read::OutstandingBilling`]
+/// needs the same fallback when an organization owes only unbilled usage and
+/// has no invoice to read a currency from. Two spellings of the platform
+/// currency would let a refusal quote one while the invoice carries the other.
+pub(crate) const BILLING_CURRENCY: &str = "usd";
 
 /// The S7 safety-net pass compares period quantities at this metric grain. The
 /// stream recompute slice feeds the same quantity into `usage_aggregates` in this

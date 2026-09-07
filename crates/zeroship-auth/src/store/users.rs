@@ -322,6 +322,16 @@ pub struct DeletionRequest {
     /// Sessions torn down as part of the request (idp + gateway), for audit.
     pub idp_sessions_revoked: u64,
     pub gateway_sessions_revoked: u64,
+    /// The single-use undo token, minted inside the same transaction that
+    /// opened the window and returned exactly once - to the code that puts it
+    /// in the confirmation email.
+    ///
+    /// It is here, and not left to the handler, so that "a scheduled deletion
+    /// always has a live undo token" is a property of this transaction rather
+    /// than of whoever remembers to call a second function. Every credential
+    /// this transaction revokes is one the person cannot use to change their
+    /// mind; this is the one that replaces them.
+    pub cancel_token: String,
 }
 
 /// Begin an account-deletion request (ISS-12 / GDPR Art. 17), atomically:
@@ -332,8 +342,15 @@ pub struct DeletionRequest {
 ///      version stop validating (the gateway's pulled lifecycle snapshot
 ///      separately denies stateless app credentials),
 ///   3. revoke every refresh family and every mapped app token family,
-///   4. revoke every app-session recovery anchor, and
-///   5. mark every live `idp_sessions` / `gateway_sessions` row revoked.
+///   4. revoke every app-session recovery anchor,
+///   5. mark every live `idp_sessions` / `gateway_sessions` row revoked, and
+///   6. mint the single-use undo token (`identity::deletion_cancel`) that is
+///      the ONLY credential able to reverse steps 1-5.
+///
+/// Step 6 is inside the transaction because steps 2-5 are: this function
+/// destroys every credential the person could otherwise have used to change
+/// their mind, so the replacement has to be committed by the same statement
+/// batch that destroyed them, not by whoever calls this next.
 ///
 /// Idempotent on an already-requested row: it leaves an existing
 /// `deletion_requested_at` untouched (the schedule does not slide) but still
@@ -429,6 +446,13 @@ async fn request_deletion_tx(
         .await
         .map_err(|e| AuthError::Db(format!("request_deletion delete gateway_sessions: {e}")))?;
 
+    // The undo credential, minted last so it carries the schedule this
+    // transaction actually committed rather than the one it intended.
+    let cancel_token =
+        crate::identity::deletion_cancel::issue_in_transaction(conn, id, scheduled_for)
+            .await?
+            .raw;
+
     Ok(Some(DeletionRequest {
         user_id: id,
         email,
@@ -436,6 +460,7 @@ async fn request_deletion_tx(
         scheduled_for,
         idp_sessions_revoked,
         gateway_sessions_revoked,
+        cancel_token,
     }))
 }
 
@@ -472,35 +497,13 @@ async fn revoke_user_app_credentials_in_transaction(
     .map_err(|e| AuthError::Db(format!("request_deletion revoke app credentials: {e}")))
 }
 
-/// Cancel an in-flight account-deletion request within the grace window
-/// (ISS-12): clear `deletion_requested_at` and `deletion_scheduled_for`.
-/// `disabled_at` is an independent administrative state and is not changed.
-/// Returns `true` if a pending request was cancelled, `false` if there was
-/// nothing to cancel (no request in flight, or the account is already
-/// anonymized and terminal).
-///
-/// Sessions are NOT restored — the user signs in fresh, exactly as after a
-/// password reset.
-///
-/// # Errors
-///
-/// Returns `AuthError::Db` on PG failure.
-pub async fn cancel_deletion(conn: &Client, id: uuid::Uuid) -> Result<bool> {
-    let n = conn
-        .execute(
-            "UPDATE zeroship.users \
-             SET deletion_requested_at = NULL, \
-                 deletion_scheduled_for = NULL, \
-                 updated_at = NOW() \
-             WHERE id = $1 \
-               AND deletion_requested_at IS NOT NULL \
-               AND anonymized_at IS NULL",
-            &[&id],
-        )
-        .await
-        .map_err(|e| AuthError::Db(format!("cancel_deletion: {e}")))?;
-    Ok(n > 0)
-}
+// There is no `cancel_deletion(user_id)` here any more, and its absence is the
+// point. Clearing the schedule by id was authority nobody could present:
+// `request_deletion` revokes every credential in the same transaction, so no
+// caller could ever prove it was the account's owner. The undo is
+// `crate::identity::deletion_cancel::redeem`, which spends the mailed token and
+// clears the schedule in ONE statement -- so the authority and the effect are
+// the same act, and there is no by-id back door beside it.
 
 /// Bump `last_login_at` to `NOW()`.
 ///

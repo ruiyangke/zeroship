@@ -283,8 +283,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             );
             let authenticator = Arc::new(ControlPlaneAuthenticator::new(
                 Arc::clone(&control_pg),
-                zeroship_authz::load_platform_policies()
-                    .expect("migrated: bundled authz policies parse"),
+                // REFUSES TO BOOT on a policy set that does not validate
+                // against deploy/policies/zeroship.cedarschema.
+                zeroship_authz::load_platform_policies().expect(
+                    "migrate-server: bundled authz policies parse and validate against the schema",
+                ),
                 bearer_verifier,
             ));
             let mutation_rate_limiter = Arc::new(PostgresMutationRateLimiter::new(

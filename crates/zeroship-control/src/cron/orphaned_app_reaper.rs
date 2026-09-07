@@ -132,7 +132,17 @@ pub async fn tick(state: &AppState) -> Result<ReaperReport, RegistryError> {
 }
 
 /// Detection query: owner-less AND NOT system AND past the grace window.
-async fn find_orphaned_apps(state: &AppState) -> Result<Vec<Uuid>, RegistryError> {
+///
+/// Exposed for the same reason [`tick`] is, and for one more: a test can assert
+/// what the sweep SELECTS without asserting how many rows it archived. The
+/// count is fleet-wide - every app in the database past the grace window is in
+/// it - so "an archived orphan is not selected again" written as `archived == 0`
+/// is really "and nothing else in the fleet became reapable meanwhile", which
+/// on a database that has been used is false often enough to fail a suite run
+/// against a database a previous run left rows in. Membership of THIS list is
+/// the property; the count is not.
+#[allow(clippy::future_not_send)]
+pub async fn find_orphaned_apps(state: &AppState) -> Result<Vec<Uuid>, RegistryError> {
     let conn = state.registry.conn().await?;
     let rows = conn
         .query(

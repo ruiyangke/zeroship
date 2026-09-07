@@ -114,6 +114,23 @@ pub struct AuthSettings {
     #[config(shared = CONTROL_URL, default = "http://localhost:9090".to_owned())]
     pub control_url: Operational<String>,
 
+    /// Shared secret this process presents to control's `/internal/*` API.
+    ///
+    /// The SAME identity control, the gateway and the worker read, so it is the
+    /// shared canonical name rather than an `auth.*` one. One call needs it
+    /// today: the erasure preflight (`crate::control_client::erasure_preflight`),
+    /// which asks the control plane whether a human is the last owner of an
+    /// organization -- a question the auth service cannot answer for itself,
+    /// because MEASURED `zeroship_auth` holds no privilege on any organization
+    /// table.
+    ///
+    /// Unset means the preflight cannot be made, and an erasure request that
+    /// cannot verify its precondition is REFUSED rather than honoured. That is
+    /// a deliberate fail-closed: the alternative is deleting a human on the
+    /// strength of a check that did not run.
+    #[config(shared = CONTROL_KEY)]
+    pub control_key: Secret<String>,
+
     /// Audience fixed onto access tokens minted for the platform CLI.
     #[config(shared = OAUTH_AUDIENCE, default = "control.zeroship.ai".to_owned())]
     pub oauth_audience: Operational<String>,

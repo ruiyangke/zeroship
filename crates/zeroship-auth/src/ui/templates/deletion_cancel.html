@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Keep your account · zeroship{% endblock %}
+{% block body %}
+<h2>Keep your zeroship account</h2>
+{% if let Some(err) = error %}<div class="error" role="alert" id="form-error">{{ err }}</div>{% endif %}
+{% if cancelled %}
+<p>Your account is no longer scheduled for deletion.</p>
+<p class="subtle">Your previous sign-ins were ended when the deletion was requested and were not restored. <a href="/login">Sign in</a> to continue.</p>
+{% else %}
+<p>This will cancel the pending deletion of your account. Nothing has been erased yet.</p>
+<p class="subtle">Cancelling does not restore the sessions that were ended when the deletion was requested. You will need to sign in again.</p>
+<form method="POST" action="/me/delete/cancel">
+  <input type="hidden" name="csrf" value="{{ csrf }}">
+  <input type="hidden" name="token" value="{{ token }}">
+  <button type="submit">Keep my account</button>
+</form>
+<script nonce="{{ script_nonce }}">
+  // Scrub the token from URL/history; the hidden form input still has it.
+  if (window.history && window.history.replaceState) {
+    window.history.replaceState(null, '', window.location.pathname);
+  }
+</script>
+{% endif %}
+{% endblock %}

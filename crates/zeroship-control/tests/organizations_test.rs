@@ -30,9 +30,10 @@ use uuid::Uuid;
 use zeroship_control::organizations::{
     self as organizations, AddMemberBody, AddProjectMemberBody, ChangeRoleBody, CreateInviteBody,
     CreateOrganizationBody, CreateProjectBody, OrganizationError, RedeemInviteBody,
-    TransferOwnershipBody, UpdateOrganizationBody,
+    TransferOwnershipBody, UpdateOrganizationBody, UpdateProjectBody,
 };
 use zeroship_control::Registry;
+use zeroship_mailer::RecordingMailer;
 
 use crate::common;
 
@@ -1129,4 +1130,1080 @@ fn the_redeem_body_names_the_token_field() {
     let parsed: RedeemInviteBody =
         serde_json::from_str(r#"{"token":"abc"}"#).expect("redeem body parses");
     assert_eq!(parsed.token, "abc");
+}
+
+// ---------------------------------------------------------------------------
+// Self-departure: the one carve-out in the rank model
+// ---------------------------------------------------------------------------
+
+/// A viewer can leave, and the SAME viewer cannot remove anybody else.
+///
+/// The pair is the whole point of the carve-out. `leave_organization` takes no
+/// target, so the first call is a statement about the actor's own row; the
+/// second is `remove_member` with the general inequality untouched, and it
+/// refuses. If the carve-out had been implemented by relaxing that inequality,
+/// the second half of this test would pass and an admin could demote a peer.
+#[compio::test]
+async fn a_member_may_leave_and_still_may_not_remove_anyone_else() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "leaveorg").await;
+    let viewer = org.seat(&fx, "viewer", "viewer").await;
+    let peer = org.seat(&fx, "peer", "viewer").await;
+    let bystander = org.seat(&fx, "bystander", "viewer").await;
+
+    // The case: a viewer, who holds no members:write at any rank and outranks
+    // nobody including themselves, gives up their own seat.
+    organizations::leave_organization(&fx.registry, viewer, &org.id, None)
+        .await
+        .expect("a viewer may give up their own seat");
+    assert_eq!(
+        org.role_of(&fx, viewer).await,
+        None,
+        "the seat must actually be gone"
+    );
+
+    // The CONTROL, differing in one variable - the target. Same actor rank,
+    // same organization, a row that is not the actor's own. The general
+    // inequality is untouched, so it refuses.
+    let err = organizations::remove_member(&fx.registry, peer, &org.id, bystander, None)
+        .await
+        .expect_err("a viewer must not remove a peer at the same rank");
+    assert!(
+        matches!(err, OrganizationError::Insufficient(_)),
+        "{err:?}"
+    );
+    assert_eq!(
+        org.role_of(&fx, bystander).await.as_deref(),
+        Some("viewer"),
+        "a refused removal must change nothing"
+    );
+
+    // And `remove_member` is not a second way to leave: an actor never
+    // outranks their own rank, which is exactly the inequality the carve-out
+    // does NOT relax.
+    let err = organizations::remove_member(&fx.registry, peer, &org.id, peer, None)
+        .await
+        .expect_err("remove_member must not be a way to leave");
+    assert!(
+        matches!(err, OrganizationError::Insufficient(_)),
+        "{err:?}"
+    );
+    assert_eq!(
+        org.role_of(&fx, peer).await.as_deref(),
+        Some("viewer"),
+        "the peer's own seat must survive a call to the wrong route"
+    );
+
+    org.cleanup(&fx).await;
+}
+
+/// A sole owner is refused, and told to transfer first; a co-owner is not.
+///
+/// The last-owner rule is not relaxed by the carve-out. The second half is the
+/// control that makes the first half a result rather than "leaving never
+/// works": after `transfer_ownership` the previous owner is an admin and walks
+/// out without argument.
+#[compio::test]
+async fn the_last_owner_cannot_walk_out_and_is_told_the_remedy() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "soleowner").await;
+    let heir = org.seat(&fx, "heir", "admin").await;
+
+    let err = organizations::leave_organization(&fx.registry, org.owner, &org.id, None)
+        .await
+        .expect_err("the only owner must not be able to leave");
+    assert!(matches!(err, OrganizationError::LastOwner), "{err:?}");
+    assert_eq!(org.owner_count(&fx).await, 1);
+
+    // The remedy the refusal names, followed exactly.
+    organizations::transfer_ownership(
+        &fx.registry,
+        org.owner,
+        &org.id,
+        &TransferOwnershipBody { user_id: heir },
+        None,
+    )
+    .await
+    .expect("transfer ownership to the heir");
+
+    organizations::leave_organization(&fx.registry, org.owner, &org.id, None)
+        .await
+        .expect("a stepped-down owner may leave");
+    assert_eq!(
+        org.role_of(&fx, org.owner).await,
+        None,
+        "the former owner's seat is gone"
+    );
+    assert_eq!(
+        org.owner_count(&fx).await,
+        1,
+        "the organization still has exactly one owner"
+    );
+
+    org.cleanup(&fx).await;
+}
+
+/// Leaving an organization you hold no seat in is a 404, not a silent success.
+#[compio::test]
+async fn leaving_without_a_seat_is_not_found() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let org = Org::new(&fx, "strangerorg").await;
+    let stranger = seed_user(&fx.pg, "stranger").await;
+
+    let err = organizations::leave_organization(&fx.registry, stranger, &org.id, None)
+        .await
+        .expect_err("a stranger holds nothing to give up");
+    assert!(matches!(err, OrganizationError::MemberNotFound), "{err:?}");
+
+    let _ = fx
+        .pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&stranger])
+        .await;
+    org.cleanup(&fx).await;
+}
+
+// ---------------------------------------------------------------------------
+// Project lifecycle
+// ---------------------------------------------------------------------------
+
+/// A project is renamed and re-slugged in one call, and a developer cannot.
+#[compio::test]
+async fn renaming_a_project_needs_admin_authority() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "renameprj").await;
+    let developer = org.seat(&fx, "dev", "developer").await;
+    let project = org.default_project(&fx).await;
+
+    let err = organizations::update_project(
+        &fx.registry,
+        developer,
+        &project,
+        &UpdateProjectBody {
+            name: Some("Stolen".to_string()),
+            slug: None,
+        },
+        None,
+    )
+    .await
+    .expect_err("a developer must not rename a project");
+    assert!(
+        matches!(err, OrganizationError::Insufficient(_)),
+        "{err:?}"
+    );
+
+    // The control: the same call by the owner, differing only in the actor.
+    let renamed = organizations::update_project(
+        &fx.registry,
+        org.owner,
+        &project,
+        &UpdateProjectBody {
+            name: Some("Checkout".to_string()),
+            slug: Some("checkout".to_string()),
+        },
+        None,
+    )
+    .await
+    .expect("an owner renames a project");
+    assert_eq!(renamed.name, "Checkout");
+    assert_eq!(renamed.slug, "checkout");
+
+    // An empty body is refused rather than being a no-op that reports success.
+    let err = organizations::update_project(
+        &fx.registry,
+        org.owner,
+        &project,
+        &UpdateProjectBody {
+            name: None,
+            slug: None,
+        },
+        None,
+    )
+    .await
+    .expect_err("an update naming nothing is a bad request");
+    assert!(matches!(err, OrganizationError::Invalid(_)), "{err:?}");
+
+    org.cleanup(&fx).await;
+}
+
+/// A project that still owns an app is not deleted, and the refusal counts them.
+///
+/// The predicate rides in the DELETE, so this binds the refusal rather than the
+/// `apps_project_id_fkey` backstop: what a caller reads is a count and a
+/// remedy, not a constraint name.
+#[compio::test]
+async fn a_project_owning_an_app_is_not_deleted() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let org = Org::new(&fx, "prjapps").await;
+    let project = org.default_project(&fx).await;
+    let app_name = format!("lifecycle{}", Uuid::new_v4().simple());
+    common::ensure_builtin_plans(&fx.registry).await;
+    // The plan id is READ from the catalog, never spelled: `apps.plan_id` is a
+    // foreign key onto `zeroship.plans`, whose ids are typed (`pln_...`), and a
+    // literal "free" is a fixture that refuses at the constraint.
+    let plan = zeroship_control::plan_catalog::free_plan_id();
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
+             VALUES ($1, $2, $3, $4)",
+            &[&app_name, &plan, &project, &org.id],
+        )
+        .await
+        .expect("seed an app in the project");
+
+    let err = organizations::delete_project(&fx.registry, org.owner, &project, None)
+        .await
+        .expect_err("a project owning an app must not be deleted");
+    match err {
+        OrganizationError::ProjectHasApps(n) => assert_eq!(n, 1, "the refusal counts the apps"),
+        other => panic!("{other:?}"),
+    }
+
+    // The CONTROL: remove the one app and the SAME call succeeds. Without it,
+    // an implementation that refused every deletion would pass the assertion
+    // above.
+    fx.pg
+        .execute("DELETE FROM zeroship.apps WHERE name = $1", &[&app_name])
+        .await
+        .expect("drop the app");
+    organizations::delete_project(&fx.registry, org.owner, &project, None)
+        .await
+        .expect("an empty project is deleted");
+    assert!(
+        organizations::get_project(&fx.pg, &project).await.is_err(),
+        "the project row must be gone"
+    );
+
+    org.cleanup(&fx).await;
+}
+
+/// Deleting a project takes its project seats with it, and refuses a developer.
+#[compio::test]
+async fn deleting_a_project_needs_admin_and_takes_its_seats() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "prjdelete").await;
+    let developer = org.seat(&fx, "dev", "developer").await;
+    let project = org.default_project(&fx).await;
+    organizations::add_project_member(
+        &fx.registry,
+        org.owner,
+        &project,
+        &AddProjectMemberBody {
+            user_id: developer,
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("seat the developer on the project");
+
+    let err = organizations::delete_project(&fx.registry, developer, &project, None)
+        .await
+        .expect_err("a developer must not delete a project");
+    assert!(
+        matches!(err, OrganizationError::Insufficient(_)),
+        "{err:?}"
+    );
+
+    organizations::delete_project(&fx.registry, org.owner, &project, None)
+        .await
+        .expect("an owner deletes an empty project");
+    let seats = fx
+        .pg
+        .query(
+            "SELECT 1 FROM zeroship.project_members WHERE project_id = $1",
+            &[&project],
+        )
+        .await
+        .expect("read project seats");
+    assert!(seats.is_empty(), "the project seats cascade with the project");
+
+    org.cleanup(&fx).await;
+}
+
+/// A project seat NARROWS in one statement, never by delete-then-add.
+#[compio::test]
+async fn a_project_seat_is_narrowed_atomically() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "prjrole").await;
+    let developer = org.seat(&fx, "dev", "developer").await;
+    let project = org.default_project(&fx).await;
+    organizations::add_project_member(
+        &fx.registry,
+        org.owner,
+        &project,
+        &AddProjectMemberBody {
+            user_id: developer,
+            role: "developer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("seat the developer");
+
+    let moved = organizations::change_project_member_role(
+        &fx.registry,
+        org.owner,
+        &project,
+        developer,
+        &ChangeRoleBody {
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("an owner narrows a project seat");
+    assert_eq!(moved.role, "viewer");
+
+    // The row was MOVED, not replaced: `added_at` survives, which is what a
+    // delete-then-add cannot preserve.
+    let rows = fx
+        .pg
+        .query(
+            "SELECT role, added_at FROM zeroship.project_members \
+              WHERE project_id = $1 AND user_id = $2",
+            &[&project, &developer],
+        )
+        .await
+        .expect("read the seat");
+    assert_eq!(rows.len(), 1, "exactly one seat, never zero and never two");
+    assert_eq!(rows[0].get::<_, String>("role"), "viewer");
+    assert_eq!(
+        rows[0].get::<_, chrono::DateTime<chrono::Utc>>("added_at"),
+        moved.added_at,
+        "the seat kept its original added_at, so it was moved rather than reseated"
+    );
+
+    // The rank fence still applies: the developer cannot re-widen their own
+    // project seat, because they do not clear the admin threshold.
+    let err = organizations::change_project_member_role(
+        &fx.registry,
+        developer,
+        &project,
+        developer,
+        &ChangeRoleBody {
+            role: "owner".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect_err("a developer must not re-role a project seat");
+    assert!(
+        matches!(err, OrganizationError::Insufficient(_)),
+        "{err:?}"
+    );
+
+    // And a member with no project row is a 404 rather than a silent grant.
+    let stranger = org.seat(&fx, "stranger", "viewer").await;
+    let err = organizations::change_project_member_role(
+        &fx.registry,
+        org.owner,
+        &project,
+        stranger,
+        &ChangeRoleBody {
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect_err("there is no seat to move");
+    assert!(matches!(err, OrganizationError::MemberNotFound), "{err:?}");
+
+    org.cleanup(&fx).await;
+}
+
+// ---------------------------------------------------------------------------
+// Dissolution
+// ---------------------------------------------------------------------------
+
+/// An organization is closed only once it owns no projects, and the refusal
+/// names how many remain.
+#[compio::test]
+async fn an_organization_with_projects_is_not_dissolved() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let org = Org::new(&fx, "dissolveorg").await;
+    let project = org.default_project(&fx).await;
+
+    let err = organizations::dissolve_organization(&fx.registry, org.owner, &org.id, LocalInvoicing::Yes, None)
+        .await
+        .expect_err("a project remains");
+    match err {
+        OrganizationError::OrganizationHasProjects(n) => {
+            assert_eq!(n, 1, "the refusal counts the projects");
+        }
+        other => panic!("{other:?}"),
+    }
+
+    // The CONTROL: the remedy named in the refusal, then the same call.
+    organizations::delete_project(&fx.registry, org.owner, &project, None)
+        .await
+        .expect("delete the default project");
+    let closed = organizations::dissolve_organization(&fx.registry, org.owner, &org.id, LocalInvoicing::Yes, None)
+        .await
+        .expect("an empty organization is closed");
+    assert!(closed.dissolved_at.is_some());
+
+    org.cleanup(&fx).await;
+}
+
+/// A dissolved organization is still READABLE and accepts no further change.
+///
+/// Every mutation goes through `lock_organization`, so this drives one of each
+/// KIND - a rename, a membership write, a project create, a departure and a
+/// second dissolve - rather than trusting that they all share the fence.
+#[compio::test]
+async fn a_dissolved_organization_reads_and_refuses_every_change() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "closedorg").await;
+    let member = org.seat(&fx, "member", "developer").await;
+    let project = org.default_project(&fx).await;
+    organizations::delete_project(&fx.registry, org.owner, &project, None)
+        .await
+        .expect("empty the organization");
+    let closed = organizations::dissolve_organization(&fx.registry, org.owner, &org.id, LocalInvoicing::Yes, None)
+        .await
+        .expect("close it");
+    let at = closed.dissolved_at.expect("a close carries its date");
+
+    // Readable, and the timestamp is what a reader sees.
+    let read = organizations::get_organization(&fx.pg, &org.id)
+        .await
+        .expect("a closed organization is still readable");
+    assert_eq!(read.dissolved_at, Some(at));
+    let listed = organizations::list_organizations(&fx.pg, org.owner)
+        .await
+        .expect("list");
+    assert!(
+        listed.iter().any(|o| o.id == org.id && o.dissolved_at.is_some()),
+        "a closed organization stays in its members' listing, marked closed"
+    );
+    assert_eq!(
+        organizations::list_members(&fx.pg, &org.id)
+            .await
+            .expect("members")
+            .len(),
+        2,
+        "the members survive the close"
+    );
+
+    let dissolved = |err: &OrganizationError| matches!(err, OrganizationError::Dissolved(_));
+
+    let err = organizations::update_organization(
+        &fx.registry,
+        org.owner,
+        &org.id,
+        &UpdateOrganizationBody {
+            name: Some("Reopened".to_string()),
+            slug: None,
+            billing_email: None,
+        },
+        None,
+    )
+    .await
+    .expect_err("a closed organization cannot be renamed");
+    assert!(dissolved(&err), "{err:?}");
+
+    let newcomer = seed_user(&fx.pg, "newcomer").await;
+    let err = organizations::add_member(
+        &fx.registry,
+        org.owner,
+        &org.id,
+        &AddMemberBody {
+            user_id: newcomer,
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect_err("a closed organization seats nobody");
+    assert!(dissolved(&err), "{err:?}");
+
+    let err = organizations::create_project(
+        &fx.registry,
+        org.owner,
+        &org.id,
+        &CreateProjectBody {
+            name: "Revival".to_string(),
+            slug: None,
+        },
+        None,
+    )
+    .await
+    .expect_err("a closed organization holds no new projects");
+    assert!(dissolved(&err), "{err:?}");
+
+    let err = organizations::leave_organization(&fx.registry, member, &org.id, None)
+        .await
+        .expect_err("a closed record does not change, including by departure");
+    assert!(dissolved(&err), "{err:?}");
+
+    let err = organizations::dissolve_organization(&fx.registry, org.owner, &org.id, LocalInvoicing::Yes, None)
+        .await
+        .expect_err("closing twice reports the first close");
+    match err {
+        OrganizationError::Dissolved(reported) => assert_eq!(reported, at),
+        other => panic!("{other:?}"),
+    }
+
+    let _ = fx
+        .pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&newcomer])
+        .await;
+    org.cleanup(&fx).await;
+}
+
+/// Only an owner closes an organization.
+#[compio::test]
+async fn closing_an_organization_is_reserved_to_its_owners() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let mut org = Org::new(&fx, "adminclose").await;
+    let admin = org.seat(&fx, "admin", "admin").await;
+    let project = org.default_project(&fx).await;
+    organizations::delete_project(&fx.registry, org.owner, &project, None)
+        .await
+        .expect("empty it first, so the refusal below is about rank");
+
+    let err = organizations::dissolve_organization(&fx.registry, admin, &org.id, LocalInvoicing::Yes, None)
+        .await
+        .expect_err("an admin must not close an organization");
+    assert!(
+        matches!(err, OrganizationError::Insufficient(_)),
+        "{err:?}"
+    );
+    assert!(
+        organizations::get_organization(&fx.pg, &org.id)
+            .await
+            .expect("still there")
+            .dissolved_at
+            .is_none(),
+        "a refused close must leave the organization open"
+    );
+
+    // The control: the owner, same organization, same state.
+    organizations::dissolve_organization(&fx.registry, org.owner, &org.id, LocalInvoicing::Yes, None)
+        .await
+        .expect("the owner closes it");
+
+    org.cleanup(&fx).await;
+}
+
+/// Closing a PERSONAL organization frees the pointer, so the creator's next
+/// first deploy mints a fresh one instead of landing on a closed record.
+///
+/// This is the case that would brick an account: `ensure_personal_project`
+/// resolves through `personal_owner_id`, and a closed row still holding it
+/// would answer every deploy with a refusal the creator could not clear -- the
+/// partial unique index would stop them minting a replacement.
+#[compio::test]
+async fn closing_a_personal_organization_frees_the_creator_to_start_again() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let owner = seed_user(&fx.pg, "solo").await;
+
+    let first = organizations::ensure_personal_project(&fx.registry, owner)
+        .await
+        .expect("first deploy mints a personal organization");
+    let first_organization: String = fx
+        .pg
+        .query(
+            "SELECT organization_id FROM zeroship.projects WHERE id = $1",
+            &[&first.as_str()],
+        )
+        .await
+        .expect("read the project's organization")[0]
+        .get("organization_id");
+    assert_eq!(
+        organizations::get_organization(&fx.pg, &first_organization)
+            .await
+            .expect("read it")
+            .personal_owner_id,
+        Some(owner),
+        "the pointer names the creator while it is live"
+    );
+
+    organizations::delete_project(&fx.registry, owner, first.as_str(), None)
+        .await
+        .expect("empty the personal organization first");
+    organizations::dissolve_organization(&fx.registry, owner, &first_organization, LocalInvoicing::Yes, None)
+        .await
+        .expect("the creator closes their personal organization");
+    // The pointer is KEPT: the record stays truthful about what it was. What
+    // frees the slot is `dissolved_at IS NULL` in the unique index and in the
+    // read, not a column edit.
+    assert_eq!(
+        organizations::get_organization(&fx.pg, &first_organization)
+            .await
+            .expect("still readable")
+            .personal_owner_id,
+        Some(owner),
+        "a closed personal organization still records whose it was"
+    );
+
+    // The whole point: the next deploy works, and lands somewhere new.
+    let second = organizations::ensure_personal_project(&fx.registry, owner)
+        .await
+        .expect("a creator who closed one workspace can still deploy");
+    assert_ne!(
+        second.as_str(),
+        first.as_str(),
+        "the second deploy must not resolve back into the closed organization"
+    );
+
+    let _ = fx
+        .pg
+        .execute(
+            "DELETE FROM zeroship.projects WHERE organization_id IN \
+               (SELECT id FROM zeroship.organizations WHERE created_by = $1 \
+                   OR personal_owner_id = $1)",
+            &[&owner],
+        )
+        .await;
+    let _ = fx
+        .pg
+        .execute(
+            "DELETE FROM zeroship.organizations WHERE created_by = $1 OR personal_owner_id = $1",
+            &[&owner],
+        )
+        .await;
+    let _ = fx
+        .pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&owner])
+        .await;
+}
+
+// ---------------------------------------------------------------------------
+// Invitation delivery
+// ---------------------------------------------------------------------------
+
+/// The invitation is mailed, the outcome is recorded, and the mail carries the
+/// token that only this one message and the create response ever hold.
+#[compio::test]
+async fn an_invitation_is_mailed_and_the_outcome_recorded() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let org = Org::new(&fx, "mailorg").await;
+    let joiner = seed_user(&fx.pg, "joiner").await;
+    let joiner_email = email_of(&fx.pg, joiner).await;
+    let mailer = RecordingMailer::new();
+
+    let created = organizations::create_and_deliver_invite(
+        &fx.registry,
+        &fx.pg,
+        &mailer,
+        org.owner,
+        &org.id,
+        &CreateInviteBody {
+            email: joiner_email.clone(),
+            role: "developer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("invite");
+
+    assert_eq!(created.delivery, organizations::InviteDelivery::Sent);
+    assert_eq!(delivery_of(&fx, &created.invite.id).await.as_deref(), Some("sent"));
+
+    let sent = mailer.sent_to(&joiner_email);
+    assert_eq!(sent.len(), 1, "exactly one message to the invited address");
+    let message = &sent[0];
+    assert!(
+        message.text.contains(&created.token),
+        "the recipient's copy must carry the token; it exists nowhere else"
+    );
+    assert!(
+        message.html.as_deref().is_some_and(|html| html.contains(&created.token)),
+        "and so must the HTML part, or a HTML-only client gets an unusable mail"
+    );
+    // The mail names the ORGANIZATION and the INVITER, both resolved by
+    // `invite_mail_context`. Asserting only that the subject says "zeroship"
+    // would still pass with the organization id in place of its name, which is
+    // exactly what that function's fallback produces when its query goes wrong.
+    let record = organizations::get_organization(&fx.pg, &org.id)
+        .await
+        .expect("read the organization");
+    assert!(
+        message.subject.contains(&record.name),
+        "the subject must name the organization, got {:?}",
+        message.subject
+    );
+    assert!(
+        !message.subject.contains(&org.id),
+        "the id is the fallback, not the name: {:?}",
+        message.subject
+    );
+    assert!(
+        message.text.contains(&invite_role_line(&created.invite.role)),
+        "the body must name the role being offered: {:?}",
+        message.text
+    );
+    // The digest is stored; the plaintext is not. This is the assertion a
+    // refactor that "helpfully" persisted the token would fail.
+    let rows = fx
+        .pg
+        .query(
+            "SELECT token_hash FROM zeroship.organization_invites WHERE id = $1",
+            &[&created.invite.id],
+        )
+        .await
+        .expect("read digest");
+    assert_ne!(
+        rows[0].get::<_, Vec<u8>>("token_hash"),
+        created.token.as_bytes().to_vec()
+    );
+
+    let _ = fx
+        .pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&joiner])
+        .await;
+    org.cleanup(&fx).await;
+}
+
+/// A send that FAILS leaves a usable invitation and records `failed`.
+///
+/// The whole reason the row is committed before the attempt: a transport error
+/// must cost the platform an email, not an invitation. The control is that the
+/// same token still redeems.
+#[compio::test]
+async fn a_failed_send_records_failure_and_keeps_the_invitation_usable() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let org = Org::new(&fx, "failmail").await;
+    let joiner = seed_user(&fx.pg, "joiner").await;
+    let joiner_email = email_of(&fx.pg, joiner).await;
+    let mailer = RecordingMailer::new();
+    mailer.fail_transport("smtp: connection refused");
+
+    let created = organizations::create_and_deliver_invite(
+        &fx.registry,
+        &fx.pg,
+        &mailer,
+        org.owner,
+        &org.id,
+        &CreateInviteBody {
+            email: joiner_email.clone(),
+            role: "developer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("a transport failure is not a failed request");
+
+    assert_eq!(created.delivery, organizations::InviteDelivery::Failed);
+    assert!(!created.delivery.reached_the_recipient());
+    assert_eq!(
+        delivery_of(&fx, &created.invite.id).await.as_deref(),
+        Some("failed"),
+        "the row must say the recipient never got it"
+    );
+    assert!(
+        mailer.sent_to(&joiner_email).is_empty(),
+        "nothing was delivered"
+    );
+
+    // The invitation survived the failure and is still the real thing.
+    organizations::redeem_invite(&fx.registry, joiner, &created.token, None)
+        .await
+        .expect("the token from a failed send still redeems");
+    assert_eq!(
+        org.role_of(&fx, joiner).await.as_deref(),
+        Some("developer")
+    );
+
+    let _ = fx
+        .pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&joiner])
+        .await;
+    org.cleanup(&fx).await;
+}
+
+/// A suppressed address is not mailed, and that is recorded as its own outcome.
+///
+/// The suppression is enforced by the `Mailer` contract, against the real
+/// `zeroship.email_suppressions` table, so this test inserts a row rather than
+/// configuring a fake. The paired control - the same mailer, an address that is
+/// not suppressed - is what makes the refusal attributable to the suppression.
+#[compio::test]
+async fn a_suppressed_address_is_not_mailed_and_says_so() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let org = Org::new(&fx, "suppressed").await;
+    let blocked = seed_user(&fx.pg, "blocked").await;
+    let blocked_email = email_of(&fx.pg, blocked).await;
+    let allowed = seed_user(&fx.pg, "allowed").await;
+    let allowed_email = email_of(&fx.pg, allowed).await;
+    fx.pg
+        .execute(
+            "INSERT INTO zeroship.email_suppressions (email, reason) \
+             VALUES ($1::citext, 'hard_bounce') ON CONFLICT (email) DO NOTHING",
+            &[&blocked_email],
+        )
+        .await
+        .expect("suppress the address");
+    let mailer = RecordingMailer::new();
+
+    let refused = organizations::create_and_deliver_invite(
+        &fx.registry,
+        &fx.pg,
+        &mailer,
+        org.owner,
+        &org.id,
+        &CreateInviteBody {
+            email: blocked_email.clone(),
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("the invitation is still created");
+    assert_eq!(refused.delivery, organizations::InviteDelivery::Suppressed);
+    assert_eq!(
+        delivery_of(&fx, &refused.invite.id).await.as_deref(),
+        Some("suppressed")
+    );
+    assert!(mailer.sent_to(&blocked_email).is_empty());
+
+    // The CONTROL: same organization, same mailer, one variable changed.
+    let delivered = organizations::create_and_deliver_invite(
+        &fx.registry,
+        &fx.pg,
+        &mailer,
+        org.owner,
+        &org.id,
+        &CreateInviteBody {
+            email: allowed_email.clone(),
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("invite");
+    assert_eq!(delivered.delivery, organizations::InviteDelivery::Sent);
+    assert_eq!(mailer.sent_to(&allowed_email).len(), 1);
+
+    let _ = fx
+        .pg
+        .execute(
+            "DELETE FROM zeroship.email_suppressions WHERE email = $1::citext",
+            &[&blocked_email],
+        )
+        .await;
+    for user in [blocked, allowed] {
+        let _ = fx
+            .pg
+            .execute("DELETE FROM zeroship.users WHERE id = $1", &[&user])
+            .await;
+    }
+    org.cleanup(&fx).await;
+}
+
+/// How the template names the offered role. Written once so the assertion and
+/// the template cannot disagree by whitespace.
+fn invite_role_line(role: &str) -> String {
+    format!("as {role}.")
+}
+
+/// `organization_invites.delivery`, or `None` while nothing has resolved.
+async fn delivery_of(fx: &Fx, invite_id: &str) -> Option<String> {
+    let rows = fx
+        .pg
+        .query(
+            "SELECT delivery FROM zeroship.organization_invites WHERE id = $1",
+            &[&invite_id],
+        )
+        .await
+        .expect("read delivery");
+    rows.first().and_then(|row| row.get("delivery"))
+}
+
+/// The delivery vocabulary is exactly the one the schema's CHECK admits.
+///
+/// A fourth variant, or a renamed one, would be refused by
+/// `organization_invites_delivery_check` at UPDATE time - which is a warning
+/// logged and swallowed, not a failed request, so nothing else would notice.
+#[compio::test]
+async fn the_delivery_vocabulary_is_the_one_the_check_admits() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let org = Org::new(&fx, "deliveryvocab").await;
+    let joiner = seed_user(&fx.pg, "joiner").await;
+    let created = organizations::create_invite(
+        &fx.registry,
+        org.owner,
+        &org.id,
+        &CreateInviteBody {
+            email: email_of(&fx.pg, joiner).await,
+            role: "viewer".to_string(),
+        },
+        None,
+    )
+    .await
+    .expect("invite");
+
+    for outcome in [
+        organizations::InviteDelivery::Sent,
+        organizations::InviteDelivery::Suppressed,
+        organizations::InviteDelivery::Failed,
+    ] {
+        fx.pg
+            .execute(
+                "UPDATE zeroship.organization_invites SET delivery = $2 WHERE id = $1",
+                &[&created.invite.id, &outcome.as_str()],
+            )
+            .await
+            .unwrap_or_else(|err| panic!("{outcome:?} must satisfy the CHECK: {err}"));
+    }
+    // The control: a word outside the vocabulary is refused, so the loop above
+    // is a result rather than a CHECK that admits anything.
+    let refused = fx
+        .pg
+        .execute(
+            "UPDATE zeroship.organization_invites SET delivery = 'queued' WHERE id = $1",
+            &[&created.invite.id],
+        )
+        .await;
+    assert!(refused.is_err(), "the CHECK must refuse an unknown outcome");
+
+    let _ = fx
+        .pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&joiner])
+        .await;
+    org.cleanup(&fx).await;
+}
+
+/// A closed organization releases its slug, and a live one still holds it.
+///
+/// The pair is what makes this a statement about `dissolved_at` rather than
+/// about uniqueness in general: the SAME slug is refused while the first
+/// organization is open and accepted once it is closed.
+#[compio::test]
+async fn a_closed_organization_releases_its_slug() {
+    let Some(fx) = Fx::new().await else {
+        return;
+    };
+    let owner = seed_user(&fx.pg, "slugowner").await;
+    let slug = format!("acme-{}", Uuid::new_v4().simple());
+    let body = || CreateOrganizationBody {
+        name: "Acme".to_string(),
+        slug: Some(slug.clone()),
+        billing_email: None,
+    };
+
+    let first = organizations::create_organization(&fx.registry, owner, &body(), None)
+        .await
+        .expect("mint the first organization");
+
+    // While it is live the name is taken.
+    let err = organizations::create_organization(&fx.registry, owner, &body(), None)
+        .await
+        .expect_err("a live organization holds its slug");
+    assert!(matches!(err, OrganizationError::SlugTaken(_)), "{err:?}");
+
+    let project = fx
+        .pg
+        .query(
+            "SELECT id FROM zeroship.projects WHERE organization_id = $1",
+            &[&first.id],
+        )
+        .await
+        .expect("read the default project")[0]
+        .get::<_, String>("id");
+    organizations::delete_project(&fx.registry, owner, &project, None)
+        .await
+        .expect("empty it");
+    organizations::dissolve_organization(&fx.registry, owner, &first.id, LocalInvoicing::Yes, None)
+        .await
+        .expect("close it");
+
+    // The CASE: one variable changed - the first organization is now closed.
+    let second = organizations::create_organization(&fx.registry, owner, &body(), None)
+        .await
+        .expect("a closed organization does not hold a live namespace");
+    assert_ne!(second.id, first.id);
+    assert_eq!(second.slug, slug);
+    // And the closed row kept the name it was known by.
+    assert_eq!(
+        organizations::get_organization(&fx.pg, &first.id)
+            .await
+            .expect("still readable")
+            .slug,
+        slug,
+        "releasing the slot must not rewrite the closed record"
+    );
+
+    for organization in [&second.id, &first.id] {
+        let _ = fx
+            .pg
+            .execute(
+                "DELETE FROM zeroship.projects WHERE organization_id = $1",
+                &[organization],
+            )
+            .await;
+        let _ = fx
+            .pg
+            .execute(
+                "DELETE FROM zeroship.organizations WHERE id = $1",
+                &[organization],
+            )
+            .await;
+    }
+    let _ = fx
+        .pg
+        .execute("DELETE FROM zeroship.users WHERE id = $1", &[&owner])
+        .await;
+}
+
+// ---------------------------------------------------------------------------
+// The fixture seat is not allowed to be quiet
+// ---------------------------------------------------------------------------
+
+/// `common::seat_app_organization_member` must REFUSE an app it cannot reach an
+/// organization from, rather than reporting success for a seat it did not make.
+///
+/// The statement is `INSERT ... SELECT` over the join from the app to its
+/// project's organization. Over an empty result set that is a SUCCESSFUL
+/// statement affecting no rows, so an app id that was never created - or one
+/// whose project row is missing - used to seat nobody and say nothing. The run
+/// then failed far away, as a 403 from whichever route wanted an owner, with
+/// nothing pointing back at the fixture. The shell peer of this helper reads a
+/// token back out of the database for the same reason; this one reads the
+/// affected-row count.
+///
+/// The app id is a fresh UUID, so the failure is the one being bound rather
+/// than a foreign key on some other column: no row is examined at all.
+///
+/// No `drain_pg` teardown, and it cannot have one: the body is expected to
+/// PANIC, so nothing after the call runs. Its one connection outlives the test
+/// the way every other case in this file's does.
+#[compio::test]
+#[should_panic(expected = "affected 0 row(s)")]
+async fn seating_an_app_that_does_not_exist_refuses_instead_of_seating_nobody() {
+    // `expect`, not a `let else` that fabricates the expected panic: this must
+    // fail on a missing database rather than report the refusal it never saw.
+    let fx = Fx::new().await.expect("a migrated database");
+    common::seat_app_organization_member(&fx.pg, &Uuid::new_v4(), &Uuid::new_v4(), "owner").await;
 }

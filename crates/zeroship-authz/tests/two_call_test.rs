@@ -462,8 +462,6 @@ fn an_unseated_creator_is_denied_cross_tenant_reads() {
                 resource: victim.app(),
                 now: 12 * 60 * 60,
                 request_ip: None,
-                mfa_verified: false,
-                mfa_age_seconds: None,
                 request_id: None,
             };
             assert_eq!(
@@ -481,8 +479,6 @@ fn an_unseated_creator_is_denied_cross_tenant_reads() {
                 resource: victim.organization(),
                 now: 12 * 60 * 60,
                 request_ip: None,
-                mfa_verified: false,
-                mfa_age_seconds: None,
                 request_id: None,
             };
             assert_eq!(
@@ -833,8 +829,6 @@ impl Fixture {
             resource,
             now: 12 * 60 * 60,
             request_ip: None,
-            mfa_verified: false,
-            mfa_age_seconds: None,
             request_id: None,
         }
     }
@@ -853,8 +847,6 @@ impl Fixture {
             resource,
             now,
             request_ip: None,
-            mfa_verified: false,
-            mfa_age_seconds: None,
             request_id: None,
         }
     }

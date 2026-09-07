@@ -309,6 +309,20 @@ export interface OrganizationRecord {
   personal_owner_id: string | null;
   created_at: string;
   updated_at: string;
+  /**
+   * When the organization was CLOSED, and `null` while it is live.
+   *
+   * A closed organization is a historical record. It stays readable, it keeps
+   * its members, its invitations and its billing history, and it accepts NO
+   * further change - every write against it answers `409 organization
+   * dissolved`. It also releases its slug, so the name is free for a new
+   * organization to take.
+   *
+   * `list()` returns closed organizations alongside live ones. A UI that
+   * shows a member's organizations should label them rather than hide them:
+   * the member is still on the record.
+   */
+  dissolved_at: string | null;
 }
 
 export interface CreateOrganizationInput {
@@ -396,16 +410,36 @@ export interface CreateInviteInput {
 }
 
 /**
+ * What became of the invitation email.
+ *
+ * - `sent` - the mailer accepted it and the recipient has the token.
+ * - `suppressed` - the address is on the platform's bounce/complaint list, so
+ *   nothing was sent. Not an error; deliver the token another way.
+ * - `failed` - the transport refused or failed. The invitation still stands
+ *   and the token in the same response is the only copy that exists.
+ *
+ * The invitation row is written and committed BEFORE the send is attempted, so
+ * a delivery failure costs an email rather than an invitation.
+ */
+export type InviteDelivery = "sent" | "suppressed" | "failed";
+
+/**
  * The only response that carries an invitation token.
  *
  * The server stores a digest and nothing else, so this value cannot be read
- * back by any later call. A client that does not surface or deliver `token`
- * here has lost the invitation, and the remedy is `revokeInvite` followed by a
- * new `createInvite`.
+ * back by any later call: the remedy for a lost one is `revokeInvite` followed
+ * by a new `createInvite`.
+ *
+ * The platform mails the invitation itself, so a client does not have to
+ * deliver `token` - but it should show it when `delivery` is not `"sent"`,
+ * because in those cases nothing else will. Possessing the token grants
+ * nothing on its own: redemption additionally requires the redeeming account's
+ * VERIFIED address to be the invited address.
  */
 export interface CreatedInvite {
   invite: InviteRecord;
   token: string;
+  delivery: InviteDelivery;
 }
 
 export interface RedeemInviteInput {
@@ -430,6 +464,12 @@ export interface CreateProjectInput {
   slug?: string;
 }
 
+/** At least one of the two must be present; an empty update is a `400`. */
+export interface UpdateProjectInput {
+  name?: string;
+  slug?: string;
+}
+
 /**
  * A project seat. It NARROWS and never widens: a member's authority on a
  * project is `min(organization rank, project rank)`, and a member at admin rank
@@ -451,6 +491,18 @@ export interface ListProjectMembersResult {
 
 export interface AddProjectMemberInput {
   user_id: string;
+  role: string;
+}
+
+/**
+ * Move an existing project seat to another role.
+ *
+ * It is one statement, not a removal followed by a grant: a member below admin
+ * with no project row reaches nothing, so delete-then-add would blank their
+ * access in between, and a failure between the two would leave the seat gone
+ * rather than narrowed.
+ */
+export interface ChangeProjectRoleInput {
   role: string;
 }
 
@@ -634,6 +686,44 @@ export class ControlClient {
         { method: "DELETE", parseAs: "void" },
       ),
     /**
+     * Give up YOUR OWN seat. It names no user, and there is no parameter that
+     * could: the route reaches the bearer's seat by construction.
+     *
+     * This is the one carve-out in the rank model. Every other membership write
+     * needs `actor.rank > target.rank`, and nobody outranks themselves - which
+     * is why `removeMember(org, myOwnId)` is refused and this exists. The
+     * general inequality is untouched, so it still stops an admin removing a
+     * peer.
+     *
+     * A SOLE OWNER IS REFUSED with `409 last owner`: an organization that keeps
+     * no owner is one no route can repair. Call `transferOwnership` first.
+     */
+    leave: (organizationId: string): Promise<void> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}/membership`, {
+        method: "DELETE",
+        parseAs: "void",
+      }),
+    /**
+     * CLOSE the organization. Owner only, and it cannot be undone.
+     *
+     * It is a soft close: the row, its members, its invitations and its billing
+     * history all survive and stay readable, and every subsequent write answers
+     * `409 organization dissolved`. The returned record carries `dissolved_at`.
+     *
+     * It is REFUSED while the organization still owns projects (`409
+     * organization has projects`, carrying the count). Delete them with
+     * `projects.delete`, which itself needs each project to own no apps. The
+     * order is deliberate: an organization that vanished while apps were still
+     * running would leave them with nobody who answers for them.
+     *
+     * Closing releases the organization's slug, so the name is free for a new
+     * organization to take.
+     */
+    dissolve: (organizationId: string): Promise<OrganizationRecord> =>
+      this.request(`/api/organizations/${pathPart(organizationId)}`, {
+        method: "DELETE",
+      }),
+    /**
      * Move the owner seat to another member. It MOVES rather than duplicates:
      * every membership write requires the actor to strictly outrank the target
      * and nothing outranks an owner, so a second owner is not reachable through
@@ -704,6 +794,29 @@ export class ControlClient {
   readonly projects = {
     get: (projectId: string): Promise<ProjectRecord> =>
       this.request(`/api/projects/${pathPart(projectId)}`),
+    /** Rename or re-slug. Admin and above. */
+    update: (
+      projectId: string,
+      input: UpdateProjectInput,
+    ): Promise<ProjectRecord> =>
+      this.request(`/api/projects/${pathPart(projectId)}`, {
+        method: "PATCH",
+        body: input,
+      }),
+    /**
+     * Delete a project. Admin and above, and HARD - unlike closing an
+     * organization, which is a timestamp. A project names no money record, so
+     * nothing has to outlive it, and its `project_members` rows go with it.
+     *
+     * REFUSED while the project still owns apps (`409 project has apps`,
+     * carrying the count). Archive and delete them, or move them to another
+     * project, first.
+     */
+    delete: (projectId: string): Promise<void> =>
+      this.request(`/api/projects/${pathPart(projectId)}`, {
+        method: "DELETE",
+        parseAs: "void",
+      }),
     members: (projectId: string): Promise<ListProjectMembersResult> =>
       this.request(`/api/projects/${pathPart(projectId)}/members`),
     addMember: (
@@ -714,6 +827,16 @@ export class ControlClient {
         method: "POST",
         body: input,
       }),
+    /** Narrow or widen an existing project seat atomically. */
+    changeMemberRole: (
+      projectId: string,
+      userId: string,
+      input: ChangeProjectRoleInput,
+    ): Promise<ProjectMemberRecord> =>
+      this.request(
+        `/api/projects/${pathPart(projectId)}/members/${pathPart(userId)}`,
+        { method: "PATCH", body: input },
+      ),
     removeMember: (projectId: string, userId: string): Promise<void> =>
       this.request(
         `/api/projects/${pathPart(projectId)}/members/${pathPart(userId)}`,

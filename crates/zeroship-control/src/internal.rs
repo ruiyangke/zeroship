@@ -13,7 +13,13 @@ use crate::AppState;
 // Auth helper
 // ---------------------------------------------------------------------------
 
-fn check_auth(req: &web::HttpRequest, state: &AppState) -> Option<web::HttpResponse> {
+/// The one control-key check every `/internal/*` handler runs, including the
+/// ones in sibling modules (`crate::erasure`). Shared rather than re-spelled:
+/// a second copy is a second place for the empty-key arm to go missing.
+pub(crate) fn check_auth(
+    req: &web::HttpRequest,
+    state: &AppState,
+) -> Option<web::HttpResponse> {
     let header = req
         .headers()
         .get("authorization")

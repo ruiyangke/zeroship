@@ -17,7 +17,11 @@ fn wrapper_lowers_to_valid_cedar_source() {
             resources: vec![Resource::App {
                 id: "blog".to_owned(),
             }],
-            conditions: vec![Condition::RequireMfa],
+            conditions: vec![Condition::TimeWindow {
+                start: "09:00".to_owned(),
+                end: "17:00".to_owned(),
+                tz: "UTC".to_owned(),
+            }],
         }],
     };
 
@@ -86,23 +90,32 @@ fn condition_ip_range_lowers_correctly() {
     ));
 }
 
+/// The deleted MFA conditions must not survive as parseable wrapper JSON.
+///
+/// Deserializing `{"kind": "require_mfa"}` would rebuild a statement whose
+/// lowering no longer exists, and `Condition` is `#[serde(tag = "kind")]`, so a
+/// wrapper carrying either kind has to be REFUSED rather than dropped: a
+/// silently ignored condition widens the statement it was meant to narrow.
 #[test]
-fn mfa_within_lowers_with_seconds_value() {
-    let policy = Policy {
-        name: "test".to_owned(),
-        statements: vec![Statement {
-            effect: Effect::Allow,
-            actions: vec![Action::AppsDeploy],
-            resources: vec![Resource::App {
-                id: "blog".to_owned(),
-            }],
-            conditions: vec![Condition::MfaWithin { seconds: 600 }],
-        }],
-    };
-
-    let source = lower(&policy);
-
-    assert!(source.contains("context.mfa_age_seconds <= 600"));
+fn deleted_mfa_conditions_do_not_deserialize() {
+    for gone in [
+        json!({"kind": "require_mfa"}),
+        json!({"kind": "mfa_within", "seconds": 600}),
+    ] {
+        let wrapper = json!({
+            "name": "test",
+            "statements": [{
+                "effect": "allow",
+                "actions": ["apps:deploy"],
+                "resources": [{"type": "app", "id": "blog"}],
+                "conditions": [gone]
+            }]
+        });
+        assert!(
+            Policy::from_json_value(&wrapper).is_err(),
+            "{wrapper} must not rebuild a condition the lowering no longer has"
+        );
+    }
 }
 
 #[test]

@@ -251,8 +251,14 @@ echo ""
 echo "=== Stage 2: REAL Stripe Customer + saved test PaymentMethod ==="
 # ===========================================================================
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
-CUS="$(spost customers -d "email=e2e-$CREATOR@zeroship.test" -d "metadata[creator_id]=$CREATOR" | jget id)"
-case "$CUS" in cus_*) pass "created REAL Stripe Customer $CUS (creator=$CREATOR)";; *) fail "create customer failed"; exit 1;; esac
+# The ids are derived HERE, before the customer, because the ownership metadata
+# the platform stamps on a Stripe Customer names the ORGANIZATION - a customer
+# created before the id exists carries no attribution, and under `set -u` the
+# expansion aborts the run outright. The rows themselves are written in stage 3;
+# this call only computes the ids.
+organization_fixture_ids "stripe-e2e-$CREATOR"
+CUS="$(spost customers -d "email=e2e-$CREATOR@zeroship.test" -d "metadata[organization_id]=$ZS_FIXTURE_ORGANIZATION_ID" | jget id)"
+case "$CUS" in cus_*) pass "created REAL Stripe Customer $CUS (organization=$ZS_FIXTURE_ORGANIZATION_ID)";; *) fail "create customer failed"; exit 1;; esac
 PM="$(spost payment_methods/pm_card_visa/attach -d "customer=$CUS" | jget id)"
 case "$PM" in pm_*) pass "attached test PaymentMethod $PM";; *) fail "attach PM failed (got '$PM')"; exit 1;; esac
 spost "customers/$CUS" -d "invoice_settings[default_payment_method]=$PM" -o /dev/null
@@ -273,9 +279,10 @@ process.stdout.write(String(Math.floor(Date.UTC(y,m,1,0,0,0)/1000)));
 ' "$NOW_UNIX")"
 
 # The app needs a project, and the project an organization: that chain is the
-# only path from an app to the party it is billed to. Set the ids here, in this
-# shell, because the emitter below runs in a subshell.
-organization_fixture_ids "stripe-e2e-$CREATOR"
+# only path from an app to the party it is billed to. The ids were derived in
+# stage 2 (the Stripe Customer's ownership metadata needs them); the rows they
+# name are written here. They live in THIS shell rather than the emitter's,
+# because `$(organization_fixture_sql ...)` runs in a subshell.
 psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "seed failed"; exit 1; }
 INSERT INTO zeroship.plans (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit,
    runtime_limits_json, spend_limit_default_cents)
@@ -285,15 +292,15 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CREATOR', 'e2e-$CREATOR@zeroship.test'::citext, 'E2E Stripe Creator', NOW());
 $(organization_fixture_sql "stripe-e2e-$CREATOR" "e2e-$CREATOR@zeroship.test")
-INSERT INTO zeroship.apps (id, name, plan_id, project_id)
-VALUES ('$CLOSED_APP', 'stripe-e2e-app-$CLOSED_APP', '$PLAN_ID', '$ZS_FIXTURE_PROJECT_ID');
+INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id)
+VALUES ('$CLOSED_APP', 'stripe-e2e-app-$CLOSED_APP', '$PLAN_ID', '$ZS_FIXTURE_PROJECT_ID', '$ZS_FIXTURE_ORGANIZATION_ID');
 $(seat_app_owner_sql "$CLOSED_APP" "$CREATOR")
--- The customer id lives in the side table billing_customer_refs (relocated off
--- creator_billing). Create the FK-parent identity row, then map the cus_.
-INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CREATOR') ON CONFLICT DO NOTHING;
-INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)
-VALUES ('$CREATOR', 'stripe', '$CUS')
-ON CONFLICT (creator_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
+-- The customer id lives in the side table billing_customer_refs, whose FK
+-- parent is organization_billing. Create that identity row, then map the cus_.
+$(organization_billing_sql "$ZS_FIXTURE_ORGANIZATION_ID")
+INSERT INTO zeroship.billing_customer_refs (organization_id, provider, external_id)
+VALUES ('$ZS_FIXTURE_ORGANIZATION_ID', 'stripe', '$CUS')
+ON CONFLICT (organization_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
 -- The platform migration set does NOT seed the pricing config: billing_metrics
 -- ('requests'), metric_weights (the CU weight), and pricing_config ('global' FX)
 -- must all be present or (a) the usage_aggregates FK to billing_metrics fails and
@@ -318,8 +325,9 @@ BILLED="$(echo "$RECON" | jget billed)"
   || { fail "expected billed=1, got '$BILLED' ($RECON) — control.log tail:"; tail -20 "$WORK/control.log"; }
 
 # The finalized Stripe invoice id (in_…) is persisted in billing_provider_refs
-# (ref_kind='invoice') against the internal invoices row keyed by (creator_id, period).
-INV="$(psql_db -tA -c "SELECT bpr.external_id FROM zeroship.billing_provider_refs bpr JOIN zeroship.invoices i ON i.id=bpr.invoice_id WHERE i.creator_id='$CREATOR' AND bpr.provider='stripe' AND bpr.ref_kind='invoice' ORDER BY bpr.created_at DESC LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
+# (ref_kind='invoice') against the internal invoices row keyed by
+# (organization_id, period).
+INV="$(psql_db -tA -c "SELECT bpr.external_id FROM zeroship.billing_provider_refs bpr JOIN zeroship.invoices i ON i.id=bpr.invoice_id WHERE i.organization_id='$ZS_FIXTURE_ORGANIZATION_ID' AND bpr.provider='stripe' AND bpr.ref_kind='invoice' ORDER BY bpr.created_at DESC LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
 case "$INV" in in_*) pass "billing_provider_refs carries the REAL finalized Stripe invoice $INV";; *) fail "no ref_kind='invoice' in billing_provider_refs (got '$INV')"; exit 1;; esac
 
 # DIVERGENCE CHECK #1: does the finalized invoice actually carry the 750c line?
@@ -419,17 +427,17 @@ echo "=== Stage 5: drive the REAL invoice.paid webhook (signed) → charge row +
 # (Stage 4) — here we prove our handler + the PR-8 resolution work correctly WHEN
 # the ids are present, which is the dimension PR-8 fixes.
 EVENT_JSON="$(node -e '
-const [inv,cus,creator,pi,ch,amount]=process.argv.slice(1);
+const [inv,cus,organization,pi,ch,amount]=process.argv.slice(1);
 const obj={ id:inv, object:"invoice", customer:cus, amount_paid:Number(amount),
   currency:"usd", status:"paid",
-  metadata:{ creator_id:creator, invoice_kind:"infra" },
+  metadata:{ organization_id:organization, invoice_kind:"infra" },
   payments:{ object:"list", data:[ { id:"inpay_e2e", object:"invoice_payment", status:"paid",
     payment:{ type:"payment_intent", payment_intent:pi||null, charge:ch||null } } ] } };
 const evt={ id:"evt_e2e_"+require("crypto").randomBytes(8).toString("hex"),
   object:"event", api_version:"2025-09-30.clover", created:Math.floor(Date.now()/1000),
   type:"invoice.paid", data:{ object:obj } };
 process.stdout.write(JSON.stringify(evt));
-' "$INV" "$CUS" "$CREATOR" "$REAL_PI" "$REAL_CH" "$PAID_AMOUNT")"
+' "$INV" "$CUS" "$ZS_FIXTURE_ORGANIZATION_ID" "$REAL_PI" "$REAL_CH" "$PAID_AMOUNT")"
 
 post_signed_webhook() {
   # $1 = event JSON. Signs t=<now>,v1=HMAC_SHA256(secret, "<t>.<body>") and POSTs.
@@ -451,23 +459,23 @@ if [ "$WH_CODE" = "200" ]; then
 elif [ "$WH_CODE" = "500" ] && grep -q "store error" "$WORK/control.log" 2>/dev/null; then
   # The REAL signature verified and the infra side-effects committed (asserted
   # below), but the handler then 500s. Root cause (genuine bug, flagged for the
-  # fixer): for an infra invoice.paid carrying metadata.creator_id (which the
+  # fixer): for an infra invoice.paid carrying metadata.organization_id (which the
   # reconciler's create_invoice DOES stamp), dispatch_event does NOT `return`
   # after record_infra_payment — it FALLS THROUGH to the Stream-2 Connect
-  # `record_payout`, whose payouts.creator_id FK → creator_accounts(creator_id)
-  # is unsatisfiable for an infra-only creator (no Connect account). The insert
+  # `record_payout`, whose payouts.organization_id FK -> organization_accounts
+  # is unsatisfiable for an infra-only organization (no Connect account). The insert
   # violates the FK → "db error" → 500. The charge row already committed (the
   # handler is NOT atomic), so on Stripe's retry the append is idempotent but
   # record_payout fails again → the event NEVER acks (poison). The infra
   # invoice.paid branch should `return` after record_infra_payment.
-  diverge "invoice.paid 500 (HTTP 500, 'store error') AFTER the infra writes committed: dispatch_event falls through an infra invoice.paid (metadata.invoice_kind=infra, metadata.creator_id set) into the Stream-2 record_payout, whose payouts→creator_accounts FK an infra-only creator can't satisfy. Non-atomic + poison-retry. crates/zeroship-control/src/stripe_handlers.rs: the infra invoice.paid branch must return after record_infra_payment."
+  diverge "invoice.paid 500 (HTTP 500, 'store error') AFTER the infra writes committed: dispatch_event falls through an infra invoice.paid (metadata.invoice_kind=infra, metadata.organization_id set) into the Stream-2 record_payout, whose payouts->organization_accounts FK an infra-only organization cannot satisfy. Non-atomic + poison-retry. crates/zeroship-control/src/stripe_handlers.rs: the infra invoice.paid branch must return after record_infra_payment."
 else
   fail "invoice.paid webhook rejected (HTTP $WH_CODE): $WH_RESP"
   tail -15 "$WORK/control.log"
 fi
 
 # Assert the charge invoice_payments row was appended (cash collected = 750c).
-CASH="$(psql_db -tA -c "SELECT COALESCE(SUM(amount_cents),0) FROM zeroship.invoice_payments ip JOIN zeroship.invoices i ON i.id=ip.invoice_id WHERE i.creator_id='$CREATOR' AND ip.kind='charge'" 2>/dev/null | tr -d '[:space:]')"
+CASH="$(psql_db -tA -c "SELECT COALESCE(SUM(amount_cents),0) FROM zeroship.invoice_payments ip JOIN zeroship.invoices i ON i.id=ip.invoice_id WHERE i.organization_id='$ZS_FIXTURE_ORGANIZATION_ID' AND ip.kind='charge'" 2>/dev/null | tr -d '[:space:]')"
 [ "$CASH" = "750" ] && pass "invoice_payments 'charge' row appended: cash-collected = 750c" \
   || fail "expected 750c charge row, got '$CASH'"
 
@@ -485,7 +493,7 @@ echo ""
 echo "=== Stage 6: REAL cash Refund (re_…) via POST /api/invoices/{id}/refunds ==="
 # ===========================================================================
 # Mint a platform-admin bearer so the authenticated refund endpoint accepts us.
-INTERNAL_INV="$(psql_db -tA -c "SELECT id FROM zeroship.invoices WHERE creator_id='$CREATOR' ORDER BY created_at DESC LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
+INTERNAL_INV="$(psql_db -tA -c "SELECT id FROM zeroship.invoices WHERE organization_id='$ZS_FIXTURE_ORGANIZATION_ID' ORDER BY created_at DESC LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
 [ -n "$INTERNAL_INV" ] && pass "internal invoice id = $INTERNAL_INV" || { fail "no internal invoice row"; }
 
 # The deleted policy's action list, one-for-one, as OAuth scopes.
@@ -524,7 +532,7 @@ if [ -n "$ADMIN_TOKEN" ] && [ -n "$INTERNAL_INV" ]; then
 fi
 
 # Over-refund cap BEFORE the dispute: remaining cap = cash_collected − refunds.
-CASH_NOW="$(psql_db -tA -c "SELECT COALESCE(SUM(amount_cents),0) FROM zeroship.invoice_payments ip JOIN zeroship.invoices i ON i.id=ip.invoice_id WHERE i.creator_id='$CREATOR'" 2>/dev/null | tr -d '[:space:]')"
+CASH_NOW="$(psql_db -tA -c "SELECT COALESCE(SUM(amount_cents),0) FROM zeroship.invoice_payments ip JOIN zeroship.invoices i ON i.id=ip.invoice_id WHERE i.organization_id='$ZS_FIXTURE_ORGANIZATION_ID'" 2>/dev/null | tr -d '[:space:]')"
 echo "    Σ(invoice_payments) for creator BEFORE dispute = ${CASH_NOW}c (the over-refund anchor)"
 
 # ===========================================================================
@@ -612,7 +620,7 @@ if [ -n "$DU" ]; then
   # (Σ(invoice_payments)) TIGHTENS by the disputed amount.
   DISPUTE_ROWS="$(psql_db -tA -c "SELECT COUNT(*) FROM zeroship.billing_disputes WHERE provider_dispute_id='$DU'" 2>/dev/null | tr -d '[:space:]')"
   DEBIT_ROWS="$(psql_db -tA -c "SELECT COUNT(*) FROM zeroship.invoice_payments WHERE kind='dispute_debit'" 2>/dev/null | tr -d '[:space:]')"
-  CASH_AFTER="$(psql_db -tA -c "SELECT COALESCE(SUM(amount_cents),0) FROM zeroship.invoice_payments ip JOIN zeroship.invoices i ON i.id=ip.invoice_id WHERE i.creator_id='$CREATOR'" 2>/dev/null | tr -d '[:space:]')"
+  CASH_AFTER="$(psql_db -tA -c "SELECT COALESCE(SUM(amount_cents),0) FROM zeroship.invoice_payments ip JOIN zeroship.invoices i ON i.id=ip.invoice_id WHERE i.organization_id='$ZS_FIXTURE_ORGANIZATION_ID'" 2>/dev/null | tr -d '[:space:]')"
   echo "    after dispute: billing_disputes=$DISPUTE_ROWS dispute_debit_rows=$DEBIT_ROWS  Σ(invoice_payments)=${CASH_AFTER}c (was ${CASH_NOW}c)"
 
   if [ "$DISPUTE_ROWS" = "1" ]; then

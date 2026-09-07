@@ -51,9 +51,16 @@ pub fn spawn_all(
     })
     .detach();
 
-    // ISS-12: erase accounts whose deletion grace window has elapsed.
+    // ISS-12: erase accounts whose deletion grace window has elapsed. The
+    // reaper re-asks the control plane whether each due human is still the last
+    // owner of a live organization, so it carries the same control access the
+    // `/me/delete` handler used to open the window.
+    let control = account_reaper::ControlAccess {
+        control_url: cfg.control_url().to_owned(),
+        control_key: cfg.settings.control_key.expose_secret().cloned(),
+    };
     compio::runtime::spawn(async move {
-        account_reaper::run(refresh_pool).await;
+        account_reaper::run(refresh_pool, control).await;
     })
     .detach();
 }

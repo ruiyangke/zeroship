@@ -801,6 +801,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         billing_stream: None,
         tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
             zeroship_control::billing_read::ProjectedChargeCache::default(),
@@ -968,8 +969,8 @@ async fn ingest_custom_metrics(
 }
 
 /// `now` placed mid-current-month so the CLOSED period is the previous month.
-fn now_for_closed_period() -> i64 {
-    common::next_isolated_period()
+async fn now_for_closed_period() -> i64 {
+    common::next_isolated_period().await
 }
 
 fn prev_period(now: i64) -> i64 {
@@ -1136,7 +1137,7 @@ async fn reconcile_creates_invoice_items_per_app_from_real_aggregates() {
     let url = db_url();
     let fx = build_fixture(&url, "items").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "items").await;
@@ -1198,7 +1199,7 @@ async fn single_segment_item_carries_cu_and_full_metadata_amount_unchanged() {
     let url = db_url();
     let fx = build_fixture(&url, "cu1seg").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "cu1seg").await;
@@ -1292,7 +1293,7 @@ async fn many_metric_item_respects_description_and_metadata_length_caps() {
     let url = db_url();
     let fx = build_fixture(&url, "cucap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "cucap").await;
@@ -1440,7 +1441,7 @@ async fn reconcile_is_idempotent_per_period() {
     let url = db_url();
     let fx = build_fixture(&url, "idem").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "idem").await;
@@ -1752,7 +1753,7 @@ async fn reconcile_groups_apps_by_owner_via_the_organization() {
     let url = db_url();
     let fx = build_fixture(&url, "owner").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "owner").await;
@@ -1807,7 +1808,7 @@ async fn crashed_run_with_null_invoice_id_is_redriven() {
     let url = db_url();
     let fx = build_fixture(&url, "crash").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "crash").await;
@@ -1883,7 +1884,7 @@ async fn missing_default_fx_aborts_sweep_and_bills_no_one() {
     let url = db_url();
     let fx = build_fixture(&url, "nofx").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "nofx").await;
@@ -2086,7 +2087,7 @@ async fn partial_post_then_crash_does_not_double_bill_app_a() {
     let url = db_url();
     let fx = build_fixture(&url, "partial").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "partial").await;
@@ -2240,7 +2241,7 @@ async fn post_then_crash_before_ledger_does_not_double_bill_after_24h() {
     let url = db_url();
     let fx = build_fixture(&url, "c1crash").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "c1crash").await;
@@ -2318,7 +2319,7 @@ async fn post_then_crash_redrive_within_24h_is_idempotent() {
     let url = db_url();
     let fx = build_fixture(&url, "c1within").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "c1within").await;
@@ -2445,7 +2446,7 @@ async fn archived_app_open_invoice_finalizes_original_draft_after_24h() {
     let url = db_url();
     let fx = build_fixture(&url, "c2crash").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "c2crash").await;
@@ -2639,7 +2640,7 @@ async fn force_reconcile_endpoint_is_operator_gated_and_drives_a_chosen_period()
     let url = db_url();
     let fx = build_fixture(&url, "force").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "force").await;
@@ -2724,7 +2725,7 @@ async fn finalized_line_replays_persisted_amount_bit_for_bit_via_bill_organizati
     let url = db_url();
     let fx = build_fixture(&url, "c1replay").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "c1replay").await;
@@ -2904,7 +2905,7 @@ async fn refinalize_already_finalized_converges_locally() {
     let url = db_url();
     let fx = build_fixture(&url, "m2converge").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "m2converge").await;
@@ -3049,7 +3050,7 @@ async fn finalize_and_invoice_ref_commit_atomically() {
     // draft-invoice leftover (the finalize is intentionally never allowed to
     // commit) can never be swept by a sibling reconcile test billing the
     // current-prev month — which would inflate that sibling's fleet-wide `billed`.
-    let now = now_for_closed_period() - 150 * 86_400;
+    let now = now_for_closed_period().await - 150 * 86_400;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "m1atomic").await;

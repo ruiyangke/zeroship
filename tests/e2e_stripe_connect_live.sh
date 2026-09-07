@@ -9,7 +9,7 @@
 # drives the SAME control-plane code those harnesses do — the cyper
 # `StripeClient` Connect calls (`create_connect_account`, `create_account_link`,
 # `retrieve_account`, `create_connect_payment_intent`), the server-held
-# `FeePolicy`, the `connect_checkout` / `callback` / `set_fee_policy` handlers,
+# `FeePolicy`, the `connect_checkout` and `callback` handlers,
 # and the signature-verified `/internal/webhooks/stripe` ingest of
 # `account.updated` / `payout.failed` — the way real Stripe + real webhooks
 # drive them.
@@ -27,9 +27,9 @@
 #         capability goes genuinely ACTIVE at Stripe — the Express hosted browser
 #         flow CANNOT be API-activated, but a Custom account CAN (this is the
 #         documented test-mode path). Re-point the seeded creator's stored
-#         `creator_accounts` row at THIS capable account (the same row `onboard`
+#         `organization_accounts` row at THIS capable account (the same row `onboard`
 #         wrote) + charges_enabled=true, then call zeroship's
-#         POST /api/creators/{id}/connect/checkout                (control's
+#         POST /api/organizations/{id}/connect/checkout           (control's
 #         REAL StripeClient + server-held FeePolicy)
 #         → control stamps application_fee_amount + transfer_data[destination]
 #           SERVER-SIDE against the CAPABLE destination; a MALICIOUS client
@@ -91,6 +91,11 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
+# Connect is ORGANIZATION-scoped end to end: the routes, the money guard, the
+# `organization_accounts` link row and the Stripe ownership metadata all name
+# one. This harness creates no app, so it seeds the organization and the seat
+# itself rather than relying on the personal organization `POST /api/apps` mints.
+source "$ROOT/tests/lib/organization_fixture.sh"
 STRICT="${STRICT:-0}"
 
 PASS=0; FAIL=0; DIVERGENCE=0
@@ -195,7 +200,7 @@ provision_custom_account() {
     -d "individual[phone]=0000000000" \
     -d "business_profile[mcc]=5734" -d "business_profile[url]=https://zeroship.ai" \
     -d "tos_acceptance[date]=$now" -d "tos_acceptance[ip]=127.0.0.1" \
-    -d "metadata[creator_id]=$creator" -d "metadata[zeroship_probe]=connect_e2e_custom" \
+    -d "metadata[organization_id]=$ZS_FIXTURE_ORGANIZATION_ID" -d "metadata[zeroship_probe]=connect_e2e_custom" \
     | jget id)"
   case "$acct" in acct_*) : ;; *) echo ""; return 1 ;; esac
   echo "$acct" >> "$CREATED_ACCTS"
@@ -284,7 +289,7 @@ cleanup() {
     [ -f "$CREATED_ACCTS" ] && while read -r a; do [ -n "$a" ] && echo "    connected account: $a"; done < "$CREATED_ACCTS"
   fi
   [ -n "${WORK:-}" ] && rm -rf "$WORK"
-  # Drop on SUCCESS only: on a red run the creator_accounts / payout rows control
+  # Drop on SUCCESS only: on a red run the organization_accounts / payout rows control
   # wrote ARE the finding.
   zs_scratch_db_cleanup_on_success "$rc"
   zs_ports_release
@@ -325,7 +330,7 @@ pass "created per-run DB $DB on :$PGPORT (real zeroship + zeroship_billing_test 
 
 MIG_LOG="$WORK/migrate.log"
 if ZEROSHIP_MIGRATE_DSN="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB" "$ROOT/deploy/ops/db-migrate.sh" > "$MIG_LOG" 2>&1; then
-  pass "platform migration set applied (incl. 0044 creator_fee_policy + creator_accounts Connect flags)"
+  pass "platform migration set applied (incl. organization_fee_policy + organization_accounts Connect flags)"
 else
   fail "platform migration FAILED (see $MIG_LOG)"; tail -20 "$MIG_LOG"; exit 1
 fi
@@ -368,19 +373,30 @@ post_signed_webhook() {
     --data-binary "$body"
 }
 
-# Mint a platform-admin bearer so the operator-only set_fee_policy + the
-# self-service onboard/checkout endpoints accept us (faithful AuthzGuard,
-# the same EdDSA-signed at+jwt control verifies in production).
+# Mint a bearer the onboard/checkout endpoints accept (faithful AuthzGuard, the
+# same EdDSA-signed at+jwt control verifies in production).
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
 NOW_UNIX="$(date +%s)"
-# The deleted policy's action list, one-for-one, as OAuth scopes.
 SCOPE="billing:read billing:write"
 
-psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "creator/bearer seed failed"; exit 1; }
+# THE CONNECT SUBJECT IS THE ORGANIZATION, not the human. Every route this
+# harness drives is `/api/organizations/{id}/...` and every one of them runs
+# `organization_money_guard`, which resolves BillingWrite at
+# `Resource::Organization` - so a bearer with the right scope and NO SEAT is
+# refused. This harness never creates an app, so nothing mints a personal
+# organization for it: the organization and the seat are both explicit here.
+#
+# `owner` rather than `developer`: BillingWrite needs billing authority, which
+# `owner` and `billing` carry (zeroship.organization_roles.billing_rank) and
+# `developer` does not.
+organization_fixture_ids "connect-$CREATOR"
+psql_db -v ON_ERROR_STOP=1 >/dev/null <<SQL || { fail "creator/organization seed failed"; exit 1; }
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CREATOR', 'connect-$CREATOR@zeroship.test'::citext, 'E2E Connect Creator', NOW());
+$(organization_fixture_sql "connect-$CREATOR" "connect-$CREATOR@zeroship.test")
+$(seat_organization_member_sql "$ZS_FIXTURE_ORGANIZATION_ID" "$CREATOR" owner)
 SQL
-pass "seeded creator $CREATOR + operator role"
+pass "seeded creator $CREATOR as owner of organization $ZS_FIXTURE_ORGANIZATION_ID"
 
 JOSE_JS="$ROOT/node_modules/.pnpm/jose@6.2.3/node_modules/jose/dist/webapi/index.js"
 ADMIN_TOKEN=""
@@ -401,14 +417,14 @@ echo "=== Stage 2: REAL Express connected account via control's onboard handler 
 # ===========================================================================
 # Drive the REAL control handler `onboard` (crates/zeroship-control/src/stripe_handlers.rs
 # :120) — it calls StripeClient::create_connect_account (stripe_client.rs:963,
-# POST /v1/accounts type=express, metadata[creator_id]=<creator>) then
+# POST /v1/accounts type=express, metadata[organization_id]=<organization>) then
 # create_account_link (:983, POST /v1/account_links type=account_onboarding).
-ONBOARD="$(curl -s -X POST "$CONTROL_URL/api/creators/$CREATOR/stripe/onboard" "${AUTH[@]}")"
+ONBOARD="$(curl -s -X POST "$CONTROL_URL/api/organizations/$ZS_FIXTURE_ORGANIZATION_ID/stripe/onboard" "${AUTH[@]}")"
 echo "    onboard → $ONBOARD"
 ACCT="$(echo "$ONBOARD" | jget account_id)"
 LINK_URL="$(echo "$ONBOARD" | jget url)"
 case "$ACCT" in
-  acct_*) pass "control minted a REAL Express connected account $ACCT (server-stamped metadata.creator_id)"; echo "$ACCT" >> "$CREATED_ACCTS";;
+  acct_*) pass "control minted a REAL Express connected account $ACCT (server-stamped metadata.organization_id)"; echo "$ACCT" >> "$CREATED_ACCTS";;
   *) fail "onboard did not return an acct_ (resp: $ONBOARD). control.log: $(grep -i 'onboard\|account' "$WORK/control.log" | tail -3 | tr '\n' '|')"; exit 1;;
 esac
 # Stage 2.2 — the account_links onboarding URL (the hosted browser flow is NOT
@@ -418,10 +434,10 @@ case "$LINK_URL" in
   *) diverge "onboard returned no/unexpected account_links url (got: '$LINK_URL')";;
 esac
 
-# Fetch the REAL account back + confirm metadata.creator_id ownership signal.
-ACCT_META="$(sget "accounts/$ACCT" | jget metadata.creator_id)"
-[ "$ACCT_META" = "$CREATOR" ] && pass "REAL acct_ carries metadata.creator_id=$CREATOR (the ownership signal callback verifies, ISS-30)" \
-  || diverge "acct_ metadata.creator_id ('$ACCT_META') != creator ($CREATOR)"
+# Fetch the REAL account back + confirm metadata.organization_id ownership signal.
+ACCT_META="$(sget "accounts/$ACCT" | jget metadata.organization_id)"
+[ "$ACCT_META" = "$CREATOR" ] && pass "REAL acct_ carries metadata.organization_id=$CREATOR (the ownership signal callback verifies, ISS-30)" \
+  || diverge "acct_ metadata.organization_id ('$ACCT_META') != creator ($CREATOR)"
 
 # Keep a handle on the Express account control just minted (the faithful
 # onboarding artifact). Its hosted onboarding can NOT be API-activated, so the
@@ -467,21 +483,21 @@ fi
   || echo "    note: card_payments=$CUSTOM_CARD (pending_verification, currently_due empty) — does NOT block a destination charge; transfers is what matters here"
 
 # ── Re-point the seeded creator's stored connect identity at THIS capable account
-# + charges_enabled=true. This is the SAME `creator_accounts` row `onboard` wrote
-# (PK=creator_id) and the SAME columns `update_account_flags_by_account_id` writes
+# + charges_enabled=true. This is the SAME `organization_accounts` row `onboard` wrote
+# (PK=organization_id) and the SAME columns `update_account_flags_by_account_id` writes
 # from a real account.updated — we just point them at the API-onboarded Custom
 # account so control's `connect_checkout` (which reads server truth from this row)
 # targets a destination Stripe will actually transfer to. control's FeePolicy
 # server-fee stamping stays entirely in the REAL path; only the destination changes.
-psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not re-point creator_accounts to the capable custom account"; exit 1; }
-UPDATE zeroship.creator_accounts
+psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "could not re-point organization_accounts to the capable custom account"; exit 1; }
+UPDATE zeroship.organization_accounts
    SET stripe_account_id = '$CUSTOM_ACCT',
        charges_enabled   = true,
        payouts_enabled   = true,
        details_submitted = true
- WHERE creator_id = '$CREATOR' AND unlinked_at IS NULL;
+ WHERE organization_id = '$ZS_FIXTURE_ORGANIZATION_ID' AND unlinked_at IS NULL;
 SQL
-GATE="$(psql1 "SELECT charges_enabled::int FROM zeroship.creator_accounts WHERE creator_id='$CREATOR' AND stripe_account_id='$CUSTOM_ACCT'")"
+GATE="$(psql1 "SELECT charges_enabled::int FROM zeroship.organization_accounts WHERE organization_id='$ZS_FIXTURE_ORGANIZATION_ID' AND stripe_account_id='$CUSTOM_ACCT'")"
 [ "$GATE" = "1" ] && pass "creator's stored stripe_account_id re-pointed to $CUSTOM_ACCT with charges_enabled=true (M2 gate open on a CAPABLE destination)" \
   || { fail "re-point did not take (charges_enabled gate='$GATE')"; exit 1; }
 
@@ -513,7 +529,7 @@ echo "=== Stage 3: connect_checkout stamps the SERVER fee (15% FeePolicy) + tran
 # — it has NO wire path (ConnectCheckoutBody has no such field) and MUST be ignored.
 GROSS=20000
 EXPECT_FEE=3000   # 15% of 20000, computed server-side (fee_policy.rs::fee_cents)
-CO="$(curl -s -X POST "$CONTROL_URL/api/creators/$CREATOR/connect/checkout" "${AUTH[@]}" \
+CO="$(curl -s -X POST "$CONTROL_URL/api/organizations/$ZS_FIXTURE_ORGANIZATION_ID/connect/checkout" "${AUTH[@]}" \
   -H 'content-type: application/json' \
   -d "{\"amount_cents\":$GROSS,\"currency\":\"usd\",\"cart_id\":\"cart-e2e-1\",\"application_fee_amount\":1,\"applicationFeePercent\":0}")"
 echo "    connect_checkout → $CO"
@@ -541,11 +557,30 @@ if [ -n "$CO_PI" ]; then
     || diverge "REAL PI transfer_data.destination ('$PI_DEST') != $ACCT — the charge did not route to the creator"
 fi
 
-# Stage 3.2 — an operator-set FeePolicy (25% capped at $40) overrides the default.
-SETP="$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$CONTROL_URL/api/creators/$CREATOR/fee-policy" "${AUTH[@]}" \
-  -H 'content-type: application/json' -d '{"kind":"percent","percent_bps":2500,"cap_cents":4000}')"
-[ "$SETP" = "204" ] && pass "operator set a 25%-capped-\$40 FeePolicy (HTTP 204)" || diverge "set_fee_policy returned HTTP $SETP (expected 204)"
-CO2="$(curl -s -X POST "$CONTROL_URL/api/creators/$CREATOR/connect/checkout" "${AUTH[@]}" \
+# Stage 3.2 — a stored FeePolicy (25% capped at $40) overrides the default.
+#
+# WRITTEN TO THE STORE, NOT OVER HTTP. `PUT /api/organizations/:id/fee-policy` is
+# deleted along with the rest of the vendor-commercial surface; there is no
+# replacement route, and this stage used to assert a 204 from it. That is not
+# what the stage is about: the property under test is that CHECKOUT resolves the
+# STORED policy server-side and stamps it on the real Stripe charge, and
+# `connect_checkout` is very much alive. So the row is written the way
+# `FeePolicyStore::set` writes it (crates/zeroship-control/src/fee_policy.rs) and
+# the assertions below are unchanged. `crates/zeroship-control/tests/connect_fee_test.rs`
+# made the same move for the same reason.
+psql_db -v ON_ERROR_STOP=1 >/dev/null <<SQL || { fail "could not store the 25%-capped FeePolicy"; exit 1; }
+INSERT INTO zeroship.organization_fee_policy
+  (organization_id, kind, percent_bps, cap_cents, updated_at)
+VALUES ('$ZS_FIXTURE_ORGANIZATION_ID', 'percent', 2500, 4000, NOW())
+ON CONFLICT (organization_id) DO UPDATE
+  SET kind = EXCLUDED.kind, percent_bps = EXCLUDED.percent_bps,
+      cap_cents = EXCLUDED.cap_cents, amount_cents = NULL, floor_cents = NULL,
+      updated_at = NOW();
+SQL
+STORED_BPS="$(psql1 "SELECT percent_bps||'/'||cap_cents FROM zeroship.organization_fee_policy WHERE organization_id='$ZS_FIXTURE_ORGANIZATION_ID'")"
+[ "$STORED_BPS" = "2500/4000" ] && pass "stored a 25%-capped-\$40 FeePolicy for the organization" \
+  || { fail "FeePolicy did not store (read back '$STORED_BPS', want 2500/4000)"; exit 1; }
+CO2="$(curl -s -X POST "$CONTROL_URL/api/organizations/$ZS_FIXTURE_ORGANIZATION_ID/connect/checkout" "${AUTH[@]}" \
   -H 'content-type: application/json' -d "{\"amount_cents\":$GROSS,\"currency\":\"usd\",\"cart_id\":\"cart-e2e-2\"}")"
 CO2_FEE="$(echo "$CO2" | jget application_fee_cents)"
 CO2_PI="$(echo "$CO2" | jget payment_intent_id)"
@@ -556,9 +591,14 @@ if [ -n "$CO2_PI" ]; then
   [ "$PI2_FEE" = "4000" ] && pass "REAL Stripe PaymentIntent $CO2_PI carries the policy fee application_fee_amount=4000c" \
     || diverge "REAL policy PI application_fee_amount ('$PI2_FEE') != 4000"
 fi
-# Reset to the default so the rest of the run reasons about 15%.
-curl -s -o /dev/null -X PUT "$CONTROL_URL/api/creators/$CREATOR/fee-policy" "${AUTH[@]}" \
-  -H 'content-type: application/json' -d '{"kind":"percent","percent_bps":1500}'
+# Reset to the default so the rest of the run reasons about 15%. DELETE rather
+# than a 1500-bps row: the default is what `FeePolicyStore::get` returns when
+# there is NO row, so writing one would leave the later stages reasoning about a
+# stored policy that happens to agree with the default rather than about the
+# default itself.
+psql_db -v ON_ERROR_STOP=1 >/dev/null <<SQL || { fail "could not clear the stored FeePolicy"; exit 1; }
+DELETE FROM zeroship.organization_fee_policy WHERE organization_id = '$ZS_FIXTURE_ORGANIZATION_ID';
+SQL
 
 # ===========================================================================
 echo ""
@@ -568,24 +608,24 @@ echo "=== Stage 4: M2 money-hole gate — account.updated charges_enabled→fals
 # risk/KYC hold). handle_account_updated (stripe_handlers.rs:1511) re-caches via
 # update_account_flags_by_account_id; connect_checkout (:503) then rejects 400.
 DISABLE_EVT="$(node -e '
-const [acct,creator]=process.argv.slice(1);
+const [acct,organization]=process.argv.slice(1);
 const obj={ id:acct, object:"account", charges_enabled:false, payouts_enabled:false,
-  details_submitted:true, metadata:{ creator_id:creator } };
+  details_submitted:true, metadata:{ organization_id:organization } };
 const evt={ id:"evt_e2e_"+require("crypto").randomBytes(8).toString("hex"),
   object:"event", api_version:"2025-09-30.clover", created:Math.floor(Date.now()/1000),
   type:"account.updated", data:{ object:obj } };
 process.stdout.write(JSON.stringify(evt));
-' "$ACCT" "$CREATOR")"
+' "$ACCT" "$ZS_FIXTURE_ORGANIZATION_ID")"
 AU2_CODE="$(post_signed_webhook "$DISABLE_EVT")"
 AU2_RESP="$(cat "$WORK/wh_resp.json" 2>/dev/null)"
 echo "    account.updated(charges_enabled=false) → HTTP $AU2_CODE  resp=$AU2_RESP"
 [ "$AU2_CODE" = "200" ] && pass "account.updated(disable) accepted (REAL signature) → 200" || fail "account.updated rejected (HTTP $AU2_CODE): $AU2_RESP"
-GATE_OFF="$(wait_for_db "SELECT charges_enabled::int FROM zeroship.creator_accounts WHERE stripe_account_id='$ACCT'" "0" 10)"
+GATE_OFF="$(wait_for_db "SELECT charges_enabled::int FROM zeroship.organization_accounts WHERE stripe_account_id='$ACCT'" "0" 10)"
 [ "$GATE_OFF" = "0" ] && pass "control re-cached charges_enabled=false (M2: the gate now reflects Stripe's risk hold)" \
   || fail "account.updated did NOT flip the cached charges_enabled to false (got '$GATE_OFF')"
 
 # The gate must now BLOCK a checkout (no PaymentIntent created).
-CO_BLOCKED="$(curl -s -o "$WORK/co_blocked.json" -w '%{http_code}' -X POST "$CONTROL_URL/api/creators/$CREATOR/connect/checkout" "${AUTH[@]}" \
+CO_BLOCKED="$(curl -s -o "$WORK/co_blocked.json" -w '%{http_code}' -X POST "$CONTROL_URL/api/organizations/$ZS_FIXTURE_ORGANIZATION_ID/connect/checkout" "${AUTH[@]}" \
   -H 'content-type: application/json' -d "{\"amount_cents\":$GROSS,\"currency\":\"usd\",\"cart_id\":\"cart-blocked\"}")"
 echo "    blocked checkout → HTTP $CO_BLOCKED  body=$(cat "$WORK/co_blocked.json" 2>/dev/null)"
 [ "$CO_BLOCKED" = "400" ] && pass "M2 money-hole guard WORKS: connect_checkout to a not-charges_enabled account is REJECTED (400) — no PaymentIntent created" \
@@ -593,16 +633,16 @@ echo "    blocked checkout → HTTP $CO_BLOCKED  body=$(cat "$WORK/co_blocked.js
 
 # Re-enable for the M4 stage below.
 post_signed_webhook "$(node -e '
-const [acct,creator]=process.argv.slice(1);
-const obj={ id:acct, object:"account", charges_enabled:true, payouts_enabled:true, details_submitted:true, metadata:{ creator_id:creator } };
+const [acct,organization]=process.argv.slice(1);
+const obj={ id:acct, object:"account", charges_enabled:true, payouts_enabled:true, details_submitted:true, metadata:{ organization_id:organization } };
 process.stdout.write(JSON.stringify({ id:"evt_e2e_"+require("crypto").randomBytes(8).toString("hex"), object:"event", api_version:"2025-09-30.clover", created:Math.floor(Date.now()/1000), type:"account.updated", data:{ object:obj } }));
-' "$ACCT" "$CREATOR")" >/dev/null
+' "$ACCT" "$ZS_FIXTURE_ORGANIZATION_ID")" >/dev/null
 
 # ===========================================================================
 echo ""
 echo "=== Stage 5: M4 payout attribution — record_payout credits ONLY on settling-account match ==="
 # ===========================================================================
-# A connect-revenue invoice.paid carries metadata.creator_id (CLIENT-influenced)
+# A connect-revenue invoice.paid carries metadata.organization_id (CLIENT-influenced)
 # AND a settling account (on_behalf_of / transfer_data.destination). handle
 # invoice.paid (stripe_handlers.rs:1353) resolves the settling account and calls
 # account_belongs_to_creator (stripe_store.rs:295) — crediting ONLY when the
@@ -610,13 +650,13 @@ echo "=== Stage 5: M4 payout attribution — record_payout credits ONLY on settl
 mk_revenue_invoice_paid() {
   # $1 = settling acct_ for transfer_data.destination
   node -e '
-  const [creator,dest]=process.argv.slice(1);
+  const [organization,dest]=process.argv.slice(1);
   const obj={ id:"in_e2e_"+require("crypto").randomBytes(8).toString("hex"), object:"invoice",
     status:"paid", amount_paid:20000, application_fee_amount:3000, currency:"usd",
-    metadata:{ creator_id:creator },
+    metadata:{ organization_id:organization },
     transfer_data:{ destination:dest } };
   process.stdout.write(JSON.stringify({ id:"evt_e2e_"+require("crypto").randomBytes(8).toString("hex"), object:"event", api_version:"2025-09-30.clover", created:Math.floor(Date.now()/1000), type:"invoice.paid", data:{ object:obj } }));
-  ' "$CREATOR" "$1"
+  ' "$ZS_FIXTURE_ORGANIZATION_ID" "$1"
 }
 
 # 5a — MISMATCH: a forged settling account the creator does NOT own → rejected.
@@ -624,7 +664,7 @@ FORGED_ACCT="acct_$(node -e 'console.log(require("crypto").randomBytes(10).toStr
 M4_BAD_CODE="$(post_signed_webhook "$(mk_revenue_invoice_paid "$FORGED_ACCT")")"
 M4_BAD_RESP="$(cat "$WORK/wh_resp.json" 2>/dev/null)"
 echo "    revenue invoice.paid w/ FORGED settling acct → HTTP $M4_BAD_CODE  resp=$M4_BAD_RESP"
-PAYOUTS_AFTER_BAD="$(psql1 "SELECT COUNT(*) FROM zeroship.payouts WHERE creator_id='$CREATOR'")"
+PAYOUTS_AFTER_BAD="$(psql1 "SELECT COUNT(*) FROM zeroship.payouts WHERE organization_id='$ZS_FIXTURE_ORGANIZATION_ID'")"
 if echo "$M4_BAD_RESP" | grep -q 'attribution_mismatch'; then
   pass "M4: a forged settling account (creator does NOT own it) → attribution_mismatch, NOT credited (metadata-only trust rejected)"
 else
@@ -637,10 +677,10 @@ fi
 M4_OK_CODE="$(post_signed_webhook "$(mk_revenue_invoice_paid "$ACCT")")"
 M4_OK_RESP="$(cat "$WORK/wh_resp.json" 2>/dev/null)"
 echo "    revenue invoice.paid w/ OWNED settling acct → HTTP $M4_OK_CODE  resp=$M4_OK_RESP"
-PAYOUT_ROW="$(wait_for_db "SELECT COUNT(*) FROM zeroship.payouts WHERE creator_id='$CREATOR'" "1" 10)"
+PAYOUT_ROW="$(wait_for_db "SELECT COUNT(*) FROM zeroship.payouts WHERE organization_id='$ZS_FIXTURE_ORGANIZATION_ID'" "1" 10)"
 if [ "$PAYOUT_ROW" = "1" ]; then
   pass "M4: the creator's OWN settling account verified → record_payout credited the earnings (1 payout row)"
-  NET="$(psql1 "SELECT net_amount FROM zeroship.payouts WHERE creator_id='$CREATOR' ORDER BY created_at DESC LIMIT 1")"
+  NET="$(psql1 "SELECT net_amount FROM zeroship.payouts WHERE organization_id='$ZS_FIXTURE_ORGANIZATION_ID' ORDER BY created_at DESC LIMIT 1")"
   [ "$NET" = "17000" ] && pass "net credited = 17000c (gross 20000 − 3000 platform fee = the creator's keep)" \
     || diverge "net_amount ('$NET') != 17000 (gross 20000 − fee 3000)"
 else
@@ -649,10 +689,10 @@ fi
 
 # 5c — NO settling account at all on a revenue event → refuse to credit.
 NOSETTLE="$(node -e '
-const [creator]=process.argv.slice(1);
-const obj={ id:"in_e2e_"+require("crypto").randomBytes(8).toString("hex"), object:"invoice", status:"paid", amount_paid:5000, currency:"usd", metadata:{ creator_id:creator } };
+const [organization]=process.argv.slice(1);
+const obj={ id:"in_e2e_"+require("crypto").randomBytes(8).toString("hex"), object:"invoice", status:"paid", amount_paid:5000, currency:"usd", metadata:{ organization_id:organization } };
 process.stdout.write(JSON.stringify({ id:"evt_e2e_"+require("crypto").randomBytes(8).toString("hex"), object:"event", api_version:"2025-09-30.clover", created:Math.floor(Date.now()/1000), type:"invoice.paid", data:{ object:obj } }));
-' "$CREATOR")"
+' "$ZS_FIXTURE_ORGANIZATION_ID")"
 post_signed_webhook "$NOSETTLE" >/dev/null
 NS_RESP="$(cat "$WORK/wh_resp.json" 2>/dev/null)"
 echo "$NS_RESP" | grep -q 'no_settling_account' && pass "M4: a revenue invoice.paid with NO settling account → no_settling_account, refused (not credited blind)" \

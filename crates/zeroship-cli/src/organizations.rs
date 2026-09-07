@@ -12,8 +12,10 @@
 //!   zeroship organization join     <token>
 //!   zeroship organization role     <user-uuid> --role=ROLE [--organization=org_...]
 //!   zeroship organization remove   <user-uuid> [--organization=org_...]
+//!   zeroship organization leave    [--organization=org_...]
 //!   zeroship organization transfer <user-uuid> [--organization=org_...]
-//!   zeroship organization projects [create <name> [--slug=SLUG]] [--organization=org_...]
+//!   zeroship organization dissolve [--organization=org_...]
+//!   zeroship organization projects [<verb> ...] [--organization=org_...]
 //!
 //! THE WORD IS SPELLED OUT AND THERE IS NO ALIAS. `org` appears only inside the
 //! opaque id value; a command named `org` would make the abbreviation a word a
@@ -53,6 +55,7 @@ use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use std::path::PathBuf;
 use zeroship_core::invite_id::InviteId;
 use zeroship_core::organization_id::OrganizationId;
+use zeroship_core::project_id::ProjectId;
 
 /// Encode every ASCII delimiter plus `.` so a value stays exactly one path
 /// segment. Every id this module puts in a path is parsed first, so nothing
@@ -103,6 +106,7 @@ const KNOWN_FLAGS: &[&str] = &[
     "--env",
     "--role",
     "--slug",
+    "--name",
     "--billing-email",
     "--clear",
 ];
@@ -115,9 +119,14 @@ const KNOWN_FLAGS: &[&str] = &[
 /// `invite` PRINTS a remedy: the token is shown once, and the note beside it
 /// says a lost one is revoked and re-issued. A CLI that says that and then has
 /// no way to revoke would be a claim that reads as protection.
+/// `leave` and `dissolve` are the two ends of the lifecycle and they are
+/// deliberately different words. `leave` gives up the caller's OWN seat and
+/// needs no rank at all; `dissolve` closes the organization for everyone and is
+/// reserved to its owners. A single `remove --self` spelling would have made
+/// the more dangerous of the two reachable by a typo.
 const SUBCOMMANDS: &[&str] = &[
     "create", "list", "show", "use", "members", "invite", "revoke", "join", "role", "remove",
-    "transfer", "projects",
+    "leave", "transfer", "dissolve", "projects",
 ];
 
 // ---------------------------------------------------------------------------
@@ -195,6 +204,7 @@ const VALUE_FLAGS: &[&str] = &[
     "--env",
     "--role",
     "--slug",
+    "--name",
     "--billing-email",
 ];
 
@@ -355,6 +365,17 @@ pub(crate) fn plan(sub: &str, args: &[String], organization: Option<&str>) -> Re
                 segment(&user)
             )))
         }
+        // No positional at all, and that is the shape of the route: nothing in
+        // this path names a user, so the seat it can reach is the caller's own
+        // by construction rather than by a check the server has to make.
+        "leave" => Ok(Call::delete(format!(
+            "/api/organizations/{}/membership",
+            organization_path()
+        ))),
+        "dissolve" => Ok(Call::delete(format!(
+            "/api/organizations/{}",
+            organization_path()
+        ))),
         "transfer" => {
             let user = require_user_id(first, "zeroship organization transfer <user-id>")?;
             Ok(Call::post(
@@ -367,13 +388,44 @@ pub(crate) fn plan(sub: &str, args: &[String], organization: Option<&str>) -> Re
     }
 }
 
+/// Every `projects` verb, in the order `usage` prints them. One list, so a verb
+/// cannot exist without being advertised or be advertised without existing -
+/// the same rule [`SUBCOMMANDS`] holds one level up.
+///
+/// A bare `zeroship organization projects` (no verb) LISTS, which is why the
+/// empty string is not in here: it is the default rather than a verb.
+const PROJECT_VERBS: &[&str] = &[
+    "create", "rename", "delete", "members", "add", "role", "remove",
+];
+
+/// Parse the `prj_...` a project verb acts on.
+///
+/// Every verb below except `create` takes one, and it is parsed HERE rather
+/// than sent as typed: a slug where an id belongs resolves to no membership at
+/// all, so the server can only answer it with a refusal that names the wrong
+/// thing.
+fn require_project_id(raw: Option<&str>, verb: &str) -> Result<String, String> {
+    let Some(raw) = raw else {
+        return Err(format!(
+            "missing <prj_...>; e.g. `zeroship organization projects {verb} prj_...`. \
+             `zeroship organization projects` lists them."
+        ));
+    };
+    ProjectId::parse(raw)
+        .map(|id| segment(id.as_str()))
+        .map_err(|_| format!("{raw:?} is not a project id (it looks like `prj_<22 chars>`)"))
+}
+
 fn plan_projects(args: &[String], organization: &str, first: Option<&str>) -> Result<Call, String> {
+    // The verb's own argument, which is the SECOND positional of
+    // `zeroship organization projects <verb> <arg>`.
+    let target = nth_positional(args, 2);
     match first {
         None => Ok(Call::get(format!(
             "/api/organizations/{organization}/projects"
         ))),
         Some("create") => {
-            let name = nth_positional(args, 2).ok_or_else(|| {
+            let name = target.ok_or_else(|| {
                 "missing <name>; e.g. `zeroship organization projects create \"Checkout\"`"
                     .to_string()
             })?;
@@ -387,10 +439,72 @@ fn plan_projects(args: &[String], organization: &str, first: Option<&str>) -> Re
                 serde_json::Value::Object(body),
             ))
         }
+        Some("rename") => {
+            let project = require_project_id(target, "rename")?;
+            let mut body = serde_json::Map::new();
+            if let Some(name) = parse_flag(args, "--name") {
+                body.insert("name".into(), name.into());
+            }
+            if let Some(slug) = parse_flag(args, "--slug") {
+                body.insert("slug".into(), slug.into());
+            }
+            if body.is_empty() {
+                return Err(
+                    "nothing to change; pass --name=<name> and/or --slug=<slug>".to_string()
+                );
+            }
+            Ok(Call::patch(
+                format!("/api/projects/{project}"),
+                serde_json::Value::Object(body),
+            ))
+        }
+        Some("delete") => {
+            let project = require_project_id(target, "delete")?;
+            Ok(Call::delete(format!("/api/projects/{project}")))
+        }
+        Some("members") => {
+            let project = require_project_id(target, "members")?;
+            Ok(Call::get(format!("/api/projects/{project}/members")))
+        }
+        Some("add") => {
+            let project = require_project_id(target, "add")?;
+            let user = require_user_id(
+                nth_positional(args, 3),
+                "zeroship organization projects add prj_... <user-id> --role=developer",
+            )?;
+            let role = required_flag(args, "--role", "role")?;
+            Ok(Call::post(
+                format!("/api/projects/{project}/members"),
+                serde_json::json!({ "user_id": user, "role": role }),
+            ))
+        }
+        Some("role") => {
+            let project = require_project_id(target, "role")?;
+            let user = require_user_id(
+                nth_positional(args, 3),
+                "zeroship organization projects role prj_... <user-id> --role=viewer",
+            )?;
+            let role = required_flag(args, "--role", "role")?;
+            Ok(Call::patch(
+                format!("/api/projects/{project}/members/{}", segment(&user)),
+                serde_json::json!({ "role": role }),
+            ))
+        }
+        Some("remove") => {
+            let project = require_project_id(target, "remove")?;
+            let user = require_user_id(
+                nth_positional(args, 3),
+                "zeroship organization projects remove prj_... <user-id>",
+            )?;
+            Ok(Call::delete(format!(
+                "/api/projects/{project}/members/{}",
+                segment(&user)
+            )))
+        }
         Some(other) => Err(format!(
             "unknown `projects` verb {other:?}; \
-             `zeroship organization projects` lists them and \
-             `zeroship organization projects create <name>` adds one"
+             `zeroship organization projects` lists them, and the verbs are {}",
+            PROJECT_VERBS.join(", ")
         )),
     }
 }
@@ -654,15 +768,60 @@ fn report(sub: &str, response: &ControlResponse) -> Result<(), String> {
         // are the moment a first-time creator would otherwise have to name it
         // again.
         "create" | "join" => note_selection_after(&response.body),
-        "invite" => eprintln!(
-            "zeroship organization: the `token` above is shown ONCE and is stored only as a \
-             digest. Send it to the person you invited now; re-reading the invite will not \
-             return it, and a lost token means revoking the invitation and issuing another."
-        ),
+        "invite" => note_invite_delivery(&response.body),
         "transfer" | "remove" | "revoke" => eprintln!("zeroship organization: {sub} applied"),
+        "leave" => eprintln!(
+            "zeroship organization: seat given up. You keep no authority here; rejoining \
+             needs a new invitation."
+        ),
+        "dissolve" => eprintln!(
+            "zeroship organization: closed. It stays readable and accepts no further \
+             changes, and its name is free for a new organization to use."
+        ),
         _ => {}
     }
     Ok(())
+}
+
+/// Say what became of the invitation email, and show the token only when the
+/// caller has to deliver it themselves.
+///
+/// The platform mails the invitation now, so telling every caller to "send the
+/// token" would be advice that is wrong in the ordinary case - and advice that
+/// is usually wrong is advice nobody reads on the day it matters. The response
+/// carries `delivery`, so the line below is the one that applies.
+fn note_invite_delivery(body: &str) {
+    let delivery = serde_json::from_str::<serde_json::Value>(body)
+        .ok()
+        .and_then(|v| {
+            v.get("delivery")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+    match delivery.as_deref() {
+        Some("sent") => eprintln!(
+            "zeroship organization: the invitation was emailed. The `token` above is shown \
+             ONCE and is stored only as a digest; you do not need to pass it on, but it is \
+             there if you would rather deliver it yourself."
+        ),
+        Some("suppressed") => eprintln!(
+            "zeroship organization: the invitation was NOT emailed - that address is on the \
+             platform's suppression list after a bounce or complaint. Send the `token` above \
+             another way; it is shown once and cannot be re-read."
+        ),
+        Some("failed") => eprintln!(
+            "zeroship organization: the invitation was created but the email FAILED to send. \
+             Send the `token` above another way; it is shown once and cannot be re-read, and \
+             a lost one means revoking the invitation and issuing another."
+        ),
+        // An unrecognised (or absent) outcome must not be reported as a
+        // success. The token is the thing that always works, so say that.
+        _ => eprintln!(
+            "zeroship organization: the `token` above is shown ONCE and is stored only as a \
+             digest. Delivery is not confirmed, so send it to the person you invited; a lost \
+             token means revoking the invitation and issuing another."
+        ),
+    }
 }
 
 /// After minting or joining an organization, select it when nothing is selected.
@@ -730,12 +889,30 @@ fn usage() -> String {
         "  zeroship organization join     <token>\n",
         "  zeroship organization role     <user-id> --role=ROLE [--organization=org_...]\n",
         "  zeroship organization remove   <user-id> [--organization=org_...]\n",
+        "  zeroship organization leave    [--organization=org_...]\n",
         "  zeroship organization transfer <user-id> [--organization=org_...]\n",
-        "  zeroship organization projects [create <name> [--slug=SLUG]] [--organization=org_...]\n",
+        "  zeroship organization dissolve [--organization=org_...]\n",
+        "  zeroship organization projects [--organization=org_...]\n",
+        "  zeroship organization projects create <name> [--slug=SLUG]\n",
+        "  zeroship organization projects rename <prj_...> [--name=NAME] [--slug=SLUG]\n",
+        "  zeroship organization projects delete <prj_...>\n",
+        "  zeroship organization projects members <prj_...>\n",
+        "  zeroship organization projects add    <prj_...> <user-id> --role=ROLE\n",
+        "  zeroship organization projects role   <prj_...> <user-id> --role=ROLE\n",
+        "  zeroship organization projects remove <prj_...> <user-id>\n",
         "\n",
         "An organization owns projects, a project owns apps, and the organization is the\n",
         "party that is billed. `use` records which one the other subcommands act on, so\n",
         "--organization= is only needed to override it.\n",
+        "\n",
+        "`leave` gives up YOUR seat and needs no rank; `remove` takes someone else's and\n",
+        "needs authority over them. `dissolve` closes the organization for everyone: it\n",
+        "is owner-only, it is refused while any project remains, and it cannot be undone.\n",
+        "A closed organization stays readable and releases its name for reuse.\n",
+        "\n",
+        "A project seat NARROWS: a member's authority on a project is the lower of their\n",
+        "organization rank and their project rank, and admins reach every project with no\n",
+        "seat at all.\n",
         "\n",
         "Roles are rows in the platform's role ladder; the control plane names the whole\n",
         "set if you pass one it does not have."
@@ -755,6 +932,7 @@ mod tests {
     }
 
     const ORG: &str = "org_0123456789abcdefghijkl";
+    const PRJ: &str = "prj_0123456789abcdefghijkl";
     const INVITE: &str = "ivt_0123456789abcdefghijkl";
     const USER: &str = "11111111-2222-3333-4444-555555555555";
 
@@ -815,6 +993,18 @@ mod tests {
                 Some(&format!(r#"{{"user_id":"{USER}"}}"#)),
             ),
             (
+                &["leave"],
+                "DELETE",
+                format!("/api/organizations/{ORG}/membership"),
+                None,
+            ),
+            (
+                &["dissolve"],
+                "DELETE",
+                format!("/api/organizations/{ORG}"),
+                None,
+            ),
+            (
                 &["projects"],
                 "GET",
                 format!("/api/organizations/{ORG}/projects"),
@@ -852,6 +1042,190 @@ mod tests {
                 "`{sub}` is dispatched but has no routing case"
             );
         }
+    }
+
+    /// Every `projects` verb, stated the same way and covering the SET.
+    ///
+    /// Kept separate from the subcommand table above because the verbs live in
+    /// their own list (`PROJECT_VERBS`) and their own planner: folding them in
+    /// would make one exhaustiveness assertion answer for two vocabularies, and
+    /// a verb added to one list and not the other would still pass.
+    #[test]
+    fn every_project_verb_targets_its_route() {
+        let cases: &[(&[&str], &str, String, Option<&str>)] = &[
+            (
+                &["projects", "create", "Checkout"],
+                "POST",
+                format!("/api/organizations/{ORG}/projects"),
+                Some(r#"{"name":"Checkout"}"#),
+            ),
+            (
+                &["projects", "rename", PRJ, "--name=Checkout"],
+                "PATCH",
+                format!("/api/projects/{PRJ}"),
+                Some(r#"{"name":"Checkout"}"#),
+            ),
+            (
+                &["projects", "delete", PRJ],
+                "DELETE",
+                format!("/api/projects/{PRJ}"),
+                None,
+            ),
+            (
+                &["projects", "members", PRJ],
+                "GET",
+                format!("/api/projects/{PRJ}/members"),
+                None,
+            ),
+            (
+                &["projects", "add", PRJ, USER, "--role=developer"],
+                "POST",
+                format!("/api/projects/{PRJ}/members"),
+                Some(r#"{"user_id":"11111111-2222-3333-4444-555555555555","role":"developer"}"#),
+            ),
+            (
+                &["projects", "role", PRJ, USER, "--role=viewer"],
+                "PATCH",
+                format!("/api/projects/{PRJ}/members/{USER}"),
+                Some(r#"{"role":"viewer"}"#),
+            ),
+            (
+                &["projects", "remove", PRJ, USER],
+                "DELETE",
+                format!("/api/projects/{PRJ}/members/{USER}"),
+                None,
+            ),
+        ];
+
+        for (rest, method, path, body) in cases {
+            let args = argv(rest);
+            let call = plan("projects", &args, Some(ORG))
+                .unwrap_or_else(|e| panic!("{rest:?} did not plan: {e}"));
+            assert_eq!(call.method, *method, "{rest:?} method");
+            assert_eq!(call.path, *path, "{rest:?} path");
+            assert_eq!(call.body.as_deref(), *body, "{rest:?} body");
+        }
+
+        // The SET, not a sample: a verb the planner handles and this table
+        // omits would be tested by nothing while every case above still passes.
+        let covered: Vec<&str> = cases.iter().map(|(rest, ..)| rest[1]).collect();
+        for verb in PROJECT_VERBS {
+            assert!(covered.contains(verb), "`projects {verb}` has no routing case");
+        }
+        assert_eq!(covered.len(), PROJECT_VERBS.len(), "a verb is covered twice");
+    }
+
+    /// A project verb that needs an id refuses a slug, an organization id and a
+    /// missing argument, HERE - before a request goes anywhere.
+    ///
+    /// A slug where an id belongs resolves to no membership at all, so the
+    /// server can only answer it with a refusal about authority: a message
+    /// pointing at the one thing the caller did not get wrong.
+    #[test]
+    fn a_project_verb_refuses_anything_that_is_not_a_project_id() {
+        for verb in ["rename", "delete", "members", "add", "role", "remove"] {
+            let err = plan("projects", &argv(&["projects", verb]), Some(ORG))
+                .expect_err("{verb} with no id must be refused");
+            assert!(err.contains("prj_"), "{verb}: {err:?}");
+
+            for wrong in ["checkout", ORG] {
+                let err = plan(
+                    "projects",
+                    &argv(&["projects", verb, wrong, USER, "--role=viewer"]),
+                    Some(ORG),
+                )
+                .expect_err("a non-project id must be refused");
+                assert!(
+                    err.contains("not a project id"),
+                    "{verb} accepted {wrong:?}: {err:?}"
+                );
+            }
+        }
+    }
+
+    /// `rename` naming nothing to change is refused here rather than becoming a
+    /// request the server answers with a 400.
+    #[test]
+    fn renaming_a_project_must_name_something_to_change() {
+        let err = plan("projects", &argv(&["projects", "rename", PRJ]), Some(ORG))
+            .expect_err("an empty rename is not a request");
+        assert!(err.contains("--name"), "{err:?}");
+        assert!(err.contains("--slug"), "{err:?}");
+
+        // The control: either flag alone is enough, and both compose.
+        let both = plan(
+            "projects",
+            &argv(&["projects", "rename", PRJ, "--name=Checkout", "--slug=checkout"]),
+            Some(ORG),
+        )
+        .unwrap();
+        assert_eq!(
+            both.body.as_deref(),
+            Some(r#"{"name":"Checkout","slug":"checkout"}"#)
+        );
+        let slug_only = plan(
+            "projects",
+            &argv(&["projects", "rename", PRJ, "--slug=checkout"]),
+            Some(ORG),
+        )
+        .unwrap();
+        assert_eq!(slug_only.body.as_deref(), Some(r#"{"slug":"checkout"}"#));
+    }
+
+    /// `leave` and `dissolve` are different routes, and neither can be aimed at
+    /// somebody else.
+    ///
+    /// `leave` sends no user id at all - the route has no segment for one - so
+    /// a stray positional cannot redirect it. `dissolve` targets the
+    /// organization itself, and the two paths must not be confusable.
+    #[test]
+    fn leaving_and_dissolving_cannot_be_aimed_at_anyone_else() {
+        let leave = plan("leave", &argv(&["leave", USER]), Some(ORG)).unwrap();
+        assert_eq!(leave.path, format!("/api/organizations/{ORG}/membership"));
+        assert!(!leave.path.contains(USER), "leave must name no user");
+        assert_eq!(leave.body, None);
+
+        let dissolve = plan("dissolve", &argv(&["dissolve"]), Some(ORG)).unwrap();
+        assert_eq!(dissolve.path, format!("/api/organizations/{ORG}"));
+        assert_ne!(dissolve.path, leave.path);
+
+        // `remove` is the one that takes a target, and it still does.
+        let remove = plan("remove", &argv(&["remove", USER]), Some(ORG)).unwrap();
+        assert_eq!(
+            remove.path,
+            format!("/api/organizations/{ORG}/members/{USER}")
+        );
+    }
+
+    /// The invitation note tells the truth about delivery, per outcome.
+    ///
+    /// A CLI that told every caller to "send the token" would be wrong in the
+    /// ordinary case now that the platform mails it, and advice that is usually
+    /// wrong is advice nobody reads on the day it matters.
+    #[test]
+    fn the_invite_note_follows_the_reported_delivery() {
+        // The function writes to stderr, so what is asserted here is that each
+        // outcome PARSES to a distinct arm. The bodies are the shapes the
+        // server sends.
+        for body in [
+            r#"{"delivery":"sent","token":"t"}"#,
+            r#"{"delivery":"suppressed","token":"t"}"#,
+            r#"{"delivery":"failed","token":"t"}"#,
+            r#"{"token":"t"}"#,
+            "not json",
+        ] {
+            note_invite_delivery(body);
+        }
+        let parsed: Option<String> = serde_json::from_str::<serde_json::Value>(
+            r#"{"delivery":"suppressed"}"#,
+        )
+        .ok()
+        .and_then(|v| {
+            v.get("delivery")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        });
+        assert_eq!(parsed.as_deref(), Some("suppressed"));
     }
 
     #[test]
@@ -1026,7 +1400,18 @@ mod tests {
         assert_eq!(free, ["create", "list", "use", "join"]);
         assert_eq!(
             targeted,
-            ["show", "members", "invite", "revoke", "role", "remove", "transfer", "projects"]
+            [
+                "show",
+                "members",
+                "invite",
+                "revoke",
+                "role",
+                "remove",
+                "leave",
+                "transfer",
+                "dissolve",
+                "projects"
+            ]
         );
     }
 

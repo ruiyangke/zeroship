@@ -105,6 +105,7 @@ impl Fixture {
             )
             .expect("native tax provider builds"),
             notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+            mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
             pairwise_salt: zeroship_core::auth::derive_pairwise_salt(b"control-test-stash"),
             projected_charge_cache: std::sync::Arc::new(
                 zeroship_control::billing_read::ProjectedChargeCache::default(),

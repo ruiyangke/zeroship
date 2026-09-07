@@ -23,7 +23,7 @@ use std::future::Future;
 use uuid::Uuid;
 use zeroship_authz::{
     authority, enforce, is_authorized_anywhere, load_platform_policies, Action, AuthzContext,
-    AuthzDecision, Resource,
+    AuthzDecision, AuthzError, Resource,
 };
 
 /// The whole chain, in one request: `Resource::App` carries a uuid in string
@@ -88,11 +88,22 @@ fn an_unknown_app_denies_without_erroring() {
     });
 }
 
-/// An app id that is not a uuid at all must also deny quietly. Sending it
-/// straight into `apps.id = $1::uuid` would raise an invalid-input error and
-/// surface as a 500 on a request that should simply be refused.
+/// An app id in a rendering `authority::app_uuid_or_refuse` has not been taught
+/// is a REFUSAL, and it must not be a deny.
+///
+/// **This test asserted the opposite until the refusal landed**, and asserting
+/// the opposite is what made the bug possible: the old shape parsed a uuid and,
+/// on failure, fell through to the UNRANKED read, so the canonical
+/// `app_<base62>` rendering resolved to rank zero and 403'd as "you hold no
+/// seat on this app". Two very different things - an id we cannot read, and an
+/// id naming an app the caller cannot reach - produced one indistinguishable
+/// answer, in the response and in `zeroship.authz_decisions` alike.
+///
+/// The neighbour above is the control that keeps this a boundary rather than a
+/// blanket refusal: a WELL-FORMED uuid naming no app still denies quietly,
+/// because "no such app" is a real answer and this is not.
 #[test]
-fn a_malformed_app_id_denies_without_erroring() {
+fn a_malformed_app_id_is_refused_rather_than_denied() {
     run_db_test(|pg| async move {
         let fixture = Fixture::new(&pg, "resolve-malformed", "owner").await;
         let policies = load_platform_policies().unwrap();
@@ -100,16 +111,16 @@ fn a_malformed_app_id_denies_without_erroring() {
         let malformed = Resource::App {
             id: "not-a-uuid".to_owned(),
         };
-        let resolved = authority::resolve(&pg, fixture.user_id, &malformed)
-            .await
-            .expect("a malformed app id must not raise a database error");
-        assert_eq!(resolved.effective_rank, 0);
+        let resolved = authority::resolve(&pg, fixture.user_id, &malformed).await;
+        assert!(
+            matches!(resolved, Err(AuthzError::Validation(_))),
+            "an unreadable app id must be refused, not resolved to rank zero: {resolved:?}"
+        );
 
-        assert_eq!(
-            enforce(&pg, &policies, &fixture.ctx(Action::AppsRead, malformed))
-                .await
-                .unwrap(),
-            AuthzDecision::Deny,
+        let decision = enforce(&pg, &policies, &fixture.ctx(Action::AppsRead, malformed)).await;
+        assert!(
+            matches!(decision, Err(AuthzError::Validation(_))),
+            "the refusal must reach the caller instead of being audited as a deny: {decision:?}"
         );
 
         fixture.cleanup(&pg).await;
@@ -328,8 +339,6 @@ impl Fixture {
             resource,
             now: 12 * 60 * 60,
             request_ip: None,
-            mfa_verified: false,
-            mfa_age_seconds: None,
             request_id: None,
         }
     }

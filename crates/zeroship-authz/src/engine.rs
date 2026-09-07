@@ -1,9 +1,10 @@
+use std::fmt::Write as _;
 use std::str::FromStr;
 
-use cedar_policy::{Decision, Entities, PolicySet, Request, Schema};
+use cedar_policy::{PolicySet, Schema, ValidationMode, Validator};
 use sha2::{Digest, Sha256};
 
-use crate::{lower, AuthzError, Policy};
+use crate::AuthzError;
 
 /// The whole shipped policy set: the self-service baseline, plus one file per
 /// authority band of the organization role ladder.
@@ -18,71 +19,55 @@ use crate::{lower, AuthzError, Policy};
 /// `app_viewer`) are deleted with the table that backed them.
 ///
 /// **THIS LIST IS THE ONLY THING THAT LOADS A POLICY.** `build.rs` walks
-/// `deploy/policies/` and parse-checks every `.cedar` file it finds, but it
-/// LOADS none of them - so a policy file that is committed, reviewed and absent
-/// from this array is syntactically valid and authorizes exactly nothing. A
-/// crate test reconciles the two: every `.cedar` file on disk must appear here.
+/// `deploy/policies/`, and parses AND schema-validates every `.cedar` file it
+/// finds, but it LOADS none of them - so a policy file that is committed,
+/// reviewed, valid against the schema and absent from this array authorizes
+/// exactly nothing. A crate test reconciles the two: every `.cedar` file on
+/// disk must appear here.
 const PLATFORM_POLICY_SOURCES: &[&str] = &[
     include_str!("../../../deploy/policies/platform/self_service.cedar"),
     include_str!("../../../deploy/policies/creator/organization_read.cedar"),
+    include_str!("../../../deploy/policies/creator/organization_depart.cedar"),
     include_str!("../../../deploy/policies/creator/organization_develop.cedar"),
     include_str!("../../../deploy/policies/creator/organization_administer.cedar"),
     include_str!("../../../deploy/policies/creator/organization_own.cedar"),
     include_str!("../../../deploy/policies/creator/organization_billing.cedar"),
 ];
 
-#[derive(Debug)]
-pub struct Authorizer {
+/// The Cedar schema describing the whole authorization vocabulary: the entity
+/// types, the closed action list, and the request context keys.
+///
+/// It is embedded rather than read at runtime for the same reason the policies
+/// are: a service that could disagree with the tree about what it is enforcing
+/// is a service whose audit rows mean nothing.
+const PLATFORM_SCHEMA_SOURCE: &str = include_str!("../../../deploy/policies/zeroship.cedarschema");
+
+/// The shipped bands, and the schema they were validated against.
+///
+/// The two travel together because they must be the SAME schema at both ends.
+/// Validation proves the policies only reference declared actions, entity types
+/// and context keys; `eval::build_request` then binds each request to
+/// that same declaration, so a request outside the vocabulary is an error
+/// instead of a deny nobody can distinguish from an honest non-match. A second,
+/// separately-parsed copy on the request side would let the two drift.
+#[derive(Clone, Debug)]
+pub struct PlatformPolicies {
     policies: PolicySet,
-    schema: Option<Schema>,
+    schema: Schema,
 }
 
-impl Authorizer {
-    /// Builds an authorizer by lowering a wrapper policy into Cedar source.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuthzError::CedarParse`] when Cedar rejects the generated
-    /// policy source.
-    pub fn new_from_wrapper(policy: &Policy) -> Result<Self, AuthzError> {
-        let source = lower(policy);
-        Self::new_from_sources(&[source.as_str()])
-    }
-
-    /// Builds an authorizer from Cedar source strings.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`AuthzError::CedarParse`] when Cedar rejects any source.
-    pub fn new_from_sources(sources: &[&str]) -> Result<Self, AuthzError> {
-        let source = sources.join("\n");
-        let policies =
-            PolicySet::from_str(&source).map_err(|err| AuthzError::CedarParse(err.to_string()))?;
-
-        Ok(Self {
-            policies,
-            schema: None,
-        })
-    }
-
-    /// Computes the stable SHA-256 cache key for wrapper JSON.
+impl PlatformPolicies {
+    /// The validated policy set.
     #[must_use]
-    pub fn policy_hash(wrapper_json: &serde_json::Value) -> String {
-        policy_hash(wrapper_json)
+    pub const fn policies(&self) -> &PolicySet {
+        &self.policies
     }
 
-    /// Evaluates a Cedar authorization request against this policy set.
+    /// The schema the policy set was validated against, and the one every
+    /// request must be built against.
     #[must_use]
-    pub fn is_authorized(&self, request: &Request, entities: &Entities) -> Decision {
-        cedar_policy::Authorizer::new()
-            .is_authorized(request, &self.policies, entities)
-            .decision()
-    }
-
-    /// Returns the optional Cedar schema reserved for U4 validation wiring.
-    #[must_use]
-    pub const fn schema(&self) -> Option<&Schema> {
-        self.schema.as_ref()
+    pub const fn schema(&self) -> &Schema {
+        &self.schema
     }
 }
 
@@ -95,15 +80,53 @@ pub fn policy_hash(wrapper_json: &serde_json::Value) -> String {
     hex::encode(hasher.finalize())
 }
 
-/// Loads the static platform and creator Cedar policies embedded in this crate.
+/// Loads the static platform and creator Cedar policies embedded in this crate
+/// and validates them against [`PLATFORM_SCHEMA_SOURCE`] under
+/// [`ValidationMode::Strict`].
+///
+/// **THIS IS A REFUSAL, NOT A WARNING.** Every service that authorizes anything
+/// calls this on startup and cannot serve without what it returns, so a policy
+/// set that does not validate takes the service down instead of authorizing
+/// requests against a vocabulary nobody checked. The failure it exists for is
+/// silent by construction: `Action::"apps:raed"` parses, loads, denies every
+/// request the band was written to permit, and records an audit row identical
+/// to an honest non-match.
+///
+/// Warnings are refused alongside errors. The one that matters is "policy is
+/// impossible" - a band that can never fire reads to an auditor as authority
+/// that exists, and it denies exactly like a band that was never written.
+///
+/// The same validation runs in `build.rs` over every `.cedar` file on disk, so
+/// a defect that would reach this refusal has already failed the build on the
+/// machine that wrote it. That is the mitigation for the boot-time failure mode
+/// this function introduces, and it is why the refusal here can be absolute.
 ///
 /// # Errors
 ///
 /// Returns [`AuthzError::CedarParse`] when Cedar rejects the embedded policy
-/// sources.
-pub fn load_platform_policies() -> Result<PolicySet, AuthzError> {
+/// sources, and [`AuthzError::CedarValidation`] when the schema fails to parse
+/// or the policy set fails to validate against it.
+pub fn load_platform_policies() -> Result<PlatformPolicies, AuthzError> {
     let source = PLATFORM_POLICY_SOURCES.join("\n");
-    PolicySet::from_str(&source).map_err(|err| AuthzError::CedarParse(err.to_string()))
+    let policies =
+        PolicySet::from_str(&source).map_err(|err| AuthzError::CedarParse(err.to_string()))?;
+    let schema = Schema::from_str(PLATFORM_SCHEMA_SOURCE).map_err(|err| {
+        AuthzError::CedarValidation(format!("deploy/policies/zeroship.cedarschema: {err}"))
+    })?;
+
+    let result = Validator::new(schema.clone()).validate(&policies, ValidationMode::Strict);
+    if !result.validation_passed_without_warnings() {
+        let mut report = String::from("the shipped policy set does not validate:");
+        for error in result.validation_errors() {
+            write!(report, "\n  error: {error}").expect("writing to String is infallible");
+        }
+        for warning in result.validation_warnings() {
+            write!(report, "\n  warning: {warning}").expect("writing to String is infallible");
+        }
+        return Err(AuthzError::CedarValidation(report));
+    }
+
+    Ok(PlatformPolicies { policies, schema })
 }
 
 fn canonical_json(value: &serde_json::Value) -> String {
@@ -163,7 +186,16 @@ fn policy_files_on_disk() -> Vec<std::path::PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{load_platform_policies, policy_files_on_disk, PLATFORM_POLICY_SOURCES};
+    use std::collections::HashSet;
+    use std::str::FromStr;
+
+    use cedar_policy::{PolicySet, Schema, ValidationMode, Validator};
+
+    use super::{
+        load_platform_policies, policy_files_on_disk, PLATFORM_POLICY_SOURCES,
+        PLATFORM_SCHEMA_SOURCE,
+    };
+    use crate::Action;
 
     /// `build.rs` parse-checks the policy directory and LOADS nothing, so a
     /// committed `.cedar` file missing from `PLATFORM_POLICY_SOURCES` is valid
@@ -202,12 +234,87 @@ mod tests {
     /// collapsed would silently drop a band.
     #[test]
     fn the_loaded_set_parses_into_one_policy_per_statement() {
-        let policies = load_platform_policies().expect("bundled policies parse");
+        let loaded = load_platform_policies().expect("bundled policies parse");
         let statements: usize = PLATFORM_POLICY_SOURCES
             .iter()
             .map(|source| source.matches("permit (").count())
             .sum();
         assert!(statements >= 2, "ruled on {statements} permit statements");
-        assert_eq!(policies.policies().count(), statements);
+        assert_eq!(loaded.policies().policies().count(), statements);
+    }
+
+    /// The shipped set validates STRICTLY, with no warnings. On its own this
+    /// assertion is worthless - a validator wired to nothing passes too - so it
+    /// is paired with `strict_validation_refuses_a_typod_action_id` below,
+    /// which shows the same instrument going red.
+    #[test]
+    fn the_shipped_set_validates_strictly_with_no_warnings() {
+        load_platform_policies().expect("the shipped policy set validates strictly");
+    }
+
+    /// The mutation proof for the assertion above, and the failure the whole
+    /// schema exists for: `PolicySet::from_str` ACCEPTS a typo'd action id
+    /// without complaint, so before the schema this defect produced no
+    /// diagnostic anywhere and denied every request the band was written to
+    /// permit.
+    ///
+    /// Both halves are asserted in one test on purpose - the parse succeeding
+    /// is what makes the validation failure meaningful.
+    #[test]
+    fn strict_validation_refuses_a_typod_action_id() {
+        let source = PLATFORM_POLICY_SOURCES
+            .join("\n")
+            .replace(r#"Action::"apps:read""#, r#"Action::"apps:raed""#);
+        assert!(
+            source.contains(r#"Action::"apps:raed""#),
+            "the mutation did not apply, so nothing below is a measurement"
+        );
+
+        let policies = PolicySet::from_str(&source)
+            .expect("Cedar's parser accepts an unknown action id - that is the defect");
+        let schema = Schema::from_str(PLATFORM_SCHEMA_SOURCE).expect("schema parses");
+        let result = Validator::new(schema).validate(&policies, ValidationMode::Strict);
+
+        assert!(
+            !result.validation_passed(),
+            "strict validation accepted an action id no schema declares"
+        );
+        assert!(
+            result
+                .validation_errors()
+                .any(|error| error.to_string().contains("apps:raed")),
+            "the diagnostic must name the offending id"
+        );
+    }
+
+    /// The schema's action list and [`Action::all`] must be the same set, in
+    /// both directions.
+    ///
+    /// **STRICT VALIDATION CANNOT SEE THIS GAP.** It rules only on the ids the
+    /// POLICIES quote, and `migrations:approve` is quoted by no band by design
+    /// while `ControlPlaneAuthenticator::authorize` issues it at a real
+    /// `Resource::App` on every migration go-live. Drop it from the schema and
+    /// validation stays green while that route starts returning 500 - because
+    /// `Request::new` refuses an action the schema does not declare, and the
+    /// refusal fires before `audit_decision`, so there is no durable record
+    /// either.
+    #[test]
+    fn the_schema_declares_exactly_the_action_vocabulary() {
+        let declared: HashSet<&str> = PLATFORM_SCHEMA_SOURCE
+            .lines()
+            .filter_map(|line| line.trim().strip_prefix("action \""))
+            .filter_map(|rest| rest.split('"').next())
+            .collect();
+        assert!(
+            declared.len() >= 2,
+            "ruled on {} declared action(s) - the extraction found nothing",
+            declared.len()
+        );
+
+        let vocabulary: HashSet<&str> = Action::all().iter().map(Action::cedar_id).collect();
+        assert_eq!(
+            declared, vocabulary,
+            "the schema's action list and Action::all() have diverged"
+        );
     }
 }

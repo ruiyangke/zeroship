@@ -319,8 +319,13 @@ echo "=== Stage 2: REAL Customer + pay → Stripe DELIVERS the core money events
 # ===========================================================================
 CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
 NOW_UNIX="$(date +%s)"
-CUS="$(spost customers -d "email=whlive-$CREATOR@zeroship.test" -d "metadata[creator_id]=$CREATOR" | jget id)"
-case "$CUS" in cus_*) pass "created REAL Stripe Customer $CUS (creator=$CREATOR)";; *) fail "create customer failed"; exit 1;; esac
+# The ids are derived HERE, before the customer, because the ownership metadata
+# the platform stamps on a Stripe Customer names the ORGANIZATION - a customer
+# created before the id exists carries no attribution, and under `set -u` the
+# expansion aborts the run outright. The rows themselves are written below.
+organization_fixture_ids "whlive-$CREATOR"
+CUS="$(spost customers -d "email=whlive-$CREATOR@zeroship.test" -d "metadata[organization_id]=$ZS_FIXTURE_ORGANIZATION_ID" | jget id)"
+case "$CUS" in cus_*) pass "created REAL Stripe Customer $CUS (organization=$ZS_FIXTURE_ORGANIZATION_ID)";; *) fail "create customer failed"; exit 1;; esac
 PM="$(spost payment_methods/pm_card_visa/attach -d "customer=$CUS" | jget id)"
 spost "customers/$CUS" -d "invoice_settings[default_payment_method]=$PM" -o /dev/null
 pass "attached test PaymentMethod $PM as default"
@@ -332,9 +337,10 @@ pass "attached test PaymentMethod $PM as default"
 CLOSED_APP="$(node -e 'console.log(require("crypto").randomUUID())')"
 PERIOD_FIRST="$(node -e 'const d=new Date();console.log(new Date(Date.UTC(d.getUTCFullYear(),d.getUTCMonth(),1)).toISOString().slice(0,10))')"
 # The app needs a project, and the project an organization: that chain is the
-# only path from an app to the party it is billed to. Set the ids here, in this
-# shell, because the emitter below runs in a subshell.
-organization_fixture_ids "whlive-$CREATOR"
+# only path from an app to the party it is billed to. The ids were derived above
+# (the Stripe Customer's ownership metadata needs them); the rows they name are
+# written here. They live in THIS shell rather than the emitter's, because
+# `$(organization_fixture_sql ...)` runs in a subshell.
 psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "seed failed"; exit 1; }
 INSERT INTO zeroship.plans (id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, runtime_limits_json, spend_limit_default_cents)
 VALUES ('pln_whlive','wh-live',0,0,1000000000000,'{"cpu_limit_ms":5000,"wall_timeout_ms":30000,"heap_limit_mb":256}',100000000)
@@ -342,13 +348,13 @@ ON CONFLICT (id) DO NOTHING;
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CREATOR', 'whlive-$CREATOR@zeroship.test'::citext, 'WH-Live Creator', NOW());
 $(organization_fixture_sql "whlive-$CREATOR" "whlive-$CREATOR@zeroship.test")
-INSERT INTO zeroship.apps (id, name, plan_id, project_id)
-VALUES ('$CLOSED_APP', 'whlive-app-$CLOSED_APP', 'pln_whlive', '$ZS_FIXTURE_PROJECT_ID');
+INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id)
+VALUES ('$CLOSED_APP', 'whlive-app-$CLOSED_APP', 'pln_whlive', '$ZS_FIXTURE_PROJECT_ID', '$ZS_FIXTURE_ORGANIZATION_ID');
 $(seat_app_owner_sql "$CLOSED_APP" "$CREATOR")
-INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CREATOR') ON CONFLICT DO NOTHING;
-INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)
-VALUES ('$CREATOR', 'stripe', '$CUS')
-ON CONFLICT (creator_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
+$(organization_billing_sql "$ZS_FIXTURE_ORGANIZATION_ID")
+INSERT INTO zeroship.billing_customer_refs (organization_id, provider, external_id)
+VALUES ('$ZS_FIXTURE_ORGANIZATION_ID', 'stripe', '$CUS')
+ON CONFLICT (organization_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
 SQL
 pass "seeded internal identity + creator↔$CUS mapping"
 
@@ -359,7 +365,7 @@ OFFSET_S2="$(listen_since)"
 spost invoiceitems -d "customer=$CUS" -d "amount=750" -d "currency=usd" \
   -d "description=zeroship infra (whlive e2e)" -o /dev/null
 INV_JSON="$(spost invoices -d "customer=$CUS" -d "collection_method=charge_automatically" \
-  -d "pending_invoice_items_behavior=include" -d "metadata[creator_id]=$CREATOR" -d "metadata[invoice_kind]=infra")"
+  -d "pending_invoice_items_behavior=include" -d "metadata[organization_id]=$ZS_FIXTURE_ORGANIZATION_ID" -d "metadata[invoice_kind]=infra")"
 INV="$(echo "$INV_JSON" | jget id)"
 case "$INV" in in_*) pass "created REAL invoice $INV (item swept via pending_invoice_items_behavior=include)";; *) fail "create invoice failed: $(echo "$INV_JSON"|jget error.message)"; ;; esac
 spost "invoices/$INV/finalize" -o /dev/null
@@ -372,8 +378,8 @@ spost "invoices/$INV/finalize" -o /dev/null
 # exact mapping the create_invoice → finalize path persists.)
 INTERNAL_INV="inv_$(node -e 'console.log(require("crypto").randomBytes(8).toString("hex"))')"
 psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL || { fail "internal-invoice seed failed"; }
-INSERT INTO zeroship.invoices (id, creator_id, period, status, currency, subtotal_cents, total_cents, finalized_at)
-VALUES ('$INTERNAL_INV','$CREATOR','$PERIOD_FIRST'::date,'finalized','usd',750,750,NOW());
+INSERT INTO zeroship.invoices (id, organization_id, period, status, currency, subtotal_cents, total_cents, finalized_at)
+VALUES ('$INTERNAL_INV','$ZS_FIXTURE_ORGANIZATION_ID','$PERIOD_FIRST'::date,'finalized','usd',750,750,NOW());
 INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id)
 VALUES ('$INTERNAL_INV','stripe','invoice','$INV')
 ON CONFLICT (invoice_id, provider, ref_kind) DO UPDATE SET external_id=EXCLUDED.external_id;
@@ -418,7 +424,7 @@ if [ -z "$HAS_TOP_PI" ] && [ -z "$HAS_NEST_PI" ]; then
 fi
 
 # Did control commit the charge row + pi_/ch_ linkage off the REAL delivered event?
-CASH="$(wait_for_db "SELECT COALESCE(SUM(amount_cents),0) FROM zeroship.invoice_payments ip JOIN zeroship.invoices i ON i.id=ip.invoice_id WHERE i.creator_id='$CREATOR' AND ip.kind='charge'" "750" 15)"
+CASH="$(wait_for_db "SELECT COALESCE(SUM(amount_cents),0) FROM zeroship.invoice_payments ip JOIN zeroship.invoices i ON i.id=ip.invoice_id WHERE i.organization_id='$ZS_FIXTURE_ORGANIZATION_ID' AND ip.kind='charge'" "750" 15)"
 [ "$CASH" = "750" ] && pass "STRIPE-DELIVERED invoice.paid → invoice_payments 'charge' row appended (cash=750c) [D1/C1 re-validated against real delivery]" \
   || diverge "no 750c charge row from the real delivered invoice.paid (got '$CASH'). control.log: $(grep -iE 'invoice.paid|store error|creator' "$WORK/control.log" | tail -3 | tr '\n' '|')"
 
@@ -482,7 +488,7 @@ RU_200="$(tail -n +"$((OFFSET_3A+1))" "$LISTEN_LOG" | grep -A1 'charge.refund.up
 # leg is genuinely unautomatable in TEST mode.
 RU_RESP_NOTE="$(grep -iE 'refund_update_noop|refund_unknown|refund_reversed|refund.updated' "$WORK/control.log" | tail -1 | tr -d '\n')"
 diverge "the failed-refund REVERSAL cannot be driven by REAL Stripe delivery in TEST mode: Stripe does not fail refunds on test cards, and 'stripe trigger charge.refund.updated --override status=failed' delivers a brand-NEW refund fixture (not an UPDATE keyed on a re_ our DB recorded as issued) → handle_refund_updated sees an unknown/non-failed refund and (correctly) acks a no-op. The REAL charge.refund.updated WAS delivered + ACK'd [200] (control: ${RU_RESP_NOTE:-<no refund log line>}). The terminal-failure reversal+clawback (reconcile_failed_refund) is unit/integration-tested."
-INTERNAL_INV="${INTERNAL_INV:-$(psql1 "SELECT id FROM zeroship.invoices WHERE creator_id='$CREATOR' ORDER BY created_at DESC LIMIT 1")}"
+INTERNAL_INV="${INTERNAL_INV:-$(psql1 "SELECT id FROM zeroship.invoices WHERE organization_id='$ZS_FIXTURE_ORGANIZATION_ID' ORDER BY created_at DESC LIMIT 1")}"
 
 # --- 3b. payment_intent.payment_failed (Connect checkout failure) ----------
 # The handler resolves the creator from the PI's connected account (top-level
@@ -490,18 +496,18 @@ INTERNAL_INV="${INTERNAL_INV:-$(psql1 "SELECT id FROM zeroship.invoices WHERE cr
 # then records a connect_checkout_failures row. `stripe trigger
 # payment_intent.payment_failed` delivers a REAL such event, but its account isn't
 # linked in OUR DB → the handler would ack `account_not_linked` (no row). To make
-# the handler WRITE a row off a REAL delivered event, we (a) seed a creator_accounts
+# the handler WRITE a row off a REAL delivered event, we (a) seed an organization_accounts
 # linkage for a synthetic acct_, and (b) trigger with --stripe-account so Stripe
 # stamps that acct_ as the event's top-level `account`. The envelope + signature +
 # delivery are Stripe's; only the acct_ binding is seeded (real Connect onboarding
 # is blocked on this test account — see Stage 5).
 ACCT_SYN="acct_$(node -e 'console.log(require("crypto").randomBytes(10).toString("hex").slice(0,16))')"
 psql_db -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-INSERT INTO zeroship.creator_accounts (creator_id, stripe_account_id, charges_enabled, payouts_enabled, details_submitted, onboarded_at)
-VALUES ('$CREATOR','$ACCT_SYN', true, true, true, NOW())
-ON CONFLICT (creator_id) DO UPDATE SET stripe_account_id=EXCLUDED.stripe_account_id, unlinked_at=NULL;
+INSERT INTO zeroship.organization_accounts (organization_id, stripe_account_id, charges_enabled, payouts_enabled, details_submitted, onboarded_at)
+VALUES ('$ZS_FIXTURE_ORGANIZATION_ID','$ACCT_SYN', true, true, true, NOW())
+ON CONFLICT (organization_id) DO UPDATE SET stripe_account_id=EXCLUDED.stripe_account_id, unlinked_at=NULL;
 SQL
-pass "seeded a creator_accounts linkage ($CREATOR ↔ $ACCT_SYN) so the Connect-failure handlers can resolve the creator"
+pass "seeded an organization_accounts linkage ($ZS_FIXTURE_ORGANIZATION_ID to $ACCT_SYN) so the Connect-failure handlers can resolve the organization"
 OFFSET_3B="$(listen_since)"
 # Fire a REAL payment_intent.payment_failed. We can't make Stripe stamp a
 # made-up acct_ as the event account (the CLI's --stripe-account routes to a REAL
@@ -699,9 +705,9 @@ fi
 # assert the handler's update_account_flags_by_account_id contract on the SEEDED
 # linkage by confirming the flags are queryable + start enabled (the real-delivery
 # flip needs a real linked acct_ — same Connect gap as above).
-FLAGS_NOW="$(psql1 "SELECT (charges_enabled::int)||'/'||(payouts_enabled::int) FROM zeroship.creator_accounts WHERE stripe_account_id='$ACCT_SYN'")"
+FLAGS_NOW="$(psql1 "SELECT (charges_enabled::int)||'/'||(payouts_enabled::int) FROM zeroship.organization_accounts WHERE stripe_account_id='$ACCT_SYN'")"
 echo "    seeded acct_ cached flags (charges/payouts) = $FLAGS_NOW"
-[ "$FLAGS_NOW" = "1/1" ] && pass "the M2 gate cache (creator_accounts.charges_enabled/payouts_enabled) is present + queryable for the seeded linkage" \
+[ "$FLAGS_NOW" = "1/1" ] && pass "the M2 gate cache (organization_accounts.charges_enabled/payouts_enabled) is present + queryable for the seeded linkage" \
   || diverge "seeded acct_ flags unexpected ('$FLAGS_NOW')"
 echo "    NOTE(5): the account.updated gate-FLIP write path + M4 settling-account ownership"
 echo "    check + the application-fee/FeePolicy + record_payout all need a REAL linked"
