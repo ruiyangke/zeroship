@@ -85,7 +85,7 @@ fn gateway_identity() -> &'static std::sync::Arc<zeroship_core::service_peers::S
 }
 
 fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+    common::platform_db_or_skip()
 }
 
 fn location(resp: &cyper::Response) -> String {

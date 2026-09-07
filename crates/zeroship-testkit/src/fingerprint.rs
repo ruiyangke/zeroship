@@ -39,7 +39,7 @@
 //! harness agree during the migration, and it costs nothing to keep afterwards.
 
 use sha2::{Digest, Sha256};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The set hashed is exactly `discover_ts_files`'s
@@ -49,12 +49,17 @@ use std::process::Command;
 /// by filename.
 pub const MIGRATIONS_DIR: &str = "db/migrations-ts";
 
-/// Hash the migration set a working tree would apply.
+/// The migration files a working tree would apply, by basename.
 ///
-/// `Err` is the refusal text; the caller exits 2. Never a fingerprint of
-/// nothing -- an empty set hashes to a FIXED value, so every broken checkout
-/// would share one database and call it schema-fresh.
-pub fn of_dir(root: &Path) -> Result<String, String> {
+/// ONE FILTER, TWO CONSUMERS: [`of_dir`] hashes this set, and
+/// [`crate::live_db`] counts it against the journal of a live database. They
+/// have to agree on membership or the two answers describe different corpora,
+/// so the selection rule lives here and neither caller restates it.
+///
+/// Order is the directory's, not sorted: [`of_dir`] sorts the digest lines it
+/// builds and the ledger check only needs the cardinality. A caller that needs
+/// an order must impose one.
+pub fn files_in(root: &Path) -> Result<Vec<PathBuf>, String> {
     let dir = root.join(MIGRATIONS_DIR);
     if !dir.is_dir() {
         return Err(format!(
@@ -65,7 +70,7 @@ pub fn of_dir(root: &Path) -> Result<String, String> {
         ));
     }
 
-    let mut lines: Vec<String> = Vec::new();
+    let mut files: Vec<PathBuf> = Vec::new();
     let entries = std::fs::read_dir(&dir)
         .map_err(|e| format!("FATAL: could not read {}: {e}\n", dir.display()))?;
     for entry in entries {
@@ -76,18 +81,37 @@ pub fn of_dir(root: &Path) -> Result<String, String> {
         if name.starts_with('.') || !name.ends_with(".ts") || !entry.path().is_file() {
             continue;
         }
-        let bytes = std::fs::read(entry.path())
-            .map_err(|e| format!("FATAL: could not read {}: {e}\n", entry.path().display()))?;
-        lines.push(sha256sum_line(&name, &bytes));
+        files.push(entry.path());
     }
 
-    if lines.is_empty() {
+    if files.is_empty() {
         return Err(format!(
             "FATAL: {} holds no *.ts migrations\n\
              \x20      An empty set would hash to a fixed value, so every broken\n\
              \x20      checkout would share one database and call it fresh.\n",
             dir.display()
         ));
+    }
+
+    Ok(files)
+}
+
+/// Hash the migration set a working tree would apply.
+///
+/// `Err` is the refusal text; the caller exits 2. Never a fingerprint of
+/// nothing -- an empty set hashes to a FIXED value, so every broken checkout
+/// would share one database and call it schema-fresh.
+pub fn of_dir(root: &Path) -> Result<String, String> {
+    let mut lines: Vec<String> = Vec::new();
+    for file in files_in(root)? {
+        let name = file
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned();
+        let bytes = std::fs::read(&file)
+            .map_err(|e| format!("FATAL: could not read {}: {e}\n", file.display()))?;
+        lines.push(sha256sum_line(&name, &bytes));
     }
 
     Ok(digest_of(lines))

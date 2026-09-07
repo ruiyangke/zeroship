@@ -8,6 +8,33 @@
 
 use uuid::Uuid;
 
+/// The test database, with the live-database preflight already run.
+///
+/// EVERY DATABASE GATE IN THIS CRATE GOES THROUGH HERE, and the reason is a run
+/// that cost real time. On 2026-09-07 the database the overlay names held every
+/// schema these targets need and had never seen
+/// `db/migrations-ts/20260906000100_apps_organization_and_billing_subject.ts`,
+/// so `zeroship.apps` had no `organization_id` and this crate's five database
+/// targets reported a stale fixture as named tests FAILING. A suite that cannot
+/// tell "the code is wrong" from "my database is behind" is not an oracle;
+/// `zeroship_testkit::live_db` makes that a refusal naming
+/// `deploy/ops/db-migrate.sh` instead.
+///
+/// `None` STAYS A SKIP, and that is deliberate rather than an oversight. A
+/// developer running `cargo test -p zeroship-gateway` on a checkout with no
+/// overlay should get the announcement `tests/lib/skip_census.sh` counts;
+/// `tests/run_auth_suite.sh` already treats a skip HERE as a failure, because
+/// it provisions a database before it runs these targets.
+///
+/// The preflight memoises per process, so calling this from every gate in a
+/// file costs one probe -- and it has to be every gate, because
+/// `cargo test --exact <one>` makes any of them the first to touch a database.
+pub fn platform_db_or_skip() -> Option<String> {
+    let dsn = zeroship_core::config::test_database_url_opt()?;
+    zeroship_testkit::live_db::require_once(&dsn, zeroship_testkit::live_db::PLATFORM_SCHEMAS);
+    Some(dsn)
+}
+
 /// The project a fixture's `zeroship.apps` row belongs to.
 ///
 /// `apps.project_id` is NOT NULL against a RESTRICT foreign key and a project
