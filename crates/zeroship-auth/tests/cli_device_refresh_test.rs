@@ -308,12 +308,13 @@ impl Fixture {
         let row = self
             .db
             .query_one(
-                "SELECT (EXTRACT(EPOCH FROM (family_absolute_expires_at - NOW())) / 86400.0)::float8 \
+                "SELECT (EXTRACT(EPOCH FROM (absolute_expires_at - NOW())) / 86400.0)::float8 \
                           AS absolute_days, \
-                        (EXTRACT(EPOCH FROM (expires_at - NOW())) / 86400.0)::float8 AS idle_days \
-                 FROM zeroship.oauth_refresh_tokens \
-                 WHERE user_id = $1 AND rotated_at IS NULL AND revoked_at IS NULL \
-                 ORDER BY issued_at DESC LIMIT 1",
+                        (EXTRACT(EPOCH FROM (idle_expires_at - NOW())) / 86400.0)::float8 \
+                          AS idle_days \
+                 FROM zeroship.sessions \
+                 WHERE person_id = $1 AND revoked_at IS NULL \
+                 ORDER BY created_at DESC LIMIT 1",
                 &[&self.user_id],
             )
             .await
@@ -332,8 +333,8 @@ impl Fixture {
             .db
             .query_one(
                 "SELECT EXTRACT(EPOCH FROM (idem_expires_at - NOW()))::float8 AS window_secs \
-                 FROM zeroship.oauth_refresh_tokens \
-                 WHERE user_id = $1 AND rotated_at IS NOT NULL \
+                 FROM zeroship.sessions \
+                 WHERE person_id = $1 AND rotated_at IS NOT NULL \
                    AND idem_expires_at IS NOT NULL \
                  ORDER BY rotated_at DESC LIMIT 1",
                 &[&self.user_id],
@@ -364,7 +365,14 @@ impl Fixture {
         let _ = self
             .db
             .execute(
-                "DELETE FROM zeroship.oauth_refresh_tokens WHERE user_id = $1",
+                "DELETE FROM zeroship.sessions WHERE person_id = $1",
+                &[&self.user_id],
+            )
+            .await;
+        let _ = self
+            .db
+            .execute(
+                "DELETE FROM zeroship.grants WHERE person_id = $1",
                 &[&self.user_id],
             )
             .await;

@@ -1,23 +1,31 @@
-//! OP refresh-token families: CLI/programmatic rotation + reuse detection.
+//! OP refresh rotation on the SESSION ROW: CLI/programmatic rotation and reuse
+//! detection.
+//!
+//! The refresh FAMILY used to be a chain of `zeroship.oauth_refresh_tokens`
+//! rows joined by `refresh_family_id`. It is now one `zeroship.sessions` row
+//! whose secret rotates in place, and every statement that reads it lives in
+//! `crate::session_store`. What is left here is the OAuth policy around those
+//! statements: client authentication, scope narrowing, the response shape, and
+//! the transaction and lock discipline the rotation runs under.
+//!
+//! **Nothing in this file mints.** Every mint goes through a
+//! `session_store::ValidatedSession`, which only the validating statements
+//! produce, so a rotation that skipped the read could not call the issuer even
+//! if someone wrote it.
 
 use std::cell::RefCell;
 use std::collections::HashMap;
-use std::path::Path;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
-use chrono::{DateTime, Utc};
+use base64::Engine as _;
 use compio_postgres::{Client, GenericClient, Pool, PoolConfig, Transaction};
 use ntex::web::{self, HttpRequest, HttpResponse};
-use rand::RngCore;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use uuid::Uuid;
-use zeroship_core::auth::{hmac_sha256, validate_client_secret};
-use zeroship_core::crypto;
-use zeroship_core::typed_id;
+use zeroship_core::auth::validate_client_secret;
 
 use crate::advisory_lock::{lock_refresh_family_xact, lock_refresh_user_xact};
 use crate::config::AuthConfig;
@@ -26,13 +34,19 @@ use crate::oidc::authorization_code::{
     sort_dedup, OAuthClient, OAuthError, TokenRequest, TokenResponse, TOKEN_TYPE_BEARER,
 };
 use crate::oidc::{device_token, introspect, Issuer, ACCESS_TOKEN_TTL_SECS};
+use crate::session_store::{
+    self, Audience, PeekedSession, Rotation, SecretSlot, SessionKind, SessionRow,
+    SessionSecretKeys, ValidatedSession,
+};
 
-const REFRESH_TOKEN_BYTES: usize = 32;
-const REFRESH_TOKEN_PREFIX: &str = "zrt_";
+/// The sliding idle window a rotation renews.
 const FAMILY_IDLE_DAYS: i64 = 7;
+/// The ceiling a session may never rotate past.
 const FAMILY_ABSOLUTE_DAYS: i64 = 30;
+/// How long a lost rotation response may be replayed.
 const IDEM_WINDOW_SECS: i64 = 30;
-const IDEM_AAD_PREFIX: &[u8] = b"zs:auth:refresh_idem:v1\0";
+/// How long a fully expired session is kept before the sweep deletes it.
+const SESSION_RETENTION_DAYS: i64 = 30;
 const REFRESH_POOL_ACQUIRE_TIMEOUT_SECS: u64 = 30;
 
 thread_local! {
@@ -122,65 +136,14 @@ impl RefreshSessionPool {
             pools.insert(key, Rc::clone(&pool));
             pool
         });
-        tracing::info!(
-            operation,
-            pool_size = self.inner.pool_size,
-            "auth transaction session pool ready"
-        );
+        tracing::debug!(operation, "refresh dedicated pool checked out");
         Ok(pool)
     }
 }
 
-#[derive(Debug, Clone)]
 struct PreauthenticatedRefresh {
-    presented_hash: TokenHash,
-    initial: RefreshRow,
+    presented: PeekedSession,
     client: OAuthClient,
-}
-
-#[derive(Debug, Clone)]
-pub(super) struct RefreshTokenKeys {
-    active: RefreshHashKey,
-    verify: Vec<RefreshHashKey>,
-    idem_key: [u8; 32],
-}
-
-#[derive(Debug, Clone)]
-struct RefreshHashKey {
-    version: i16,
-    key: Vec<u8>,
-}
-
-#[derive(Debug, Clone)]
-struct TokenHash {
-    version: i16,
-    hash: Vec<u8>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct CachedRefreshResponse {
-    refresh_token: String,
-    scope: String,
-}
-
-#[derive(Debug, Clone)]
-struct RefreshRow {
-    token_hash: Vec<u8>,
-    hash_key_version: i16,
-    refresh_family_id: String,
-    replaced_by_token_hash: Option<Vec<u8>>,
-    client_id: String,
-    user_id: Uuid,
-    sub: String,
-    granted_scopes: Vec<String>,
-    family_granted_scopes: Vec<String>,
-    issued_at: DateTime<Utc>,
-    expires_at: DateTime<Utc>,
-    family_absolute_expires_at: DateTime<Utc>,
-    rotated_at: Option<DateTime<Utc>>,
-    revoked_at: Option<DateTime<Utc>>,
-    idem_response_enc: Option<Vec<u8>>,
-    idem_expires_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -210,88 +173,23 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     introspect::configure(cfg);
 }
 
-impl RefreshTokenKeys {
-    pub(super) fn from_config(cfg: &AuthConfig) -> Result<Self, OAuthError> {
-        let hash_file = cfg.refresh_hash_key_file().ok_or_else(|| {
-            OAuthError::server_error("refresh hash key is not configured")
-        })?;
-        let idem_file = cfg.refresh_idem_key_file().ok_or_else(|| {
-            OAuthError::server_error("refresh idempotency key is not configured")
-        })?;
-        Self::from_files(hash_file, idem_file).map_err(|err| {
-            tracing::error!(error = %err, "refresh token key load failed");
-            OAuthError::server_error("refresh token keys unavailable")
-        })
-    }
-
-    pub fn from_files(hash_file: &Path, idem_file: &Path) -> Result<Self, String> {
-        let mut verify = load_hash_keyring(hash_file)?;
-        verify.sort_by(|a, b| b.version.cmp(&a.version));
-        let Some(active) = verify.first().cloned() else {
-            return Err(format!(
-                "REFRESH_HASH_KEY_FILE {} yielded no keys",
-                hash_file.display()
-            ));
-        };
-        let idem_secret = read_secret_file(idem_file, "REFRESH_IDEM_KEY_FILE")?;
-        let idem_key = crypto::derive_key(&String::from_utf8_lossy(&idem_secret));
-        Ok(Self {
-            active,
-            verify,
-            idem_key,
-        })
-    }
-
-    fn active_hash(&self, raw: &str) -> TokenHash {
-        TokenHash {
-            version: self.active.version,
-            hash: hmac_sha256(&self.active.key, raw.as_bytes()).to_vec(),
-        }
-    }
-
-    fn hashes_newest_first(&self, raw: &str) -> Vec<TokenHash> {
-        self.verify
-            .iter()
-            .map(|key| TokenHash {
-                version: key.version,
-                hash: hmac_sha256(&key.key, raw.as_bytes()).to_vec(),
-            })
-            .collect()
-    }
-
-    fn seal_cached_response(
-        &self,
-        predecessor_hash: &[u8],
-        family_id: &str,
-        body: &CachedRefreshResponse,
-    ) -> Result<Vec<u8>, OAuthError> {
-        let aad = idem_aad(predecessor_hash, family_id);
-        let plain = serde_json::to_vec(body).map_err(|err| {
-            tracing::error!(error = %err, "refresh: encode idempotency cache failed");
-            OAuthError::server_error("refresh idempotency cache failed")
-        })?;
-        crypto::encrypt(&self.idem_key, &aad, &plain).map_err(|err| {
-            tracing::error!(error = %err, "refresh: seal idempotency cache failed");
-            OAuthError::server_error("refresh idempotency cache failed")
-        })
-    }
-
-    fn open_cached_response(
-        &self,
-        predecessor_hash: &[u8],
-        family_id: &str,
-        enc: &[u8],
-    ) -> Result<CachedRefreshResponse, OAuthError> {
-        let aad = idem_aad(predecessor_hash, family_id);
-        let plain = crypto::decrypt(&self.idem_key, &aad, enc).map_err(|err| {
-            tracing::warn!(error = %err, "refresh: idempotency cache decrypt failed");
-            OAuthError::invalid_grant("refresh token is invalid")
-        })?;
-        serde_json::from_slice(&plain).map_err(|err| {
-            tracing::warn!(error = %err, "refresh: idempotency cache decode failed");
-            OAuthError::invalid_grant("refresh token is invalid")
-        })
-    }
+/// Load the session-secret keyring from the two configured secret files.
+///
+/// # Errors
+///
+/// `OAuthError::server_error` when either setting is unset or the material is
+/// unusable. The message never names the file's contents.
+pub(super) fn session_keys(cfg: &AuthConfig) -> Result<SessionSecretKeys, OAuthError> {
+    let hash_file = cfg
+        .refresh_hash_key_file()
+        .ok_or_else(|| OAuthError::server_error("refresh hash key is not configured"))?;
+    let idem_file = cfg
+        .refresh_idem_key_file()
+        .ok_or_else(|| OAuthError::server_error("refresh idempotency key is not configured"))?;
+    SessionSecretKeys::from_files(hash_file, idem_file).map_err(|err| {
+        tracing::error!(error = %err, "session secret key load failed");
+        OAuthError::server_error("session secret keys unavailable")
+    })
 }
 
 pub(super) fn client_auth_from_request(
@@ -317,86 +215,122 @@ pub(super) fn client_auth_from_request(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Establishing a session
+// ---------------------------------------------------------------------------
+
+/// What a grant produced: the credential to hand back, and the proof every mint
+/// on this exchange needs.
+pub(super) struct EstablishedSession {
+    /// `None` when the grant carried no `offline_access`.
+    pub secret: Option<String>,
+    pub proof: ValidatedSession,
+}
+
+/// Create the session a token exchange mints from.
+///
+/// This replaces `issue_root_refresh_token`, and it does strictly more: the old
+/// function ran only when `offline_access` was granted, so an exchange without
+/// it minted an access token against no stored object at all. Every exchange
+/// now creates a session; only the SECRET is conditional. A session with no
+/// secret can never be presented again (`session_store::peek` cannot match a
+/// NULL hash), so its one and only mint is the one the creating statement
+/// authorised.
+///
+/// The audience and the subject are today's, unchanged. The first-party CLI
+/// client is the PLATFORM audience and its subject is the person's own id,
+/// because the `zeroship.token_revocations` marker a kill writes is looked up
+/// by control under (`zeroship-cli`, principal UUID): a platform family storing
+/// a pairwise subject would revoke a subject nothing ever presents. Every other
+/// client is an APP audience with the pairwise subject over its sector.
 #[allow(clippy::future_not_send)]
-pub(super) async fn issue_root_refresh_token(
+pub(super) async fn establish_session(
     db: &(impl GenericClient + ?Sized),
     issuer: &Issuer,
-    keys: &RefreshTokenKeys,
+    keys: &SessionSecretKeys,
     client: &OAuthClient,
     user_id: Uuid,
     granted_scopes: &[String],
     auth_credential_version: i64,
-) -> Result<String, OAuthError> {
+    kind: SessionKind,
+    with_secret: bool,
+) -> Result<EstablishedSession, OAuthError> {
     lock_refresh_user_xact(db, user_id).await.map_err(|err| {
-        tracing::error!(error = %err, user_id = %user_id, "refresh issuance user lock failed");
-        OAuthError::server_error("refresh issuance unavailable")
+        tracing::error!(error = %err, user_id = %user_id, "session issuance user lock failed");
+        OAuthError::server_error("session issuance unavailable")
     })?;
 
-    let rows = db
-        .query(
-            "SELECT credential_version FROM zeroship.users \
-             WHERE id = $1 \
-               AND disabled_at IS NULL \
-               AND anonymized_at IS NULL \
-               AND deletion_requested_at IS NULL \
-               AND deletion_scheduled_for IS NULL",
-            &[&user_id],
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, user_id = %user_id, "refresh issuance credential_version read failed");
-            OAuthError::server_error("refresh issuance unavailable")
-        })?;
-    let Some(row) = rows.first() else {
-        return Err(OAuthError::invalid_grant("authenticated user no longer exists"));
-    };
-    let current_version: i64 = row.get("credential_version");
-    if current_version != auth_credential_version {
-        return Err(OAuthError::invalid_grant("credential version changed"));
-    }
-
-    let raw = generate_refresh_token();
-    let hash = keys.active_hash(&raw);
-    let family_id = typed_id::generate("rfam");
     let user_id_string = user_id.to_string();
-    // `sub` is not decoration here: `kill_family` copies it into
-    // `zeroship.token_revocations`, and that table is what recalls an
-    // OUTSTANDING access token. Control looks the marker up under
-    // (`zeroship-cli`, principal UUID), so a platform CLI family that stored a
-    // pairwise subject would revoke a subject nothing ever presents - the
-    // family would die and the access token would live out its TTL.
-    let sub = if device_token::platform_cli_policy_selected(db, &client.client_id).await? {
-        user_id_string.clone()
+    let (audience, subject) = if device_token::platform_cli_policy_selected(db, &client.client_id)
+        .await?
+    {
+        (Audience::Platform, user_id_string.clone())
     } else {
-        issuer.pairwise_subject(&user_id_string, &client.sector_identifier)
+        (
+            Audience::App {
+                client_id: client.client_id.clone(),
+            },
+            issuer.pairwise_subject(&user_id_string, &client.sector_identifier),
+        )
     };
-    db.execute(
-        "INSERT INTO zeroship.oauth_refresh_tokens \
-            (token_hash, hash_key_version, refresh_family_id, client_id, user_id, sub, \
-             granted_scopes, family_granted_scopes, expires_at, family_absolute_expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $7, \
-                 LEAST(NOW() + make_interval(days => $8::INT), \
-                       NOW() + make_interval(days => $9::INT)), \
-                 NOW() + make_interval(days => $9::INT))",
-        &[
-            &hash.hash,
-            &hash.version,
-            &family_id,
-            &client.client_id,
-            &user_id,
-            &sub,
-            &granted_scopes,
-            &i32::try_from(FAMILY_IDLE_DAYS).unwrap_or(7),
-            &i32::try_from(FAMILY_ABSOLUTE_DAYS).unwrap_or(30),
-        ],
+
+    let grant_id = session_store::upsert_grant(
+        db,
+        user_id,
+        &audience,
+        &subject,
+        granted_scopes,
+        None,
     )
     .await
     .map_err(|err| {
-        tracing::error!(error = %err, family_id = %family_id, "refresh root insert failed");
-        OAuthError::server_error("refresh issuance unavailable")
+        tracing::error!(error = %err, user_id = %user_id, "grant upsert failed");
+        OAuthError::server_error("session issuance unavailable")
     })?;
-    Ok(raw)
+
+    let created = session_store::create(
+        db,
+        keys,
+        &session_store::NewSession {
+            person_id: user_id,
+            grant_id: &grant_id,
+            subject: &subject,
+            grant_scopes: granted_scopes,
+            parent_session_id: None,
+            kind,
+            scopes: granted_scopes,
+            amr: &[],
+            acr: None,
+            label: None,
+            expected_credential_epoch: Some(auth_credential_version),
+            idle_days: FAMILY_IDLE_DAYS,
+            absolute_days: FAMILY_ABSOLUTE_DAYS,
+            with_secret,
+        },
+    )
+    .await
+    .map_err(|err| {
+        tracing::error!(error = %err, user_id = %user_id, "session create failed");
+        OAuthError::server_error("session issuance unavailable")
+    })?;
+
+    // The refusal arms are indistinguishable on purpose: the creating statement
+    // returns no row for an inactive person, a moved credential epoch and a
+    // suspended grant alike, and telling them apart at this boundary would leak
+    // account state to an unauthenticated caller.
+    let Some(created) = created else {
+        return Err(OAuthError::invalid_grant("credential version changed"));
+    };
+
+    Ok(EstablishedSession {
+        secret: created.secret,
+        proof: created.proof,
+    })
 }
+
+// ---------------------------------------------------------------------------
+// Rotation
+// ---------------------------------------------------------------------------
 
 #[allow(clippy::future_not_send)]
 pub(super) async fn exchange_refresh_token(
@@ -404,7 +338,7 @@ pub(super) async fn exchange_refresh_token(
     refresh_pool: &RefreshSessionPool,
     cfg: &AuthConfig,
     issuer: &Issuer,
-    keys: &RefreshTokenKeys,
+    keys: &SessionSecretKeys,
     params: &TokenRequest,
     client_auth: &ClientAuth,
 ) -> Result<TokenResponse, OAuthError> {
@@ -433,6 +367,8 @@ pub(super) async fn exchange_refresh_token(
             })?;
             Ok(response)
         }
+        // A refusal that KILLED the session has to commit the kill, which is
+        // why an invalid_grant commits rather than rolling back.
         Err(err) if err.status == ntex::http::StatusCode::BAD_REQUEST => {
             tx.commit().await.map_err(|commit_err| {
                 tracing::error!(error = %commit_err, oauth_error = err.error, "refresh: COMMIT failed");
@@ -453,7 +389,7 @@ pub(super) async fn exchange_refresh_token(
 async fn preauthenticate_refresh(
     issuer: &Issuer,
     db: &(impl GenericClient + ?Sized),
-    keys: &RefreshTokenKeys,
+    keys: &SessionSecretKeys,
     params: &TokenRequest,
     client_auth: &ClientAuth,
 ) -> Result<PreauthenticatedRefresh, OAuthError> {
@@ -465,15 +401,20 @@ async fn preauthenticate_refresh(
         return Err(OAuthError::invalid_grant("refresh token is invalid"));
     }
 
-    let Some((presented_hash, initial)) = lookup_by_any_hash(db, keys, raw_token).await? else {
+    // A non-locking, non-validating resolve. It decides nothing: the row it
+    // names is re-read under a lock and re-validated by the statement that
+    // rotates it.
+    let Some(presented) = session_store::peek(db, keys, raw_token)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "refresh: session lookup failed");
+            OAuthError::server_error("session store unavailable")
+        })?
+    else {
         return Err(OAuthError::invalid_grant("refresh token is invalid"));
     };
 
-    Ok(PreauthenticatedRefresh {
-        presented_hash,
-        initial,
-        client,
-    })
+    Ok(PreauthenticatedRefresh { presented, client })
 }
 
 #[allow(clippy::future_not_send)]
@@ -481,135 +422,169 @@ async fn exchange_refresh_token_inner(
     db: &Transaction<'_>,
     cfg: &AuthConfig,
     issuer: &Issuer,
-    keys: &RefreshTokenKeys,
+    keys: &SessionSecretKeys,
     params: &TokenRequest,
     preauth: PreauthenticatedRefresh,
 ) -> Result<TokenResponse, OAuthError> {
-    let PreauthenticatedRefresh {
-        presented_hash,
-        initial,
-        client,
-    } = preauth;
+    let PreauthenticatedRefresh { presented, client } = preauth;
 
-    lock_refresh_user_xact(db, initial.user_id).await.map_err(|err| {
-        tracing::error!(
-            error = %err,
-            user_id = %initial.user_id,
-            "refresh rotation user lock failed"
-        );
-        OAuthError::server_error("refresh rotation unavailable")
-    })?;
-    lock_refresh_family_xact(db, &initial.refresh_family_id)
+    lock_refresh_user_xact(db, presented.person_id)
         .await
         .map_err(|err| {
             tracing::error!(
                 error = %err,
-                family_id = %initial.refresh_family_id,
-                "refresh rotation family lock failed"
+                user_id = %presented.person_id,
+                "refresh rotation user lock failed"
             );
             OAuthError::server_error("refresh rotation unavailable")
         })?;
-    require_refresh_user_active(db, initial.user_id).await?;
-
-    let Some(row) = select_refresh_row_for_update(db, &presented_hash.hash).await? else {
-        return Err(OAuthError::invalid_grant("refresh token is invalid"));
-    };
-    if row.hash_key_version != presented_hash.version {
-        return Err(OAuthError::invalid_grant("refresh token is invalid"));
-    }
-    if row.client_id != client.client_id {
-        return Err(OAuthError::invalid_grant("refresh token is invalid"));
-    }
-
-    if row.rotated_at.is_some() {
-        return replay_or_kill(db, cfg, issuer, keys, &client, &row).await;
-    }
-
-    if row.revoked_at.is_some()
-        || family_has_revoked_row(db, &row.refresh_family_id).await?
-        || row.expires_at <= Utc::now()
-        || row.family_absolute_expires_at <= Utc::now()
-    {
-        return Err(OAuthError::invalid_grant("refresh token is invalid"));
-    }
-
-    let new_scopes = requested_refresh_scopes(params.scope.as_deref(), &row.family_granted_scopes)?;
-    let new_raw = generate_refresh_token();
-    let new_hash = keys.active_hash(&new_raw);
-    let cached = CachedRefreshResponse {
-        refresh_token: new_raw.clone(),
-        scope: new_scopes.join(" "),
-    };
-    let idem_response_enc =
-        keys.seal_cached_response(&row.token_hash, &row.refresh_family_id, &cached)?;
-
-    let consumed = db
-        .query(
-            "UPDATE zeroship.oauth_refresh_tokens \
-             SET rotated_at = NOW(), \
-                 consumed_at = NOW(), \
-                 last_used_at = NOW(), \
-                 replaced_by_token_hash = $2, \
-                 idem_response_enc = $3, \
-                 idem_expires_at = NOW() + make_interval(secs => $4::INT) \
-             WHERE token_hash = $1 \
-               AND rotated_at IS NULL \
-               AND revoked_at IS NULL \
-             RETURNING refresh_family_id",
-            &[
-                &row.token_hash,
-                &new_hash.hash,
-                &idem_response_enc,
-                &i32::try_from(IDEM_WINDOW_SECS).unwrap_or(30),
-            ],
-        )
+    lock_refresh_family_xact(db, &presented.session_id)
         .await
         .map_err(|err| {
-            tracing::error!(error = %err, "refresh token consume failed");
+            tracing::error!(
+                error = %err,
+                session_id = %presented.session_id,
+                "refresh rotation session lock failed"
+            );
             OAuthError::server_error("refresh rotation unavailable")
         })?;
-    if consumed.is_empty() {
-        kill_family(db, &row.refresh_family_id, "race").await?;
+
+    let Some(row) = session_store::lock_and_read(db, &presented.session_id)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "refresh: session read failed");
+            OAuthError::server_error("session store unavailable")
+        })?
+    else {
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    };
+    // The client that holds a session is the client the session was issued to.
+    // A platform-audience session carries no client id and belongs to the
+    // first-party CLI.
+    let owning_client = row
+        .client_id
+        .clone()
+        .unwrap_or_else(|| zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID.to_string());
+    if owning_client != client.client_id {
         return Err(OAuthError::invalid_grant("refresh token is invalid"));
     }
 
-    db.execute(
-        "INSERT INTO zeroship.oauth_refresh_tokens \
-            (token_hash, hash_key_version, refresh_family_id, client_id, user_id, sub, \
-             granted_scopes, family_granted_scopes, expires_at, family_absolute_expires_at) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, \
-                 LEAST(NOW() + make_interval(days => $9::INT), $10), $10)",
-        &[
-            &new_hash.hash,
-            &new_hash.version,
-            &row.refresh_family_id,
-            &row.client_id,
-            &row.user_id,
-            &row.sub,
-            &new_scopes,
-            &row.family_granted_scopes,
-            &i32::try_from(FAMILY_IDLE_DAYS).unwrap_or(7),
-            &row.family_absolute_expires_at,
-        ],
+    // THE SLOT IS RE-DERIVED HERE, NOT CARRIED FROM THE PEEK. `peek` ran before
+    // the transaction and before the locks above, so a concurrent rotation can
+    // commit in between: the secret that resolved as CURRENT is SUPERSEDED by
+    // the time this lock is granted, and acting on the stale verdict refuses a
+    // request that has earned the idempotent replay. See
+    // `SessionRow::slot_for`.
+    let Some(slot) = row.slot_for(&presented) else {
+        // Neither slot matches any more: the session rotated at least twice
+        // while this request waited, so the presented secret is older than the
+        // one superseded slot can speak for. Unknown, not reuse - the horizon
+        // note in `session_store` says why that is the honest verdict.
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    };
+    if slot == SecretSlot::Superseded {
+        return replay_or_kill(db, cfg, issuer, keys, &client, &presented, &row).await;
+    }
+
+    let new_scopes = requested_refresh_scopes(params.scope.as_deref(), &row.grant_scopes)?;
+    let rotation = session_store::rotate(
+        db,
+        keys,
+        &presented,
+        &new_scopes,
+        FAMILY_IDLE_DAYS,
+        IDEM_WINDOW_SECS,
     )
     .await
     .map_err(|err| {
-        tracing::error!(error = %err, family_id = %row.refresh_family_id, "refresh child insert failed");
+        tracing::error!(error = %err, "refresh: rotation failed");
         OAuthError::server_error("refresh rotation unavailable")
     })?;
 
-    // Rotation must reproduce the token shape the ORIGINAL grant issued; see
-    // `device_token::mint_grant_access_token`.
-    let access_token =
-        device_token::mint_grant_access_token(db, cfg, issuer, &client, row.user_id, &new_scopes)
-            .await?;
+    let Rotation::Rotated {
+        row: rotated,
+        secret,
+        proof,
+    } = rotation
+    else {
+        // The row exists but the validating read refused it: revoked, expired,
+        // suspended, or the person's credential epoch moved. One
+        // indistinguishable refusal class, as C14 requires.
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    };
+
+    let access_token = device_token::mint_grant_access_token(
+        db,
+        cfg,
+        issuer,
+        &client,
+        rotated.person_id,
+        &new_scopes,
+        &proof,
+    )
+    .await?;
     Ok(TokenResponse {
         access_token,
         id_token: None,
-        refresh_token: Some(new_raw),
+        refresh_token: Some(secret),
         token_type: TOKEN_TYPE_BEARER,
         expires_in: ACCESS_TOKEN_TTL_SECS as u64,
         scope: new_scopes.join(" "),
+    })
+}
+
+/// A presentation of a SUPERSEDED secret is one of two things: the single retry
+/// a lost response earns, or reuse. Serve the retry, then kill.
+#[allow(clippy::future_not_send)]
+async fn replay_or_kill(
+    db: &Transaction<'_>,
+    cfg: &AuthConfig,
+    issuer: &Issuer,
+    keys: &SessionSecretKeys,
+    client: &OAuthClient,
+    presented: &PeekedSession,
+    row: &SessionRow,
+) -> Result<TokenResponse, OAuthError> {
+    let replayed = session_store::replay(db, keys, presented, row)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "refresh: idempotent replay failed");
+            OAuthError::server_error("refresh rotation unavailable")
+        })?;
+
+    // Every arm that declines to serve reaches the kill. Nothing above may
+    // short-circuit with a refusal of its own: an early return would skip it,
+    // so a record that will not open - which is what a rotated idempotency key
+    // looks like - would disarm reuse detection for every session at once.
+    let Some((cached, replayed_row, proof)) = replayed else {
+        session_store::revoke(db, &row.id, "replay")
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, session_id = %row.id, "refresh: reuse kill failed");
+                OAuthError::server_error("refresh revoke unavailable")
+            })?;
+        return Err(OAuthError::invalid_grant("refresh token is invalid"));
+    };
+
+    let scopes = parse_scopes(&cached.scope);
+    let access_token = device_token::mint_grant_access_token(
+        db,
+        cfg,
+        issuer,
+        client,
+        replayed_row.person_id,
+        &scopes,
+        &proof,
+    )
+    .await?;
+    tracing::info!(session_id = %replayed_row.id, "refresh idempotency replay recovered");
+    Ok(TokenResponse {
+        access_token,
+        id_token: None,
+        refresh_token: Some(cached.refresh_token),
+        token_type: TOKEN_TYPE_BEARER,
+        expires_in: ACCESS_TOKEN_TTL_SECS as u64,
+        scope: scopes.join(" "),
     })
 }
 
@@ -635,15 +610,9 @@ async fn refresh_user_active(
     Ok(!rows.is_empty())
 }
 
-async fn require_refresh_user_active(
-    db: &(impl GenericClient + ?Sized),
-    user_id: Uuid,
-) -> Result<(), OAuthError> {
-    if !refresh_user_active(db, user_id).await? {
-        return Err(OAuthError::invalid_grant("authenticated user is inactive"));
-    }
-    Ok(())
-}
+// ---------------------------------------------------------------------------
+// Revocation
+// ---------------------------------------------------------------------------
 
 #[allow(clippy::future_not_send)]
 pub async fn revoke_post(
@@ -694,7 +663,7 @@ async fn revoke_inner(
     };
     let client_auth =
         client_auth_from_request(req, form.client_id.as_deref(), form.client_secret.as_deref());
-    let keys = RefreshTokenKeys::from_config(cfg)?;
+    let keys = session_keys(cfg)?;
     let client_id = match authenticated_client_id(db, form.client_id.as_deref(), &client_auth).await
     {
         Ok(client_id) => client_id,
@@ -705,14 +674,24 @@ async fn revoke_inner(
     authenticate_client(issuer, &client, &client_auth)?;
     if let Ok(claims) = issuer.verify_access_token(raw_token) {
         if claims.client_id == client.client_id {
-            kill_families_for_subject(refresh_pool, &claims.client_id, &claims.sub).await?;
+            revoke_sessions_for_subject(refresh_pool, &claims.client_id, &claims.sub).await?;
         }
         return Ok(());
     }
-    let Some((_hash, row)) = lookup_by_any_hash(db, &keys, raw_token).await? else {
+    let Some(presented) = session_store::peek(db, &keys, raw_token)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "revoke: session lookup failed");
+            OAuthError::server_error("revoke unavailable")
+        })?
+    else {
         return Ok(());
     };
-    if row.client_id != client.client_id {
+    let owning_client = presented
+        .client_id
+        .clone()
+        .unwrap_or_else(|| zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID.to_string());
+    if owning_client != client.client_id {
         return Ok(());
     }
 
@@ -732,18 +711,24 @@ async fn revoke_inner(
         OAuthError::server_error("revoke unavailable")
     })?;
     let result = async {
-        lock_refresh_user_xact(&tx, row.user_id).await.map_err(|err| {
-            tracing::error!(error = %err, user_id = %row.user_id, "revoke user lock failed");
-            OAuthError::server_error("revoke unavailable")
-        })?;
-        lock_refresh_family_xact(&tx, &row.refresh_family_id)
+        lock_refresh_user_xact(&tx, presented.person_id)
             .await
             .map_err(|err| {
-                tracing::error!(error = %err, family_id = %row.refresh_family_id, "revoke family lock failed");
+                tracing::error!(error = %err, user_id = %presented.person_id, "revoke user lock failed");
                 OAuthError::server_error("revoke unavailable")
             })?;
-        kill_family(&tx, &row.refresh_family_id, "revoke").await?;
-        Ok(())
+        lock_refresh_family_xact(&tx, &presented.session_id)
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, session_id = %presented.session_id, "revoke session lock failed");
+                OAuthError::server_error("revoke unavailable")
+            })?;
+        session_store::revoke(&tx, &presented.session_id, "revoke")
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, "revoke: session revoke failed");
+                OAuthError::server_error("revoke unavailable")
+            })
     }
     .await;
     match result {
@@ -763,7 +748,13 @@ async fn revoke_inner(
     }
 }
 
-pub async fn revoke_user_refresh_families(
+/// End every session a person holds, on a dedicated connection.
+///
+/// # Errors
+///
+/// A message naming the reason when the pool, the transaction or the statement
+/// fails.
+pub async fn revoke_person_sessions(
     refresh_pool: &RefreshSessionPool,
     user_id: Uuid,
     reason: &'static str,
@@ -784,7 +775,7 @@ pub async fn revoke_user_refresh_families(
         lock_refresh_user_xact(&tx, user_id)
             .await
             .map_err(|err| format!("refresh user revoke lock: {err}"))?;
-        revoke_user_refresh_families_in_transaction(&tx, user_id, reason).await
+        revoke_person_sessions_in_transaction(&tx, user_id, reason).await
     }
     .await;
     match result {
@@ -797,155 +788,176 @@ pub async fn revoke_user_refresh_families(
             return Err(err);
         }
     }
-    tracing::info!(user_id = %user_id, reason, "refresh families revoked for user");
+    tracing::info!(user_id = %user_id, reason, "sessions revoked for user");
     Ok(())
 }
 
-/// Revoke every refresh family for a user inside the caller's transaction.
+/// Revoke every live session a person holds, inside the caller's transaction.
 ///
 /// The caller must first hold [`lock_refresh_user_xact`] on this transaction.
-/// Keeping the row updates and access-token family markers in one statement
-/// makes either both effects commit or neither effect commit.
-pub(crate) async fn revoke_user_refresh_families_in_transaction(
+/// The row updates and the access-token markers ride one statement, so either
+/// both effects commit or neither does.
+///
+/// # Errors
+///
+/// A message naming the reason when the statement fails.
+pub(crate) async fn revoke_person_sessions_in_transaction(
     db: &(impl GenericClient + ?Sized),
     user_id: Uuid,
     reason: &'static str,
 ) -> Result<(), String> {
-    db.execute(
-        "WITH fam AS ( \
-             SELECT DISTINCT client_id, sub \
-             FROM zeroship.oauth_refresh_tokens \
-             WHERE user_id = $1 AND revoked_at IS NULL \
-         ), upd AS ( \
-             UPDATE zeroship.oauth_refresh_tokens \
-             SET revoked_at = clock_timestamp() \
-             WHERE user_id = $1 AND revoked_at IS NULL \
-             RETURNING 1 \
-         ) \
-         INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
-         SELECT client_id, sub, clock_timestamp() FROM fam \
-         ON CONFLICT (client_id, sub) \
-           DO UPDATE SET revoked_after = \
-             GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after)",
-        &[&user_id],
-    )
-    .await
-    .map(|_| ())
-    .map_err(|err| format!("refresh user revoke families ({reason}): {err}"))
+    session_store::revoke_person_sessions(db, user_id, reason)
+        .await
+        .map(|_| ())
 }
 
-pub async fn sweep_refresh_tokens(refresh_pool: &RefreshSessionPool) -> Result<(u64, u64), String> {
-    let family_deleted = sweep_refresh_family_delete(refresh_pool).await?;
-    let idem_reaped = sweep_refresh_idem(refresh_pool).await?;
-    Ok((family_deleted, idem_reaped))
+/// End every session whose grant names this (client, subject) pair.
+async fn revoke_sessions_for_subject(
+    refresh_pool: &RefreshSessionPool,
+    client_id: &str,
+    sub: &str,
+) -> Result<(), OAuthError> {
+    let pool = refresh_pool
+        .checkout_pool("access-token revoke")
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "access-token revoke: dedicated database pool checkout failed");
+            OAuthError::server_error("revoke unavailable")
+        })?;
+    let mut conn = pool.get().await.map_err(|err| {
+        tracing::error!(error = %err, "access-token revoke: dedicated database session checkout failed");
+        OAuthError::server_error("revoke unavailable")
+    })?;
+    let tx = conn.transaction().await.map_err(|err| {
+        tracing::error!(error = %err, "access-token revoke: BEGIN failed on dedicated session");
+        OAuthError::server_error("revoke unavailable")
+    })?;
+    let result = revoke_sessions_for_subject_in_transaction(&tx, client_id, sub).await;
+
+    match result {
+        Ok(()) => {
+            tx.commit().await.map_err(|err| {
+                tracing::error!(error = %err, "access-token revoke: COMMIT failed");
+                OAuthError::server_error("revoke unavailable")
+            })?;
+            Ok(())
+        }
+        Err(err) => {
+            if let Err(rollback) = tx.rollback().await {
+                tracing::error!(error = %rollback, "access-token revoke: ROLLBACK failed");
+            }
+            Err(err)
+        }
+    }
 }
 
-/// A presentation of an already-rotated token is one of two things: the single
-/// retry a lost response earns, or reuse. Serve the retry, then kill.
-async fn replay_or_kill(
-    db: &Transaction<'_>,
-    cfg: &AuthConfig,
-    issuer: &Issuer,
-    keys: &RefreshTokenKeys,
-    client: &OAuthClient,
-    row: &RefreshRow,
-) -> Result<TokenResponse, OAuthError> {
-    if let Some(response) = replay_lost_response(db, cfg, issuer, keys, client, row).await? {
-        return Ok(response);
-    }
-    kill_family(db, &row.refresh_family_id, "replay").await?;
-    Err(OAuthError::invalid_grant("refresh token is invalid"))
-}
-
-/// `Ok(None)` is the reuse verdict, and every arm below that declines to serve
-/// must reach the caller as one. Nothing here may short-circuit with an
-/// `invalid_grant` of its own: an early return skips `kill_family`, so a
-/// decrypt failure that answered `invalid_grant` directly would disarm reuse
-/// detection for every family at once the moment the idempotency key rotated
-/// or a snapshot came back under a different one.
-async fn replay_lost_response(
-    db: &Transaction<'_>,
-    cfg: &AuthConfig,
-    issuer: &Issuer,
-    keys: &RefreshTokenKeys,
-    client: &OAuthClient,
-    row: &RefreshRow,
-) -> Result<Option<TokenResponse>, OAuthError> {
-    let (Some(successor_hash), Some(idem_expires_at), Some(enc)) = (
-        row.replaced_by_token_hash.as_ref(),
-        row.idem_expires_at,
-        row.idem_response_enc.as_ref(),
-    ) else {
-        return Ok(None);
-    };
-    let now = Utc::now();
-    if idem_expires_at <= now || row.expires_at <= now || row.family_absolute_expires_at <= now {
-        return Ok(None);
-    }
-    // `select_live_successor` requires `rotated_at IS NULL`, so a chain that has
-    // already advanced past the successor is a kill and not a retry: the
-    // legitimate client is holding something newer, and no honest retry of this
-    // token remains outstanding.
-    let Some(successor) = select_live_successor(db, successor_hash).await? else {
-        return Ok(None);
-    };
-    if successor.expires_at <= now || successor.family_absolute_expires_at <= now {
-        return Ok(None);
-    }
-
-    // The record is single-use: serving it consumes it, so the second
-    // presentation of the same predecessor falls through to the family kill.
-    // A conditional UPDATE rather than a read-then-write, so two replays cannot
-    // both observe it present and both be served. NULL is already the spent
-    // marker the idempotency sweep writes, so no other reader learns a new
-    // state.
-    let consumed = db
-        .execute(
-            "UPDATE zeroship.oauth_refresh_tokens \
-             SET idem_response_enc = NULL, idem_expires_at = NULL \
-             WHERE token_hash = $1 AND idem_response_enc IS NOT NULL",
-            &[&row.token_hash],
+/// The same, inside the caller's transaction.
+///
+/// The person and session locks are taken in a deterministic order before any
+/// write, which is what keeps two concurrent revokes from deadlocking.
+///
+/// # Errors
+///
+/// `OAuthError::server_error` when a lock or the write fails.
+pub(super) async fn revoke_sessions_for_subject_in_transaction(
+    db: &(impl GenericClient + ?Sized),
+    client_id: &str,
+    sub: &str,
+) -> Result<(), OAuthError> {
+    let rows = db
+        .query(
+            "SELECT DISTINCT s.person_id, s.id \
+             FROM zeroship.sessions s \
+             JOIN zeroship.grants g ON g.id = s.grant_id \
+             WHERE COALESCE(g.client_id, $1) = $2 AND g.subject = $3 \
+             ORDER BY s.person_id, s.id",
+            &[
+                &zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID,
+                &client_id,
+                &sub,
+            ],
         )
         .await
         .map_err(|err| {
+            tracing::error!(error = %err, client_id, sub, "access-token revoke: session lookup failed");
+            OAuthError::server_error("revoke unavailable")
+        })?;
+
+    let mut person_ids = Vec::new();
+    let mut session_ids = Vec::new();
+    for row in rows {
+        person_ids.push(row.get::<_, Uuid>("person_id"));
+        session_ids.push(row.get::<_, String>("id"));
+    }
+    person_ids.sort();
+    person_ids.dedup();
+    session_ids.sort();
+    session_ids.dedup();
+
+    for person_id in person_ids {
+        lock_refresh_user_xact(db, person_id).await.map_err(|err| {
             tracing::error!(
                 error = %err,
-                family_id = %row.refresh_family_id,
-                "refresh idempotency consume failed"
+                user_id = %person_id,
+                "access-token revoke: user lock failed"
             );
-            OAuthError::server_error("refresh rotation unavailable")
+            OAuthError::server_error("revoke unavailable")
         })?;
-    if consumed == 0 {
-        return Ok(None);
+    }
+    for session_id in &session_ids {
+        lock_refresh_family_xact(db, session_id).await.map_err(|err| {
+            tracing::error!(
+                error = %err,
+                session_id = %session_id,
+                "access-token revoke: session lock failed"
+            );
+            OAuthError::server_error("revoke unavailable")
+        })?;
     }
 
-    let Ok(cached) = keys.open_cached_response(&row.token_hash, &row.refresh_family_id, enc) else {
-        tracing::warn!(
-            family_id = %row.refresh_family_id,
-            client_id = %row.client_id,
-            "refresh idempotency record would not open; failing closed and treating \
-             the presentation as reuse"
-        );
-        return Ok(None);
-    };
-    let scopes = parse_scopes(&cached.scope);
-    let access_token =
-        device_token::mint_grant_access_token(db, cfg, issuer, client, successor.user_id, &scopes)
-            .await?;
-    tracing::info!(
-        family_id = %row.refresh_family_id,
-        client_id = %row.client_id,
-        "refresh idempotency replay recovered"
-    );
-    Ok(Some(TokenResponse {
-        access_token,
-        id_token: None,
-        refresh_token: Some(cached.refresh_token),
-        token_type: TOKEN_TYPE_BEARER,
-        expires_in: ACCESS_TOKEN_TTL_SECS as u64,
-        scope: scopes.join(" "),
-    }))
+    for session_id in &session_ids {
+        session_store::revoke(db, session_id, "access-token revoke")
+            .await
+            .map_err(|err| {
+                tracing::error!(error = %err, session_id, "access-token revoke failed");
+                OAuthError::server_error("revoke unavailable")
+            })?;
+    }
+    tracing::info!(client_id, sub, "sessions revoked for subject");
+    Ok(())
 }
+
+/// Delete expired sessions and clear spent idempotent records.
+///
+/// Returns `(deleted, idempotent records cleared)`.
+///
+/// This takes NO per-person advisory lock, and the old sweep did. It could:
+/// the family sweep had to enumerate a chain and delete rows a rotation might
+/// be walking, so it serialised against rotation on the person. One row per
+/// session removes the chain, and the two statements this runs touch only rows
+/// whose deadlines have already passed - a row a rotation could still validate
+/// is out of both predicates by construction. A single statement taking only
+/// row locks cannot deadlock against a rotation that takes them in the same
+/// order.
+///
+/// # Errors
+///
+/// A message when the pool, the session checkout or either statement fails.
+pub async fn sweep_sessions(refresh_pool: &RefreshSessionPool) -> Result<(u64, u64), String> {
+    let pool = refresh_pool
+        .checkout_pool("session sweep")
+        .await
+        .map_err(|err| format!("session sweep pool checkout: {err}"))?;
+    let conn = pool
+        .get()
+        .await
+        .map_err(|err| format!("session sweep session checkout: {err}"))?;
+    session_store::sweep(&*conn, SESSION_RETENTION_DAYS).await
+}
+
+// ---------------------------------------------------------------------------
+// Client authentication
+// ---------------------------------------------------------------------------
 
 pub(super) async fn authenticated_client_id(
     db: &(impl GenericClient + ?Sized),
@@ -1028,38 +1040,65 @@ pub(super) struct ActiveRefreshToken {
     pub aud: String,
 }
 
+/// Introspect a presented session secret.
+///
+/// This mints nothing, so it takes no witness and produces none. It is a READ,
+/// and it answers `None` for anything a rotation would refuse - which is why it
+/// repeats those predicates rather than sharing the rotating statement.
 #[allow(clippy::future_not_send)]
 pub(super) async fn introspect_refresh_token(
     db: &(impl GenericClient + ?Sized),
-    keys: &RefreshTokenKeys,
+    keys: &SessionSecretKeys,
     authenticated_client: &OAuthClient,
     raw_token: &str,
 ) -> Result<Option<ActiveRefreshToken>, OAuthError> {
-    let Some((_hash, row)) = lookup_by_any_hash(db, keys, raw_token).await? else {
+    let Some(presented) = session_store::peek(db, keys, raw_token)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "introspect: session lookup failed");
+            OAuthError::server_error("session store unavailable")
+        })?
+    else {
         return Ok(None);
     };
-    if row.client_id != authenticated_client.client_id {
+    // Only the LIVE secret is an active token. A superseded one is at best a
+    // spent replay record.
+    if presented.slot() != SecretSlot::Current {
         return Ok(None);
     }
-    let now = Utc::now();
-    if row.rotated_at.is_some()
-        || row.revoked_at.is_some()
-        || row.expires_at <= now
-        || row.family_absolute_expires_at <= now
-        || family_has_revoked_row(db, &row.refresh_family_id).await?
+    let owning_client = presented
+        .client_id
+        .clone()
+        .unwrap_or_else(|| zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID.to_string());
+    if owning_client != authenticated_client.client_id {
+        return Ok(None);
+    }
+    let Some(row) = session_store::lock_and_read(db, &presented.session_id)
+        .await
+        .map_err(|err| {
+            tracing::error!(error = %err, "introspect: session read failed");
+            OAuthError::server_error("session store unavailable")
+        })?
+    else {
+        return Ok(None);
+    };
+    let now = chrono::Utc::now();
+    if row.revoked_at.is_some()
+        || row.idle_expires_at <= now
+        || row.absolute_expires_at <= now
     {
         return Ok(None);
     }
-    if !refresh_user_active(db, row.user_id).await? {
+    if !refresh_user_active(db, row.person_id).await? {
         return Ok(None);
     }
     Ok(Some(ActiveRefreshToken {
-        scope: row.granted_scopes.join(" "),
-        client_id: row.client_id,
+        scope: row.scopes.join(" "),
+        client_id: owning_client,
         token_type: "refresh_token",
-        exp: row.expires_at.timestamp(),
-        iat: row.issued_at.timestamp(),
-        sub: row.sub,
+        exp: row.idle_expires_at.timestamp(),
+        iat: row.rotated_at.unwrap_or(row.created_at).timestamp(),
+        sub: row.subject,
         aud: authenticated_client.resource_audience(),
     }))
 }
@@ -1094,447 +1133,6 @@ fn requested_refresh_scopes(
     }
 }
 
-async fn lookup_by_any_hash(
-    db: &(impl GenericClient + ?Sized),
-    keys: &RefreshTokenKeys,
-    raw_token: &str,
-) -> Result<Option<(TokenHash, RefreshRow)>, OAuthError> {
-    let hashes = keys.hashes_newest_first(raw_token);
-    if hashes.is_empty() {
-        return Ok(None);
-    }
-    let candidate_hashes = hashes
-        .iter()
-        .map(|hash| hash.hash.clone())
-        .collect::<Vec<_>>();
-    let rows = db
-        .query(REFRESH_ROW_SELECT_ANY, &[&candidate_hashes])
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "refresh row lookup failed");
-            OAuthError::server_error("refresh token store unavailable")
-        })?
-        .into_iter()
-        .map(|row| row_to_refresh_row(&row))
-        .collect::<Vec<_>>();
-    for hash in hashes {
-        if let Some(row) = rows.iter().find(|row| row.token_hash == hash.hash) {
-            return Ok(Some((hash, row.clone())));
-        }
-    }
-    Ok(None)
-}
-
-async fn select_refresh_row_for_update(
-    db: &(impl GenericClient + ?Sized),
-    token_hash: &[u8],
-) -> Result<Option<RefreshRow>, OAuthError> {
-    select_refresh_row(db, token_hash, true).await
-}
-
-async fn select_refresh_row(
-    db: &(impl GenericClient + ?Sized),
-    token_hash: &[u8],
-    for_update: bool,
-) -> Result<Option<RefreshRow>, OAuthError> {
-    let sql = if for_update {
-        REFRESH_ROW_SELECT_FOR_UPDATE
-    } else {
-        REFRESH_ROW_SELECT
-    };
-    let rows = db.query(sql, &[&token_hash]).await.map_err(|err| {
-        tracing::error!(error = %err, "refresh row lookup failed");
-        OAuthError::server_error("refresh token store unavailable")
-    })?;
-    Ok(rows.first().map(row_to_refresh_row))
-}
-
-const REFRESH_ROW_SELECT: &str = "\
-    SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
-           client_id, user_id, sub, granted_scopes, family_granted_scopes, issued_at, expires_at, \
-           family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
-    FROM zeroship.oauth_refresh_tokens \
-    WHERE token_hash = $1";
-const REFRESH_ROW_SELECT_ANY: &str = "\
-    SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
-           client_id, user_id, sub, granted_scopes, family_granted_scopes, issued_at, expires_at, \
-           family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
-    FROM zeroship.oauth_refresh_tokens \
-    WHERE token_hash = ANY($1::BYTEA[])";
-const REFRESH_ROW_SELECT_FOR_UPDATE: &str = "\
-    SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
-           client_id, user_id, sub, granted_scopes, family_granted_scopes, issued_at, expires_at, \
-           family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
-    FROM zeroship.oauth_refresh_tokens \
-    WHERE token_hash = $1 \
-    FOR UPDATE";
-
-fn row_to_refresh_row(row: &compio_postgres::Row) -> RefreshRow {
-    RefreshRow {
-        token_hash: row.get("token_hash"),
-        hash_key_version: row.get("hash_key_version"),
-        refresh_family_id: row.get("refresh_family_id"),
-        replaced_by_token_hash: row.try_get("replaced_by_token_hash").ok().flatten(),
-        client_id: row.get("client_id"),
-        user_id: row.get("user_id"),
-        sub: row.get("sub"),
-        granted_scopes: row.get("granted_scopes"),
-        family_granted_scopes: row.get("family_granted_scopes"),
-        issued_at: row.get("issued_at"),
-        expires_at: row.get("expires_at"),
-        family_absolute_expires_at: row.get("family_absolute_expires_at"),
-        rotated_at: row.try_get("rotated_at").ok().flatten(),
-        revoked_at: row.try_get("revoked_at").ok().flatten(),
-        idem_response_enc: row.try_get("idem_response_enc").ok().flatten(),
-        idem_expires_at: row.try_get("idem_expires_at").ok().flatten(),
-    }
-}
-
-async fn family_has_revoked_row(
-    db: &(impl GenericClient + ?Sized),
-    family_id: &str,
-) -> Result<bool, OAuthError> {
-    let rows = db
-        .query(
-            "SELECT 1 FROM zeroship.oauth_refresh_tokens \
-             WHERE refresh_family_id = $1 AND revoked_at IS NOT NULL LIMIT 1",
-            &[&family_id],
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, family_id, "refresh family revoke check failed");
-            OAuthError::server_error("refresh token store unavailable")
-        })?;
-    Ok(!rows.is_empty())
-}
-
-async fn select_live_successor(
-    db: &(impl GenericClient + ?Sized),
-    successor_hash: &[u8],
-) -> Result<Option<RefreshRow>, OAuthError> {
-    let rows = db
-        .query(
-            "SELECT token_hash, hash_key_version, refresh_family_id, replaced_by_token_hash, \
-                    client_id, user_id, sub, granted_scopes, family_granted_scopes, issued_at, expires_at, \
-                    family_absolute_expires_at, rotated_at, revoked_at, idem_response_enc, idem_expires_at \
-             FROM zeroship.oauth_refresh_tokens \
-             WHERE token_hash = $1 AND rotated_at IS NULL AND revoked_at IS NULL",
-            &[&successor_hash],
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "refresh successor lookup failed");
-            OAuthError::server_error("refresh token store unavailable")
-        })?;
-    Ok(rows.first().map(row_to_refresh_row))
-}
-
-async fn kill_family(
-    db: &(impl GenericClient + ?Sized),
-    family_id: &str,
-    reason: &'static str,
-) -> Result<(), OAuthError> {
-    db.execute(
-        "WITH fam AS ( \
-             SELECT DISTINCT client_id, sub \
-             FROM zeroship.oauth_refresh_tokens \
-             WHERE refresh_family_id = $1 \
-         ), upd AS ( \
-             UPDATE zeroship.oauth_refresh_tokens \
-             SET revoked_at = NOW() \
-             WHERE refresh_family_id = $1 AND revoked_at IS NULL \
-             RETURNING 1 \
-         ) \
-         INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
-         SELECT client_id, sub, NOW() FROM fam \
-         ON CONFLICT (client_id, sub) \
-           DO UPDATE SET revoked_after = \
-             GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after)",
-        &[&family_id],
-    )
-    .await
-    .map_err(|err| {
-        tracing::error!(error = %err, family_id, reason, "refresh family kill failed");
-        OAuthError::server_error("refresh family revoke unavailable")
-    })?;
-    tracing::info!(family_id, reason, "refresh family killed");
-    Ok(())
-}
-
-async fn kill_families_for_subject(
-    refresh_pool: &RefreshSessionPool,
-    client_id: &str,
-    sub: &str,
-) -> Result<(), OAuthError> {
-    let pool = refresh_pool
-        .checkout_pool("access-token revoke")
-        .await
-        .map_err(|err| {
-            tracing::error!(error = %err, "access-token revoke: dedicated database pool checkout failed");
-            OAuthError::server_error("revoke unavailable")
-        })?;
-    let mut conn = pool.get().await.map_err(|err| {
-        tracing::error!(error = %err, "access-token revoke: dedicated database session checkout failed");
-        OAuthError::server_error("revoke unavailable")
-    })?;
-    let tx = conn.transaction().await.map_err(|err| {
-        tracing::error!(error = %err, "access-token revoke: BEGIN failed on dedicated session");
-        OAuthError::server_error("revoke unavailable")
-    })?;
-    let result = async {
-        kill_families_for_subject_in_transaction(&tx, client_id, sub).await
-    }
-    .await;
-
-    match result {
-        Ok(()) => {
-            tx.commit().await.map_err(|err| {
-                tracing::error!(error = %err, "access-token revoke: COMMIT failed");
-                OAuthError::server_error("revoke unavailable")
-            })?;
-            Ok(())
-        }
-        Err(err) => {
-            if let Err(rollback) = tx.rollback().await {
-                tracing::error!(error = %rollback, "access-token revoke: ROLLBACK failed");
-            }
-            Err(err)
-        }
-    }
-}
-
-pub(super) async fn kill_families_for_subject_in_transaction(
-    db: &(impl GenericClient + ?Sized),
-    client_id: &str,
-    sub: &str,
-) -> Result<(), OAuthError> {
-    let rows = db
-        .query(
-            "SELECT DISTINCT user_id, refresh_family_id \
-             FROM zeroship.oauth_refresh_tokens \
-             WHERE client_id = $1 AND sub = $2 \
-             ORDER BY user_id, refresh_family_id",
-            &[&client_id, &sub],
-        )
-        .await
-        .map_err(|err| {
-            tracing::error!(
-                error = %err,
-                client_id,
-                sub,
-                "access-token revoke: refresh family lookup failed"
-            );
-            OAuthError::server_error("revoke unavailable")
-        })?;
-
-    let mut user_ids = Vec::new();
-    let mut family_ids = Vec::new();
-    for row in rows {
-        user_ids.push(row.get::<_, Uuid>("user_id"));
-        family_ids.push(row.get::<_, String>("refresh_family_id"));
-    }
-    user_ids.sort();
-    user_ids.dedup();
-    family_ids.sort();
-    family_ids.dedup();
-
-    for user_id in user_ids {
-        lock_refresh_user_xact(db, user_id).await.map_err(|err| {
-            tracing::error!(
-                error = %err,
-                user_id = %user_id,
-                "access-token revoke: refresh user lock failed"
-            );
-            OAuthError::server_error("revoke unavailable")
-        })?;
-    }
-    for family_id in family_ids {
-        lock_refresh_family_xact(db, &family_id)
-            .await
-            .map_err(|err| {
-                tracing::error!(
-                    error = %err,
-                    family_id = %family_id,
-                    "access-token revoke: refresh family lock failed"
-                );
-                OAuthError::server_error("revoke unavailable")
-            })?;
-    }
-
-    kill_families_for_subject_inner(db, client_id, sub).await
-}
-
-async fn kill_families_for_subject_inner(
-    db: &(impl GenericClient + ?Sized),
-    client_id: &str,
-    sub: &str,
-) -> Result<(), OAuthError> {
-    db.execute(
-        "WITH upd AS ( \
-             UPDATE zeroship.oauth_refresh_tokens \
-             SET revoked_at = NOW() \
-             WHERE client_id = $1 AND sub = $2 AND revoked_at IS NULL \
-             RETURNING 1 \
-         ) \
-         INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
-         VALUES ($1, $2, NOW()) \
-         ON CONFLICT (client_id, sub) \
-           DO UPDATE SET revoked_after = \
-             GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after)",
-        &[&client_id, &sub],
-    )
-    .await
-    .map_err(|err| {
-        tracing::error!(
-            error = %err,
-            client_id,
-            sub,
-            "access-token revoke: refresh families kill failed"
-        );
-        OAuthError::server_error("revoke unavailable")
-    })?;
-    tracing::info!(client_id, sub, "access-token refresh families killed");
-    Ok(())
-}
-
-async fn sweep_refresh_family_delete(refresh_pool: &RefreshSessionPool) -> Result<u64, String> {
-    let enum_pool = refresh_pool
-        .checkout_pool("refresh sweep family-delete enumerate")
-        .await
-        .map_err(|err| format!("refresh sweep enumerate family-delete pool checkout: {err}"))?;
-    let enum_conn = enum_pool
-        .get()
-        .await
-        .map_err(|err| format!("refresh sweep enumerate family-delete session checkout: {err}"))?;
-    let users = enum_conn
-        .query(
-            "SELECT DISTINCT user_id \
-             FROM zeroship.oauth_refresh_tokens \
-             WHERE family_absolute_expires_at < NOW() \
-                OR (rotated_at IS NOT NULL AND issued_at < NOW() - INTERVAL '24 hours')",
-            &[],
-        )
-        .await
-        .map_err(|err| format!("refresh sweep enumerate family-delete users: {err}"))?
-        .into_iter()
-        .map(|row| row.get::<_, Uuid>("user_id"))
-        .collect::<Vec<_>>();
-    drop(enum_conn);
-    drop(enum_pool);
-    let mut deleted = 0;
-    for user_id in users {
-        let pool = refresh_pool
-            .checkout_pool("refresh sweep family-delete")
-            .await
-            .map_err(|err| format!("refresh sweep family-delete pool checkout: {err}"))?;
-        let mut conn = pool
-            .get()
-            .await
-            .map_err(|err| format!("refresh sweep family-delete session checkout: {err}"))?;
-        let tx = conn
-            .transaction()
-            .await
-            .map_err(|err| format!("refresh sweep family-delete begin: {err}"))?;
-        let result = async {
-            lock_refresh_user_xact(&tx, user_id)
-                .await
-                .map_err(|err| format!("refresh sweep family-delete lock {user_id}: {err}"))?;
-            tx.execute(
-                "DELETE FROM zeroship.oauth_refresh_tokens \
-                 WHERE user_id = $1 \
-                   AND (family_absolute_expires_at < NOW() \
-                        OR (rotated_at IS NOT NULL AND issued_at < NOW() - INTERVAL '24 hours'))",
-                &[&user_id],
-            )
-            .await
-            .map_err(|err| format!("refresh sweep family-delete {user_id}: {err}"))
-        }
-        .await;
-        match result {
-            Ok(n) => {
-                tx.commit()
-                    .await
-                    .map_err(|err| format!("refresh sweep family-delete commit: {err}"))?;
-                deleted += n;
-            }
-            Err(err) => {
-                let _ = tx.rollback().await;
-                return Err(err);
-            }
-        }
-    }
-    Ok(deleted)
-}
-
-async fn sweep_refresh_idem(refresh_pool: &RefreshSessionPool) -> Result<u64, String> {
-    let enum_pool = refresh_pool
-        .checkout_pool("refresh sweep idem enumerate")
-        .await
-        .map_err(|err| format!("refresh sweep enumerate idem pool checkout: {err}"))?;
-    let enum_conn = enum_pool
-        .get()
-        .await
-        .map_err(|err| format!("refresh sweep enumerate idem session checkout: {err}"))?;
-    let users = enum_conn
-        .query(
-            "SELECT DISTINCT user_id \
-             FROM zeroship.oauth_refresh_tokens \
-             WHERE idem_response_enc IS NOT NULL AND idem_expires_at < NOW()",
-            &[],
-        )
-        .await
-        .map_err(|err| format!("refresh sweep enumerate idem users: {err}"))?
-        .into_iter()
-        .map(|row| row.get::<_, Uuid>("user_id"))
-        .collect::<Vec<_>>();
-    drop(enum_conn);
-    drop(enum_pool);
-    let mut reaped = 0;
-    for user_id in users {
-        let pool = refresh_pool
-            .checkout_pool("refresh sweep idem")
-            .await
-            .map_err(|err| format!("refresh sweep idem pool checkout: {err}"))?;
-        let mut conn = pool
-            .get()
-            .await
-            .map_err(|err| format!("refresh sweep idem session checkout: {err}"))?;
-        let tx = conn
-            .transaction()
-            .await
-            .map_err(|err| format!("refresh sweep idem begin: {err}"))?;
-        let result = async {
-            lock_refresh_user_xact(&tx, user_id)
-                .await
-                .map_err(|err| format!("refresh sweep idem lock {user_id}: {err}"))?;
-            tx.execute(
-                "UPDATE zeroship.oauth_refresh_tokens \
-                 SET idem_response_enc = NULL, idem_expires_at = NULL \
-                 WHERE user_id = $1 \
-                   AND idem_response_enc IS NOT NULL \
-                   AND idem_expires_at < NOW()",
-                &[&user_id],
-            )
-            .await
-            .map_err(|err| format!("refresh sweep idem {user_id}: {err}"))
-        }
-        .await;
-        match result {
-            Ok(n) => {
-                tx.commit()
-                    .await
-                    .map_err(|err| format!("refresh sweep idem commit: {err}"))?;
-                reaped += n;
-            }
-            Err(err) => {
-                let _ = tx.rollback().await;
-                return Err(err);
-            }
-        }
-    }
-    Ok(reaped)
-}
-
 fn basic_client_auth(req: &HttpRequest) -> Option<(String, String)> {
     let header = req
         .headers()
@@ -1547,117 +1145,6 @@ fn basic_client_auth(req: &HttpRequest) -> Option<(String, String)> {
     let decoded = String::from_utf8(decoded).ok()?;
     let (id, secret) = decoded.split_once(':')?;
     Some((id.to_string(), secret.to_string()))
-}
-
-fn generate_refresh_token() -> String {
-    let mut bytes = [0u8; REFRESH_TOKEN_BYTES];
-    rand::rngs::OsRng.fill_bytes(&mut bytes);
-    format!("{REFRESH_TOKEN_PREFIX}{}", URL_SAFE_NO_PAD.encode(bytes))
-}
-
-fn idem_aad(predecessor_hash: &[u8], family_id: &str) -> Vec<u8> {
-    let mut aad =
-        Vec::with_capacity(IDEM_AAD_PREFIX.len() + predecessor_hash.len() + family_id.len());
-    aad.extend_from_slice(IDEM_AAD_PREFIX);
-    aad.extend_from_slice(predecessor_hash);
-    aad.extend_from_slice(family_id.as_bytes());
-    aad
-}
-
-fn load_hash_keyring(path: &Path) -> Result<Vec<RefreshHashKey>, String> {
-    let raw = read_secret_file(path, "REFRESH_HASH_KEY_FILE")?;
-    let text = std::str::from_utf8(&raw).map_err(|err| {
-        format!(
-            "REFRESH_HASH_KEY_FILE {} must be UTF-8 version:key lines: {err}",
-            path.display()
-        )
-    })?;
-    let mut keys = Vec::new();
-    for (idx, line) in text
-        .lines()
-        .map(str::trim)
-        .filter(|line| !line.is_empty())
-        .enumerate()
-    {
-        let Some((version, secret)) = line.split_once(':') else {
-            return Err(format!(
-                "REFRESH_HASH_KEY_FILE {} line {} must be version:hex-or-base64url-key",
-                path.display(),
-                idx + 1
-            ));
-        };
-        let version: i16 = version.trim().parse().map_err(|_| {
-            format!(
-                "REFRESH_HASH_KEY_FILE {} line {} has invalid version {:?}",
-                path.display(),
-                idx + 1,
-                version
-            )
-        })?;
-        let key = decode_key_material(secret.trim()).ok_or_else(|| {
-            format!(
-                "REFRESH_HASH_KEY_FILE {} line {} has unparseable key material",
-                path.display(),
-                idx + 1
-            )
-        })?;
-        if key.len() < 32 {
-            return Err(format!(
-                "REFRESH_HASH_KEY_FILE {} line {} key for version {} is {} bytes; require at least 32",
-                path.display(),
-                idx + 1,
-                version,
-                key.len()
-            ));
-        }
-        keys.push(RefreshHashKey { version, key });
-    }
-    if keys.is_empty() {
-        return Err(format!(
-            "REFRESH_HASH_KEY_FILE {} yielded no keys",
-            path.display()
-        ));
-    }
-    Ok(keys)
-}
-
-fn decode_key_material(value: &str) -> Option<Vec<u8>> {
-    hex::decode(value)
-        .ok()
-        .or_else(|| URL_SAFE_NO_PAD.decode(value).ok())
-        .filter(|bytes| !bytes.is_empty())
-}
-
-fn read_secret_file(path: &Path, label: &str) -> Result<Vec<u8>, String> {
-    let bytes = std::fs::read(path).map_err(|err| format!("read {label} {}: {err}", path.display()))?;
-    reject_insecure_permissions(path, label)?;
-    if bytes.is_empty() {
-        return Err(format!("{label} {} is empty", path.display()));
-    }
-    Ok(bytes)
-}
-
-#[cfg(unix)]
-fn reject_insecure_permissions(path: &Path, label: &str) -> Result<(), String> {
-    use std::os::unix::fs::PermissionsExt as _;
-
-    let mode = path
-        .metadata()
-        .map_err(|err| format!("stat {label} {}: {err}", path.display()))?
-        .permissions()
-        .mode();
-    if mode & 0o077 != 0 {
-        return Err(format!(
-            "{label} {} has insecure permissions {mode:o}; require owner-only permissions",
-            path.display()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn reject_insecure_permissions(_path: &Path, _label: &str) -> Result<(), String> {
-    Ok(())
 }
 
 #[cfg(test)]

@@ -2352,7 +2352,9 @@ modification, not exfiltration.
 VERIFIED: the handler comment says it revokes the grant and active tokens, but
 the disconnect transaction deletes the `oauth_grants` row, revokes the relay
 alias, and writes an access-token family marker without updating
-`oauth_refresh_tokens` or `app_session_anchors`
+`zeroship.sessions` or `app_session_anchors` (the finding was written against
+`oauth_refresh_tokens`, which the session object replaced; the gap is the same
+one against the row that replaced it)
 (`crates/zeroship-control/src/oauth_grants_handlers.rs:82-84`,
 `crates/zeroship-control/src/oauth_grants_handlers.rs:101-155`,
 `crates/zeroship-control/src/oauth_grants_handlers.rs:158-231`). The refresh exchange

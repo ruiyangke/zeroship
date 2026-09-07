@@ -172,18 +172,20 @@ async fn offline_access_authorization_code_returns_refresh_token_bound_to_family
     let row = fx
         .db
         .query_one(
-            "SELECT refresh_family_id, sub, family_granted_scopes, octet_length(token_hash) AS hash_len \
-             FROM zeroship.oauth_refresh_tokens \
-             WHERE client_id = $1 AND user_id = $2",
+            "SELECT s.id, g.subject, g.scopes AS grant_scopes, \
+                    octet_length(s.secret_hash) AS hash_len \
+             FROM zeroship.sessions s \
+             JOIN zeroship.grants g ON g.id = s.grant_id \
+             WHERE s.client_id = $1 AND s.person_id = $2",
             &[&fx.client_id, &fx.user_id],
         )
         .await
-        .expect("refresh family row");
-    let family_id: String = row.get("refresh_family_id");
-    let sub: String = row.get("sub");
-    let family_scopes: Vec<String> = row.get("family_granted_scopes");
+        .expect("session row");
+    let family_id: String = row.get("id");
+    let sub: String = row.get("subject");
+    let family_scopes: Vec<String> = row.get("grant_scopes");
     let hash_len: i32 = row.get("hash_len");
-    assert!(family_id.starts_with("rfam_"));
+    assert!(family_id.starts_with("ses_"));
     assert_eq!(
         sub,
         test_issuer().pairwise_subject(&fx.user_id.to_string(), SECTOR)
@@ -348,13 +350,17 @@ async fn refresh_rotation_returns_new_refresh_narrows_scope_and_no_id_token() {
     let row = fx
         .db
         .query_one(
-            "SELECT COUNT(*) FILTER (WHERE rotated_at IS NOT NULL AND consumed_at IS NOT NULL)::BIGINT AS rotated, \
-                    COUNT(*) FILTER (WHERE rotated_at IS NULL AND revoked_at IS NULL)::BIGINT AS live \
-             FROM zeroship.oauth_refresh_tokens WHERE client_id = $1 AND user_id = $2",
+            // One row per family now, so the two counts are two facts about the
+            // SAME row rather than two rows: it has rotated, and it is still
+            // live. A chain would have made "rotated" and "live" disjoint; a
+            // rotating row makes them simultaneous.
+            "SELECT COUNT(*) FILTER (WHERE rotated_at IS NOT NULL)::BIGINT AS rotated, \
+                    COUNT(*) FILTER (WHERE revoked_at IS NULL)::BIGINT AS live \
+             FROM zeroship.sessions WHERE client_id = $1 AND person_id = $2",
             &[&fx.client_id, &fx.user_id],
         )
         .await
-        .expect("refresh row counts");
+        .expect("session row counts");
     assert_eq!(row.get::<_, i64>("rotated"), 1);
     assert_eq!(row.get::<_, i64>("live"), 1);
 
@@ -401,12 +407,12 @@ async fn refresh_scope_cannot_widen_past_family_granted_scopes() {
     let row = fx
         .db
         .query_one(
-            "SELECT COUNT(*) FILTER (WHERE consumed_at IS NOT NULL)::BIGINT AS consumed \
-             FROM zeroship.oauth_refresh_tokens WHERE client_id = $1 AND user_id = $2",
+            "SELECT COUNT(*) FILTER (WHERE rotated_at IS NOT NULL)::BIGINT AS consumed \
+             FROM zeroship.sessions WHERE client_id = $1 AND person_id = $2",
             &[&fx.client_id, &fx.user_id],
         )
         .await
-        .expect("refresh consumed count");
+        .expect("session rotation count");
     assert_eq!(row.get::<_, i64>("consumed"), 0);
 
     fx.cleanup().await;
@@ -590,12 +596,12 @@ async fn concurrent_refresh_same_token_serializes_to_one_successor_without_famil
         .db
         .query_one(
             "SELECT COUNT(*) FILTER (WHERE rotated_at IS NOT NULL)::BIGINT AS rotated, \
-                    COUNT(*) FILTER (WHERE rotated_at IS NULL AND revoked_at IS NULL)::BIGINT AS live \
-             FROM zeroship.oauth_refresh_tokens WHERE refresh_family_id = $1",
+                    COUNT(*) FILTER (WHERE revoked_at IS NULL)::BIGINT AS live \
+             FROM zeroship.sessions WHERE id = $1",
             &[&family_id],
         )
         .await
-        .expect("refresh family counts");
+        .expect("session counts");
     assert_eq!(row.get::<_, i64>("rotated"), 1);
     assert_eq!(row.get::<_, i64>("live"), 1);
 
@@ -1149,7 +1155,7 @@ async fn bulk_credential_bump_revoke_does_not_deadlock_concurrent_rotation() {
     let root = issue_refresh(&fx, FULL_SCOPE).await;
     let root_refresh = root.refresh_token.expect("root refresh token");
     let rotate = refresh_request(&fx, &root_refresh, Some(NARROW_SCOPE));
-    let revoke = zeroship_auth::oidc::refresh::revoke_user_refresh_families(
+    let revoke = zeroship_auth::oidc::refresh::revoke_person_sessions(
         &fx.refresh_pool,
         fx.user_id,
         "credential_bump_test",
@@ -1274,7 +1280,13 @@ async fn cleanup_seeded_rows(db: &Client, user_id: Uuid, app_id: Uuid, client_id
         .await;
     let _ = db
         .execute(
-            "DELETE FROM zeroship.oauth_refresh_tokens WHERE client_id = $1",
+            "DELETE FROM zeroship.sessions WHERE client_id = $1",
+            &[&client_id],
+        )
+        .await;
+    let _ = db
+        .execute(
+            "DELETE FROM zeroship.grants WHERE client_id = $1",
             &[&client_id],
         )
         .await;
@@ -1502,26 +1514,28 @@ fn basic_auth_with_secret(client_id: &str, secret: &str) -> String {
     format!("Basic {}", STANDARD.encode(format!("{client_id}:{secret}")))
 }
 
+/// The session the family became. There is one row per family now, so "the
+/// family id" and "the session id" are the same value read from one place.
 async fn refresh_family_id(fx: &Fixture) -> String {
     fx.db
         .query_one(
-            "SELECT refresh_family_id \
-             FROM zeroship.oauth_refresh_tokens \
-             WHERE client_id = $1 AND user_id = $2 \
+            "SELECT id \
+             FROM zeroship.sessions \
+             WHERE client_id = $1 AND person_id = $2 \
              LIMIT 1",
             &[&fx.client_id, &fx.user_id],
         )
         .await
-        .expect("refresh family id")
-        .get("refresh_family_id")
+        .expect("refresh session id")
+        .get("id")
 }
 
 async fn expire_idempotency_window(fx: &Fixture, family_id: &str) {
     fx.db
         .execute(
-            "UPDATE zeroship.oauth_refresh_tokens \
+            "UPDATE zeroship.sessions \
              SET idem_expires_at = NOW() - INTERVAL '1 second' \
-             WHERE refresh_family_id = $1 AND idem_response_enc IS NOT NULL",
+             WHERE id = $1 AND idem_response_enc IS NOT NULL",
             &[&family_id],
         )
         .await
@@ -1536,12 +1550,12 @@ async fn corrupt_idempotency_record(fx: &Fixture, family_id: &str) {
     let corrupted = fx
         .db
         .execute(
-            "UPDATE zeroship.oauth_refresh_tokens \
+            "UPDATE zeroship.sessions \
              SET idem_response_enc = set_byte( \
                      idem_response_enc, \
                      length(idem_response_enc) - 1, \
                      get_byte(idem_response_enc, length(idem_response_enc) - 1) # 255) \
-             WHERE refresh_family_id = $1 AND idem_response_enc IS NOT NULL",
+             WHERE id = $1 AND idem_response_enc IS NOT NULL",
             &[&family_id],
         )
         .await
@@ -1555,15 +1569,15 @@ async fn assert_family_revoked(fx: &Fixture, family_id: &str) {
         .query_one(
             "SELECT COUNT(*) FILTER (WHERE revoked_at IS NOT NULL)::BIGINT AS revoked, \
                     COUNT(*)::BIGINT AS total \
-             FROM zeroship.oauth_refresh_tokens WHERE refresh_family_id = $1",
+             FROM zeroship.sessions WHERE id = $1",
             &[&family_id],
         )
         .await
-        .expect("family revoke count");
+        .expect("session revoke count");
     let revoked: i64 = row.get("revoked");
     let total: i64 = row.get("total");
     assert!(total > 0);
-    assert_eq!(revoked, total, "family must be fully revoked");
+    assert_eq!(revoked, total, "the session must be revoked");
 }
 
 async fn assert_family_not_revoked(fx: &Fixture, family_id: &str) {
@@ -1571,11 +1585,11 @@ async fn assert_family_not_revoked(fx: &Fixture, family_id: &str) {
         .db
         .query_one(
             "SELECT COUNT(*) FILTER (WHERE revoked_at IS NOT NULL)::BIGINT AS revoked \
-             FROM zeroship.oauth_refresh_tokens WHERE refresh_family_id = $1",
+             FROM zeroship.sessions WHERE id = $1",
             &[&family_id],
         )
         .await
-        .expect("family revoke count");
+        .expect("session revoke count");
     assert_eq!(row.get::<_, i64>("revoked"), 0);
 }
 

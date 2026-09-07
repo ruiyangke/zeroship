@@ -1453,7 +1453,7 @@ async fn app_session_revoke_at_the_op_ends_the_gateway_session() {
         .await;
     let _ = pg_client
         .execute(
-            "DELETE FROM zeroship.oauth_refresh_tokens WHERE client_id = $1",
+            "DELETE FROM zeroship.sessions WHERE client_id = $1",
             &[&client_id],
         )
         .await;

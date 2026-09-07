@@ -381,7 +381,8 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
     )
     .await;
 
-    let user_id = Uuid::new_v4().to_string();
+    let (proof, person_id) = common::validated_session(&db, "retention-race").await;
+    let user_id = person_id.to_string();
     let scopes = vec!["openid".to_string()];
     let mint = AccessTokenMint {
         user_id: &user_id,
@@ -392,7 +393,7 @@ async fn issuance_and_prune_never_return_a_token_without_its_published_key() {
         ttl_secs: Some(60),
     };
     let (issued, report) = futures::join!(
-        issuer.issue_access_token(&issue_db, &mint),
+        issuer.issue_access_token(&issue_db, &mint, &proof),
         signing_key_retention::tick(&prune_db)
     );
     let report = report.expect("concurrent retention tick");
@@ -443,7 +444,8 @@ async fn every_production_token_kind_advances_the_key_watermark() {
     seed_key(&db, &kid, issuer.public_jwk(), "active", 1).await;
     clear_watermark(&db, &kid).await;
 
-    let user_id = Uuid::new_v4().to_string();
+    let (proof, person_id) = common::validated_session(&db, "retention-kinds").await;
+    let user_id = person_id.to_string();
     let scopes = vec!["openid".to_string()];
     let access_token = issuer
         .issue_access_token(
@@ -456,6 +458,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
                 scopes: &scopes,
                 ttl_secs: Some(60),
             },
+            &proof,
         )
         .await
         .expect("issue access token");
@@ -472,6 +475,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
                 scopes: &scopes,
                 ttl_secs: Some(60),
             },
+            &proof,
         )
         .await
         .expect("issue principal access token");
@@ -497,6 +501,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
                 picture: None,
                 ttl_secs: Some(60),
             },
+            &proof,
         )
         .await
         .expect("issue ID token");
@@ -521,6 +526,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
                 picture: None,
                 ttl_secs: Some(60),
             },
+            &proof,
         )
         .await
         .expect("issue principal ID token");
@@ -552,6 +558,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
                 scopes: &scopes,
                 ttl_secs: Some(3_600),
             },
+            &proof,
         )
         .await
         .expect("issue long-lived token");
@@ -591,6 +598,7 @@ async fn every_production_token_kind_advances_the_key_watermark() {
                 scopes: &scopes,
                 ttl_secs: Some(60),
             },
+            &proof,
         )
         .await;
     assert!(refused.is_err(), "terminal retired key issued a token");

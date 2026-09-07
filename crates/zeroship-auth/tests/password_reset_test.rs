@@ -946,13 +946,13 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 /// `password_reset::complete` writes its family markers from TWO data-modifying
 /// CTEs that both `INSERT ... ON CONFLICT (client_id, sub) DO UPDATE` into
 /// `zeroship.token_revocations`: `wrapper_family_markers` (drawn from
-/// `app_user_identities`) and `refresh_family_markers` (drawn from
-/// `oauth_refresh_tokens`). For a non-brokered app client those two sources
-/// carry the SAME `(client_id, sub)` pair - `app_user_identities.pairwise_sub`
-/// and `oauth_refresh_tokens.sub` are both
-/// `Issuer::pairwise_subject(user_id, sector_identifier)`
-/// (`crates/zeroship-auth/src/oidc/authorization_code.rs:1442` and
-/// `crates/zeroship-auth/src/oidc/refresh.rs:376`). PostgreSQL refuses that:
+/// `app_user_identities`) and `refresh_family_markers` (drawn from the live
+/// `zeroship.sessions` rows joined to their grant). For a non-brokered app
+/// client those two sources carry the SAME `(client_id, sub)` pair -
+/// `app_user_identities.pairwise_sub` and `zeroship.grants.subject` are both
+/// `Issuer::pairwise_subject(user_id, sector_identifier)`, written by
+/// `mint_access_token` and `establish_session` respectively. PostgreSQL
+/// refuses that:
 ///
 ///   ERROR:  ON CONFLICT DO UPDATE command cannot affect row a second time
 ///
@@ -1057,27 +1057,42 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
         .await
         .expect("insert app_user_identity");
 
-    // The live refresh family the same login issued (`offline_access` is always
-    // requested by the gateway), carrying that SAME `sub`.
+    // The live session the same login established (`offline_access` is always
+    // requested by the gateway), whose GRANT carries that SAME `sub`. The
+    // collision this test exists for is between the grant's subject and the
+    // pairwise identity row above, which are two spellings of one value.
+    let scopes = vec!["openid".to_string(), "offline_access".to_string()];
+    let grant_id = zeroship_auth::session_store::upsert_grant(
+        &client,
+        user.id,
+        &zeroship_auth::session_store::Audience::App {
+            client_id: client_id.clone(),
+        },
+        &pairwise_sub,
+        &scopes,
+        None,
+    )
+    .await
+    .expect("seed grant");
     client
         .execute(
-            "INSERT INTO zeroship.oauth_refresh_tokens \
-                (token_hash, hash_key_version, refresh_family_id, client_id, user_id, \
-                 sub, granted_scopes, family_granted_scopes, expires_at, \
-                 family_absolute_expires_at) \
-             VALUES ($1, 1, $2, $3, $4, $5, $6, $6, \
+            "INSERT INTO zeroship.sessions \
+                (id, person_id, audience_kind, client_id, grant_id, kind, \
+                 credential_epoch, secret_hash, secret_key_version, scopes, \
+                 idle_expires_at, absolute_expires_at) \
+             VALUES ($1, $2, 'app', $3, $4, 'browser', 0, $5, 1, $6, \
                      NOW() + INTERVAL '7 days', NOW() + INTERVAL '30 days')",
             &[
-                &Uuid::new_v4().as_bytes().to_vec(),
-                &format!("rfam_{}", Uuid::new_v4().simple()),
-                &client_id,
+                &zeroship_core::typed_id::new_session_id(),
                 &user.id,
-                &pairwise_sub,
-                &vec!["openid".to_string(), "offline_access".to_string()],
+                &client_id,
+                &grant_id,
+                &Uuid::new_v4().as_bytes().to_vec(),
+                &scopes,
             ],
         )
         .await
-        .expect("insert refresh token");
+        .expect("insert session");
 
     let issued = password_reset::issue(&client, &email)
         .await
@@ -1143,7 +1158,8 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
     // one (this test shares its database with concurrent runs).
     let cleanup = async {
         for (sql, ()) in [
-            ("DELETE FROM zeroship.oauth_refresh_tokens WHERE user_id = $1", ()),
+            ("DELETE FROM zeroship.sessions WHERE person_id = $1", ()),
+            ("DELETE FROM zeroship.grants WHERE person_id = $1", ()),
             ("DELETE FROM zeroship.app_session_anchors WHERE global_user_id = $1", ()),
             ("DELETE FROM zeroship.audit_events WHERE actor_user_id = $1", ()),
         ] {

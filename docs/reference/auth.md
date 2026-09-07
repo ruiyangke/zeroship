@@ -224,11 +224,12 @@ All token operations are native to `crates/auth`.
   scope-gated identity claims such as `email`, `email_verified`, `name`, and
   `picture`.
 - **Access token:** RFC 9068-style EdDSA JWT, 15 min TTL, `typ = at+jwt`.
-- **Refresh token:** opaque `zrt_...` token. Only HMAC-SHA256 verifiers are
-  stored in `zeroship.oauth_refresh_tokens`. Families are 7 d idle / 30 d hard
-  and rotate on every refresh. A lost response can be retried once inside a
-  bounded window; the record is single-use, so a second presentation of an
-  already-rotated token revokes the whole family.
+- **Refresh token:** opaque `zrt_...` token, and the presentable half of a
+  SESSION. Only HMAC-SHA256 verifiers are stored, on the `zeroship.sessions`
+  row itself. A session is 7 d idle / 30 d hard and its secret rotates in place
+  on every refresh. A lost response can be retried once inside a bounded
+  window; the record is single-use, so a second presentation of the superseded
+  secret revokes the session.
 - **Authorization code:** single-use, PKCE-bound, 60 s TTL.
 - **Device code:** 10 min TTL, polling interval enforced by the OP.
 
@@ -323,7 +324,8 @@ platform corpus in `db/migrations-ts/`, applied by the `zero-migrate` CLI
 | `zeroship.app_oauth_clients` | Per-app client extension rows |
 | `zeroship.oauth_grants` | User consent grants |
 | `zeroship.oauth_authorization_codes` | Pending authorization codes |
-| `zeroship.oauth_refresh_tokens` | Refresh-token family state |
+| `zeroship.sessions` | Session state, including the rotating secret and its single-use replay record |
+| `zeroship.grants` | One row per (person, audience): the subject, the consented scopes, the suspension status |
 | `zeroship.device_grants` | Device authorization grants |
 | `zeroship.principal_grants` | Platform grants; auth has SELECT-only access for CLI mint capping |
 | `zeroship.signing_keys` | Public JWK lifecycle and maximum issued-expiry watermark |

@@ -150,7 +150,62 @@ pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
     cfg.settings.stash_signing_key = test_secret("test-stash-key-not-for-prod-32bytes!");
     cfg.settings.totp_enc_key =
         test_secret("000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f");
+    // The session-secret keyring, which `main.rs` REFUSES TO BOOT WITHOUT.
+    // Every fixture needs it now, because every token exchange establishes a
+    // session and a session's secret is hashed under this keyring - where
+    // before, only an exchange that issued a refresh token reached it, so a
+    // fixture could omit it and still serve tokens.
+    //
+    // That gap is what a device-grant test found: it configured no keyring
+    // (it never asked for `offline_access`), and the exchange answered 500.
+    // The fixture was simply less configured than any real deployment, so the
+    // fix is here rather than in the three tests that already set these by
+    // hand for their own reasons.
+    let (hash_file, idem_file) = session_key_files();
+    cfg.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_file);
+    cfg.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_file);
     cfg
+}
+
+/// Owner-only key files for the session-secret keyring, one pair per process.
+///
+/// Memoised: `SessionSecretKeys::from_files` reads them on every exchange, and
+/// a per-CALL temp dir would leave one directory per token request behind.
+#[allow(dead_code)]
+fn session_key_files() -> (std::path::PathBuf, std::path::PathBuf) {
+    use std::io::Write as _;
+    static FILES: std::sync::OnceLock<(std::path::PathBuf, std::path::PathBuf)> =
+        std::sync::OnceLock::new();
+    FILES
+        .get_or_init(|| {
+            let dir = std::env::temp_dir().join(format!(
+                "zs-auth-fixture-keys-{}",
+                uuid::Uuid::new_v4().simple()
+            ));
+            std::fs::create_dir_all(&dir).expect("fixture key dir");
+            let hash_path = dir.join("refresh-hmac.keys");
+            let idem_path = dir.join("refresh-idem.key");
+            for (path, body) in [
+                (
+                    &hash_path,
+                    "1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n"
+                        .as_bytes(),
+                ),
+                (&idem_path, "fixture-idempotency-master-secret".as_bytes()),
+            ] {
+                let mut file = std::fs::File::create(path).expect("create fixture key file");
+                file.write_all(body).expect("write fixture key file");
+                drop(file);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt as _;
+                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                        .expect("chmod fixture key file");
+                }
+            }
+            (hash_path, idem_path)
+        })
+        .clone()
 }
 
 /// A secret in the shape an in-memory literal resolves to. See
@@ -672,4 +727,94 @@ impl zeroship_mailer::Mailer for CapturingMailer {
         };
         Ok(zeroship_mailer::MessageId(format!("test-message-{n}")))
     }
+}
+
+/// A person, a platform grant and a session, and the proof the creating
+/// statement produced.
+///
+/// Every `Issuer::issue_*` mint takes a `ValidatedSession`, and the type has no
+/// constructor outside `zeroship_auth::session_store` - so a test that wants to
+/// mint has to establish a real session, exactly as production does. That is
+/// the point of the witness: a fixture cannot fabricate one, and a test that
+/// could would be testing nothing.
+///
+/// The returned uuid is the person the proof names; a mint must use it as its
+/// subject, because `Issuer` refuses a mint whose subject is not the validated
+/// session's person.
+pub async fn validated_session(
+    pg: &compio_postgres::Client,
+    label: &str,
+) -> (zeroship_auth::session_store::ValidatedSession, uuid::Uuid) {
+    use std::io::Write as _;
+
+    let tag = uuid::Uuid::new_v4().simple().to_string();
+    let person_id: uuid::Uuid = pg
+        .query_one(
+            "INSERT INTO zeroship.users (email, name) VALUES ($1::citext, $2) RETURNING id",
+            &[&format!("{label}-{tag}@zeroship.test"), &"Witness Fixture"],
+        )
+        .await
+        .expect("seed person")
+        .get("id");
+
+    let dir = std::env::temp_dir().join(format!("zs-witness-keys-{tag}"));
+    std::fs::create_dir_all(&dir).expect("key dir");
+    let hash_path = dir.join("hash");
+    let idem_path = dir.join("idem");
+    for (path, body) in [
+        (
+            &hash_path,
+            "1:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n".as_bytes(),
+        ),
+        (&idem_path, "witness-fixture-idempotency-secret".as_bytes()),
+    ] {
+        let mut file = std::fs::File::create(path).expect("create key file");
+        file.write_all(body).expect("write key file");
+        drop(file);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt as _;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                .expect("chmod key file");
+        }
+    }
+    let keys = zeroship_auth::session_store::SessionSecretKeys::from_files(&hash_path, &idem_path)
+        .expect("load session keys");
+
+    let scopes = vec!["openid".to_string()];
+    let subject = person_id.to_string();
+    let grant_id = zeroship_auth::session_store::upsert_grant(
+        pg,
+        person_id,
+        &zeroship_auth::session_store::Audience::Platform,
+        &subject,
+        &scopes,
+        None,
+    )
+    .await
+    .expect("seed grant");
+    let created = zeroship_auth::session_store::create(
+        pg,
+        &keys,
+        &zeroship_auth::session_store::NewSession {
+            person_id,
+            grant_id: &grant_id,
+            subject: &subject,
+            grant_scopes: &scopes,
+            parent_session_id: None,
+            kind: zeroship_auth::session_store::SessionKind::Cli,
+            scopes: &scopes,
+            amr: &[],
+            acr: None,
+            label: None,
+            expected_credential_epoch: None,
+            idle_days: 7,
+            absolute_days: 30,
+            with_secret: false,
+        },
+    )
+    .await
+    .expect("create session")
+    .expect("session created");
+    (created.proof, person_id)
 }
