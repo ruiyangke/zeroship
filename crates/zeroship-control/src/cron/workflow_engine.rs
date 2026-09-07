@@ -696,13 +696,25 @@ impl StepDispatcher for StubStepDispatcher {
 #[derive(Debug, Clone)]
 pub struct GatewayStepDispatcher {
     gateway_url: String,
+    /// The identity this dispatcher presents to the gateway.
+    ///
+    /// The advance edge takes the FULL profile: it fires once per advance, so
+    /// the single-use claim's write is proportional to advances rather than to
+    /// end-user traffic, and the gateway's inbound handler REFUSES without it.
+    /// An unconfigured `ServiceAuth` therefore turns every advance into
+    /// backpressure, which is the loud failure rather than the quiet one.
+    service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
 }
 
 impl GatewayStepDispatcher {
     #[must_use]
-    pub fn new(gateway_url: impl Into<String>) -> Self {
+    pub fn new(
+        gateway_url: impl Into<String>,
+        service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
+    ) -> Self {
         Self {
             gateway_url: gateway_url.into().trim_end_matches('/').to_string(),
+            service_auth,
         }
     }
 }
@@ -739,6 +751,32 @@ impl StepDispatcher for GatewayStepDispatcher {
                 return DispatchOutcome::backpressure(
                     &request,
                     format!("set gateway workflow advance content-type: {e}"),
+                );
+            }
+        };
+        let gateway_issuer = match zeroship_core::service_peers::service_issuer(
+            zeroship_core::service_peers::GATEWAY_SERVICE_NAME,
+        ) {
+            Ok(issuer) => issuer,
+            Err(e) => {
+                return DispatchOutcome::backpressure(
+                    &request,
+                    format!("gateway service issuer is malformed: {e}"),
+                );
+            }
+        };
+        let Some(authorization) = self.service_auth.authorization_for(&gateway_issuer) else {
+            return DispatchOutcome::backpressure(
+                &request,
+                "no service key material configured; cannot assert control's identity to the gateway",
+            );
+        };
+        let builder = match builder.header("authorization", authorization.as_str()) {
+            Ok(builder) => builder,
+            Err(e) => {
+                return DispatchOutcome::backpressure(
+                    &request,
+                    format!("set gateway workflow advance authorization: {e}"),
                 );
             }
         };
@@ -872,7 +910,7 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
         match reap_lapsed_inflight_once(
             &store,
             &state,
-            Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone())),
+            Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone(), Arc::clone(&state.service_auth))),
             WorkflowEngineConfig::default(),
             64,
         )
@@ -1079,7 +1117,7 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     fire_once(
         &store,
         state,
-        Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone())),
+        Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone(), Arc::clone(&state.service_auth))),
         WorkflowEngineConfig::default(),
     )
     .await
@@ -2133,6 +2171,32 @@ where
 
 #[cfg(test)]
 mod tests {
+    /// A control-plane identity for fixtures that drive a STUB gateway.
+    ///
+    /// It MINTS and verifies nobody: the bundle is empty on purpose, because the
+    /// stub these tests point at does no verification and a fixture that pretended
+    /// otherwise would be asserting against itself. What it does bind is that the
+    /// dispatcher can produce a credential at all - an unconfigured `ServiceAuth`
+    /// turns every advance into backpressure, so without this the fixtures would
+    /// measure the mint failing rather than the workflow advancing.
+    fn test_control_service_auth() -> std::sync::Arc<zeroship_core::service_peers::ServiceAuth> {
+        use zeroship_core::service_assertion::{
+            ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
+        };
+        use zeroship_core::service_peers::{
+            service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME,
+        };
+    
+        let issuer = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+        let key = ServiceSigningKey::generate();
+        let keyring = ServiceKeyring::from_parts(issuer, key, ServiceTrustBundle::new())
+            .expect("control keyring");
+        std::sync::Arc::new(ServiceAuth::new(
+            keyring,
+            std::sync::Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+        ))
+    }
+
     use super::*;
     use ntex::web::{self, test};
     use serde_json::Value;
@@ -2270,7 +2334,7 @@ mod tests {
         .await;
 
         let request = test_dispatch_request();
-        let dispatcher = GatewayStepDispatcher::new(gateway.url(""));
+        let dispatcher = GatewayStepDispatcher::new(gateway.url(""), test_control_service_auth());
         let outcome = dispatcher.dispatch(request.clone()).await;
         let DispatchOutcome::Completed(result) = outcome else {
             panic!("expected completed dispatch outcome");
@@ -2302,7 +2366,7 @@ mod tests {
         .await;
 
         let request = test_dispatch_request();
-        let dispatcher = GatewayStepDispatcher::new(gateway.url(""));
+        let dispatcher = GatewayStepDispatcher::new(gateway.url(""), test_control_service_auth());
         let outcome = dispatcher.dispatch(request.clone()).await;
         let DispatchOutcome::Backpressure { run_id, reason } = outcome
         else {

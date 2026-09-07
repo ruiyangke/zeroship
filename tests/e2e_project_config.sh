@@ -315,7 +315,7 @@ fs.writeFileSync(out, Buffer.concat([len, meta, Buffer.from(body, "utf8")]));
 }
 dispatch() {  # dispatch <frame-file> -> body on stdout
   curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
-    -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+    -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
     -H 'content-type: application/octet-stream' --data-binary @"$1"
 }
 

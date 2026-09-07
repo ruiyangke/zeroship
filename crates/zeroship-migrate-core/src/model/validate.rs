@@ -14645,7 +14645,7 @@ mod tests {
 
         let collection = validate_declared_descriptor_identifiers(
             crate::test_fixtures::VENDORS,
-            &[descriptor("__zeroship_admin", "email")],
+            &[descriptor("__zeroship_reserved", "email")],
             &POSTGRES,
         )
         .expect_err("a reserved collection name is refused on the manual source too");

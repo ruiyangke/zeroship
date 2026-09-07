@@ -46,6 +46,20 @@
 //! would have failed; it exists so a Postgres outage, which refuses every
 //! caller at once, is distinguishable from an attack by the operator watching.
 //!
+//! # The two profiles, and which one an edge takes
+//!
+//! Steps 1 to 6 above are the TRANSPORT-ONLY profile
+//! ([`TransportAssertionVerifier`]). Step 7 is what the FULL profile
+//! ([`ServiceAssertionVerifier`]) adds, and it is a WRITE against a store
+//! shared by every replica of the callee, on the request's critical path.
+//!
+//! That cost is why the profile is chosen per edge by CALL RATE and never
+//! inherited by default: an edge whose rate is proportional to app loads or
+//! control-plane events can afford it, and the gateway-to-worker dispatch hop -
+//! which runs per end-user request - cannot. The two are separate TYPES rather
+//! than one type with a flag, for the reason the paragraph above gives about
+//! optional checks; see [`TransportAssertionVerifier`].
+//!
 //! # What lives elsewhere
 //!
 //! The Postgres implementation of [`ReplayStore`] lives in `zeroship-authn`,
@@ -81,8 +95,18 @@ use crate::service_identity::{
 /// so an access-token verifier refuses an assertion. RFC 8725 section 3.11.
 pub const SERVICE_ASSERTION_TYP: &str = "svc-assertion+jwt";
 
-/// The opaque mechanism tag stamped on identities this module produces.
+/// The opaque mechanism tag stamped on identities the FULL profile produces.
 pub const JWT_ASSERTION_MECHANISM: &str = "jwt-assertion";
+
+/// The opaque mechanism tag stamped on identities the TRANSPORT-ONLY profile
+/// produces.
+///
+/// A DISTINCT tag, not a shared one, and that is the point: a verified identity
+/// carries which profile admitted it, so an edge that requires the full profile
+/// cannot be satisfied by a transport-only verification that happened to be
+/// wired next to it. Two profiles sharing one tag would make the two
+/// indistinguishable in every log line and every downstream check.
+pub const JWT_ASSERTION_TRANSPORT_MECHANISM: &str = "jwt-assertion-transport";
 
 /// The longest assertion lifetime a callee accepts, matching Keycloak.
 ///
@@ -307,6 +331,31 @@ impl ServiceSigningKey {
         self.inner.verifying_key().to_bytes()
     }
 
+    /// Return the `kid` this key publishes and mints under.
+    ///
+    /// DERIVED, never configured: see [`thumbprint_key_id`]. The minter stamps
+    /// this on every assertion header and a peer bundle indexes the public half
+    /// under the same value, so the two agree by construction rather than by an
+    /// operator copying a name into two files.
+    #[must_use]
+    pub fn key_id(&self) -> String {
+        thumbprint_key_id(&self.verifying_key_bytes())
+    }
+
+    /// Sign `message` with this key, returning the raw 64-byte ed25519
+    /// signature.
+    ///
+    /// The one way out of this type that is not a JWT. It exists for the
+    /// `ZeroShip-User` identity envelope ([`crate::user_envelope`]), which is
+    /// not a JWT and must not become one: it is signed per request on the app
+    /// data path, and a JOSE header plus JSON claims would triple its size for
+    /// nothing it needs.
+    #[must_use]
+    pub fn sign_detached(&self, message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer as _;
+        self.inner.sign(message).to_bytes()
+    }
+
     fn encoding_key(&self) -> Result<EncodingKey, AssertionError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey as _;
         let der = self
@@ -315,6 +364,26 @@ impl ServiceSigningKey {
             .map_err(|error| AssertionError::KeyMaterial(error.to_string()))?;
         Ok(EncodingKey::from_ed_der(der.as_bytes()))
     }
+}
+
+/// The RFC 7638 JWK thumbprint of an ed25519 public key, base64url encoded.
+///
+/// The canonical form is the required members in lexicographic order with no
+/// whitespace - `{"crv":"Ed25519","kty":"OKP","x":"<x>"}` - hashed with
+/// SHA-256. It is written out literally rather than serialized through
+/// `serde_json`, because a `BTreeMap` round trip would produce the same bytes
+/// only by accident of member naming and the spec fixes the exact string.
+///
+/// A `kid` is DERIVED from key material everywhere in this stack, so the value
+/// a minter stamps and the value a bundle is indexed under cannot drift. The
+/// same expression already produces the gateway's session-cookie `kid` and the
+/// one the end-to-end harness publishes in its JWKS.
+#[must_use]
+pub fn thumbprint_key_id(public_key: &[u8; 32]) -> String {
+    use sha2::Digest as _;
+    let x = URL_SAFE_NO_PAD.encode(public_key);
+    let canonical = format!(r#"{{"crv":"Ed25519","kty":"OKP","x":"{x}"}}"#);
+    URL_SAFE_NO_PAD.encode(sha2::Sha256::digest(canonical.as_bytes()))
 }
 
 // ─── The minter ──────────────────────────────────────────────────────────
@@ -563,6 +632,24 @@ impl ServiceTrustBundle {
     fn keys_for(&self, issuer: &str) -> Option<&[TrustedServiceKey]> {
         self.issuers.get(issuer).map(Vec::as_slice)
     }
+
+    /// The raw public keys trusted for exactly `issuer`, each with the `kid` it
+    /// is indexed under.
+    ///
+    /// Public key material, so handing it out concedes nothing: the holder can
+    /// CHECK this issuer's signatures and cannot produce one. It exists because
+    /// the `ZeroShip-User` envelope is verified by a second mechanism
+    /// ([`crate::user_envelope`]) that reads the same operator-published
+    /// document - and reading it twice, from two parsers, is how the two ends
+    /// of one edge drift.
+    #[must_use]
+    pub fn public_keys_for(&self, issuer: &ServiceIssuer) -> Vec<(String, [u8; 32])> {
+        self.keys_for(issuer.as_str())
+            .unwrap_or_default()
+            .iter()
+            .map(|key| (key.key_id.clone(), key.public))
+            .collect()
+    }
 }
 
 // ─── The replay store ────────────────────────────────────────────────────
@@ -660,12 +747,45 @@ impl ReplayStore for InMemoryReplayStore {
 
 // ─── The verifier ────────────────────────────────────────────────────────
 
-/// Verifies service assertions against a trust bundle and a replay store.
-pub struct ServiceAssertionVerifier {
+/// The cryptographic half of both profiles: everything decidable without I/O.
+///
+/// Shared by [`ServiceAssertionVerifier`] and [`TransportAssertionVerifier`]
+/// so the two profiles cannot drift in what they check. The only difference
+/// between them is whether the `jti` is CLAIMED after these checks pass, and
+/// that difference lives in the two [`IdentityVerifier`] impls rather than in
+/// a flag on one of them - see the module notes on why a flag is refused.
+struct AssertionChecks {
     bundle: ServiceTrustBundle,
-    replay: Arc<dyn ReplayStore>,
     max_lifetime: Duration,
     leeway: Duration,
+}
+
+impl fmt::Debug for AssertionChecks {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AssertionChecks")
+            .field("bundle", &self.bundle)
+            .field("max_lifetime", &self.max_lifetime)
+            .field("leeway", &self.leeway)
+            .finish()
+    }
+}
+
+/// Verifies service assertions against a trust bundle and a replay store.
+///
+/// This is the FULL profile of the design's credential inventory: signed, and
+/// single-use through the replay store. Use it where the call rate is
+/// proportional to app loads or control-plane events; the store write is on the
+/// request's critical path.
+pub struct ServiceAssertionVerifier {
+    checks: AssertionChecks,
+    // `Send + Sync` on the trait object, not merely on the `Arc`: a verifier
+    // lives in the state a multi-threaded HTTP server shares across its worker
+    // threads, and auto traits do not propagate through a bare `dyn Trait`. The
+    // bound belongs here rather than at each service, because a store that
+    // cannot be shared is a store that cannot settle a claim across replicas
+    // either - the two are the same requirement.
+    replay: Arc<dyn ReplayStore + Send + Sync>,
     store_skew: Duration,
 }
 
@@ -673,11 +793,50 @@ impl fmt::Debug for ServiceAssertionVerifier {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ServiceAssertionVerifier")
-            .field("bundle", &self.bundle)
-            .field("max_lifetime", &self.max_lifetime)
-            .field("leeway", &self.leeway)
+            .field("checks", &self.checks)
             .field("store_skew", &self.store_skew)
             .finish_non_exhaustive()
+    }
+}
+
+/// Verifies service assertions against a trust bundle and NOTHING ELSE.
+///
+/// The TRANSPORT-ONLY profile: the same ed25519 mechanism, the same
+/// `svc-assertion+jwt` shape, the same `kid` resolution against the same peer
+/// bundle, with no `jti` claimed and no store consulted. It answers "which
+/// service is calling" and does not answer "has this assertion been seen
+/// before".
+///
+/// # Why this is a separate TYPE and not a flag
+///
+/// The module doc above states that every check here is a hard rejection with
+/// no warn-and-continue arm and no configuration that turns one off, citing the
+/// Keycloak `cache-embedded-mtls-enabled` case where an optional hardening flag
+/// silently did nothing across two version lines. A boolean on
+/// [`ServiceAssertionVerifier`] would be exactly that flag, and it would put
+/// every edge that keeps the full profile one mis-set field away from losing
+/// replay defence. A distinct type cannot be mis-set: an edge gets the profile
+/// its constructor names, and the identity it produces carries
+/// [`JWT_ASSERTION_TRANSPORT_MECHANISM`] so the two are distinguishable
+/// afterwards.
+///
+/// # Where it is correct to use
+///
+/// On a hop whose rate is end-user traffic, where a single-use claim would put
+/// a write against a store shared by every replica of the callee on the
+/// per-request path. The gateway-to-worker dispatch hop is that hop, and its
+/// replay bound comes from the identity envelope's binding to the dispatch
+/// request id and an issuance window rather than from a `jti`.
+pub struct TransportAssertionVerifier {
+    checks: AssertionChecks,
+}
+
+impl fmt::Debug for TransportAssertionVerifier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("TransportAssertionVerifier")
+            .field("checks", &self.checks)
+            .finish()
     }
 }
 
@@ -685,16 +844,34 @@ impl ServiceAssertionVerifier {
     /// Build a verifier over a trust bundle and a replay store.
     ///
     /// There is no constructor without a replay store. Replay defence is not a
-    /// mode of this mechanism; an assertion verifier without it is weaker than
-    /// the mTLS it was chosen over, not equivalent to it.
+    /// mode of THIS type; an edge that cannot afford the store takes
+    /// [`TransportAssertionVerifier`], which says so in its name.
     #[must_use]
-    pub fn new(bundle: ServiceTrustBundle, replay: Arc<dyn ReplayStore>) -> Self {
+    pub fn new(bundle: ServiceTrustBundle, replay: Arc<dyn ReplayStore + Send + Sync>) -> Self {
+        Self {
+            checks: AssertionChecks::new(bundle),
+            replay,
+            store_skew: MAX_REPLAY_STORE_CLOCK_SKEW,
+        }
+    }
+}
+
+impl TransportAssertionVerifier {
+    /// Build a transport-only verifier over a trust bundle.
+    #[must_use]
+    pub fn new(bundle: ServiceTrustBundle) -> Self {
+        Self {
+            checks: AssertionChecks::new(bundle),
+        }
+    }
+}
+
+impl AssertionChecks {
+    fn new(bundle: ServiceTrustBundle) -> Self {
         Self {
             bundle,
-            replay,
             max_lifetime: MAX_ASSERTION_LIFETIME,
             leeway: CLOCK_SKEW_TOLERANCE,
-            store_skew: MAX_REPLAY_STORE_CLOCK_SKEW,
         }
     }
 
@@ -836,11 +1013,55 @@ fn unverified_issuer(assertion: &str) -> Result<String, &'static str> {
         .ok_or("no iss claim")
 }
 
+/// Build the mechanism-thin identity a verified assertion names.
+fn identity_from(
+    claims: &AssertionClaims,
+    key_id: String,
+    mechanism: &str,
+) -> Result<ServiceIdentity, AuthError> {
+    let mut attributes = BTreeMap::new();
+    attributes.insert("kid".to_owned(), json!(key_id));
+    attributes.insert("exp".to_owned(), json!(claims.exp));
+    attributes.insert("jti".to_owned(), json!(claims.jti));
+    // `aud` is deliberately absent. It is verifier INPUT, and an mTLS
+    // adapter arriving later would have to fabricate one to fill it.
+
+    let issuer = ServiceIssuer::parse(&claims.iss).map_err(|_| AuthError::CredentialRejected)?;
+    Ok(ServiceIdentity::new(
+        issuer.principal().clone(),
+        MechanismTag::new(mechanism),
+        attributes,
+    ))
+}
+
+impl IdentityVerifier for TransportAssertionVerifier {
+    fn verify<'a>(&'a self, credentials: &'a PresentedCredentials<'a>) -> VerifyFuture<'a> {
+        Box::pin(async move {
+            let now = SystemTime::now();
+            let (claims, key_id) = match self.checks.verify_claims(
+                credentials.bearer_assertion(),
+                credentials.expected_audience(),
+                now,
+            ) {
+                Ok(verified) => verified,
+                Err(reason) => {
+                    tracing::debug!(reason, "transport service assertion rejected");
+                    return Err(AuthError::CredentialRejected);
+                }
+            };
+            // No replay claim, deliberately, and this is the ONLY line that
+            // differs from the full profile. See the type's own doc for the
+            // edge this is correct on and the bound that replaces the `jti`.
+            identity_from(&claims, key_id, JWT_ASSERTION_TRANSPORT_MECHANISM)
+        })
+    }
+}
+
 impl IdentityVerifier for ServiceAssertionVerifier {
     fn verify<'a>(&'a self, credentials: &'a PresentedCredentials<'a>) -> VerifyFuture<'a> {
         Box::pin(async move {
             let now = SystemTime::now();
-            let (claims, key_id) = match self.verify_claims(
+            let (claims, key_id) = match self.checks.verify_claims(
                 credentials.bearer_assertion(),
                 credentials.expected_audience(),
                 now,
@@ -864,7 +1085,7 @@ impl IdentityVerifier for ServiceAssertionVerifier {
                 + Duration::from_secs(
                     u64::try_from(claims.exp)
                         .unwrap_or(0)
-                        .saturating_add(self.leeway.as_secs())
+                        .saturating_add(self.checks.leeway.as_secs())
                         .saturating_add(self.store_skew.as_secs()),
                 );
             // Scoped by issuer so one service cannot burn another service's
@@ -887,20 +1108,7 @@ impl IdentityVerifier for ServiceAssertionVerifier {
                 }
             }
 
-            let mut attributes = BTreeMap::new();
-            attributes.insert("kid".to_owned(), json!(key_id));
-            attributes.insert("exp".to_owned(), json!(claims.exp));
-            attributes.insert("jti".to_owned(), json!(claims.jti));
-            // `aud` is deliberately absent. It is verifier INPUT, and an mTLS
-            // adapter arriving later would have to fabricate one to fill it.
-
-            let issuer = ServiceIssuer::parse(&claims.iss)
-                .map_err(|_| AuthError::CredentialRejected)?;
-            Ok(ServiceIdentity::new(
-                issuer.principal().clone(),
-                MechanismTag::new(JWT_ASSERTION_MECHANISM),
-                attributes,
-            ))
+            identity_from(&claims, key_id, JWT_ASSERTION_MECHANISM)
         })
     }
 }

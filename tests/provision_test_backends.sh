@@ -108,8 +108,8 @@ fatal() { echo "FATAL: $*" >&2; exit 1; }
 #
 # MEASURED 2026-08-18 on a checkout with no `deploy/compose/.env`: that command
 # exits 1 having started nothing, with fourteen lines of
-#   error while interpolating services.worker.environment.ZEROSHIP_WORKER_KEY:
-#   required variable ZEROSHIP_WORKER_KEY is missing a value: run zeroship dev init
+#   error while interpolating services.worker.environment.ZEROSHIP_CONTROL_KEY:
+#   required variable ZEROSHIP_CONTROL_KEY is missing a value: run zeroship dev init
 # Compose interpolates the WHOLE file before it selects services, so the `:?`
 # guards on the PLATFORM services (auth, control, gateway, worker, migrate-server)
 # reject a run that would not have started any of them. Those guards are right

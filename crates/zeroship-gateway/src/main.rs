@@ -27,8 +27,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Operator-facing spelling of the control key, for a diagnostic that has to
 /// name something the operator can actually set.
 const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
-/// Operator-facing spelling of the worker dispatch key.
-const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
 /// Operator-facing spelling of the gateway stash signing key. Auth reads a
 /// DIFFERENT variable behind the same validator, which is why the validator
 /// takes the name as a parameter rather than spelling one itself. Derived from
@@ -60,11 +58,16 @@ fn parse_worker_urls(raw: &str) -> Vec<String> {
 /// Every credential the gateway needs, TAGGED BY THE SUBSYSTEM THAT NEEDS IT.
 ///
 /// The per-subsystem property of the boot gate: a deployer who has not enabled
-/// a subsystem is never blocked on its credential. The gateway's four are all
-/// unconditional today - route sync, worker dispatch, the OIDC stash and the
-/// pairwise anchor are not optional in a gateway that serves anything - and
-/// `enabled: true` states that as a positive claim rather than leaving the
-/// dimension absent. `crates/zeroship-migrate-server` is where a `false` actually appears.
+/// a subsystem is never blocked on its credential. The gateway's three are all
+/// unconditional today - route sync, the OIDC stash and the pairwise anchor are
+/// not optional in a gateway that serves anything - and `enabled: true` states
+/// that as a positive claim rather than leaving the dimension absent.
+/// `crates/zeroship-migrate-server` is where a `false` actually appears.
+///
+/// The worker-dispatch credential was a fourth row and is not one now. It has
+/// not become optional: it moved to `service_key_file`, a PATH the loader reads
+/// and refuses when it is unreadable or group-readable. A strength floor on a
+/// shared string could express neither check.
 ///
 /// Each row carries the validator `main` runs, so
 /// [`zeroship_core::config::audit_credentials`] runs the check itself rather
@@ -95,26 +98,6 @@ fn gateway_credentials(settings: &GateSettings) -> Vec<SubsystemCredential<'_>> 
             label: PAIRWISE_SALT_LABEL,
             secret: &settings.pairwise_salt,
             validate: validate_pairwise_salt,
-        },
-        // S3 - the gateway is the caller of the worker admin endpoints, so it
-        // must refuse to start without a worker key rather than ship
-        // `Authorization: Bearer ` (empty) into a cluster that believes dispatch
-        // is authenticated.
-        //
-        // NOT symmetric with the worker: the worker and control run
-        // `validate_worker_key` and enforce a >=32-byte floor, while the gateway
-        // only requires the credential to exist. A short shared key is therefore
-        // refused on three binaries and accepted here. Presence is what closes
-        // the empty-bearer hole; the strength floor is enforced by the peers
-        // that also key the ZeroShip-User HMAC with it. The SENTINEL is refused
-        // on all four, because `require_nonempty` rules on
-        // `is_unset_credential` and not on length.
-        SubsystemCredential {
-            subsystem: "worker-dispatch",
-            enabled: true,
-            label: WORKER_KEY_LABEL,
-            secret: &settings.worker_key,
-            validate: require_nonempty,
         },
     ]
 }
@@ -157,6 +140,93 @@ fn enforce_gateway_credentials(
     }
 }
 
+/// A [`ReplayStore`] over the gateway's per-worker-thread Postgres pool.
+///
+/// The gateway is a callee on exactly one internal edge -
+/// `/__zeroship/internal/workflow-advance` - and that edge takes the FULL
+/// profile, so the `jti` must be claimed in a store every gateway replica
+/// shares. The gateway's `Pool` is `!Send` and lives in a thread-local, so the
+/// checkout happens inside `claim` rather than being held on the store.
+///
+/// **This is the one consumer of the gateway's database credential that the
+/// auth redesign's step 6 does NOT delete along with the anchor and RP paths.**
+/// That step's F3 says the gateway holds no database credential at all, which
+/// is incompatible with a shared replay store terminating here. The tension is
+/// recorded rather than resolved: whoever lands step 6 has to either move this
+/// edge off the gateway or re-tier it, and finding this comment is how they
+/// learn that.
+struct PoolReplayStore {
+    db: zeroship_gateway::db::DbConfig,
+}
+
+impl zeroship_core::service_assertion::ReplayStore for PoolReplayStore {
+    fn claim<'a>(
+        &'a self,
+        key: &'a str,
+        expires_at: std::time::SystemTime,
+    ) -> zeroship_core::service_assertion::ClaimFuture<'a> {
+        Box::pin(async move {
+            let pool = zeroship_gateway::db::checkout(&self.db).await.map_err(|error| {
+                zeroship_core::service_assertion::ReplayStoreError(error.to_string())
+            })?;
+            let client = pool.get().await.map_err(|error| {
+                zeroship_core::service_assertion::ReplayStoreError(error.to_string())
+            })?;
+            zeroship_authn::service_replay::claim_replay_key(&*client, key, expires_at).await
+        })
+    }
+}
+
+/// Load this gateway's service identity, or refuse to start.
+///
+/// Neither file configured: boot, refuse the inbound advance edge, and mint
+/// nothing for the worker - which makes every dispatch fail at the worker's
+/// door rather than sail through it. Configured but unloadable: exit.
+fn build_service_auth(
+    key_file: &std::path::Path,
+    peers_file: &std::path::Path,
+    db: Option<zeroship_gateway::db::DbConfig>,
+) -> zeroship_core::service_peers::ServiceAuth {
+    use zeroship_core::service_assertion::ServiceAssertionVerifier;
+    use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+
+    if key_file.as_os_str().is_empty() && peers_file.as_os_str().is_empty() {
+        tracing::error!(
+            "gateway: no service key material configured; the internal workflow-advance \
+             edge will refuse and every worker dispatch will carry no credential. Set \
+             gateway.service_key_file and gateway.service_peers_file."
+        );
+        return ServiceAuth::unconfigured();
+    }
+    let Some(db) = db else {
+        tracing::error!(
+            "gateway: refusing to start - service key material is configured but no database \
+             is, and the inbound advance edge's single-use claim needs the shared store"
+        );
+        std::process::exit(1);
+    };
+    let issuer = match service_issuer(zeroship_core::service_peers::GATEWAY_SERVICE_NAME) {
+        Ok(issuer) => issuer,
+        Err(error) => {
+            tracing::error!(%error, "gateway: refusing to start - gateway service issuer is malformed");
+            std::process::exit(1);
+        }
+    };
+    let mut keyring = match ServiceKeyring::load(issuer, key_file, peers_file) {
+        Ok(keyring) => keyring,
+        Err(error) => {
+            tracing::error!(%error, "gateway: refusing to start - service key material rejected");
+            std::process::exit(1);
+        }
+    };
+    let Some(bundle) = keyring.take_bundle() else {
+        tracing::error!("gateway: refusing to start - peer bundle already taken");
+        std::process::exit(1);
+    };
+    let replay = Arc::new(PoolReplayStore { db });
+    ServiceAuth::new(keyring, Arc::new(ServiceAssertionVerifier::new(bundle, replay)))
+}
+
 fn main() -> std::io::Result<()> {
     let (settings, boot) = bootstrap_or_exit::<GateSettings>(
         GateSettingsSources::parse(),
@@ -190,7 +260,6 @@ fn main() -> std::io::Result<()> {
     // runtime hash ring, so the two can never disagree.
     let worker_urls = parse_worker_urls(settings.worker_urls.get());
     let poll_interval = *settings.poll_interval.get();
-    let worker_key = settings.worker_key.expose_str().to_owned();
     let blob_store_root = settings.blob_store.get().clone();
     // Classify the `--blob-store` value: `s3://…` → remote S3, bare path →
     // local disk (dev default). An `s3://` URL is validated now so a
@@ -544,12 +613,16 @@ fn main() -> std::io::Result<()> {
     let meter = Arc::new(zeroship_metering::Meter::with_source(gate_meter_source.clone()));
 
     let state = Arc::new(GateState {
+        service_auth: Arc::new(build_service_auth(
+            settings.service_key_file.get(),
+            settings.service_peers_file.get(),
+            db.clone(),
+        )),
         config: GateConfig {
             control_url,
             control_key,
             worker_urls,
             poll_interval_secs: poll_interval,
-            worker_key,
             auth_ui_url,
             origin_scheme,
             trusted_origins,
@@ -797,9 +870,9 @@ mod tests {
     }
 
     #[test]
-    fn gateway_worker_key_is_required() {
-        assert!(require_nonempty(WORKER_KEY_LABEL, "").is_err());
-        assert!(require_nonempty(WORKER_KEY_LABEL, "key").is_ok());
+    fn gateway_control_key_is_required() {
+        assert!(require_nonempty(CONTROL_KEY_LABEL, "").is_err());
+        assert!(require_nonempty(CONTROL_KEY_LABEL, "key").is_ok());
     }
 
     // M6: `--auth-secret` is a deleted legacy knob — clap must reject it
@@ -904,15 +977,12 @@ mod tests {
         // Every other required secret supplied, so only the stash key can be
         // the reason a case fails. `--` values are inline files, never argv.
         let control = SecretFile::new("control", "control-key-material");
-        let worker = SecretFile::new("worker", strong);
         let broker = SecretFile::new("broker", "gateway-broker-secret-test-master-32-bytes");
         let salt = SecretFile::new("salt", strong);
         let base = |stash: &str| -> Vec<String> {
             vec![
                 "--control-key-file".to_owned(),
                 control.arg().to_owned(),
-                "--worker-key-file".to_owned(),
-                worker.arg().to_owned(),
                 "--broker-secret-file".to_owned(),
                 broker.arg().to_owned(),
                 "--pairwise-salt-file".to_owned(),
@@ -940,12 +1010,12 @@ mod tests {
         let args = base(good.arg());
         let ok = audit_credentials(&gateway_credentials(&resolve(&borrow(&args))));
         assert!(ok.is_ok(), "a strong stash key passes every guard: {ok:?}");
-        assert_eq!(ok.checked(), 4, "all four gateway credentials were judged");
+        assert_eq!(ok.checked(), 3, "all three gateway credentials were judged");
 
         // 2. ABSENT: nothing supplies the stash key at all. The bridge runs the
         // validator on "", which is how it produces its own "is required".
         let mut args = base(good.arg());
-        args.truncate(8);
+        args.truncate(6);
         let settings = resolve(&borrow(&args));
         assert!(!settings.stash_signing_key.is_configured());
         let posture = audit_credentials(&gateway_credentials(&settings));
@@ -982,14 +1052,11 @@ mod tests {
     fn every_gateway_credential_names_a_distinct_subsystem() {
         let strong = "0123456789abcdef0123456789abcdef";
         let control = SecretFile::new("sub_control", "control-key-material");
-        let worker = SecretFile::new("sub_worker", strong);
         let stash = SecretFile::new("sub_stash", strong);
         let salt = SecretFile::new("sub_salt", strong);
         let args = [
             "--control-key-file",
             control.arg(),
-            "--worker-key-file",
-            worker.arg(),
             "--stash-signing-key-file",
             stash.arg(),
             "--pairwise-salt-file",
@@ -997,11 +1064,11 @@ mod tests {
         ];
         let settings = resolve(&args);
         let rows = gateway_credentials(&settings);
-        assert_eq!(rows.len(), 4, "the gateway declares four credentials");
+        assert_eq!(rows.len(), 3, "the gateway declares three credentials");
         let mut subsystems: Vec<&str> = rows.iter().map(|row| row.subsystem).collect();
         subsystems.sort_unstable();
         subsystems.dedup();
-        assert_eq!(subsystems.len(), 4, "two rows share a subsystem name");
+        assert_eq!(subsystems.len(), 3, "two rows share a subsystem name");
         assert!(rows.iter().all(|row| row.label.starts_with("ZEROSHIP_")));
     }
 
@@ -1010,14 +1077,11 @@ mod tests {
     fn the_gateway_verdict_refuses_in_production_and_on_every_dry_run() {
         let strong = "0123456789abcdef0123456789abcdef";
         let control = SecretFile::new("v_control", SERVICE_CREDENTIAL_SENTINEL);
-        let worker = SecretFile::new("v_worker", strong);
         let stash = SecretFile::new("v_stash", strong);
         let salt = SecretFile::new("v_salt", strong);
         let args = vec![
             "--control-key-file".to_owned(),
             control.arg().to_owned(),
-            "--worker-key-file".to_owned(),
-            worker.arg().to_owned(),
             "--stash-signing-key-file".to_owned(),
             stash.arg().to_owned(),
             "--pairwise-salt-file".to_owned(),
@@ -1164,7 +1228,6 @@ mod tests {
             .collect::<Vec<_>>();
         for secret in [
             "control-key",
-            "worker-key",
             "database-url",
             "stash-signing-key",
             "pairwise-salt",

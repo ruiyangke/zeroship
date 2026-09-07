@@ -334,7 +334,7 @@ mod cdc_lifecycle;
 
 // The `auth` module is always compiled: `auth::bootstrap` carries the
 // per-app PG role machinery the data plane runs on every transaction.
-// The `keys` / `session` submodules and the `__zeroship_admin` schema they
+// The `keys` / `session` submodules and the platform-owned system schema they
 // spoke to are deleted -- see `auth/mod.rs` for why they are not coming back.
 // `auth::util` was the shared-helper subtree the SQLite `SessionMinter` impl
 // reused; that impl was deleted on 2026-09-02 and `util` followed it on

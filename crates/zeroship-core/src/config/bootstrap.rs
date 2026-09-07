@@ -220,11 +220,11 @@ mod tests {
         report.field("dev", CheckValue::Flag(true));
         report.field("name", CheckValue::Plain("control".to_string()));
         report.field("master_key", CheckValue::Secret(true));
-        report.field("worker_key", CheckValue::Secret(false));
+        report.field("stash_signing_key", CheckValue::Secret(false));
 
         // The internal ordering is what the emitters iterate.
         let keys: Vec<&str> = report.fields.iter().map(|(k, _)| k.as_str()).collect();
-        assert_eq!(keys, ["port", "dev", "name", "master_key", "worker_key"]);
+        assert_eq!(keys, ["port", "dev", "name", "master_key", "stash_signing_key"]);
     }
 
     #[test]

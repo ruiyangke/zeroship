@@ -96,7 +96,7 @@ dispatch() {
   local frame="$WORK/frame-$$.bin"
   zs_rpc_frame "$frame" "$id" "$args"
   curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$app" \
-    -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+    -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
     -H 'content-type: application/octet-stream' --data-binary @"$frame"
 }
 

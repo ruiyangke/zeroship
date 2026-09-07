@@ -337,6 +337,48 @@ pub async fn verify_identity(
     verifier.verify(&presented).await
 }
 
+/// Verify a peer's transport credential and its grant on ONE endpoint.
+///
+/// The whole inbound guard for an internal edge, in one call, so every edge
+/// runs the same three checks in the same order and none of them can be
+/// half-written at a call site:
+///
+/// 1. a credential was presented at all ([`verify_identity`]);
+/// 2. it verifies under the peer bundle for the issuer it claims, against
+///    `expected_audience` - which must be the CALLEE's own issuer identifier,
+///    never an endpoint URL;
+/// 3. the verified principal holds the machine grant for `endpoint`.
+///
+/// Step 3 is what makes a valid credential insufficient. Without it any service
+/// that can mint an assertion at all reaches every guarded edge on every peer,
+/// which is the shared-bearer property this mechanism replaces.
+///
+/// # Errors
+///
+/// Returns [`AuthError::NoCredentialPresented`] when the header carries no
+/// bearer, [`AuthError::CredentialRejected`] when verification fails or the
+/// grant is absent, and [`AuthError::StoreUnavailable`] when a store the
+/// mechanism must consult could not answer.
+pub async fn verify_service_call(
+    verifier: &(impl IdentityVerifier + ?Sized),
+    authorization: Option<&str>,
+    expected_audience: &str,
+    endpoint: ServiceEndpoint,
+) -> Result<ServiceIdentity, AuthError> {
+    let bearer = authorization.and_then(crate::auth::extract_bearer);
+    let observed = PeerCredentials::new(bearer, None, expected_audience);
+    let identity = verify_identity(verifier, &observed).await?;
+    if !authorize(&identity, endpoint) {
+        tracing::debug!(
+            destination = endpoint.destination(),
+            path = endpoint.path_template(),
+            "service call rejected: verified principal holds no grant for this endpoint"
+        );
+        return Err(AuthError::CredentialRejected);
+    }
+    Ok(identity)
+}
+
 /// A platform HTTP endpoint protected by service authorization.
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ServiceEndpoint {

@@ -3582,7 +3582,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
 // Per-app role privilege floor.
 //
 // One test survives here. The rest of this section tested the
-// `__zeroship_admin` schema, its HMAC session anchor and its SECURITY
+// platform-owned system schema, its HMAC session anchor and its SECURITY
 // DEFINER wrappers, all deleted on 2026-08-27 (see `crate::auth`);
 // those tests were deleted with their subject rather than weakened.
 //
@@ -4657,8 +4657,8 @@ use zeroship_plugin_db::encryption;
 /// so that race cannot happen here.
 ///
 /// This IS the PG resolve path now, not a fallback behind one. The
-/// `__zeroship_admin.get_column_key` arm that used to run first was
-/// deleted on 2026-08-27; PG and SQLite both read the isolate's
+/// `get_column_key` arm that used to run first, in the platform-owned system
+/// schema, was deleted on 2026-08-27; PG and SQLite both read the isolate's
 /// supplied roots. This is the same arm the env var used to occupy.
 ///
 /// The returned guard withdraws the keys on drop; keep it alive for the
@@ -5533,10 +5533,12 @@ async fn pg_bytea_decoder_preserves_raw_binary_prefix_bytes() {
 //      raw `DROP/CREATE`; `restore()`; assert rows recovered.
 //      `#[ignore]`-d when `pg_dump` / `pg_restore` are not on PATH
 //      (CI minimal images don't always carry them).
-//   2. (deleted) `pitr_pg_records_target` asserted the row landed in
-//      `__zeroship_admin.pitr_targets`. That table has no installer
-//      since the admin schema was deleted, so the test was deleted
-//      with its subject rather than left to assert nothing.
+//   2. (deleted) `pitr_pg_records_target` asserted the row landed in a
+//      `pitr_targets` table in the platform-owned system schema. That
+//      table lost its installer when the schema was deleted, so the test
+//      went with its subject rather than assert nothing. `pitr_replay`
+//      itself followed on 2026-09-07; see
+//      `zeroship_data_core::storage::Backup`.
 //   3. `snapshot_during_migration_returns_typed_error` — acquire the
 //      `snapshot_restore` mig-lock manually; attempt `snapshot()`;
 //      expect `Coded { code: "migration_in_progress" }`. No subprocess.
@@ -7105,11 +7107,11 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
 /// Regression fence for the PG mask-policy arm.
 ///
 /// Until 2026-08-27 `dispatch_set_mask_policy` wrote through
-/// `__zeroship_admin.set_mask_policy` and `dispatch_unmask` re-read
-/// through `__zeroship_admin.get_mask_policy`. Neither routine had an
-/// installer, so on PG the write failed outright and every unmask on an
-/// app with no cached policy died with `schema "__zeroship_admin" does
-/// not exist` instead of default-denying. The durable PG store was
+/// `set_mask_policy` and `dispatch_unmask` re-read through
+/// `get_mask_policy`, both definer-rights routines in the platform-owned
+/// system schema. Neither had an installer, so on PG the write failed
+/// outright and every unmask on an app with no cached policy died with an
+/// undefined-schema error instead of default-denying. The durable PG store was
 /// deleted rather than rehomed: the policy the creator declares in
 /// source is installed straight into the per-isolate cache at boot, and
 /// that cache is the only reader.
@@ -7168,8 +7170,8 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     zeroship_plugin_db::clear_mask_policy_cache_for_tests(app);
 
     // The boot-time install `installSchema` performs. Before the fix
-    // this issued `SELECT __zeroship_admin.set_mask_policy(...)` and
-    // failed here on every database.
+    // this issued `SELECT set_mask_policy(...)` against the platform-owned
+    // system schema and failed here on every database.
     mask_policy::dispatch_set_mask_policy(
         // The backend the V8 dispatcher resolves before calling the installer.
         &unmask_backend().await,

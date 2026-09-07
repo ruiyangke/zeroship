@@ -358,11 +358,8 @@ services:
       # service used to carry it and nothing consumed it.
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
       ZEROSHIP_CONTROL_MASTER_KEY: ${ZEROSHIP_CONTROL_MASTER_KEY:?run zeroship dev init}
-      # control ALSO needs the worker key: it refuses to start without one,
-      # because it calls the worker's admin endpoints. MUST match the worker's
-      # value - it is ONE setting with several consumers, which is why it has
-      # one name rather than a per-service spelling.
-      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
+      ZEROSHIP_CONTROL_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-control.pem
+      ZEROSHIP_CONTROL_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
       # OPTIONAL, and empty means "this deployment does not accept Stripe
       # webhooks". Stripe is the only party that can issue a value that
       # verifies: the secret is `whsec_...` from the dashboard endpoint, or
@@ -416,6 +413,11 @@ services:
     volumes:
       - bundles:/data/bundles
       - ../../data:/data
+      # This service's OWN assertion key and the public halves of its peers.
+      # The privileged internal reads (app version, app environment) verify a
+      # per-service assertion now, so control cannot answer them without both.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-control.pem:/etc/zeroship/secrets/svc-control.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
       # mounted at the well-known path => auto-discovered, no --config needed
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro
     security_opt:
@@ -579,6 +581,13 @@ services:
       # Only the two files the gateway consumes are mounted.
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/gateway-signing.pem:/etc/zeroship/secrets/gateway-signing.pem:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/broker-secret:/etc/zeroship/secrets/broker-secret:ro
+      # The gateway's OWN service-assertion key, and the public halves of its
+      # peers. DISTINCT from gateway-signing.pem: that one signs an end-user
+      # session cookie, this one asserts which SERVICE is calling. Only the
+      # gateway's private key is mounted here - the peers file holds public
+      # keys only, so sharing it concedes nothing.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-gateway.pem:/etc/zeroship/secrets/svc-gateway.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
       # Same content-addressed blob store control writes to (asset proxy).
       - bundles:/data/bundles
       # mounted at the well-known path => auto-discovered, no --config needed
@@ -589,13 +598,14 @@ services:
       ZEROSHIP_GATEWAY_DATABASE_URL: ${ZEROSHIP_GATEWAY_DATABASE_URL:-postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship}
       # One key, one name, several consumers. MUST match the worker's.
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
-      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
       # Public-edge topology consumed by the gateway's --origin-scheme setting.
       ZEROSHIP_ORIGIN_SCHEME: ${ZEROSHIP_ORIGIN_SCHEME:-http}
       # Counterpart to auth's ZEROSHIP_AUTH_BROKER_SECRET_FILE -- SAME FILE, and
       # both sides read it as raw bytes, because the OP and the gateway derive
       # each brokered client secret from identical input.
       ZEROSHIP_GATEWAY_SIGNING_KEY_FILE: /etc/zeroship/secrets/gateway-signing.pem
+      ZEROSHIP_GATEWAY_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-gateway.pem
+      ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
       ZEROSHIP_GATEWAY_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret
       # HMAC key signing the per-request __Host-zs_oidc_stash cookie.
       # Tampering is rejected at decode time; rotating this key
@@ -633,13 +643,13 @@ services:
     image: zeroship-platform:dev
     # Worker defaults to binding 127.0.0.1 for safety. In the Docker
     # network the gateway reaches the worker via the `worker` DNS name,
-    # so we explicitly opt in to 0.0.0.0 AND set a worker key - without
-    # the key the worker refuses to bind a non-loopback address (to
-    # avoid exposing unauthenticated code execution). The key must match
-    # the gateway's ZEROSHIP_WORKER_KEY.
+    # so we explicitly opt in to 0.0.0.0. What makes that safe is the
+    # service key material below: dispatch carries an ed25519 assertion the
+    # worker verifies under the peer document, and an unconfigured worker
+    # REFUSES every caller rather than admitting one.
     # No secret is a flag; each arrives under its own canonical ZEROSHIP_ name
-    # in the `environment:` block below. ZEROSHIP_WORKER_KEY must match the
-    # gateway's. The worker logs in as the constrained zeroship_worker role.
+    # in the `environment:` block below. The worker logs in as the
+    # constrained zeroship_worker role.
     # zeroship-migrate-server creates app roles, workflow schemas, and publications;
     # the worker receives only runtime-role membership, its narrow workflow
     # owner membership, and REPLICATION for per-worker logical slots. It has no
@@ -684,7 +694,8 @@ services:
       # no value flag and arrives here instead of on the command line.
       ZEROSHIP_WORKER_KV_URL: ${ZEROSHIP_WORKER_KV_URL:-redis://redis:6379}
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
-      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
+      ZEROSHIP_WORKER_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-worker.pem
+      ZEROSHIP_WORKER_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
       ZEROSHIP_OBSERVABILITY_LOG_FILTER: info,zeroship_=debug
       ZEROSHIP_OBSERVABILITY_LOG_FORMAT: json
     volumes:
@@ -696,6 +707,11 @@ services:
       # pattern (mirrors how `bundles` is shared for deploy blobs). S3/R2
       # replaces this in prod behind the same Backend trait.
       - app-storage:/data/app-storage
+      # This worker's OWN assertion key and the public halves of its peers.
+      # Without both it refuses every dispatch and cannot read an app's
+      # environment from control - absence is a closed door, not an open one.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-worker.pem:/etc/zeroship/secrets/svc-worker.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
     deploy:
       replicas: 3
     security_opt:

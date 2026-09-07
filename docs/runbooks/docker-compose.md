@@ -53,7 +53,7 @@ out was `migrate-dsn`, the privileged DSN, which is also the file
 
 The env overlay contains eight generated scalar values:
 
-`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY`
 `ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
 `ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
 `ZEROSHIP_AUTH_TOTP_ENC_KEY`
@@ -184,7 +184,7 @@ docker compose -f deploy/compose/docker-compose.yml up --build
 All four web binaries default to a **loopback** bind for safety, so each compose
 command explicitly opts into a non-loopback address to be reachable across the
 container network: `control` and `gateway` pass `--bind 0.0.0.0`, `zeroship-worker`
-passes `--bind 0.0.0.0` (paired with `ZEROSHIP_WORKER_KEY`), and `zeroship-auth`
+passes `--bind 0.0.0.0` (paired with its service key and peer document), and `zeroship-auth`
 passes `--addr 0.0.0.0:9092`. Outside compose (single-host dev), the loopback defaults
 need no override. Authentication and secret checks remain active on those
 non-loopback container binds.
@@ -302,7 +302,7 @@ defined ONCE instead of being repeated as per-service flags:
 - `[observability]` - shared `log_filter` / `log_format` (every service, worker
   included).
 - There is NO `[secrets]` table. A secret sits at its canonical path beside its
-  operational siblings, so location encodes sharing: `control_key`, `worker_key`
+  operational siblings, so location encodes sharing: `control_key`
   and `pairwise_salt` are root keys because several binaries read the one value,
   while `[control] master_key` and each service's `database_url` belong to one
   binary. A value is either the secret itself or a `urn:zeroship:file:<path>`

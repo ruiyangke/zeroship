@@ -69,7 +69,6 @@ fn run(overlay: Option<&Path>, extra_env: &[(&str, &str)], args: &[&str]) -> Out
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_zeroship-control"));
     cmd.env_clear()
         .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
-        .env("ZEROSHIP_WORKER_KEY", STRONG_HEX)
         .env("ZEROSHIP_PAIRWISE_SALT", STRONG_HEX)
         .env("ZEROSHIP_CONTROL_MASTER_KEY", STRONG_HEX);
     for (key, value) in extra_env {

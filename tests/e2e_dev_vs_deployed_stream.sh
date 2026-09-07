@@ -128,7 +128,7 @@ DEV_PORT="${DEV_PORT:-3061}"
 # Checked the rest of the mapping against that list too -- 5011, 5021, 5081,
 # 5091, 5092, 5093, 5097 are all clear; 5061 was the only collision.
 VITE_PORT="${VITE_PORT:-5062}"
-export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-stream-worker-key-0123456789abcdefgh}"
+export E2E_STALE_WORKER_BEARER="${E2E_STALE_WORKER_BEARER:-stream-worker-key-0123456789abcdefgh}"
 APP_NAME="streamp"
 # Set to 1 to run the buffering mutation described in the header.
 MUTATE_BUFFERED="${MUTATE_BUFFERED:-0}"

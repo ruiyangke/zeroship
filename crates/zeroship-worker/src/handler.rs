@@ -11,10 +11,9 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use zeroship_core::app_id::AppId;
-use zeroship_core::auth::{
-    constant_time_eq, derive_app_scoped_control_token, extract_bearer,
-    verify_zeroship_user_header_for_request,
-};
+use zeroship_core::auth::derive_app_scoped_control_token;
+use zeroship_core::service_identity::{endpoints, ServiceEndpoint};
+use zeroship_core::service_peers::ServiceAuth;
 use zeroship_core::dispatch_frame::decode_dispatch_frame;
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_bundle::sha256_hex;
@@ -65,28 +64,68 @@ static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock:
 /// it did until this was wired up.
 pub const MAX_DISPATCH_BODY_BYTES: usize = zeroship_core::dispatch_frame::MAX_REQUEST_BODY_BYTES;
 
-/// Verify the gateway-issued bearer token on /dispatch endpoints.
-/// Returns `None` if the request is authorized; otherwise a 401 response.
-pub(crate) fn check_worker_auth(req: &HttpRequest, worker_key: &str) -> Option<HttpResponse> {
-    // Empty worker_key disables the check (dev-only loopback bind enforces this).
-    if worker_key.is_empty() {
-        return None;
-    }
-    let auth = req
+/// Verify the CALLER's own service credential on the dispatch endpoints.
+///
+/// The TRANSPORT-ONLY assertion profile: an ed25519 JWT the gateway signs with
+/// a key only the gateway holds, verified here under the gateway's published
+/// public half, with no `jti` claimed and no shared store consulted. This hop
+/// carries every end-user request, so a single-use claim would put a write
+/// against a table shared by every worker replica on the app data path; the
+/// identity envelope's binding to the dispatch request id and its issuance
+/// window is what bounds replay here instead.
+///
+/// It answers ONE question - which service is calling - and deliberately says
+/// nothing about the end user. That is [`verified_user_json`]'s job, and the
+/// two are now separate credentials under separate keys, which is what makes
+/// the guarantee on `encode_user_header` writable at all.
+///
+/// # There is no bypass
+///
+/// The predecessor returned `None` - authorized - when the shared secret was
+/// empty, so an unconfigured worker accepted every caller. An unconfigured
+/// [`ServiceAuth`] REFUSES instead. Absence of key material is now a closed
+/// door, not an open one.
+pub(crate) async fn check_worker_auth(
+    req: &HttpRequest,
+    service_auth: &ServiceAuth,
+    endpoint: ServiceEndpoint,
+) -> Option<HttpResponse> {
+    let header = req
         .headers()
         .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(extract_bearer);
-    match auth {
-        Some(token) if constant_time_eq(token, worker_key) => None,
-        _ => {
+        .and_then(|v| v.to_str().ok());
+    match service_auth.verify(header, endpoint).await {
+        Ok(_identity) => None,
+        Err(error) => {
+            tracing::warn!(%error, path = %req.path(), "worker: caller rejected");
             metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
             Some(HttpResponse::Unauthorized().body(r#"{"error":"unauthorized"}"#))
         }
     }
 }
 
-fn verified_user_json(req: &HttpRequest, worker_key: &str) -> Result<Option<String>, HttpResponse> {
+/// Verify the END-USER identity the gateway forwarded, under the GATEWAY's
+/// public key.
+///
+/// A second, independent credential from the one [`check_worker_auth`] checks -
+/// independent now in the only sense that counts, which is the key. Until this
+/// change both were the shared `worker_key`, so a worker able to verify an
+/// envelope was equally able to mint one, and every claim about the envelope
+/// surviving a transport bypass was circular. The worker now holds only the
+/// public half: it can check the gateway's signature and cannot produce one.
+///
+/// # Absence refuses
+///
+/// No verifier - a worker started with no service key material, or one whose
+/// peer document named no gateway key - REFUSES a request that carries an
+/// envelope, rather than passing the identity through unchecked or dropping it
+/// to anonymous. In practice such a worker never gets here, because
+/// [`check_worker_auth`] has already refused the caller; the arm exists so the
+/// answer does not depend on the order of two guards.
+fn verified_user_json(
+    req: &HttpRequest,
+    service_auth: &ServiceAuth,
+) -> Result<Option<String>, HttpResponse> {
     let Some(value) = req.headers().get("zeroship-user") else {
         return Ok(None);
     };
@@ -103,11 +142,14 @@ fn verified_user_json(req: &HttpRequest, worker_key: &str) -> Result<Option<Stri
         metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
         return Err(HttpResponse::Unauthorized().body(r#"{"error":"invalid user header"}"#));
     };
-    match verify_zeroship_user_header_for_request(
-        worker_key.as_bytes(),
-        header,
-        expected_request_id,
-    ) {
+    let Some(verifier) = service_auth.user_envelope_verifier() else {
+        tracing::error!(
+            "worker: an identity envelope arrived but no gateway public key is configured"
+        );
+        metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
+        return Err(HttpResponse::Unauthorized().body(r#"{"error":"invalid user header"}"#));
+    };
+    match verifier.verify_for_request(header, expected_request_id) {
         Some(json) => Ok(Some(json)),
         None => {
             metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
@@ -212,10 +254,12 @@ pub async fn dispatch(
     body: Bytes,
 ) -> HttpResponse {
     // Authenticate the gateway before touching the runtime.
-    if let Some(resp) = check_worker_auth(&req, &config.worker_key) {
+    if let Some(resp) =
+        check_worker_auth(&req, &config.service_auth, endpoints::WORKER_DISPATCH).await
+    {
         return resp;
     }
-    let user_json = match verified_user_json(&req, &config.worker_key) {
+    let user_json = match verified_user_json(&req, &config.service_auth) {
         Ok(user_json) => user_json,
         Err(resp) => return resp,
     };
@@ -580,7 +624,13 @@ pub async fn workflow_advance_unsigned(
     path: web::types::Path<String>,
     body: Bytes,
 ) -> HttpResponse {
-    if let Some(resp) = check_worker_auth(&req, &config.worker_key) {
+    if let Some(resp) = check_worker_auth(
+        &req,
+        &config.service_auth,
+        endpoints::WORKER_WORKFLOW_ADVANCE,
+    )
+    .await
+    {
         return resp;
     }
     if !config.workflow_advance_unsigned {
@@ -1437,7 +1487,7 @@ async fn load_on_demand(
     envs: &SharedEnvs,
     app_id: &Uuid,
 ) -> Result<(), String> {
-    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id).await?;
+    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.service_auth, app_id).await?;
 
     let manifest = app_version
         .manifest
@@ -1458,7 +1508,7 @@ async fn load_on_demand(
 
     // Fetch env BEFORE committing the V8 isolate. If env fetch fails
     // we never partially-load.
-    let env_json = crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id)
+    let env_json = crate::sync::fetch_app_env(&config.control_url, &config.service_auth, app_id)
         .await
         .map_err(|e| format!("env fetch failed: {e}"))?;
 
@@ -1525,7 +1575,7 @@ async fn load_pinned_workflow_on_demand(
     app_id: &Uuid,
     deploy_hash: &str,
 ) -> Result<(), String> {
-    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id)
+    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.service_auth, app_id)
         .await
         .ok();
     let manifest_bytes = config
@@ -1561,7 +1611,7 @@ async fn load_pinned_workflow_on_demand(
             .as_ref()
             .is_some_and(|info| crate::sync::cached_env_version(envs, app_id) != Some(info.env_version))
     {
-        let env_json = crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id)
+        let env_json = crate::sync::fetch_app_env(&config.control_url, &config.service_auth, app_id)
             .await
             .map_err(|e| format!("env fetch failed for pinned workflow load: {e}"))?;
         let env_version = app_version.as_ref().map_or(0, |info| info.env_version);
@@ -1603,7 +1653,7 @@ async fn load_pinned_workflow_on_demand(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::collections::HashMap;
     use std::path::PathBuf;
     use std::sync::{Arc, Once, RwLock};
@@ -1674,6 +1724,143 @@ mod tests {
         events: Vec<zeroship_core::usage_event::UsageEvent>,
     }
 
+    /// One worker identity for the whole test binary, plus the header the
+    /// gateway presents to it.
+    ///
+    /// A process-wide `OnceLock` so every fixture below verifies under the SAME
+    /// bundle that mints [`gateway_authorization`]. Two fixtures generating
+    /// their own keys would each pass in isolation and fail the moment a test
+    /// crossed between them, which is the shape hardest to read from a failing
+    /// run.
+    ///
+    /// The TRANSPORT-ONLY profile, because that is what the worker runs on its
+    /// dispatch hop: no `jti` claimed and no store consulted, so a single minted
+    /// header is reusable across every request here. That reusability is not a
+    /// test convenience - it is the property the tier buys, and a fixture that
+    /// had to re-mint per request would be quietly measuring the wrong profile.
+    /// Everything one worker identity carries for these tests.
+    ///
+    /// `gateway` and `impostor` are whole keyrings rather than bare headers
+    /// because the identity envelope is signed per request: the forgery test
+    /// needs a SECOND service that can produce a well-formed envelope the worker
+    /// must refuse, and a fixture that only handed out strings could not express
+    /// that at all.
+    pub(crate) struct WorkerTestIdentity {
+        pub(crate) service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
+        pub(crate) gateway_header: String,
+        pub(crate) control_header: String,
+        /// The gateway's keyring - the ONLY one whose identity envelopes the
+        /// worker's verifier is built to accept.
+        pub(crate) gateway: zeroship_core::service_peers::ServiceKeyring,
+        /// A second, differently-keyed service. Its assertions are not trusted
+        /// and neither are its envelopes; it exists to be refused.
+        pub(crate) impostor: zeroship_core::service_peers::ServiceKeyring,
+    }
+
+    fn worker_test_identity() -> &'static WorkerTestIdentity {
+        use zeroship_core::service_assertion::{
+            ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
+        };
+        use zeroship_core::service_peers::{
+            service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME,
+            GATEWAY_SERVICE_NAME, WORKER_SERVICE_NAME,
+        };
+        use zeroship_core::user_envelope::UserEnvelopeVerifier;
+
+        static IDENTITY: OnceLock<WorkerTestIdentity> = OnceLock::new();
+        IDENTITY.get_or_init(|| {
+            let worker_issuer = service_issuer(WORKER_SERVICE_NAME).expect("worker issuer");
+            let gateway_issuer = service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer");
+            let control_issuer = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+            let worker_key = ServiceSigningKey::generate();
+            let gateway_key = ServiceSigningKey::generate();
+            let control_key = ServiceSigningKey::generate();
+
+            // BOTH peers, because the worker is a callee for two different
+            // services on two different endpoints: the gateway dispatches, and
+            // control reads app logs. Trusting one and testing the other is how
+            // a fixture proves the wrong thing.
+            // Two bundles carrying the same trust: a verifier consumes one.
+            let mut trusted = ServiceTrustBundle::new();
+            let mut held = ServiceTrustBundle::new();
+            for bundle in [&mut trusted, &mut held] {
+                bundle
+                    .trust_signing_key(&gateway_issuer, gateway_key.key_id(), &gateway_key)
+                    .expect("trust the gateway");
+                bundle
+                    .trust_signing_key(&control_issuer, control_key.key_id(), &control_key)
+                    .expect("trust control");
+            }
+
+            // Built from `trusted` BEFORE the verifier consumes it, and for the
+            // GATEWAY issuer alone. The worker's own key is in this fixture and
+            // is deliberately not reachable through it: that is the asymmetry
+            // `an_identity_envelope_signed_by_the_wrong_key_is_refused` rules on.
+            let user_envelope = UserEnvelopeVerifier::for_issuer(&trusted, &gateway_issuer)
+                .expect("the bundle publishes the gateway key");
+
+            let keyring = ServiceKeyring::from_parts(worker_issuer, worker_key, held)
+                .expect("worker keyring");
+            let gateway = ServiceKeyring::from_parts(
+                gateway_issuer.clone(),
+                gateway_key,
+                ServiceTrustBundle::new(),
+            )
+            .expect("gateway keyring");
+            let control = ServiceKeyring::from_parts(
+                control_issuer,
+                control_key,
+                ServiceTrustBundle::new(),
+            )
+            .expect("control keyring");
+            // A fourth service, trusted by nobody. It signs under the GATEWAY's
+            // issuer so a refusal cannot be attributed to a mismatched `iss`
+            // string: the only thing wrong with its envelopes is the key.
+            let impostor = ServiceKeyring::from_parts(
+                gateway_issuer.clone(),
+                ServiceSigningKey::generate(),
+                ServiceTrustBundle::new(),
+            )
+            .expect("impostor keyring");
+            let worker_audience = service_issuer(WORKER_SERVICE_NAME).expect("worker issuer");
+            let gateway_header = format!(
+                "Bearer {}",
+                gateway.mint_for(&worker_audience).expect("mint for the worker")
+            );
+            let control_header = format!(
+                "Bearer {}",
+                control.mint_for(&worker_audience).expect("mint for the worker")
+            );
+            WorkerTestIdentity {
+                service_auth: Arc::new(
+                    ServiceAuth::new(keyring, Arc::new(TransportAssertionVerifier::new(trusted)))
+                        .verifying_user_envelopes(user_envelope),
+                ),
+                gateway_header,
+                control_header,
+                gateway,
+                impostor,
+            }
+        })
+    }
+
+    /// The gateway's credential for the worker, for tests that drive dispatch.
+    pub(crate) fn gateway_authorization() -> &'static str {
+        &worker_test_identity().gateway_header
+    }
+
+    /// Control's credential for the worker. The log read is granted to
+    /// `svc/control` and NOT to `svc/gateway`, so the two headers are not
+    /// interchangeable - which is the separation a shared bearer could not
+    /// express and this fixture would hide if it minted only one.
+    fn control_authorization() -> &'static str {
+        &worker_test_identity().control_header
+    }
+
+    pub(crate) fn test_service_auth() -> Arc<zeroship_core::service_peers::ServiceAuth> {
+        Arc::clone(&worker_test_identity().service_auth)
+    }
+
     /// A worker config pointed at a dead control plane, so any on-demand load
     /// attempt fails rather than reaching the network.
     fn test_worker_config(blob_root: &std::path::Path) -> Arc<crate::WorkerConfig> {
@@ -1684,6 +1871,7 @@ mod tests {
                 .expect("workflow blob store"),
         );
         Arc::new(crate::WorkerConfig {
+            service_auth: test_service_auth(),
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: String::new(),
             db_url: None,
@@ -1692,7 +1880,6 @@ mod tests {
             max_isolates: 10,
             max_pinned_isolates_per_app: 4,
             poll_interval_secs: 60,
-            worker_key: String::new(),
             shutdown_timeout_secs: 0,
             blob_store,
             workflow_blob_store,
@@ -1740,6 +1927,7 @@ mod tests {
 
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(payload)
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -1792,6 +1980,7 @@ mod tests {
                 .load(std::sync::atomic::Ordering::Relaxed);
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{segment}"))
+                .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame("GET", "http://app.test/", b""))
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -1970,6 +2159,7 @@ mod tests {
 
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame(
                     "POST",
                     "http://example.test/generated-error",
@@ -2438,6 +2628,7 @@ mod tests {
                     .expect("workflow blob store"),
             );
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: test_service_auth(),
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
@@ -2446,7 +2637,6 @@ mod tests {
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
-                worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
                 workflow_blob_store,
@@ -2469,6 +2659,7 @@ mod tests {
 
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame(
                     "GET",
                     "http://example.test/from-worker-test",
@@ -2482,6 +2673,7 @@ mod tests {
 
             let req = test::TestRequest::get()
                 .uri(&format!("/logs/{}", worker_app_path(&app_id)))
+                .header("authorization", control_authorization())
                 .to_request();
             let resp = test::call_service(&app, req).await;
             assert_eq!(resp.status(), StatusCode::OK);
@@ -2636,6 +2828,7 @@ mod tests {
         // what the gateway forwards on a public route.
         let req = test::TestRequest::post()
             .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
             .set_payload(dispatch_frame(
                 "GET",
                 &format!("http://app.test{path}"),
@@ -2674,6 +2867,244 @@ mod tests {
                  must have logged nothing; got {lines:?}"
             );
         });
+    }
+
+    /// The dispatch hop refuses a caller that has not proved WHICH SERVICE it
+    /// is.
+    ///
+    /// The predecessor accepted every caller whenever the shared secret was
+    /// empty, so this arm could not be written at all: the fixtures all ran
+    /// with `worker_key: String::new()`, which was the disabled state. The
+    /// three headers below are the shapes an attacker with network reach can
+    /// produce without the gateway's private key.
+    #[test]
+    fn dispatch_refuses_a_caller_with_no_service_credential() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let dir = tmpdir("dispatch-no-credential");
+            let config = test_worker_config(&dir);
+            let app_id = Uuid::new_v4();
+            let app = test::init_service(
+                web::App::new()
+                    .state(config.clone())
+                    .state(crate::sync::SharedEnvs::default())
+                    .state(crate::logs::new_store())
+                    .configure(configure),
+            )
+            .await;
+
+            for header in [None, Some("Bearer "), Some("Bearer not-an-assertion")] {
+                let mut req = test::TestRequest::post()
+                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .set_payload(dispatch_frame("GET", "http://example.test/", b""));
+                if let Some(value) = header {
+                    req = req.header("authorization", value);
+                }
+                let resp = test::call_service(&app, req.to_request()).await;
+                assert_eq!(
+                    resp.status(),
+                    StatusCode::UNAUTHORIZED,
+                    "header {header:?} must not reach the runtime"
+                );
+            }
+
+            // THE CONTROL, one variable apart: with the gateway's assertion the
+            // request gets past the guard and fails on the missing app instead,
+            // so the refusals above are the credential check rather than the
+            // route being unreachable in this fixture.
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .header("authorization", gateway_authorization())
+                    .set_payload(dispatch_frame("GET", "http://example.test/", b""))
+                    .to_request(),
+            )
+            .await;
+            assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+        });
+    }
+
+    /// An unconfigured worker refuses dispatch instead of admitting everyone.
+    ///
+    /// The exact inversion of the deleted `if worker_key.is_empty() { return
+    /// None }`, asserted directly because it is the property a later "make it
+    /// work locally" edit is most likely to undo.
+    #[test]
+    fn an_unconfigured_worker_refuses_dispatch() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let dir = tmpdir("dispatch-unconfigured");
+            let mut config = test_worker_config(&dir);
+            Arc::get_mut(&mut config).expect("sole owner").service_auth =
+                Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured());
+            let app_id = Uuid::new_v4();
+            let app = test::init_service(
+                web::App::new()
+                    .state(config.clone())
+                    .state(crate::sync::SharedEnvs::default())
+                    .state(crate::logs::new_store())
+                    .configure(configure),
+            )
+            .await;
+
+            // Even the gateway's real assertion is refused: with no peer bundle
+            // there is nothing to verify it against, and the answer is no.
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .header("authorization", gateway_authorization())
+                    .set_payload(dispatch_frame("GET", "http://example.test/", b""))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        });
+    }
+
+    /// THE RED TEST OF THE ASYMMETRIC ENVELOPE: an identity envelope signed
+    /// with the WRONG key is refused, and the request never reaches the runtime.
+    ///
+    /// # Its existence is the proof the keys actually split
+    ///
+    /// This test COULD NOT BE WRITTEN before this change, and not because nobody
+    /// tried. The envelope was an HMAC keyed by `worker_key` - the same secret
+    /// the worker used to verify it - so the worker could produce any envelope
+    /// it could check. "Signed with the wrong key" had no referent: there was
+    /// one key, and anything that failed to verify was a corrupted header rather
+    /// than a forgery by a distinct party. What made the arm expressible is that
+    /// signing and verifying are now different capabilities held by different
+    /// processes.
+    ///
+    /// The impostor signs under the GATEWAY's own issuer, so the refusal cannot
+    /// be a mismatched `iss` string. It is the signature, and nothing else.
+    #[test]
+    fn an_identity_envelope_signed_by_the_wrong_key_is_refused() {
+        compio::runtime::Runtime::new().unwrap().block_on(async {
+            let dir = tmpdir("dispatch-forged-identity");
+            let config = test_worker_config(&dir);
+            let app_id = Uuid::new_v4();
+            let app = test::init_service(
+                web::App::new()
+                    .state(config.clone())
+                    .state(crate::sync::SharedEnvs::default())
+                    .state(crate::logs::new_store())
+                    .configure(configure),
+            )
+            .await;
+
+            const USER: &[u8] = br#"{"id":"pws_forged","email":"a@b.test","name":"A","avatar":null,"email_verified":true,"scopes":[]}"#;
+            let request_id = Uuid::new_v4();
+            let identity = worker_test_identity();
+            let forged = identity
+                .impostor
+                .user_envelope_signer()
+                .sign(USER, request_id);
+
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .header("authorization", gateway_authorization())
+                    .header("x-request-id", request_id.to_string().as_str())
+                    .header("zeroship-user", forged.as_str())
+                    .set_payload(dispatch_frame("GET", "http://example.test/", b""))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "an identity envelope the gateway did not sign must be refused, \
+                 even when the TRANSPORT credential is the gateway's genuine one"
+            );
+
+            // THE SAME FORGERY, RELABELLED with the gateway's real `kid`.
+            //
+            // Without this arm the one above is bound by KEY RESOLUTION rather
+            // than by the signature: an unknown `kid` resolves to no key and is
+            // refused before any verification runs, so neutralising the
+            // signature check leaves it green. Measured, not assumed - deleting
+            // `verify_strict` from `UserEnvelopeVerifier` kept the arm above
+            // passing and this one is what goes red.
+            let mut parts: Vec<&str> = forged.split('.').collect();
+            parts[3] = identity.gateway.user_envelope_signer().key_id();
+            let relabelled = parts.join(".");
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .header("authorization", gateway_authorization())
+                    .header("x-request-id", request_id.to_string().as_str())
+                    .header("zeroship-user", relabelled.as_str())
+                    .set_payload(dispatch_frame("GET", "http://example.test/", b""))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "naming a trusted kid must not admit an envelope signed by another key"
+            );
+
+            // THE CONTROL, one variable apart: the SAME payload, the SAME
+            // request id, the SAME transport credential - signed by the gateway.
+            // It gets past the identity check and fails on the missing app
+            // instead, so the refusals above are the credential and not the
+            // shape of the envelope or the reachability of the route.
+            let genuine = identity.gateway.user_envelope_signer().sign(USER, request_id);
+            assert_ne!(genuine, forged, "the two signers must differ");
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .header("authorization", gateway_authorization())
+                    .header("x-request-id", request_id.to_string().as_str())
+                    .header("zeroship-user", genuine.as_str())
+                    .set_payload(dispatch_frame("GET", "http://example.test/", b""))
+                    .to_request(),
+            )
+            .await;
+            assert_ne!(resp.status(), StatusCode::UNAUTHORIZED);
+        });
+    }
+
+    /// The worker cannot mint an identity it would accept.
+    ///
+    /// The corollary of the arm above, asserted against the WORKER's own service
+    /// key rather than a third party's - because that is the key the worker
+    /// actually holds, and the one a compromise of the worker process hands an
+    /// attacker. Under the shared secret this was the whole defect; here the
+    /// worker's key is published under a different issuer, so the verifier
+    /// resolves no key for it.
+    #[test]
+    fn the_worker_own_service_key_cannot_sign_an_identity_it_accepts() {
+        let identity = worker_test_identity();
+        const USER: &[u8] = br#"{"id":"pws_self","email":"a@b.test","name":"A","avatar":null,"email_verified":true,"scopes":[]}"#;
+        let request_id = Uuid::new_v4();
+        let verifier = identity
+            .service_auth
+            .user_envelope_verifier()
+            .expect("the test worker verifies envelopes");
+
+        let self_signed = identity
+            .service_auth
+            .user_envelope_signer()
+            .expect("the worker holds its own key")
+            .sign(USER, request_id);
+        assert_eq!(
+            verifier.verify_for_request(&self_signed, request_id),
+            None,
+            "the worker must not be able to mint an identity it would accept"
+        );
+
+        // The one-variable partner: the gateway's signature over the same bytes
+        // for the same request IS accepted.
+        assert!(verifier
+            .verify_for_request(
+                &identity.gateway.user_envelope_signer().sign(USER, request_id),
+                request_id
+            )
+            .is_some());
     }
 
     /// THE CONTROL. Same app, same missing identity, one variable changed:
@@ -2757,6 +3188,7 @@ mod tests {
                     .expect("workflow blob store"),
             );
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: test_service_auth(),
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
@@ -2765,7 +3197,6 @@ mod tests {
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
-                worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
                 workflow_blob_store,
@@ -2785,6 +3216,7 @@ mod tests {
             let raw_body = [0xff, 0x00, 0xfe, 0x80];
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame(
                     "POST",
                     "http://example.test/binary-body",
@@ -2862,6 +3294,7 @@ mod tests {
                     .expect("workflow blob store"),
             );
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: test_service_auth(),
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
@@ -2870,7 +3303,6 @@ mod tests {
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
-                worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
                 workflow_blob_store,
@@ -2889,6 +3321,7 @@ mod tests {
 
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame(
                     "GET",
                     "http://example.test/binary-response",
@@ -2982,6 +3415,7 @@ mod tests {
                     .expect("workflow blob store"),
             );
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: test_service_auth(),
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
@@ -2990,7 +3424,6 @@ mod tests {
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
-                worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
                 workflow_blob_store,
@@ -3012,6 +3445,7 @@ mod tests {
             let url = "http://example.test/counters-probe";
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame("POST", url, req_body.as_bytes()))
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -3178,6 +3612,7 @@ mod tests {
                     .expect("workflow blob store"),
             );
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: test_service_auth(),
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
@@ -3186,7 +3621,6 @@ mod tests {
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
-                worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
                 workflow_blob_store,
@@ -3205,6 +3639,7 @@ mod tests {
 
             let req = test::TestRequest::post()
                 .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(dispatch_frame(
                     "GET",
                     "http://example.test/kernel-probe",
@@ -3548,6 +3983,7 @@ mod tests {
             let dispatch = compio::runtime::spawn(async move {
                 let req = test::TestRequest::post()
                     .uri(&format!("/dispatch/{}", worker_app_path(&app_a)))
+                .header("authorization", gateway_authorization())
                     .set_payload(dispatch_frame("GET", "http://app-a.test/", b""))
                     .to_request();
                 let resp = test::call_service(&service, req).await;
@@ -3860,6 +4296,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 .expect("workflow blob store"),
         );
         let config = Arc::new(crate::WorkerConfig {
+            service_auth: test_service_auth(),
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: String::new(),
             db_url,
@@ -3868,7 +4305,6 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             max_isolates: 10,
             max_pinned_isolates_per_app,
             poll_interval_secs: 60,
-            worker_key: String::new(),
             shutdown_timeout_secs: 0,
             blob_store: blob_store.clone(),
             workflow_blob_store: workflow_blob_store.clone(),
@@ -4131,6 +4567,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
             let req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -4180,6 +4617,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
             let req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(
                     serde_json::to_vec(&workflow_request_for_run(&app_id, "run_claim_lost"))
                         .unwrap(),
@@ -4230,6 +4668,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
             let req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(
                     serde_json::to_vec(&workflow_request(&app_id))
                     .unwrap(),
@@ -4280,6 +4719,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             let payload = serde_json::to_vec(&workflow_request(&app_id)).unwrap();
             let req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(payload.clone())
                 .to_request();
             let resp = test::call_service(&app, req).await;
@@ -4351,6 +4791,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
 
             let first_req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
             let first_resp = test::call_service(&app, first_req).await;
@@ -4360,6 +4801,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             reclaim_workflow_run(&db_url, &app_id, "run_test").await;
             let second_req = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(serde_json::to_vec(&workflow_request(&app_id)).unwrap())
                 .to_request();
             let second_resp = test::call_service(&app, second_req).await;
@@ -4411,6 +4853,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 seed_unclaimed_workflow_run(&db_url, &app_id, &run_id, "Checkout", deploy_hash).await;
                 let req = test::TestRequest::post()
                     .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                     .set_payload(serde_json::to_vec(&workflow_request_for_run(&app_id, &run_id)).unwrap())
                     .to_request();
                 let resp = test::call_service(&app, req).await;
@@ -4458,6 +4901,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await;
             let req_a = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(
                     serde_json::to_vec(&workflow_request_for_run(&app_id, "run_test_lru_a"))
                     .unwrap(),
@@ -4477,6 +4921,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
             .await;
             let req_b = test::TestRequest::post()
                 .uri(&format!("/workflow-advance-unsigned/{}", worker_app_path(&app_id)))
+                .header("authorization", gateway_authorization())
                 .set_payload(
                     serde_json::to_vec(&workflow_request_for_run(&app_id, "run_test_lru_b"))
                     .unwrap(),

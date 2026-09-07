@@ -29,8 +29,8 @@
 //! `__zeroship_audit_unmask` lives in the **per-app schema** (alongside
 //! `__zeroship_schema_migrations`). App-scoped audit data should not
 //! require platform-role access to query — operators query via the
-//! per-app schema. A platform-wide `__zeroship_admin` schema was
-//! proposed for it and refused; it is now deleted outright (see
+//! per-app schema. A platform-wide system schema was proposed for it
+//! and refused; that schema is now deleted outright (see
 //! `crate::auth`).
 //!
 //! **This module does not create it.** It did until 2026-08-28, from
@@ -418,11 +418,13 @@ pub fn check_unmask_authorization(
 /// `crate::crud::mask_policy::dispatch_set_mask_policy`; there is no
 /// durable store to fall back to, and an app that declared no policy
 /// correctly lands on the default-deny rule below (`auto` only). The
-/// PG arm used to `SELECT __zeroship_admin.get_mask_policy($1)` here,
-/// which meant every unmask on an app with no cached policy failed with
-/// `schema "__zeroship_admin" does not exist` rather than default-denying.
-/// The routine and its store were deleted on 2026-08-27; see
-/// `crate::crud::mask_policy`.
+/// PG arm used to `SELECT get_mask_policy($1)` here against the
+/// platform-owned system schema, which meant every unmask on an app with no
+/// cached policy failed with an undefined-schema error rather than
+/// default-denying. The routine and its store were deleted on 2026-08-27; see
+/// `crate::crud::mask_policy`. The regression fence for the default-deny
+/// behaviour is
+/// `pg_declared_mask_policy_authorizes_unmask_without_durable_store`.
 ///
 /// SQLite still keeps a sidecar file and is still re-read here. That
 /// asymmetry is deliberate and flagged in the module header of

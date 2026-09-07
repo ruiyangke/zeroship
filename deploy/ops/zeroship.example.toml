@@ -19,11 +19,10 @@
 # trusted_origins = ["https://console.zeroship.ai", "http://localhost:3000"]
 
 # Platform-global secrets, at the ROOT because several binaries read the one
-# value: control_key (control, gateway, worker, migrated), worker_key (control,
-# gateway, worker), pairwise_salt (control, gateway). Root keys must precede the
+# value: control_key (control, gateway, worker, migrated) and pairwise_salt
+# (control, gateway). Root keys must precede the
 # first table header, or TOML puts them inside it.
 control_key = "urn:zeroship:file:/etc/zeroship/secrets/control_key"
-worker_key = "urn:zeroship:file:/etc/zeroship/secrets/worker_key"
 pairwise_salt = "urn:zeroship:file:/etc/zeroship/secrets/pairwise_salt"
 
 [auth]

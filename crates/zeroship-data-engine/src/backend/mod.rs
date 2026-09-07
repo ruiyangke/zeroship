@@ -162,7 +162,7 @@ pub use zeroship_data_core::capability::{LockScope, SNAPSHOT_RESTORE_LOCK_TAG};
 // test-helpers --all-targets` passed clean while zeroship-worker and
 // zeroship-cli both failed to build. Only a dependent lib/bins build reveals
 // it; `tests/shipped_config_gate.sh` is that build.
-pub use zeroship_data_core::capability::{BusyPolicy, PitrTarget, SnapshotHandle, SnapshotOpts};
+pub use zeroship_data_core::capability::{BusyPolicy, SnapshotHandle, SnapshotOpts};
 
 // The eight capability traits followed their vocabulary down on 2026-09-02.
 // Each is a contract and nothing more: associated types and signatures over the
@@ -260,7 +260,7 @@ pub use zeroship_schema::descriptors::GeoPoint;
 // This section brings:
 //   - the `Backup` trait declaration;
 //   - the supporting [`EncryptionMode`] / [`BusyPolicy`] /
-//     [`SnapshotOpts`] / [`SnapshotHandle`] / [`PitrTarget`] types;
+//     [`SnapshotOpts`] / [`SnapshotHandle`] types;
 //   - impls on `PostgresBackend` + `SqliteBackend`;
 //   - compile-time trait-shape pins in the `tests` module.
 //
@@ -513,9 +513,7 @@ mod tests {
     }
 
     /// Compile-time: `PostgresBackend` satisfies [`Backup`].
-    /// The `pg_dump`/`pg_restore` shell-out body is backfilled; the
-    /// PITR placeholder still targets a `__zeroship_admin.pitr_targets`
-    /// table that no longer has an installer. Mirrors the
+    /// The `pg_dump`/`pg_restore` shell-out body is backfilled. Mirrors the
     /// `_assert_postgres_backend_impls_encrypted_column` shape above.
     #[cfg(feature = "test-helpers")]
     #[allow(dead_code)]

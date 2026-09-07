@@ -132,11 +132,11 @@ fn the_deploy_scripts_sed_still_yields_the_whole_table() {
 fn the_extraction_returns_nothing_when_the_table_is_absent() {
     assert!(scrape("fn main() {}\n").is_empty());
     assert!(
-        scrape("    \"ZEROSHIP_WORKER_KEY\",\n").is_empty(),
+        scrape("    \"ZEROSHIP_CONTROL_KEY\",\n").is_empty(),
         "the OLD pattern's shape must not match; that looseness is what went blind"
     );
     assert_eq!(
-        scrape("    env: \"ZEROSHIP_WORKER_KEY\",\n"),
-        vec!["ZEROSHIP_WORKER_KEY".to_owned()]
+        scrape("    env: \"ZEROSHIP_CONTROL_KEY\",\n"),
+        vec!["ZEROSHIP_CONTROL_KEY".to_owned()]
     );
 }

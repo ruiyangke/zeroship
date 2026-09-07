@@ -1723,6 +1723,17 @@ VERIFIED walk-through:
 
 ### 5.2 Gateway-to-Worker `worker_key` dispatch
 
+**SUPERSEDED, and the whole of sections 5.2, 5.3 and every `worker_key` row in
+the tables below describe a shape that no longer exists.** `worker_key` is
+deleted: the dispatch hop carries an ed25519 service assertion the worker
+verifies under the peer document, control's log read carries its own assertion,
+and the `ZeroShip-User` envelope is signed by the gateway's private key and
+verified under its published public half
+(`crates/zeroship-core/src/user_envelope.rs`). The empty-key bypass this audit
+records at the end of the document is gone with it. The text is kept as the
+audit that motivated the change rather than rewritten in place - reading it as
+current would describe a fleet nobody runs.
+
 ```text
 +--------------------------------------------------------+
 | Operator gives worker_key to Gateway and Worker        |

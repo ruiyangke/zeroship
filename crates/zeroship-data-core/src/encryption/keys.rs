@@ -29,7 +29,8 @@
 //! not a variant of the `SQLite` arm, it is the same code.
 //!
 //! There used to be a second variant, `KeySource::PgAdminTable`, which
-//! asked `__zeroship_admin.get_column_key($1)` and fell back to a
+//! asked a `get_column_key($1)` definer-rights routine in the platform-owned
+//! system schema and fell back to a
 //! local source. Per-column keys held in the database were removed by
 //! operator decision (2026-08-27) together with the admin schema that
 //! installed the getter, and the variant was deleted with them. It is

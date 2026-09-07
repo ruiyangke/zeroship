@@ -205,6 +205,7 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
         )?;
     }
     ensure_pairwise_file(&pairwise_path, pairwise.as_bytes(), &mut outcome)?;
+    write_service_peers(&secrets_dir)?;
 
     let missing_env = env_keys()
         .filter(|name| !existing_env.contains_key(*name))
@@ -260,9 +261,57 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
     Ok(())
 }
 
-fn secret_specs() -> [SecretSpec; 6] {
+/// The services that hold a per-service assertion key, and the file each one
+/// reads.
+///
+/// Four keys and not one shared file, because the whole point of the mechanism
+/// is that a peer can VERIFY a service without being able to IMPERSONATE it.
+/// One key held by four processes would put every service's identity in every
+/// service's memory and turn the assertion back into a shared secret with more
+/// ceremony.
+///
+/// The names match `zeroship_core::service_peers`, and
+/// `tests/lib/runtime_secrets.sh` writes the same set under the same names for
+/// the end-to-end harnesses.
+const SERVICE_KEY_FILES: [(&str, &str); 4] = [
+    ("svc-gateway.pem", "svc/gateway"),
+    ("svc-worker.pem", "svc/worker"),
+    ("svc-control.pem", "svc/control"),
+    ("svc-auth.pem", "svc/auth"),
+];
+
+/// The JWKS-shaped document naming every service's PUBLIC key.
+///
+/// DERIVED from the four private keys above rather than generated, so it cannot
+/// drift from them: rotating a key and forgetting to republish it would leave
+/// every peer refusing that service, and the failure would look like a network
+/// problem. Written on every run for that reason - it is not a secret and it
+/// carries no state an operator would want preserved.
+const SERVICE_PEERS_FILE: &str = "service-peers.json";
+
+fn secret_specs() -> [SecretSpec; 10] {
     [
         ("migrate-dsn", generate_migrate_dsn, validate_migrate_dsn),
+        (
+            SERVICE_KEY_FILES[0].0,
+            generate_signing_key,
+            validate_signing_key,
+        ),
+        (
+            SERVICE_KEY_FILES[1].0,
+            generate_signing_key,
+            validate_signing_key,
+        ),
+        (
+            SERVICE_KEY_FILES[2].0,
+            generate_signing_key,
+            validate_signing_key,
+        ),
+        (
+            SERVICE_KEY_FILES[3].0,
+            generate_signing_key,
+            validate_signing_key,
+        ),
         (
             "auth-signing.pem",
             generate_signing_key,
@@ -578,6 +627,43 @@ fn append_env_values(
         create_private_file(path, &addition)?;
     }
     Ok(())
+}
+
+/// Publish every service's public key into one JWKS-shaped document.
+///
+/// Read back from the private files rather than remembered from generation, so
+/// the document describes the keys ON DISK. A run that finds existing keys and
+/// generates none still republishes them, which is what makes a hand-edited or
+/// half-rotated directory converge instead of silently disagreeing.
+///
+/// No `kid` is written: the loader derives it as the RFC 7638 thumbprint of the
+/// key, which is the same value the minter stamps. Two spellings of a derived
+/// fact is one spelling too many.
+fn write_service_peers(secrets_dir: &Path) -> Result<(), String> {
+    use base64::Engine as _;
+
+    let mut entries = Vec::with_capacity(SERVICE_KEY_FILES.len());
+    for (file, service) in SERVICE_KEY_FILES {
+        let path = secrets_dir.join(file);
+        let bytes = std::fs::read(&path)
+            .map_err(|error| format!("read {}: {error}", path.display()))?;
+        let signing = if let Ok(text) = std::str::from_utf8(&bytes) {
+            SigningKey::from_pkcs8_pem(text)
+                .map_err(|error| format!("{}: Ed25519 PKCS#8 PEM: {error}", path.display()))?
+        } else {
+            SigningKey::from_pkcs8_der(&bytes)
+                .map_err(|error| format!("{}: Ed25519 PKCS#8 DER: {error}", path.display()))?
+        };
+        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(signing.verifying_key().to_bytes());
+        entries.push(format!(
+            r#"{{"kty":"OKP","crv":"Ed25519","iss":"spiffe://zeroship.ai/{service}","x":"{x}"}}"#
+        ));
+    }
+    let document = format!("{{\"keys\":[{}]}}\n", entries.join(","));
+    let path = secrets_dir.join(SERVICE_PEERS_FILE);
+    std::fs::write(&path, document)
+        .map_err(|error| format!("write {}: {error}", path.display()))
 }
 
 fn generate_signing_key() -> Result<Vec<u8>, String> {

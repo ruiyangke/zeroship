@@ -5810,9 +5810,11 @@ fn missing_sibling_fails_not_null_constraint_sqlite() {
 }
 
 // ===========================================================================
-// SQLite `Backup` impl (VACUUM INTO snapshot + atomic
-// file-swap restore + `pitr_pg_only` refusal). Five tests covering the
-// gates in plan §11 + the CRITICAL #3 fence (concurrent writer):
+// SQLite `Backup` impl (VACUUM INTO snapshot + atomic file-swap restore).
+// Four tests covering the gates in plan §11 + the CRITICAL #3 fence
+// (concurrent writer). Gate #6 was a fifth, deleted 2026-09-07 with
+// `pitr_replay`; its slot is left numbered below so the plan's gate numbers
+// still line up with what is here.
 //
 //   1. `snapshot_restore_round_trip_sqlite` (gate #4): seed rows,
 //      snapshot to file://; drop rows; restore; assert recovery.
@@ -5820,16 +5822,14 @@ fn missing_sibling_fails_not_null_constraint_sqlite() {
 //      (gate #5 / CRITICAL #3 fence): spawn a writer thread; trigger
 //      snapshot; assert (a) snap file well-formed, (b) live > snap,
 //      (c) no SQLITE_BUSY under Retry policy.
-//   3. `pitr_pg_only_returns_configuration_on_sqlite` (gate #6).
+//   3. (gate #6, deleted) `pitr_pg_only_returns_configuration_on_sqlite`.
 //   4. `snapshot_during_migration_returns_typed_error_sqlite`: hold
 //      snapshot_restore lock; snapshot must refuse w/ `migration_in_progress`.
 //   5. `restore_hash_mismatch_rejected_sqlite`: corrupt snapshot;
 //      restore must refuse with `snapshot_hash_mismatch` BEFORE touching
 //      the live DB.
 
-use zeroship_plugin_db::backend::{
-    Backup as _, BusyPolicy as BackupBusyPolicy, PitrTarget, SnapshotOpts,
-};
+use zeroship_plugin_db::backend::{Backup as _, BusyPolicy as BackupBusyPolicy, SnapshotOpts};
 
 /// **Gate #4**: round-trip snapshot+restore on SQLite.
 /// Insert N rows into a per-app collection; snapshot to a temp dir;
@@ -6085,42 +6085,13 @@ fn vacuum_into_snapshot_consistent_under_concurrent_writer() {
     });
 }
 
-/// **Gate #6**: `pitr_replay` on SQLite returns the typed
-/// `Configuration { code: "pitr_pg_only" }` for both `Lsn` and
-/// `TimeMillis` targets. SQLite has no WAL-archive PITR substrate;
-/// the API surface must refuse cleanly so the SDK can branch.
-#[test]
-fn pitr_pg_only_returns_configuration_on_sqlite() {
-    run(async {
-        let (backend, _dir) = fresh_backend();
-        // LSN form.
-        let err = backend
-            .pitr_replay("app_demo", PitrTarget::Lsn("0/0".to_string()))
-            .await
-            .expect_err("pitr_replay must refuse on SQLite");
-        match err {
-            DbError::Configuration { code, .. } => {
-                assert_eq!(code, "pitr_pg_only");
-            }
-            other => {
-                panic!("expected Configuration {{ code: \"pitr_pg_only\", .. }}, got {other:?}")
-            }
-        }
-        // TimeMillis form — same refusal.
-        let err2 = backend
-            .pitr_replay("app_demo", PitrTarget::TimeMillis(1_700_000_000_000))
-            .await
-            .expect_err("pitr_replay (TimeMillis) must refuse on SQLite");
-        match err2 {
-            DbError::Configuration { code, .. } => {
-                assert_eq!(code, "pitr_pg_only");
-            }
-            other => {
-                panic!("expected Configuration {{ code: \"pitr_pg_only\", .. }}, got {other:?}")
-            }
-        }
-    });
-}
+// Gate #6 was `pitr_pg_only_returns_configuration_on_sqlite`, asserting that
+// `pitr_replay` refused with `Configuration { code: "pitr_pg_only" }` on both
+// target forms. It went on 2026-09-07 with the method: the refusal it pinned
+// described a per-vendor divergence that did not exist, because the PG arm
+// could not replay either. `zeroship_data_core::storage::Backup`'s rustdoc
+// carries the reason. Nothing replaced this test, and nothing should - there is
+// no behaviour left to assert.
 
 /// When the per-app `snapshot_restore` advisory lock is
 /// already held in this process, `snapshot()` surfaces the typed
