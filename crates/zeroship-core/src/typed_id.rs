@@ -226,6 +226,16 @@ pub const USER_PREFIX: &str = "usr";
 pub const APP_PREFIX: &str = "app";
 pub const SESSION_PREFIX: &str = "ses";
 
+/// Grant typed-id prefix: one row per (person, audience) in `zeroship.grants`,
+/// the object a session hangs off and the place the person's subject for that
+/// audience is stored.
+///
+/// `grt`, not `grn`: three characters like every other prefix, and the three
+/// that read as the word. It is disjoint from every prefix above and below,
+/// including `org`/`prj`, which is what keeps a mis-typed id unresolvable
+/// rather than resolvable against the wrong table.
+pub const GRANT_PREFIX: &str = "grt";
+
 /// Organization entity typed-id prefix: the ownership root and the billing
 /// subject. Three chars like every other prefix, and deliberately the
 /// abbreviation even though the COLUMN name is spelled out in full
@@ -390,6 +400,14 @@ pub fn new_user_id() -> String {
 /// Generate a new session ID: `ses_{base62(uuidv7)}`
 pub fn new_session_id() -> String {
     generate(SESSION_PREFIX)
+}
+
+/// Generate a new grant ID: `grt_{base62(uuidv7)}`. One row per (person,
+/// audience) in `zeroship.grants`; the `id` column stores the full typed-id
+/// string under a `grants_id_shape` CHECK, with no SQL `DEFAULT` because there
+/// is no in-database base62 generator.
+pub fn new_grant_id() -> String {
+    generate(GRANT_PREFIX)
 }
 
 /// Generate a new wake-job ID: `wak_{base62(uuidv7)}`. Used by the

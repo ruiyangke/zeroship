@@ -23,6 +23,7 @@ pub mod identity;
 pub mod oidc;
 pub mod return_to;
 pub mod server;
+pub mod session_store;
 pub mod sessions;
 pub mod store;
 pub mod startup_validation;

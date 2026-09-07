@@ -146,6 +146,7 @@ mod relay_auto_revoke_test;
 mod relay_dedup_test;
 mod reset_hash_gate_test;
 mod security_headers_test;
+mod session_object_test;
 mod session_visibility_test;
 mod signing_key_retention_test;
 mod signup_continuation_test;
