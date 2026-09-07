@@ -488,6 +488,78 @@ e2e_export_database_urls() {
   export ZEROSHIP_WORKFLOW_SCHEDULER_DATABASE_URL
 }
 
+# The base64url of a file's bytes, no padding.
+_e2e_base64url() {
+  openssl base64 -A -in "$1" | tr '+/' '-_' | tr -d '='
+}
+
+# e2e_export_service_keys <secret-dir>
+#
+# One ed25519 private key per platform service, plus ONE peer document naming
+# every public half. Every harness that boots more than one binary needs both,
+# because the internal edges between them now carry a per-service assertion
+# rather than a shared bearer: a worker with no key gets 401 from control on the
+# app-env read, and a gateway with no key gets 401 from the worker on dispatch.
+#
+# THE DOCUMENT IS SHARED AND THAT CONCEDES NOTHING. It holds PUBLIC keys, and a
+# verified assertion still has to match the callee's own audience and the
+# endpoint allowlist in crates/zeroship-core/src/service_identity.rs. Holding a
+# peer's public key is the ability to check that peer's signature and nothing
+# else.
+#
+# NO `kid` IS WRITTEN. The loader derives it as the RFC 7638 thumbprint of the
+# key itself (`thumbprint_key_id` in crates/zeroship-core/src/service_assertion.rs),
+# which is the same value the minter stamps. Writing one here would be a second
+# spelling of a derived fact, and the two would drift the first time a key was
+# regenerated without the document being rewritten.
+#
+# The `iss` member is NOT standard JWKS and is not optional: RFC 8725 section
+# 3.8 requires the verification key to be resolved from the issuer, and a bare
+# key array carries no issuer at all.
+e2e_export_service_keys() {
+  local secret_dir="$1" svc key_path entries=""
+  [ -n "$secret_dir" ] || {
+    echo "e2e_export_service_keys: a workspace directory is required" >&2
+    return 1
+  }
+  mkdir -p "$secret_dir"
+
+  ZEROSHIP_SERVICE_PEERS_FILE="${ZEROSHIP_SERVICE_PEERS_FILE:-$secret_dir/service-peers.json}"
+
+  for svc in gateway worker control auth; do
+    key_path="$secret_dir/svc-$svc.pem"
+    if [ ! -s "$key_path" ]; then
+      openssl genpkey -algorithm ed25519 -out "$key_path" 2>/dev/null || return 1
+    fi
+    # 0600 is not hygiene here, it is a startup requirement: the loader refuses
+    # a group- or world-readable private key.
+    chmod 600 "$key_path"
+    # An ed25519 SPKI DER is a fixed 12-byte prefix plus the 32-byte key, so
+    # the raw public half is the last 32 bytes.
+    openssl pkey -in "$key_path" -pubout -outform DER 2>/dev/null \
+      | tail -c 32 > "$secret_dir/svc-$svc.pub.raw" || return 1
+    local x
+    x="$(_e2e_base64url "$secret_dir/svc-$svc.pub.raw")"
+    [ -n "$x" ] || {
+      echo "e2e_export_service_keys: could not derive the $svc public key" >&2
+      return 1
+    }
+    entries="$entries{\"kty\":\"OKP\",\"crv\":\"Ed25519\",\"iss\":\"spiffe://zeroship.ai/svc/$svc\",\"x\":\"$x\"},"
+  done
+  printf '{"keys":[%s]}' "${entries%,}" > "$ZEROSHIP_SERVICE_PEERS_FILE" || return 1
+
+  ZEROSHIP_GATEWAY_SERVICE_KEY_FILE="${ZEROSHIP_GATEWAY_SERVICE_KEY_FILE:-$secret_dir/svc-gateway.pem}"
+  ZEROSHIP_WORKER_SERVICE_KEY_FILE="${ZEROSHIP_WORKER_SERVICE_KEY_FILE:-$secret_dir/svc-worker.pem}"
+  ZEROSHIP_CONTROL_SERVICE_KEY_FILE="${ZEROSHIP_CONTROL_SERVICE_KEY_FILE:-$secret_dir/svc-control.pem}"
+  ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE="${ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE:-$ZEROSHIP_SERVICE_PEERS_FILE}"
+  ZEROSHIP_WORKER_SERVICE_PEERS_FILE="${ZEROSHIP_WORKER_SERVICE_PEERS_FILE:-$ZEROSHIP_SERVICE_PEERS_FILE}"
+  ZEROSHIP_CONTROL_SERVICE_PEERS_FILE="${ZEROSHIP_CONTROL_SERVICE_PEERS_FILE:-$ZEROSHIP_SERVICE_PEERS_FILE}"
+  export ZEROSHIP_SERVICE_PEERS_FILE
+  export ZEROSHIP_GATEWAY_SERVICE_KEY_FILE ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE
+  export ZEROSHIP_WORKER_SERVICE_KEY_FILE ZEROSHIP_WORKER_SERVICE_PEERS_FILE
+  export ZEROSHIP_CONTROL_SERVICE_KEY_FILE ZEROSHIP_CONTROL_SERVICE_PEERS_FILE
+}
+
 e2e_export_runtime_secrets() {
   local secret_dir="$1"
   [ -n "$secret_dir" ] || {
@@ -557,6 +629,8 @@ e2e_export_runtime_secrets() {
   fi
   chmod 600 "$ZEROSHIP_AUTH_SIGNING_KEY_FILE"
   export ZEROSHIP_AUTH_SIGNING_KEY_FILE
+
+  e2e_export_service_keys "$secret_dir" || return 1
 
   ZEROSHIP_AUTH_PAIRWISE_SALT_FILE="${ZEROSHIP_AUTH_PAIRWISE_SALT_FILE:-$secret_dir/auth-pairwise-salt}"
   ZEROSHIP_AUTH_BROKER_SECRET_FILE="${ZEROSHIP_AUTH_BROKER_SECRET_FILE:-$ZEROSHIP_GATEWAY_BROKER_SECRET_FILE}"
