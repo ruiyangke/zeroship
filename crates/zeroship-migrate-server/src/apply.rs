@@ -1982,6 +1982,23 @@ mod tests {
 // moving this DDL out of the worker is a privilege change, and a privilege
 // change is only observable against a live catalog.
 #[cfg(all(test, feature = "live-db-tests"))]
+/// The scratch schema as the TYPE `provision_runtime_app_role` takes.
+///
+/// The binding stays a `String` because the other helpers here - `teardown`,
+/// `provision_schema_and_migrator`, `provision_audit_unmask_table` - take
+/// `&str` and outnumber the typed one several times over. Converting at the
+/// one boundary that needs the type is smaller than pushing `.as_str()`
+/// through every other call.
+///
+/// The `expect` is sound rather than optimistic: `scratch_schema` yields a
+/// hyphenated uuid, and `validate_schema` accepts ASCII alphanumerics, `_`
+/// and `-`. A panic here would mean that helper changed shape, which is a
+/// fixture bug worth failing loudly on.
+fn scratch_schema_name(raw: &str) -> SchemaName {
+    SchemaName::new(raw).expect("a scratch schema is a valid schema name")
+}
+
+#[cfg(all(test, feature = "live-db-tests"))]
 mod live_audit_unmask_provisioning {
     use super::*;
     use compio_postgres::NoTls;
@@ -2013,6 +2030,7 @@ mod live_audit_unmask_provisioning {
     fn scratch_schema() -> String {
         Uuid::new_v4().to_string()
     }
+
 
     fn audit_table_ref(schema: &str) -> String {
         format!("{}.\"__zeroship_audit_unmask\"", quote_ident(schema))
@@ -2250,7 +2268,7 @@ mod live_audit_unmask_provisioning {
         provision_audit_unmask_table(&admin, &before)
             .await
             .expect("provision audit table (production order)");
-        provision_runtime_app_role(&admin, &before, &migrator_before)
+        provision_runtime_app_role(&admin, &scratch_schema_name(&before), &migrator_before)
             .await
             .expect("provision runtime role (production order)");
 
@@ -2258,7 +2276,7 @@ mod live_audit_unmask_provisioning {
         let after = scratch_schema();
         teardown(&admin, &after).await;
         let migrator_after = provision_schema_and_migrator(&admin, &after).await;
-        provision_runtime_app_role(&admin, &after, &migrator_after)
+        provision_runtime_app_role(&admin, &scratch_schema_name(&after), &migrator_after)
             .await
             .expect("provision runtime role (inverted order)");
         provision_audit_unmask_table(&admin, &after)
@@ -2271,13 +2289,13 @@ mod live_audit_unmask_provisioning {
         let between = scratch_schema();
         teardown(&admin, &between).await;
         let migrator_between = provision_schema_and_migrator(&admin, &between).await;
-        provision_runtime_app_role(&admin, &between, &migrator_between)
+        provision_runtime_app_role(&admin, &scratch_schema_name(&between), &migrator_between)
             .await
             .expect("provision runtime role (first apply-path call)");
         provision_audit_unmask_table(&admin, &between)
             .await
             .expect("provision audit table (between the two calls)");
-        provision_runtime_app_role(&admin, &between, &migrator_between)
+        provision_runtime_app_role(&admin, &scratch_schema_name(&between), &migrator_between)
             .await
             .expect("provision runtime role (second apply-path call)");
 
@@ -2524,7 +2542,7 @@ mod live_reserved_journal_privileges {
         provision_audit_unmask_table(admin, schema)
             .await
             .expect("provision the audit table");
-        provision_runtime_app_role(admin, schema, &migrator)
+        provision_runtime_app_role(admin, &scratch_schema_name(schema), &migrator)
             .await
             .expect("provision the runtime role");
         migrator
@@ -2565,7 +2583,7 @@ mod live_reserved_journal_privileges {
             ))
             .await
             .expect("seed an inflight marker");
-        provision_runtime_app_role(&admin, &schema, &migrator)
+        provision_runtime_app_role(&admin, &scratch_schema_name(&schema), &migrator)
             .await
             .expect("the apply path's second provisioning call");
 
@@ -2724,7 +2742,7 @@ mod live_reserved_journal_privileges {
         );
 
         // ARM 2 - and the apply path's next provisioning call takes it back.
-        provision_runtime_app_role(&admin, &schema, &migrator)
+        provision_runtime_app_role(&admin, &scratch_schema_name(&schema), &migrator)
             .await
             .expect("re-provision the runtime role");
         for privilege in ["SELECT", "INSERT", "UPDATE", "DELETE"] {
@@ -2931,7 +2949,7 @@ mod live_worker_role_fence {
     /// literal or the block silently no-ops and every assertion below would
     /// then be measuring the ABSENCE of a grant while reading as a fence.
     fn production_grant_for(fx: &Fixture) -> String {
-        let sql = runtime_dependents_sql_for_role(&fx.schema, &fx.app_role);
+        let sql = runtime_dependents_sql_for_role(&scratch_schema_name(&fx.schema), &fx.app_role);
         assert!(
             sql.matches(WORKER_ROLE).count() >= 2,
             "expected the worker role as both a quoted ident and a literal: {sql}"
