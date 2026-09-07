@@ -15,6 +15,8 @@
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 
+use crate::common;
+
 use zeroship_auth::store::sessions::{self, SessionKind};
 use zeroship_auth::store::users;
 
@@ -47,13 +49,18 @@ async fn seed_app(client: &Client) -> Uuid {
         )
         .await
         .expect("seed session visibility test plan");
+    // An app row needs a project, and a project needs an organization. Nothing
+    // here asserts on authority, so the organization is left member-less.
+    let project_id = common::unowned_project(client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id) VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
+             VALUES ($1, $2, $3, $4)",
             &[
                 &app_id,
                 &format!("iss10-app-{}", app_id.simple()),
-                &plan_id
+                &plan_id,
+                &project_id
             ],
         )
         .await

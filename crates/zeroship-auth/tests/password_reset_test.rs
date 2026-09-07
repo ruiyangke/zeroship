@@ -4,6 +4,8 @@
 //! random email so concurrent runs don't collide; the cleanup at the end
 //! removes every row the test inserted.
 
+use crate::common;
+
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
 
@@ -226,13 +228,18 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     // gateway_sessions.app_id is UUID + FK → apps(id); seed a real app row.
     let gw_app_id = Uuid::new_v4();
     let plan_id = seed_test_plan(&client).await;
+    // An app row needs a project, and a project needs an organization. Nothing
+    // here asserts on authority, so the organization is left member-less.
+    let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id) VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
+             VALUES ($1, $2, $3, $4)",
             &[
                 &gw_app_id,
                 &format!("reset-revoke-app-{}", gw_app_id.simple()),
-                &plan_id
+                &plan_id,
+                &project_id
             ],
         )
         .await
@@ -729,10 +736,19 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
 
     let app_id = Uuid::new_v4();
     let plan_id = seed_test_plan(&client).await;
+    // An app row needs a project, and a project needs an organization. Nothing
+    // here asserts on authority, so the organization is left member-less.
+    let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id) VALUES ($1, $2, $3)",
-            &[&app_id, &format!("anchor-app-{}", app_id.simple()), &plan_id],
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &app_id,
+                &format!("anchor-app-{}", app_id.simple()),
+                &plan_id,
+                &project_id,
+            ],
         )
         .await
         .expect("insert app");
@@ -1006,10 +1022,19 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
 
     let app_id = Uuid::new_v4();
     let plan_id = seed_test_plan(&client).await;
+    // An app row needs a project, and a project needs an organization. Nothing
+    // here asserts on authority, so the organization is left member-less.
+    let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id) VALUES ($1, $2, $3)",
-            &[&app_id, &format!("refresh-app-{}", app_id.simple()), &plan_id],
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &app_id,
+                &format!("refresh-app-{}", app_id.simple()),
+                &plan_id,
+                &project_id,
+            ],
         )
         .await
         .expect("insert app");

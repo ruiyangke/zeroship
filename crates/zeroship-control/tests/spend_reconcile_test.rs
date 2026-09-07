@@ -161,16 +161,7 @@ async fn make_over_limit_app(state: &AppState, limit: i64) -> Uuid {
         .await
         .expect("seed priced plan");
     let name = format!("spend-{}", Uuid::new_v4());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id) \
-             VALUES ($1, $2) RETURNING id",
-            &[&name, &plan_id],
-        )
-        .await
-        .expect("insert app");
-    rows[0].get("id")
+    common::seed_app(&state.control_pg, &name, &plan_id).await
 }
 
 /// #8: a transition through the REAL cron `tick` writes a `SpendStateChange`

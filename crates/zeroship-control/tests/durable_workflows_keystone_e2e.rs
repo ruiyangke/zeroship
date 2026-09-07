@@ -515,7 +515,8 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
 ///
 /// WHY THE APP SCHEMA AND NOT `zeroship`. `env.db.collection("foo")` addresses
 /// exactly one place: `"<app_id>"."foo"`
-/// (crates/zeroship-schema/src/query.rs:3504-3505, :3551). There is no
+/// (`build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling`
+/// in crates/zeroship-schema/src/query.rs). There is no
 /// cross-schema qualifier - an op-level `schema:` naming another schema is
 /// refused - so the tables the step bodies write have to live there. Every
 /// accessor below still spells them `zeroship.workflow_e2e_*`;

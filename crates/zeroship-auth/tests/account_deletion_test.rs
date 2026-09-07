@@ -234,10 +234,14 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
     )
     .await
     .unwrap();
+    // An app row needs a project, and a project needs an organization. Account
+    // deletion is what this file is about, not authority, so the organization
+    // is left member-less.
+    let project_id = common::unowned_project(&db).await;
     db.execute(
-        "INSERT INTO zeroship.apps (id, name, plan_id) \
-         VALUES ($1, $2, 'free')",
-        &[&app_id, &format!("acctdel-app-{tag}")],
+        "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
+         VALUES ($1, $2, 'free', $3)",
+        &[&app_id, &format!("acctdel-app-{tag}"), &project_id],
     )
     .await
     .unwrap();

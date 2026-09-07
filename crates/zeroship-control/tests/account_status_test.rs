@@ -360,30 +360,14 @@ async fn get_routes_fanout_picks_most_restrictive_account_state() {
         .get("id");
 
     // One app with BOTH creators as owner rows (the fan-out).
-    let app_rows = f
-        .pg
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id) \
-             VALUES ($1, $2) RETURNING id",
-            &[
-                &format!("fanout-{}", Uuid::new_v4().simple()),
-                &plan_id
-            ],
-        )
-        .await
-        .expect("insert app");
-    let app_id: Uuid = app_rows[0].get("id");
+    let app_id = common::seed_app(
+        &f.pg,
+        &format!("fanout-{}", Uuid::new_v4().simple()),
+        &plan_id,
+    )
+    .await;
     for owner in [active, suspended] {
-        f.pg
-            .execute(
-                "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
-             SELECT p.organization_id, $2, 'owner' FROM zeroship.apps a \
-               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
-             ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-                &[&app_id, &owner],
-            )
-            .await
-            .expect("insert owner");
+        common::seat_app_organization_member(&f.pg, &app_id, &owner, "owner").await;
     }
 
     // get_routes must surface the MOST-RESTRICTIVE state (suspended), not a

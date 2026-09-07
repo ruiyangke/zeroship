@@ -3682,7 +3682,7 @@ mod workflow_live_tests {
     use zeroship_migrate_server::provisioning::provision_workflow_journal_schema;
     use zeroship_plugin_workflow::store::pg::{PgStore, WorkflowTables};
 
-    use super::tests::{init_runtime, tmpdir, usage_value};
+    use super::tests::{init_runtime, tmpdir, usage_value, worker_app_path};
     use super::*;
 
     const WORKFLOW_TEST_PLAN: &str = "pln_worker_workflow_test";
@@ -3929,11 +3929,31 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         // `apps_name_key` instead. These tests run concurrently, so a shared name
         // makes all but the first fail on contact.
         let app_name = format!("worker-workflow-test-app-{app_id}");
+        // An app needs a project and a project needs an organization:
+        // `apps.project_id` is NOT NULL against a RESTRICT foreign key. Workflow
+        // admission is what these tests drive, not authority, so the
+        // organization is left member-less.
+        let organization_id = zeroship_core::typed_id::generate("org");
+        let project_id = zeroship_core::typed_id::generate("prj");
         conn.execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled) \
-             VALUES ($1, $3, $2, true) \
+            "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+             VALUES ($1, $2, 'Worker Workflow Fixture', 'fixture@zeroship.test')",
+            &[&organization_id, &format!("worker-workflow-{}", Uuid::new_v4().simple())],
+        )
+        .await
+        .expect("seed worker workflow test organization");
+        conn.execute(
+            "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
+             VALUES ($1, $2, 'default', 'Default')",
+            &[&project_id, &organization_id],
+        )
+        .await
+        .expect("seed worker workflow test project");
+        conn.execute(
+            "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled, project_id) \
+             VALUES ($1, $3, $2, true, $4) \
              ON CONFLICT (id) DO UPDATE SET plan_id = EXCLUDED.plan_id, workflows_enabled = true",
-            &[app_id, &WORKFLOW_TEST_PLAN, &app_name],
+            &[app_id, &WORKFLOW_TEST_PLAN, &app_name, &project_id],
         )
         .await
         .expect("upsert worker workflow test app");

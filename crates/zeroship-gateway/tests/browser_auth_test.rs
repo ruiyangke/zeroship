@@ -18,6 +18,8 @@
 //! convention — no live PG in CI by default), but the same-origin guard +
 //! cookie-clear parts run unconditionally.
 
+mod common;
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 
@@ -702,13 +704,15 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
         )
         .await
         .expect("seed oauth client");
+    let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name) VALUES ($1, $2) \
+            "INSERT INTO zeroship.apps (id, name, project_id) VALUES ($1, $2, $3) \
              ON CONFLICT (id) DO NOTHING",
             &[
                 &Uuid::parse_str(APP_UUID).expect("valid APP_UUID"),
-                &format!("browser-auth-{APP_NAME}")
+                &format!("browser-auth-{APP_NAME}"),
+                &project_id
             ],
         )
         .await

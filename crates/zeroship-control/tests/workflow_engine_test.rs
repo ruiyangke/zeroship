@@ -520,11 +520,14 @@ async fn seed_app_and_deploy_on_plan(
 ) -> (Uuid, String) {
     let app_id = Uuid::new_v4();
     let name = format!("wf-{label}-{}", Uuid::new_v4().simple());
+    // Workflow admission is what this file is about, not authority, so the app
+    // wants a home rather than a creator.
+    let project = common::unowned_project(fx.pg.inner.as_ref()).await;
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled) \
-             VALUES ($1, $2, $3, true)",
-            &[&app_id, &name, &plan_id],
+            "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled, project_id) \
+             VALUES ($1, $2, $3, true, $4)",
+            &[&app_id, &name, &plan_id, &project],
         )
         .await
         .expect("insert app");

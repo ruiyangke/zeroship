@@ -13,6 +13,8 @@
 //! the migration/superuser role (which is BYPASSRLS), so the policy does not
 //! filter; the per-`app_id` WHERE clauses still enforce the same behaviour.
 
+mod common;
+
 use compio_postgres::{connect, NoTls};
 use uuid::Uuid;
 use zeroship_gateway::sessions::{create, revoke_app_sessions_for_user, NewSession};
@@ -183,13 +185,15 @@ async fn insert_app(client: &compio_postgres::Client, app_id: Uuid) {
         )
         .await
         .expect("insert free plan");
+    let project_id = common::unowned_project(client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name) \
-             VALUES ($1, $2)",
+            "INSERT INTO zeroship.apps (id, name, project_id) \
+             VALUES ($1, $2, $3)",
             &[
                 &app_id,
-                &format!("gateway-session-app-{}", app_id.simple())
+                &format!("gateway-session-app-{}", app_id.simple()),
+                &project_id
             ],
         )
         .await

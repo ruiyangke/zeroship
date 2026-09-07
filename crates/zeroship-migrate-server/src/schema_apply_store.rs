@@ -372,11 +372,36 @@ mod tests {
             .await
             .expect("seed transition test user");
         let app_name = format!("schema-apply-{}", app_id.simple());
+        // An app needs a project and a project needs an organization:
+        // `apps.project_id` is NOT NULL against a RESTRICT foreign key. This
+        // fixture is about the apply-record state machine, not about who may
+        // apply, so the organization is left member-less.
+        let organization_id = zeroship_core::typed_id::generate("org");
+        let project_id = zeroship_core::typed_id::generate("prj");
         client
             .execute(
-                "INSERT INTO zeroship.apps (id, name, plan_id) \
-                 VALUES ($1, $2, $3)",
-                &[&app_id, &app_name, &plan_id],
+                "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+                 VALUES ($1, $2, 'Schema Apply Fixture', 'fixture@zeroship.test')",
+                &[
+                    &organization_id,
+                    &format!("schema-apply-org-{}", Uuid::new_v4().simple()),
+                ],
+            )
+            .await
+            .expect("seed transition test organization");
+        client
+            .execute(
+                "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
+                 VALUES ($1, $2, 'default', 'Default')",
+                &[&project_id, &organization_id],
+            )
+            .await
+            .expect("seed transition test project");
+        client
+            .execute(
+                "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
+                 VALUES ($1, $2, $3, $4)",
+                &[&app_id, &app_name, &plan_id, &project_id],
             )
             .await
             .expect("seed transition test app");

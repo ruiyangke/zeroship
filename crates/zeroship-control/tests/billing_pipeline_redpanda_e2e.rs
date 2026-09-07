@@ -81,15 +81,7 @@ async fn seed_pricing(client: &compio_postgres::Client) -> String {
 
 async fn seed_priced_app(client: &compio_postgres::Client, plan_id: &str) -> Uuid {
     let name = format!("e2e-probe-{}", Uuid::new_v4());
-    client
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id) \
-             VALUES ($1, $2) RETURNING id",
-            &[&name, &plan_id],
-        )
-        .await
-        .expect("insert app")[0]
-        .get("id")
+    common::seed_app(client, &name, plan_id).await
 }
 
 async fn usage_total(client: &compio_postgres::Client, app: Uuid) -> i64 {

@@ -114,7 +114,15 @@ async fn create_app_neither_returns_nor_stores_an_app_level_key() {
 
     let name = format!("nokey-{}", &Uuid::new_v4().simple().to_string()[..12]);
     let record = registry
-        .create_app(&name, &zeroship_control::plan_catalog::free_plan_id(), &owner_id)
+        // `None` project: let the registry mint the owner's personal
+        // organization and default project, which is the one-step path a
+        // creator's first deploy takes.
+        .create_app(
+            &name,
+            &zeroship_control::plan_catalog::free_plan_id(),
+            &owner_id,
+            None,
+        )
         .await
         .expect("create_app");
 

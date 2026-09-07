@@ -110,12 +110,13 @@ async fn build_state(db_url: &str) -> (Arc<AppState>, PathBuf, PathBuf) {
     (state, blob_root, deploy_tmp_dir)
 }
 
-/// Seed a plan with `spend_limit_default_cents = 1000` and an app on it.
 /// Seed a plan and an app on it, OWNED by `owner_id`.
 ///
-/// The `app_members` owner row is what authorizes `billing:read` on the app now;
-/// this helper used to insert the app with no membership at all and rely on the
-/// caller holding the deleted universal-allow platform role.
+/// The owner SEAT is what authorizes `billing:read` on the app: an app reaches
+/// its authority root through `apps.project_id -> projects.organization_id`, so
+/// ownership is an `organization_members` row on the organization behind the
+/// app's project. This helper used to insert the app with no membership at all
+/// and rely on the caller holding the deleted universal-allow platform role.
 async fn make_app_with_plan_default(
     state: &AppState,
     plan_default: i64,
@@ -134,27 +135,13 @@ async fn make_app_with_plan_default(
         )
         .await
         .expect("seed plan");
-    let app_id: Uuid = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id) \
-             VALUES ($1, $2) RETURNING id",
-            &[&format!("sl-{}", Uuid::new_v4()), &plan_id],
-        )
-        .await
-        .expect("insert app")[0]
-        .get("id");
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
-             SELECT p.organization_id, $2, 'owner' FROM zeroship.apps a \
-               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
-             ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-            &[&app_id, &owner_id],
-        )
-        .await
-        .expect("bind owner membership");
+    let app_id: Uuid = common::seed_app(
+        &state.control_pg,
+        &format!("sl-{}", Uuid::new_v4()),
+        &plan_id,
+    )
+    .await;
+    common::seat_app_organization_member(&state.control_pg, &app_id, &owner_id, "owner").await;
     app_id
 }
 

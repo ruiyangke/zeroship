@@ -22,6 +22,8 @@
 //! established env-skip convention — no live PG in CI by default). The mock-OP
 //! single-flight test and the cookie/Origin tests run unconditionally.
 
+mod common;
+
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -1223,13 +1225,15 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
         )
         .await
         .expect("seed oauth client");
+    let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name) VALUES ($1, $2) \
+            "INSERT INTO zeroship.apps (id, name, project_id) VALUES ($1, $2, $3) \
              ON CONFLICT (id) DO NOTHING",
             &[
                 &Uuid::parse_str(APP_UUID).expect("app uuid"),
-                &format!("anchor-test-{APP_NAME}")
+                &format!("anchor-test-{APP_NAME}"),
+                &project_id
             ],
         )
         .await
@@ -2371,13 +2375,15 @@ async fn seed_app_and_client_for(
         )
         .await
         .expect("seed oauth client");
+    let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name) VALUES ($1, $2) \
+            "INSERT INTO zeroship.apps (id, name, project_id) VALUES ($1, $2, $3) \
              ON CONFLICT (id) DO NOTHING",
             &[
                 &Uuid::parse_str(app_uuid).expect("app uuid"),
-                &format!("{app_name}-{}", user_id.simple())
+                &format!("{app_name}-{}", user_id.simple()),
+                &project_id
             ],
         )
         .await

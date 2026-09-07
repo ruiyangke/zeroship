@@ -30,6 +30,8 @@
 //! test JWKS endpoint; for verifier-only checks see
 //! `crates/zeroship-core/src/logout_token.rs::tests`.
 
+mod common;
+
 use std::sync::Arc;
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -222,13 +224,15 @@ async fn insert_user(client: &Client, label: &str) -> Uuid {
 /// Seed a real `zeroship.apps` row with the given stable UUID so the
 /// `app_session_anchors` / `gateway_sessions` FKs to `apps(id)` are satisfied.
 async fn seed_app(client: &Client, app_id: Uuid, name: &str) {
+    let project_id = common::unowned_project(client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id) \
-             VALUES ($1, $2, 'free')",
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
+             VALUES ($1, $2, 'free', $3)",
             &[
                 &app_id,
-                &name
+                &name,
+                &project_id
             ],
         )
         .await
