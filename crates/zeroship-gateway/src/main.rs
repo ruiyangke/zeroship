@@ -157,6 +157,93 @@ fn enforce_gateway_credentials(
     }
 }
 
+/// A [`ReplayStore`] over the gateway's per-worker-thread Postgres pool.
+///
+/// The gateway is a callee on exactly one internal edge -
+/// `/__zeroship/internal/workflow-advance` - and that edge takes the FULL
+/// profile, so the `jti` must be claimed in a store every gateway replica
+/// shares. The gateway's `Pool` is `!Send` and lives in a thread-local, so the
+/// checkout happens inside `claim` rather than being held on the store.
+///
+/// **This is the one consumer of the gateway's database credential that the
+/// auth redesign's step 6 does NOT delete along with the anchor and RP paths.**
+/// That step's F3 says the gateway holds no database credential at all, which
+/// is incompatible with a shared replay store terminating here. The tension is
+/// recorded rather than resolved: whoever lands step 6 has to either move this
+/// edge off the gateway or re-tier it, and finding this comment is how they
+/// learn that.
+struct PoolReplayStore {
+    db: zeroship_gateway::db::DbConfig,
+}
+
+impl zeroship_core::service_assertion::ReplayStore for PoolReplayStore {
+    fn claim<'a>(
+        &'a self,
+        key: &'a str,
+        expires_at: std::time::SystemTime,
+    ) -> zeroship_core::service_assertion::ClaimFuture<'a> {
+        Box::pin(async move {
+            let pool = zeroship_gateway::db::checkout(&self.db).await.map_err(|error| {
+                zeroship_core::service_assertion::ReplayStoreError(error.to_string())
+            })?;
+            let client = pool.get().await.map_err(|error| {
+                zeroship_core::service_assertion::ReplayStoreError(error.to_string())
+            })?;
+            zeroship_authn::service_replay::claim_replay_key(&*client, key, expires_at).await
+        })
+    }
+}
+
+/// Load this gateway's service identity, or refuse to start.
+///
+/// Neither file configured: boot, refuse the inbound advance edge, and mint
+/// nothing for the worker - which makes every dispatch fail at the worker's
+/// door rather than sail through it. Configured but unloadable: exit.
+fn build_service_auth(
+    key_file: &std::path::Path,
+    peers_file: &std::path::Path,
+    db: Option<zeroship_gateway::db::DbConfig>,
+) -> zeroship_core::service_peers::ServiceAuth {
+    use zeroship_core::service_assertion::ServiceAssertionVerifier;
+    use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+
+    if key_file.as_os_str().is_empty() && peers_file.as_os_str().is_empty() {
+        tracing::error!(
+            "gateway: no service key material configured; the internal workflow-advance \
+             edge will refuse and every worker dispatch will carry no credential. Set \
+             gateway.service_key_file and gateway.service_peers_file."
+        );
+        return ServiceAuth::unconfigured();
+    }
+    let Some(db) = db else {
+        tracing::error!(
+            "gateway: refusing to start - service key material is configured but no database \
+             is, and the inbound advance edge's single-use claim needs the shared store"
+        );
+        std::process::exit(1);
+    };
+    let issuer = match service_issuer(zeroship_core::service_peers::GATEWAY_SERVICE_NAME) {
+        Ok(issuer) => issuer,
+        Err(error) => {
+            tracing::error!(%error, "gateway: refusing to start - gateway service issuer is malformed");
+            std::process::exit(1);
+        }
+    };
+    let mut keyring = match ServiceKeyring::load(issuer, key_file, peers_file) {
+        Ok(keyring) => keyring,
+        Err(error) => {
+            tracing::error!(%error, "gateway: refusing to start - service key material rejected");
+            std::process::exit(1);
+        }
+    };
+    let Some(bundle) = keyring.take_bundle() else {
+        tracing::error!("gateway: refusing to start - peer bundle already taken");
+        std::process::exit(1);
+    };
+    let replay = Arc::new(PoolReplayStore { db });
+    ServiceAuth::new(keyring, Arc::new(ServiceAssertionVerifier::new(bundle, replay)))
+}
+
 fn main() -> std::io::Result<()> {
     let (settings, boot) = bootstrap_or_exit::<GateSettings>(
         GateSettingsSources::parse(),
@@ -544,6 +631,11 @@ fn main() -> std::io::Result<()> {
     let meter = Arc::new(zeroship_metering::Meter::with_source(gate_meter_source.clone()));
 
     let state = Arc::new(GateState {
+        service_auth: Arc::new(build_service_auth(
+            settings.service_key_file.get(),
+            settings.service_peers_file.get(),
+            db.clone(),
+        )),
         config: GateConfig {
             control_url,
             control_key,

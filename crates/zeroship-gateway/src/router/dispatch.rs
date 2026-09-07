@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::RequiredPrincipal;
 use zeroship_core::app_id::AppId;
+use zeroship_core::service_identity::{endpoints, AuthError as ServiceAuthError};
 
 use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
 
@@ -115,6 +116,40 @@ pub async fn workflow_advance_internal(
         return HttpResponse::NotFound().finish();
     }
 
+    // WHO IS CALLING. This edge is reached by the control plane's workflow
+    // engine and by nobody else, and until this check landed it took no caller
+    // credential at all - the Host-header rule above was the whole gate, and it
+    // refuses only hosts that PARSE as a subdomain, so a dotless Host reached
+    // the forwarder and made the gateway advance an arbitrary app's workflow
+    // under the gateway's own authority.
+    //
+    // The FULL profile, because the rate is per advance: the single-use `jti`
+    // claim's write against the shared store is proportional to advances, not
+    // to end-user traffic. The handler's OUTBOUND leg below is the ordinary
+    // dispatch hop and takes the transport-only profile instead; applying one
+    // sentence to the handler rather than to its two edges would re-import the
+    // store write onto the forwarding path.
+    let authorization = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    if let Err(error) = state
+        .service_auth
+        .verify(authorization, endpoints::GATEWAY_WORKFLOW_ADVANCE)
+        .await
+    {
+        tracing::warn!(%error, "gateway: workflow-advance caller rejected");
+        // A store outage refuses every caller at once and is the operator's
+        // problem; the control plane treats 5xx as backpressure and retries,
+        // where a 401 would look like a credential to rotate.
+        return if matches!(error, ServiceAuthError::StoreUnavailable) {
+            HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error": "service unavailable"}))
+        } else {
+            HttpResponse::Unauthorized().json(&serde_json::json!({"error": "unauthorized"}))
+        };
+    }
+
     let request: WorkflowStepRequest = match serde_json::from_slice(body.as_ref()) {
         Ok(request) => request,
         Err(e) => {
@@ -153,17 +188,16 @@ pub async fn workflow_advance_internal(
         }
     };
 
-    // TODO(DW-signed-transport): verify a control-plane signature/nonce before
-    // accepting this internal StepRequest, then sign the gateway->worker hop.
-    // For DW-05b the worker's unsigned test-flag route is the intentional seam.
     let request_id = Uuid::new_v4();
+    // The OUTBOUND leg: a fresh transport-only assertion for the worker.
+    let worker_authorization = state.worker_authorization();
     let worker_response = match proxy::forward_workflow_advance(
         &state.hash_ring,
         &app_id,
         &compiled_route.entry.plan_id,
         &request_id,
         &worker_body,
-        &state.config.worker_key,
+        worker_authorization.as_deref(),
     )
     .await
     {
@@ -2436,6 +2470,12 @@ async fn handle_dispatch(
     // HMAC `ZeroShip-User` channel (`user_header_value`), never here.
     let headers = collect_forwarded_headers(req.headers());
 
+    // The gateway's own peer credential for this hop, minted per request under
+    // the transport-only profile. It says WHICH SERVICE is calling and nothing
+    // about the end user; the identity envelope above is a separate credential
+    // for a separate job, which is the point of splitting them.
+    let worker_authorization = state.worker_authorization();
+
     // Proxy to worker via CHWBL hash ring.
     let mut response = match proxy::forward_dispatch(
         &state.hash_ring,
@@ -2447,7 +2487,7 @@ async fn handle_dispatch(
         &headers,
         body.as_ref(),
         user_header_value.as_deref(),
-        &state.config.worker_key,
+        worker_authorization.as_deref(),
     )
     .await
     {
@@ -3078,6 +3118,7 @@ mod tests {
         tmp.push(format!("zsgate-idem-{}", uuid::Uuid::new_v4().simple()));
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
         Arc::new(GateState {
+            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),

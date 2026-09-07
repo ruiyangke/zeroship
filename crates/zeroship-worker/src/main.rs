@@ -182,6 +182,18 @@ fn unsigned_advance_bind_allowed(bind_host: &str, unsigned_advance: bool) -> boo
 
 #[allow(missing_debug_implementations)]
 pub struct WorkerConfig {
+    /// This process's service identity: the peer bundle it verifies inbound
+    /// dispatch with, and its own ed25519 key for the control-plane reads it
+    /// makes.
+    ///
+    /// INBOUND takes the transport-only profile - the dispatch hop is the app
+    /// data path, so no `jti` is claimed and no shared store is consulted.
+    /// OUTBOUND to control takes the FULL profile, because those reads fire
+    /// once per app load.
+    ///
+    /// `ServiceAuth::unconfigured()` refuses every inbound call and mints
+    /// nothing outbound. Unlike `worker_key`, absence is a closed door.
+    pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub control_url: String,
     pub control_key: String,
     pub db_url: Option<String>,
@@ -219,6 +231,53 @@ pub struct WorkerConfig {
     /// never exposes a CLI/env switch for this; signed control-plane advance
     /// replaces it in a later durable-workflows task.
     pub workflow_advance_unsigned: bool,
+}
+
+/// Load this worker's service identity, or refuse to start.
+///
+/// The verifier is the TRANSPORT-ONLY one. The worker is a callee on exactly
+/// one edge - the gateway's dispatch hop - and that hop carries every end-user
+/// request, so it claims no `jti` and consults no shared store. The worker
+/// therefore needs NO database reachability for inbound authentication at all,
+/// which is the property the tiering buys and the reason it is stated here
+/// rather than left implicit in a missing argument.
+///
+/// Neither file configured: boot, and refuse every guarded edge. Configured but
+/// unloadable: exit, because a wrong path must not be indistinguishable from an
+/// unadopted deployment.
+fn build_service_auth(
+    key_file: &std::path::Path,
+    peers_file: &std::path::Path,
+) -> zeroship_core::service_peers::ServiceAuth {
+    use zeroship_core::service_assertion::TransportAssertionVerifier;
+    use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+
+    if key_file.as_os_str().is_empty() && peers_file.as_os_str().is_empty() {
+        tracing::error!(
+            "worker: no service key material configured; dispatch and the control-plane \
+             app reads will refuse. Set worker.service_key_file and worker.service_peers_file."
+        );
+        return ServiceAuth::unconfigured();
+    }
+    let issuer = match service_issuer(zeroship_core::service_peers::WORKER_SERVICE_NAME) {
+        Ok(issuer) => issuer,
+        Err(error) => {
+            tracing::error!(%error, "worker: refusing to start - worker service issuer is malformed");
+            std::process::exit(1);
+        }
+    };
+    let mut keyring = match ServiceKeyring::load(issuer, key_file, peers_file) {
+        Ok(keyring) => keyring,
+        Err(error) => {
+            tracing::error!(%error, "worker: refusing to start - service key material rejected");
+            std::process::exit(1);
+        }
+    };
+    let Some(bundle) = keyring.take_bundle() else {
+        tracing::error!("worker: refusing to start - peer bundle already taken");
+        std::process::exit(1);
+    };
+    ServiceAuth::new(keyring, Arc::new(TransportAssertionVerifier::new(bundle)))
 }
 
 fn main() -> std::io::Result<()> {
@@ -492,6 +551,10 @@ fn main() -> std::io::Result<()> {
     );
 
     let config = Arc::new(WorkerConfig {
+        service_auth: Arc::new(build_service_auth(
+            settings.service_key_file.get(),
+            settings.service_peers_file.get(),
+        )),
         control_url,
         control_key,
         db_url: if db_url.is_empty() { None } else { Some(db_url) },

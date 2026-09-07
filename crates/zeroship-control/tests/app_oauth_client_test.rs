@@ -300,6 +300,7 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
     let control_pg = Arc::new(pg(db_url).await);
 
     Arc::new(AppState {
+        service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
         registry,
         env_store,
         stripe_store,

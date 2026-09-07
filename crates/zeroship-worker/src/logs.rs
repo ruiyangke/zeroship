@@ -53,7 +53,16 @@ pub async fn get_logs(
     logs: web::types::State<SharedLogs>,
     path: web::types::Path<String>,
 ) -> HttpResponse {
-    if let Some(resp) = check_worker_auth(&req, &config.worker_key) {
+    // The log read is called by the CONTROL plane, not the gateway, and the
+    // allowlist says so: `svc/control` holds the grant on this endpoint and
+    // `svc/gateway` does not.
+    if let Some(resp) = check_worker_auth(
+        &req,
+        &config.service_auth,
+        zeroship_core::service_identity::endpoints::WORKER_APP_LOGS,
+    )
+    .await
+    {
         return resp;
     }
 

@@ -1198,6 +1198,7 @@ mod tests {
         );
 
         let state = StdArc::new(crate::GateState {
+            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),

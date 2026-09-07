@@ -696,13 +696,25 @@ impl StepDispatcher for StubStepDispatcher {
 #[derive(Debug, Clone)]
 pub struct GatewayStepDispatcher {
     gateway_url: String,
+    /// The identity this dispatcher presents to the gateway.
+    ///
+    /// The advance edge takes the FULL profile: it fires once per advance, so
+    /// the single-use claim's write is proportional to advances rather than to
+    /// end-user traffic, and the gateway's inbound handler REFUSES without it.
+    /// An unconfigured `ServiceAuth` therefore turns every advance into
+    /// backpressure, which is the loud failure rather than the quiet one.
+    service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
 }
 
 impl GatewayStepDispatcher {
     #[must_use]
-    pub fn new(gateway_url: impl Into<String>) -> Self {
+    pub fn new(
+        gateway_url: impl Into<String>,
+        service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
+    ) -> Self {
         Self {
             gateway_url: gateway_url.into().trim_end_matches('/').to_string(),
+            service_auth,
         }
     }
 }
@@ -739,6 +751,32 @@ impl StepDispatcher for GatewayStepDispatcher {
                 return DispatchOutcome::backpressure(
                     &request,
                     format!("set gateway workflow advance content-type: {e}"),
+                );
+            }
+        };
+        let gateway_issuer = match zeroship_core::service_peers::service_issuer(
+            zeroship_core::service_peers::GATEWAY_SERVICE_NAME,
+        ) {
+            Ok(issuer) => issuer,
+            Err(e) => {
+                return DispatchOutcome::backpressure(
+                    &request,
+                    format!("gateway service issuer is malformed: {e}"),
+                );
+            }
+        };
+        let Some(authorization) = self.service_auth.authorization_for(&gateway_issuer) else {
+            return DispatchOutcome::backpressure(
+                &request,
+                "no service key material configured; cannot assert control's identity to the gateway",
+            );
+        };
+        let builder = match builder.header("authorization", authorization.as_str()) {
+            Ok(builder) => builder,
+            Err(e) => {
+                return DispatchOutcome::backpressure(
+                    &request,
+                    format!("set gateway workflow advance authorization: {e}"),
                 );
             }
         };
@@ -872,7 +910,7 @@ pub async fn run_inflight_reaper(state: Arc<AppState>, tick_secs: u64) {
         match reap_lapsed_inflight_once(
             &store,
             &state,
-            Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone())),
+            Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone(), Arc::clone(&state.service_auth))),
             WorkflowEngineConfig::default(),
             64,
         )
@@ -1079,7 +1117,7 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
     fire_once(
         &store,
         state,
-        Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone())),
+        Arc::new(GatewayStepDispatcher::new(state.gateway_url.clone(), Arc::clone(&state.service_auth))),
         WorkflowEngineConfig::default(),
     )
     .await

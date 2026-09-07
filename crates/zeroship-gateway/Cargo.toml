@@ -28,6 +28,12 @@ zeroship-bundle = { workspace = true }
 # (moved out of zeroship-core so core links no DB driver). The gate's OIDC-RP
 # JWT path checks revocation on every request.
 zeroship-authz = { workspace = true }
+# The service-assertion replay statement. The gateway is a callee on ONE
+# internal edge (workflow-advance) and that edge takes the full profile, so
+# it must claim a `jti` in the store every replica shares. The statement lives
+# in zeroship-authn because it needs compio-postgres; a second copy here is the
+# defect this dependency exists to avoid.
+zeroship-authn = { workspace = true }
 # Metering coverage (#27): the gateway is a SECOND metering producer. It
 # builds its own process-wide `Arc<Meter>` + `spawn_flush_task` (same wire
 # type, same `/internal/usage` ingest as the worker) and emits

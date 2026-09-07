@@ -465,6 +465,19 @@ fn with_stream_group_id(
 /// after the process exits or panics.
 #[allow(missing_debug_implementations)]
 pub struct AppState {
+    /// This process's service identity: its own ed25519 key for the calls it
+    /// MAKES, and the peer bundle plus replay store for the calls it RECEIVES.
+    ///
+    /// It guards the privileged internal reads (`/internal/apps/{id}` and
+    /// `/internal/apps/{id}/env`) under the full assertion profile, and it is
+    /// what the workflow engine mints with when it asks the gateway to advance
+    /// a run. Both are app-load or control-plane rate, which is what makes the
+    /// profile's shared-store write affordable there.
+    ///
+    /// `ServiceAuth::unconfigured()` when no key material was configured. That
+    /// state REFUSES every guarded edge rather than skipping the check, so a
+    /// fixture built without keys cannot accidentally exercise an open door.
+    pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub registry: Registry,
     pub env_store: EnvStore,
     pub stripe_store: StripeStore,

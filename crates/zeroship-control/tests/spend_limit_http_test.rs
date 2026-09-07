@@ -67,6 +67,7 @@ async fn build_state(db_url: &str) -> (Arc<AppState>, PathBuf, PathBuf) {
     .detach();
 
     let state = Arc::new(AppState {
+        service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
         registry,
         env_store,
         stripe_store,

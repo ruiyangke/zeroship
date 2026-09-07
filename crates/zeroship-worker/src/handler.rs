@@ -15,6 +15,8 @@ use zeroship_core::auth::{
     constant_time_eq, derive_app_scoped_control_token, extract_bearer,
     verify_zeroship_user_header_for_request,
 };
+use zeroship_core::service_identity::{endpoints, ServiceEndpoint};
+use zeroship_core::service_peers::ServiceAuth;
 use zeroship_core::dispatch_frame::decode_dispatch_frame;
 use zeroship_core::types::{AppNetPolicy, AppRuntimeLimits};
 use zeroship_bundle::sha256_hex;
@@ -65,21 +67,40 @@ static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock:
 /// it did until this was wired up.
 pub const MAX_DISPATCH_BODY_BYTES: usize = zeroship_core::dispatch_frame::MAX_REQUEST_BODY_BYTES;
 
-/// Verify the gateway-issued bearer token on /dispatch endpoints.
-/// Returns `None` if the request is authorized; otherwise a 401 response.
-pub(crate) fn check_worker_auth(req: &HttpRequest, worker_key: &str) -> Option<HttpResponse> {
-    // Empty worker_key disables the check (dev-only loopback bind enforces this).
-    if worker_key.is_empty() {
-        return None;
-    }
-    let auth = req
+/// Verify the CALLER's own service credential on the dispatch endpoints.
+///
+/// The TRANSPORT-ONLY assertion profile: an ed25519 JWT the gateway signs with
+/// a key only the gateway holds, verified here under the gateway's published
+/// public half, with no `jti` claimed and no shared store consulted. This hop
+/// carries every end-user request, so a single-use claim would put a write
+/// against a table shared by every worker replica on the app data path; the
+/// identity envelope's binding to the dispatch request id and its issuance
+/// window is what bounds replay here instead.
+///
+/// It answers ONE question - which service is calling - and deliberately says
+/// nothing about the end user. That is [`verified_user_json`]'s job, and the
+/// two are now separate credentials under separate keys, which is what makes
+/// the guarantee on `encode_user_header` writable at all.
+///
+/// # There is no bypass
+///
+/// The predecessor returned `None` - authorized - when the shared secret was
+/// empty, so an unconfigured worker accepted every caller. An unconfigured
+/// [`ServiceAuth`] REFUSES instead. Absence of key material is now a closed
+/// door, not an open one.
+pub(crate) async fn check_worker_auth(
+    req: &HttpRequest,
+    service_auth: &ServiceAuth,
+    endpoint: ServiceEndpoint,
+) -> Option<HttpResponse> {
+    let header = req
         .headers()
         .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(extract_bearer);
-    match auth {
-        Some(token) if constant_time_eq(token, worker_key) => None,
-        _ => {
+        .and_then(|v| v.to_str().ok());
+    match service_auth.verify(header, endpoint).await {
+        Ok(_identity) => None,
+        Err(error) => {
+            tracing::warn!(%error, path = %req.path(), "worker: caller rejected");
             metrics::inc(&metrics::DISPATCH_REJECTED_AUTH);
             Some(HttpResponse::Unauthorized().body(r#"{"error":"unauthorized"}"#))
         }
@@ -212,7 +233,9 @@ pub async fn dispatch(
     body: Bytes,
 ) -> HttpResponse {
     // Authenticate the gateway before touching the runtime.
-    if let Some(resp) = check_worker_auth(&req, &config.worker_key) {
+    if let Some(resp) =
+        check_worker_auth(&req, &config.service_auth, endpoints::WORKER_DISPATCH).await
+    {
         return resp;
     }
     let user_json = match verified_user_json(&req, &config.worker_key) {
@@ -580,7 +603,13 @@ pub async fn workflow_advance_unsigned(
     path: web::types::Path<String>,
     body: Bytes,
 ) -> HttpResponse {
-    if let Some(resp) = check_worker_auth(&req, &config.worker_key) {
+    if let Some(resp) = check_worker_auth(
+        &req,
+        &config.service_auth,
+        endpoints::WORKER_WORKFLOW_ADVANCE,
+    )
+    .await
+    {
         return resp;
     }
     if !config.workflow_advance_unsigned {
@@ -1437,7 +1466,7 @@ async fn load_on_demand(
     envs: &SharedEnvs,
     app_id: &Uuid,
 ) -> Result<(), String> {
-    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id).await?;
+    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.service_auth, app_id).await?;
 
     let manifest = app_version
         .manifest
@@ -1458,7 +1487,7 @@ async fn load_on_demand(
 
     // Fetch env BEFORE committing the V8 isolate. If env fetch fails
     // we never partially-load.
-    let env_json = crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id)
+    let env_json = crate::sync::fetch_app_env(&config.control_url, &config.service_auth, app_id)
         .await
         .map_err(|e| format!("env fetch failed: {e}"))?;
 
@@ -1525,7 +1554,7 @@ async fn load_pinned_workflow_on_demand(
     app_id: &Uuid,
     deploy_hash: &str,
 ) -> Result<(), String> {
-    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.control_key, app_id)
+    let app_version = crate::sync::fetch_app_version(&config.control_url, &config.service_auth, app_id)
         .await
         .ok();
     let manifest_bytes = config
@@ -1561,7 +1590,7 @@ async fn load_pinned_workflow_on_demand(
             .as_ref()
             .is_some_and(|info| crate::sync::cached_env_version(envs, app_id) != Some(info.env_version))
     {
-        let env_json = crate::sync::fetch_app_env(&config.control_url, &config.control_key, app_id)
+        let env_json = crate::sync::fetch_app_env(&config.control_url, &config.service_auth, app_id)
             .await
             .map_err(|e| format!("env fetch failed for pinned workflow load: {e}"))?;
         let env_version = app_version.as_ref().map_or(0, |info| info.env_version);
@@ -1684,6 +1713,7 @@ mod tests {
                 .expect("workflow blob store"),
         );
         Arc::new(crate::WorkerConfig {
+            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: String::new(),
             db_url: None,
@@ -2438,6 +2468,7 @@ mod tests {
                     .expect("workflow blob store"),
             );
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
@@ -2757,6 +2788,7 @@ mod tests {
                     .expect("workflow blob store"),
             );
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
@@ -2862,6 +2894,7 @@ mod tests {
                     .expect("workflow blob store"),
             );
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
@@ -2982,6 +3015,7 @@ mod tests {
                     .expect("workflow blob store"),
             );
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: None,
@@ -3178,6 +3212,7 @@ mod tests {
                     .expect("workflow blob store"),
             );
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
                 control_url: "http://127.0.0.1:1".to_string(),
                 control_key: String::new(),
                 db_url: Some("postgres://localhost/zs_phase2_unused".to_string()),
@@ -3860,6 +3895,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
                 .expect("workflow blob store"),
         );
         let config = Arc::new(crate::WorkerConfig {
+            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
             control_url: "http://127.0.0.1:1".to_string(),
             control_key: String::new(),
             db_url,

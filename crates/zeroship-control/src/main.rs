@@ -137,6 +137,61 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// (`crates/zeroship-control/src/stripe_handlers.rs`). Adding them would be exactly the
 /// "blocked on a credential for a service they never enabled" outage the
 /// per-subsystem rule forbids.
+/// Load this control plane's service identity, or refuse to start.
+///
+/// Two outcomes and they are deliberately different:
+///
+/// - **Neither file configured** is a deployment that has not adopted service
+///   identity yet. It boots, and every guarded internal edge REFUSES. That is
+///   loud in the log and safe at the door.
+/// - **Configured but unloadable** is an operator mistake - a wrong path, a
+///   group-readable key, a peer document that does not parse. Starting on it
+///   would produce the same refusals as the first case while the operator
+///   believes the material is in place, so it exits instead of degrading into
+///   something indistinguishable from a correct-but-unconfigured process.
+fn build_service_auth(
+    key_file: &std::path::Path,
+    peers_file: &std::path::Path,
+    control_pg: Arc<compio_postgres::Client>,
+) -> zeroship_core::service_peers::ServiceAuth {
+    use zeroship_core::service_assertion::ServiceAssertionVerifier;
+    use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+
+    if key_file.as_os_str().is_empty() && peers_file.as_os_str().is_empty() {
+        tracing::error!(
+            "control: no service key material configured; every internal service edge \
+             will refuse. Set control.service_key_file and control.service_peers_file."
+        );
+        return ServiceAuth::unconfigured();
+    }
+    let issuer = match service_issuer(zeroship_core::service_peers::CONTROL_SERVICE_NAME) {
+        Ok(issuer) => issuer,
+        Err(error) => {
+            tracing::error!(%error, "control: refusing to start - control service issuer is malformed");
+            std::process::exit(1);
+        }
+    };
+    let mut keyring = match ServiceKeyring::load(issuer, key_file, peers_file) {
+        Ok(keyring) => keyring,
+        Err(error) => {
+            tracing::error!(%error, "control: refusing to start - service key material rejected");
+            std::process::exit(1);
+        }
+    };
+    let Some(bundle) = keyring.take_bundle() else {
+        tracing::error!("control: refusing to start - peer bundle already taken");
+        std::process::exit(1);
+    };
+    // The FULL profile: control's guarded edges fire at app-load rate, so the
+    // single-use claim's write against the shared table is proportional to app
+    // loads. The store is the process's own long-lived client, which is the
+    // same connection `/readyz` probes.
+    let replay = Arc::new(zeroship_authn::service_replay::SharedClientReplayStore::new(
+        control_pg,
+    ));
+    ServiceAuth::new(keyring, Arc::new(ServiceAssertionVerifier::new(bundle, replay)))
+}
+
 fn control_credentials(settings: &ControlSettings) -> Vec<SubsystemCredential<'_>> {
     vec![
         SubsystemCredential {
@@ -982,7 +1037,14 @@ fn main() -> std::io::Result<()> {
         Arc::new(zeroship_control::notify::MailerNotifier::new(billing_mailer));
     tracing::info!(mailer = %mailer_kind, "control: billing notifier selected");
 
+    let service_auth = Arc::new(build_service_auth(
+        settings.service_key_file.get(),
+        settings.service_peers_file.get(),
+        Arc::clone(&control_pg),
+    ));
+
     let state = Arc::new(AppState {
+        service_auth,
         registry,
         env_store,
         stripe_store,
