@@ -135,16 +135,19 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 /// per-subsystem rule forbids.
 /// Load this control plane's service identity, or refuse to start.
 ///
-/// Two outcomes and they are deliberately different:
+/// ONE OUTCOME: unconfigured, unreadable and unparseable all exit. They used to
+/// be two - "neither file configured" booted with every guarded internal edge
+/// refusing, and only a wrong path exited - on the reasoning that the first is a
+/// deployment which has not adopted service identity yet. Fence F4 of
+/// `docs/proposals/2026-09-05-auth-foundation-redesign.md` retires that
+/// distinction, and the old rustdoc contained the argument against itself: it
+/// said a misconfigured process must not be allowed to look like a
+/// correct-but-unconfigured one, which is exactly as true of an ORCHESTRATOR
+/// looking at the unconfigured one. A control plane that boots and refuses every
+/// internal edge is a control plane whose workers cannot load an app.
 ///
-/// - **Neither file configured** is a deployment that has not adopted service
-///   identity yet. It boots, and every guarded internal edge REFUSES. That is
-///   loud in the log and safe at the door.
-/// - **Configured but unloadable** is an operator mistake - a wrong path, a
-///   group-readable key, a peer document that does not parse. Starting on it
-///   would produce the same refusals as the first case while the operator
-///   believes the material is in place, so it exits instead of degrading into
-///   something indistinguishable from a correct-but-unconfigured process.
+/// The unconfigured case is refused inside `ServiceKeyring::load`, so this
+/// function has no empty-path branch to get wrong.
 fn build_service_auth(
     key_file: &std::path::Path,
     peers_file: &std::path::Path,
@@ -153,13 +156,6 @@ fn build_service_auth(
     use zeroship_core::service_assertion::ServiceAssertionVerifier;
     use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
 
-    if key_file.as_os_str().is_empty() && peers_file.as_os_str().is_empty() {
-        tracing::error!(
-            "control: no service key material configured; every internal service edge \
-             will refuse. Set control.service_key_file and control.service_peers_file."
-        );
-        return ServiceAuth::unconfigured();
-    }
     let issuer = match service_issuer(zeroship_core::service_peers::CONTROL_SERVICE_NAME) {
         Ok(issuer) => issuer,
         Err(error) => {
@@ -170,7 +166,11 @@ fn build_service_auth(
     let mut keyring = match ServiceKeyring::load(issuer, key_file, peers_file) {
         Ok(keyring) => keyring,
         Err(error) => {
-            tracing::error!(%error, "control: refusing to start - service key material rejected");
+            tracing::error!(
+                %error,
+                "control: refusing to start - service key material rejected; set \
+                 control.service_key_file and control.service_peers_file"
+            );
             std::process::exit(1);
         }
     };
