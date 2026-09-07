@@ -814,10 +814,10 @@ fn write_projected_field(
     match &field.source {
         ProjectionSource::Column(column) => out.sql.push_str(&quote(column)),
         ProjectionSource::Path(path) => write_path(out, path)?,
-        // The parent column is deliberately NOT read: the sibling is selected
-        // and aliased back to the parent's name, so `row[col]` holds the masked
-        // string and there is no `<col>_masked` key for a caller to find.
-        ProjectionSource::MaskedSibling { sibling, .. } => out.sql.push_str(&quote(sibling)),
+        // The logical name is deliberately NOT read: the physical column is
+        // selected and aliased back to it, so `row[col]` holds the stored form
+        // and there is no second key for a caller to find.
+        ProjectionSource::Stored { physical } => out.sql.push_str(&quote(physical)),
         ProjectionSource::Aggregate(aggregate) => write_aggregate(out, aggregate),
         ProjectionSource::SearchScalar(kind) => {
             let Some(slots) = slots else {

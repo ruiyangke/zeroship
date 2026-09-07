@@ -346,9 +346,7 @@ impl SelectBuilder {
                     // Refused by `Projection::aggregate` already; kept as an
                     // explicit arm so a future variant cannot slip through the
                     // grouping check by being added to the enum alone.
-                    ProjectionSource::MaskedSibling { parent, .. } => {
-                        FieldPath::column(parent.clone())
-                    }
+                    ProjectionSource::Stored { physical } => FieldPath::column(physical.clone()),
                     // Refused by `Projection::rows` and `Projection::aggregate`
                     // both, so no `Select` can carry one. Kept as an explicit
                     // arm for the same reason as the one above: a family added

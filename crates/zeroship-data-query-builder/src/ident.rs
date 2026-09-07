@@ -108,6 +108,21 @@ pub enum IdentRole {
     /// A column name being *referenced*. Not a column being declared: this
     /// crate plans no DDL.
     Column,
+    /// A column the PLATFORM references, not one a creator declared: the
+    /// physical side of a [`crate::ProjectionSource::Stored`].
+    ///
+    /// It exists for the same reason [`Self::Alias`] does. The platform's stored
+    /// forms are spelled with the very prefixes [`COLUMN_RESERVATIONS`] refuses,
+    /// because refusing them is what stops a creator declaring one; the platform
+    /// still has to name them. Splitting the role is how that is expressed
+    /// without weakening the creator-facing fence.
+    ///
+    /// This replaced a `pub(crate)` constructor that built the name by
+    /// `format!` and skipped `parse_as` entirely, so a stored name went through
+    /// no charset check and no catalog fence at all. A role is strictly
+    /// stronger: it still refuses `pg_` and `sqlite_`, the classification names,
+    /// quote injection and NUL.
+    StoredColumn,
     /// An output name in a projection, including the platform's own synthetic
     /// result columns.
     Alias,
@@ -124,6 +139,7 @@ impl IdentRole {
             Self::Namespace => NAMESPACE_RESERVATIONS,
             Self::Collection => &[],
             Self::Column => COLUMN_RESERVATIONS,
+            Self::StoredColumn => STORED_COLUMN_RESERVATIONS,
             Self::Alias => ALIAS_RESERVATIONS,
             Self::Constraint | Self::Index => DERIVED_NAME_RESERVATIONS,
         }
@@ -135,6 +151,7 @@ impl IdentRole {
             Self::Namespace => "namespace",
             Self::Collection => "collection",
             Self::Column => "column",
+            Self::StoredColumn => "stored column",
             Self::Alias => "alias",
             Self::Constraint => "constraint",
             Self::Index => "index",
@@ -243,6 +260,27 @@ const COLUMN_RESERVATIONS: &[Reservation] = &[
     Reservation::Exact("internal"),
 ];
 
+/// Fences for a column the platform references rather than one a creator
+/// declared.
+///
+/// This is [`COLUMN_RESERVATIONS`] with the four platform-shape rows removed -
+/// `Prefix("_")`, `Prefix("__zs_")`, `Prefix("__zeroship_")` and
+/// `Suffix("_masked")` - because those rows exist to stop a CREATOR naming a
+/// platform column, and this role is the platform doing exactly that. The
+/// classification names stay: nothing the platform stores is called `pii`, and
+/// keeping them costs nothing while preserving the taxonomy fence in both roles.
+///
+/// The backend catalog fences (`pg_`, `sqlite_`) apply to this role too, wired
+/// beside [`IdentRole::Column`] in `parse_as`.
+const STORED_COLUMN_RESERVATIONS: &[Reservation] = &[
+    Reservation::Exact("public"),
+    Reservation::Exact("pii"),
+    Reservation::Exact("spi"),
+    Reservation::Exact("phi"),
+    Reservation::Exact("pci"),
+    Reservation::Exact("internal"),
+];
+
 /// Output-name fences.
 ///
 /// An alias is **allowed** a single leading `_`, which a column is not, and the
@@ -334,8 +372,7 @@ impl std::error::Error for IdentError {}
 /// collection. What prevents it in practice is that the plan structs name their
 /// slots, so the miscarriage has to be written deliberately. Carrying the role
 /// in the type was considered and rejected because it forces a double parse at
-/// every masked-sibling projection, where the same text is both a column and an
-/// alias.
+/// every stored projection, where the same text is both a column and an alias.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Ident(String);
 
@@ -401,7 +438,7 @@ impl Ident {
                 });
             }
         }
-        if role == IdentRole::Column {
+        if matches!(role, IdentRole::Column | IdentRole::StoredColumn) {
             for reservation in BACKEND_CATALOG_RESERVATIONS {
                 if reservation.matches(raw) {
                     return Err(IdentError::Reserved {
@@ -425,42 +462,7 @@ impl Ident {
         &self.0
     }
 
-    /// The platform's masked-sibling column for `parent`.
-    ///
-    /// This exists because the `_masked` suffix is **refused** for a column
-    /// (`COLUMN_RESERVATIONS`), which is what stops a creator declaring
-    /// `ssn_masked` and shadowing the sibling the platform emits. The platform
-    /// still has to name it, so the name is DERIVED at exactly one site rather
-    /// than parsed at every call site that needs it - a second site would be a
-    /// second place the fence could be argued around.
-    ///
-    /// `pub(crate)` on purpose: the only legitimate consumer is
-    /// `ProjectedField::masked`.
-    ///
-    /// # Errors
-    ///
-    /// [`IdentError::TooLong`] when the derived name overflows
-    /// [`MAX_IDENT_BYTES`]. This crate deliberately does **not** reproduce the
-    /// hash-and-truncate cap that `zeroship_schema::ident::cap_ident_name`
-    /// applies to derived names: a second implementation of that cap is how the
-    /// runtime and the migration engine once disagreed about what an index was
-    /// called, and guessing wrong here would mean projecting a column that does
-    /// not exist. Refusing says so.
-    pub(crate) fn masked_sibling_of(parent: &Self) -> Result<Self, IdentError> {
-        let derived = format!("{}{MASKED_SUFFIX}", parent.0);
-        if derived.len() > MAX_IDENT_BYTES {
-            return Err(IdentError::TooLong {
-                role: IdentRole::Column,
-                len: derived.len(),
-            });
-        }
-        Ok(Self(derived))
-    }
 }
-
-/// The suffix the platform's sibling columns carry. Reserved against creator
-/// declaration by [`COLUMN_RESERVATIONS`].
-pub const MASKED_SUFFIX: &str = "_masked";
 
 impl fmt::Display for Ident {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
