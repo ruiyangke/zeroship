@@ -179,9 +179,25 @@ impl zeroship_core::service_assertion::ReplayStore for PoolReplayStore {
 
 /// Load this gateway's service identity, or refuse to start.
 ///
-/// Neither file configured: boot, refuse the inbound advance edge, and mint
-/// nothing for the worker - which makes every dispatch fail at the worker's
-/// door rather than sail through it. Configured but unloadable: exit.
+/// THERE IS NO UNCONFIGURED ARM, and its absence is the whole of fence F4 in
+/// `docs/proposals/2026-09-05-auth-foundation-redesign.md`. This function used
+/// to return `ServiceAuth::unconfigured()` when neither file was configured, on
+/// the reasoning that the advance edge would then refuse and every dispatch
+/// would carry no credential. Both halves of that were true and it was still
+/// the wrong answer: a gateway in that state binds its port, answers a liveness
+/// probe and looks healthy to an orchestrator, and the first thing that notices
+/// is an end user whose request the worker turns away. Refusing here moves the
+/// failure to deploy time, when someone is watching.
+///
+/// The refusal itself lives in `ServiceKeyring::load`, which is what makes an
+/// empty path indistinguishable from a wrong one HERE while staying two
+/// distinct messages for the operator - a caller cannot reintroduce the escape
+/// by writing its own empty-path branch, because there is nothing left for such
+/// a branch to do.
+///
+/// The database requirement is checked AFTER the key material, so a deployment
+/// missing both is told about the key material first: that is the one an
+/// operator must fix whatever they decide about the advance edge.
 fn build_service_auth(
     key_file: &std::path::Path,
     peers_file: &std::path::Path,
@@ -190,21 +206,6 @@ fn build_service_auth(
     use zeroship_core::service_assertion::ServiceAssertionVerifier;
     use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
 
-    if key_file.as_os_str().is_empty() && peers_file.as_os_str().is_empty() {
-        tracing::error!(
-            "gateway: no service key material configured; the internal workflow-advance \
-             edge will refuse and every worker dispatch will carry no credential. Set \
-             gateway.service_key_file and gateway.service_peers_file."
-        );
-        return ServiceAuth::unconfigured();
-    }
-    let Some(db) = db else {
-        tracing::error!(
-            "gateway: refusing to start - service key material is configured but no database \
-             is, and the inbound advance edge's single-use claim needs the shared store"
-        );
-        std::process::exit(1);
-    };
     let issuer = match service_issuer(zeroship_core::service_peers::GATEWAY_SERVICE_NAME) {
         Ok(issuer) => issuer,
         Err(error) => {
@@ -215,9 +216,20 @@ fn build_service_auth(
     let mut keyring = match ServiceKeyring::load(issuer, key_file, peers_file) {
         Ok(keyring) => keyring,
         Err(error) => {
-            tracing::error!(%error, "gateway: refusing to start - service key material rejected");
+            tracing::error!(
+                %error,
+                "gateway: refusing to start - service key material rejected; set \
+                 gateway.service_key_file and gateway.service_peers_file"
+            );
             std::process::exit(1);
         }
+    };
+    let Some(db) = db else {
+        tracing::error!(
+            "gateway: refusing to start - service key material is configured but no database \
+             is, and the inbound advance edge's single-use claim needs the shared store"
+        );
+        std::process::exit(1);
     };
     let Some(bundle) = keyring.take_bundle() else {
         tracing::error!("gateway: refusing to start - peer bundle already taken");
@@ -535,6 +547,19 @@ fn main() -> std::io::Result<()> {
         Some(db_cfg)
     };
 
+    // THE KEY-MATERIAL REFUSAL, hoisted out of `GateState` below so it lands
+    // before the broker master secret is read. Both are boot refusals, so the
+    // only thing the order decides is which one an operator who is missing both
+    // is told about first - and this is the one that has to be right whatever
+    // else is: without it the gateway signs no `ZeroShip-User` envelope and
+    // mints no assertion, so every dispatch fails at the worker's door. See
+    // `build_service_auth` for why there is no longer a boot-anyway arm.
+    let service_auth = Arc::new(build_service_auth(
+        settings.service_key_file.get(),
+        settings.service_peers_file.get(),
+        db.clone(),
+    ));
+
     // OIDC RP — services every `{app}.zeroship.ai` host. The
     // `client_id` must match the client this gateway host is registered
     // as with the OP; `redirect_uri` is per-app and built at the
@@ -613,11 +638,7 @@ fn main() -> std::io::Result<()> {
     let meter = Arc::new(zeroship_metering::Meter::with_source(gate_meter_source.clone()));
 
     let state = Arc::new(GateState {
-        service_auth: Arc::new(build_service_auth(
-            settings.service_key_file.get(),
-            settings.service_peers_file.get(),
-            db.clone(),
-        )),
+        service_auth,
         config: GateConfig {
             control_url,
             control_key,

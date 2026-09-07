@@ -116,8 +116,10 @@ pub struct GateSettings {
     /// are two settings and two files.
     ///
     /// A PATH for the same reasons as `signing_key_file`. Empty (the default)
-    /// means this process can neither mint an assertion nor verify a peer's, so
-    /// every internal edge guarded by one REFUSES. Absence never admits.
+    /// REFUSES THE BOOT: a gateway that came up without it could neither mint
+    /// an assertion nor sign a `ZeroShip-User` envelope, and would look healthy
+    /// to an orchestrator while every dispatch failed at the worker's door.
+    /// Absence never admits, and no longer defers either.
     #[config(name = "gateway.service_key_file", default = PathBuf::new())]
     pub service_key_file: Operational<PathBuf>,
 
