@@ -1293,7 +1293,7 @@ mod pooled_retry_tests {
             &request_id,
             br#"{"op":"charge"}"#,
             None,
-            "",
+            None,
         )
         .await
     }

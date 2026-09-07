@@ -58,7 +58,9 @@
 //! [`crate::service_identity::authorize`], so holding a peer's PUBLIC key is
 //! the ability to check that peer's signature and nothing else.
 
+use std::fmt;
 use std::path::Path;
+use std::sync::Arc;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use serde::Deserialize;
@@ -66,6 +68,9 @@ use serde::Deserialize;
 use crate::service_assertion::{
     thumbprint_key_id, AssertionError, ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey,
     ServiceTrustBundle,
+};
+use crate::service_identity::{
+    verify_service_call, AuthError, IdentityVerifier, ServiceEndpoint, ServiceIdentity,
 };
 
 /// The trust domain every platform service issuer sits in.
@@ -175,10 +180,31 @@ impl ServiceKeyring {
         key_path: &Path,
         peers_path: &Path,
     ) -> Result<Self, PeerKeyError> {
-        let signing_key = load_signing_key(key_path)?;
-        let bundle = load_peer_bundle(peers_path)?;
+        Self::from_parts(
+            issuer,
+            &load_signing_key(key_path)?,
+            load_peer_bundle(peers_path)?,
+        )
+    }
+
+    /// Build a keyring from material already in memory.
+    ///
+    /// The one place the `kid` is derived, so [`ServiceKeyring::load`] and a
+    /// test fixture cannot end up minting under different ones. A caller
+    /// holding a key it did not read from disk is a TEST or a generator; the
+    /// production path is `load`, which is what applies the permission refusal.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerKeyError::Material`] when the key cannot be encoded for
+    /// signing.
+    pub fn from_parts(
+        issuer: ServiceIssuer,
+        signing_key: &ServiceSigningKey,
+        bundle: ServiceTrustBundle,
+    ) -> Result<Self, PeerKeyError> {
         let minter =
-            ServiceAssertionMinter::new(issuer.clone(), signing_key.key_id(), &signing_key)?;
+            ServiceAssertionMinter::new(issuer.clone(), signing_key.key_id(), signing_key)?;
         Ok(Self {
             issuer,
             minter,
@@ -211,6 +237,124 @@ impl ServiceKeyring {
     #[must_use]
     pub fn take_bundle(&mut self) -> Option<ServiceTrustBundle> {
         self.bundle.take()
+    }
+}
+
+/// One process's whole service-assertion capability: mint outbound, verify
+/// inbound, or neither.
+///
+/// Held by each service's shared state so a handler asks one object rather than
+/// assembling an issuer, a verifier and an endpoint at each call site. The
+/// verifier is type-erased because the PROFILE differs per service - the worker
+/// takes the transport-only one on its dispatch hop, control and the gateway
+/// take the full one on their per-app-load and per-advance edges - while the
+/// guard is identical.
+///
+/// # Absence refuses; it does not disable
+///
+/// [`ServiceAuth::unconfigured`] is what a process holds when no key material
+/// was configured. Every [`ServiceAuth::verify`] then returns a refusal and
+/// every [`ServiceAuth::authorization_for`] returns `None`, so an unconfigured
+/// process serves no guarded edge and reaches no guarded peer. That is the
+/// opposite of the shared secrets this replaces, whose empty value turned the
+/// check OFF - and it is the whole reason the unconfigured state is a named
+/// constructor rather than two `Option` fields a call site might forget to
+/// check.
+pub struct ServiceAuth {
+    keyring: Option<ServiceKeyring>,
+    verifier: Option<Arc<dyn IdentityVerifier + Send + Sync>>,
+}
+
+impl fmt::Debug for ServiceAuth {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("ServiceAuth")
+            .field("issuer", &self.keyring.as_ref().map(|k| k.issuer().as_str()))
+            .field("can_verify", &self.verifier.is_some())
+            .finish()
+    }
+}
+
+impl ServiceAuth {
+    /// Build a capability from a loaded keyring and the verifier for its tier.
+    #[must_use]
+    pub fn new(
+        keyring: ServiceKeyring,
+        verifier: Arc<dyn IdentityVerifier + Send + Sync>,
+    ) -> Self {
+        Self {
+            keyring: Some(keyring),
+            verifier: Some(verifier),
+        }
+    }
+
+    /// The state of a process that was given no service key material.
+    #[must_use]
+    pub const fn unconfigured() -> Self {
+        Self {
+            keyring: None,
+            verifier: None,
+        }
+    }
+
+    /// Whether this process can mint and verify at all.
+    #[must_use]
+    pub const fn is_configured(&self) -> bool {
+        self.keyring.is_some() && self.verifier.is_some()
+    }
+
+    /// The `Authorization` header value naming `audience`, or `None` when this
+    /// process holds no key.
+    ///
+    /// Returning the whole header value rather than the bare assertion keeps
+    /// the `Bearer ` prefix in ONE place; three call sites spelling it
+    /// themselves is three chances to send a header the peer's extractor drops.
+    #[must_use]
+    pub fn authorization_for(&self, audience: &ServiceIssuer) -> Option<String> {
+        let keyring = self.keyring.as_ref()?;
+        match keyring.mint_for(audience) {
+            Ok(assertion) => Some(format!("Bearer {assertion}")),
+            Err(error) => {
+                tracing::error!(%error, audience = audience.as_str(), "service assertion mint failed");
+                None
+            }
+        }
+    }
+
+    /// Verify an inbound caller's credential and its grant on `endpoint`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AuthError`] exactly as [`verify_service_call`] does, and
+    /// [`AuthError::CredentialRejected`] when this process holds no key
+    /// material at all.
+    pub async fn verify(
+        &self,
+        authorization: Option<&str>,
+        endpoint: ServiceEndpoint,
+    ) -> Result<ServiceIdentity, AuthError> {
+        let (Some(keyring), Some(verifier)) = (self.keyring.as_ref(), self.verifier.as_ref())
+        else {
+            // Loud for the operator, opaque to the caller. An unconfigured
+            // process refuses every caller identically to a bad credential, so
+            // the response is not an oracle for whether the deployment has
+            // keys; the log line names the missing configuration because that
+            // is the only thing an operator can act on.
+            tracing::error!(
+                destination = endpoint.destination(),
+                path = endpoint.path_template(),
+                "refusing an internal call: no service key material is configured \
+                 (set the service key and peer files for this binary)"
+            );
+            return Err(AuthError::CredentialRejected);
+        };
+        verify_service_call(
+            verifier.as_ref(),
+            authorization,
+            keyring.issuer().as_str(),
+            endpoint,
+        )
+        .await
     }
 }
 

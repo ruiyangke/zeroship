@@ -940,6 +940,10 @@ mod tests {
                 "/dispatch/{}",
                 zeroship_core::app_id::canonical_app_id_for(app_id).as_str()
             ))
+            .header(
+                "authorization",
+                crate::handler::tests::gateway_authorization(),
+            )
             .set_payload(frame)
             .to_request()
     }
@@ -1042,7 +1046,7 @@ mod tests {
 
             let logs = crate::logs::new_store();
             let config = Arc::new(crate::WorkerConfig {
-                service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+                service_auth: crate::handler::tests::test_service_auth(),
                 // Dead port: this scenario must not need the control plane
                 // (SharedEnvs is already current when PHASE 2 swaps).
                 control_url: "http://127.0.0.1:1".to_string(),

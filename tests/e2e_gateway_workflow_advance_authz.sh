@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 # Gateway internal workflow-advance authorization probe.
 #
-# DRIVES (does not merely read) the claim that the gateway's
-# `/__zeroship/internal/workflow-advance` edge has no authorization gate other
-# than a Host-header check, and that an external caller can therefore make the
-# gateway advance an arbitrary app's workflow using the gateway's own
-# worker_key authority.
+# DRIVES (does not merely read) whether an external caller can make the gateway
+# advance an arbitrary app's workflow through
+# `/__zeroship/internal/workflow-advance`.
+#
+# WHAT THIS PROBE FOUND, AND WHAT IT NOW GUARDS. It was written against an edge
+# whose only gate was a Host-header check: a caller whose Host did not parse as
+# a subdomain reached the forwarder and advanced the workflow under the
+# GATEWAY's own authority. That edge now verifies WHICH SERVICE is calling - the
+# full service-assertion profile, signed and single-use, because the rate is per
+# advance - so arm A refuses instead of advancing, and this file's expected-
+# failure list is gone rather than emptied.
 #
 # Boots disposable Postgres, applies the real platform migrations, boots real
 # control/gateway/worker binaries, deploys a real self-completing workflow app,
@@ -13,17 +19,23 @@
 # returns for:
 #
 #   A  (exploit)  POST internal route, Host does NOT parse as a subdomain
-#                 (Host: localhost), body naming the real {runId, appId}.
-#                 -> does the workflow actually ADVANCE?
+#                 (Host: localhost), body naming the real {runId, appId}, and
+#                 NO caller credential.
+#                 -> must be refused with HTTP 401, and the run must not move.
 #   C1a (control) same POST, Host = <app>.zeroship.localhost (an APP subdomain)
-#                 -> must be refused (404 at dispatch.rs:113).
+#                 -> refused by the Host gate, which runs FIRST and still 404s.
 #   C1b (control) same POST, Host = evil.example.com (a NON-app subdomain)
-#                 -> also refused: proves the gate keys on "parses as a
+#                 -> also refused: proves the Host gate keys on "parses as a
 #                    subdomain", NOT on "is a registered app" (a correction to
 #                    the original hypothesis).
 #   C2  (control) reachable Host, body app_id = a random non-existent UUID
-#                 -> 404 at dispatch.rs:130 ("app route not found"): separates
-#                    "route reachable" from "route did something".
+#                 -> the SAME 401 as arm A, byte for byte: an unauthenticated
+#                    caller cannot use this edge as an app-existence oracle.
+#
+# The positive direction - a control-minted assertion is ADMITTED - is measured
+# in `crates/zeroship-gateway/src/router/dispatch.rs`'s own tests, which mint a
+# real assertion for this handler. Without that pairing a probe that only sees
+# 401s cannot tell a working guard from a broken route.
 #
 # Phase 2 restarts the worker WITHOUT --workflow-advance-unsigned (the
 # deploy/compose shipped configuration) and re-fires the exploit, to measure
@@ -413,8 +425,13 @@ if [ "$FIRST_CODE" = "200" ] && [ "$FIRST_ACK" = "true" ] \
   fail "CONFIRMED AUTHZ GAP: unauthenticated Host:localhost caller advanced app workflow (ack=true, state=$STATE_A, steps $PRE_STEPS_A->$STEPS_A)"
 elif [ "$FIRST_CODE" = "200" ] && [ "$FIRST_ACK" = "true" ]; then
   fail "CONFIRMED (weak): gateway acked the advance (ack=true) but no state mutation observed (state=$STATE_A)"
+elif [ "$FIRST_CODE" = "401" ]; then
+  pass "REFUSED at the gateway: no service credential (HTTP 401, state=$STATE_A, steps $PRE_STEPS_A->$STEPS_A)"
 else
-  pass "REFUTED at gateway: no advance (first HTTP $FIRST_CODE ack=$FIRST_ACK, state=$STATE_A)"
+  # Neither advanced nor refused for the RIGHT reason. A 404, a 502 or a 500
+  # here would read as "no advance" and hide a gateway that is broken rather
+  # than guarded, so the code is asserted rather than the outcome alone.
+  fail "expected HTTP 401 from the caller check; got HTTP $FIRST_CODE ack=$FIRST_ACK state=$STATE_A"
 fi
 
 echo "--- Arm C1a: CONTROL, Host = <app>.zeroship.localhost (app subdomain) ---"
@@ -446,14 +463,29 @@ else
 fi
 
 echo "--- Arm C2: CONTROL, reachable Host + non-existent appId ---"
+# THIS ARM MEASURES SOMETHING DIFFERENT NOW, AND THE CHANGE IS THE POINT.
+#
+# It used to expect 404 "app route not found", which separated "route
+# reachable" from "route did something". That separation was only visible
+# because an unauthenticated caller got as far as the route lookup. The caller
+# check now runs FIRST, so an unauthenticated request is refused before the
+# gateway consults its route table at all.
+#
+# What that buys, and what this arm now asserts: an unauthenticated caller
+# cannot tell a real app from a made-up one. Both answer 401, byte for byte, so
+# the edge is not an existence oracle for app ids. Arm A above already fired the
+# same shape with the REAL app id; this is its one-variable pair.
 BODY_C2="{\"runId\":\"$RANDOM_UUID\",\"appId\":\"$RANDOM_UUID\"}"
 note "REQUEST : Host: localhost   BODY: $BODY_C2"
 gw_post "localhost" "$BODY_C2"
-note "RESPONSE: HTTP $LAST_CODE  BYTES: $LAST_BODY"
-if [ "$LAST_CODE" = "404" ] && printf '%s' "$LAST_BODY" | grep -q "app route not found"; then
-  pass "route reachable but unknown app -> 404 'app route not found' (dispatch.rs:130)"
+UNKNOWN_APP_CODE="$LAST_CODE"; UNKNOWN_APP_BODY="$LAST_BODY"
+note "RESPONSE: HTTP $UNKNOWN_APP_CODE  BYTES: $UNKNOWN_APP_BODY"
+if [ "$UNKNOWN_APP_CODE" = "401" ] &&
+   [ "$UNKNOWN_APP_CODE" = "$FIRST_CODE" ] &&
+   [ "$UNKNOWN_APP_BODY" = "$FIRST_BYTES" ]; then
+  pass "unknown app and real app are indistinguishable to an unauthenticated caller (both HTTP 401, identical bytes)"
 else
-  fail "expected 404 'app route not found', got HTTP $LAST_CODE : $LAST_BODY"
+  fail "expected an unauthenticated 401 identical to arm A's (HTTP $FIRST_CODE : $FIRST_BYTES), got HTTP $UNKNOWN_APP_CODE : $UNKNOWN_APP_BODY"
 fi
 
 echo
@@ -550,71 +582,34 @@ fi
 
 echo
 echo "############ SUMMARY ############"
-# WHICH failures, not just how many.
+# THIS PROBE IS NO LONGER RED AT HEAD, AND THAT IS THE CHANGE THIS BLOCK RECORDS.
 #
-# This probe is RED AT HEAD BY DESIGN: #199's authorization gap is real and
-# unfixed, so `exit 1` carries no regression signal on its own -- it is already 1
-# before anything new breaks. Wiring it into CI without this block would make the
-# job permanently red and hide the next real change inside a failure everyone has
-# learned to ignore. Same reasoning and the same two-sided shape as
-# GOLDEN_EXPECTED_FAILURES in tests/golden_path.sh.
+# It used to carry a `AUTHZ_EXPECTED_FAILURES="CONFIRMED AUTHZ GAP"` list and a
+# two-sided classifier: a failure outside the list was a regression, and a
+# listed pattern matching nothing meant the gap had been closed and the list was
+# stale. The second direction has now fired for real. The gateway verifies its
+# caller on this edge, arm A refuses instead of advancing, and the list is gone
+# rather than emptied - an empty pattern list is not a smaller expectation, it
+# is a classifier that matches every failure or none depending on how the shell
+# splits it.
 #
-# TWO-SIDED ON PURPOSE:
-#   - a failure matching NO pattern is a REGRESSION or a new defect
-#   - a pattern matching NO failure means the gap was FIXED and this list is
-#     stale, which is the notification missing today: whoever closes #199
-#     currently gets told by nothing
-# Both set rc=1.
+# So the rule is now the plain one: ANY failure is a regression or a new defect.
 #
-# THE BOUNDS BELONG WITH THE EXPECTATION, because a bare "expected" invites the
-# reading that it does not matter. It matters and it is mitigated, and this
-# probe measures both mitigations itself: phase 2 shows the shipped worker
-# refusing the unsigned advance (HTTP 403, run stays queued) and phase 3 shows
-# the dotless Host that bypasses the gate is not routable through Caddy.
-# Reaching the gap in the shipped topology needs BOTH the worker flag ON and
-# direct gateway access.
-AUTHZ_EXPECTED_FAILURES="CONFIRMED AUTHZ GAP"
-IFS='|' read -r -a _apats <<< "$AUTHZ_EXPECTED_FAILURES"
-# FIXED-STRING matching, both directions. An earlier golden_path classifier used
-# an ERE and `sort({id:-1})` matched nothing because `{id:-1}` is an invalid
-# interval, so it reported its own known failure as UNEXPECTED. grep -F cannot
-# do that.
-_aunexp=0; _astale=0
-# THE LENGTH GUARD IS NOT DEFENSIVE PADDING. Without it this loop iterates ONCE
-# on an empty array in this shell -- `"${A[@]+"${A[@]}"}"` still yields a single
-# empty word -- so a run with ZERO failures reported a phantom
-# `UNEXPECTED FAILURE: ` and `-1 expected`. That is the gap-was-FIXED case, the
-# one this whole block exists to announce, and a reader seeing "-1 expected"
-# would rightly distrust the entire line. Caught by a three-arm standalone test
-# before this was ever committed; arms A and B were already correct, which is
-# exactly why arm C had to be run separately rather than inferred from them.
-if [ "${#AUTHZ_FAILURES[@]}" -gt 0 ]; then
-  for _f in "${AUTHZ_FAILURES[@]}"; do
-    _hit=0
-    for _p in "${_apats[@]}"; do
-      printf '%s' "$_f" | grep -qF -- "$_p" && { _hit=1; break; }
-    done
-    [ "$_hit" -eq 1 ] || { echo "  UNEXPECTED FAILURE (not in the red-at-HEAD set): $_f"; _aunexp=$((_aunexp+1)); }
-  done
-fi
-for _p in "${_apats[@]}"; do
-  _seen=0
-  # Same guard, same reason. Here a phantom empty element would merely fail to
-  # match and leave _seen=0, which happens to give the RIGHT answer -- so this
-  # loop was not visibly broken. Guarding it anyway, because "correct by
-  # coincidence" is the state that turns into a defect the next time someone
-  # edits the matching.
+# What still bounds the residual risk is measured by the probe itself and did
+# not go away: phase 2 shows the shipped worker refusing an unsigned advance,
+# and phase 3 shows that the dotless Host which bypasses the Host gate is not
+# routable through the repository's Caddy rule. Those are defence in depth
+# behind the credential check, not substitutes for it.
+if [ "$FAILS" -gt 0 ]; then
+  echo "  failures:"
   if [ "${#AUTHZ_FAILURES[@]}" -gt 0 ]; then
-  for _f in "${AUTHZ_FAILURES[@]}"; do
-    printf '%s' "$_f" | grep -qF -- "$_p" && { _seen=1; break; }
-  done
+    # The length guard is not padding: `"${A[@]}"` on an empty array still
+    # yields one empty word in this shell, so an unguarded loop prints a
+    # phantom blank failure on a clean run.
+    for _f in "${AUTHZ_FAILURES[@]}"; do echo "    $_f"; done
   fi
-  [ "$_seen" -eq 1 ] || { echo "  STALE EXPECTATION (no failure matched): $_p -- was #199 fixed? update this list in that same change"; _astale=$((_astale+1)); }
-done
-echo "  failures: $FAILS total, $((FAILS-_aunexp)) expected, $_aunexp unexpected, $_astale stale expectation(s)"
-if [ "$_aunexp" -gt 0 ] || [ "$_astale" -gt 0 ]; then
-  echo "FAIL: the red-at-HEAD set no longer describes this run." >&2
+  echo "FAIL: the workflow-advance edge did not behave as specified." >&2
   exit 1
 fi
-echo "OK: every failure is the documented, bounded #199 gap; nothing new."
+echo "OK: the internal advance edge refuses an uncredentialled caller."
 exit 0
