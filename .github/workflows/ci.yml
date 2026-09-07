@@ -709,6 +709,18 @@ jobs:
           cargo build --bins -p zeroship-gateway -p zeroship-worker -p zeroship-migrate-server
           cargo build --release -p zeroship-gateway --bin zeroship-gate
           tests/service_credential_boot_gate.sh
+      # Fence F4 of docs/proposals/2026-09-05-auth-foundation-redesign.md: a
+      # missing or unparseable peer document refuses STARTUP, not merely every
+      # request. Same shape as the step above and for the same reason - the
+      # loader test in crates/zeroship-core rules on the loader and cannot rule
+      # on whether `main` calls it - so this launches the compiled binaries.
+      #
+      # It reuses the binaries the step above builds, and needs no release
+      # build: there is no dev escape to key to a build profile, which is the
+      # point. It needs no Postgres either, because the refusal was deliberately
+      # hoisted above each binary's database work.
+      - name: services refuse to boot without a peer public key
+        run: tests/service_peer_boot_gate.sh
       # deploy/scripts/{deploy-remote,deploy-app}.sh had no test of any kind.
       # The compose-variable extraction in deploy-remote.sh produced two false
       # results while it was written - it counted `$${VAR}` escapes and refs in

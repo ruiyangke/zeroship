@@ -1940,8 +1940,8 @@ they will find out.
 
 **Absence refuses rather than disabling, and that is the inversion.** A process
 with no key material serves no guarded edge and reaches no guarded peer
-(`ServiceAuth::unconfigured`). Step 3 still owes the STARTUP refusal F4 names;
-what step 2 delivers is that the request-time answer is already no.
+(`ServiceAuth::unconfigured`). Step 2 delivers the request-time half of that;
+the STARTUP half was step 3's, and is now paid - see the note under step 3.
 
 **Step 3. Make the identity envelope asymmetric.** The gateway signs with its own
 Ed25519 private key; the worker verifies under the public half; the empty-key
@@ -1952,6 +1952,41 @@ Step 2's dispatch tier drops the `jti` and the replay store from that hop and
 keeps exactly this half, which is what this step consumes.
 *Red test:* F4's worker-side forgery test, which cannot even be written today.
 This step alone makes the `encode_user_header` rustdoc true.
+
+*Landed, in two parts, and the second part is worth reading before step 6.* The
+asymmetric envelope came first; the STARTUP refusal followed, and closing it
+turned up two things neither this step nor F4 had anticipated.
+
+**The refusal belongs in the LOADER, not in the three `main`s.** Every binary
+that holds a peer bundle read two paths and had its own "neither was configured"
+branch, and the natural body of such a branch is to carry on. Putting the
+refusal in `ServiceKeyring::load` in `crates/zeroship-core/src/service_peers.rs`
+means there is nothing left for such a branch to do, so the escape cannot be
+reintroduced one binary at a time. An unset path gets its own error naming the
+SETTING, because an empty path reaches the filesystem as `""` and comes back as
+a not-found naming no file - the least actionable sentence a boot log can carry.
+
+**IT WAS ORDERED BEHIND UNRELATED SUBSYSTEMS IN BOTH BINARIES, WHICH MADE IT
+CONDITIONAL ON THEM.** The worker built its `ServiceAuth` inside `WorkerConfig`,
+after `db_posture::validate_database_url` CONNECTS; the gateway built its own
+after the broker master secret is read. A worker with no peer document and no
+database therefore reported the DATABASE - so the fence the worker cannot serve
+a request without was gated on the one subsystem the dispatch tiering was chosen
+to keep it independent of. Both loads are now hoisted above that work. Whoever
+lands step 6 should keep them there: an F3 that moves the gateway's database
+away must not silently move this fence with it.
+
+**Three binaries refuse; two correctly do not.** `zeroship-auth` and
+`zeroship-migrate-server` mint no assertion and verify none, so they hold no
+peer bundle and have nothing to refuse.
+
+*Gate:* `tests/service_peer_boot_gate.sh`, which launches the real worker and
+gateway. Its `configured` control does not assert exit 0 and does not need to -
+it requires the key-material refusal to be ABSENT and a named LATER refusal to
+be PRESENT, which is positive evidence the process walked THROUGH the fence.
+That shape is not stylistic: a mutation that logged the refusal and then carried
+on left an exit-code-only gate fully green, because the later refusal supplied
+the non-zero exit.
 
 **Step 4. The environment becomes a lease control grants, not a fetch the worker
 performs.** `control_key` and the app-scoped derivation are deleted.

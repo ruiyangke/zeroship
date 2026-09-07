@@ -52,11 +52,12 @@ pub struct WorkerSettings {
     /// refuses a group- or world-readable file, and neither is possible once
     /// the material has become an in-memory `String`.
     ///
-    /// Empty (the default) means this process can neither mint an assertion nor
-    /// verify a peer's, so every internal edge guarded by one REFUSES - the
-    /// dispatch endpoint included. Absence never admits; that is the difference
-    /// between this and the shared dispatch secret it replaced, whose empty
-    /// value disabled the check.
+    /// Empty (the default) REFUSES THE BOOT. A worker that came up without it
+    /// could neither mint an assertion nor verify a peer's, so it would bind
+    /// its port, pass a liveness probe and turn away every request that reached
+    /// it - a failure first visible to an end user. Absence never admits and no
+    /// longer defers: that is the difference between this and the shared
+    /// dispatch secret it replaced, whose empty value disabled the check.
     #[config(name = "worker.service_key_file", default = PathBuf::new())]
     pub service_key_file: Operational<PathBuf>,
 

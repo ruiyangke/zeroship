@@ -227,9 +227,18 @@ pub struct WorkerConfig {
 /// which is the property the tiering buys and the reason it is stated here
 /// rather than left implicit in a missing argument.
 ///
-/// Neither file configured: boot, and refuse every guarded edge. Configured but
-/// unloadable: exit, because a wrong path must not be indistinguishable from an
-/// unadopted deployment.
+/// EVERY OUTCOME BUT ONE IS AN EXIT, and that is fence F4 of
+/// `docs/proposals/2026-09-05-auth-foundation-redesign.md` in full: "absent a
+/// configured gateway public key the worker refuses to start". Unconfigured,
+/// unreadable, unparseable and missing-the-gateway-key are one fate, because
+/// from the outside they produce one behaviour - a worker that binds its port,
+/// passes a liveness probe and turns away every request that reaches it. Step 3
+/// landed the request-time half of this and left the startup half owing; this
+/// is the half that is loud where an operator is looking.
+///
+/// The unconfigured case is refused by `ServiceKeyring::load` rather than by a
+/// branch here, so no future edit of this function can restore the escape by
+/// giving the empty path its own arm.
 ///
 /// The same peer document also supplies the GATEWAY's public key for the
 /// `ZeroShip-User` identity envelope, and a document that omits it is a HARD
@@ -245,14 +254,6 @@ fn build_service_auth(
     use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
     use zeroship_core::user_envelope::UserEnvelopeVerifier;
 
-    if key_file.as_os_str().is_empty() && peers_file.as_os_str().is_empty() {
-        tracing::error!(
-            "worker: no service key material configured; dispatch, the identity envelope \
-             and the control-plane app reads will all refuse. Set worker.service_key_file \
-             and worker.service_peers_file."
-        );
-        return ServiceAuth::unconfigured();
-    }
     let issuer = match service_issuer(zeroship_core::service_peers::WORKER_SERVICE_NAME) {
         Ok(issuer) => issuer,
         Err(error) => {
@@ -270,7 +271,11 @@ fn build_service_auth(
     let mut keyring = match ServiceKeyring::load(issuer, key_file, peers_file) {
         Ok(keyring) => keyring,
         Err(error) => {
-            tracing::error!(%error, "worker: refusing to start - service key material rejected");
+            tracing::error!(
+                %error,
+                "worker: refusing to start - service key material rejected; set \
+                 worker.service_key_file and worker.service_peers_file"
+            );
             std::process::exit(1);
         }
     };
@@ -515,6 +520,23 @@ fn main() -> std::io::Result<()> {
         return Ok(());
     }
 
+    // THE KEY-MATERIAL REFUSAL, and it runs HERE - before the runtime starts and
+    // before the database posture check - because fence F4 must not be
+    // conditional on an unrelated subsystem being reachable. It used to be built
+    // inside `WorkerConfig` below, which is after
+    // `db_posture::validate_database_url` CONNECTS: a worker with no peer
+    // document and no database reported the database, so the operator fixed
+    // Postgres and only then learned about the key material. Worse, it made the
+    // one fence the worker cannot serve a request without dependent on the one
+    // subsystem the tiering was chosen to keep it independent of - the dispatch
+    // hop claims no `jti` precisely so inbound authentication needs no database
+    // at all. Reading two files needs no async runtime, so nothing is lost by
+    // doing it first.
+    let service_auth = Arc::new(build_service_auth(
+        settings.service_key_file.get(),
+        settings.service_peers_file.get(),
+    ));
+
     ntex::rt::System::build()
         .name("zeroship-worker")
         .build(ntex::rt::DefaultRuntime)
@@ -568,10 +590,7 @@ fn main() -> std::io::Result<()> {
     );
 
     let config = Arc::new(WorkerConfig {
-        service_auth: Arc::new(build_service_auth(
-            settings.service_key_file.get(),
-            settings.service_peers_file.get(),
-        )),
+        service_auth,
         control_url,
         control_key,
         db_url: if db_url.is_empty() { None } else { Some(db_url) },

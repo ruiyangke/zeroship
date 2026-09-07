@@ -279,10 +279,13 @@ pub struct ControlSettings {
     /// the material has become an in-memory `String`. A path to a secret is not
     /// itself a secret.
     ///
-    /// Empty (the default) means this process can neither mint an assertion nor
-    /// verify a peer's, so every internal edge guarded by one REFUSES. Absence
-    /// never admits; that is the difference between this and the shared secrets
-    /// it replaces, whose empty value disabled the check.
+    /// Empty (the default) REFUSES THE BOOT. A control plane that came up
+    /// without it could neither mint an assertion nor verify a peer's, so every
+    /// guarded internal edge would refuse and no worker could load an app -
+    /// while `/readyz` and every liveness probe reported a healthy process.
+    /// Absence never admits, and no longer defers either; that is the
+    /// difference between this and the shared secrets it replaces, whose empty
+    /// value disabled the check.
     #[config(name = "control.service_key_file", default = PathBuf::new())]
     pub service_key_file: Operational<PathBuf>,
 
