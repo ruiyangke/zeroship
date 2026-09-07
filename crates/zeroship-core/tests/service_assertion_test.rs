@@ -27,7 +27,8 @@ use serde_json::{json, Value};
 use zeroship_core::service_assertion::{
     AssertionError, ClaimFuture, InMemoryReplayStore, ReplayClaim, ReplayStore, ReplayStoreError,
     ServiceAssertionMinter, ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
-    ServiceTrustBundle, CLOCK_SKEW_TOLERANCE, JWT_ASSERTION_MECHANISM, MAX_ASSERTION_LIFETIME,
+    ServiceTrustBundle, TransportAssertionVerifier, CLOCK_SKEW_TOLERANCE,
+    JWT_ASSERTION_MECHANISM, JWT_ASSERTION_TRANSPORT_MECHANISM, MAX_ASSERTION_LIFETIME,
     MAX_JTI_LEN, MAX_REPLAY_STORE_CLOCK_SKEW, SERVICE_ASSERTION_TYP,
 };
 use zeroship_core::service_identity::{
@@ -1096,4 +1097,188 @@ async fn a_multi_audience_assertion_is_rejected() {
             .await,
         Err(AuthError::CredentialRejected)
     );
+}
+
+// ─── The transport-only profile ──────────────────────────────────────────
+//
+// Every case below is paired with the FULL profile over the same assertion and
+// the same trust bundle, so the one variable is which verifier judged it.
+
+/// Build a transport-only verifier trusting the same caller as `fixture`.
+fn transport_verifier(fixture: &Fixture) -> TransportAssertionVerifier {
+    let mut bundle = ServiceTrustBundle::new();
+    bundle
+        .trust(&issuer(CALLER), CALLER_KID, fixture.caller_key.public)
+        .expect("trust the caller's key");
+    TransportAssertionVerifier::new(bundle)
+}
+
+async fn verify_transport(
+    verifier: &TransportAssertionVerifier,
+    assertion: &str,
+    audience: &str,
+) -> Result<ServiceIdentity, AuthError> {
+    let observed = PeerCredentials::new(Some(assertion), None, audience);
+    verify_identity(verifier, &observed).await
+}
+
+#[compio::test]
+async fn the_transport_profile_admits_a_second_presentation_and_the_full_profile_does_not() {
+    let fixture = Fixture::new();
+    let transport = transport_verifier(&fixture);
+    let assertion = fixture
+        .minter
+        .mint(&issuer(CALLEE))
+        .expect("mint one assertion");
+
+    // FULL: first presentation accepted, second refused. That is the `jti`
+    // claim, and it is the whole difference between the two profiles.
+    assert!(fixture.verify(&assertion).await.is_ok());
+    assert_eq!(
+        fixture.verify(&assertion).await,
+        Err(AuthError::CredentialRejected)
+    );
+
+    // TRANSPORT: the SAME already-burnt assertion is accepted, twice. This is
+    // the property the dispatch hop buys by not writing to a shared store, and
+    // it is stated as a measured fact rather than left implicit - a reader has
+    // to be able to see exactly what the tier gives up.
+    assert!(verify_transport(&transport, &assertion, CALLEE)
+        .await
+        .is_ok());
+    assert!(verify_transport(&transport, &assertion, CALLEE)
+        .await
+        .is_ok());
+}
+
+#[compio::test]
+async fn the_transport_profile_still_enforces_every_cryptographic_check() {
+    let fixture = Fixture::new();
+    let transport = transport_verifier(&fixture);
+    let signing = fixture.caller_key.encoding_key();
+
+    // The control: a conforming assertion is admitted, so each refusal below
+    // differs from an accepted call in exactly one variable.
+    assert!(verify_transport(
+        &transport,
+        &forge(
+            &conforming_header(),
+            &conforming_payload(),
+            Some((&signing, Algorithm::EdDSA))
+        ),
+        CALLEE
+    )
+    .await
+    .is_ok());
+
+    // Wrong audience: this callee is not the one the assertion names.
+    let good = fixture.minter.mint(&issuer(CALLEE)).expect("mint");
+    assert_eq!(
+        verify_transport(&transport, &good, THIRD_PARTY).await,
+        Err(AuthError::CredentialRejected)
+    );
+
+    // Untrusted signer: a key the bundle does not carry for this issuer.
+    let stranger = TestKey::generate();
+    assert_eq!(
+        verify_transport(
+            &transport,
+            &forge(
+                &conforming_header(),
+                &conforming_payload(),
+                Some((&stranger.encoding_key(), Algorithm::EdDSA))
+            ),
+            CALLEE
+        )
+        .await,
+        Err(AuthError::CredentialRejected)
+    );
+
+    // Wrong `typ`: a user access token presented as a service assertion.
+    let mut user_token = conforming_header();
+    user_token["typ"] = json!("at+jwt");
+    assert_eq!(
+        verify_transport(
+            &transport,
+            &forge(
+                &user_token,
+                &conforming_payload(),
+                Some((&signing, Algorithm::EdDSA))
+            ),
+            CALLEE
+        )
+        .await,
+        Err(AuthError::CredentialRejected)
+    );
+
+    // A malformed `jti` is STILL refused. The transport profile does not claim
+    // the `jti`; it does not stop requiring one. Dropping the requirement would
+    // make the two profiles accept different token shapes, and an assertion
+    // minted for one edge could then be unusable on the other.
+    let mut no_jti = conforming_payload();
+    no_jti.as_object_mut().expect("payload object").remove("jti");
+    assert_eq!(
+        verify_transport(
+            &transport,
+            &forge(
+                &conforming_header(),
+                &no_jti,
+                Some((&signing, Algorithm::EdDSA))
+            ),
+            CALLEE
+        )
+        .await,
+        Err(AuthError::CredentialRejected)
+    );
+}
+
+#[compio::test]
+async fn the_two_profiles_stamp_distinguishable_mechanism_tags() {
+    let fixture = Fixture::new();
+    let transport = transport_verifier(&fixture);
+    let assertion = fixture.minter.mint(&issuer(CALLEE)).expect("mint");
+
+    let by_transport = verify_transport(&transport, &assertion, CALLEE)
+        .await
+        .expect("the transport profile admits it");
+    let by_full = fixture
+        .verify(&assertion)
+        .await
+        .expect("the full profile admits it too");
+
+    // Same principal, different mechanism. A downstream check that requires the
+    // full profile can therefore say so, instead of trusting that whoever wired
+    // the edge picked the right verifier.
+    assert!(by_transport.matches_principal(&caller_principal()));
+    assert!(by_full.matches_principal(&caller_principal()));
+    assert_eq!(
+        by_transport.mechanism().as_ref(),
+        JWT_ASSERTION_TRANSPORT_MECHANISM
+    );
+    assert_eq!(by_full.mechanism().as_ref(), JWT_ASSERTION_MECHANISM);
+    assert_ne!(JWT_ASSERTION_TRANSPORT_MECHANISM, JWT_ASSERTION_MECHANISM);
+}
+
+#[compio::test]
+async fn a_transport_verifier_never_touches_its_peers_replay_store() {
+    // The store the FULL profile would consult, wired to fail every claim. A
+    // transport verification that consulted it would be refused; it is not.
+    struct AlwaysUnavailable;
+    impl ReplayStore for AlwaysUnavailable {
+        fn claim<'a>(&'a self, _key: &'a str, _expires_at: SystemTime) -> ClaimFuture<'a> {
+            Box::pin(async { Err(ReplayStoreError("store is down".to_owned())) })
+        }
+    }
+
+    let fixture = Fixture::with_replay_store(Arc::new(AlwaysUnavailable));
+    let transport = transport_verifier(&fixture);
+    let assertion = fixture.minter.mint(&issuer(CALLEE)).expect("mint");
+
+    assert_eq!(
+        fixture.verify(&assertion).await,
+        Err(AuthError::StoreUnavailable)
+    );
+    assert!(verify_transport(&transport, &assertion, CALLEE)
+        .await
+        .is_ok());
 }

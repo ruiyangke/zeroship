@@ -37,6 +37,7 @@ pub mod readiness;
 pub mod replication_names;
 pub mod service_assertion;
 pub mod service_identity;
+pub mod service_peers;
 pub mod superjson;
 pub mod typed_id;
 pub mod types;

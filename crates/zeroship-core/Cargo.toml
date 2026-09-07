@@ -51,6 +51,11 @@ tracing-logfmt = { workspace = true }
 tracing-bunyan-formatter = { workspace = true }
 
 [dev-dependencies]
+# `service_peers_test` writes real key files and peer documents and then loads
+# them back through the production loader, including its file-permission
+# refusal. That check has nothing to inspect unless a real file on a real
+# filesystem is what the test hands it.
+tempfile = { workspace = true }
 zeroship-test-support = { workspace = true }
 # Core tests include local ntex/compio HTTP servers. The polling fallback
 # keeps them runnable in sandboxes that block io_uring; production builds use

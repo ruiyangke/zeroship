@@ -1,0 +1,371 @@
+//! Where a service's own signing key and its peers' public keys come from.
+//!
+//! A service that mints a [service assertion](crate::service_assertion) needs
+//! two facts it cannot compute: its own ed25519 private key, and the public
+//! half of every peer whose assertions it verifies. This module is the ONLY
+//! place either is loaded, so both ends of every internal edge read the same
+//! shapes and derive the same `kid`.
+//!
+//! # Why the peer keys are CONFIGURED and not FETCHED
+//!
+//! The obvious alternative is a JWKS document each service publishes and its
+//! peers poll, riding the route-table poll the gateway already runs. It is
+//! refused here, for the reasons [`crate::service_assertion::ServiceTrustBundle`]
+//! already records against its own index, plus two that are specific to this
+//! deployment:
+//!
+//! - **The transport a fetched document would ride is the one the assertions
+//!   exist to stop trusting.** Internal hops are cleartext HTTP here (neither
+//!   the gateway nor the worker declares rustls), so a polled JWKS is
+//!   attacker-substitutable by anyone who can already reach the network - which
+//!   is exactly the adversary an asymmetric peer credential is for.
+//! - **The only feed that reaches both the gateway and the worker is served by
+//!   the control plane.** Distributing the GATEWAY's identity key over CONTROL's
+//!   feed would make control able to substitute the gateway's identity, moving a
+//!   trust root onto a process the design does not put it on. A file the
+//!   operator writes keeps each key's authority with the operator.
+//!
+//! The cost is unattended rotation, and it is real. Rotation is still
+//! expressible without downtime because a bundle may carry several keys for one
+//! issuer at once: publish the new public half everywhere, then swap the private
+//! half, then drop the old public half.
+//!
+//! # The document
+//!
+//! JWKS-shaped, with one non-standard member:
+//!
+//! ```json
+//! { "keys": [
+//!     { "kty": "OKP", "crv": "Ed25519", "iss": "spiffe://zeroship.ai/svc/gateway",
+//!       "x": "<base64url 32-byte public key>" }
+//! ] }
+//! ```
+//!
+//! `iss` is the addition, and it is not decoration: RFC 8725 section 3.8
+//! requires the verification key to be resolved FROM the issuer, and a bare
+//! JWKS array carries no issuer at all. A flat pool of every service's key means
+//! any service's key validates any service's assertion - the Storm-0558 shape.
+//!
+//! `kid` is DERIVED, not carried: it is the RFC 7638 thumbprint
+//! ([`crate::service_assertion::thumbprint_key_id`]) of the key itself. A
+//! document MAY still state one, in which case a disagreement is an error rather
+//! than a silently preferred value - an operator who edits a `kid` by hand is
+//! saying something about which key this is, and the two answers must agree.
+//!
+//! ONE document is handed to every service. That grants nothing extra: a
+//! verified identity still has to pass `aud` equality with the callee's own
+//! issuer and the endpoint allowlist in
+//! [`crate::service_identity::authorize`], so holding a peer's PUBLIC key is
+//! the ability to check that peer's signature and nothing else.
+
+use std::path::Path;
+
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
+use serde::Deserialize;
+
+use crate::service_assertion::{
+    thumbprint_key_id, AssertionError, ServiceAssertionMinter, ServiceIssuer, ServiceSigningKey,
+    ServiceTrustBundle,
+};
+
+/// The trust domain every platform service issuer sits in.
+pub const SERVICE_TRUST_DOMAIN: &str = "zeroship.ai";
+
+/// The hierarchical name of the gateway's service identity.
+pub const GATEWAY_SERVICE_NAME: &str = "svc/gateway";
+/// The hierarchical name of the worker's service identity.
+pub const WORKER_SERVICE_NAME: &str = "svc/worker";
+/// The hierarchical name of the control plane's service identity.
+pub const CONTROL_SERVICE_NAME: &str = "svc/control";
+/// The hierarchical name of the auth service's identity.
+pub const AUTH_SERVICE_NAME: &str = "svc/auth";
+
+/// Build the issuer identifier of a platform service by name.
+///
+/// # Panics
+///
+/// Never for the constants in this module: the names are checked by
+/// `every_named_service_parses_as_an_issuer`. A caller passing an arbitrary
+/// string gets [`AssertionError::MalformedIssuer`] instead.
+///
+/// # Errors
+///
+/// Returns [`AssertionError::MalformedIssuer`] when `name` is not a well-formed
+/// service path.
+pub fn service_issuer(name: &str) -> Result<ServiceIssuer, AssertionError> {
+    ServiceIssuer::parse(&format!("spiffe://{SERVICE_TRUST_DOMAIN}/{name}"))
+}
+
+/// Failure to load service key material.
+///
+/// Distinct from [`AssertionError`] and from
+/// [`crate::service_identity::AuthError`]: these are provisioning faults raised
+/// while a process is starting, never verdicts about a credential a peer
+/// presented.
+#[derive(Debug, thiserror::Error)]
+pub enum PeerKeyError {
+    /// The file could not be read.
+    #[error("read {path}: {source}")]
+    Read {
+        /// The path that could not be read.
+        path: String,
+        /// The underlying I/O failure.
+        source: std::io::Error,
+    },
+    /// The file is group- or world-accessible.
+    #[error("{path} is group/world accessible (mode {mode:o}); chmod 600 it")]
+    InsecurePermissions {
+        /// The offending path.
+        path: String,
+        /// The mode as reported by the filesystem.
+        mode: u32,
+    },
+    /// The peer document did not parse, or an entry was malformed.
+    #[error("service peer document {path}: {reason}")]
+    Document {
+        /// The offending path.
+        path: String,
+        /// What was wrong with it.
+        reason: String,
+    },
+    /// The key material was rejected by the assertion mechanism.
+    #[error("service key material: {0}")]
+    Material(#[from] AssertionError),
+}
+
+/// One published peer key.
+#[derive(Debug, Deserialize)]
+struct PeerKeyEntry {
+    #[serde(default)]
+    kty: Option<String>,
+    #[serde(default)]
+    crv: Option<String>,
+    iss: String,
+    x: String,
+    #[serde(default)]
+    kid: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PeerKeyDocument {
+    keys: Vec<PeerKeyEntry>,
+}
+
+/// Everything one process needs to speak and verify service assertions.
+///
+/// Held whole rather than as two loose values so a service cannot end up able
+/// to verify its peers but unable to name itself, or the reverse - which is the
+/// shape that produces a hop authenticated in one direction only.
+#[derive(Debug)]
+pub struct ServiceKeyring {
+    issuer: ServiceIssuer,
+    minter: ServiceAssertionMinter,
+    bundle: Option<ServiceTrustBundle>,
+}
+
+impl ServiceKeyring {
+    /// Load this service's private key and the peer bundle from two files.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PeerKeyError`] when either file is unreadable, insecurely
+    /// permissioned, or does not hold what it claims to.
+    pub fn load(
+        issuer: ServiceIssuer,
+        key_path: &Path,
+        peers_path: &Path,
+    ) -> Result<Self, PeerKeyError> {
+        let signing_key = load_signing_key(key_path)?;
+        let bundle = load_peer_bundle(peers_path)?;
+        let minter =
+            ServiceAssertionMinter::new(issuer.clone(), signing_key.key_id(), &signing_key)?;
+        Ok(Self {
+            issuer,
+            minter,
+            bundle: Some(bundle),
+        })
+    }
+
+    /// The issuer identifier this service mints under and is addressed by.
+    #[must_use]
+    pub const fn issuer(&self) -> &ServiceIssuer {
+        &self.issuer
+    }
+
+    /// Mint one assertion naming `audience`, valid from now.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AssertionError::Signing`] when the JWT cannot be signed.
+    pub fn mint_for(&self, audience: &ServiceIssuer) -> Result<String, AssertionError> {
+        self.minter.mint(audience)
+    }
+
+    /// Take the peer trust bundle, leaving the minter behind.
+    ///
+    /// A verifier CONSUMES its bundle, and a process builds exactly one
+    /// verifier, so this hands the bundle over once. A second call returns
+    /// `None` rather than an empty bundle: an empty bundle trusts nobody and
+    /// would look like a working verifier that refuses every caller, which is
+    /// the failure that is hardest to read in a log.
+    #[must_use]
+    pub fn take_bundle(&mut self) -> Option<ServiceTrustBundle> {
+        self.bundle.take()
+    }
+}
+
+/// Load an ed25519 signing key from a PKCS#8 PEM or DER file.
+///
+/// The format is sniffed on the PEM armor, exactly as the gateway's
+/// session-cookie key loader does, so one `openssl genpkey -algorithm ed25519`
+/// recipe produces every key in this stack.
+///
+/// # Errors
+///
+/// Returns [`PeerKeyError`] when the file cannot be read, is group- or
+/// world-accessible, or does not hold an ed25519 private key.
+pub fn load_signing_key(path: &Path) -> Result<ServiceSigningKey, PeerKeyError> {
+    let bytes = read_file(path)?;
+    reject_insecure_permissions(path)?;
+    if let Ok(text) = std::str::from_utf8(&bytes) {
+        if text.contains("-----BEGIN PRIVATE KEY-----") {
+            let der = pem_body(text).ok_or_else(|| PeerKeyError::Document {
+                path: path.display().to_string(),
+                reason: "PEM armor present but the body did not decode".to_owned(),
+            })?;
+            return Ok(ServiceSigningKey::from_pkcs8_der(&der)?);
+        }
+    }
+    Ok(ServiceSigningKey::from_pkcs8_der(&bytes)?)
+}
+
+/// Load the peer trust bundle from a JWKS-shaped document.
+///
+/// # Errors
+///
+/// Returns [`PeerKeyError`] when the file cannot be read, does not parse, holds
+/// an entry that is not an ed25519 public key, or states a `kid` that
+/// disagrees with the key's own thumbprint.
+pub fn load_peer_bundle(path: &Path) -> Result<ServiceTrustBundle, PeerKeyError> {
+    let bytes = read_file(path)?;
+    let document: PeerKeyDocument =
+        serde_json::from_slice(&bytes).map_err(|error| PeerKeyError::Document {
+            path: path.display().to_string(),
+            reason: error.to_string(),
+        })?;
+    let fault = |reason: String| PeerKeyError::Document {
+        path: path.display().to_string(),
+        reason,
+    };
+    if document.keys.is_empty() {
+        return Err(fault("no keys".to_owned()));
+    }
+    let mut bundle = ServiceTrustBundle::new();
+    for entry in &document.keys {
+        if let Some(kty) = entry.kty.as_deref() {
+            if kty != "OKP" {
+                return Err(fault(format!("{}: kty is {kty}, not OKP", entry.iss)));
+            }
+        }
+        if let Some(crv) = entry.crv.as_deref() {
+            if crv != "Ed25519" {
+                return Err(fault(format!("{}: crv is {crv}, not Ed25519", entry.iss)));
+            }
+        }
+        let issuer = ServiceIssuer::parse(&entry.iss)
+            .map_err(|_| fault(format!("{} is not an issuer identifier", entry.iss)))?;
+        let raw = URL_SAFE_NO_PAD
+            .decode(entry.x.as_bytes())
+            .map_err(|error| fault(format!("{}: x is not base64url: {error}", entry.iss)))?;
+        let public: [u8; 32] = raw
+            .try_into()
+            .map_err(|_| fault(format!("{}: x is not 32 bytes", entry.iss)))?;
+        let key_id = thumbprint_key_id(&public);
+        if let Some(stated) = entry.kid.as_deref() {
+            if stated != key_id {
+                return Err(fault(format!(
+                    "{}: stated kid does not match the key's own thumbprint",
+                    entry.iss
+                )));
+            }
+        }
+        bundle.trust(&issuer, key_id, public)?;
+    }
+    Ok(bundle)
+}
+
+fn read_file(path: &Path) -> Result<Vec<u8>, PeerKeyError> {
+    std::fs::read(path).map_err(|source| PeerKeyError::Read {
+        path: path.display().to_string(),
+        source,
+    })
+}
+
+/// Decode the base64 body of a single-block PKCS#8 PEM file.
+fn pem_body(text: &str) -> Option<Vec<u8>> {
+    let body: String = text
+        .lines()
+        .skip_while(|line| !line.starts_with("-----BEGIN PRIVATE KEY-----"))
+        .skip(1)
+        .take_while(|line| !line.starts_with("-----END PRIVATE KEY-----"))
+        .collect();
+    base64::engine::general_purpose::STANDARD
+        .decode(body.trim())
+        .ok()
+}
+
+/// Refuse a private key any other local user can read.
+///
+/// The peer document is deliberately NOT subject to this: it holds public keys
+/// and an operator may well want it world-readable. Applying a secret's
+/// permission rule to a non-secret is how a check stops being believed.
+#[cfg(unix)]
+fn reject_insecure_permissions(path: &Path) -> Result<(), PeerKeyError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let metadata = std::fs::metadata(path).map_err(|source| PeerKeyError::Read {
+        path: path.display().to_string(),
+        source,
+    })?;
+    let mode = metadata.permissions().mode();
+    if mode & 0o077 != 0 {
+        return Err(PeerKeyError::InsecurePermissions {
+            path: path.display().to_string(),
+            mode: mode & 0o777,
+        });
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn reject_insecure_permissions(_path: &Path) -> Result<(), PeerKeyError> {
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_named_service_parses_as_an_issuer() {
+        let names = [
+            GATEWAY_SERVICE_NAME,
+            WORKER_SERVICE_NAME,
+            CONTROL_SERVICE_NAME,
+            AUTH_SERVICE_NAME,
+        ];
+        // The floor is the whole constant list, not a sample: a name added
+        // without an issuer that parses would be an edge nobody can address.
+        assert_eq!(names.len(), 4);
+        for name in names {
+            let issuer = service_issuer(name).expect("named service issuer parses");
+            assert_eq!(issuer.as_str(), format!("spiffe://zeroship.ai/{name}"));
+        }
+    }
+
+    #[test]
+    fn a_thumbprint_kid_round_trips_between_the_minter_and_the_bundle() {
+        let key = ServiceSigningKey::generate();
+        let public = key.verifying_key_bytes();
+        assert_eq!(key.key_id(), thumbprint_key_id(&public));
+    }
+}
