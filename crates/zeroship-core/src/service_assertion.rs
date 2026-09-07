@@ -747,7 +747,13 @@ impl fmt::Debug for AssertionChecks {
 /// request's critical path.
 pub struct ServiceAssertionVerifier {
     checks: AssertionChecks,
-    replay: Arc<dyn ReplayStore>,
+    // `Send + Sync` on the trait object, not merely on the `Arc`: a verifier
+    // lives in the state a multi-threaded HTTP server shares across its worker
+    // threads, and auto traits do not propagate through a bare `dyn Trait`. The
+    // bound belongs here rather than at each service, because a store that
+    // cannot be shared is a store that cannot settle a claim across replicas
+    // either - the two are the same requirement.
+    replay: Arc<dyn ReplayStore + Send + Sync>,
     store_skew: Duration,
 }
 
@@ -809,7 +815,7 @@ impl ServiceAssertionVerifier {
     /// mode of THIS type; an edge that cannot afford the store takes
     /// [`TransportAssertionVerifier`], which says so in its name.
     #[must_use]
-    pub fn new(bundle: ServiceTrustBundle, replay: Arc<dyn ReplayStore>) -> Self {
+    pub fn new(bundle: ServiceTrustBundle, replay: Arc<dyn ReplayStore + Send + Sync>) -> Self {
         Self {
             checks: AssertionChecks::new(bundle),
             replay,
