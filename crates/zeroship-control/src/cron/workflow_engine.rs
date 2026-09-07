@@ -2189,7 +2189,7 @@ mod tests {
     
         let issuer = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
         let key = ServiceSigningKey::generate();
-        let keyring = ServiceKeyring::from_parts(issuer, &key, ServiceTrustBundle::new())
+        let keyring = ServiceKeyring::from_parts(issuer, key, ServiceTrustBundle::new())
             .expect("control keyring");
         std::sync::Arc::new(ServiceAuth::new(
             keyring,

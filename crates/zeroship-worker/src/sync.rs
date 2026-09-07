@@ -1057,7 +1057,6 @@ mod tests {
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
-                worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
                 workflow_blob_store,

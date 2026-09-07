@@ -80,7 +80,6 @@ async fn build_state(db_url: &str) -> (Arc<AppState>, PathBuf, PathBuf) {
         stripe_base_url: "http://127.0.0.1:9".to_string(),
         gateway_url: "http://127.0.0.1:9".to_string(),
         worker_urls: Vec::new(),
-        worker_key: SecretString::new(String::new()),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         origin_scheme: zeroship_core::config::OriginScheme::Https,

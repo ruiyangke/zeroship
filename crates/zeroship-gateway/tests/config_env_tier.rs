@@ -78,7 +78,6 @@ fn check_config(broker_secret: &Path, overlay: &Path, extra_env: &[(&str, &str)]
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_zeroship-gate"));
     cmd.env_clear()
         .env("ZEROSHIP_CONTROL_KEY", STRONG_HEX)
-        .env("ZEROSHIP_WORKER_KEY", STRONG_HEX)
         .env("ZEROSHIP_GATEWAY_STASH_SIGNING_KEY", STRONG_HEX)
         .env("ZEROSHIP_PAIRWISE_SALT", STRONG_HEX);
     for (key, value) in extra_env {
