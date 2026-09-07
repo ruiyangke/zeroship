@@ -361,6 +361,68 @@ pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
     project_id
 }
 
+/// A fixture `zeroship.apps` row, together with the ownership chain it now
+/// requires. Returns the app id.
+///
+/// A fixture app is no longer one row. `apps.project_id` is NOT NULL against a
+/// RESTRICT foreign key and a project needs an organization, so the chain is
+/// organization -> project -> app, and this writes all three. Every direct
+/// `INSERT INTO zeroship.apps` in this crate's tests goes through here or
+/// through [`unowned_project`], so the chain is spelled once.
+///
+/// THE ORGANIZATION IS FRESH PER CALL AND HAS NO MEMBERS. That is deliberate:
+/// two fixture apps never share a billing subject or an authority root unless a
+/// test seats the same member in both, which is the isolation the deleted
+/// `zeroship.app_members` row used to give per app. Ownership is therefore NOT
+/// expressed here - a test that means "this user owns this app" follows with
+/// [`seat_app_organization_member`], the direct replacement for an
+/// `app_members` owner row.
+///
+/// See [`unowned_project`] for which tests a member-less organization is right
+/// for, and for what to do instead when the placement IS the thing under test.
+#[allow(dead_code)]
+pub async fn seed_app(pg: &compio_postgres::Client, name: &str, plan_id: &str) -> Uuid {
+    let project_id = unowned_project(pg).await;
+    let rows = pg
+        .query(
+            "INSERT INTO zeroship.apps (name, plan_id, project_id) \
+             VALUES ($1, $2, $3) RETURNING id",
+            &[&name, &plan_id, &project_id],
+        )
+        .await
+        .expect("seed fixture app");
+    rows[0].get("id")
+}
+
+/// Seat `user` in the organization behind `app`'s project, at `role`.
+///
+/// The replacement for a `zeroship.app_members` row. An app reaches its
+/// authority root through exactly one path - `apps.project_id ->
+/// projects.organization_id` - so the seat is written by joining that path
+/// rather than by the caller carrying an organization id it would have to keep
+/// in agreement.
+///
+/// `role` must name a row in `zeroship.organization_roles`; the foreign key
+/// there makes an invented role unspellable rather than silently powerless.
+/// Upserts, so a test may promote or demote the same user by calling again.
+#[allow(dead_code)]
+pub async fn seat_app_organization_member(
+    pg: &compio_postgres::Client,
+    app: &Uuid,
+    user: &Uuid,
+    role: &str,
+) {
+    pg.execute(
+        "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+         SELECT p.organization_id, $2, $3 FROM zeroship.apps a \
+           JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
+         ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
+        &[app, user, &role],
+    )
+    .await
+    .expect("seat organization member for fixture app");
+}
+
 #[allow(dead_code)]
 pub async fn seed_usage_total(
     pg: &compio_postgres::Client,

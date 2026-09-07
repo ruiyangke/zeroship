@@ -754,9 +754,10 @@ fn lock_spend_gate() -> std::sync::MutexGuard<'static, ()> {
     SPEND_TICK_GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Seed a plan charging 1 cent/request with `limit_cents` default spend cap, an app on
-/// that plan, and an `owner` app_members row tying the app to `creator` (the H1 join the
-/// notify scan resolves the creator through). Returns the app id.
+/// Seed a plan charging 1 cent/request with `limit_cents` default spend cap, an
+/// app on that plan, and an `owner` SEAT tying the app to `creator` - the
+/// organization behind the app's project is the join the notify scan resolves
+/// the creator through. Returns the app id.
 async fn make_spend_app_owned_by(
     pg: &compio_postgres::Client,
     creator: Uuid,
@@ -783,24 +784,8 @@ async fn make_spend_app_owned_by(
     .await
     .expect("seed priced plan");
     let app_name = format!("spend-notify-{}", Uuid::new_v4());
-    let rows = pg
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id) \
-             VALUES ($1, $2) RETURNING id",
-            &[&app_name, &plan_id],
-        )
-        .await
-        .expect("insert app");
-    let app_id: Uuid = rows[0].get("id");
-    pg.execute(
-        "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
-             SELECT p.organization_id, $2, 'owner' FROM zeroship.apps a \
-               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
-             ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-        &[&app_id, &creator],
-    )
-    .await
-    .expect("insert owner membership");
+    let app_id = common::seed_app(pg, &app_name, &plan_id).await;
+    common::seat_app_organization_member(pg, &app_id, &creator, "owner").await;
     (app_id, app_name)
 }
 

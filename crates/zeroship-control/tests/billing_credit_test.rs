@@ -364,27 +364,8 @@ async fn make_plan(state: &AppState) -> String {
 
 async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     let name = format!("credit-{}", Uuid::new_v4());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id) \
-             VALUES ($1, $2) RETURNING id",
-            &[&name, &plan_id],
-        )
-        .await
-        .expect("insert app");
-    let app_id: Uuid = rows[0].get("id");
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
-             SELECT p.organization_id, $2, 'owner' FROM zeroship.apps a \
-               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
-             ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-            &[&app_id, &owner],
-        )
-        .await
-        .expect("insert owner membership");
+    let app_id = common::seed_app(&state.control_pg, &name, plan_id).await;
+    common::seat_app_organization_member(&state.control_pg, &app_id, &owner, "owner").await;
     app_id
 }
 

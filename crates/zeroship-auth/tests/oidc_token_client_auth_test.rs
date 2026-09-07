@@ -340,12 +340,16 @@ async fn seed_user_client(
     )
     .await
     .expect("seed free plan");
+    // An app row needs a project, and a project needs an organization. Nothing
+    // here asserts on authority, so the organization is left member-less.
+    let project_id = common::unowned_project(db).await;
     db.execute(
-        "INSERT INTO zeroship.apps (id, name) \
-         VALUES ($1, $2)",
+        "INSERT INTO zeroship.apps (id, name, project_id) \
+         VALUES ($1, $2, $3)",
         &[
             &app_id,
-            &app_name
+            &app_name,
+            &project_id
         ],
     )
     .await

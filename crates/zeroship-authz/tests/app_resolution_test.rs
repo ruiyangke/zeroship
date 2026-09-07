@@ -273,11 +273,10 @@ impl Fixture {
         .await
         .expect("insert project");
         pg.execute(
-            "INSERT INTO zeroship.apps (id, name, api_key, project_id) VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, project_id) VALUES ($1, $2, $3)",
             &[
                 &app_uuid,
                 &format!("authz-{label}-{}", Uuid::new_v4().simple()),
-                &"test-api-key",
                 &project_id,
             ],
         )

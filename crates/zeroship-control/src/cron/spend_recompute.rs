@@ -659,11 +659,34 @@ mod live_db_tests {
         label: &str,
     ) -> Uuid {
         let name = format!("{label}-{}", Uuid::new_v4());
+        // An app needs a project and a project needs an organization:
+        // `apps.project_id` is NOT NULL against a RESTRICT foreign key. The
+        // organization here has no members, because recompute is a fleet-wide
+        // sweep keyed on the app and this fixture asserts nothing about
+        // authority.
+        let organization_id = zeroship_core::typed_id::generate("org");
+        let project_id = zeroship_core::typed_id::generate("prj");
+        client
+            .execute(
+                "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+                 VALUES ($1, $2, 'Recompute Fixture', 'fixture@zeroship.test')",
+                &[&organization_id, &format!("recompute-{}", Uuid::new_v4().simple())],
+            )
+            .await
+            .expect("seed fixture organization");
+        client
+            .execute(
+                "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
+                 VALUES ($1, $2, 'default', 'Default')",
+                &[&project_id, &organization_id],
+            )
+            .await
+            .expect("seed fixture project");
         client
             .query(
-                "INSERT INTO zeroship.apps (name, plan_id) \
-                 VALUES ($1, $2) RETURNING id",
-                &[&name, &plan_id],
+                "INSERT INTO zeroship.apps (name, plan_id, project_id) \
+                 VALUES ($1, $2, $3) RETURNING id",
+                &[&name, &plan_id, &project_id],
             )
             .await
             .expect("insert app")[0]

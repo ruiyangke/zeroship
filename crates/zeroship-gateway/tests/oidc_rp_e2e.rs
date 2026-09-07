@@ -8,6 +8,8 @@
 //! master and verifies the OP id_token (`iss` with the fixed `/oauth2` prefix,
 //! `aud = oac_...`).
 
+mod common;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
@@ -696,12 +698,14 @@ async fn seed_user_client(
     )
     .await
     .expect("seed free plan");
+    let project_id = common::unowned_project(db).await;
     db.execute(
-        "INSERT INTO zeroship.apps (id, name) \
-         VALUES ($1, $2)",
+        "INSERT INTO zeroship.apps (id, name, project_id) \
+         VALUES ($1, $2, $3)",
         &[
             &app_id,
-            &format!("gateway-e2e-app-{}", app_id.simple())
+            &format!("gateway-e2e-app-{}", app_id.simple()),
+            &project_id
         ],
     )
     .await

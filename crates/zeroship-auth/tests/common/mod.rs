@@ -417,6 +417,45 @@ pub fn native_authorize_return_to(client_id: &str, redirect_uri: &str) -> String
     format!("/oauth2/authorize?{q}")
 }
 
+// ─── App ownership chain ─────────────────────────────────────────────────
+
+/// The project a fixture's `zeroship.apps` row belongs to.
+///
+/// `apps.project_id` is NOT NULL against a RESTRICT foreign key and a project
+/// needs an organization, so an app row can no longer be seeded on its own.
+/// This mints an organization with NO members and a project inside it, which is
+/// the right home for every app in this crate's tests: they are about OIDC,
+/// sessions, consent and account lifecycle, and an app here needs a place to
+/// exist rather than a creator.
+///
+/// A test whose subject IS the seat - `consent_ui_test`, which asserts on the
+/// consenting user's ROLE - writes the `organization_members` row itself,
+/// joining through `apps.project_id -> projects.organization_id`. That is the
+/// replacement for the deleted `zeroship.app_members` row, and the reason this
+/// helper deliberately seats nobody.
+pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
+    let organization_id = zeroship_core::typed_id::generate("org");
+    let project_id = zeroship_core::typed_id::generate("prj");
+    pg.execute(
+        "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+         VALUES ($1, $2, 'Auth Fixture Organization', 'fixture@zeroship.test')",
+        &[
+            &organization_id,
+            &format!("auth-fixture-{}", Uuid::new_v4().simple()),
+        ],
+    )
+    .await
+    .expect("seed fixture organization");
+    pg.execute(
+        "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
+         VALUES ($1, $2, 'default', 'Default')",
+        &[&project_id, &organization_id],
+    )
+    .await
+    .expect("seed fixture project");
+    project_id
+}
+
 // ─── DB cleanup ──────────────────────────────────────────────────────────
 
 /// Delete sessions + user row for `email`. CITEXT columns require an explicit

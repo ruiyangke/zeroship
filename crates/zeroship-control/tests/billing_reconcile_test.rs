@@ -867,27 +867,8 @@ async fn make_plan(state: &AppState) -> String {
 /// Create an app on `plan_id` owned by `owner`. Returns the app id.
 async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
     let name = format!("bill-{}", Uuid::new_v4());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id) \
-             VALUES ($1, $2) RETURNING id",
-            &[&name, &plan_id],
-        )
-        .await
-        .expect("insert app");
-    let app_id: Uuid = rows[0].get("id");
-    state
-        .control_pg
-        .execute(
-            "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
-             SELECT p.organization_id, $2, 'owner' FROM zeroship.apps a \
-               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
-             ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-            &[&app_id, &owner],
-        )
-        .await
-        .expect("insert owner membership");
+    let app_id = common::seed_app(&state.control_pg, &name, plan_id).await;
+    common::seat_app_organization_member(&state.control_pg, &app_id, &owner, "owner").await;
     app_id
 }
 
@@ -1742,21 +1723,15 @@ async fn reconcile_groups_apps_by_owner_via_the_organization() {
     let owned_b = make_owned_app(&fx.state, &plan, creator).await;
     fx.state.stripe_store.set_customer(creator, &format!("cus_test_owner_{}", Uuid::new_v4().simple())).await.unwrap();
 
-    // An app with NO owner row — must be skipped (no billable creator).
-    let unowned = {
-        let name = format!("unowned-{}", Uuid::new_v4());
-        let rows = fx
-            .state
-            .control_pg
-            .query(
-                "INSERT INTO zeroship.apps (name, plan_id) \
-                 VALUES ($1, $2) RETURNING id",
-                &[&name, &plan],
-            )
-            .await
-            .expect("insert unowned app");
-        rows[0].get::<_, Uuid>("id")
-    };
+    // An app in an organization with NO member rows — must be skipped (no
+    // billable creator). `seed_app` mints exactly that: a fresh organization
+    // nobody is seated in.
+    let unowned = common::seed_app(
+        &fx.state.control_pg,
+        &format!("unowned-{}", Uuid::new_v4()),
+        &plan,
+    )
+    .await;
 
     ingest_at(&fx.state, owned_a, 100, period, 1).await; // 100c
     ingest_at(&fx.state, owned_b, 200, period, 2).await; // 200c

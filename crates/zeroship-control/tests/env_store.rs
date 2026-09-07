@@ -254,9 +254,9 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
 
     client
         .execute(
-            "INSERT INTO app_secrets(app_id, key_name, ciphertext)
+            "INSERT INTO zeroship.app_secrets(app_id, key_name, ciphertext)
              SELECT $1, $2, ciphertext
-             FROM app_secrets
+             FROM zeroship.app_secrets
              WHERE app_id = $3 AND key_name = $4
              ON CONFLICT (app_id, key_name) DO UPDATE
              SET ciphertext = EXCLUDED.ciphertext",
@@ -273,9 +273,9 @@ async fn ciphertext_transplant_fails_across_app_and_key() {
 
     client
         .execute(
-            "INSERT INTO app_secrets(app_id, key_name, ciphertext)
+            "INSERT INTO zeroship.app_secrets(app_id, key_name, ciphertext)
              SELECT $1, $2, ciphertext
-             FROM app_secrets
+             FROM zeroship.app_secrets
              WHERE app_id = $3 AND key_name = $4
              ON CONFLICT (app_id, key_name) DO UPDATE
              SET ciphertext = EXCLUDED.ciphertext",
@@ -537,7 +537,8 @@ async fn app_audit_is_append_only() {
     let conn = raw_conn(&url).await;
     let rows = conn
         .query(
-            "SELECT id FROM app_audit WHERE app_id = $1 AND resource = 'APPEND_ONLY_PROBE'",
+            "SELECT id FROM zeroship.app_audit \
+             WHERE app_id = $1 AND resource = 'APPEND_ONLY_PROBE'",
             &[&app],
         )
         .await
@@ -545,7 +546,7 @@ async fn app_audit_is_append_only() {
     let audit_id: Uuid = rows[0].get("id");
 
     let err = conn
-        .execute("DELETE FROM app_audit WHERE id = $1", &[&audit_id])
+        .execute("DELETE FROM zeroship.app_audit WHERE id = $1", &[&audit_id])
         .await
         .expect_err("app_audit should reject delete");
     let message = err.to_string();

@@ -339,10 +339,31 @@ async fn seed_app(conn: &Client, app_id: Uuid, owner_id: Uuid) {
     .await
     .expect("seed user");
     let name = format!("migrated-{}", app_id.simple());
+    // An app needs a project and a project needs an organization:
+    // `apps.project_id` is NOT NULL against a RESTRICT foreign key, and the
+    // organization is where `owner_id` is seated below. The seat is written by
+    // joining `apps.project_id -> projects.organization_id`, the app's one path
+    // to a human, so the two rows have to exist before it.
+    let organization_id = zeroship_core::typed_id::generate("org");
+    let project_id = zeroship_core::typed_id::generate("prj");
     conn.execute(
-        "INSERT INTO zeroship.apps (id, name, plan_id) \
-         VALUES ($1, $2, $3)",
-        &[&app_id, &name, &plan_id],
+        "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+         VALUES ($1, $2, 'Migrate Fixture', 'fixture@zeroship.test')",
+        &[&organization_id, &format!("migrated-org-{}", Uuid::new_v4().simple())],
+    )
+    .await
+    .expect("seed organization");
+    conn.execute(
+        "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
+         VALUES ($1, $2, 'default', 'Default')",
+        &[&project_id, &organization_id],
+    )
+    .await
+    .expect("seed project");
+    conn.execute(
+        "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
+         VALUES ($1, $2, $3, $4)",
+        &[&app_id, &name, &plan_id, &project_id],
     )
     .await
     .expect("seed app");

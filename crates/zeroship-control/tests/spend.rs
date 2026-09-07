@@ -80,15 +80,8 @@ async fn make_app_on_priced_plan(
         .await
         .expect("seed priced plan");
     let name = format!("spend-test-{}", Uuid::new_v4());
-    let rows = client
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id) \
-             VALUES ($1, $2) RETURNING id",
-            &[&name, &plan_id],
-        )
-        .await
-        .expect("insert app");
-    (plan_id, rows[0].get("id"))
+    let app = common::seed_app(client, &name, &plan_id).await;
+    (plan_id, app)
 }
 
 async fn seed_requests(metering: &Metering, app: Uuid, requests: u64) {
@@ -389,15 +382,7 @@ async fn overflowing_spend_is_skipped_not_clamped_and_blocked() {
         .await
         .expect("seed overflow plan");
     let name = format!("ovf-test-{}", Uuid::new_v4());
-    let app: Uuid = client
-        .query(
-            "INSERT INTO zeroship.apps (name, plan_id) \
-             VALUES ($1, $2) RETURNING id",
-            &[&name, &plan_id],
-        )
-        .await
-        .expect("insert app")[0]
-        .get("id");
+    let app: Uuid = common::seed_app(&client, &name, &plan_id).await;
 
     // Usage = i64::MAX requests in the current period.
     seed_requests(&metering, app, i64::MAX as u64).await;

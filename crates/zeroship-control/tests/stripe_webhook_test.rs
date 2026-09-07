@@ -389,7 +389,7 @@ async fn invoice_paid_webhook_records_app_audit_row() {
     let rows = conn
         .query(
             "SELECT resource, detail \
-             FROM app_audit \
+             FROM zeroship.app_audit \
              WHERE creator_id = $1 AND action = 'record_payout' AND resource = $2",
             &[&creator_id, &event_id],
         )
@@ -1558,7 +1558,7 @@ async fn ledger_count(conn: &compio_postgres::Client, event_id: &str) -> i64 {
 /// the handler ran (one row per actual processing).
 async fn setup_audit_count(conn: &compio_postgres::Client, creator_id: Uuid, event_id: &str) -> i64 {
     conn.query(
-        "SELECT COUNT(*)::bigint AS n FROM app_audit \
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.app_audit \
          WHERE creator_id = $1 AND action = 'setup_intent_succeeded' AND resource = $2",
         &[&creator_id, &event_id],
     )
