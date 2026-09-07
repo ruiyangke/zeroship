@@ -91,7 +91,7 @@ impl Fixture {
         Self::with_replay_store(Arc::new(InMemoryReplayStore::new()))
     }
 
-    fn with_replay_store(replay: Arc<dyn ReplayStore>) -> Self {
+    fn with_replay_store(replay: Arc<dyn ReplayStore + Send + Sync>) -> Self {
         let caller_key = TestKey::generate();
         let minter = ServiceAssertionMinter::new(
             issuer(CALLER),
@@ -531,7 +531,7 @@ async fn the_race_harness_can_tell_a_read_then_write_store_apart() {
 #[compio::test]
 async fn a_replay_claim_is_retained_for_the_whole_acceptance_window() {
     let store = Arc::new(RecordingReplayStore::default());
-    let fixture = Fixture::with_replay_store(Arc::clone(&store) as Arc<dyn ReplayStore>);
+    let fixture = Fixture::with_replay_store(Arc::clone(&store) as Arc<dyn ReplayStore + Send + Sync>);
     let assertion = fixture.minter.mint(&issuer(CALLEE)).expect("mint");
 
     let identity = fixture.verify(&assertion).await.expect("verify");
@@ -608,7 +608,7 @@ async fn the_replay_claim_happens_only_after_the_signature_verifies() {
     // would have stayed green even if the claim were moved ahead of signature
     // verification but left behind header parsing.
     let store = Arc::new(CountingReplayStore::default());
-    let fixture = Fixture::with_replay_store(Arc::clone(&store) as Arc<dyn ReplayStore>);
+    let fixture = Fixture::with_replay_store(Arc::clone(&store) as Arc<dyn ReplayStore + Send + Sync>);
     let untrusted = TestKey::generate();
     let forged = forge(
         &conforming_header(),
@@ -1035,7 +1035,7 @@ async fn algorithm_confusion_against_the_public_key_is_rejected() {
 #[compio::test]
 async fn absent_credentials_never_reach_the_verifier() {
     let store = Arc::new(CountingReplayStore::default());
-    let fixture = Fixture::with_replay_store(Arc::clone(&store) as Arc<dyn ReplayStore>);
+    let fixture = Fixture::with_replay_store(Arc::clone(&store) as Arc<dyn ReplayStore + Send + Sync>);
 
     for absent in [None, Some("")] {
         let observed = PeerCredentials::new(absent, None, CALLEE);
