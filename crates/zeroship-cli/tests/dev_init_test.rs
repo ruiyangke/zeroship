@@ -476,31 +476,73 @@ fn compose_preserves_shared_secret_topology_and_has_no_weak_literals() {
     assert!(auth.contains("ZEROSHIP_AUTH_PAIRWISE_SALT_FILE: /etc/zeroship/secrets/pairwise-salt"));
     assert_eq!(compose.matches(required_pairwise).count(), 2);
 
+    // The control key is a SHARED symmetric root: every holder of it is every
+    // other holder, so control cannot tell which of them is calling and admits
+    // any of them at every route `check_auth` guards. The membership of this set
+    // is therefore a security property, not a wiring detail, and it is asserted
+    // as a SET rather than a count - a bare number would be satisfied by
+    // swapping one holder for another.
+    //
+    // The witnesses below are the whole intended membership. A service that
+    // needs ONE control-plane route takes a service assertion instead
+    // (`zeroship_core::service_identity::service_allowlist`), which names it and
+    // opens that route alone; `auth` did exactly that for the erasure preflight
+    // rather than becoming a fifth holder.
     let required_control = "ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}";
+    let may_hold_control_key = ["control", "gateway", "worker", "migrate-server"];
     for (name, block) in [
         ("control", control),
         ("gateway", gateway),
         ("worker", worker),
+        ("migrate-server", migrate_server),
     ] {
         assert!(
             block.contains(required_control),
             "{name} is not wired to the generated control key"
         );
     }
-    assert!(
-        migrate_server.contains(required_control),
-        "migrate-server is not wired to the same generated control key"
-    );
+    // Every OTHER service block in the file, checked by NAME rather than by
+    // subtracting a count. A sixth holder is caught here even if a fifth is
+    // deleted in the same change, which is what a bare tally cannot do.
+    for name in compose_service_names(&compose) {
+        if may_hold_control_key.contains(&name.as_str()) {
+            continue;
+        }
+        assert!(
+            !service_block(&compose, &name).contains("ZEROSHIP_CONTROL_KEY"),
+            "{name} holds the shared control key; only {may_hold_control_key:?} may. \
+             A service needing one control route takes a service assertion \
+             (see zeroship_core::service_identity::service_allowlist) instead"
+        );
+    }
     assert_eq!(
         compose
             .matches("${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}")
             .count(),
-        4,
-        "only control, gateway, worker, and migrate-server consume the control key"
+        may_hold_control_key.len(),
+        "a holder appears twice, or one of the named four lost its wiring"
     );
     assert!(
-        !auth.contains(required_control),
-        "auth must not receive the control key"
+        !auth.contains("ZEROSHIP_CONTROL_KEY"),
+        "auth must not receive the control key: it renders the login form, and \
+         that key would carry the route table, the version feed and both \
+         reconcile triggers with it"
+    );
+    // The credential auth DOES hold, so the assertion above cannot be satisfied
+    // by an auth service that simply lost its control-plane access.
+    assert!(
+        auth.contains("ZEROSHIP_AUTH_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-auth.pem"),
+        "auth must present its own service assertion key to the control plane"
+    );
+    assert!(
+        auth.contains(
+            "ZEROSHIP_AUTH_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json"
+        ),
+        "auth must be wired to the shared peer document"
+    );
+    assert!(
+        auth.contains("/etc/zeroship/secrets/svc-auth.pem:ro"),
+        "auth declares its service key but never mounts it"
     );
 
     assert!(!worker.contains("../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro"));
@@ -830,6 +872,53 @@ fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
             out.push(path);
         }
     }
+}
+
+/// Every service the compose file declares, in file order.
+///
+/// Scoped to the `services:` mapping rather than to two-space indentation
+/// anywhere, so the top-level `volumes:` and `networks:` keys are not mistaken
+/// for services - an enumeration that swept them in would still pass every
+/// "does not hold X" assertion and would silently stop being an enumeration of
+/// services at all.
+///
+/// It exists so a membership rule can be checked against the WHOLE file. A rule
+/// written as "these four, and the count is four" is satisfied by a fifth
+/// holder arriving as a fourth one leaves.
+fn compose_service_names(compose: &str) -> Vec<String> {
+    let start = compose
+        .find("\nservices:\n")
+        .expect("compose declares a services mapping")
+        + "\nservices:\n".len();
+    let mut names = Vec::new();
+    for line in compose[start..].lines() {
+        // A non-indented, non-comment, non-blank line ends the mapping.
+        if !line.starts_with(' ') && !line.trim().is_empty() && !line.starts_with('#') {
+            break;
+        }
+        let Some(rest) = line.strip_prefix("  ") else {
+            continue;
+        };
+        if rest.starts_with(' ') || rest.starts_with('#') {
+            continue;
+        }
+        let Some(name) = rest.strip_suffix(':') else {
+            continue;
+        };
+        if !name.is_empty()
+            && name
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            names.push(name.to_owned());
+        }
+    }
+    assert!(
+        names.iter().any(|name| name == "auth"),
+        "the service enumeration found no `auth`, so it is not reading the \
+         services mapping and every membership rule built on it rules on nothing"
+    );
+    names
 }
 
 fn service_block<'a>(compose: &'a str, service: &str) -> &'a str {

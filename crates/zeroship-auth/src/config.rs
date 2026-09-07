@@ -114,22 +114,37 @@ pub struct AuthSettings {
     #[config(shared = CONTROL_URL, default = "http://localhost:9090".to_owned())]
     pub control_url: Operational<String>,
 
-    /// Shared secret this process presents to control's `/internal/*` API.
+    /// PEM/DER file holding this service's own ed25519 private key.
     ///
-    /// The SAME identity control, the gateway and the worker read, so it is the
-    /// shared canonical name rather than an `auth.*` one. One call needs it
-    /// today: the erasure preflight (`crate::control_client::erasure_preflight`),
-    /// which asks the control plane whether a human is the last owner of an
-    /// organization -- a question the auth service cannot answer for itself,
-    /// because MEASURED `zeroship_auth` holds no privilege on any organization
-    /// table.
+    /// The credential the auth service presents to the control plane, and the
+    /// ONLY one it holds for that hop. One call needs it today: the erasure
+    /// preflight (`crate::control_client::erasure_preflight`), which asks the
+    /// control plane whether a human is the last owner of an organization -- a
+    /// question the auth service cannot answer for itself, because MEASURED
+    /// `zeroship_auth` holds no privilege on any organization table.
     ///
-    /// Unset means the preflight cannot be made, and an erasure request that
-    /// cannot verify its precondition is REFUSED rather than honoured. That is
-    /// a deliberate fail-closed: the alternative is deleting a human on the
-    /// strength of a check that did not run.
-    #[config(shared = CONTROL_KEY)]
-    pub control_key: Secret<String>,
+    /// NOT the shared control key, which is what this used to be. That key is
+    /// one identity four other processes hold, so presenting it would have made
+    /// the process that renders the login form indistinguishable from the
+    /// gateway and the worker at control's door -- and would have handed it the
+    /// route table, the version feed and both reconcile triggers along with the
+    /// one route it needs. An assertion names `svc/auth` under a key only this
+    /// process holds, and control's allowlist decides what that reaches.
+    ///
+    /// Empty REFUSES THE BOOT, in `ServiceKeyring::load`. An auth service that
+    /// started without it would answer every liveness probe while every account
+    /// deletion failed its precondition check.
+    #[config(name = "auth.service_key_file", default = PathBuf::new())]
+    pub service_key_file: Operational<PathBuf>,
+
+    /// JWKS-shaped FILE holding the public key of every peer service.
+    ///
+    /// One document is handed to every service. `crates/zeroship-core/src/service_peers.rs`
+    /// carries the shape, why the keys are configured rather than fetched from
+    /// a peer, and why a shared document grants nothing beyond the ability to
+    /// check a signature.
+    #[config(name = "auth.service_peers_file", default = PathBuf::new())]
+    pub service_peers_file: Operational<PathBuf>,
 
     /// Audience fixed onto access tokens minted for the platform CLI.
     #[config(shared = OAUTH_AUDIENCE, default = "control.zeroship.ai".to_owned())]

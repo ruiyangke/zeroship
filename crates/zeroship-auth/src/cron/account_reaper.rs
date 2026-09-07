@@ -102,11 +102,17 @@ pub const GRACE_DAYS: i64 = 30;
 /// `token_sweep`'s cadence.
 const INTERVAL_SECS: u64 = 60 * 60;
 
-/// Where the reaper asks whether a due user is still erasable.
+/// Where the reaper asks whether a due user is still erasable, and what it
+/// presents when it asks.
+///
+/// The keyring is this service's OWN assertion key, shared with the `/me/delete`
+/// handler so both halves of the deletion lifecycle assert the same identity. It
+/// is not a shared root: control grants `svc/auth` the preflight endpoint and
+/// nothing else.
 #[derive(Debug, Clone)]
 pub struct ControlAccess {
     pub control_url: String,
-    pub control_key: Option<String>,
+    pub keyring: std::sync::Arc<zeroship_core::service_peers::ServiceKeyring>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -221,18 +227,12 @@ async fn still_erasable(
     control: &ControlAccess,
     user_id: Uuid,
 ) -> std::result::Result<(), Refusal> {
-    match control_client::erasure_preflight(
-        &control.control_url,
-        control.control_key.as_deref(),
-        user_id,
-    )
-    .await
-    {
+    match control_client::erasure_preflight(&control.control_url, &control.keyring, user_id).await {
         Ok(report) if report.is_clear() => Ok(()),
         Ok(report) => Err(classify_blockers(&report)),
-        Err(PreflightError::NoCredential) => Err(Refusal {
+        Err(PreflightError::NoCredential(detail)) => Err(Refusal {
             stage: "preflight",
-            reason: "control key is not configured; erasure cannot be verified".into(),
+            reason: format!("erasure cannot be verified: {detail}"),
         }),
         Err(e) => Err(Refusal {
             stage: "preflight",

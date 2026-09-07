@@ -19,17 +19,21 @@ use crate::AppState;
 /// grant on this endpoint.
 ///
 /// The FULL assertion profile: signed, and single-use through the replay store.
-/// Correct here and only here because these endpoints fire at app-load rate -
-/// the worker calls them once per app it loads and again on a version change -
-/// so the store write is proportional to app loads rather than to end-user
-/// traffic. Do not reach for this on a per-request path.
+/// Correct here because these endpoints fire at app-load rate - the worker calls
+/// them once per app it loads and again on a version change - and at
+/// account-deletion rate on the erasure preflight, which is rarer still. The
+/// store write is proportional to those, never to end-user traffic. Do not reach
+/// for this on a per-request path.
 ///
 /// It replaces [`check_auth`] on the privileged reads, and the difference is
 /// the whole point of the change: the shared bearer proves only that the caller
 /// read the same file the control plane did, so every holder of it is every
 /// other holder. An assertion names one service, under a key only that service
 /// holds, and the endpoint allowlist then decides what that service may reach.
-async fn check_service_auth(
+///
+/// `pub(crate)` so `crate::erasure` runs THIS check rather than growing a second
+/// copy, for the same reason [`check_auth`] is.
+pub(crate) async fn check_service_auth(
     req: &web::HttpRequest,
     service_auth: &ServiceAuth,
     endpoint: ServiceEndpoint,
@@ -62,15 +66,16 @@ async fn check_service_auth(
 }
 
 /// The shared-control-key check the `/internal/*` endpoints that are NOT
-/// privileged still run, including the one in `crate::erasure`.
+/// privileged still run.
 ///
-/// `pub(crate)` rather than private so that sibling module can call THIS
-/// spelling instead of growing a second copy - and a second copy is where the
-/// empty-key arm goes missing. It is deliberately not the check on the
-/// privileged reads: those took [`check_service_auth`] above, which names one
-/// service under a key only that service holds, where this one proves only that
-/// the caller read the same file the control plane did.
-pub(crate) fn check_auth(
+/// It is deliberately not the check on the privileged reads: those take
+/// [`check_service_auth`] above, which names one service under a key only that
+/// service holds, where this one proves only that the caller read the same file
+/// the control plane did. Every endpoint still on it is one whose caller set is
+/// the four processes that hold that file; adding a fifth holder is how a
+/// narrow need for one route becomes a grant on all of them, which is what
+/// happened when the erasure preflight briefly landed here.
+fn check_auth(
     req: &web::HttpRequest,
     state: &AppState,
 ) -> Option<web::HttpResponse> {

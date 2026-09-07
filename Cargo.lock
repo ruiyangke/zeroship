@@ -7262,6 +7262,7 @@ dependencies = [
  "uuid",
  "zeroship-core",
  "zeroship-test-support",
+ "zeroship-testkit",
 ]
 
 [[package]]
@@ -7587,6 +7588,7 @@ dependencies = [
  "zeroship-mailer",
  "zeroship-metering",
  "zeroship-test-support",
+ "zeroship-testkit",
 ]
 
 [[package]]
