@@ -11,6 +11,17 @@
 //! the erasure with it, which is exactly what the deleted
 //! `user_has_financial_history` did.
 //!
+//! # The credential is this service's OWN identity, never a shared root
+//!
+//! The call carries an ed25519 assertion minted under `svc/auth`, audienced to
+//! the control plane, and control grants `CONTROL_ERASURE_PREFLIGHT` to that
+//! principal alone. It is deliberately NOT the shared control key: that key is
+//! one identity the gateway, the worker, the migration service and control
+//! itself already hold, so presenting it would have made this process
+//! indistinguishable from them at control's door - and would have carried the
+//! route table, the version feed and both reconcile triggers with it, none of
+//! which the auth service has any business reaching.
+//!
 //! # Fail-closed, on purpose
 //!
 //! Every failure arm here is [`PreflightError`], and every caller treats it as a
@@ -23,6 +34,7 @@ use std::time::Duration;
 
 use http::Method;
 use serde::Deserialize;
+use zeroship_core::service_peers::{service_issuer, ServiceKeyring, CONTROL_SERVICE_NAME};
 
 /// Wall-clock ceiling on the preflight round trip. `POST /me/delete` is a
 /// browser form submit, so this is bounded by what a person will sit through,
@@ -148,10 +160,15 @@ impl ErasurePreflight {
 /// Why the preflight produced no answer. Never a clear one.
 #[derive(Debug, thiserror::Error)]
 pub enum PreflightError {
-    /// No `control_key` on this process. Fail-closed: without it the call
-    /// cannot be authenticated, so it is not attempted and not guessed at.
-    #[error("control key is not configured; account erasure cannot be verified")]
-    NoCredential,
+    /// This process could not produce a credential naming itself to the control
+    /// plane. Fail-closed: the call cannot be authenticated, so it is not
+    /// attempted and not guessed at.
+    ///
+    /// An ABSENT key is not this arm and cannot reach it - `ServiceKeyring::load`
+    /// refuses the boot, so a process that is running holds one. What is left is
+    /// a signing failure, which is a fault rather than a configuration.
+    #[error("this service could not assert its identity to the control plane: {0}")]
+    NoCredential(String),
     #[error("control plane unreachable: {0}")]
     Transport(String),
     #[error("control plane answered {status}")]
@@ -160,21 +177,34 @@ pub enum PreflightError {
     Body(String),
 }
 
+/// Mint this service's credential for ONE preflight call.
+///
+/// A fresh assertion per call, deliberately. Caching one would defeat the
+/// single-use property control's replay store enforces: the second presentation
+/// is exactly what that store refuses.
+fn control_authorization(keyring: &ServiceKeyring) -> Result<String, PreflightError> {
+    let control = service_issuer(CONTROL_SERVICE_NAME)
+        .map_err(|e| PreflightError::NoCredential(format!("control service issuer: {e}")))?;
+    keyring
+        .mint_for(&control)
+        .map(|assertion| format!("Bearer {assertion}"))
+        .map_err(|e| PreflightError::NoCredential(e.to_string()))
+}
+
 /// Ask the control plane whether `principal` can be erased.
 ///
 /// # Errors
 ///
 /// [`PreflightError`] for every arm in which the answer is unknown, including a
-/// missing credential. There is no success value that means "could not check".
+/// credential this process could not mint. There is no success value that means
+/// "could not check".
 #[allow(clippy::future_not_send)]
 pub async fn erasure_preflight(
     control_url: &str,
-    control_key: Option<&str>,
+    keyring: &ServiceKeyring,
     principal: uuid::Uuid,
 ) -> Result<ErasurePreflight, PreflightError> {
-    let Some(key) = control_key.filter(|k| !k.is_empty()) else {
-        return Err(PreflightError::NoCredential);
-    };
+    let authorization = control_authorization(keyring)?;
     let url = format!(
         "{}/internal/principals/{}/erasure-preflight",
         control_url.trim_end_matches('/'),
@@ -184,7 +214,7 @@ pub async fn erasure_preflight(
     let request = client
         .request(Method::GET, &url)
         .map_err(|e| PreflightError::Transport(format!("build request: {e}")))?
-        .header("authorization", format!("Bearer {key}"))
+        .header("authorization", authorization)
         .map_err(|e| PreflightError::Transport(format!("authorization header: {e}")))?
         .header("accept", "application/json")
         .map_err(|e| PreflightError::Transport(format!("accept header: {e}")))?;
@@ -208,22 +238,100 @@ pub async fn erasure_preflight(
 mod tests {
     use super::*;
 
+    /// The credential names THIS service and reaches exactly one endpoint.
+    ///
+    /// Both halves matter and only the second distinguishes an assertion from
+    /// the shared control key. A key would have opened every `/internal/*` route
+    /// that checks it; this opens `CONTROL_ERASURE_PREFLIGHT` and is refused at
+    /// the route table, the version feed and both reconcile triggers - verified
+    /// here through the same `verify_service_call` control runs, not asserted.
     #[test]
-    fn an_absent_or_empty_credential_refuses_without_a_round_trip() {
-        // Both spellings of "not configured" take the same arm. An empty
-        // string is what an unset `-file` secret reads as, and treating it as
-        // a usable key would send `Bearer ` and read control's 401 as a
-        // transport blip.
-        for key in [None, Some(""), Some("")] {
-            let err = compio::runtime::Runtime::new()
-                .expect("runtime")
-                .block_on(erasure_preflight("http://127.0.0.1:1", key, uuid::Uuid::nil()))
-                .expect_err("must refuse");
-            assert!(
-                matches!(err, PreflightError::NoCredential),
-                "expected NoCredential, got {err:?}"
+    fn the_minted_credential_names_this_service_and_opens_only_the_preflight() {
+        use std::sync::Arc;
+
+        use zeroship_core::service_assertion::{
+            InMemoryReplayStore, ServiceAssertionVerifier, ServiceSigningKey, ServiceTrustBundle,
+        };
+        use zeroship_core::service_identity::{endpoints, verify_service_call};
+        use zeroship_core::service_peers::AUTH_SERVICE_NAME;
+
+        let auth = service_issuer(AUTH_SERVICE_NAME).expect("auth issuer");
+        let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+        let key = ServiceSigningKey::generate();
+        let mut trusted = ServiceTrustBundle::new();
+        trusted
+            .trust_signing_key(&auth, key.key_id(), &key)
+            .expect("trust the auth key");
+        let keyring = ServiceKeyring::from_parts(auth, key, ServiceTrustBundle::new())
+            .expect("build the auth keyring");
+        let verifier =
+            ServiceAssertionVerifier::new(trusted, Arc::new(InMemoryReplayStore::new()));
+
+        let runtime = compio::runtime::Runtime::new().expect("runtime");
+        for (endpoint, granted) in [
+            (endpoints::CONTROL_ERASURE_PREFLIGHT, true),
+            (endpoints::CONTROL_ROUTES, false),
+            (endpoints::CONTROL_VERSIONS, false),
+            (endpoints::CONTROL_BILLING_RECONCILE, false),
+            (endpoints::CONTROL_SPEND_RECONCILE, false),
+            (endpoints::CONTROL_APP_ENV, false),
+        ] {
+            // A FRESH mint per endpoint, because the store is single-use and a
+            // reused assertion would be refused for replay rather than for the
+            // grant, which is the wrong reason and would hide a widened row.
+            let header = control_authorization(&keyring).expect("mint");
+            let verified = runtime.block_on(verify_service_call(
+                &verifier,
+                Some(&header),
+                control.as_str(),
+                endpoint,
+            ));
+            assert_eq!(
+                verified.is_ok(),
+                granted,
+                "wrong verdict for {endpoint:?}: {verified:?}"
             );
         }
+    }
+
+    /// The audience is the CALLEE's issuer, so the same assertion presented to
+    /// any other service is refused. Without this the credential would be a
+    /// bearer any peer could replay onward.
+    #[test]
+    fn the_credential_is_audienced_to_the_control_plane_alone() {
+        use std::sync::Arc;
+
+        use zeroship_core::service_assertion::{
+            InMemoryReplayStore, ServiceAssertionVerifier, ServiceSigningKey, ServiceTrustBundle,
+        };
+        use zeroship_core::service_identity::{endpoints, verify_service_call};
+        use zeroship_core::service_peers::{AUTH_SERVICE_NAME, GATEWAY_SERVICE_NAME};
+
+        let auth = service_issuer(AUTH_SERVICE_NAME).expect("auth issuer");
+        let gateway = service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer");
+        let key = ServiceSigningKey::generate();
+        let mut trusted = ServiceTrustBundle::new();
+        trusted
+            .trust_signing_key(&auth, key.key_id(), &key)
+            .expect("trust the auth key");
+        let keyring = ServiceKeyring::from_parts(auth, key, ServiceTrustBundle::new())
+            .expect("build the auth keyring");
+        let verifier =
+            ServiceAssertionVerifier::new(trusted, Arc::new(InMemoryReplayStore::new()));
+
+        let header = control_authorization(&keyring).expect("mint");
+        let verified = compio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(verify_service_call(
+                &verifier,
+                Some(&header),
+                gateway.as_str(),
+                endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
+            ));
+        assert!(
+            verified.is_err(),
+            "a control-audienced assertion must not open a gateway endpoint"
+        );
     }
 
     /// The wire carries facts; the instruction is this crate's. A remedy the

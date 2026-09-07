@@ -857,14 +857,23 @@ services:
       ZEROSHIP_AUTH_BROKER_SECRET_FILE: /etc/zeroship/secrets/broker-secret
       ZEROSHIP_AUTH_REFRESH_HASH_KEY_FILE: /etc/zeroship/secrets/refresh-hash-key
       ZEROSHIP_AUTH_REFRESH_IDEM_KEY_FILE: /etc/zeroship/secrets/refresh-idem-key
-      # The SHARED control-plane key, same identity control, the gateway and the
-      # worker read. Auth presents it on exactly one call: the erasure preflight
-      # (`GET /internal/principals/{id}/erasure-preflight`), which is how
-      # `/me/delete` learns whether erasing this human would strand an
-      # organization. Without it that request is REFUSED, not proceeded with.
-      ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
-      # And where to present it. The service name, not the public host: this is
-      # an internal call and must not traverse the edge.
+      # Auth's OWN assertion key, and the public halves of its peers. This is
+      # what it presents on its one call into the control plane: the erasure
+      # preflight (`GET /internal/principals/{id}/erasure-preflight`), which is
+      # how `/me/delete` learns whether erasing this human would strand an
+      # organization. Without it auth REFUSES TO START, and without the grant
+      # control refuses the call; neither degrades into proceeding.
+      #
+      # DELIBERATELY NOT the shared control key. That key is one identity
+      # control, the gateway, the worker and migrate-server all read, so a fifth
+      # holder is a fifth process that can reach every route it opens -- the
+      # route table, the version feed and both reconcile triggers -- to obtain
+      # one preflight. `zeroship dev init` already writes svc-auth.pem and
+      # publishes its public half in service-peers.json.
+      ZEROSHIP_AUTH_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-auth.pem
+      ZEROSHIP_AUTH_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
+      # Where to present it. The service name, not the public host: this is an
+      # internal call and must not traverse the edge.
       ZEROSHIP_CONTROL_URL: http://control:9090
     # LOOPBACK, same reasoning as the gateway: Caddy reaches auth by service
     # name (`reverse_proxy auth:9092`, three site blocks), so this published
@@ -879,6 +888,9 @@ services:
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/broker-secret:/etc/zeroship/secrets/broker-secret:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/refresh-hash-key:/etc/zeroship/secrets/refresh-hash-key:ro
       - ${ZEROSHIP_SECRETS_DIR:-./secrets}/refresh-idem-key:/etc/zeroship/secrets/refresh-idem-key:ro
+      # This service's OWN assertion key and the public halves of its peers.
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/svc-auth.pem:/etc/zeroship/secrets/svc-auth.pem:ro
+      - ${ZEROSHIP_SECRETS_DIR:-./secrets}/service-peers.json:/etc/zeroship/secrets/service-peers.json:ro
       # frame_ancestor_origins comes from the shared [auth] overlay,
       # auto-discovered at the well-known path.
       - ../ops/zeroship.toml:/etc/zeroship/zeroship.toml:ro

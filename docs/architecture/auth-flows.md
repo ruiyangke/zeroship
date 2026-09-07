@@ -890,7 +890,11 @@ VERIFIED walk-through:
    with no owner (`crates/zeroship-auth/src/control_client.rs::erasure_preflight`
    against `crates/zeroship-control/src/erasure.rs::preflight`); a blocker
    renders the refusal page with `409`, and a preflight that could not be
-   COMPUTED renders it with `503` rather than proceeding. Only then does it
+   COMPUTED renders it with `503` rather than proceeding. The credential is
+   Auth's OWN ed25519 assertion, audienced to Control, and Control grants
+   `CONTROL_ERASURE_PREFLIGHT` to `svc/auth` alone - NOT the shared `control_key`
+   of section 5.1, which would have made Auth a fifth holder of one identity and
+   opened every route that key guards. Only then does it
    atomically stamp the deletion request and schedule, bump
    `credential_version`, revoke refresh families and IdP rows, delete gateway
    audit rows, and mint the single-use undo token

@@ -27,6 +27,7 @@ pub fn spawn_all(
     db: Arc<compio_postgres::Client>,
     cfg: Arc<AuthConfig>,
     refresh_pool: crate::oidc::refresh::RefreshSessionPool,
+    service_keyring: Arc<zeroship_core::service_peers::ServiceKeyring>,
 ) {
     // `audit_retention` opens its OWN dedicated connection per tick (the
     // sweep flips the append-only tamper trigger off via a transaction-local
@@ -57,7 +58,7 @@ pub fn spawn_all(
     // `/me/delete` handler used to open the window.
     let control = account_reaper::ControlAccess {
         control_url: cfg.control_url().to_owned(),
-        control_key: cfg.settings.control_key.expose_secret().cloned(),
+        keyring: service_keyring,
     };
     compio::runtime::spawn(async move {
         account_reaper::run(refresh_pool, control).await;

@@ -447,6 +447,11 @@ pub mod endpoints {
         ServiceEndpoint::new("control", "POST", "/internal/billing/reconcile");
     pub const CONTROL_SPEND_RECONCILE: ServiceEndpoint =
         ServiceEndpoint::new("control", "POST", "/internal/spend/reconcile");
+    pub const CONTROL_ERASURE_PREFLIGHT: ServiceEndpoint = ServiceEndpoint::new(
+        "control",
+        "GET",
+        "/internal/principals/{principal_id}/erasure-preflight",
+    );
     pub const WORKER_DISPATCH: ServiceEndpoint =
         ServiceEndpoint::new("worker", "POST", "/dispatch/{app_id}");
     pub const WORKER_WORKFLOW_ADVANCE: ServiceEndpoint = ServiceEndpoint::new(
@@ -510,7 +515,18 @@ pub fn service_allowlist() -> &'static [ServiceAuthorization] {
             ServiceAuthorization::new(
                 principal("svc/auth"),
                 // Registered third-party BCL targets are checked dynamically.
-                &[endpoints::GATEWAY_BACKCHANNEL_LOGOUT],
+                //
+                // The erasure preflight is the auth service's ONE call into the
+                // control plane, and it is here rather than on the shared
+                // control key on purpose: that key is one identity four other
+                // processes already hold, so handing it to the process that
+                // renders the login form would have given the most exposed
+                // surface on the platform the route table, the version feed and
+                // both reconcile triggers as well.
+                &[
+                    endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
+                    endpoints::CONTROL_ERASURE_PREFLIGHT,
+                ],
             ),
             ServiceAuthorization::new(principal("svc/migrate-server"), &[]),
             ServiceAuthorization::new(
