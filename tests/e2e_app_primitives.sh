@@ -321,7 +321,7 @@ zs_unmigrated_frame "$WORK/frame-unmigrated-auto.bin" POST \
   "http://db-todos-e2e.localhost/__zeroship/v1/users.public" '{"json":{}}'
 AUTO_RESP="$(curl -sS -w '\n%{http_code}' -X POST \
   "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
-  -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+  -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
   -H 'content-type: application/octet-stream' \
   --data-binary @"$WORK/frame-unmigrated-auto.bin")"
 AUTO_CODE="$(echo "$AUTO_RESP" | tail -1)"
@@ -339,7 +339,7 @@ zs_unmigrated_frame "$WORK/frame-unmigrated-tx.bin" POST \
   '{"json":null}'
 TX_RESP="$(curl -sS -w '\n%{http_code}' -X POST \
   "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
-  -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+  -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
   -H 'content-type: application/octet-stream' \
   --data-binary @"$WORK/frame-unmigrated-tx.bin")"
 TX_CODE="$(echo "$TX_RESP" | tail -1)"
@@ -357,7 +357,7 @@ zs_unmigrated_frame "$WORK/frame-unmigrated-stream.bin" POST \
   '{"json":null}' 'text/event-stream'
 STREAM_RESP="$(curl -s -N --max-time 5 -w '\n%{http_code}' -X POST \
   "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" \
-  -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+  -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
   -H 'content-type: application/octet-stream' \
   --data-binary @"$WORK/frame-unmigrated-stream.bin")"
 STREAM_CODE="$(echo "$STREAM_RESP" | tail -1)"
@@ -445,7 +445,7 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 5c: db-todos RPC DIRECT to worker /dispatch (authenticated) ==="
-# Bypasses the gateway auth gate (empty worker_key ⇒ loopback dispatch is
+# Bypasses the gateway auth gate (the worker verifies a service assertion, so
 # unauthenticated). This is the cleanest proof env.db works on the runtime —
 # IF schema-init succeeds.
 # zs_frame <out> <method> <url> <body> — write the dispatch frame the worker
@@ -478,7 +478,7 @@ fs.writeFileSync(out, Buffer.concat([len, meta, Buffer.from(body, "utf8")]));
 
 zs_frame "$WORK/frame-users.bin" POST \
   "http://db-todos-e2e.localhost/__zeroship/v1/users.public" '{"json":{}}'
-WK_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-users.bin")"
+WK_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-users.bin")"
 WK_CODE="$(echo "$WK_RESP" | tail -1)"
 WK_BODY="$(echo "$WK_RESP" | head -1)"
 if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
@@ -488,11 +488,11 @@ if [ "$WK_CODE" = "200" ] && echo "$WK_BODY" | grep -q '"json"'; then
   if [ -n "$UID_VAL" ]; then
     zs_frame "$WORK/frame-create.bin" POST "http://x/__zeroship/v1/todos.create" \
       "$(node -e 'process.stdout.write(JSON.stringify({json:{userId:process.argv[1],title:"e2e todo"}}))' "$UID_VAL")"
-    C_RESP="$(curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-create.bin")"
+    C_RESP="$(curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-create.bin")"
     echo "$C_RESP" | grep -q '"json"' && pass "env.db mutation todos.create over worker" || fail "todos.create failed: $C_RESP"
     zs_frame "$WORK/frame-list.bin" POST "http://x/__zeroship/v1/todos.list" \
       "$(node -e 'process.stdout.write(JSON.stringify({json:{userId:process.argv[1]}}))' "$UID_VAL")"
-    L_RESP="$(curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-list.bin")"
+    L_RESP="$(curl -s -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$APP_ID" -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" -H 'content-type: application/octet-stream' --data-binary @"$WORK/frame-list.bin")"
     echo "$L_RESP" | grep -q 'e2e todo' && pass "env.db query todos.list returned the inserted row" || fail "todos.list missing row: $L_RESP"
   fi
 else

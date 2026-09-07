@@ -276,7 +276,7 @@ fi
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Stage 6: LARGE multipart env.storage streaming round-trip (S3) ==="
-# Dispatch DIRECT to the worker (empty worker_key ⇒ loopback dispatch is
+# Dispatch DIRECT to the worker (the worker verifies a service assertion, so
 # unauthenticated; this mirrors the kv/storage edge harness and bypasses the
 # gateway's fail-closed auth gate on authenticated procedures). The object is
 # 20 MiB > the 8 MiB S3 part size, so putStream uses a real S3 MULTIPART
@@ -290,7 +290,7 @@ envelope() {
 }
 dispatch() {
   curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$ST_APP" \
-    -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+    -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
     -H 'content-type: application/json' -d "$(envelope "$1" "$2")"
 }
 jget_json() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);console.log((o.json&&o.json'"$1"')??"")}catch(e){console.log("")}})'; }

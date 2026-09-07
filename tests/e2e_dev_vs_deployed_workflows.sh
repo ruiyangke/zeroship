@@ -108,7 +108,7 @@ VITE_PORT="${VITE_PORT:-5051}"
 REDIS_PORT="${REDIS_PORT:-6399}"
 REDIS_CONTAINER="zs-devdeploy-wf-redis"
 ZEROSHIP_CONTROL_KEY="dd-wf-ck"; ZEROSHIP_CONTROL_MASTER_KEY="dd-wf-mk"
-export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
+export E2E_STALE_WORKER_BEARER="${E2E_STALE_WORKER_BEARER:-devdeploy-worker-key-0123456789abcd}"
 APP_NAME="wfprobe"
 MUTATE="${MUTATE:-none}"
 # The sleep the fixture asks for (examples/workflow-probe/src/index.ts CASES),

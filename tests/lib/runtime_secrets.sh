@@ -36,8 +36,7 @@ _e2e_strong_value() {
     platform-key|dev-secret|dev-stash-key-please-rotate|\
     dev-stash-signing-key-not-for-production|\
     dev-only-stash-signing-key-not-for-production-use\!\!|\
-    dev-pairwise-salt-never-rotate-in-prod|\
-    dev-worker-key-not-for-production-use)
+    dev-pairwise-salt-never-rotate-in-prod)
       return 1
       ;;
   esac
@@ -575,8 +574,17 @@ e2e_export_runtime_secrets() {
   _e2e_keep_or_generate ZEROSHIP_CONTROL_KEY "${ZEROSHIP_CONTROL_KEY:-}" || return 1
   _e2e_keep_or_generate_hex_key ZEROSHIP_CONTROL_MASTER_KEY \
     "${ZEROSHIP_CONTROL_MASTER_KEY:-}" || return 1
-  _e2e_keep_or_generate ZEROSHIP_WORKER_KEY "${ZEROSHIP_WORKER_KEY:-}" || return 1
   _e2e_keep_or_generate ZEROSHIP_PAIRWISE_SALT "${ZEROSHIP_PAIRWISE_SALT:-}" || return 1
+
+  # HARNESS-OWNED, and no binary reads it. Several harnesses below POST straight
+  # to the worker's /dispatch and present this as a bearer. That stopped working
+  # when the dispatch hop became an ed25519 service assertion: the worker now
+  # verifies a signed credential these scripts cannot mint from shell, so those
+  # calls take a 401 whatever this holds. It is exported under a harness name
+  # rather than `E2E_STALE_WORKER_BEARER` so nothing reads it as platform config -
+  # that variable is gone, along with the shared secret it carried.
+  E2E_STALE_WORKER_BEARER="${E2E_STALE_WORKER_BEARER:-e2e-stale-worker-bearer-0123456789ab}"
+  export E2E_STALE_WORKER_BEARER
   _e2e_keep_or_generate ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY \
     "${ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY:-}" || return 1
   _e2e_keep_or_generate_hex_key ZEROSHIP_AUTH_TOTP_ENC_KEY \
