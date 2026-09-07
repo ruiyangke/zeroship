@@ -106,6 +106,28 @@ impl OriginMatch {
     }
 }
 
+impl GateState {
+    /// Mint the `Authorization` header value this gateway presents to a worker.
+    ///
+    /// The TRANSPORT-ONLY profile, and the choice is by RATE: this hop carries
+    /// every end-user request, so a single-use `jti` here would put a write
+    /// against a table shared by every worker replica on the app data path.
+    /// What bounds replay on this hop instead is the identity envelope's own
+    /// binding to the dispatch request id and its issuance window.
+    ///
+    /// `None` when no service key material is configured. The worker then sees
+    /// no credential and refuses, which is the whole difference from the shared
+    /// secret this replaces: absence used to mean "skip the check".
+    #[must_use]
+    pub fn worker_authorization(&self) -> Option<String> {
+        let worker = zeroship_core::service_peers::service_issuer(
+            zeroship_core::service_peers::WORKER_SERVICE_NAME,
+        )
+        .ok()?;
+        self.service_auth.authorization_for(&worker)
+    }
+}
+
 impl GateConfig {
     /// Classify an exact Origin match, preferring the implicit app origin when
     /// an operator redundantly lists it in `trusted_origins`.
@@ -249,5 +271,20 @@ pub struct GateState {
     /// on the response path (an `RwLock` read + a per-app `Mutex` for the
     /// custom metric — uncontended, not literally lock-free); the flush is a
     /// detached background task, so the proxy hot path is not slowed.
+    /// This process's service identity: its own ed25519 key for the calls it
+    /// MAKES, and the peer bundle plus replay store for the calls it RECEIVES.
+    ///
+    /// DISTINCT from `signing_key`, which signs an END-USER session cookie. One
+    /// key doing both jobs is the shape this change removes.
+    ///
+    /// Two edges use it, at two profiles. The inbound workflow-advance handler
+    /// verifies control under the FULL profile, because that edge fires per
+    /// advance. The outbound dispatch hop MINTS under the transport-only
+    /// profile, because that hop is the app data path and a single-use claim
+    /// there would be a shared-store write per end-user request.
+    ///
+    /// `ServiceAuth::unconfigured()` when no key material was configured; that
+    /// state refuses the inbound edge and mints nothing outbound.
+    pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub meter: Arc<zeroship_metering::Meter>,
 }

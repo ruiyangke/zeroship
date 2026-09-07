@@ -271,6 +271,30 @@ pub struct ControlSettings {
     #[config(shared = CONTROL_KEY)]
     pub control_key: Secret<String>,
 
+    /// PKCS#8 PEM/DER FILE holding this process's own ed25519 service key.
+    ///
+    /// A PATH, not a `Secret<String>`, for the same two reasons as the
+    /// gateway's `signing_key_file`: the loader sniffs PEM against DER and
+    /// refuses a group- or world-readable file, and neither is possible once
+    /// the material has become an in-memory `String`. A path to a secret is not
+    /// itself a secret.
+    ///
+    /// Empty (the default) means this process can neither mint an assertion nor
+    /// verify a peer's, so every internal edge guarded by one REFUSES. Absence
+    /// never admits; that is the difference between this and the shared secrets
+    /// it replaces, whose empty value disabled the check.
+    #[config(name = "control.service_key_file", default = PathBuf::new())]
+    pub service_key_file: Operational<PathBuf>,
+
+    /// JWKS-shaped FILE holding the public key of every peer service.
+    ///
+    /// One document is handed to every service. `crates/zeroship-core/src/service_peers.rs`
+    /// carries the shape, why the keys are configured rather than fetched from
+    /// a peer, and why a shared document grants nothing beyond the ability to
+    /// check a signature.
+    #[config(name = "control.service_peers_file", default = PathBuf::new())]
+    pub service_peers_file: Operational<PathBuf>,
+
     /// Shared secret for worker admin endpoints.
     #[config(shared = WORKER_KEY)]
     pub worker_key: Secret<String>,

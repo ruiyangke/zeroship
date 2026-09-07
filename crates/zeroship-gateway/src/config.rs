@@ -112,6 +112,28 @@ pub struct GateSettings {
     #[config(name = "gateway.prev_signing_key_file", default = PathBuf::new())]
     pub prev_signing_key_file: Operational<PathBuf>,
 
+    /// PKCS#8 PEM/DER FILE holding this process's own ed25519 service key.
+    ///
+    /// DISTINCT from `signing_key_file`, deliberately. That key signs an
+    /// END-USER session cookie; this one asserts WHICH SERVICE is calling. One
+    /// key doing both is the shape this whole change exists to remove, so they
+    /// are two settings and two files.
+    ///
+    /// A PATH for the same reasons as `signing_key_file`. Empty (the default)
+    /// means this process can neither mint an assertion nor verify a peer's, so
+    /// every internal edge guarded by one REFUSES. Absence never admits.
+    #[config(name = "gateway.service_key_file", default = PathBuf::new())]
+    pub service_key_file: Operational<PathBuf>,
+
+    /// JWKS-shaped FILE holding the public key of every peer service.
+    ///
+    /// One document is handed to every service. `crates/zeroship-core/src/service_peers.rs`
+    /// carries the shape, why the keys are configured rather than fetched from
+    /// a peer, and why a shared document grants nothing beyond the ability to
+    /// check a signature.
+    #[config(name = "gateway.service_peers_file", default = PathBuf::new())]
+    pub service_peers_file: Operational<PathBuf>,
+
     /// `EnvFilter` directive for the tracing subscriber.
     #[config(shared = OBSERVABILITY_LOG_FILTER, default = DEFAULT_LOG_FILTER.to_owned())]
     pub log_filter: Operational<String>,

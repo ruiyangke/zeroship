@@ -232,7 +232,7 @@ pub async fn forward_dispatch(
     headers: &[(String, String)],
     body: &[u8],
     user_header: Option<&str>,
-    worker_key: &str,
+    authorization: Option<&str>,
 ) -> Result<HttpResponse, String> {
     if ring.num_workers() == 0 {
         return Err("no workers configured".into());
@@ -246,7 +246,7 @@ pub async fn forward_dispatch(
     ring.acquire(idx);
 
     let result = forward_to_worker_dispatch(
-        worker_url, app_id, plan_id, request_id, &envelope_bytes, user_header, worker_key,
+        worker_url, app_id, plan_id, request_id, &envelope_bytes, user_header, authorization,
     ).await;
     ring.release(idx);
     result
@@ -254,15 +254,18 @@ pub async fn forward_dispatch(
 
 /// Forward a durable-workflow StepRequest JSON body to the worker replay host.
 ///
-/// DW-05b intentionally uses the worker's unsigned workflow ingress; signed
-/// gateway→worker workflow transport is a later hardening task.
+/// `authorization` is the gateway's own peer credential for this hop, minted
+/// per call by the caller. This is the OUTBOUND leg of the internal advance
+/// edge, and it takes the same transport-only profile as every other
+/// gateway-to-worker call - the inbound leg's full profile stops at the
+/// handler, so the store write does not follow the request onto the ring.
 pub async fn forward_workflow_advance(
     ring: &HashRing,
     app_id: &AppId,
     plan_id: &str,
     request_id: &Uuid,
     body: &[u8],
-    worker_key: &str,
+    authorization: Option<&str>,
 ) -> Result<HttpResponse, String> {
     if ring.num_workers() == 0 {
         return Err("no workers configured".into());
@@ -279,7 +282,7 @@ pub async fn forward_workflow_advance(
         request_id,
         body,
         None,
-        worker_key,
+        authorization,
     )
     .await;
     ring.release(idx);
@@ -297,7 +300,7 @@ async fn forward_to_worker_dispatch(
     request_id: &Uuid,
     body: &[u8],
     user_header: Option<&str>,
-    worker_key: &str,
+    authorization: Option<&str>,
 ) -> Result<HttpResponse, String> {
     let path = format!("/dispatch/{}", app_id.as_str());
 
@@ -309,7 +312,7 @@ async fn forward_to_worker_dispatch(
         request_id,
         body,
         user_header,
-        worker_key,
+        authorization,
     )
     .await
 }
@@ -324,7 +327,7 @@ async fn forward_to_worker_path(
     request_id: &Uuid,
     body: &[u8],
     user_header: Option<&str>,
-    worker_key: &str,
+    authorization: Option<&str>,
 ) -> Result<HttpResponse, String> {
     let key = pool_key(worker_url);
 
@@ -355,7 +358,7 @@ async fn forward_to_worker_path(
         }
     };
 
-    let request = build_request(path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
+    let request = build_request(path, &host, app_id, plan_id, request_id, body, user_header, authorization);
 
     if stream.write_all(request).await.is_err() {
         let (new_stream, _, _) = compio::time::timeout(WORKER_TIMEOUT, connect(worker_url))
@@ -364,7 +367,7 @@ async fn forward_to_worker_path(
             .map_err(|e| format!("reconnect: {e}"))?;
         stream = new_stream;
         from_pool = false;
-        let retry_request = build_request(path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
+        let retry_request = build_request(path, &host, app_id, plan_id, request_id, body, user_header, authorization);
         stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
     }
 
@@ -380,7 +383,7 @@ async fn forward_to_worker_path(
                 .map_err(|e| format!("reconnect: {e}"))?;
             stream = new_stream;
             from_pool = false;
-            let retry_request = build_request(path, &host, app_id, plan_id, request_id, body, user_header, worker_key);
+            let retry_request = build_request(path, &host, app_id, plan_id, request_id, body, user_header, authorization);
             stream.write_all(retry_request).await.map_err(|e| format!("write: {e}"))?;
             compio::time::timeout(WORKER_TIMEOUT, read_http_headers(&mut stream))
                 .await
@@ -553,16 +556,19 @@ fn build_request(
     request_id: &Uuid,
     body: &[u8],
     user_header: Option<&str>,
-    worker_key: &str,
+    authorization: Option<&str>,
 ) -> Vec<u8> {
     let user_line = match user_header {
         Some(val) => format!("ZeroShip-User: {val}\r\n"),
         None => String::new(),
     };
-    let auth_line = if worker_key.is_empty() {
-        String::new()
-    } else {
-        format!("Authorization: Bearer {worker_key}\r\n")
+    // The peer credential, minted per call by the caller and passed through
+    // verbatim. `None` means this process holds no service key, in which case
+    // the worker refuses the call - which is the intended outcome, not a
+    // degraded one.
+    let auth_line = match authorization {
+        Some(value) => format!("Authorization: {value}\r\n"),
+        None => String::new(),
     };
     let header = format!(
         "POST {path} HTTP/1.1\r\n\

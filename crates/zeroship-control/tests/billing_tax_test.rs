@@ -302,6 +302,7 @@ async fn build_fixture(
     let control_pg = Arc::new(control_pg_client);
 
     let state = Arc::new(AppState {
+        service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
         registry,
         env_store,
         stripe_store,

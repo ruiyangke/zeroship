@@ -191,6 +191,7 @@ fn build_state(opts: StateOpts) -> Arc<GateState> {
     );
 
     Arc::new(GateState {
+        service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
         config: GateConfig {
             control_url: String::new(),
             control_key: String::new(),
