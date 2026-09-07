@@ -13,10 +13,14 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 tracing = { workspace = true }
 uuid = { workspace = true }
+# Promoted from dev-dependencies: `authority::app_uuid_or_refuse` parses the
+# canonical `app_<base62>` rendering through `AppId`, so the LIB needs it, not
+# only the tests. This adds no closure to any binary - every crate that depends
+# on zeroship-authz already depends on zeroship-core.
+zeroship-core = { workspace = true }
 
 [dev-dependencies]
 zeroship-test-support = { workspace = true }
-zeroship-core = { workspace = true }
 compio = { workspace = true }
 
 [build-dependencies]

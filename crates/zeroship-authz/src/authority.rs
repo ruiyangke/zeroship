@@ -117,16 +117,38 @@ pub async fn resolve(
             resolve_narrowed(pg, principal_id, Some(id.as_str()), None).await
         }
         Resource::App { id } => {
-            // `zeroship.apps` still keys on uuid. An id that is not a uuid names
-            // no app, so it carries no authority - but the principal's own
-            // attributes still have to be read, and a malformed id must not be
-            // reported as a database failure.
-            match Uuid::parse_str(id) {
-                Ok(app_id) => resolve_narrowed(pg, principal_id, None, Some(app_id)).await,
-                Err(_) => resolve_unranked(pg, principal_id).await,
-            }
+            let app_id = app_uuid_or_refuse(id)?;
+            resolve_narrowed(pg, principal_id, None, Some(app_id)).await
         }
     }
+}
+
+/// Decide ACCEPT or REFUSE for an app id, never which of two behaviours to take.
+///
+/// Two renderings name one app and both are accepted:
+///
+/// - `app_<base62>`, the canonical typed id ([`zeroship_core::app_id::AppId`]).
+/// - a bare uuid, in any spelling `uuid::Uuid` accepts. THAT ARM IS
+///   TRANSITIONAL: `zeroship.apps.id` is still a `uuid` column, so a uuid is
+///   what the control plane holds and what its path segments carry today. It
+///   goes when the column flips.
+///
+/// A rendering this function has not been taught is a REFUSAL, not a deny.
+/// The shape it replaces parsed a uuid and, on failure, fell through to the
+/// unranked read - so a caller presenting the CANONICAL `app_` id got rank
+/// zero and a 403 that named nothing, indistinguishable from "you hold no seat
+/// on this app". Branching on the shape of an id string is the same defect the
+/// CLI's deleted `is_uuid` produced, where a typed id silently took the other
+/// branch; the fix there and here is that one value means one thing.
+fn app_uuid_or_refuse(id: &str) -> Result<Uuid, AuthzError> {
+    if let Ok(app_id) = zeroship_core::app_id::AppId::parse(id) {
+        return Ok(app_id.uuid());
+    }
+    Uuid::parse_str(id).map_err(|_| {
+        AuthzError::Validation(format!(
+            "app resource id {id:?} is neither an app typed id (app_<base62>) nor a uuid"
+        ))
+    })
 }
 
 const USER_ATTRS: &str = "u.email_verified_at IS NOT NULL AS email_verified, \
@@ -334,7 +356,9 @@ pub async fn project_probe_resources(
 
 #[cfg(test)]
 mod tests {
-    use super::effective_project_rank;
+    use super::{app_uuid_or_refuse, effective_project_rank};
+    use crate::AuthzError;
+    use uuid::Uuid;
 
     const VIEWER: i32 = 10;
     const DEVELOPER: i32 = 20;
@@ -398,5 +422,50 @@ mod tests {
             effective_project_rank(Some(OWNER), Some(VIEWER), None),
             VIEWER
         );
+    }
+
+    /// The CANONICAL app id must resolve, not deny.
+    ///
+    /// REGRESSION. The previous shape parsed a uuid and fell through to the
+    /// unranked read when that failed, so `app_<base62>` - the rendering
+    /// `canonical_app_id_for` produces and the worker already parses - yielded
+    /// rank zero. That is a 403 for a correctly formed id, reported as "no
+    /// seat". Restoring the fall-through makes the first assertion fail.
+    #[test]
+    fn a_typed_app_id_resolves_to_the_same_uuid_as_its_bare_spelling() {
+        let stored = Uuid::new_v4();
+        let typed = zeroship_core::app_id::canonical_app_id_for(&stored);
+
+        assert_eq!(
+            app_uuid_or_refuse(typed.as_str()).expect("the canonical rendering must be accepted"),
+            stored,
+            "a typed app id must name the same app as its uuid"
+        );
+        assert_eq!(
+            app_uuid_or_refuse(&stored.to_string()).expect("the uuid arm is transitional but live"),
+            stored
+        );
+    }
+
+    /// An id in neither rendering is a REFUSAL, never a silent rank zero.
+    ///
+    /// The distinction is the whole point: "this id names nothing" and "you
+    /// hold no seat here" are different answers, and the old shape collapsed
+    /// them into the second one.
+    #[test]
+    fn an_unteachable_rendering_is_refused_rather_than_denied() {
+        for raw in [
+            "",
+            "not-an-id",
+            "org_0000000000000000000000",
+            "prj_0000000000000000000000",
+        ] {
+            let err = app_uuid_or_refuse(raw)
+                .expect_err("an id that names no app must be refused, not denied");
+            assert!(
+                matches!(err, AuthzError::Validation(_)),
+                "refusal must be a validation error, not a database or deny outcome: {err:?}"
+            );
+        }
     }
 }

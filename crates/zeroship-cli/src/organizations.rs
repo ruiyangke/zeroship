@@ -48,7 +48,7 @@
 //! built here from named fields silently drops whatever the server adds.
 
 use crate::project_config;
-use crate::{flag_str, is_uuid, parse_flag, resolve_bearer_token, run_curl, ControlResponse};
+use crate::{flag_str, parse_flag, resolve_bearer_token, run_curl, ControlResponse};
 use percent_encoding::{utf8_percent_encode, AsciiSet, CONTROLS};
 use std::path::PathBuf;
 use zeroship_core::invite_id::InviteId;
@@ -244,7 +244,11 @@ fn require_user_id(raw: Option<&str>, example: &str) -> Result<String, String> {
     let Some(raw) = raw else {
         return Err(format!("missing <user-id>; e.g. `{example}`"));
     };
-    if !is_uuid(raw) {
+    // A USER id, not an app id, so this parses uuid directly rather than
+    // borrowing `app_id_or_refuse`: that helper also accepts `app_<base62>`,
+    // which is a different entity and would be accepted here for no reason.
+    // `zeroship.users.id` is a uuid column, so uuid is the whole vocabulary.
+    if raw.parse::<uuid::Uuid>().is_err() {
         return Err(format!(
             "{raw:?} is not a user id. A user id is a UUID; \
              `zeroship organization members` lists the ones seated here."
