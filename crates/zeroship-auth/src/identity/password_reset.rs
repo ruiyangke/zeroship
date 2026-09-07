@@ -257,14 +257,14 @@ pub async fn is_live(db: &Client, raw_token: &str) -> Result<bool> {
 ///      holds, from the UNION of two sources: `app_user_identities` (the
 ///      `pairwise_sub` an app-session cookie carries, persisted by the
 ///      access-token issuer and the gateway session minters) and the live
-///      `oauth_refresh_tokens` rows (which also covers the `zeroship-cli`
-///      platform family). This rejects every already-live app-session cookie /
+///      `zeroship.sessions` rows joined to their grant (which also covers the
+///      `zeroship-cli` platform session). This rejects every already-live
 ///      wrapper token for those families from now on; and
 ///
 ///      **The UNION is load-bearing, not tidying.** These were two sibling
 ///      CTEs, each its own `INSERT ... ON CONFLICT (client_id, sub) DO UPDATE`.
 ///      For a non-brokered app client the two sources carry the SAME pair -
-///      `app_user_identities.pairwise_sub` and `oauth_refresh_tokens.sub` are
+///      `app_user_identities.pairwise_sub` and `zeroship.grants.subject` are
 ///      both `Issuer::pairwise_subject(user_id, sector_identifier)` - and
 ///      PostgreSQL refuses to let one command upsert a key twice:
 ///      `ON CONFLICT DO UPDATE command cannot affect row a second time`. That
@@ -361,10 +361,11 @@ pub async fn complete(
                  FROM zeroship.app_user_identities aui \
                  JOIN consumed c ON c.user_id = aui.global_user_id \
                  UNION \
-                 SELECT ort.client_id, ort.sub \
-                 FROM zeroship.oauth_refresh_tokens ort \
-                 JOIN consumed c ON c.user_id = ort.user_id \
-                 WHERE ort.revoked_at IS NULL \
+                 SELECT COALESCE(g.client_id, $5), g.subject \
+                 FROM zeroship.sessions s \
+                 JOIN zeroship.grants g ON g.id = s.grant_id \
+                 JOIN consumed c ON c.user_id = s.person_id \
+                 WHERE s.revoked_at IS NULL \
              ), family_markers AS ( \
                  INSERT INTO zeroship.token_revocations (client_id, sub, revoked_after) \
                  SELECT client_id, sub, NOW() FROM family_targets \
@@ -372,14 +373,20 @@ pub async fn complete(
                    DO UPDATE SET revoked_after = \
                      GREATEST(zeroship.token_revocations.revoked_after, EXCLUDED.revoked_after) \
              ), refresh_revoked AS ( \
-                 UPDATE zeroship.oauth_refresh_tokens ort \
+                 UPDATE zeroship.sessions s \
                  SET revoked_at = NOW() \
                  FROM consumed c \
-                 WHERE ort.user_id = c.user_id \
-                   AND ort.revoked_at IS NULL \
+                 WHERE s.person_id = c.user_id \
+                   AND s.revoked_at IS NULL \
              ) \
              SELECT user_id, email FROM consumed",
-            &[&token_hash.as_slice(), &PURPOSE, &password_hash, &NS_USER],
+            &[
+                &token_hash.as_slice(),
+                &PURPOSE,
+                &password_hash,
+                &NS_USER,
+                &zeroship_core::device_grant::PLATFORM_CLI_CLIENT_ID,
+            ],
         )
         .await
         .map_err(|e| AuthError::Db(format!("password_reset complete: {e}")))?;

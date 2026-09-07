@@ -22,8 +22,9 @@ use crate::oidc::authorization_code::{
     load_client, mint_access_token, oauth_error_response, parse_scopes, required_param,
     scope_subset, sort_dedup, OAuthError, TokenRequest, TokenResponse, TOKEN_TYPE_BEARER,
 };
-use crate::oidc::refresh::{self, ClientAuth, ClientAuthMethod, RefreshSessionPool, RefreshTokenKeys};
+use crate::oidc::refresh::{self, ClientAuth, ClientAuthMethod, RefreshSessionPool};
 use crate::oidc::{Issuer, PrincipalAccessTokenMint, ACCESS_TOKEN_TTL_SECS};
+use crate::session_store::{SessionKind, ValidatedSession};
 
 pub const DEVICE_CODE_GRANT_TYPE: &str = "urn:ietf:params:oauth:grant-type:device_code";
 
@@ -184,9 +185,10 @@ pub(super) async fn mint_grant_access_token(
     client: &crate::oidc::authorization_code::OAuthClient,
     user_id: Uuid,
     scopes: &[String],
+    proof: &ValidatedSession,
 ) -> Result<String, OAuthError> {
     if !platform_cli_policy_selected(db, &client.client_id).await? {
-        return mint_access_token(db, issuer, client, user_id, scopes).await;
+        return mint_access_token(db, issuer, client, user_id, scopes, proof).await;
     }
     let principal_id = user_id.to_string();
     issuer
@@ -199,6 +201,7 @@ pub(super) async fn mint_grant_access_token(
                 scopes,
                 ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
             },
+            proof,
         )
         .await
         .map_err(|err| {
@@ -667,31 +670,41 @@ async fn exchange_device_code_locked(
             // One lifetime for every client on this grant. The CLI used to take
             // the 12-hour ceiling BECAUSE it got no refresh token; now that it
             // does, the trade runs the other way - a short self-contained
-            // bearer plus a long DB-backed family gives the same usable
+            // bearer plus a long DB-backed session gives the same usable
             // session AND a revocation that works.
-            let access_token =
-                mint_grant_access_token(db, cfg, issuer, client, user_id, &granted_scopes).await?;
-            let refresh_token = if granted_scopes
-                .iter()
-                .any(|scope| scope == OFFLINE_ACCESS_SCOPE)
-                && client.refresh_allowed
-            {
-                let keys = RefreshTokenKeys::from_config(cfg)?;
-                Some(
-                    refresh::issue_root_refresh_token(
-                        db,
-                        issuer,
-                        &keys,
-                        client,
-                        user_id,
-                        &granted_scopes,
-                        auth_credential_version,
-                    )
-                    .await?,
-                )
-            } else {
-                None
-            };
+            //
+            // THE SESSION IS CREATED FIRST, AND THAT ORDER IS THE STEP. The
+            // access token is minted from the proof the creating statement
+            // returned, so an approved device grant whose person went inactive
+            // between approval and redemption mints nothing at all - where
+            // before, the access token was minted unconditionally and only the
+            // refresh family checked.
+            let established = refresh::establish_session(
+                db,
+                issuer,
+                &refresh::session_keys(cfg)?,
+                client,
+                user_id,
+                &granted_scopes,
+                auth_credential_version,
+                SessionKind::Cli,
+                granted_scopes
+                    .iter()
+                    .any(|scope| scope == OFFLINE_ACCESS_SCOPE)
+                    && client.refresh_allowed,
+            )
+            .await?;
+            let access_token = mint_grant_access_token(
+                db,
+                cfg,
+                issuer,
+                client,
+                user_id,
+                &granted_scopes,
+                &established.proof,
+            )
+            .await?;
+            let refresh_token = established.secret;
 
             tracing::debug!(client_id = %client.client_id, user_id = %user_id, sid = %sid, "device token approved");
             Ok(TokenResponse {

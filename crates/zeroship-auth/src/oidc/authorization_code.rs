@@ -18,15 +18,14 @@ use crate::oidc::auth_request::{AuthRequest, AuthRequestError};
 use crate::oidc::backchannel_logout;
 use crate::oidc::claims::scope_gated_identity_claims;
 use crate::oidc::device_token;
-use crate::oidc::refresh::{
-    self, ClientAuth, ClientAuthMethod, RefreshSessionPool, RefreshTokenKeys,
-};
+use crate::oidc::refresh::{self, ClientAuth, ClientAuthMethod, RefreshSessionPool};
 use crate::oidc::{
     AccessTokenMint, IdTokenMint, Issuer, PrincipalIdTokenMint, ACCESS_TOKEN_TTL_SECS,
 };
 use crate::return_to;
+use crate::session_store::{SessionKind, ValidatedSession};
 use crate::sessions::login as login_session;
-use crate::store::sessions as session_store;
+use crate::store::sessions as idp_sessions;
 use crate::store::users;
 
 const AUTH_CODE_TTL_SECS: i64 = 60;
@@ -457,7 +456,7 @@ async fn issue_authorization_code(
     issuer: &Issuer,
     client: &OAuthClient,
     auth_request: &AuthRequest,
-    session: &session_store::Session,
+    session: &idp_sessions::Session,
     code_challenge: &str,
 ) -> Result<HttpResponse, OAuthError> {
     let requested_scopes = auth_request.scopes.clone();
@@ -604,7 +603,7 @@ async fn token_inner(
             }
         }
         "refresh_token" => {
-            let keys = RefreshTokenKeys::from_config(cfg)?;
+            let keys = refresh::session_keys(cfg)?;
             refresh::exchange_refresh_token(
                 db,
                 refresh_pool,
@@ -705,30 +704,40 @@ async fn exchange_authorization_code(
 
     // Keep the global lock order refresh-user -> signing-key. Refresh exchange
     // already holds the user lock when it advances the signing-key watermark.
-    let refresh_token =
-        if consumed.granted_scopes.iter().any(|scope| scope == "offline_access")
-            && client.refresh_allowed
-        {
-            let keys = RefreshTokenKeys::from_config(cfg)?;
-            Some(
-                refresh::issue_root_refresh_token(
-                    db,
-                    issuer,
-                    &keys,
-                    client,
-                    consumed.user_id,
-                    &consumed.granted_scopes,
-                    consumed.auth_credential_version,
-                )
-                .await?,
-            )
-        } else {
-            None
-        };
+    //
+    // THE SESSION IS ESTABLISHED BEFORE ANYTHING IS MINTED, and it is
+    // established on EVERY exchange rather than only when `offline_access` was
+    // granted. That is what makes this a MINT-READS-ROW path: the access token
+    // and the ID token below are both minted from the proof the creating
+    // statement returned, so an exchange whose person went inactive between the
+    // authorization and the redemption mints nothing. Only the SECRET is
+    // conditional - a session created without one can never be presented again.
+    let established = refresh::establish_session(
+        db,
+        issuer,
+        &refresh::session_keys(cfg)?,
+        client,
+        consumed.user_id,
+        &consumed.granted_scopes,
+        consumed.auth_credential_version,
+        SessionKind::Browser,
+        consumed.granted_scopes.iter().any(|scope| scope == "offline_access")
+            && client.refresh_allowed,
+    )
+    .await?;
+    let refresh_token = established.secret;
+    let proof = &established.proof;
 
     let user_id = consumed.user_id.to_string();
-    let access_token =
-        mint_access_token(db, issuer, client, consumed.user_id, &consumed.granted_scopes).await?;
+    let access_token = mint_access_token(
+        db,
+        issuer,
+        client,
+        consumed.user_id,
+        &consumed.granted_scopes,
+        proof,
+    )
+    .await?;
 
     let id_token = if consumed.granted_scopes.iter().any(|scope| scope == "openid") {
         let nonce = consumed
@@ -791,6 +800,7 @@ async fn exchange_authorization_code(
                             .and_then(|claims| claims.picture.as_deref()),
                         ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
                     },
+                    proof,
                 )
                 .await
         } else {
@@ -821,6 +831,7 @@ async fn exchange_authorization_code(
                             .and_then(|claims| claims.picture.as_deref()),
                         ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
                     },
+                    proof,
                 )
                 .await
         }
@@ -900,7 +911,7 @@ async fn revoke_replayed_authorization_code_lineage(
     let user_id: Uuid = row.get("user_id");
     let sector_identifier: String = row.get("sector_identifier");
     let sub = issuer.pairwise_subject(&user_id.to_string(), &sector_identifier);
-    refresh::kill_families_for_subject_in_transaction(db, &client_id, &sub).await?;
+    refresh::revoke_sessions_for_subject_in_transaction(db, &client_id, &sub).await?;
     Ok(true)
 }
 
@@ -908,7 +919,7 @@ async fn resolve_session(
     req: &HttpRequest,
     _cfg: &AuthConfig,
     db: &Client,
-) -> Result<Option<session_store::Session>, OAuthError> {
+) -> Result<Option<idp_sessions::Session>, OAuthError> {
     let cookie_header = req
         .headers()
         .get(COOKIE)
@@ -917,7 +928,7 @@ async fn resolve_session(
     let Some(session_id) = login_session::parse_cookie(cookie_header) else {
         return Ok(None);
     };
-    session_store::validate(db, session_id).await.map_err(|err| {
+    idp_sessions::validate(db, session_id).await.map_err(|err| {
         tracing::error!(error = %err, "authorize: session validation failed");
         OAuthError::server_error("session store unavailable")
     })
@@ -1420,6 +1431,7 @@ pub(super) async fn mint_access_token(
     client: &OAuthClient,
     user_id: Uuid,
     scopes: &[String],
+    proof: &ValidatedSession,
 ) -> Result<String, OAuthError> {
     crate::advisory_lock::lock_refresh_user_xact(db, user_id)
         .await
@@ -1476,14 +1488,18 @@ pub(super) async fn mint_access_token(
     }
     let audience = client.resource_audience();
     issuer
-        .issue_access_token(db, &AccessTokenMint {
-            user_id: &user_id_string,
-            sector: &client.sector_identifier,
-            audience: &audience,
-            client_id: &client.client_id,
-            scopes,
-            ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
-        })
+        .issue_access_token(
+            db,
+            &AccessTokenMint {
+                user_id: &user_id_string,
+                sector: &client.sector_identifier,
+                audience: &audience,
+                client_id: &client.client_id,
+                scopes,
+                ttl_secs: Some(ACCESS_TOKEN_TTL_SECS),
+            },
+            proof,
+        )
         .await
         .map_err(|err| {
             tracing::error!(error = %err, "token: access-token mint failed");
@@ -1507,6 +1523,64 @@ mod access_identity_tests {
         })
         .detach();
         client
+    }
+
+    /// A keyring in a private, owner-only directory. These tests need one
+    /// because `mint_access_token` takes a `ValidatedSession`, and the only way
+    /// to get one is to run the creating statement - which is the property
+    /// under test everywhere else in the crate. A test that could fabricate the
+    /// witness would be testing nothing.
+    fn test_keys(tag: &str) -> crate::session_store::SessionSecretKeys {
+        use std::io::Write as _;
+        let dir = std::env::temp_dir().join(format!("zs-mint-race-keys-{tag}"));
+        std::fs::create_dir_all(&dir).expect("key dir");
+        let hash_path = dir.join("hash");
+        let idem_path = dir.join("idem");
+        for (path, body) in [
+            (
+                &hash_path,
+                "1:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\n"
+                    .as_bytes(),
+            ),
+            (&idem_path, "mint-race-idempotency-master-secret".as_bytes()),
+        ] {
+            let mut file = std::fs::File::create(path).expect("create key file");
+            file.write_all(body).expect("write key file");
+            drop(file);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt as _;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+                    .expect("chmod key file");
+            }
+        }
+        crate::session_store::SessionSecretKeys::from_files(&hash_path, &idem_path)
+            .expect("load session keys")
+    }
+
+    /// Establish a session for `user_id` under `client`, and hand back the
+    /// proof its creating statement produced.
+    async fn proof_for(
+        tx: &Transaction<'_>,
+        issuer: &Issuer,
+        client: &OAuthClient,
+        user_id: Uuid,
+    ) -> ValidatedSession {
+        let tag = Uuid::new_v4().simple().to_string();
+        refresh::establish_session(
+            tx,
+            issuer,
+            &test_keys(&tag),
+            client,
+            user_id,
+            &["openid".to_string()],
+            0,
+            SessionKind::Browser,
+            false,
+        )
+        .await
+        .expect("establish session")
+        .proof
     }
 
     // A missing Postgres is a FAILURE, not a skip: these fixtures exercise
@@ -1683,7 +1757,8 @@ mod access_identity_tests {
     async fn access_token_mint_holds_the_user_lock_until_commit() {
         let (_dsn, setup, mut mint, _deletion, user_id, client, issuer) = mint_fixture().await;
         let tx = mint.transaction().await.expect("mint transaction");
-        mint_access_token(&tx, &issuer, &client, user_id, &["openid".to_string()])
+        let proof = proof_for(&tx, &issuer, &client, user_id).await;
+        mint_access_token(&tx, &issuer, &client, user_id, &["openid".to_string()], &proof)
             .await
             .expect("mint token");
 
@@ -1713,11 +1788,28 @@ mod access_identity_tests {
             .expect("user exists");
 
         let tx = mint.transaction().await.expect("mint transaction");
-        let result =
-            mint_access_token(&tx, &issuer, &client, user_id, &["openid".to_string()]).await;
+        // The session cannot even be ESTABLISHED for a deleted principal, so
+        // the refusal now arrives one step earlier than it used to - at the
+        // creating statement rather than at the mint's own lifecycle check.
+        // That is the shape MINT-READS-ROW buys: there is no proof to carry
+        // into a mint, so the mint is unreachable rather than merely refused.
+        let tag = Uuid::new_v4().simple().to_string();
+        let result = refresh::establish_session(
+            &tx,
+            &issuer,
+            &test_keys(&tag),
+            &client,
+            user_id,
+            &["openid".to_string()],
+            0,
+            SessionKind::Browser,
+            false,
+        )
+        .await
+        .map(|_| ());
         assert!(
             result.is_err(),
-            "the shared access-token issuer minted for a deleted principal"
+            "a session was established for a deleted principal"
         );
         tx.rollback().await.expect("rollback mint");
         cleanup_mint_fixture(&setup, user_id, &client.client_id).await;
@@ -1762,12 +1854,14 @@ mod access_identity_tests {
         }
         assert!(observed_wait, "deletion never reached the held user lock");
         compio::time::sleep(Duration::from_millis(1100)).await;
+        let proof = proof_for(&tx, &issuer, &client, user_id).await;
         let token = mint_access_token(
             &tx,
             &issuer,
             &client,
             user_id,
             &["openid".to_string()],
+            &proof,
         )
         .await
         .expect("mint token while deletion waits");

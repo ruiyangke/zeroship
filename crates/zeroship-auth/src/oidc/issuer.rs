@@ -18,6 +18,7 @@ use zeroship_core::device_grant::PLATFORM_TOKEN_MAX_TTL_SECS;
 use crate::advisory_lock::{with_advisory_lock, OP_SIGNING_KEY_BOOTSTRAP_LOCK};
 use crate::error::{AuthError, Result};
 use crate::oidc::signing;
+use crate::session_store::ValidatedSession;
 
 /// RFC 9068 access-token type header.
 pub const ACCESS_TOKEN_TYP: &str = "at+jwt";
@@ -408,12 +409,21 @@ impl Issuer {
     }
 
     /// Issue an RFC 9068 JWT access token and reserve its expiry before return.
+    ///
+    /// `proof` is MINT-READS-ROW as a type. A [`ValidatedSession`] cannot be
+    /// constructed outside `crate::session_store`, so a caller holding one has
+    /// executed the statement that enforced liveness, expiry, the grant's
+    /// status and the person's credential epoch. Deleting the parameter does
+    /// not weaken a check - it fails the build at every call site, which is why
+    /// this is a witness and not an assertion.
     #[allow(clippy::future_not_send)]
     pub async fn issue_access_token(
         &self,
         db: &(impl GenericClient + ?Sized),
         mint: &AccessTokenMint<'_>,
+        proof: &ValidatedSession,
     ) -> Result<String> {
+        bind_proof_to_person(proof, mint.user_id)?;
         validate_registered_ttl(
             mint.ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS),
             "access token",
@@ -458,7 +468,9 @@ impl Issuer {
         &self,
         db: &(impl GenericClient + ?Sized),
         mint: &PrincipalAccessTokenMint<'_>,
+        proof: &ValidatedSession,
     ) -> Result<String> {
+        bind_proof_to_person(proof, mint.principal_id)?;
         validate_registered_ttl(
             mint.ttl_secs.unwrap_or(ACCESS_TOKEN_TTL_SECS),
             "principal access token",
@@ -544,7 +556,9 @@ impl Issuer {
         &self,
         db: &(impl GenericClient + ?Sized),
         mint: &IdTokenMint<'_>,
+        proof: &ValidatedSession,
     ) -> Result<String> {
+        bind_proof_to_person(proof, mint.user_id)?;
         validate_registered_ttl(mint.ttl_secs.unwrap_or(ID_TOKEN_TTL_SECS), "ID token")?;
         let subject = self.pairwise_subject(mint.user_id, mint.sector);
         let signed = self.build_id_token_with_subject(
@@ -596,7 +610,9 @@ impl Issuer {
         &self,
         db: &(impl GenericClient + ?Sized),
         mint: &PrincipalIdTokenMint<'_>,
+        proof: &ValidatedSession,
     ) -> Result<String> {
+        bind_proof_to_person(proof, mint.principal_id)?;
         validate_registered_ttl(
             mint.ttl_secs.unwrap_or(ID_TOKEN_TTL_SECS),
             "principal ID token",
@@ -691,6 +707,17 @@ impl Issuer {
     }
 
     /// Issue a logout token and reserve its expiry before return.
+    ///
+    /// **This is the one mint on the issuer that takes no
+    /// [`ValidatedSession`], and the omission is the argument rather than an
+    /// oversight.** A logout token authorises nothing: it is a notification
+    /// that a session ENDED, addressed to a relying party, and it is minted at
+    /// revocation time when by construction no live session row remains to
+    /// validate. Requiring a witness here would mean either revoking after
+    /// notifying - which loses the notification when the revoke fails - or
+    /// minting a proof from a row that is already dead, which is the property
+    /// the witness exists to deny. Every mint that hands a SUBJECT a credential
+    /// takes one.
     #[allow(clippy::future_not_send)]
     pub async fn issue_logout_token(
         &self,
@@ -881,6 +908,31 @@ impl Issuer {
 pub fn oidc_at_hash(access_token: &str) -> String {
     let digest = Sha512::digest(access_token.as_bytes());
     URL_SAFE_NO_PAD.encode(&digest[..32])
+}
+
+/// Refuse a mint whose subject is not the person the witness was minted for.
+///
+/// The witness alone says "SOME session was validated". This makes it say "THIS
+/// person's session was validated", which is what MINT-READS-ROW means: a
+/// caller holding a proof for one session must not be able to mint a credential
+/// naming another person. It is a runtime check because the identifier crosses
+/// the boundary as a string - the type says a read happened, this says what the
+/// read was about, and both are needed.
+///
+/// Every live call site passes the session's own person id, so a failure here
+/// is a programming error rather than a request-shaped one, and it is reported
+/// as an internal error without naming either identifier.
+fn bind_proof_to_person(proof: &ValidatedSession, minting_for: &str) -> Result<()> {
+    if proof.person_id().to_string() == minting_for {
+        return Ok(());
+    }
+    tracing::error!(
+        session_id = proof.session_id(),
+        "mint subject does not match the validated session's person"
+    );
+    Err(AuthError::Internal(
+        "mint subject does not match the validated session".into(),
+    ))
 }
 
 fn validate_registered_ttl(ttl_secs: i64, token_kind: &str) -> Result<()> {

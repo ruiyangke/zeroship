@@ -11,7 +11,7 @@ use crate::config::AuthConfig;
 use crate::oidc::authorization_code::{load_client, OAuthClient, OAuthError};
 use crate::oidc::refresh::{
     authenticate_client, authenticated_client_id, client_auth_from_request,
-    introspect_refresh_token, ClientAuthMethod, RefreshTokenKeys,
+    introspect_refresh_token, ClientAuthMethod,
 };
 use crate::oidc::{AccessTokenClaims, Issuer};
 use zeroship_authz::wrapper_revocation;
@@ -163,7 +163,7 @@ async fn introspect_refresh(
     client: &OAuthClient,
     raw_token: &str,
 ) -> Result<Option<Value>, OAuthError> {
-    let keys = RefreshTokenKeys::from_config(cfg)?;
+    let keys = super::refresh::session_keys(cfg)?;
     Ok(introspect_refresh_token(db, &keys, client, raw_token)
         .await?
         .map(|active| {

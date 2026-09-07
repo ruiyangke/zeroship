@@ -6,7 +6,7 @@ use compio_postgres::{Client, GenericClient};
 
 use crate::advisory_lock::lock_refresh_user_xact;
 use crate::error::{AuthError, Result};
-use crate::oidc::refresh::revoke_user_refresh_families_in_transaction;
+use crate::oidc::refresh::revoke_person_sessions_in_transaction;
 
 thread_local! {
     /// Test-observable count of failed-login round-trips issued on THIS thread
@@ -415,7 +415,7 @@ async fn request_deletion_tx(
     let Some(row) = rows.first() else {
         return Ok(None);
     };
-    revoke_user_refresh_families_in_transaction(conn, id, "account_deletion")
+    revoke_person_sessions_in_transaction(conn, id, "account_deletion")
         .await
         .map_err(|e| AuthError::Db(format!("request_deletion revoke refresh families: {e}")))?;
     revoke_user_app_credentials_in_transaction(conn, id).await?;

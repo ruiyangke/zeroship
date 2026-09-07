@@ -198,9 +198,39 @@ pub struct SessionRow {
     pub idem_expires_at: Option<DateTime<Utc>>,
     pub secret_key_version: Option<i16>,
     pub prev_secret_key_version: Option<i16>,
+    /// The stored HMACs, never the secrets. They are here so a caller holding
+    /// the row under a lock can re-decide which slot a presented secret matches
+    /// - see [`SessionRow::slot_for`].
+    secret_hash: Option<Vec<u8>>,
+    prev_secret_hash: Option<Vec<u8>>,
 }
 
 impl SessionRow {
+    /// Which slot the presented secret matches ON THIS ROW, as the row stands
+    /// now.
+    ///
+    /// **The answer [`peek`] gave is advisory and MUST be re-derived here.**
+    /// `peek` runs before the transaction and before any lock, so a concurrent
+    /// rotation can commit between the two: the caller's secret was the current
+    /// one when it was resolved and is the SUPERSEDED one by the time the lock
+    /// is granted. Acting on the stale verdict rotates against a hash that has
+    /// moved, updates nothing, and refuses a request that should have been
+    /// served the idempotent replay - which is exactly what
+    /// `concurrent_refresh_same_token_serializes_to_one_successor_without_family_kill`
+    /// caught. The old shape did not have this hazard, because it re-read the
+    /// row by token hash and asked `rotated_at`; one row per family means the
+    /// question has to be asked of the slots instead.
+    #[must_use]
+    pub fn slot_for(&self, presented: &PeekedSession) -> Option<SecretSlot> {
+        if self.secret_hash.as_deref() == Some(presented.hash.as_slice()) {
+            return Some(SecretSlot::Current);
+        }
+        if self.prev_secret_hash.as_deref() == Some(presented.hash.as_slice()) {
+            return Some(SecretSlot::Superseded);
+        }
+        None
+    }
+
     fn proof(&self) -> ValidatedSession {
         ValidatedSession {
             session_id: self.id.clone(),
@@ -694,7 +724,7 @@ const CREATE_SESSION_SQL: &str = "\
     RETURNING id, person_id, audience_kind, client_id, grant_id, kind, epoch, \
               credential_epoch, scopes, created_at, rotated_at, idle_expires_at, \
               absolute_expires_at, revoked_at, idem_response_enc, idem_expires_at, \
-              secret_key_version, prev_secret_key_version";
+              secret_key_version, prev_secret_key_version, secret_hash, prev_secret_hash";
 
 // ---------------------------------------------------------------------------
 // Presentation - the validating read on every later mint
@@ -773,7 +803,8 @@ pub async fn lock_and_read(
                     s.epoch, s.credential_epoch, s.scopes, s.created_at, s.rotated_at, \
                     s.idle_expires_at, s.absolute_expires_at, s.revoked_at, \
                     s.idem_response_enc, s.idem_expires_at, s.secret_key_version, \
-                    s.prev_secret_key_version, g.subject, g.scopes AS grant_scopes \
+                    s.prev_secret_key_version, s.secret_hash, s.prev_secret_hash, \
+                    g.subject, g.scopes AS grant_scopes \
              FROM zeroship.sessions s \
              JOIN zeroship.grants g ON g.id = s.grant_id \
              WHERE s.id = $1 \
@@ -879,7 +910,8 @@ const ROTATE_SESSION_SQL: &str = "\
               s.epoch, s.credential_epoch, s.scopes, s.created_at, s.rotated_at, \
               s.idle_expires_at, s.absolute_expires_at, s.revoked_at, \
               s.idem_response_enc, s.idem_expires_at, s.secret_key_version, \
-              s.prev_secret_key_version, g.subject, g.scopes AS grant_scopes";
+              s.prev_secret_key_version, s.secret_hash, s.prev_secret_hash, \
+              g.subject, g.scopes AS grant_scopes";
 
 /// The single retry a lost rotation response earns.
 ///
@@ -954,7 +986,8 @@ const CONSUME_IDEM_SQL: &str = "\
               s.epoch, s.credential_epoch, s.scopes, s.created_at, s.rotated_at, \
               s.idle_expires_at, s.absolute_expires_at, s.revoked_at, \
               s.idem_response_enc, s.idem_expires_at, s.secret_key_version, \
-              s.prev_secret_key_version, g.subject, g.scopes AS grant_scopes";
+              s.prev_secret_key_version, s.secret_hash, s.prev_secret_hash, \
+              g.subject, g.scopes AS grant_scopes";
 
 // ---------------------------------------------------------------------------
 // Revocation
@@ -1116,6 +1149,8 @@ fn row_to_session_with_grant(
         idem_expires_at: row.try_get("idem_expires_at").ok().flatten(),
         secret_key_version: row.try_get("secret_key_version").ok().flatten(),
         prev_secret_key_version: row.try_get("prev_secret_key_version").ok().flatten(),
+        secret_hash: row.try_get("secret_hash").ok().flatten(),
+        prev_secret_hash: row.try_get("prev_secret_hash").ok().flatten(),
     }
 }
 
