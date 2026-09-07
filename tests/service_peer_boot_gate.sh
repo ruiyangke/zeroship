@@ -34,6 +34,34 @@
 #               key and NOT the gateway's. This is F4's own sentence: the
 #               material the worker verifies `ZeroShip-User` under is missing,
 #               everything else is present, and it must still refuse.
+#   forged      a well-formed document in which ONE key appears under TWO
+#               issuers. The document parses, every entry is a valid Ed25519
+#               public key, every issuer is syntactically good, and every key
+#               id matches its thumbprint - so every check the loader had
+#               before this arm existed passes. What is wrong is a property of
+#               the SET, which no per-entry check can see.
+#
+#               WHY THIS IS THE SHARPEST ARM IN THE FILE. The envelope wire
+#               format carries a key id and NO ISSUER, and both the signer and
+#               the loader derive that id from the public bytes. The worker's
+#               verifier resolves the gateway's key BY ISSUER STRING. So a
+#               document publishing the WORKER's own key under the GATEWAY's
+#               issuer makes the worker's own signer stamp exactly the key id
+#               its own verifier looks up: the worker can MINT the identity
+#               envelope it then ACCEPTS. That is precisely what F4 forbids,
+#               and until this arm existed the gate was green on a worker that
+#               could do it - the `envelope` arm above passes, because a
+#               gateway key IS published; it is just the worker's.
+#
+#               The blast radius is wider than F4 and the third launch here
+#               measures it: the assertion verifier resolves its key from the
+#               issuer parsed OUT OF the presented assertion, so under a
+#               shared-key document possession of any one service key file is
+#               the ability to present as any service to any service. The
+#               third launch therefore shares a key between two services the
+#               launched process is NEITHER of, proving the refusal is a
+#               property of the document rather than of "my own key turned up
+#               somewhere".
 #   configured  THE ONE-VARIABLE CONTROL, one per binary. Same launch, same
 #               flags, a valid key and a valid document; the process must get
 #               PAST this fence. Without it a binary that refused every launch
@@ -68,6 +96,15 @@
 #   - zeroship-auth and zeroship-migrate-server, correctly: neither mints nor
 #     verifies a service assertion, so neither holds a peer bundle and neither
 #     has anything to refuse.
+#   - how the `forged` document gets WRITTEN. This gate rules on the reader.
+#     The writer is `zeroship dev init`, whose `SERVICE_KEY_FILES` rustdoc has
+#     always said four keys and not one shared file; it now refuses a secrets
+#     directory in which two of the four paths hold the same key, and
+#     `dev_init_refuses_when_two_service_key_paths_hold_the_same_key` in
+#     crates/zeroship-cli/tests/dev_init_test.rs is the one-variable control for
+#     that. The two halves are deliberately separate: an operator can hand a
+#     service a document this tool never wrote, so the reader must refuse it
+#     whatever produced it.
 # ============================================================================
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -106,11 +143,16 @@ service_name() {
 DOMAIN="$(trust_domain)"
 WORKER_NAME="$(service_name WORKER)"
 GATEWAY_NAME="$(service_name GATEWAY)"
-if [ -z "$DOMAIN" ] || [ -z "$WORKER_NAME" ] || [ -z "$GATEWAY_NAME" ]; then
+# Read for the `forged` arm's third launch, which shares a key between two
+# services the launched process is neither of.
+CONTROL_NAME="$(service_name CONTROL)"
+AUTH_NAME="$(service_name AUTH)"
+if [ -z "$DOMAIN" ] || [ -z "$WORKER_NAME" ] || [ -z "$GATEWAY_NAME" ] \
+  || [ -z "$CONTROL_NAME" ] || [ -z "$AUTH_NAME" ]; then
   echo "REFUSED: could not read the trust domain and service names from $NAMES_SRC" >&2
   exit 1
 fi
-echo "  issuers under test: spiffe://$DOMAIN/{$WORKER_NAME,$GATEWAY_NAME}"
+echo "  issuers under test: spiffe://$DOMAIN/{$WORKER_NAME,$GATEWAY_NAME,$CONTROL_NAME,$AUTH_NAME}"
 
 # 0600 is not hygiene: the loader REFUSES a group- or world-readable private
 # key, so a fixture at 0644 would fail every arm for the wrong reason.
@@ -131,12 +173,24 @@ peer_entry() {
 
 new_key svc-worker || { echo "REFUSED: could not generate the worker key" >&2; exit 1; }
 new_key svc-gateway || { echo "REFUSED: could not generate the gateway key" >&2; exit 1; }
+# A key belonging to NEITHER launched binary, for the third `forged` launch.
+new_key svc-control || { echo "REFUSED: could not generate the control key" >&2; exit 1; }
 WORKER_X="$(public_x svc-worker)"
 GATEWAY_X="$(public_x svc-gateway)"
-[ -n "$WORKER_X" ] && [ -n "$GATEWAY_X" ] || {
+CONTROL_X="$(public_x svc-control)"
+[ -n "$WORKER_X" ] && [ -n "$GATEWAY_X" ] && [ -n "$CONTROL_X" ] || {
   echo "REFUSED: could not derive the fixture public keys" >&2
   exit 1
 }
+# The fixture keys must be DISTINCT, or the `forged` documents below would be
+# indistinguishable from the control and the whole arm would be measuring
+# nothing. openssl makes this overwhelmingly likely rather than certain, and a
+# gate that assumed it would report a green it had not earned.
+if [ "$WORKER_X" = "$GATEWAY_X" ] || [ "$WORKER_X" = "$CONTROL_X" ] \
+  || [ "$GATEWAY_X" = "$CONTROL_X" ]; then
+  echo "REFUSED: two fixture keys came out identical; the forged arm would be vacuous" >&2
+  exit 1
+fi
 
 PEERS="$TMP/service-peers.json"
 printf '{"keys":[%s,%s]}' \
@@ -150,10 +204,40 @@ printf '{ this is not a JWKS document' > "$PEERS_MALFORMED"
 PEERS_ABSENT="$TMP/service-peers-absent.json"
 rm -f "$PEERS_ABSENT"
 
+# --- the `forged` documents -------------------------------------------------
+# Each is `$PEERS` with ONE member's `x` changed and nothing else, so the arm
+# below and the `configured` control differ in exactly one variable.
+#
+# The WORKER's own key published under the GATEWAY's issuer as well. The worker
+# signs with the private half; the loader files the public half under the
+# gateway issuer; the key ids agree because both are the thumbprint of the same
+# bytes. So the worker mints an identity envelope its own verifier accepts.
+PEERS_WORKER_MINTS_ITS_OWN="$TMP/service-peers-worker-mints-its-own.json"
+printf '{"keys":[%s,%s]}' \
+  "$(peer_entry "$WORKER_NAME" "$WORKER_X")" \
+  "$(peer_entry "$GATEWAY_NAME" "$WORKER_X")" > "$PEERS_WORKER_MINTS_ITS_OWN"
+# The same shape on the gateway: its own key also published as the worker's, so
+# it can present as the worker to any peer that reads this document.
+PEERS_GATEWAY_MINTS_ITS_OWN="$TMP/service-peers-gateway-mints-its-own.json"
+printf '{"keys":[%s,%s]}' \
+  "$(peer_entry "$WORKER_NAME" "$GATEWAY_X")" \
+  "$(peer_entry "$GATEWAY_NAME" "$GATEWAY_X")" > "$PEERS_GATEWAY_MINTS_ITS_OWN"
+# The blast-radius case: the valid worker/gateway pair, PLUS control and auth
+# sharing one key that belongs to neither launched binary. Whoever holds it
+# presents as either service, and the process reading this document is not a
+# party to the collision - so a refusal here is a property of the document.
+PEERS_THIRD_PARTIES_SHARE="$TMP/service-peers-third-parties-share.json"
+printf '{"keys":[%s,%s,%s,%s]}' \
+  "$(peer_entry "$WORKER_NAME" "$WORKER_X")" \
+  "$(peer_entry "$GATEWAY_NAME" "$GATEWAY_X")" \
+  "$(peer_entry "$CONTROL_NAME" "$CONTROL_X")" \
+  "$(peer_entry "$AUTH_NAME" "$CONTROL_X")" > "$PEERS_THIRD_PARTIES_SHARE"
+
 UNSET_EXAMINED=0
 MISSING_EXAMINED=0
 MALFORMED_EXAMINED=0
 ENVELOPE_EXAMINED=0
+FORGED_EXAMINED=0
 CONFIGURED_EXAMINED=0
 
 # The refusal every arm below looks for. Read as a substring of the boot log,
@@ -262,6 +346,38 @@ else
 fi
 stopped_at_the_fence "$TMP/wk_no_gateway.log" "$WORKER_NEXT" "the worker without the gateway key"
 
+# --- ARM: forged -----------------------------------------------------------
+# ONE KEY UNDER TWO ISSUERS. Every per-entry check passes; what is wrong is a
+# property of the set, and the consequence is that the worker's own signer
+# stamps the key id its own verifier resolves for the gateway.
+#
+# WHAT THIS ASSERTS AND WHY IT IS NOT THE LOADER'S EXACT WORDING. The refusal
+# has to come from `ServiceKeyring::load`, which the worker reports as
+# `$REFUSAL`; asserting the loader's own sentence would pin this gate to a
+# message in a crate it does not own. `stopped_at_the_fence` supplies the other
+# half - the discriminator this file already relies on, because a fence that
+# logs and carries on satisfies a message assertion and a non-zero exit both.
+forged_worker() {
+  local log="$1" peers="$2" label="$3"
+  local status
+  status=$(worker_run "$log" \
+    "ZEROSHIP_WORKER_SERVICE_KEY_FILE=$TMP/svc-worker.pem" \
+    "ZEROSHIP_WORKER_SERVICE_PEERS_FILE=$peers")
+  FORGED_EXAMINED=$((FORGED_EXAMINED + 1))
+  if [ "$status" -eq 0 ]; then
+    note_fail "zeroship-worker BOOTED on a document where $label (exit 0)"
+  else
+    grep -qF "$REFUSAL" "$log" \
+      || note_fail "the worker did not refuse a document where $label"
+  fi
+  stopped_at_the_fence "$log" "$WORKER_NEXT" "the worker on a document where $label"
+}
+
+forged_worker "$TMP/wk_forged_self.log" "$PEERS_WORKER_MINTS_ITS_OWN" \
+  "its OWN key is also published as the gateway's, so it can mint the identity envelope it accepts"
+forged_worker "$TMP/wk_forged_third.log" "$PEERS_THIRD_PARTIES_SHARE" \
+  "control and auth share one key, which is neither the worker's nor the gateway's"
+
 # --- ARM: configured (the one-variable control) ----------------------------
 # Only the peer document changes from the arm above. The worker must walk past
 # this fence and fail on the NEXT one, which is the database posture check.
@@ -339,6 +455,26 @@ if [ -x "$BIN/zeroship-gate" ]; then
   fi
   stopped_at_the_fence "$TMP/gw_malformed.log" "$GATEWAY_NEXT" "the gateway with an unparseable document"
 
+  # The gateway's half of the `forged` arm: its OWN key also published as the
+  # worker's. The gateway verifies no identity envelope, so F4 as worded does
+  # not reach it - but it holds a service key and presents assertions, and the
+  # assertion verifier resolves material from the issuer parsed out of what it
+  # is shown. A document that maps two issuers onto one key therefore makes
+  # this process able to present as the worker, which is the wider consequence
+  # the header describes.
+  status=$(gateway_run "$TMP/gw_forged_self.log" \
+    "ZEROSHIP_GATEWAY_SERVICE_KEY_FILE=$TMP/svc-gateway.pem" \
+    "ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE=$PEERS_GATEWAY_MINTS_ITS_OWN")
+  FORGED_EXAMINED=$((FORGED_EXAMINED + 1))
+  if [ "$status" -eq 0 ]; then
+    note_fail "zeroship-gate BOOTED on a document publishing its own key as the worker's (exit 0)"
+  else
+    grep -qF "$REFUSAL" "$TMP/gw_forged_self.log" \
+      || note_fail "the gateway did not refuse a document publishing its own key as the worker's"
+  fi
+  stopped_at_the_fence "$TMP/gw_forged_self.log" "$GATEWAY_NEXT" \
+    "the gateway on a document publishing its own key as the worker's"
+
   # The control. No broker master secret is supplied in ANY gateway arm, so the
   # gateway with valid key material walks past this fence and stops at that one
   # instead - which is what makes this positive evidence rather than a
@@ -364,6 +500,15 @@ fi
 #   missing:    2 today, floor 1
 #   malformed:  2 today, floor 1
 #   envelope:   1 today (worker only - the gateway verifies no envelope), floor 1
+#   forged:     3 today - the worker on its own key republished as the
+#               gateway's, the worker on two THIRD parties sharing a key, and
+#               the gateway on its own key republished as the worker's. Floor
+#               2, which is where the two things this arm proves separate: that
+#               a shared key is refused AT ALL, and that the refusal does not
+#               depend on the reading process being a party to the collision.
+#               A floor of 1 would let either of those be dropped silently, and
+#               the second is the one that distinguishes a real set-level check
+#               from a special case for "my own key".
 #   configured: 2 today, floor 2. THE CONTROLS, and the floor is the full count
 #               deliberately: a gate that lost a control would be a gate that
 #               refuses everything while printing this.
@@ -372,6 +517,7 @@ gate_arm unset      "$UNSET_EXAMINED"      1
 gate_arm missing    "$MISSING_EXAMINED"    1
 gate_arm malformed  "$MALFORMED_EXAMINED"  1
 gate_arm envelope   "$ENVELOPE_EXAMINED"   1
+gate_arm forged     "$FORGED_EXAMINED"     2
 gate_arm configured "$CONFIGURED_EXAMINED" 2
 
 status=0
