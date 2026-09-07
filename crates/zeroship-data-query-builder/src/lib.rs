@@ -88,7 +88,7 @@ pub mod render;
 pub mod search;
 pub mod write;
 
-pub use ident::{Ident, IdentError, IdentRole, MASKED_SUFFIX, MAX_IDENT_BYTES};
+pub use ident::{Ident, IdentError, IdentRole, MAX_IDENT_BYTES};
 pub use literal::{
     Finite, Finite32, Literal, LiteralError, LiteralSet, QueryVector, MAX_MEMBERSHIP_LIST_LEN,
     MAX_VECTOR_DIMS,

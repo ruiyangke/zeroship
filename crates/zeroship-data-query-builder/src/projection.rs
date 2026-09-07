@@ -24,24 +24,32 @@
 //! A narrowing implementation could plausibly be written, reviewed and shipped
 //! against any one of those with the other three never exercised.
 //!
-//! # `MaskedSibling` is a node, and that is only half a guarantee
+//! # `Stored` is a node, and that is only half a guarantee
 //!
-//! The read path does not select a masked column alongside its sibling; it
-//! *substitutes*, emitting `"ssn_masked" AS "ssn"`, and the mask pass depends on
-//! exactly that aliasing. So the obvious implementation of narrowing - filter
-//! the final column list down to what the caller asked for - emits a bare
-//! `"ssn"` and returns **plaintext**: not fewer columns than intended but the
-//! wrong value, silently, on precisely the columns marked as needing
-//! protection.
+//! A protected column is not selected alongside the column that holds its
+//! stored form; it is *substituted*, emitting `"<physical>" AS "<logical>"`, and
+//! the mask pass depends on exactly that aliasing. So the obvious implementation
+//! of narrowing - filter the final column list down to what the caller asked for
+//! - emits a bare logical name and returns **plaintext**: not fewer columns than
+//! intended but the wrong value, silently, on precisely the columns marked as
+//! needing protection.
 //!
-//! [`ProjectionSource::MaskedSibling`] makes that substitution a node rather
-//! than a late string rewrite, and [`crate::render`] has no way to emit a bare
-//! parent name for one. **What it cannot do is force the choice.** Deciding
-//! that `ssn` is masked requires the declared schema, which lives outside this
-//! leaf crate, so a caller who builds `ProjectionSource::Column(ssn)` for a
-//! masked column still gets plaintext. The node makes the correct form
-//! expressible and nameable; the schema-aware layer above is what must choose
-//! it. That gap is real and is listed under what the types cannot enforce.
+//! [`ProjectionSource::Stored`] makes that substitution a node rather than a
+//! late string rewrite, and [`crate::render`] has no way to emit a bare logical
+//! name for one. **What it cannot do is force the choice.** Deciding that a
+//! column is protected requires the declared schema, which lives outside this
+//! leaf crate, so a caller who builds `ProjectionSource::Column` for a protected
+//! column still gets plaintext. The node makes the correct form expressible and
+//! nameable; the schema-aware layer above is what must choose it. That gap is
+//! real and is listed under what the types cannot enforce.
+//!
+//! This variant DERIVED its physical name until 2026-09-07, as `<col>_masked`,
+//! at one site. The storage flip moved the platform's stored form to a
+//! `__zs_raw__` prefix and stopped creating `<col>_masked` at all, so the
+//! derivation outlived the layout it described and rendered against a column no
+//! migration produces. Both names are now supplied by the caller, because where
+//! a value is physically stored is the storage owner's fact, not a rule a
+//! grammar can hold.
 
 use crate::ident::{Ident, IdentRole};
 use crate::path::FieldPath;
@@ -119,7 +127,7 @@ impl SearchScalarKind {
     /// These are the names the shipped builders emit - `_distance`
     /// (`crates/zeroship-schema/src/query.rs:5007`) and `_distance_m`
     /// (`:5075`) - and they are spelled at **exactly one site**, here, for the
-    /// same reason [`Ident::masked_sibling_of`] exists: a leading `_` is
+    /// same reason the reservation tables split by role: a leading `_` is
     /// refused for a column ([`crate::IdentRole::Column`]) and permitted for an
     /// alias ([`crate::IdentRole::Alias`]), so the platform can name these and
     /// a creator cannot shadow them. A second site that spelled the name would
@@ -152,9 +160,15 @@ impl SearchScalarKind {
 pub enum ProjectionSource {
     Column(Ident),
     Path(FieldPath),
-    /// `"<sibling>" AS "<alias>"`. The parent column is **not** read, which is
-    /// also what keeps key resolution off the default read path.
-    MaskedSibling { parent: Ident, sibling: Ident },
+    /// `"<physical>" AS "<alias>"`, where the physical column is NOT the name
+    /// the row is returned under.
+    ///
+    /// A distinct variant rather than a `Column` with an unequal alias, because
+    /// two rules depend on being able to SEE the divergence: [`crate::render`]
+    /// has no way to emit a bare `alias` for one, and [`Projection::aggregate`]
+    /// refuses it as a grouping key. Collapsing it into `Column` would keep the
+    /// rendering correct and silently drop the refusal.
+    Stored { physical: Ident },
     Aggregate(AggregateRef),
     /// The scalar a search ranks by. Only reachable inside a
     /// [`crate::Search`]; see [`SearchScalarKind`].
@@ -188,27 +202,32 @@ impl ProjectedField {
         })
     }
 
-    /// A masked column: the sibling is read and aliased back to the parent's
-    /// name, so `row[col]` holds the masked string and there is no
-    /// `<col>_masked` key.
+    /// A column whose PHYSICAL name differs from the LOGICAL name it is
+    /// returned under: `"<physical>" AS "<logical>"`.
     ///
-    /// The sibling name is **derived**, not supplied. A caller cannot pass one,
-    /// because `<col>_masked` is refused as a column identifier - which is what
-    /// stops a creator declaring it - so there has to be exactly one site that
-    /// forms the name, and it is [`Ident::masked_sibling_of`].
+    /// This is the only expressible form of physical/logical divergence, and it
+    /// is why [`Self::column`] is not enough on its own: that constructor
+    /// derives the alias from the name, so it can never express a divergence.
+    ///
+    /// The caller supplies both names. Nothing here derives one from the other,
+    /// which is deliberate: the previous constructor derived a `<col>_masked`
+    /// sibling at exactly one site, and the storage flip stopped creating that
+    /// column, so the derivation outlived the shape it described. A rule about
+    /// where a value is physically stored belongs to whoever owns the storage
+    /// layout, not to the grammar that renders a name.
+    ///
+    /// `physical` must have been parsed under [`crate::IdentRole::StoredColumn`],
+    /// which is the role that permits the platform's own column prefixes while
+    /// still refusing the backend catalogs and the classification names.
     ///
     /// # Errors
     ///
-    /// [`ProjectionError::Alias`] if the parent name is not a legal alias, or
-    /// [`ProjectionError::MaskedSiblingName`] if the derived sibling would
-    /// overflow the identifier limit.
-    pub fn masked(parent: Ident) -> Result<Self, ProjectionError> {
-        let alias = Ident::parse_as(parent.as_str(), IdentRole::Alias)
+    /// [`ProjectionError::Alias`] if `logical` is not a legal alias.
+    pub fn stored(physical: Ident, logical: Ident) -> Result<Self, ProjectionError> {
+        let alias = Ident::parse_as(logical.as_str(), IdentRole::Alias)
             .map_err(|source| ProjectionError::Alias { source })?;
-        let sibling = Ident::masked_sibling_of(&parent)
-            .map_err(|source| ProjectionError::MaskedSiblingName { source })?;
         Ok(Self {
-            source: ProjectionSource::MaskedSibling { parent, sibling },
+            source: ProjectionSource::Stored { physical },
             alias,
             exposure: Exposure::Declared,
         })
@@ -315,9 +334,10 @@ impl Projection {
     /// [`ProjectionError::NoAggregate`] if nothing in the list aggregates -
     /// that is a row projection and should say so.
     /// [`ProjectionError::DuplicateAlias`] as above.
-    /// [`ProjectionError::MaskedSiblingInAggregate`], because a masked column
-    /// as a grouping key would need its mask policy resolved over a grouped
-    /// result, which is SC-6's contract rather than something to guess at here.
+    /// [`ProjectionError::StoredInAggregate`], because a column whose physical
+    /// name diverges from its logical one is the shape a protected value takes,
+    /// and resolving its policy over a grouped result is SC-6's contract rather
+    /// than something to guess at here.
     pub fn aggregate(fields: Vec<ProjectedField>) -> Result<Self, ProjectionError> {
         if !fields.iter().any(ProjectedField::is_aggregate) {
             return Err(ProjectionError::NoAggregate);
@@ -325,9 +345,9 @@ impl Projection {
         Self::refuse_search_scalar(&fields)?;
         if let Some(field) = fields
             .iter()
-            .find(|f| matches!(f.source, ProjectionSource::MaskedSibling { .. }))
+            .find(|f| matches!(f.source, ProjectionSource::Stored { .. }))
         {
-            return Err(ProjectionError::MaskedSiblingInAggregate {
+            return Err(ProjectionError::StoredInAggregate {
                 alias: field.alias.as_str().to_string(),
             });
         }
@@ -439,11 +459,9 @@ impl Projection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionError {
     Alias { source: crate::ident::IdentError },
-    /// The derived `<col>_masked` name would overflow the identifier limit.
-    MaskedSiblingName { source: crate::ident::IdentError },
     DuplicateAlias { alias: String },
     AggregateInRowProjection { alias: String },
-    MaskedSiblingInAggregate { alias: String },
+    StoredInAggregate { alias: String },
     NoAggregate,
     /// A ranking scalar was offered to a projection that is not a search's.
     SearchScalarOutsideSearch { alias: String },
@@ -453,12 +471,6 @@ impl fmt::Display for ProjectionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Alias { source } => write!(f, "projection alias is invalid: {source}"),
-            Self::MaskedSiblingName { source } => write!(
-                f,
-                "the masked sibling column cannot be named: {source}. This crate does \
-                 not reproduce the migration side's identifier cap, because a second \
-                 implementation of it would project a column that does not exist"
-            ),
             Self::DuplicateAlias { alias } => write!(
                 f,
                 "two projected fields share the alias '{alias}'; the row would be ambiguous"
@@ -468,10 +480,10 @@ impl fmt::Display for ProjectionError {
                 "'{alias}' aggregates, so this is not a row projection; use \
                  Projection::aggregate"
             ),
-            Self::MaskedSiblingInAggregate { alias } => write!(
+            Self::StoredInAggregate { alias } => write!(
                 f,
-                "'{alias}' is a masked column and cannot be a grouping key: its mask \
-                 policy over a grouped result is not decided here"
+                "'{alias}' is stored under a different physical name and cannot be a \
+                 grouping key: its policy over a grouped result is not decided here"
             ),
             Self::NoAggregate => f.write_str(
                 "an aggregate projection must contain at least one aggregate; use \

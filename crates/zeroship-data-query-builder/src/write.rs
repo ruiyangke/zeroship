@@ -362,12 +362,12 @@ impl ColumnAssignment {
 ///
 /// The reason the type has no wildcard is unchanged and is not about that
 /// census. A star returns every **physical** column of the row, which is not
-/// the set the creator may see: a masked field occupies two columns, and only
+/// the set the creator may see: a protected field occupies two columns, and only
 /// one of them is on the read surface. Expressing "everything" would let a
 /// rendered plan reach the other one with no node to point at, which is the
 /// property this type exists to make unstateable. It reuses [`Projection`], the
 /// same node the read family projects through, including
-/// [`crate::ProjectionSource::MaskedSibling`].
+/// [`crate::ProjectionSource::Stored`].
 ///
 /// `Projection` fits without alteration and is therefore reused rather than
 /// re-invented: it is non-empty, it has no wildcard variant, it unions the

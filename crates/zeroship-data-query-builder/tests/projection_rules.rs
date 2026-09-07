@@ -117,10 +117,12 @@ fn planner_added_fields_are_not_visible_to_user_code() {
 /// not fewer columns than intended but the wrong value, silently, on precisely
 /// the columns marked as needing protection.
 #[test]
-fn a_narrowed_projection_over_a_masked_column_renders_the_sibling() {
-    let projection = Projection::rows(vec![
-        ProjectedField::masked(column("ssn")).expect("masked field"),
-    ])
+fn a_narrowed_projection_over_a_stored_column_renders_the_physical_name() {
+    let projection = Projection::rows(vec![ProjectedField::stored(
+        Ident::parse_as("__zs_raw__ssn", IdentRole::StoredColumn).expect("stored column"),
+        column("ssn"),
+    )
+    .expect("stored field")])
     .expect("row projection");
     let plan = Select::builder(
         Ident::parse_as("people", IdentRole::Collection).expect("collection"),
@@ -131,48 +133,62 @@ fn a_narrowed_projection_over_a_masked_column_renders_the_sibling() {
     let sql = postgres::render_select(&plan).expect("renders").sql().to_string();
 
     assert!(
-        sql.contains(r#""ssn_masked" AS "ssn""#),
-        "the mask substitution did not reach the SQL: {sql}"
+        sql.contains(r#""__zs_raw__ssn" AS "ssn""#),
+        "the storage substitution did not reach the SQL: {sql}"
     );
-    // The parent column is NOT read. Checking for the exact projected form is
-    // what distinguishes "the sibling was selected" from "both were".
+    // The logical name is NOT read. Checking for the exact projected form is
+    // what distinguishes "the physical column was selected" from "both were".
     assert!(
         !sql.contains(r#""ssn" AS "ssn""#),
-        "the plaintext column was projected alongside the sibling: {sql}"
+        "the plaintext column was projected alongside the stored one: {sql}"
     );
-    println!("ruled on 1 masked projection");
+    println!("ruled on 1 stored projection");
 }
 
-/// The sibling suffix is reserved on COLUMN names - it has to be, or a creator
-/// could declare `ssn_masked` and shadow the platform's own sibling - and the
-/// platform still has to name it. Both halves, together, because either alone
-/// reads as a contradiction.
+/// The platform's stored prefixes are reserved against CREATOR columns - they
+/// have to be, or a creator could declare one and shadow a platform column - and
+/// the platform still has to name them. Both halves, together, because either
+/// alone reads as a contradiction, and the split role is what expresses it.
 #[test]
-fn the_sibling_name_is_reserved_against_creators_and_derived_for_the_platform() {
-    assert!(
-        Ident::parse_as("ssn_masked", IdentRole::Column).is_err(),
-        "a creator could declare the sibling name and shadow the platform's"
-    );
-    // `ProjectedField::masked` takes ONE ident and derives the other, so there
-    // is no argument position a caller could pass an arbitrary sibling in.
-    let field = ProjectedField::masked(column("ssn")).expect("masked field");
+fn the_stored_prefix_is_reserved_against_creators_and_nameable_by_the_platform() {
+    let mut ruled_on = 0_usize;
+    for name in ["__zs_raw__ssn", "_distance", "__zeroship_journal"] {
+        assert!(
+            Ident::parse_as(name, IdentRole::Column).is_err(),
+            "a creator could declare {name:?} and shadow a platform column"
+        );
+        assert!(
+            Ident::parse_as(name, IdentRole::StoredColumn).is_ok(),
+            "the platform cannot name its own stored column {name:?}"
+        );
+        ruled_on += 1;
+    }
+    // The looser role is NOT a bypass: the backend catalogs and the
+    // classification names are refused in both. Without these the role would be
+    // a hole rather than a split.
+    for refused in ["pg_attribute", "sqlite_master", "pii"] {
+        assert!(
+            Ident::parse_as(refused, IdentRole::StoredColumn).is_err(),
+            "the stored-column role let {refused:?} through"
+        );
+        ruled_on += 1;
+    }
+    assert_eq!(ruled_on, 6);
+    println!("ruled on {ruled_on} stored-column names");
+}
+
+/// Both names are supplied, and the physical one is what reaches the SQL. The
+/// crate derived it until 2026-09-07 and the derivation outlived the storage
+/// layout it described.
+#[test]
+fn a_stored_field_takes_both_names_from_the_caller() {
+    let field = ProjectedField::stored(
+        Ident::parse_as("__zs_raw__ssn", IdentRole::StoredColumn).expect("stored column"),
+        column("ssn"),
+    )
+    .expect("stored field");
     assert_eq!(field.alias.as_str(), "ssn");
-    println!("ruled on 1 reserved name and 1 derivation");
-}
-
-/// The derived name is not capped or hashed here, and refusing beats guessing:
-/// the migration side applies its own cap, and a second implementation of it
-/// would project a column that does not exist.
-#[test]
-fn an_overlong_masked_sibling_is_refused_rather_than_truncated() {
-    let parent = column(&"p".repeat(60));
-    assert!(matches!(
-        ProjectedField::masked(parent),
-        Err(ProjectionError::MaskedSiblingName { .. })
-    ));
-    // The control: a parent short enough to leave room is fine.
-    assert!(ProjectedField::masked(column(&"p".repeat(56))).is_ok());
-    println!("ruled on 2 parent lengths");
+    println!("ruled on 1 stored field");
 }
 
 /// Two columns arriving under one name is an ambiguous row, not a narrowing.
@@ -228,13 +244,17 @@ fn a_masked_sibling_is_refused_in_an_aggregate_projection() {
             AggregateRef::over(AggregateFunc::Max, column("age"), false).expect("aggregate"),
             alias("oldest"),
         ),
-        ProjectedField::masked(column("ssn")).expect("masked field"),
+        ProjectedField::stored(
+            Ident::parse_as("__zs_raw__ssn", IdentRole::StoredColumn).expect("stored column"),
+            column("ssn"),
+        )
+        .expect("stored field"),
     ]);
     assert!(matches!(
         outcome,
-        Err(ProjectionError::MaskedSiblingInAggregate { .. })
+        Err(ProjectionError::StoredInAggregate { .. })
     ));
-    println!("ruled on 1 masked aggregate");
+    println!("ruled on 1 stored aggregate");
 }
 
 /// There is no `SELECT *`, and the absence is structural: `ProjectionSource`

@@ -130,10 +130,14 @@ fn no_write_renders_a_returning_star() {
 /// With `Returning` over a `Projection`, the substitution is the same node the
 /// read family uses, so the plaintext column is never named.
 #[test]
-fn a_returning_list_over_a_masked_column_renders_the_sibling() {
+fn a_returning_list_over_a_stored_column_renders_the_physical_name() {
     let returning = Returning::rows(
-        Projection::rows(vec![ProjectedField::masked(column("ssn")).expect("masked field")])
-            .expect("row projection"),
+        Projection::rows(vec![ProjectedField::stored(
+            Ident::parse_as("__zs_raw__ssn", IdentRole::StoredColumn).expect("stored column"),
+            column("ssn"),
+        )
+        .expect("stored field")])
+        .expect("row projection"),
     )
     .expect("returning");
 
@@ -141,19 +145,19 @@ fn a_returning_list_over_a_masked_column_renders_the_sibling() {
     for plan in all_three_writes(&returning) {
         let sql = sql_of(&plan);
         assert!(
-            sql.contains(r#""ssn_masked" AS "ssn""#),
-            "the mask substitution did not reach the RETURNING list: {sql}"
+            sql.contains(r#""__zs_raw__ssn" AS "ssn""#),
+            "the storage substitution did not reach the RETURNING list: {sql}"
         );
-        // The parent column is NOT returned. Checking the exact projected form
-        // is what distinguishes "the sibling was returned" from "both were".
+        // The logical name is NOT returned. Checking the exact projected form
+        // is what distinguishes "the physical column was returned" from "both".
         assert!(
             !sql.contains(r#""ssn" AS "ssn""#),
-            "the plaintext column was returned alongside the sibling: {sql}"
+            "the plaintext column was returned alongside the stored one: {sql}"
         );
         ruled_on += 1;
     }
     assert_eq!(ruled_on, 3);
-    println!("ruled on {ruled_on} masked write statements");
+    println!("ruled on {ruled_on} stored write statements");
 }
 
 /// The platform-field union reaches a write's returned row too, which is what
