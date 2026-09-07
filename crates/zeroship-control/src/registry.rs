@@ -243,26 +243,7 @@ impl Registry {
         plan_id: &str,
         owner_id: &Uuid,
     ) -> Result<AppRecord, RegistryError> {
-        if name.is_empty()
-            || name.len() > 64
-            || !name
-                .chars()
-                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        {
-            return Err(RegistryError::InvalidInput(
-                "name must be 1-64 alphanumeric/hyphen/underscore".into(),
-            ));
-        }
-
-        // The name IS the app's hostname label, so a name the platform edge
-        // already routes elsewhere cannot be handed to a creator. Refused here,
-        // at the only point a name is ever claimed, rather than at dispatch —
-        // by the time a request arrives the name is already taken.
-        if crate::reserved_names::is_reserved_app_name(name) {
-            return Err(RegistryError::ReservedName(
-                crate::reserved_names::reserved_name_message(name),
-            ));
-        }
+        validate_app_name(name)?;
 
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
@@ -1053,6 +1034,169 @@ fn net_policy_limits_from_catalog(
             }
         },
         None => FREE_TIER_NET_POLICY_LIMITS,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Name validation
+// ---------------------------------------------------------------------------
+
+/// Every rule a NEW app name must satisfy, in the order a creator should read
+/// them: is it a legal name, and is it a name the platform can hand out.
+///
+/// Extracted from [`Registry::create_app`] so the rules can be ruled on without
+/// a database. `create_app` calls it as its first statement and is the only
+/// caller; `crates/zeroship-control/tests/reserved_app_names_test.rs` is what
+/// binds the two together against the real route.
+///
+/// # Errors
+///
+/// [`RegistryError::InvalidInput`] for a malformed name and
+/// [`RegistryError::ReservedName`] for a well-formed one the platform keeps.
+/// The two are separate on purpose - see the variant docs.
+pub fn validate_app_name(name: &str) -> Result<(), RegistryError> {
+    if name.is_empty()
+        || name.len() > 64
+        || !name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(RegistryError::InvalidInput(
+            "name must be 1-64 alphanumeric/hyphen/underscore".into(),
+        ));
+    }
+
+    // The name IS the app's hostname label, so a name the platform edge
+    // already routes elsewhere cannot be handed to a creator. Refused here,
+    // at the only point a name is ever claimed, rather than at dispatch —
+    // by the time a request arrives the name is already taken.
+    if crate::reserved_names::is_reserved_app_name(name) {
+        return Err(RegistryError::ReservedName(
+            crate::reserved_names::reserved_name_message(name),
+        ));
+    }
+
+    if name_reads_as_an_app_id(name) {
+        return Err(RegistryError::ReservedName(format!(
+            "'{name}' starts with '{APP_ID_PREFIX}', which is reserved for app IDs. \
+             An app's name is a routing label and an app's id is its identity; a \
+             name in the id namespace makes the two indistinguishable wherever one \
+             string carries both. Choose a different app name."
+        )));
+    }
+
+    Ok(())
+}
+
+/// The prefix an app id is spelled with, including its separator.
+///
+/// A literal rather than a `format!` of [`AppId::PREFIX`] so it can be a
+/// `const`, and PINNED to that constant by
+/// `name_validation_tests::the_reserved_prefix_is_the_one_the_id_type_uses` -
+/// the reservation and the parse must name one namespace, and a second literal
+/// nobody compares is how they would come to name two.
+const APP_ID_PREFIX: &str = "app_";
+
+/// True when `name` claims the app-id namespace.
+///
+/// THE WHOLE PREFIX IS RESERVED, not merely the names that parse as an id. The
+/// charset rule above admits `_`, so `app_0123456789ABCDEFGHIJKL` is a legal
+/// name AND a legal [`AppId`] - a single string that is both, which is what
+/// makes any name-or-id discriminator unwritable. Reserving only the parsable
+/// bodies would leave the boundary standing on base62 length and range checks:
+/// a body one character short would be claimable, and the rule would be one no
+/// creator could state and no reviewer could check.
+///
+/// Case-folded, for the same reason `is_reserved_app_name` folds: an app name
+/// is a hostname label and hostnames are case-insensitive (RFC 4343), so
+/// `App_x` and `app_x` name one origin.
+fn name_reads_as_an_app_id(name: &str) -> bool {
+    name.len() >= APP_ID_PREFIX.len()
+        && name[..APP_ID_PREFIX.len()].eq_ignore_ascii_case(APP_ID_PREFIX)
+}
+
+#[cfg(test)]
+mod name_validation_tests {
+    use super::*;
+
+    /// The string that is a legal app NAME and a legal app ID at once.
+    ///
+    /// `create_app`'s charset rule admits `_`, and `AppId::parse` wants the
+    /// `app_` prefix plus a base62 body, so this passes both. A creator who
+    /// claims it holds a name that every `--app=` reads as an identity.
+    const ID_SHAPED_NAME: &str = "app_0123456789ABCDEFGHIJKL";
+
+    /// The premise: this really is BOTH, so the collision is a fact rather
+    /// than a worry about one. If `AppId::parse` ever stopped taking it, the
+    /// refusal below would be guarding nothing and this arm says so first.
+    #[test]
+    fn the_id_shaped_name_really_does_parse_as_an_app_id() {
+        assert!(
+            AppId::parse(ID_SHAPED_NAME).is_ok(),
+            "{ID_SHAPED_NAME} must be a real app id, or the refusal under test \
+             is defending against a string nothing would confuse"
+        );
+    }
+
+    /// The refusal, and its control one variable away: the same call, the same
+    /// charset, a name that does not claim the id namespace.
+    #[test]
+    fn a_name_in_the_app_id_namespace_is_refused() {
+        let err = validate_app_name(ID_SHAPED_NAME)
+            .expect_err("a name that is also an app id must not be claimable");
+        assert!(
+            matches!(err, RegistryError::ReservedName(_)),
+            "well-formed and unavailable, like a reserved label - not malformed; \
+             got {err:?}"
+        );
+
+        // The whole prefix is reserved, not only the bodies that parse.
+        for name in ["app_", "app_x", "APP_something", "App_Mixed"] {
+            assert!(
+                matches!(
+                    validate_app_name(name),
+                    Err(RegistryError::ReservedName(_))
+                ),
+                "{name} claims the id namespace and must be refused too"
+            );
+        }
+
+        for ordinary in ["app", "apps", "application", "my-app", "app-store"] {
+            assert!(
+                validate_app_name(ordinary).is_ok(),
+                "{ordinary} does not claim the id namespace and must stay \
+                 claimable - a refusal that denied these would read as correct \
+                 from the refusal side alone"
+            );
+        }
+    }
+
+    /// The reservation and the id parse must name ONE namespace.
+    #[test]
+    fn the_reserved_prefix_is_the_one_the_id_type_uses() {
+        assert_eq!(
+            APP_ID_PREFIX,
+            format!("{}_", AppId::PREFIX),
+            "the refusal must reserve exactly the prefix AppId::parse reads"
+        );
+    }
+
+    /// The extraction is behaviour-neutral for the rules that were already
+    /// there: a reserved label and a malformed name still answer differently.
+    #[test]
+    fn the_earlier_rules_survive_the_extraction() {
+        assert!(matches!(
+            validate_app_name("console"),
+            Err(RegistryError::ReservedName(_))
+        ));
+        assert!(matches!(
+            validate_app_name("not a legal name!"),
+            Err(RegistryError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            validate_app_name(""),
+            Err(RegistryError::InvalidInput(_))
+        ));
     }
 }
 

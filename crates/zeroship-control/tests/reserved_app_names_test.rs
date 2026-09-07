@@ -371,6 +371,66 @@ async fn a_reserved_name_and_a_malformed_name_answer_differently() {
     );
 }
 
+/// A name in the APP-ID namespace is refused by the real create route.
+///
+/// The other tests here are about hostname labels the edge claims. This one is
+/// about a different collision with the same remedy: `create_app`'s charset
+/// rule admits `_`, so `app_0123456789ABCDEFGHIJKL` is a legal NAME and also a
+/// legal `zeroship_core::app_id::AppId` - one string that is both, which is
+/// what makes any name-or-id discriminator unwritable. The CLI's `--app` used
+/// to be exactly such a discriminator.
+///
+/// `registry::name_validation_tests` rules on the predicate without a database.
+/// This is the PATH claim, for the same reason stated in this file's header:
+/// a predicate stays green when its call site stops being reached.
+#[compio::test]
+async fn a_name_in_the_app_id_namespace_is_refused_by_the_route() {
+    let fx = build_test_state("appid").await;
+    let creator = common::authz_fixture::seeded_principal(&fx.state).await;
+    let control = init_control!(fx);
+
+    let id_shaped = "app_0123456789ABCDEFGHIJKL";
+    assert!(
+        zeroship_core::app_id::AppId::parse(id_shaped).is_ok(),
+        "the premise: this name really is a well-formed app id"
+    );
+
+    let (status, body) = create!(control, creator.bearer(), id_shaped);
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "a name that is also an app id must be refused; got {body}"
+    );
+    let message = body["error"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(id_shaped) && message.contains("reserved"),
+        "the refusal must name the label and say it is reserved: {message}"
+    );
+    assert_eq!(app_row_count(&fx, id_shaped).await, 0);
+
+    // THE CONTROL, one variable away: the same route, the same charset,
+    // underscores and the word "app" included - what is refused is the id
+    // PREFIX, not the underscore and not the word.
+    let ordinary = format!("my_app_{}", Uuid::new_v4().simple());
+    let (status, body) = create!(control, creator.bearer(), &ordinary);
+    assert_eq!(
+        status,
+        StatusCode::CREATED,
+        "an underscore name outside the id namespace must still be created: {body}"
+    );
+    let created_id: Uuid = body["id"]
+        .as_str()
+        .expect("created app carries an id")
+        .parse()
+        .expect("app id parses");
+
+    cleanup_app(&fx, created_id).await;
+    creator.cleanup(&fx.state).await;
+    drop(control);
+    drop(fx);
+    common::drain_pg().await;
+}
+
 /// The registry is the choke point, and `crates/zeroship-control/src/bin/dev_provision.rs`
 /// reaches it WITHOUT the HTTP handler. Driving `Registry::create_app` directly
 /// covers that vector and pins the typed error the HTTP layer maps.
