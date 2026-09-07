@@ -1,9 +1,13 @@
 //! The erasure seam, against the real organization tables.
 //!
 //! `crate::erasure::preflight` is what the auth service asks before it opens a
-//! deletion window and again before the reaper erases. It answers ONE question -
-//! is this human the only owner of a live organization - and every blocker it
-//! returns has to carry enough for the person to act on it.
+//! deletion window and again before the reaper erases. This file rules on its
+//! OWNERSHIP rule - is this human the only owner of a live organization - and
+//! every blocker it returns has to carry enough for the person to act on it.
+//!
+//! Its second rule, whether an organization still OWES, has its own file
+//! (`deletion_owes_test.rs`) because it shares one predicate with the dissolve
+//! path and the two are worth ruling on together.
 //!
 //! The auth suite exercises the WIRE (`mock_control`); this exercises the SQL,
 //! because that is where the tables are and `zeroship_auth` cannot read them.
@@ -13,6 +17,7 @@
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 
+use zeroship_control::billing_read::LocalInvoicing;
 use zeroship_control::erasure::{preflight, ErasureRemedy};
 use zeroship_control::organizations::{
     self, AddMemberBody, CreateOrganizationBody, TransferOwnershipBody,
@@ -116,7 +121,7 @@ async fn a_sole_owner_is_blocked_and_told_what_to_do() {
     let owner = fx.seed_user("erasure-sole").await;
     let organization = fx.organization(owner, "erasure-sole").await;
 
-    let report = preflight(&fx.pg, owner).await.expect("preflight");
+    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight");
     assert_eq!(report.blockers.len(), 1, "{report:?}");
     let blocker = &report.blockers[0];
     assert_eq!(blocker.organization_id, organization);
@@ -130,7 +135,7 @@ async fn a_sole_owner_is_blocked_and_told_what_to_do() {
 
     // Empty it and the remedy becomes the one the creator can actually run.
     fx.drop_projects(&organization).await;
-    let report = preflight(&fx.pg, owner).await.expect("preflight");
+    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight");
     assert_eq!(report.blockers[0].remedy, ErasureRemedy::Dissolve);
 
     fx.cleanup(&[&organization], &[owner]).await;
@@ -169,10 +174,10 @@ async fn transferring_ownership_moves_the_blocker_to_the_successor() {
     .expect("transfer");
 
     assert!(
-        preflight(&fx.pg, owner).await.expect("preflight").is_clear(),
+        preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight").is_clear(),
         "the remedy the blocker names must clear the blocker"
     );
-    let heir = preflight(&fx.pg, successor).await.expect("preflight");
+    let heir = preflight(&fx.pg, successor, LocalInvoicing::Yes).await.expect("preflight");
     assert_eq!(heir.blockers.len(), 1, "the successor inherits it: {heir:?}");
 
     fx.cleanup(&[&organization], &[owner, successor]).await;
@@ -206,10 +211,10 @@ async fn a_second_owner_row_clears_the_blocker_for_both() {
         .expect("seed a second owner row");
 
     assert!(
-        preflight(&fx.pg, owner).await.expect("preflight").is_clear(),
+        preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight").is_clear(),
         "two owners means neither is the last one"
     );
-    assert!(preflight(&fx.pg, peer).await.expect("preflight").is_clear());
+    assert!(preflight(&fx.pg, peer, LocalInvoicing::Yes).await.expect("preflight").is_clear());
 
     fx.cleanup(&[&organization], &[owner, peer]).await;
 }
@@ -237,10 +242,10 @@ async fn a_non_owner_seat_is_never_a_blocker_and_the_owner_still_is() {
     .expect("seat a developer");
 
     assert!(
-        preflight(&fx.pg, member).await.expect("preflight").is_clear(),
+        preflight(&fx.pg, member, LocalInvoicing::Yes).await.expect("preflight").is_clear(),
         "a developer's departure strands nothing"
     );
-    let report = preflight(&fx.pg, owner).await.expect("preflight");
+    let report = preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight");
     assert_eq!(report.blockers.len(), 1);
     assert_eq!(
         report.blockers[0].remedy,
@@ -270,7 +275,7 @@ async fn a_dissolved_organization_is_not_a_blocker() {
         .expect("close the organization");
 
     assert!(
-        preflight(&fx.pg, owner).await.expect("preflight").is_clear(),
+        preflight(&fx.pg, owner, LocalInvoicing::Yes).await.expect("preflight").is_clear(),
         "a closed organization needs no successor"
     );
 
@@ -283,6 +288,6 @@ async fn a_dissolved_organization_is_not_a_blocker() {
 async fn a_principal_with_no_seat_is_clear() {
     let Some(fx) = Fx::new().await else { return };
     let nobody = fx.seed_user("erasure-nobody").await;
-    assert!(preflight(&fx.pg, nobody).await.expect("preflight").is_clear());
+    assert!(preflight(&fx.pg, nobody, LocalInvoicing::Yes).await.expect("preflight").is_clear());
     fx.cleanup(&[], &[nobody]).await;
 }

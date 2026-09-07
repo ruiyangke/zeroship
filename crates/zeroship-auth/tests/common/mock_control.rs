@@ -27,10 +27,15 @@ use serde_json::json;
 /// What the mock answers with.
 #[derive(Debug, Clone)]
 pub enum Answer {
-    /// `200 {"blockers": []}` - erasure may proceed.
+    /// `200` with both blocker lists empty - erasure may proceed.
     Clear,
-    /// `200` with one blocker naming this organization slug.
+    /// `200` with one OWNERSHIP blocker naming this organization slug.
     SoleOwnerOf { slug: String },
+    /// `200` with one MONEY blocker: an organization whose last owner seat is
+    /// this human's and which still owes. Its organization is DISSOLVED, which
+    /// is the shape the ownership rule cannot produce - so a test using this
+    /// arm cannot pass by accident on the older rule.
+    OwesBilling { slug: String, owed_cents: i64 },
     /// `500` - the control plane could not compute the answer. NOT the same as
     /// `Clear`, and the whole point of having this arm.
     Unavailable,
