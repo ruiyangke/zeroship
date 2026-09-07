@@ -141,7 +141,6 @@ gateway_run() {
   shift 2
   run_gate "$log" env \
     "ZEROSHIP_CONTROL_KEY=$control" \
-    "ZEROSHIP_WORKER_KEY=$STRONG" \
     "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY=$STRONG" \
     "ZEROSHIP_PAIRWISE_SALT=$STRONG" \
     "$BIN/zeroship-gate" "$@"
@@ -187,7 +186,6 @@ REL="$ROOT/target/release/zeroship-gate"
 if [ -x "$REL" ]; then
   status=$(run_gate "$TMP/gw_release_boot.log" env \
     "ZEROSHIP_CONTROL_KEY=$SENTINEL" \
-    "ZEROSHIP_WORKER_KEY=$STRONG" \
     "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY=$STRONG" \
     "ZEROSHIP_PAIRWISE_SALT=$STRONG" \
     "$REL")
@@ -205,7 +203,6 @@ if [ -x "$REL" ]; then
   # not about the release build refusing everything.
   run_gate "$TMP/gw_release_ok.log" env \
     "ZEROSHIP_CONTROL_KEY=control-key-material" \
-    "ZEROSHIP_WORKER_KEY=$STRONG" \
     "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY=$STRONG" \
     "ZEROSHIP_PAIRWISE_SALT=$STRONG" \
     "$REL" --check-config > /dev/null
@@ -249,7 +246,7 @@ if [ "$status" -ne 0 ]; then
 fi
 grep -q 'service_credentials = configured' "$TMP/gw_ok.log" \
   || note_fail "the check-config report does not publish the credential posture"
-grep -q 'service_credentials_checked = 4' "$TMP/gw_ok.log" \
+grep -q 'service_credentials_checked = 3' "$TMP/gw_ok.log" \
   || note_fail "the report does not say how many credentials it ruled on"
 grep -qF "REFUSES TO START" "$TMP/gw_ok.log" \
   && note_fail "a healthy configuration printed a refusal banner"
@@ -258,7 +255,6 @@ grep -qF "REFUSES TO START" "$TMP/gw_ok.log" \
 # rather than reporting a green built out of zero readings.
 status=$(run_gate "$TMP/gw_files.log" "$BIN/zeroship-gate" --check-config \
   --control-key-file "$(secret_file gw_control "control-key-material")" \
-  --worker-key-file "$(secret_file gw_worker "$STRONG")" \
   --stash-signing-key-file "$(secret_file gw_stash "$STRONG")" \
   --pairwise-salt-file "$(secret_file gw_salt "$STRONG")")
 CONFIGURED_EXAMINED=$((CONFIGURED_EXAMINED + 1))
@@ -277,7 +273,6 @@ if [ -x "$BIN/zeroship-worker" ]; then
     shift 2
     run_gate "$log" env \
       "ZEROSHIP_CONTROL_KEY=$control" \
-      "ZEROSHIP_WORKER_KEY=$STRONG" \
       "$BIN/zeroship-worker" "$@"
   }
 

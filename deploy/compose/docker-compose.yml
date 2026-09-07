@@ -360,11 +360,6 @@ services:
       ZEROSHIP_CONTROL_MASTER_KEY: ${ZEROSHIP_CONTROL_MASTER_KEY:?run zeroship dev init}
       ZEROSHIP_CONTROL_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-control.pem
       ZEROSHIP_CONTROL_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
-      # control ALSO needs the worker key: it refuses to start without one,
-      # because it calls the worker's admin endpoints. MUST match the worker's
-      # value - it is ONE setting with several consumers, which is why it has
-      # one name rather than a per-service spelling.
-      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
       # OPTIONAL, and empty means "this deployment does not accept Stripe
       # webhooks". Stripe is the only party that can issue a value that
       # verifies: the secret is `whsec_...` from the dashboard endpoint, or
@@ -603,7 +598,6 @@ services:
       ZEROSHIP_GATEWAY_DATABASE_URL: ${ZEROSHIP_GATEWAY_DATABASE_URL:-postgres://zeroship_gateway:zeroship_gateway@postgres:5432/zeroship}
       # One key, one name, several consumers. MUST match the worker's.
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
-      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
       # Public-edge topology consumed by the gateway's --origin-scheme setting.
       ZEROSHIP_ORIGIN_SCHEME: ${ZEROSHIP_ORIGIN_SCHEME:-http}
       # Counterpart to auth's ZEROSHIP_AUTH_BROKER_SECRET_FILE -- SAME FILE, and
@@ -649,13 +643,13 @@ services:
     image: zeroship-platform:dev
     # Worker defaults to binding 127.0.0.1 for safety. In the Docker
     # network the gateway reaches the worker via the `worker` DNS name,
-    # so we explicitly opt in to 0.0.0.0 AND set a worker key - without
-    # the key the worker refuses to bind a non-loopback address (to
-    # avoid exposing unauthenticated code execution). The key must match
-    # the gateway's ZEROSHIP_WORKER_KEY.
+    # so we explicitly opt in to 0.0.0.0. What makes that safe is the
+    # service key material below: dispatch carries an ed25519 assertion the
+    # worker verifies under the peer document, and an unconfigured worker
+    # REFUSES every caller rather than admitting one.
     # No secret is a flag; each arrives under its own canonical ZEROSHIP_ name
-    # in the `environment:` block below. ZEROSHIP_WORKER_KEY must match the
-    # gateway's. The worker logs in as the constrained zeroship_worker role.
+    # in the `environment:` block below. The worker logs in as the
+    # constrained zeroship_worker role.
     # zeroship-migrate-server creates app roles, workflow schemas, and publications;
     # the worker receives only runtime-role membership, its narrow workflow
     # owner membership, and REPLICATION for per-worker logical slots. It has no
@@ -700,7 +694,6 @@ services:
       # no value flag and arrives here instead of on the command line.
       ZEROSHIP_WORKER_KV_URL: ${ZEROSHIP_WORKER_KV_URL:-redis://redis:6379}
       ZEROSHIP_CONTROL_KEY: ${ZEROSHIP_CONTROL_KEY:?run zeroship dev init}
-      ZEROSHIP_WORKER_KEY: ${ZEROSHIP_WORKER_KEY:?run zeroship dev init}
       ZEROSHIP_WORKER_SERVICE_KEY_FILE: /etc/zeroship/secrets/svc-worker.pem
       ZEROSHIP_WORKER_SERVICE_PEERS_FILE: /etc/zeroship/secrets/service-peers.json
       ZEROSHIP_OBSERVABILITY_LOG_FILTER: info,zeroship_=debug

@@ -654,7 +654,7 @@ jobs:
       # crates/zeroship-gatekit gates behind them, as a complexity-budget
       # decision about that crate rather than a finding that the checks were
       # wrong. The properties they held are unguarded; each had caught a real
-      # defect (PGDATA in the container's writable layer; a 10-byte WORKER_KEY
+      # defect (PGDATA in the container's writable layer; a 10-byte shared secret
       # against a 32-byte minimum).
       #
       # THE ONE STEP IN THIS JOB THAT USES DOCKER, and it has to.
