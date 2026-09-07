@@ -225,7 +225,6 @@ by the generator.
 | `poll_interval` | operational | `ZEROSHIP_POLL_INTERVAL` | `poll_interval` | zeroship-gate `--poll-interval`<br>zeroship-worker `--poll-interval` | `5` |
 | `trust_proxy` | operational | `ZEROSHIP_TRUST_PROXY` | `trust_proxy` | zeroship-control `--trust-proxy`<br>zeroship-gate `--trust-proxy`<br>zeroship-migrate-server `--trust-proxy` | `false` |
 | `trusted_origins` | operational | `ZEROSHIP_TRUSTED_ORIGINS` | `trusted_origins` | zeroship-gate `--trusted-origins` | empty |
-| `worker_key` | secret | `ZEROSHIP_WORKER_KEY` | `worker_key` | zeroship-control `--worker-key-file`<br>zeroship-gate `--worker-key-file`<br>zeroship-worker `--worker-key-file` | - |
 | `worker_urls` | operational | `ZEROSHIP_WORKER_URLS` | `worker_urls` | zeroship-control `--worker-urls`<br>zeroship-gate `--worker-urls` | `http://localhost:8080` |
 
 ### auth
@@ -483,7 +482,7 @@ conflict fails without rotating either side.
 32 random bytes as lowercase hex. Rerunning keeps an existing valid value rather
 than rotating it. Here the `.env` name and the container name coincide:
 
-`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY`
 `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY` `ZEROSHIP_PAIRWISE_SALT`
 `ZEROSHIP_AUTH_STASH_SIGNING_KEY` `ZEROSHIP_AUTH_TOTP_ENC_KEY`
 `ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY`

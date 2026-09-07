@@ -105,9 +105,9 @@ The command creates exactly these eight files, with a mode of 0600 on Unix (and
 `gateway-signing.pem` `auth-signing.pem` `broker-secret`
 `pairwise-salt` `refresh-hash-key` `refresh-idem-key`
 
-It also adds eight 32-byte random hex values to the env overlay:
+It also adds seven 32-byte random hex values to the env overlay:
 
-`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY` `ZEROSHIP_WORKER_KEY`
+`ZEROSHIP_CONTROL_KEY` `ZEROSHIP_CONTROL_MASTER_KEY`
 `ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY` `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY`
 `ZEROSHIP_PAIRWISE_SALT` `ZEROSHIP_AUTH_STASH_SIGNING_KEY`
 `ZEROSHIP_AUTH_TOTP_ENC_KEY`

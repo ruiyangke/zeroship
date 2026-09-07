@@ -149,7 +149,8 @@ Notes:
   no trailing newline; changing either value would change every derived
   per-app `pws_`.
 - `zeroship-worker` binds `127.0.0.1` by default (loopback, as above). Only add
-  `--bind 0.0.0.0` together with `ZEROSHIP_WORKER_KEY` if another host must
+  `--bind 0.0.0.0` together with `ZEROSHIP_WORKER_SERVICE_KEY_FILE` and
+  `ZEROSHIP_WORKER_SERVICE_PEERS_FILE` if another host must
   reach it.
 - Except for the worker, `--config <path>` or `ZEROSHIP_CONFIG=<path>` loads the optional TOML
   overlay; add `--check-config` to the normal command for a read-only dry run
