@@ -380,7 +380,7 @@ pub(crate) const RESERVED_SYSTEM_TABLE_PREFIX: &str = "__zeroship_";
 /// # Placement
 ///
 /// The APP'S OWN SCHEMA, beside `__zeroship_schema_migrations` and its siblings,
-/// not `__zeroship_admin`. That is not a weakening: the platform's system schema
+/// not a platform-owned system schema. That is not a weakening: such a schema
 /// is for state a separate service WRITES and the worker only READS, and this
 /// table is the other way round. The worker is the sole writer, over ordinary
 /// parameterised SQL, with provenance enforced at the Rust call boundary rather

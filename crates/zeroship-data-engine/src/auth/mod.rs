@@ -13,7 +13,7 @@
 //!
 //! ## What was deleted, and why it is not coming back
 //!
-//! An earlier design put a `__zeroship_admin` schema here, owned by a
+//! An earlier design put a platform-owned system schema here, owned by a
 //! `__zeroship_platform_role`, holding six tables (`hmac_keys`,
 //! `session_ctx`, `session_nonces`, `column_keys`, `pitr_targets`,
 //! `mask_policies`) and 32 `SECURITY DEFINER` routines, with the
@@ -36,6 +36,27 @@
 //! Concretely: slot and publication ownership belongs to the CDC relay,
 //! and the runtime descriptor - not a platform-owned schema epoch - is
 //! the schema authority.
+//!
+//! ## The name is reserved, not retired
+//!
+//! The schema this design used was spelled with the `__zeroship` prefix, and
+//! that prefix is still fenced off from creator code by five surfaces: the
+//! namespace, column and alias reservation tables in
+//! `zeroship-data-query-builder`'s `ident`, `zeroship-schema`'s `RESERVED_NAMES`,
+//! and the `PLATFORM_RESERVED_COLLECTION_PREFIXES` list that three crates pin
+//! against each other. Those fences are NOT guarding a dead name. `__zeroship_`
+//! is the live prefix of tables that exist in every app schema today - the
+//! migration journal, the unmask audit table and the workflow journal - and it
+//! additionally holds the namespace open for the one use AGENTS.md's invariant
+//! permits: state a separate service WRITES and the worker only READS, which a
+//! schema epoch would be. Deleting a reservation because the schema it was
+//! named for is gone would let creator code collide with the tables that are
+//! there now. As of 2026-09-07 no code in this repo names that schema and no
+//! prose asserts it exists; the two live proposals that specify creating one,
+//! `docs/proposals/2026-08-28-app-database-decoupling.md` and
+//! `-cdc-service.md`, are untouched, and one of them carries the grant posture
+//! that is the whole difference between the schema deleted for being a
+//! vulnerability and the one the invariant would permit.
 //!
 //! ## The last residue went 2026-09-04
 //!

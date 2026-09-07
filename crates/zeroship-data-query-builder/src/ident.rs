@@ -186,11 +186,17 @@ impl Reservation {
 
 /// Schema-name fences.
 ///
-/// `__zeroship` is refused here even though the platform's own system schema
-/// (`__zeroship_admin`) is spelled that way, and refusing it is the point: this
-/// crate builds plans the *worker* executes, and the worker executes creator
-/// code. Per the platform invariant, state a separate service writes and the
-/// worker only reads must not be nameable from a worker-built plan.
+/// `__zeroship` is refused here, and it guards two distinct things. The first is
+/// live: `__zeroship_` is the prefix of tables that exist in every app schema
+/// today - the migration journal, the unmask audit table, the workflow journal -
+/// and a creator-named collection colliding with one of them is a corruption
+/// rather than a name clash. The second is a reservation: this crate builds
+/// plans the *worker* executes, and the worker executes creator code, so per the
+/// platform invariant, state a separate service writes and the worker only reads
+/// must not be nameable from a worker-built plan. No such platform-owned schema
+/// exists at the time of writing; the fence holds the namespace open for one and
+/// protects the live tables meanwhile. Do not narrow it on the grounds that the
+/// schema is absent.
 const NAMESPACE_RESERVATIONS: &[Reservation] = &[
     Reservation::Prefix("pg_"),
     Reservation::Exact("information_schema"),
@@ -495,7 +501,7 @@ mod tests {
     #[test]
     fn every_role_has_deliberate_reservation_behavior() {
         let cases = [
-            (IdentRole::Namespace, "__zeroship_admin", false),
+            (IdentRole::Namespace, "__zeroship_reserved", false),
             (IdentRole::Collection, "pg_class", false),
             (IdentRole::Column, "pg_attribute", false),
             (IdentRole::Alias, "__zeroship_internal", false),

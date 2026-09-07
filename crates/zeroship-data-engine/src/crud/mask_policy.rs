@@ -17,9 +17,9 @@
 //! symbol (see `crate::v8_classes::db_platform`).
 //!
 //! There is no durable policy store on PG. There used to be:
-//! `__zeroship_admin.get_mask_policy(app_id)` /
-//! `set_mask_policy(app_id, policy)`, a pair of `SECURITY DEFINER`
-//! routines over an `__zeroship_admin.mask_policies` table. Installed
+//! `get_mask_policy(app_id)` / `set_mask_policy(app_id, policy)`, a pair of
+//! `SECURITY DEFINER` routines over a `mask_policies` table, all three in the
+//! platform-owned system schema deleted on 2026-08-27. Installed
 //! only by `auth::bootstrap::ensure_admin_schema`, which was `cfg(test,
 //! feature = "test-helpers")` - so they never existed in a shipped
 //! worker even before that function was deleted on 2026-08-27. They were

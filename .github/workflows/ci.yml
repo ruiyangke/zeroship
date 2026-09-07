@@ -918,8 +918,11 @@ jobs:
       # contributes no test count and no failure. plugin-db puts three suites
       # behind `test-helpers`, which is why none of them have ever run here.
       #
-      # Only the SQLite one is listed: it needs no server and passes 124 tests
-      # in about 20 seconds, so it is real coverage this job was missing. Its
+      # Only the SQLite one is listed: it needs no server and runs in seconds,
+      # so it is real coverage this job was missing. This comment carried an
+      # exact test count until 2026-09-07, when deleting one test made it wrong
+      # and nothing re-measured it; the count is not asserted anywhere, so it
+      # was a maintenance obligation with no gate behind it. Its
       # two siblings (`integration`, `native_transaction`) need a live
       # PostgreSQL that this job does not provision, and they belong with the
       # other live-database gates rather than here.

@@ -185,7 +185,7 @@ const CHARTER_INJECTED_COLUMNS: &[&str] = &[
 
 /// Every reserved TABLE shape.
 const RESERVED_TABLE_NAMES: &[(&str, &str)] = &[
-    ("__zeroship_admin", "__zeroship"),
+    ("__zeroship_reserved", "__zeroship"),
     ("__zero_migrate_journal", "__zero_migrate"),
     ("pg_todos", "pg_"),
     ("sqlite_todos", "sqlite_"),

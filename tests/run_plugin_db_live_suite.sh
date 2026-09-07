@@ -152,7 +152,7 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 #   SUM                100
 #
 # Accounting for -18, every line verified rather than inferred:
-#   -15  the `__zeroship_admin` deletion (`390f4b97b`) removed 15 `integration`
+#   -15  the platform system-schema deletion (`390f4b97b`) removed 15 `integration`
 #        tests, all named in that commit's review: the 13 `b8c_*` admin-schema
 #        arms plus `pg_admin_table_key_source_reads_bytea_directly` and
 #        `pitr_pg_records_target`. Their subject is gone, not their coverage.
