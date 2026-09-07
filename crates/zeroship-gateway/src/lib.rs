@@ -57,11 +57,6 @@ pub struct GateConfig {
     pub control_key: String,
     pub worker_urls: Vec<String>,
     pub poll_interval_secs: u64,
-    /// Shared secret between gateway and workers. Used to bearer-auth the
-    /// `/dispatch` endpoints and HMAC-sign the `ZeroShip-User` header so
-    /// workers can verify forwarded identity was not forged by an attacker
-    /// with direct network access. Startup rejects an empty value.
-    pub worker_key: String,
     /// Upstream URL for `crates/auth` — the self-contained OP
     /// (`/oauth2/*`, `/oauth2/.well-known/*`),
     /// login/signup UI, OAuth2 consent handlers, and webhook surfaces.
@@ -283,8 +278,44 @@ pub struct GateState {
     /// profile, because that hop is the app data path and a single-use claim
     /// there would be a shared-store write per end-user request.
     ///
+    /// It also holds the gateway's signer for the `ZeroShip-User` identity
+    /// envelope, which is the same ed25519 key under a second use: what the
+    /// gateway asserts about a SERVICE (itself) and what it asserts about an
+    /// END USER both carry its signature, and the worker checks both under the
+    /// one published public half.
+    ///
     /// `ServiceAuth::unconfigured()` when no key material was configured; that
-    /// state refuses the inbound edge and mints nothing outbound.
+    /// state refuses the inbound edge, mints nothing outbound, and signs no
+    /// identity - so an unconfigured gateway forwards no user rather than
+    /// forwarding one nothing can check.
     pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub meter: Arc<zeroship_metering::Meter>,
+}
+
+/// A gateway service identity backed by a freshly generated key, for tests that
+/// need the gateway to SIGN.
+///
+/// Not `#[cfg(test)]`: the gateway's integration tests build `GateState`
+/// directly and would otherwise each grow their own copy of this, which is how
+/// two fixtures end up signing under keys that verify differently. The peer
+/// bundle is empty because the gateway verifies its own envelope from its own
+/// signer, and nothing here receives an inbound service call.
+#[must_use]
+pub fn test_gateway_service_auth() -> zeroship_core::service_peers::ServiceAuth {
+    use zeroship_core::service_assertion::{
+        ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
+    };
+    use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring, GATEWAY_SERVICE_NAME};
+
+    let issuer = service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer");
+    let keyring = ServiceKeyring::from_parts(
+        issuer,
+        ServiceSigningKey::generate(),
+        ServiceTrustBundle::new(),
+    )
+    .expect("gateway keyring");
+    ServiceAuth::new(
+        keyring,
+        Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+    )
 }

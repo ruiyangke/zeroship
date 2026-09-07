@@ -246,18 +246,27 @@ fn decode_header_scopes(state: &Arc<GateState>, header: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Verify a freshly-built `ZeroShip-User` header under the worker key and
-/// return its decoded claims object — the SAME bytes, verified the SAME
-/// way, that the worker will read as the request's principal.
+/// Verify a freshly-built `ZeroShip-User` header under this gateway's own
+/// public key and return its decoded claims object — the SAME bytes, verified
+/// the SAME way, that the worker will read as the request's principal.
 ///
 /// Reading identity back out of the header rather than threading it
 /// separately keeps ONE source of truth: whatever arm authenticated, the
 /// principal the gateway acts on is exactly the principal the worker
 /// sees, so the two can never drift. A verify/parse failure yields `None`
 /// and every caller MUST fail closed on it.
+///
+/// The verifier is the signer's OWN public half rather than an entry looked up
+/// in the peer document. The gateway is reading back what it just signed, so
+/// deriving the check from the same key removes any way for the two to
+/// disagree - and it keeps this working on a deployment whose peer document
+/// (correctly) does not need to list the gateway to itself.
 fn decode_user_header(state: &Arc<GateState>, header: &str) -> Option<serde_json::Value> {
-    let key = state.config.worker_key.as_bytes();
-    let json = zeroship_core::auth::verify_zeroship_user_header(key, header)?;
+    let json = state
+        .service_auth
+        .user_envelope_signer()?
+        .own_verifier()
+        .verify(header)?;
     serde_json::from_str::<serde_json::Value>(&json).ok()
 }
 
@@ -683,11 +692,18 @@ async fn resolve_bearer_user_header(
         let mut owned = build_worker_user_from_access_claims(&claims);
         owned.id = pws_sub;
         let user: oidc_rp::WorkerUser<'_> = (&owned).into();
-        return BearerOutcome::Allowed(oidc_rp::encode_user_header(
+        // Fail closed on a gateway that cannot sign. `Invalid` is the
+        // no-identity verdict, never a downgrade in disguise: such a gateway
+        // also mints no dispatch credential, so the worker refuses the hop.
+        let Some(header) = oidc_rp::encode_user_header(
             &user,
-            &state.config.worker_key,
+            state.service_auth.user_envelope_signer(),
             *request_id,
-        ));
+        ) else {
+            tracing::error!("gateway: no service key to sign the identity envelope with");
+            return BearerOutcome::Invalid;
+        };
+        return BearerOutcome::Allowed(header);
     }
 
     // Not a raw OP JWT — reserved API-key path (e.g. a future `zsk_…`
@@ -887,11 +903,18 @@ async fn resolve_app_session_user_header_inner(
         email_verified: claims.email_verified,
         scopes: claims.scopes.iter().map(String::as_str).collect(),
     };
-    CookieOutcome::Allowed(oidc_rp::encode_user_header(
+    // Fail closed on a gateway that cannot sign; see the bearer arm above.
+    match oidc_rp::encode_user_header(
         &user,
-        &state.config.worker_key,
+        state.service_auth.user_envelope_signer(),
         *request_id,
-    ))
+    ) {
+        Some(header) => CookieOutcome::Allowed(header),
+        None => {
+            tracing::error!("gateway: no service key to sign the identity envelope with");
+            CookieOutcome::None
+        }
+    }
 }
 
 fn credential_authentication_allows(
@@ -1010,14 +1033,20 @@ mod tests {
             vec!["openid", "read:billing", "write:projects"]
         );
 
-        // Encode the WorkerUser as the worker would receive it, verify the MAC,
-        // and JSON-parse it back — `scopes` must survive verbatim.
+        // Encode the WorkerUser as the worker would receive it, verify the
+        // signature, and JSON-parse it back - `scopes` must survive verbatim.
         let user: oidc_rp::WorkerUser<'_> = (&owned).into();
-        let key = "worker-key-1234567890";
+        let service_auth = crate::test_gateway_service_auth();
+        let signer = service_auth
+            .user_envelope_signer()
+            .expect("the test gateway signs");
         let rid = Uuid::new_v4();
-        let header = oidc_rp::encode_user_header(&user, key, rid);
-        let json = zeroship_core::auth::verify_zeroship_user_header(key.as_bytes(), &header)
-            .expect("MAC verifies");
+        let header =
+            oidc_rp::encode_user_header(&user, Some(signer), rid).expect("a signer was supplied");
+        let json = signer
+            .own_verifier()
+            .verify(&header)
+            .expect("the signature verifies");
         let parsed: serde_json::Value = serde_json::from_str(&json).expect("user json");
         assert_eq!(
             parsed["scopes"],
@@ -1198,13 +1227,12 @@ mod tests {
         );
 
         let state = StdArc::new(crate::GateState {
-            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+            service_auth: std::sync::Arc::new(crate::test_gateway_service_auth()),
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),
                 worker_urls: vec![],
                 poll_interval_secs: 5,
-                worker_key: "wk".into(),
                 auth_ui_url: oidc_rp.auth_ui_url.clone(),
                 origin_scheme: zeroship_core::config::OriginScheme::Http,
                 trusted_origins: vec![],
@@ -1488,7 +1516,6 @@ mod tests {
             control_key: String::new(),
             worker_urls: vec![],
             poll_interval_secs: 5,
-            worker_key: String::new(),
             auth_ui_url: String::new(),
             origin_scheme,
             trusted_origins: trusted_origins
@@ -1848,10 +1875,12 @@ mod tests {
             panic!("expected Allowed with a user header, got {outcome:?}");
         };
         // Faithful: the granted scope rode through the header the worker reads.
-        let json = zeroship_core::auth::verify_zeroship_user_header(
-            state.config.worker_key.as_bytes(),
-            &header,
-        )
+        let json = state
+            .service_auth
+            .user_envelope_signer()
+            .expect("the test gateway signs")
+            .own_verifier()
+            .verify(&header)
         .expect("ZeroShip-User MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         assert!(
@@ -2069,10 +2098,12 @@ mod tests {
         let BearerOutcome::Allowed(header) = outcome else {
             panic!("expected Allowed, got {outcome:?}");
         };
-        let json = zeroship_core::auth::verify_zeroship_user_header(
-            state.config.worker_key.as_bytes(),
-            &header,
-        )
+        let json = state
+            .service_auth
+            .user_envelope_signer()
+            .expect("the test gateway signs")
+            .own_verifier()
+            .verify(&header)
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         assert_eq!(user["id"], expected_pws);
@@ -2499,10 +2530,12 @@ mod tests {
         else {
             panic!("expected Allowed{{Some}}, got {outcome:?}");
         };
-        let json = zeroship_core::auth::verify_zeroship_user_header(
-            state.config.worker_key.as_bytes(),
-            &header,
-        )
+        let json = state
+            .service_auth
+            .user_envelope_signer()
+            .expect("the test gateway signs")
+            .own_verifier()
+            .verify(&header)
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         // The OP-issued per-app pws_ survives resolve_auth unchanged; the
@@ -2977,10 +3010,12 @@ mod tests {
 
     /// Decode the signed `ZeroShip-User` header and pull `.id` out.
     fn decode_header_id(state: &crate::GateState, header: &str) -> String {
-        let json = zeroship_core::auth::verify_zeroship_user_header(
-            state.config.worker_key.as_bytes(),
-            header,
-        )
+        let json = state
+            .service_auth
+            .user_envelope_signer()
+            .expect("the test gateway signs")
+            .own_verifier()
+            .verify(header)
         .expect("ZeroShip-User MAC verifies");
         let v: serde_json::Value = serde_json::from_str(&json).expect("user json");
         v["id"].as_str().expect("id is a string").to_string()
@@ -3103,10 +3138,12 @@ mod tests {
         // Emits the pws_ id + relay alias + scopes, straight from the claims.
         let id = decode_header_id(&state, &header);
         assert_eq!(id, pws, "cookie arm emits the cookie's pws_ subject");
-        let json = zeroship_core::auth::verify_zeroship_user_header(
-            state.config.worker_key.as_bytes(),
-            &header,
-        )
+        let json = state
+            .service_auth
+            .user_envelope_signer()
+            .expect("the test gateway signs")
+            .own_verifier()
+            .verify(&header)
         .expect("MAC verifies");
         let user: serde_json::Value = serde_json::from_str(&json).expect("user json");
         assert_eq!(user["email"], "relay-alias@zeroship.ai", "relay alias from claim");
