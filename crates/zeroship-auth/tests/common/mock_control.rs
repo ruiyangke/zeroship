@@ -123,6 +123,7 @@ async fn preflight(
         Answer::Clear => HttpResponse::Ok().json(&json!({
             "principal_id": principal_id.to_string(),
             "blockers": [],
+            "billing_blockers": [],
         })),
         Answer::SoleOwnerOf { slug } => HttpResponse::Ok().json(&json!({
             "principal_id": principal_id.to_string(),
@@ -134,6 +135,44 @@ async fn preflight(
                 "other_member_count": 0,
                 "project_count": 0,
                 "remedy": "dissolve",
+            }],
+            "billing_blockers": [],
+        })),
+        Answer::OwesBilling { slug, owed_cents } => HttpResponse::Ok().json(&json!({
+            "principal_id": principal_id.to_string(),
+            // EMPTY on purpose. The ownership rule only looks at LIVE
+            // organizations, so a dissolved one cannot appear here - which is
+            // what makes a test on this arm rule on the money rule alone.
+            "blockers": [],
+            "billing_blockers": [{
+                "organization_id": format!("org_{slug}"),
+                "organization_slug": slug,
+                "organization_name": slug,
+                "personal": false,
+                "dissolved": true,
+                "owed_cents": owed_cents,
+                "currency": "usd",
+                "unpaid_invoice_count": 1,
+                "unbilled_period_count": 0,
+                "remedy": "settle_invoices",
+                // Control sends the per-invoice detail beside the summary and
+                // the client deliberately does not deserialize it. It is sent
+                // anyway, and kept consistent with the summary above, so this
+                // body is one the real handler could have produced - a mock
+                // that omitted it would stop exercising the client's tolerance
+                // of the fields it ignores.
+                "outstanding": {
+                    "organization_id": format!("org_{slug}"),
+                    "unpaid_invoices": [{
+                        "invoice_id": format!("inv_{slug}"),
+                        "period": "2026-08-01",
+                        "currency": "usd",
+                        "total_cents": owed_cents,
+                        "cash_collected_cents": 0,
+                        "owed_cents": owed_cents,
+                    }],
+                    "unbilled_periods": [],
+                },
             }],
         })),
         Answer::Unavailable => {
