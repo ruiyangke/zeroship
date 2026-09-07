@@ -248,13 +248,21 @@ fn an_illegal_character_refusal_does_not_echo_the_name() {
 /// The schema fence keeps the worker out of the platform's own namespace. The
 /// invariant this serves is that state a separate service writes and the worker
 /// only reads must not be nameable from a worker-built plan.
+///
+/// The witness is any `__zeroship`-prefixed name; the fence is
+/// `Reservation::Prefix`, so no particular spelling is load-bearing. Until
+/// 2026-09-07 the witness was the name of a platform system schema that was
+/// deleted in 2026-08, which read as though that schema still existed. It does
+/// not, and the fence is not weaker for it: `__zeroship_` is the live prefix of
+/// the migration journal, the unmask audit table and the workflow journal in
+/// every app schema.
 #[test]
 fn the_namespace_fence_refuses_the_platform_schema() {
     let mut ruled_on = 0_usize;
     for name in [
         "pg_catalog",
         "information_schema",
-        "__zeroship_admin",
+        "__zeroship_reserved",
         "sqlite_temp",
     ] {
         assert!(

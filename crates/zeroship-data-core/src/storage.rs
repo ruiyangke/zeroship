@@ -82,7 +82,7 @@ use zeroship_schema::descriptors::{GeoPoint, VectorMetric};
 use zeroship_schema::query::SqlDialect;
 
 use crate::binding::DbBinding;
-use crate::capability::{LockScope, PitrTarget, SnapshotHandle, SnapshotOpts};
+use crate::capability::{LockScope, SnapshotHandle, SnapshotOpts};
 use crate::error::DbError;
 
 /// SQL execution capability — the "connection lifecycle + run a
@@ -701,7 +701,7 @@ pub trait SpatialIndex: 'static {
     ) -> Result<Vec<serde_json::Value>, DbError>;
 }
 
-/// Snapshot + restore + PITR for the per-app data store.
+/// Snapshot + restore for the per-app data store.
 ///
 /// **Admin surface** — like [`ChangeStream`] / [`VectorIndex`], this
 /// trait sits beside the `Backend` super-trait rather than joining it.
@@ -725,9 +725,14 @@ pub trait SpatialIndex: 'static {
 ///   restore path) and `zeroship-data-sqlite`'s `VACUUM INTO` + atomic rename;
 /// * the `sha2` both use to hash dump artifacts, which is `optional = true` in
 ///   each vendor manifest and pulled in by `test-helpers`;
-/// * both `BackendHandle::as_backup_*` accessors, which have no caller at all;
 /// * the three compile-time assertions in `zeroship-data-engine`'s
 ///   `backend::tests`.
+///
+/// This list named `BackendHandle::as_backup_*` until 2026-09-07. Those
+/// accessors are gone; `zeroship-data-engine`'s `backend_handle` carries the
+/// tombstone recording why. A bullet describing a symbol that no longer exists
+/// reads as an inventory of what is gated, which is the one thing this block is
+/// for.
 ///
 /// That line is drawn deliberately and is not the same line the gate on the
 /// trait drew. A capability contract costs nothing to ship and is what a future
@@ -739,13 +744,29 @@ pub trait SpatialIndex: 'static {
 /// discovery: an ungated caller of a gated impl fails the lib/bins build the
 /// way `SchemaIntrospect` did.
 ///
-/// `pitr_replay` will not work even then. The PG arm records its target in
-/// `__zeroship_admin.pitr_targets`, a table deleted with the admin schema on
-/// 2026-08-27 and provisioned by nothing since, so the INSERT fails on every
-/// database; the SQLite arm refuses outright with `pitr_pg_only`. Snapshot and
-/// restore do not touch it. Re-verified 2026-09-04 against
-/// `zeroship-data-postgres`'s `backup_pg::pitr_replay_impl` and
-/// `db/migrations-ts/`, which provisions no such schema.
+/// # Why there is no `pitr_replay`, and what it would take
+///
+/// This trait carried a third method until 2026-09-07 and it never worked on
+/// either backend. Recording the reason here is the point of this section: the
+/// method looked like an unfinished implementation and was in fact a shape
+/// problem, so deleting it without the reason invites the next author to add it
+/// back.
+///
+/// PostgreSQL point-in-time recovery is driven by server-level configuration -
+/// `restore_command`, `recovery_target_*`, an `archive_command` that was already
+/// running before the window being recovered. None of that can be initiated over
+/// a client connection, so the PG arm never replayed anything; it recorded a
+/// requested target into a table for an operator to act on out of band. That
+/// table lived in the platform system schema deleted on 2026-08-27 under
+/// AGENTS.md's privilege invariant, and PITR targets were never rehomed, so the
+/// recording had nowhere to land. The SQLite arm refused unconditionally, having
+/// no WAL-archive substrate to replay from.
+///
+/// So PITR is an operator capability with a database-server contract, not a
+/// per-app data-store method. Whoever gives it a home should start from where an
+/// operator's request is durably recorded and who is allowed to write there -
+/// not from this trait, whose two remaining methods are both things a client
+/// connection can actually perform.
 pub trait Backup: 'static {
     /// Take a snapshot of the per-app data store and stream it to
     /// `dest_uri`. Returns a handle with the content hash for
@@ -763,14 +784,5 @@ pub trait Backup: 'static {
     /// downloads + atomic rename + isolate evict.
     #[allow(async_fn_in_trait)]
     async fn restore(&self, app_id: &str, snapshot: &SnapshotHandle) -> Result<(), DbError>;
-
-    /// Replay WAL up to `target`. PG: writes the target to a
-    /// `__zeroship_admin.pitr_targets` table NOTHING NOW CREATES, so
-    /// the call fails; operator runs `recovery.conf`. The impl has no
-    /// caller - see `backend/postgres.rs`.
-    /// SQLite: returns `Configuration { code: "pitr_pg_only" }`
-    /// — SQLite has no WAL-archive PITR story.
-    #[allow(async_fn_in_trait)]
-    async fn pitr_replay(&self, app_id: &str, target: PitrTarget) -> Result<(), DbError>;
 }
 
