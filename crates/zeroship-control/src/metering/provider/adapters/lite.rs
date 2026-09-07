@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use uuid::Uuid;
+use zeroship_core::organization_id::OrganizationId;
 
 use crate::metering::provider::{
     AggregateQuery, BillingPeriod, Capabilities, CorrectionCapability, DedupContract, DedupKey,
@@ -47,11 +47,11 @@ impl Meter for LiteProvider {
     }
 
     async fn read_aggregate(&self, q: &AggregateQuery) -> Result<u64, ProviderError> {
-        let creator = Uuid::parse_str(q.subject.as_str()).map_err(|e| {
-            ProviderError::Config(format!("lite: subject is not a creator UUID: {e}"))
+        let organization = OrganizationId::parse(q.subject.as_str()).map_err(|e| {
+            ProviderError::Config(format!("lite: subject is not an organization id: {e}"))
         })?;
         self.store
-            .period_meter_units(&creator, q.period.start, &q.meter)
+            .period_meter_units(organization.as_str(), q.period.start, &q.meter)
             .await
     }
 }
@@ -63,10 +63,10 @@ impl crate::metering::provider::Invoicer for LiteProvider {
         subject: &SubjectRef,
         period: BillingPeriod,
     ) -> Result<InvoiceRef, ProviderError> {
-        let creator = Uuid::parse_str(subject.as_str()).map_err(|e| {
-            ProviderError::Config(format!("lite: subject is not a creator UUID: {e}"))
+        let organization = OrganizationId::parse(subject.as_str()).map_err(|e| {
+            ProviderError::Config(format!("lite: subject is not an organization id: {e}"))
         })?;
-        self.store.close_period_invoice(&creator, period).await
+        self.store.close_period_invoice(organization.as_str(), period).await
     }
 
     async fn adjustment_note(
@@ -74,10 +74,10 @@ impl crate::metering::provider::Invoicer for LiteProvider {
         subject: &SubjectRef,
         note: &crate::metering::provider::AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
-        let creator = Uuid::parse_str(subject.as_str()).map_err(|e| {
-            ProviderError::Config(format!("lite: subject is not a creator UUID: {e}"))
+        let organization = OrganizationId::parse(subject.as_str()).map_err(|e| {
+            ProviderError::Config(format!("lite: subject is not an organization id: {e}"))
         })?;
-        self.store.adjustment_note_invoice(&creator, note).await
+        self.store.adjustment_note_invoice(organization.as_str(), note).await
     }
 }
 

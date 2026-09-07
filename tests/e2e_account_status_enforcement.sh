@@ -29,10 +29,10 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"; BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
 # `zeroship.app_members` is deleted; an app reaches the people who answer for it
-# through its project's organization. `seat_app_owner_sql` emits that join AND a
-# check that raises when it matches nothing - an INSERT ... SELECT over no rows
-# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
-# surfaces far from here.
+# through its project's organization. `seat_app_owner` writes that join, reads
+# the seat back out of the database and exits when it is not there - an
+# INSERT ... SELECT over no rows is a SUCCESSFUL statement that seats nobody,
+# and the 403 it later produces surfaces far from here.
 source "$ROOT/tests/lib/organization_fixture.sh"
 # shellcheck source=tests/lib/usage_producer.sh
 source "$ROOT/tests/lib/usage_producer.sh"
@@ -194,9 +194,7 @@ ADMIN_TOKEN="$(e2e_mint_platform_bearer "$CREATOR" "$SCOPE")"
 [ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ] && pass "minted platform bearer + creator_billing row (creator=$CREATOR)" || { fail "bearer mint"; exit 1; }
 APP="$(curl -s -X POST "$CONTROL_URL/api/apps" -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d "{\"name\":\"acct-probe\",\"plan_id\":\"$PLAN_ID\"}" | jget '.id')"
 [ -n "$APP" ] && pass "created app $APP" || { fail "create app"; exit 1; }
-psql_exec >/dev/null 2>&1 <<SQL
-$(seat_app_owner_sql "$APP" "$CREATOR")
-SQL
+seat_app_owner "$APP" "$CREATOR" owner psql_exec
 CREATE_CODE="$(curl -sS -o "$WORK/create-database-response.json" -w '%{http_code}' \
   -X POST "$MIGRATE_SERVER_URL/v1/databases/$APP" \
   -H "Authorization: Bearer $ADMIN_TOKEN")"

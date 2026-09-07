@@ -205,10 +205,7 @@ impl zeroship_control::metering::provider::Invoicer for DbAdjustmentProvider {
         subject: &SubjectRef,
         note: &AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
-        let creator = Uuid::parse_str(subject.as_str()).map_err(|e| {
-            ProviderError::Config(format!("test provider subject is not a UUID: {e}"))
-        })?;
-        self.store.adjustment_note_invoice(&creator, note).await
+        self.store.adjustment_note_invoice(subject.as_str(), note).await
     }
 }
 
@@ -243,10 +240,11 @@ async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
     };
-    let creator = make_creator(&fx.state).await;
+    let organization = make_organization(&fx.state).await;
+    let organization = organization.as_str();
     let plan_id = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan_id, creator).await;
-    seed_witness_and_invoice(&fx.state, creator, app, &plan_id, period).await;
+    let app = make_owned_app(&fx.state, &plan_id, organization).await;
+    seed_witness_and_invoice(&fx.state, organization, app, &plan_id, period).await;
 
     let first = billing_reconcile::reconcile_pass(&fx.state, period)
         .await
@@ -288,10 +286,11 @@ async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_r
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
     };
-    let creator = make_creator(&fx.state).await;
+    let organization = make_organization(&fx.state).await;
+    let organization = organization.as_str();
     let plan_id = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan_id, creator).await;
-    seed_witness_and_invoice(&fx.state, creator, app, &plan_id, period).await;
+    let app = make_owned_app(&fx.state, &plan_id, organization).await;
+    seed_witness_and_invoice(&fx.state, organization, app, &plan_id, period).await;
 
     let first = billing_reconcile::reconcile_pass(&fx.state, period)
         .await
@@ -329,9 +328,10 @@ async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
     };
-    let creator = make_creator(&fx.state).await;
+    let organization = make_organization(&fx.state).await;
+    let organization = organization.as_str();
     let plan_id = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan_id, creator).await;
+    let app = make_owned_app(&fx.state, &plan_id, organization).await;
     // Witness only — deliberately NO invoice / invoice_lines seeded.
     seed_witness_only(&fx.state, app, period).await;
 
@@ -366,11 +366,12 @@ async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
     };
-    let creator = make_creator(&fx.state).await;
+    let organization = make_organization(&fx.state).await;
+    let organization = organization.as_str();
     let plan_id = make_plan(&fx.state).await;
     seed_metric(&fx.state, SECOND_METER).await;
-    let app = make_owned_app(&fx.state, &plan_id, creator).await;
-    seed_multi_metric_witness_and_invoice(&fx.state, creator, app, &plan_id, period).await;
+    let app = make_owned_app(&fx.state, &plan_id, organization).await;
+    seed_multi_metric_witness_and_invoice(&fx.state, organization, app, &plan_id, period).await;
 
     let first = billing_reconcile::reconcile_pass(&fx.state, period)
         .await
@@ -426,27 +427,28 @@ async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
     common::drain_pg().await;
 }
 
-async fn make_creator(state: &AppState) -> Uuid {
-    let email = format!("safety-{}@example.test", Uuid::new_v4().simple());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, 'Safety Test') RETURNING id",
-            &[&email],
-        )
-        .await
-        .expect("insert user");
-    let creator: Uuid = rows[0].get("id");
+async fn make_organization(state: &AppState) -> String {
+    let slug = format!("safety-{}", Uuid::new_v4().simple());
+    let organization = zeroship_core::typed_id::generate("org");
     state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.creator_billing (creator_id, default_pm_set) \
-             VALUES ($1, true) ON CONFLICT (creator_id) DO NOTHING",
-            &[&creator],
+            "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+             VALUES ($1, $2, 'Safety Test', $3)",
+            &[&organization, &slug, &format!("{slug}@example.test")],
         )
         .await
-        .expect("insert creator_billing");
-    creator
+        .expect("insert organization");
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.organization_billing (organization_id, default_pm_set) \
+             VALUES ($1, true) ON CONFLICT (organization_id) DO NOTHING",
+            &[&organization],
+        )
+        .await
+        .expect("insert organization_billing");
+    organization
 }
 
 async fn make_plan(state: &AppState) -> String {
@@ -481,11 +483,12 @@ async fn seed_metric(state: &AppState, metric: &str) {
         .expect("seed metric");
 }
 
-async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
+/// An app the given ORGANIZATION bills. See the equivalent in the reconcile
+/// tests: an app seeded into a different organization than the one asserted on
+/// is never billed, so the pass would go green over an empty set.
+async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> Uuid {
     let name = format!("safety-{}", Uuid::new_v4());
-    let app_id = common::seed_app(&state.control_pg, &name, plan_id).await;
-    common::seat_app_organization_member(&state.control_pg, &app_id, &owner, "owner").await;
-    app_id
+    common::seed_app_in_organization(&state.control_pg, &name, plan_id, organization).await
 }
 
 /// Seed only the local witness (usage_aggregates) with no invoice/invoice_lines —
@@ -505,7 +508,7 @@ async fn seed_witness_only(state: &AppState, app: Uuid, period: BillingPeriod) {
 
 async fn seed_witness_and_invoice(
     state: &AppState,
-    creator: Uuid,
+    organization: &str,
     app: Uuid,
     plan_id: &str,
     period: BillingPeriod,
@@ -525,9 +528,9 @@ async fn seed_witness_and_invoice(
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, total_cents) \
+               (id, organization_id, period, status, subtotal_cents, total_cents) \
              VALUES ($1, $2, $3::date, 'draft', 100, 100)",
-            &[&invoice_id, &creator, &period_date],
+            &[&invoice_id, &organization, &period_date],
         )
         .await
         .expect("seed draft invoice");
@@ -558,7 +561,7 @@ async fn seed_witness_and_invoice(
 
 async fn seed_multi_metric_witness_and_invoice(
     state: &AppState,
-    creator: Uuid,
+    organization: &str,
     app: Uuid,
     plan_id: &str,
     period: BillingPeriod,
@@ -580,9 +583,9 @@ async fn seed_multi_metric_witness_and_invoice(
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, total_cents) \
+               (id, organization_id, period, status, subtotal_cents, total_cents) \
              VALUES ($1, $2, $3::date, 'draft', 150, 150)",
-            &[&invoice_id, &creator, &period_date],
+            &[&invoice_id, &organization, &period_date],
         )
         .await
         .expect("seed draft invoice");

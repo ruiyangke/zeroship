@@ -1,4 +1,4 @@
-//! PR-7 (billing-ops gap #26) — creator billing READ APIs, FAITHFUL suite.
+//! PR-7 (billing-ops gap #26) — organization billing READ APIs, FAITHFUL suite.
 //!
 //! Drives the REAL ntex handlers (`api::list_app_invoices`, `get_invoice`,
 //! `get_projected_charge`, `get_credit_balance`, `get_payment_method`,
@@ -7,11 +7,11 @@
 //! NO shims: the same router wiring, the same Cedar enforce, the same
 //! `charge_cents` pricing kernel the reconciler runs.
 //!
-//! The SECURITY core (a creator must never read another creator's billing):
-//!   - a creator reads ONLY their own apps' invoices/lines/credit;
-//!   - a SECOND creator's data is invisible (cross-creator read → 403/empty);
+//! The SECURITY core (a organization must never read another organization's billing):
+//!   - a organization reads ONLY their own apps' invoices/lines/credit;
+//!   - a SECOND organization's data is invisible (cross-organization read → 403/empty);
 //!   - an unauthorized / wrong-app token → 403;
-//!   - an operator (`Resource::Any`) reads any creator;
+//!   - an operator (`Resource::Any`) reads any organization;
 //!   - the invoice line detail returns the FROZEN snapshot that reproduces
 //!     `amount_cents` via `charge_cents`;
 //!   - the projected-charge response is labelled non-authoritative AND the cache
@@ -20,7 +20,7 @@
 //!   - the credit balance reflects grants/consumes.
 //!
 //! PARALLEL-SAFE (the PR-6 lesson): every test mints UNIQUE creators/apps and
-//! asserts per-creator scope, so the default cargo runner can run them
+//! asserts per-organization scope, so the default cargo runner can run them
 //! concurrently without cross-test interference.
 //!
 //! Configure a test database (`zeroship_core::config::test_database_url_opt`;
@@ -160,7 +160,7 @@ impl Caller {
 ///
 /// It used to take an optional platform role and seed a `platform_admin_roles`
 /// row for the operator paths. That table and those roles are deleted, so every
-/// principal this mints is an ordinary creator.
+/// principal this mints is an ordinary organization.
 async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
     let _ = state;
     Caller {
@@ -176,6 +176,24 @@ async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
 // --------------------------------------------------------------------------
 // Seeding helpers (faithful: real schema, real pricing inputs)
 // --------------------------------------------------------------------------
+
+/// The organization an app bills, read back off the app row.
+///
+/// The subject is derived from the app rather than minted beside it. Minting one
+/// separately would produce a well-formed organization that owns nothing, and
+/// every scope assertion below would then pass against an empty set - the
+/// failure mode a fixture must not be able to have.
+async fn app_organization(pg: &Client, app: &Uuid) -> String {
+    pg.query(
+        "SELECT organization_id FROM zeroship.apps WHERE id = $1",
+        &[app],
+    )
+    .await
+    .expect("read app organization")
+    .first()
+    .expect("app exists")
+    .get("organization_id")
+}
 
 async fn make_user(pg: &Client, label: &str) -> Uuid {
     let id = Uuid::now_v7();
@@ -222,7 +240,7 @@ async fn make_app(registry: &Registry, plan_id: &str, owner: &Uuid) -> Uuid {
 }
 
 /// Seat `user` at a NON-owner role in the ORGANIZATION that owns `app`'s
-/// project. Used to model the cross-creator hole: a victim-creator who is
+/// project. Used to model the cross-organization hole: a victim-organization who is
 /// merely a viewer of the attacker's app appears in the attacker's
 /// role-AGNOSTIC `list_apps_for_owner`.
 ///
@@ -245,24 +263,24 @@ async fn add_member(pg: &Client, app: &Uuid, user: &Uuid, role: &str) {
     .expect("seat non-owner organization member");
 }
 
-/// Ensure a `creator_billing` row exists (the FK target for invoices/credit).
-async fn ensure_creator_billing(pg: &Client, creator_id: &Uuid, default_pm_set: bool) {
+/// Ensure a `organization_billing` row exists (the FK target for invoices/credit).
+async fn ensure_organization_billing(pg: &Client, organization_id: &str, default_pm_set: bool) {
     pg.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id, default_pm_set) \
+        "INSERT INTO zeroship.organization_billing (organization_id, default_pm_set) \
          VALUES ($1, $2) \
-         ON CONFLICT (creator_id) DO UPDATE SET default_pm_set = EXCLUDED.default_pm_set",
-        &[creator_id, &default_pm_set],
+         ON CONFLICT (organization_id) DO UPDATE SET default_pm_set = EXCLUDED.default_pm_set",
+        &[&organization_id, &default_pm_set],
     )
     .await
-    .expect("ensure creator_billing");
+    .expect("ensure organization_billing");
 }
 
 /// Seed a Stripe customer ref (presence only is surfaced; the raw id stays internal).
-async fn seed_customer_ref(pg: &Client, creator_id: &Uuid, external_id: &str) {
+async fn seed_customer_ref(pg: &Client, organization_id: &str, external_id: &str) {
     pg.execute(
-        "INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id) \
+        "INSERT INTO zeroship.billing_customer_refs (organization_id, provider, external_id) \
          VALUES ($1, 'stripe', $2) ON CONFLICT DO NOTHING",
-        &[creator_id, &external_id],
+        &[&organization_id, &external_id],
     )
     .await
     .expect("seed customer ref");
@@ -278,7 +296,7 @@ async fn seed_customer_ref(pg: &Client, creator_id: &Uuid, external_id: &str) {
 #[allow(clippy::too_many_arguments)]
 async fn seed_finalized_invoice(
     pg: &Client,
-    creator_id: &Uuid,
+    organization_id: &str,
     app_id: &Uuid,
     plan_id: &str,
     period: chrono::NaiveDate, // first-of-month
@@ -296,9 +314,9 @@ async fn seed_finalized_invoice(
     // 1. draft invoice (lines are mutable while draft).
     pg.execute(
         "INSERT INTO zeroship.invoices \
-           (id, creator_id, period, status, currency, subtotal_cents, credit_cents, tax_cents, total_cents) \
+           (id, organization_id, period, status, currency, subtotal_cents, credit_cents, tax_cents, total_cents) \
          VALUES ($1, $2, $3::date, 'draft', 'usd', $4, 0, 0, $4)",
-        &[&invoice_id, creator_id, &period, &amount],
+        &[&invoice_id, &organization_id, &period, &amount],
     )
     .await
     .expect("insert draft invoice");
@@ -396,7 +414,7 @@ fn current_period() -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1).expect("first-of-month")
 }
 
-async fn cleanup(pg: &Client, creator_ids: &[Uuid], app_ids: &[Uuid], callers: &[&Caller]) {
+async fn cleanup(pg: &Client, organization_ids: &[Uuid], app_ids: &[Uuid], callers: &[&Caller]) {
     for app in app_ids {
         let _ = pg.execute("DELETE FROM zeroship.usage_aggregates WHERE app_id = $1", &[app]).await;
         let _ = pg.execute("DELETE FROM zeroship.invoice_lines WHERE app_id = $1", &[app]).await;
@@ -404,21 +422,21 @@ async fn cleanup(pg: &Client, creator_ids: &[Uuid], app_ids: &[Uuid], callers: &
         let _ = pg.execute("DELETE FROM zeroship.app_spend_limit WHERE app_id = $1", &[app]).await;
         let _ = pg.execute("DELETE FROM zeroship.organization_members om USING zeroship.apps a JOIN zeroship.projects p ON p.id = a.project_id WHERE om.organization_id = p.organization_id AND a.id = $1", &[app]).await;
     }
-    for creator in creator_ids {
+    for organization in organization_ids {
         // Invoices reference lines (RESTRICT) — lines were dropped above by app_id,
-        // but drop any remaining by creator before the invoice rows.
+        // but drop any remaining by organization before the invoice rows.
         let _ = pg
             .execute(
                 "DELETE FROM zeroship.invoice_lines WHERE invoice_id IN \
-                 (SELECT id FROM zeroship.invoices WHERE creator_id = $1)",
-                &[creator],
+                 (SELECT id FROM zeroship.invoices WHERE organization_id = $1)",
+                &[organization],
             )
             .await;
-        let _ = pg.execute("DELETE FROM zeroship.credit_ledger WHERE creator_id = $1", &[creator]).await;
-        let _ = pg.execute("DELETE FROM zeroship.invoices WHERE creator_id = $1", &[creator]).await;
-        let _ = pg.execute("DELETE FROM zeroship.billing_customer_refs WHERE creator_id = $1", &[creator]).await;
-        let _ = pg.execute("DELETE FROM zeroship.creator_billing_status WHERE creator_id = $1", &[creator]).await;
-        let _ = pg.execute("DELETE FROM zeroship.creator_billing WHERE creator_id = $1", &[creator]).await;
+        let _ = pg.execute("DELETE FROM zeroship.credit_ledger WHERE organization_id = $1", &[organization]).await;
+        let _ = pg.execute("DELETE FROM zeroship.invoices WHERE organization_id = $1", &[organization]).await;
+        let _ = pg.execute("DELETE FROM zeroship.billing_customer_refs WHERE organization_id = $1", &[organization]).await;
+        let _ = pg.execute("DELETE FROM zeroship.organization_billing_status WHERE organization_id = $1", &[organization]).await;
+        let _ = pg.execute("DELETE FROM zeroship.organization_billing WHERE organization_id = $1", &[organization]).await;
     }
     for app in app_ids {
         let _ = pg.execute("DELETE FROM zeroship.apps WHERE id = $1", &[app]).await;
@@ -427,7 +445,7 @@ async fn cleanup(pg: &Client, creator_ids: &[Uuid], app_ids: &[Uuid], callers: &
         let _ = pg.execute("DELETE FROM zeroship.authz_decisions WHERE actor_user_id = $1", &[&caller.user_id]).await;
         let _ = pg.execute("DELETE FROM zeroship.users WHERE id = $1", &[&caller.user_id]).await;
     }
-    let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&creator_ids.to_vec()]).await;
+    let _ = pg.execute("DELETE FROM zeroship.users WHERE id = ANY($1)", &[&organization_ids.to_vec()]).await;
 }
 
 fn full_router() -> impl Fn(&mut web::ServiceConfig) + Clone {
@@ -456,7 +474,7 @@ fn full_router() -> impl Fn(&mut web::ServiceConfig) + Clone {
 }
 
 // ==========================================================================
-// (a) + (c): creator reads only their OWN invoices; cross-creator → 403/empty;
+// (a) + (c): organization reads only their OWN invoices; cross-organization → 403/empty;
 //            operator (Resource::Any) reads any.
 // ==========================================================================
 
@@ -469,13 +487,17 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
 
     let plan = seed_plan(&pg, 1000, 0, FX_SCALE as i64, 0).await;
 
-    // Creator A owns app A; creator B owns app B. Disjoint billing.
-    let creator_a = make_user(&pg, "creatorA").await;
-    let creator_b = make_user(&pg, "creatorB").await;
-    ensure_creator_billing(&pg, &creator_a, true).await;
-    ensure_creator_billing(&pg, &creator_b, false).await;
-    let app_a = make_app(&fx.state.registry, &plan, &creator_a).await;
-    let app_b = make_app(&fx.state.registry, &plan, &creator_b).await;
+    // Creator A owns app A; organization B owns app B. Disjoint billing.
+    let user_a = make_user(&pg, "creatorA").await;
+    let user_b = make_user(&pg, "creatorB").await;
+    let app_a = make_app(&fx.state.registry, &plan, &user_a).await;
+    let organization_a = app_organization(&pg, &app_a).await;
+    let organization_a = organization_a.as_str();
+    ensure_organization_billing(&pg, organization_a, true).await;
+    let app_b = make_app(&fx.state.registry, &plan, &user_b).await;
+    let organization_b = app_organization(&pg, &app_b).await;
+    let organization_b = organization_b.as_str();
+    ensure_organization_billing(&pg, organization_b, false).await;
 
     let weights = MetricWeights::new();
     let price = PlanPrice {
@@ -486,15 +508,15 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
     };
     let usage = std::collections::HashMap::new();
     let (inv_a, amt_a) =
-        seed_finalized_invoice(&pg, &creator_a, &app_a, &plan, period, &price, &usage, &weights)
+        seed_finalized_invoice(&pg, &organization_a, &app_a, &plan, period, &price, &usage, &weights)
             .await;
     let (_inv_b, _amt_b) =
-        seed_finalized_invoice(&pg, &creator_b, &app_b, &plan, period, &price, &usage, &weights)
+        seed_finalized_invoice(&pg, &organization_b, &app_b, &plan, period, &price, &usage, &weights)
             .await;
 
-    // PATs: creator A (read on app A), creator B (read on app B), operator.
-    let pat_a = issue_bearer(&fx.state, creator_a, "billing:read").await;
-    let pat_b = issue_bearer(&fx.state, creator_b, "billing:read").await;
+    // PATs: organization A (read on app A), organization B (read on app B), operator.
+    let pat_a = issue_bearer(&fx.state, user_a, "billing:read").await;
+    let pat_b = issue_bearer(&fx.state, user_b, "billing:read").await;
     let outsider = make_user(&pg, "outsider").await;
     let pat_outsider = issue_bearer(&fx.state, outsider, "billing:read").await;
 
@@ -510,12 +532,12 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
         test::read_response_json(&svc, get(pat_a.bearer(), format!("/api/apps/{app_a}/invoices")))
             .await;
     let invoices = body["invoices"].as_array().expect("invoices array");
-    assert_eq!(invoices.len(), 1, "creator A sees exactly their own invoice");
+    assert_eq!(invoices.len(), 1, "organization A sees exactly their own invoice");
     assert_eq!(invoices[0]["id"], inv_a, "and it is their invoice");
     assert_eq!(invoices[0]["total_cents"], amt_a);
     assert_eq!(invoices[0]["status"], "finalized");
 
-    // (c) Cross-creator: creator A reading app B → 403 (not their app).
+    // (c) Cross-organization: organization A reading app B → 403 (not their app).
     // Status only: a retained `WebResponse` keeps the app state - and its
     // Postgres client - alive past the teardown below.
     let status = test::call_service(
@@ -527,10 +549,10 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "creator A must NOT read creator B's app invoices",
+        "organization A must NOT read organization B's app invoices",
     );
 
-    // There is no operator arm left to read across creators. A third creator
+    // There is no operator arm left to read across creators. A third organization
     // holding the same billing scopes, but no membership of either app, is
     // refused on BOTH - which is the property the operator arm used to be the
     // documented exception to.
@@ -544,11 +566,11 @@ async fn invoice_history_is_creator_scoped_with_no_operator_exception() {
         assert_eq!(
             status,
             StatusCode::FORBIDDEN,
-            "a creator with no membership must not read another creator's app invoices",
+            "a organization with no membership must not read another organization's app invoices",
         );
     }
 
-    cleanup(&pg, &[creator_a, creator_b, outsider], &[app_a, app_b], &[&pat_a, &pat_b, &pat_outsider]).await;
+    cleanup(&pg, &[user_a, user_b, outsider], &[app_a, app_b], &[&pat_a, &pat_b, &pat_outsider]).await;
 
     // Teardown: the ntex test service holds a cloned Arc<AppState>, and the
     // fixture holds the fixture's own Postgres connection; both locals are
@@ -572,9 +594,11 @@ async fn unauthorized_token_is_forbidden_on_billing_reads() {
     let pg = fx.state.control_pg.clone();
 
     let plan = seed_plan(&pg, 0, 0, FX_SCALE as i64, 0).await;
-    let creator = make_user(&pg, "creator").await;
-    ensure_creator_billing(&pg, &creator, false).await;
-    let app = make_app(&fx.state.registry, &plan, &creator).await;
+    let user = make_user(&pg, "organization").await;
+    let app = make_app(&fx.state.registry, &plan, &user).await;
+    let organization = app_organization(&pg, &app).await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&pg, organization, false).await;
 
     // A token with NO billing grant whatsoever.
     let stranger = make_user(&pg, "stranger").await;
@@ -598,13 +622,17 @@ async fn unauthorized_token_is_forbidden_on_billing_reads() {
         let status = test::call_service(&svc, get(uri.clone())).await.status();
         assert_eq!(status, StatusCode::FORBIDDEN, "no-billing token: 403 on {uri}");
     }
-    // Creator-keyed reads → 403 (the caller has no billing capability anywhere).
+    // Organization-keyed reads → 403. They now NAME the organization, because
+    // "the caller's own billing" stopped being a single answer the moment a user
+    // could hold seats at several organizations. The refusal is therefore about
+    // authority at THAT organization, not about the caller having none anywhere.
     for uri in ["/api/billing/credit-balance", "/api/billing/payment-method"] {
-        let status = test::call_service(&svc, get(uri.to_string())).await.status();
+        let uri = format!("{uri}?organization_id={organization}");
+        let status = test::call_service(&svc, get(uri.clone())).await.status();
         assert_eq!(status, StatusCode::FORBIDDEN, "no-billing token: 403 on {uri}");
     }
 
-    cleanup(&pg, &[creator, stranger], &[app], &[&pat_none]).await;
+    cleanup(&pg, &[user, stranger], &[app], &[&pat_none]).await;
 
     drop(svc);
     drop(pg);
@@ -626,9 +654,11 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
     // A real overage: base 500c, 100 included CU, FX = 1 cent/CU, 350 CU used ⇒
     // 250 billable CU × 1c = 250c overage + 500c base = 750c.
     let plan = seed_plan(&pg, 500, 100, FX_SCALE as i64, 0).await;
-    let creator = make_user(&pg, "creator").await;
-    ensure_creator_billing(&pg, &creator, true).await;
-    let app = make_app(&fx.state.registry, &plan, &creator).await;
+    let user = make_user(&pg, "organization").await;
+    let app = make_app(&fx.state.registry, &plan, &user).await;
+    let organization = app_organization(&pg, &app).await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&pg, organization, true).await;
 
     let mut weights = MetricWeights::new();
     weights.insert("rpc_calls".to_string(), MetricWeight { units_per_op: 1, per_units: 1 });
@@ -641,10 +671,10 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
         spend_limit_default_cents: 0,
     };
     let (inv, amt) =
-        seed_finalized_invoice(&pg, &creator, &app, &plan, period, &price, &usage, &weights).await;
+        seed_finalized_invoice(&pg, &organization, &app, &plan, period, &price, &usage, &weights).await;
     assert_eq!(amt, 750, "sanity: seeded amount is the overage+base total");
 
-    let pat = issue_bearer(&fx.state, creator, "billing:read").await;
+    let pat = issue_bearer(&fx.state, user, "billing:read").await;
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
 
@@ -701,7 +731,7 @@ async fn invoice_line_detail_reproduces_amount_from_frozen_snapshot() {
         "read-API billable_units == post-included-units CU",
     );
 
-    cleanup(&pg, &[creator], &[app], &[&pat]).await;
+    cleanup(&pg, &[user], &[app], &[&pat]).await;
 
     drop(svc);
     drop(pg);
@@ -724,13 +754,15 @@ async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
     // Plan: base 200c, 0 included, FX 1c/CU. Weight: 1 CU per rpc_call.
     let plan = seed_plan(&pg, 200, 0, FX_SCALE as i64, 0).await;
     ensure_global_pricing(&pg, "rpc_calls", 1, 1).await;
-    let creator = make_user(&pg, "creator").await;
-    ensure_creator_billing(&pg, &creator, false).await;
-    let app = make_app(&fx.state.registry, &plan, &creator).await;
+    let user = make_user(&pg, "organization").await;
+    let app = make_app(&fx.state.registry, &plan, &user).await;
+    let organization = app_organization(&pg, &app).await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&pg, organization, false).await;
     // 300 live rpc_calls ⇒ 300 CU × 1c + 200c base = 500c projected.
     seed_usage(&pg, &app, period, "rpc_calls", 300).await;
 
-    let pat = issue_bearer(&fx.state, creator, "billing:read").await;
+    let pat = issue_bearer(&fx.state, user, "billing:read").await;
     let svc = test::init_service(web::App::new().state(fx.state.clone()).configure(full_router()))
         .await;
 
@@ -764,7 +796,7 @@ async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
     // The cached value's as_of is stable across the two calls (same compute).
     assert_eq!(body1["as_of"], body2["as_of"], "as_of is the original compute instant");
 
-    cleanup(&pg, &[creator], &[app], &[&pat]).await;
+    cleanup(&pg, &[user], &[app], &[&pat]).await;
 
     drop(svc);
     drop(pg);
@@ -773,7 +805,7 @@ async fn projected_charge_is_non_authoritative_and_cache_budget_holds() {
 }
 
 // ==========================================================================
-// (f): credit balance reflects grants/consumes; cross-creator isolation;
+// (f): credit balance reflects grants/consumes; cross-organization isolation;
 //      payment-method status; plan/spend-state.
 // ==========================================================================
 
@@ -785,23 +817,27 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     let period = current_period();
 
     let plan = seed_plan(&pg, 0, 0, FX_SCALE as i64, 2500).await;
-    let creator_a = make_user(&pg, "creditA").await;
-    let creator_b = make_user(&pg, "creditB").await;
-    ensure_creator_billing(&pg, &creator_a, true).await;
-    ensure_creator_billing(&pg, &creator_b, false).await;
-    let app_a = make_app(&fx.state.registry, &plan, &creator_a).await;
-    let app_b = make_app(&fx.state.registry, &plan, &creator_b).await;
-    seed_customer_ref(&pg, &creator_a, &format!("cus_{}", Uuid::new_v4().simple())).await;
+    let user_a = make_user(&pg, "creditA").await;
+    let user_b = make_user(&pg, "creditB").await;
+    let app_a = make_app(&fx.state.registry, &plan, &user_a).await;
+    let organization_a = app_organization(&pg, &app_a).await;
+    let organization_a = organization_a.as_str();
+    ensure_organization_billing(&pg, organization_a, true).await;
+    let app_b = make_app(&fx.state.registry, &plan, &user_b).await;
+    let organization_b = app_organization(&pg, &app_b).await;
+    let organization_b = organization_b.as_str();
+    ensure_organization_billing(&pg, organization_b, false).await;
+    seed_customer_ref(&pg, &organization_a, &format!("cus_{}", Uuid::new_v4().simple())).await;
 
     // Creator A: grant $50, then a finalized invoice consumes $20 → balance $30.
-    zeroship_control::credit::grant(&*pg, &creator_a, zeroship_control::credit::GrantRequest { amount_cents: 5000, currency: "usd", kind: "promo", expires_at: None, note: Some("seed grant A"), idempotency_key: &format!("idem-{}", Uuid::new_v4().simple()) })
+    zeroship_control::credit::grant(&*pg, &organization_a, zeroship_control::credit::GrantRequest { amount_cents: 5000, currency: "usd", kind: "promo", expires_at: None, note: Some("seed grant A"), idempotency_key: &format!("idem-{}", Uuid::new_v4().simple()) })
     .await
     .expect("grant A");
     // Seed a consume entry referencing the grant (faithful negative companion).
     let grant_id: String = pg
         .query_one(
-            "SELECT id FROM zeroship.credit_ledger WHERE creator_id = $1 AND kind = 'promo' LIMIT 1",
-            &[&creator_a],
+            "SELECT id FROM zeroship.credit_ledger WHERE organization_id = $1 AND kind = 'promo' LIMIT 1",
+            &[&organization_a],
         )
         .await
         .expect("read grant id")
@@ -809,7 +845,7 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     // A finalized invoice the consume can reference.
     let (inv_a, _amt) = seed_finalized_invoice(
         &pg,
-        &creator_a,
+        &organization_a,
         &app_a,
         &plan,
         period,
@@ -825,11 +861,11 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     .await;
     pg.execute(
         "INSERT INTO zeroship.credit_ledger \
-           (id, creator_id, kind, amount_cents, currency, applied_invoice_id, consumed_from_grant_id) \
+           (id, organization_id, kind, amount_cents, currency, applied_invoice_id, consumed_from_grant_id) \
          VALUES ($1, $2, 'consumed', -2000, 'usd', $3, $4)",
         &[
             &zeroship_core::typed_id::new_credit_id(),
-            &creator_a,
+            &organization_a,
             &inv_a,
             &grant_id,
         ],
@@ -838,12 +874,12 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     .expect("seed consume");
 
     // Creator B: grant $10 only → balance $10 (must NOT leak into A's read).
-    zeroship_control::credit::grant(&*pg, &creator_b, zeroship_control::credit::GrantRequest { amount_cents: 1000, currency: "usd", kind: "grant", expires_at: None, note: Some("seed grant B"), idempotency_key: &format!("idem-{}", Uuid::new_v4().simple()) })
+    zeroship_control::credit::grant(&*pg, &organization_b, zeroship_control::credit::GrantRequest { amount_cents: 1000, currency: "usd", kind: "grant", expires_at: None, note: Some("seed grant B"), idempotency_key: &format!("idem-{}", Uuid::new_v4().simple()) })
     .await
     .expect("grant B");
 
-    let pat_a = issue_bearer(&fx.state, creator_a, "billing:read").await;
-    let pat_b = issue_bearer(&fx.state, creator_b, "billing:read").await;
+    let pat_a = issue_bearer(&fx.state, user_a, "billing:read").await;
+    let pat_b = issue_bearer(&fx.state, user_b, "billing:read").await;
     let outsider = make_user(&pg, "outsider").await;
     let pat_outsider = issue_bearer(&fx.state, outsider, "billing:read").await;
 
@@ -857,7 +893,10 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     // ledger shows BOTH the grant and the consume.
     let bal_a: serde_json::Value = test::read_response_json(
         &svc,
-        get(pat_a.bearer(), "/api/billing/credit-balance".to_string()),
+        get(
+            pat_a.bearer(),
+            format!("/api/billing/credit-balance?organization_id={organization_a}"),
+        ),
     )
     .await;
     assert_eq!(bal_a["balance_cents"], 3000, "A: $50 granted − $20 consumed = $30");
@@ -871,23 +910,28 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     assert!(kinds.contains(&"promo"), "grant entry surfaced");
     assert!(kinds.contains(&"consumed"), "consume entry surfaced");
 
-    // Cross-creator isolation: creator B's read shows ONLY $10, never A's $30.
+    // Cross-organization isolation: organization B's read shows ONLY $10, never A's $30.
     let bal_b: serde_json::Value = test::read_response_json(
         &svc,
-        get(pat_b.bearer(), "/api/billing/credit-balance".to_string()),
+        get(
+            pat_b.bearer(),
+            format!("/api/billing/credit-balance?organization_id={organization_b}"),
+        ),
     )
     .await;
     assert_eq!(bal_b["balance_cents"], 1000, "B sees ONLY their own $10");
 
-    // (c) `?creator_id` naming ANOTHER creator is 403 for everyone. The
-    // parameter used to be the operator's cross-creator selector; with that arm
-    // deleted it can only confirm or contradict the caller's own id, and a
-    // contradiction is refused rather than silently answered with self.
+    // (c) `?organization_id` naming an organization the caller has no seat at is
+    // 403 for everyone. The parameter is REQUIRED now rather than defaulting to
+    // the caller: a user may hold seats at several organizations, so "my
+    // billing" no longer names one subject. What it selects is checked against
+    // the ladder's money authority at that organization, so naming a stranger's
+    // organization is refused rather than silently answered with the caller's.
     let status = test::call_service(
         &svc,
         get(
             pat_outsider.bearer(),
-            format!("/api/billing/credit-balance?creator_id={creator_a}"),
+            format!("/api/billing/credit-balance?organization_id={organization_a}"),
         ),
     )
     .await
@@ -895,17 +939,17 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "no caller may read another creator's balance via ?creator_id",
+        "no caller may read another organization's balance via ?organization_id",
     );
 
-    // A non-operator passing ANOTHER creator's id is 403 (no cross-creator read).
+    // A non-operator passing ANOTHER organization's id is 403 (no cross-organization read).
     // Status only: a retained `WebResponse` keeps the app state - and its
     // Postgres client - alive past the teardown below.
     let status = test::call_service(
         &svc,
         get(
             pat_b.bearer(),
-            format!("/api/billing/credit-balance?creator_id={creator_a}"),
+            format!("/api/billing/credit-balance?organization_id={organization_a}"),
         ),
     )
     .await
@@ -913,13 +957,16 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "creator B must NOT read creator A's balance via ?creator_id",
+        "organization B must NOT read organization A's balance via ?organization_id",
     );
 
     // Payment-method status: A has default_pm_set + a customer ref (presence only).
     let pm_a: serde_json::Value = test::read_response_json(
         &svc,
-        get(pat_a.bearer(), "/api/billing/payment-method".to_string()),
+        get(
+            pat_a.bearer(),
+            format!("/api/billing/payment-method?organization_id={organization_a}"),
+        ),
     )
     .await;
     assert_eq!(pm_a["default_pm_set"], true);
@@ -928,7 +975,10 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     // B has neither.
     let pm_b: serde_json::Value = test::read_response_json(
         &svc,
-        get(pat_b.bearer(), "/api/billing/payment-method".to_string()),
+        get(
+            pat_b.bearer(),
+            format!("/api/billing/payment-method?organization_id={organization_b}"),
+        ),
     )
     .await;
     assert_eq!(pm_b["default_pm_set"], false);
@@ -945,7 +995,7 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
     assert_eq!(bs_a["effective_limit_cents"], 2500, "no override ⇒ plan default");
     assert_eq!(bs_a["account_state"], "active", "no dunning row ⇒ active");
     assert_eq!(bs_a["spend_state"], "allow", "no spend-state row ⇒ allow");
-    // Cross-creator: A cannot read B's billing-status.
+    // Cross-organization: A cannot read B's billing-status.
     let status = test::call_service(
         &svc,
         get(pat_a.bearer(), format!("/api/apps/{app_b}/billing-status")),
@@ -956,7 +1006,7 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
 
     cleanup(
         &pg,
-        &[creator_a, creator_b, outsider],
+        &[user_a, user_b, outsider],
         &[app_a, app_b],
         &[&pat_a, &pat_b, &pat_outsider],
     )
@@ -969,8 +1019,8 @@ async fn credit_balance_pm_and_billing_status_are_creator_scoped() {
 }
 
 // ==========================================================================
-// (d-authz): invoice line detail is authz-scoped by the invoice's creator —
-//            a different creator cannot read it.
+// (d-authz): invoice line detail is authz-scoped by the invoice's organization —
+//            a different organization cannot read it.
 // ==========================================================================
 
 #[compio::test]
@@ -981,12 +1031,16 @@ async fn invoice_detail_denies_a_different_creator() {
     let period = current_period();
 
     let plan = seed_plan(&pg, 100, 0, FX_SCALE as i64, 0).await;
-    let creator_a = make_user(&pg, "ownerA").await;
-    let creator_b = make_user(&pg, "ownerB").await;
-    ensure_creator_billing(&pg, &creator_a, false).await;
-    ensure_creator_billing(&pg, &creator_b, false).await;
-    let app_a = make_app(&fx.state.registry, &plan, &creator_a).await;
-    let app_b = make_app(&fx.state.registry, &plan, &creator_b).await;
+    let user_a = make_user(&pg, "ownerA").await;
+    let user_b = make_user(&pg, "ownerB").await;
+    let app_a = make_app(&fx.state.registry, &plan, &user_a).await;
+    let organization_a = app_organization(&pg, &app_a).await;
+    let organization_a = organization_a.as_str();
+    ensure_organization_billing(&pg, organization_a, false).await;
+    let app_b = make_app(&fx.state.registry, &plan, &user_b).await;
+    let organization_b = app_organization(&pg, &app_b).await;
+    let organization_b = organization_b.as_str();
+    ensure_organization_billing(&pg, organization_b, false).await;
 
     let price = PlanPrice {
         base_fee_cents: 100,
@@ -996,7 +1050,7 @@ async fn invoice_detail_denies_a_different_creator() {
     };
     let (inv_a, _) = seed_finalized_invoice(
         &pg,
-        &creator_a,
+        &organization_a,
         &app_a,
         &plan,
         period,
@@ -1006,8 +1060,8 @@ async fn invoice_detail_denies_a_different_creator() {
     )
     .await;
 
-    let pat_a = issue_bearer(&fx.state, creator_a, "billing:read").await;
-    let pat_b = issue_bearer(&fx.state, creator_b, "billing:read").await;
+    let pat_a = issue_bearer(&fx.state, user_a, "billing:read").await;
+    let pat_b = issue_bearer(&fx.state, user_b, "billing:read").await;
     let outsider = make_user(&pg, "outsider").await;
     let pat_outsider = issue_bearer(&fx.state, outsider, "billing:read").await;
 
@@ -1029,22 +1083,22 @@ async fn invoice_detail_denies_a_different_creator() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "a different creator must NOT read A's invoice line detail",
+        "a different organization must NOT read A's invoice line detail",
     );
 
-    // A third creator is refused exactly like B. The operator arm that used to
-    // read any invoice detail is deleted, so "a different creator" is now the
+    // A third organization is refused exactly like B. The operator arm that used to
+    // read any invoice detail is deleted, so "a different organization" is now the
     // only case there is.
     let status = test::call_service(&svc, get(pat_outsider.bearer(), format!("/api/invoices/{inv_a}"))).await.status();
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "no caller but the invoice's own creator reads its line detail",
+        "no caller but the invoice's own organization reads its line detail",
     );
 
     cleanup(
         &pg,
-        &[creator_a, creator_b, outsider],
+        &[user_a, user_b, outsider],
         &[app_a, app_b],
         &[&pat_a, &pat_b, &pat_outsider],
     )
@@ -1057,13 +1111,13 @@ async fn invoice_detail_denies_a_different_creator() {
 }
 
 // ==========================================================================
-// (CRITICAL-1): cross-creator invoice read via SHARED app membership.
+// (CRITICAL-1): cross-organization invoice read via SHARED app membership.
 //
-// Attacker A owns app Z; victim-creator C is merely a VIEWER on Z. C owns app C
+// Attacker A owns app Z; victim-organization C is merely a VIEWER on Z. C owns app C
 // and has their own invoice. Pre-fix, `get_invoice` looped
 // `list_apps_for_owner(C)` (role-AGNOSTIC → includes Z because C is a member of
 // Z in ANY role) and accepted A's `BillingRead` on Z, leaking C's ENTIRE invoice
-// to A. The fix makes the read creator-LEVEL (caller == invoice.creator_id ||
+// to A. The fix makes the read organization-LEVEL (caller == invoice.organization_id ||
 // operator), so A → 403. RED pre-fix: A got 200 and C's invoice body.
 // ==========================================================================
 
@@ -1076,18 +1130,20 @@ async fn invoice_read_denied_via_shared_app_membership() {
 
     let plan = seed_plan(&pg, 100, 0, FX_SCALE as i64, 0).await;
 
-    // Attacker A owns app Z. Victim-creator C owns app C (and an invoice).
+    // Attacker A owns app Z. Victim-organization C owns app C (and an invoice).
     let attacker_a = make_user(&pg, "attackerA").await;
     let victim_c = make_user(&pg, "victimC").await;
-    ensure_creator_billing(&pg, &attacker_a, false).await;
-    ensure_creator_billing(&pg, &victim_c, false).await;
     let app_z = make_app(&fx.state.registry, &plan, &attacker_a).await;
     let app_c = make_app(&fx.state.registry, &plan, &victim_c).await;
+    let organization_a = app_organization(&pg, &app_z).await;
+    let organization_c = app_organization(&pg, &app_c).await;
+    ensure_organization_billing(&pg, &organization_a, false).await;
+    ensure_organization_billing(&pg, &organization_c, false).await;
 
-    // The shared-membership hole: victim-creator C is a (non-owner) VIEWER on Z.
+    // The shared-membership hole: victim-organization C is a (non-owner) VIEWER on Z.
     add_member(&pg, &app_z, &victim_c, "viewer").await;
 
-    // C's own finalized invoice (creator-keyed to C, lines on app C).
+    // C's own finalized invoice (organization-keyed to C, lines on app C).
     let price = PlanPrice {
         base_fee_cents: 100,
         included_units: 0,
@@ -1096,7 +1152,7 @@ async fn invoice_read_denied_via_shared_app_membership() {
     };
     let (inv_c, _amt) = seed_finalized_invoice(
         &pg,
-        &victim_c,
+        &organization_c,
         &app_c,
         &plan,
         period,
@@ -1138,28 +1194,26 @@ async fn invoice_read_denied_via_shared_app_membership() {
 }
 
 // ==========================================================================
-// (over-disclosure): a NON-OWNER member of the owner's organization must NOT
-// read the owner's cross-app invoice HISTORY via
-// `GET /api/apps/{ownerApp}/invoices`.
+// The invoice HISTORY of an organization is read by money authority at that
+// organization, and by nothing else.
 //
-// The owner O owns app O. A BOOKKEEPER V holds the `billing` seat in O's
-// organization - rank 10, billing_rank 20 - so V clears the `billing:read`
-// gate outright while holding no app authority at all. Pre-fix the handler
-// gated ONLY that capability and returned
-// `list_invoices_for_creator(owner_of_app(O))` = O's whole history, so V saw O's
-// billing envelope. The fix requires owner == principal, so V gets 403.
+// THIS TEST'S PREMISE INVERTED, AND THE INVERSION IS THE POINT. It used to
+// assert that a bookkeeper V - the `billing` seat, rank 10 / billing_rank 20 -
+// was REFUSED O's cross-app history, because an invoice was keyed on one human
+// and only that human could read it. The invoice is keyed on the ORGANIZATION
+// now, and `billing` is the seat the ladder defines as money authority over it,
+// so refusing V would be refusing the exact person the seat exists for. The
+// policy file says so in as many words: "a bookkeeper reads the invoice".
 //
-// THE SEAT USED TO BE `viewer` AND HAD TO CHANGE. Billing authority is now the
-// SECOND integer on the ladder, and a viewer carries billing_rank 0, so a
-// viewer is refused at the capability gate itself. That would still produce a
-// 403 - and would make this test pass for the wrong reason, proving nothing
-// about the owner-grain check it exists for. `billing` is the seat that clears
-// the capability and is still not the owner, which is exactly the shape the
-// over-disclosure needs.
+// What still has to hold, and is what this asserts in three directions:
+//   * the `billing` seat READS the history (billing_rank 20),
+//   * a `developer` seat does NOT (billing_rank 0, and it holds plenty of app
+//     authority - so a pass here would be app authority leaking into money),
+//   * someone with no seat at all does NOT.
 // ==========================================================================
 
 #[compio::test]
-async fn app_invoice_history_denied_to_non_owner_member() {
+async fn app_invoice_history_follows_money_authority_not_app_authority() {
     let url = db_url();
     let fx = build_test_state(&url, "history-nonowner").await;
     let pg = fx.state.control_pg.clone();
@@ -1168,13 +1222,17 @@ async fn app_invoice_history_denied_to_non_owner_member() {
     let plan = seed_plan(&pg, 100, 0, FX_SCALE as i64, 0).await;
 
     let owner = make_user(&pg, "ownerO").await;
-    let viewer = make_user(&pg, "viewerV").await;
-    ensure_creator_billing(&pg, &owner, false).await;
+    let bookkeeper = make_user(&pg, "bookkeeperV").await;
+    let developer = make_user(&pg, "developerD").await;
     let app_o = make_app(&fx.state.registry, &plan, &owner).await;
+    let organization_o = app_organization(&pg, &app_o).await;
+    ensure_organization_billing(&pg, &organization_o, false).await;
 
-    // V holds the `billing` seat in O's organization: full money authority,
-    // no app authority, not the owner.
-    add_member(&pg, &app_o, &viewer, "billing").await;
+    // V holds the `billing` seat: money authority, no app authority.
+    // D holds `developer`: app authority, no money authority. The pair is what
+    // separates the two axes.
+    add_member(&pg, &app_o, &bookkeeper, "billing").await;
+    add_member(&pg, &app_o, &developer, "developer").await;
 
     let price = PlanPrice {
         base_fee_cents: 100,
@@ -1184,7 +1242,7 @@ async fn app_invoice_history_denied_to_non_owner_member() {
     };
     let (inv_o, _amt) = seed_finalized_invoice(
         &pg,
-        &owner,
+        &organization_o,
         &app_o,
         &plan,
         period,
@@ -1194,9 +1252,9 @@ async fn app_invoice_history_denied_to_non_owner_member() {
     )
     .await;
 
-    // Both PATs carry BillingRead on app O; the difference is owner-vs-member.
     let pat_owner = issue_bearer(&fx.state, owner, "billing:read").await;
-    let pat_viewer = issue_bearer(&fx.state, viewer, "billing:read").await;
+    let pat_bookkeeper = issue_bearer(&fx.state, bookkeeper, "billing:read").await;
+    let pat_developer = issue_bearer(&fx.state, developer, "billing:read").await;
     let outsider = make_user(&pg, "outsider").await;
     let pat_outsider = issue_bearer(&fx.state, outsider, "billing:read").await;
 
@@ -1206,51 +1264,43 @@ async fn app_invoice_history_denied_to_non_owner_member() {
         test::TestRequest::get().uri(&uri).header("authorization", bearer).to_request()
     };
 
-    // Owner reads their own app's invoice history → 200 with their invoice.
+    // The owner reads it.
     let body: serde_json::Value = test::read_response_json(
         &svc,
         get(pat_owner.bearer(), format!("/api/apps/{app_o}/invoices")),
     )
     .await;
     let invoices = body["invoices"].as_array().expect("invoices array");
-    assert_eq!(invoices.len(), 1, "owner sees their own invoice");
+    assert_eq!(invoices.len(), 1, "the owner sees the organization's invoice");
     assert_eq!(invoices[0]["id"], inv_o);
 
-    // First prove the per-app gate is actually CLEARED by the viewer (so the 403
-    // below is the OWNER-grain check firing, not merely the capability gate): the
-    // viewer reads the app's billing-STATUS (app-scoped, BillingRead) → 200.
-    // Status only across these rebinds: retaining a `WebResponse` binding would
-    // keep the app state - and its Postgres client - alive past the teardown
-    // below.
-    let status = test::call_service(
+    // The bookkeeper reads it: that is what billing_rank 20 IS.
+    let body: serde_json::Value = test::read_response_json(
         &svc,
-        get(pat_viewer.bearer(), format!("/api/apps/{app_o}/billing-status")),
+        get(pat_bookkeeper.bearer(), format!("/api/apps/{app_o}/invoices")),
     )
-    .await
-    .status();
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "sanity: the bookkeeper DOES clear the billing:read gate on O's organization",
-    );
+    .await;
+    let invoices = body["invoices"].as_array().expect("invoices array");
+    assert_eq!(invoices.len(), 1, "the billing seat reads the organization's invoices");
+    assert_eq!(invoices[0]["id"], inv_o);
 
-    // Non-owner viewer V (BillingRead on app O) → 403 on the OWNER's invoice
-    // history. Pre-fix this was 200 and leaked the owner's whole history.
+    // The developer does NOT, despite holding app authority. Without this arm the
+    // pair above would pass just as happily with no money gate at all.
+    // Status only across these rebinds: retaining a `WebResponse` binding would
+    // keep the app state - and its Postgres client - alive past the teardown.
     let status = test::call_service(
         &svc,
-        get(pat_viewer.bearer(), format!("/api/apps/{app_o}/invoices")),
+        get(pat_developer.bearer(), format!("/api/apps/{app_o}/invoices")),
     )
     .await
     .status();
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "a non-owner member must NOT read the owner's invoice history",
+        "app authority must not reach the invoice envelope",
     );
 
-    // A creator with no membership of the app is refused too. This used to be
-    // the operator's 200: the owner-or-operator arm is now owner-only, so the
-    // envelope has exactly one reader.
+    // Nor does someone with no seat at the organization at all.
     let status = test::call_service(
         &svc,
         get(pat_outsider.bearer(), format!("/api/apps/{app_o}/invoices")),
@@ -1260,14 +1310,14 @@ async fn app_invoice_history_denied_to_non_owner_member() {
     assert_eq!(
         status,
         StatusCode::FORBIDDEN,
-        "only the app's OWNER reads the owner's cross-app invoice history",
+        "an unseated caller reads no organization's invoices",
     );
 
     cleanup(
         &pg,
-        &[owner, viewer, outsider],
+        &[owner, bookkeeper, developer, outsider],
         &[app_o],
-        &[&pat_owner, &pat_viewer, &pat_outsider],
+        &[&pat_owner, &pat_bookkeeper, &pat_developer, &pat_outsider],
     )
     .await;
 

@@ -389,7 +389,7 @@ mod tests {
         // The push is per CUSTOMER now — no per-app id rides in `data`.
         assert!(
             json.get("data").and_then(|d| d.get("app_id")).is_none(),
-            "data carries no app_id on the per-creator export grain"
+            "data carries no app_id on the per-organization export grain"
         );
         assert_eq!(
             json.get("data").and_then(|d| d.get("period_start")).and_then(serde_json::Value::as_i64),

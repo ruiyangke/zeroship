@@ -1187,29 +1187,29 @@ fn main() -> std::io::Result<()> {
             .configure(oauth_grants_handlers::configure)
             // --- Stripe Connect ---
             .service(
-                web::resource("/api/creators/{id}/stripe/onboard")
+                web::resource("/api/organizations/{id}/stripe/onboard")
                     .route(web::post().to(stripe_handlers::onboard)),
             )
             .service(
-                web::resource("/api/creators/{id}/stripe/callback")
+                web::resource("/api/organizations/{id}/stripe/callback")
                     .route(web::post().to(stripe_handlers::callback)),
             )
             // --- Stream-2 Connect: server-stamped checkout ---
             .service(
-                web::resource("/api/creators/{id}/connect/checkout")
+                web::resource("/api/organizations/{id}/connect/checkout")
                     .route(web::post().to(stripe_handlers::connect_checkout)),
             )
             // --- Infrastructure-billing setup: platform Customer + card ---
             .service(
-                web::resource("/api/creators/{id}/billing/setup")
+                web::resource("/api/organizations/{id}/billing/setup")
                     .route(web::post().to(stripe_handlers::billing_setup)),
             )
             .service(
-                web::resource("/api/creators/{id}/stripe")
+                web::resource("/api/organizations/{id}/stripe")
                     .route(web::delete().to(stripe_handlers::unlink)),
             )
             .service(
-                web::resource("/api/creators/{id}/earnings")
+                web::resource("/api/organizations/{id}/earnings")
                     .route(web::get().to(stripe_handlers::earnings)),
             )
             // --- Internal API ---

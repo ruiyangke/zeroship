@@ -529,7 +529,7 @@ mod tests {
     #[test]
     fn a_usage_event_from_another_period_is_not_counted() {
         let app = uuid::Uuid::new_v4();
-        let creator = uuid::Uuid::new_v4();
+        let organization = zeroship_core::typed_id::generate("org");
         let period = period_start_unix(1_783_468_800);
         let previous = period_start_unix(period - 1);
         assert_ne!(period, previous, "the two stamps must be in different periods");
@@ -539,7 +539,7 @@ mod tests {
             source: "worker-test".to_string(),
             subject: zeroship_core::usage_event::UsageSubject {
                 app: Some(app),
-                creator,
+                organization: Some(organization.clone()),
             },
             meter: "requests".to_string(),
             value,
@@ -684,8 +684,9 @@ mod live_db_tests {
             .expect("seed fixture project");
         client
             .query(
-                "INSERT INTO zeroship.apps (name, plan_id, project_id) \
-                 VALUES ($1, $2, $3) RETURNING id",
+                "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
+                 SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p \
+                  WHERE p.id = $3 RETURNING id",
                 &[&name, &plan_id, &project_id],
             )
             .await
@@ -761,13 +762,13 @@ mod live_db_tests {
         let warn_app = seed_priced_app(&client, &plan_id, "recompute-warn").await;
         let degrade_app = seed_priced_app(&client, &plan_id, "recompute-degrade").await;
         let block_app = seed_priced_app(&client, &plan_id, "recompute-block").await;
-        let creator = Uuid::new_v4();
+        let organization = zeroship_core::typed_id::generate("org");
         let stream = FakeStream::new(vec![
-            event("evt_warn_a", warn_app, creator, 30, period + 10),
-            event("evt_warn_b", warn_app, creator, 50, period + 11),
-            event("evt_degrade", degrade_app, creator, 95, period + 12),
-            event("evt_block", block_app, creator, 100, period + 13),
-            event("evt_old_period", block_app, creator, 999, period.saturating_sub(60)),
+            event("evt_warn_a", warn_app, &organization, 30, period + 10),
+            event("evt_warn_b", warn_app, &organization, 50, period + 11),
+            event("evt_degrade", degrade_app, &organization, 95, period + 12),
+            event("evt_block", block_app, &organization, 100, period + 13),
+            event("evt_old_period", block_app, &organization, 999, period.saturating_sub(60)),
         ]);
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
@@ -824,7 +825,7 @@ mod live_db_tests {
         let period = current_period_start_unix();
         let plan_id = seed_pricing(&client).await;
         let app = seed_priced_app(&client, &plan_id, "recompute-nowipe").await;
-        let creator = Uuid::new_v4();
+        let organization = zeroship_core::typed_id::generate("org");
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
             settle_window: Duration::from_secs(
@@ -834,7 +835,7 @@ mod live_db_tests {
         };
 
         // Cycle 1: real usage lands.
-        let populated = FakeStream::new(vec![event("evt_real", app, creator, 100, period + 10)]);
+        let populated = FakeStream::new(vec![event("evt_real", app, &organization, 100, period + 10)]);
         let first = recompute_usage_aggregates(&registry, &populated, period, &cfg)
             .await
             .expect("populated recompute");
@@ -859,11 +860,11 @@ mod live_db_tests {
         let period = current_period_start_unix();
         let plan_id = seed_pricing(&client).await;
         let app = seed_priced_app(&client, &plan_id, "recompute-dedup").await;
-        let creator = Uuid::new_v4();
+        let organization = zeroship_core::typed_id::generate("org");
         let stream = FakeStream::new(vec![
-            event("evt_duplicate_replay", app, creator, 40, period + 10),
-            event("evt_duplicate_replay", app, creator, 40, period + 10),
-            event("evt_distinct", app, creator, 2, period + 11),
+            event("evt_duplicate_replay", app, &organization, 40, period + 10),
+            event("evt_duplicate_replay", app, &organization, 40, period + 10),
+            event("evt_distinct", app, &organization, 2, period + 11),
         ]);
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
@@ -895,16 +896,16 @@ mod live_db_tests {
         let period = current_period_start_unix();
         let plan_id = seed_pricing(&client).await;
         let app = seed_priced_app(&client, &plan_id, "recompute-poison").await;
-        let creator = Uuid::new_v4();
+        let organization = zeroship_core::typed_id::generate("org");
         let stream = FakeStream::from_records(vec![
-            record_from_event(0, event("evt_before_poison", app, creator, 10, period + 10)),
+            record_from_event(0, event("evt_before_poison", app, &organization, 10, period + 10)),
             StreamRecord {
                 partition: 0,
                 offset: 1,
                 key: b"poison".to_vec(),
                 payload: b"{not-json".to_vec(),
             },
-            record_from_event(2, event("evt_after_poison", app, creator, 7, period + 11)),
+            record_from_event(2, event("evt_after_poison", app, &organization, 7, period + 11)),
         ]);
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
@@ -940,10 +941,10 @@ mod live_db_tests {
         let previous = super::super::billing_reconcile::previous_period_start_unix(now);
         let plan_id = seed_pricing(&client).await;
         let app = seed_priced_app(&client, &plan_id, "recompute-prev").await;
-        let creator = Uuid::new_v4();
+        let organization = zeroship_core::typed_id::generate("org");
         let stream = FakeStream::new(vec![
-            event("evt_prev_unsettled", app, creator, 41, previous + 10),
-            event("evt_current_unsettled", app, creator, 59, current + 10),
+            event("evt_prev_unsettled", app, &organization, 41, previous + 10),
+            event("evt_current_unsettled", app, &organization, 59, current + 10),
         ]);
         let cfg = SpendRecomputeConfig {
             interval: Duration::from_secs(1),
@@ -987,13 +988,13 @@ mod live_db_tests {
         }
     }
 
-    fn event(id: &str, app: Uuid, creator: Uuid, value: u64, event_time: i64) -> UsageEvent {
+    fn event(id: &str, app: Uuid, organization: &str, value: u64, event_time: i64) -> UsageEvent {
         UsageEvent {
             event_id: id.to_string(),
             source: "worker-test".to_string(),
             subject: UsageSubject {
                 app: Some(app),
-                creator,
+                organization: Some(organization.to_owned()),
             },
             meter: "requests".to_string(),
             value,
@@ -1006,7 +1007,7 @@ mod live_db_tests {
         StreamRecord {
             partition: 0,
             offset,
-            key: event.creator_subject().into_bytes(),
+            key: event.organization_subject().unwrap_or_default().as_bytes().to_vec(),
             payload: serde_json::to_vec(&event).expect("event serializes"),
         }
     }

@@ -233,8 +233,8 @@ async fn reset_post_revokes_all_sessions_and_audits_counts() {
     let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+             SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
                 &gw_app_id,
                 &format!("reset-revoke-app-{}", gw_app_id.simple()),
@@ -741,8 +741,8 @@ async fn reset_post_revokes_app_session_anchor_and_writes_family_marker() {
     let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+             SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
                 &app_id,
                 &format!("anchor-app-{}", app_id.simple()),
@@ -1027,8 +1027,8 @@ async fn reset_still_applies_when_user_holds_a_refresh_token_for_the_same_app() 
     let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+             SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
                 &app_id,
                 &format!("refresh-app-{}", app_id.simple()),

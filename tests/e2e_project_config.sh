@@ -63,10 +63,10 @@ jget() { node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>{try{co
 
 source "$ROOT/tests/lib/runtime_secrets.sh"
 # `zeroship.app_members` is deleted; an app reaches the people who answer for it
-# through its project's organization. `seat_app_owner_sql` emits that join AND a
-# check that raises when it matches nothing - an INSERT ... SELECT over no rows
-# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
-# surfaces far from here.
+# through its project's organization. `seat_app_owner` writes that join, reads
+# the seat back out of the database and exits when it is not there - an
+# INSERT ... SELECT over no rows is a SUCCESSFUL statement that seats nobody,
+# and the 403 it later produces surfaces far from here.
 source "$ROOT/tests/lib/organization_fixture.sh"
 
 cleanup() {
@@ -206,9 +206,8 @@ APP_JSON="$(curl -s -X POST "http://localhost:$ZEROSHIP_CONTROL_PORT/api/apps" \
   -H 'Content-Type: application/json' -H "Authorization: Bearer $ADMIN_TOKEN" -d '{"name":"projcfg-e2e"}')"
 APP_ID="$(echo "$APP_JSON" | jget '.id')"
 [ -n "$APP_ID" ] && pass "created app projcfg-e2e ($APP_ID)" || { fail "create app: $APP_JSON"; exit 1; }
-docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-$(seat_app_owner_sql "$APP_ID" "$OWNER")
-SQL
+seat_app_owner "$APP_ID" "$OWNER" owner \
+  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1
 
 # ---------------------------------------------------------------------------
 echo ""

@@ -1,7 +1,7 @@
 //! Credit ledger — the append-only customer-balance primitive (billing-ops gap
 //! #26, PR-2; design `0048 credit_ledger` + flow A "credit-apply at finalize").
 //!
-//! The Stripe customer-balance model: a creator's credit BALANCE is
+//! The Stripe customer-balance model: an organization's credit BALANCE is
 //! `SUM(amount_cents)` over `credit_ledger`, never a stored column (so it can
 //! never drift from its history). A grant is a POSITIVE entry; consumption is one
 //! NEGATIVE `consumed` entry PER DRAWN GRANT (`consumed_from_grant_id`), written at
@@ -15,7 +15,7 @@
 //!     body is a 409 conflict (mirroring Stripe), never a silent second grant.
 //!
 //!   * [`consume_at_finalize`] — the reconciler's credit-apply step: draw the
-//!     creator's consumable, non-expired, same-currency credit OLDEST-FIRST against
+//!     organization's consumable, non-expired, same-currency credit OLDEST-FIRST against
 //!     the invoice subtotal, appending one `consumed` entry per drawn grant keyed to
 //!     the draft invoice id. **Re-run idempotent:** if `consumed` entries already
 //!     exist for this invoice id (a crash-window re-drive of the SAME claim), the
@@ -24,7 +24,7 @@
 //!
 //! Both are generic over [`compio_postgres::GenericClient`] so they compose on a
 //! bare connection or inside a caller's `conn.transaction()`. `consume_at_finalize`
-//! takes a transaction-scoped per-creator advisory lock as its first act, so the
+//! takes a transaction-scoped per-organization advisory lock as its first act, so the
 //! balance-non-negative invariant is intrinsic to the consume op — it does NOT rely
 //! on an outer fleet-wide sweep lock (which a future on-demand caller wouldn't hold).
 
@@ -68,7 +68,7 @@ pub struct CreditApplied {
 /// `note`-present flag so `note=Some("")` and `note=None` can never collide.
 #[must_use]
 pub fn grant_fingerprint(
-    creator_id: &uuid::Uuid,
+    organization_id: &str,
     amount_cents: i64,
     currency: &str,
     kind: &str,
@@ -76,7 +76,7 @@ pub fn grant_fingerprint(
     note: Option<&str>,
 ) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(creator_id.as_bytes());
+    hasher.update(organization_id.as_bytes());
     hasher.update(b"|");
     hasher.update(amount_cents.to_le_bytes());
     hasher.update(b"|");
@@ -123,7 +123,7 @@ pub struct GrantRequest<'a> {
     pub idempotency_key: &'a str,
 }
 
-/// Append an operator credit grant for `creator_id`, idempotency-keyed and
+/// Append an operator credit grant for `organization_id`, idempotency-keyed and
 /// body-fingerprinted. `kind` is a positive grant kind (`grant`/`promo`/`goodwill`);
 /// `consumed`/`void_reversal` are reconciler-internal and rejected here. `currency`
 /// MUST be USD (v1 pin). A reused `idempotency_key` returns the first grant if the
@@ -132,7 +132,7 @@ pub struct GrantRequest<'a> {
 /// Generic over the client so it composes inside a transaction.
 pub async fn grant<C: GenericClient + Sync>(
     conn: &C,
-    creator_id: &uuid::Uuid,
+    organization_id: &str,
     request: GrantRequest<'_>,
 ) -> Result<GrantOutcome, RegistryError> {
     let GrantRequest {
@@ -174,7 +174,7 @@ pub async fn grant<C: GenericClient + Sync>(
     // `note` IS part of the fingerprint (MINOR-2): a reused key with a changed note
     // is a body change → 409, never a silent return of the first grant.
     let fingerprint =
-        grant_fingerprint(creator_id, amount_cents, &currency, &kind, expires_unix, note);
+        grant_fingerprint(organization_id, amount_cents, &currency, &kind, expires_unix, note);
 
     let id = zeroship_core::typed_id::new_credit_id();
     // Claim: INSERT … ON CONFLICT (idempotency_key) DO NOTHING. The first writer
@@ -182,7 +182,7 @@ pub async fn grant<C: GenericClient + Sync>(
     let inserted = conn
         .query(
             "INSERT INTO zeroship.credit_ledger \
-               (id, creator_id, kind, amount_cents, currency, expires_at, note, \
+               (id, organization_id, kind, amount_cents, currency, expires_at, note, \
                 idempotency_key, request_fingerprint) \
              VALUES ($1, $2, $3::text, $4, $5, $6, $7, $8, $9) \
              ON CONFLICT (idempotency_key) WHERE idempotency_key IS NOT NULL \
@@ -190,7 +190,7 @@ pub async fn grant<C: GenericClient + Sync>(
              RETURNING id",
             &[
                 &id,
-                creator_id,
+                &organization_id,
                 &kind,
                 &amount_cents,
                 &currency,
@@ -208,24 +208,24 @@ pub async fn grant<C: GenericClient + Sync>(
 
     // Conflict: a grant with this idempotency_key already exists. Compare the
     // stored fingerprint to decide safe-retry (same body) vs reuse-conflict.
-    // MINOR-3: scope the re-SELECT to `creator_id` too — defense in depth and a
+    // MINOR-3: scope the re-SELECT to `organization_id` too — defense in depth and a
     // clearer signal on cross-tenant key reuse. The idempotency_key index is
-    // globally unique, so a key reused across creators surfaces here as a
-    // no-row-for-THIS-creator: the stored row belongs to another creator, the
-    // fingerprint cannot match, and we must NOT return another creator's grant id.
+    // globally unique, so a key reused across organizations surfaces here as a
+    // no-row-for-THIS-organization: the stored row belongs to another organization, the
+    // fingerprint cannot match, and we must NOT return another organization's grant id.
     let existing = conn
         .query(
             "SELECT id, request_fingerprint FROM zeroship.credit_ledger \
-             WHERE idempotency_key = $1 AND creator_id = $2",
-            &[&idempotency_key, creator_id],
+             WHERE idempotency_key = $1 AND organization_id = $2",
+            &[&idempotency_key, &organization_id],
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
     let Some(row) = existing.first() else {
         // The INSERT hit the globally-unique idempotency_key index, but no row for
-        // THIS creator carries that key ⇒ the key is owned by a DIFFERENT creator
+        // THIS organization carries that key ⇒ the key is owned by a DIFFERENT organization
         // (cross-tenant reuse). That is a conflict, not a server fault: surface a
-        // 409 (no grant for this creator), never another creator's grant id.
+        // 409 (no grant for this organization), never another organization's grant id.
         return Ok(GrantOutcome::Conflict);
     };
     let existing_id: String = row.get("id");
@@ -243,9 +243,9 @@ struct AvailableGrant {
     remaining: i64,
 }
 
-/// Consume the creator's available credit against `subtotal_cents` at finalize,
+/// Consume the organization's available credit against `subtotal_cents` at finalize,
 /// keyed to `invoice_id` (the draft invoice's id — stable across re-runs of the
-/// SAME `(creator, period)` claim).
+/// SAME `(organization, period)` claim).
 ///
 /// **Re-run idempotency (the helper's OWN contract):** if `consumed` entries already
 /// reference this `invoice_id`, the credit was applied on a prior pass of this SAME
@@ -253,7 +253,7 @@ struct AvailableGrant {
 /// so a re-run never double-consumes. This is the consume helper's self-contained
 /// idempotency contract, the one a caller OUTSIDE a finalize txn (a future on-demand
 /// finalizer) relies on. In the reconciler specifically this guard is belt-and-braces:
-/// the `status='finalized'` short-circuit in `bill_creator` fires FIRST, so a
+/// the `status='finalized'` short-circuit in `bill_organization` fires FIRST, so a
 /// committed-draft-with-consumed-rows is never reached on that path — but the guard
 /// keeps the helper correct regardless of which caller drives it.
 ///
@@ -263,25 +263,25 @@ struct AvailableGrant {
 /// draws and the finalize UPDATE commit together.
 pub async fn consume_at_finalize<C: GenericClient + Sync>(
     conn: &C,
-    creator_id: &uuid::Uuid,
+    organization_id: &str,
     invoice_id: &str,
     subtotal_cents: i64,
     invoice_currency: &str,
 ) -> Result<CreditApplied, RegistryError> {
-    // MAJOR-1: SERIALIZE consume per creator. Two concurrent `consume_at_finalize`
-    // calls for the SAME creator would each read `remaining` and each draw, and
+    // MAJOR-1: SERIALIZE consume per organization. Two concurrent `consume_at_finalize`
+    // calls for the SAME organization would each read `remaining` and each draw, and
     // both draws could exceed a grant's balance — over-drawing the grant / driving
-    // the creator balance negative (the invariant 0048 claims). Today the fleet-wide
+    // the organization balance negative (the invariant 0048 claims). Today the fleet-wide
     // `BILLING_SWEEP_ADVISORY_LOCK_KEY` happens to serialize the reconciler against
     // itself, but a FUTURE on-demand caller (e.g. NativeProvider on-demand finalize
-    // / `bill_creator`) would NOT hold that global lock. A TRANSACTION-scoped
-    // advisory lock keyed on the creator makes balance-non-negativity intrinsic to
+    // / `bill_organization`) would NOT hold that global lock. A TRANSACTION-scoped
+    // advisory lock keyed on the organization makes balance-non-negativity intrinsic to
     // the consume op rather than emergent from one caller. `hashtext` (int4) → bigint
     // for `pg_advisory_xact_lock(bigint)`; the lock auto-releases at commit/rollback
     // (we already run inside the caller's `tx`).
     conn.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
-        &[&creator_id.to_string()],
+        &[&organization_id.to_string()],
     )
     .await
     .map_err(|e| RegistryError::Database(e.to_string()))?;
@@ -329,13 +329,13 @@ pub async fn consume_at_finalize<C: GenericClient + Sync>(
                  WHERE kind = 'consumed' \
                  GROUP BY consumed_from_grant_id \
              ) d ON d.consumed_from_grant_id = g.id \
-             WHERE g.creator_id = $1 \
+             WHERE g.organization_id = $1 \
                AND g.kind <> 'consumed' \
                AND g.amount_cents > 0 \
                AND g.currency = $2 \
                AND (g.expires_at IS NULL OR g.expires_at > NOW()) \
              ORDER BY g.created_at, g.id",
-            &[creator_id, &currency],
+            &[&organization_id, &currency],
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
@@ -369,10 +369,10 @@ pub async fn consume_at_finalize<C: GenericClient + Sync>(
         let entry_id = zeroship_core::typed_id::new_credit_id();
         conn.execute(
             "INSERT INTO zeroship.credit_ledger \
-               (id, creator_id, kind, amount_cents, currency, applied_invoice_id, \
+               (id, organization_id, kind, amount_cents, currency, applied_invoice_id, \
                 consumed_from_grant_id) \
              VALUES ($1, $2, 'consumed', $3, $4, $5, $6)",
-            &[&entry_id, creator_id, &(-draw), &currency, &invoice_id, &g.id],
+            &[&entry_id, &organization_id, &(-draw), &currency, &invoice_id, &g.id],
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
@@ -390,20 +390,20 @@ pub async fn consume_at_finalize<C: GenericClient + Sync>(
     })
 }
 
-/// A creator's current credit balance: `SUM(amount_cents)` over their ledger,
+/// An organization's current credit balance: `SUM(amount_cents)` over their ledger,
 /// filtered by currency. Positive grants minus negative `consumed` entries. Used
 /// by tests and the read API (PR-7). `0` when there are no entries.
 pub async fn balance<C: GenericClient + Sync>(
     conn: &C,
-    creator_id: &uuid::Uuid,
+    organization_id: &str,
     currency: &str,
 ) -> Result<i64, RegistryError> {
     let currency = currency.to_ascii_lowercase();
     let rows = conn
         .query(
             "SELECT COALESCE(SUM(amount_cents), 0)::bigint AS bal \
-             FROM zeroship.credit_ledger WHERE creator_id = $1 AND currency = $2",
-            &[creator_id, &currency],
+             FROM zeroship.credit_ledger WHERE organization_id = $1 AND currency = $2",
+            &[&organization_id, &currency],
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;

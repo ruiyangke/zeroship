@@ -1228,7 +1228,8 @@ async fn seed_user(dsn: &str, user_id: Uuid) {
     let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, project_id) VALUES ($1, $2, $3) \
+            "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
+             SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3 \
              ON CONFLICT (id) DO NOTHING",
             &[
                 &Uuid::parse_str(APP_UUID).expect("app uuid"),
@@ -2378,7 +2379,8 @@ async fn seed_app_and_client_for(
     let project_id = common::unowned_project(&client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, project_id) VALUES ($1, $2, $3) \
+            "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
+             SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3 \
              ON CONFLICT (id) DO NOTHING",
             &[
                 &Uuid::parse_str(app_uuid).expect("app uuid"),

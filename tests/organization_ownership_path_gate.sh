@@ -416,6 +416,71 @@ else
        gives the app an owner through them."
 fi
 
+# ---------------------------------------------------------------------------
+# Arm 6: no harness throws a seat's failure away
+# ---------------------------------------------------------------------------
+#
+# `seat_app_owner_sql` ends in a RAISE precisely because `INSERT ... SELECT`
+# over an empty result is a SUCCESSFUL statement affecting no rows, so a seat
+# that matched nothing has to announce itself. Every standalone call site was
+# then written as
+#
+#     psql_exec >/dev/null 2>&1 <<SQL
+#     $(seat_app_owner_sql "$APP" "$CREATOR")
+#     SQL
+#
+# which discards the message AND the exit status, in scripts that run `set -uo
+# pipefail` with NO `-e`. The RAISE reached nobody, and the harness went on to
+# fail much later as an unexplained 403 from the one service that requires a
+# literal owner row. That is the exact failure the emitter was built to remove,
+# reintroduced at the point of use.
+#
+# THE RULE. A seat is either run through `seat_app_owner` - which reads a token
+# back out of the database and exits, so its caller has nothing to discard - or
+# it is spliced into a heredoc whose OPENING line carries a guard (`||`, or the
+# heredoc is the condition of an `if`). Nothing else counts.
+#
+# The library and the gates are excluded: the library DEFINES both spellings,
+# and a gate that writes a seat is proving something about it rather than
+# depending on one.
+n_seats=0
+unguarded=""
+while IFS=: read -r file line _; do
+  n_seats=$((n_seats + 1))
+  # Walk up to the nearest heredoc opener and judge THAT line. The seat's own
+  # line is inside the heredoc body, where a guard cannot be written.
+  opener="$(awk -v n="$line" 'NR < n && /<</ { keep = $0; kept = NR } END { print keep }' "$file")"
+  case "$opener" in
+    *"||"*) ;;
+    if\ *|*[[:space:]]if\ *) ;;
+    *) unguarded="$unguarded
+       $file:$line (heredoc opened by: ${opener:-<none found>})" ;;
+  esac
+done < <(grep -rn '\$(seat_app_owner_sql ' tests/*.sh | grep -v '_gate\.sh:')
+
+# The runner sites need no opener: the check is inside the function.
+n_runner=$(grep -rc '^[[:space:]]*seat_app_owner "' tests/*.sh 2>/dev/null \
+           | awk -F: '{ s += $2 } END { print s + 0 }')
+n_seats=$((n_seats + n_runner))
+
+# MEASURED 2026-09-06: most harnesses seat through the runner, a few splice the
+# emitter into a heredoc that also writes the app row. Floor 8 sits under the
+# total and above the emitter sites alone, so losing the runner sweep is a
+# refusal rather than a pass on the heredoc sites' evidence.
+if ! gate_arm seat_failure_is_loud "$n_seats" 8; then
+  fail "found $n_seats seat site(s) under tests/. The enumeration is broken, not
+       the harnesses."
+elif [ -z "$unguarded" ]; then
+  pass "all $n_seats harness seat(s) surface their own failure"
+else
+  fail "these harness seats discard the failure they were built to report:$unguarded
+       seat_app_owner_sql ends in a RAISE because an INSERT ... SELECT matching
+       no rows SUCCEEDS. No e2e harness here sets -e, so an unguarded heredoc
+       drops that RAISE and the run continues without an owner. Call
+       seat_app_owner (tests/lib/organization_fixture.sh), which reads the seat
+       back and exits, or guard the heredoc that carries the emitter."
+fi
+
 gate_arms_finish || FAIL=$((FAIL + 1))
 echo "  organization ownership path gate: $PASS passed, $FAIL failed"
 [ "$FAIL" -eq 0 ] || exit 1

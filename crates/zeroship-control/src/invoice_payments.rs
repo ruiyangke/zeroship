@@ -253,7 +253,7 @@ pub async fn append_charge<C: GenericClient + Sync>(
 ///
 /// A `dispute_debit` (`amount_cents < 0`) records cash CLAWED BACK by a
 /// `charge.dispute.created` — it LOWERS `Σ(invoice_payments)`, automatically tightening
-/// PR-3's over-refund cap (which reads that sum) so a creator can't refund cash that was
+/// PR-3's over-refund cap (which reads that sum) so an organization can't refund cash that was
 /// charged back. A `dispute_reversal` (`amount_cents > 0`) records cash RESTORED by a
 /// `charge.dispute.closed won`. Neither touches the finalized invoice — the immutability
 /// trigger is never challenged.

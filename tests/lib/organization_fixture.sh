@@ -29,12 +29,23 @@
 #
 #     . "$ROOT/tests/lib/organization_fixture.sh"
 #     organization_fixture_ids billing-e2e          # <- IN THE PARENT SHELL
-#     docker exec -i "$PG" psql -U "$U" -d "$DB" -v ON_ERROR_STOP=1 <<SQL
+#     docker exec -i "$PG" psql -U "$U" -d "$DB" -v ON_ERROR_STOP=1 <<SQL || exit 1
 #     $(organization_fixture_sql billing-e2e ops@zeroship.test)
-#     INSERT INTO zeroship.apps (id, name, plan_id, api_key, project_id)
-#       VALUES ('$APP', 'demo', 'free', '', '$ZS_FIXTURE_PROJECT_ID');
+#     INSERT INTO zeroship.apps (id, name, plan_id, project_id)
+#       VALUES ('$APP', 'demo', 'free', '$ZS_FIXTURE_PROJECT_ID');
 #     $(seat_app_owner_sql "$APP" "$CREATOR")
 #     SQL
+#
+# THE COLUMN LIST ABOVE IS THE WHOLE OF IT. `apps.api_key` was dropped by
+# db/migrations-ts/20260905000200_drop_app_api_key.ts, and this example named it
+# until the drop and the organization change met in one tree. A column list that
+# names a dropped column is refused at PARSE time, so the app row is never
+# written and the seat below it then RAISEs about a missing app - which reads as
+# a fault in THIS file rather than in the line the reader copied.
+#
+# WHEN THE SEAT IS THE ONLY STATEMENT, CALL `seat_app_owner` INSTEAD (below).
+# The heredoc form above is for a seat that has to travel with the app row that
+# precedes it; it is only as loud as the guard the caller puts on the heredoc.
 #
 # THE ID CALL IS SEPARATE, AND IT HAS TO BE. `$(organization_fixture_sql ...)`
 # runs in a SUBSHELL, so any variable it sets is gone by the time the next line
@@ -135,4 +146,67 @@ BEGIN
 END
 \$zs\$;
 SQL
+}
+
+# seat_app_owner <app-uuid> <user-uuid> <role> <psql-command> [args...]
+#
+# Runs the seat and REFUSES TO BE QUIET ABOUT IT. `<psql-command>` is whatever
+# the harness already uses to feed SQL to its database on stdin - the local
+# `psql_exec` function in most of them, or the `docker exec -i ... psql ...`
+# words spelled out.
+#
+# WHY THIS EXISTS ALONGSIDE THE EMITTER. `seat_app_owner_sql` ends in a RAISE so
+# that a seat matching no rows is loud. Every standalone call site wrote it as
+#
+#     psql_exec >/dev/null 2>&1 <<SQL
+#     $(seat_app_owner_sql "$APP" "$CREATOR")
+#     SQL
+#
+# and every one of those three details throws the RAISE away: the message goes
+# to /dev/null, the exit status is never read, and NO e2e harness in this tree
+# sets `-e` (they all run `set -uo pipefail`), so a failing psql is simply the
+# next line's predecessor. The apparatus was inert at the point it was built
+# for. One of those harnesses even carried the comment "fails loudly if the app
+# somehow has no project" directly above a call that could not.
+#
+# WHY IT DOES NOT TRUST THE EXIT STATUS ALONE. `ON_ERROR_STOP` lives in the
+# CALLER's psql invocation, where this function cannot see it, and psql without
+# it reports a RAISE and exits zero - the exact trap this file's header names.
+# So the verdict is a token read back out of the database by the same
+# invocation: the count can only be 1 if the row is really there, whatever psql
+# decided to do about the statements above it.
+#
+# IT EXITS RATHER THAN RETURNING. A seat is a precondition, not an assertion;
+# there is nothing useful to do with an app whose owner is missing, and a return
+# code would land in the same unchecked place the redirection did.
+seat_app_owner() {
+  local app="${1:?seat_app_owner needs an app id}"
+  local user="${2:?seat_app_owner needs a user id}"
+  local role="${3:?seat_app_owner needs a role}"
+  shift 3
+  if [ "$#" -eq 0 ]; then
+    echo "FAIL: seat_app_owner needs the psql command to run, e.g. 'seat_app_owner \"\$APP\" \"\$USER\" owner psql_exec'" >&2
+    exit 1
+  fi
+
+  local sql out
+  sql="$(seat_app_owner_sql "$app" "$user" "$role")
+SELECT 'zs-seat-ok=' || count(*)::text
+  FROM zeroship.apps a
+  JOIN zeroship.projects p ON p.id = a.project_id
+  JOIN zeroship.organization_members m
+       ON m.organization_id = p.organization_id AND m.user_id = '${user}'
+ WHERE a.id = '${app}' AND m.role = '${role}';"
+
+  out="$("$@" 2>&1 <<<"$sql")"
+  case "$out" in
+    *"zs-seat-ok=1"*) return 0 ;;
+  esac
+
+  echo "FAIL: could not seat $user as '$role' on app $app." >&2
+  echo "      The app must exist and reach an organization through" >&2
+  echo "      apps.project_id -> projects.organization_id before this runs." >&2
+  echo "      psql said:" >&2
+  printf '%s\n' "$out" | sed 's/^/        /' >&2
+  exit 1
 }

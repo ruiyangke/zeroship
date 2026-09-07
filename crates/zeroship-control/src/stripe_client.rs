@@ -1,7 +1,7 @@
 //! Thin `cyper`-based Stripe REST client.
 //!
 //! Infrastructure-cost billing talks to the PLATFORM's own Stripe account:
-//! it creates a Customer (`cus_…`) per creator, a Checkout setup-mode session to
+//! it creates a Customer (`cus_…`) per organization, a Checkout setup-mode session to
 //! save a PaymentMethod, and — at month close — invoice items + a finalized
 //! invoice on that Customer. Connect and `application_fee` are handled
 //! separately.
@@ -11,16 +11,16 @@
 //! (`bootstrap_builder.rs`) and the worker-log GET
 //! (`api.rs::fetch_worker_logs`). Bodies are `application/x-www-form-urlencoded`
 //! (Stripe's wire); we hand-encode so nested params (`period[start]`,
-//! `metadata[creator_id]`) come out in Stripe's bracket form. Money-moving /
+//! `metadata[organization_id]`) come out in Stripe's bracket form. Money-moving /
 //! object-minting MUTATING calls that the caller may retry under a deterministic
 //! key (invoice item / invoice / finalize / refund / meter event / connect
 //! PaymentIntent) carry an `Idempotency-Key` header (defense in depth on top of
 //! the `invoices` per-period claim) so an at-least-once retry replays the
 //! same Stripe object instead of creating a duplicate. **Customer and connect
-//! account creation now carry one too**, keyed on `creator_id`.
+//! account creation now carry one too**, keyed on `organization_id`.
 //!
 //! They previously did not, on the stated grounds that "at-most-once is
-//! enforced by the caller's own `creator_billing` / `creator_accounts` row
+//! enforced by the caller's own `organization_billing` / `organization_accounts` row
 //! check". That check is a plain check-then-act with no lock spanning it
 //! (`stripe_handlers.rs` 245/253/257), so two concurrent requests both observe
 //! no row and both post. The row's `ON CONFLICT` then keeps one and the other
@@ -87,19 +87,19 @@ pub struct ConnectAccount {
     pub charges_enabled: bool,
     pub payouts_enabled: bool,
     pub details_submitted: bool,
-    /// The `metadata.creator_id` we stamped at account-create time, if present —
+    /// The `metadata.organization_id` we stamped at account-create time, if present —
     /// the ownership signal the callback matches against the path principal.
-    pub creator_id: Option<String>,
+    pub organization_id: Option<String>,
 }
 
 /// Result of creating a server-stamped Connect charge (billing G1). The platform
 /// builds the PaymentIntent server-side with `application_fee_amount` resolved
-/// from the creator's server-held [`crate::fee_policy::FeePolicy`] — the SDK
+/// from the organization's server-held [`crate::fee_policy::FeePolicy`] — the SDK
 /// cannot set or override the fee.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConnectPaymentIntent {
     pub id: String,
-    /// The `client_secret` the creator's front-end uses to confirm the payment.
+    /// The `client_secret` the organization's front-end uses to confirm the payment.
     pub client_secret: Option<String>,
 }
 
@@ -154,10 +154,10 @@ pub struct StripeDispute {
 /// server.
 #[allow(async_fn_in_trait)]
 pub trait StripeApi {
-    /// Create a Customer in the platform account for a creator. `creator_id` is
-    /// stamped into `metadata.creator_id` so webhooks can resolve it back.
+    /// Create a Customer in the platform account for an organization. `organization_id` is
+    /// stamped into `metadata.organization_id` so webhooks can resolve it back.
     /// Returns the `cus_…` id.
-    async fn create_customer(&self, email: &str, creator_id: &str) -> Result<String, StripeError>;
+    async fn create_customer(&self, email: &str, organization_id: &str) -> Result<String, StripeError>;
 
     /// Create a Checkout session in `mode=setup` to collect + save a
     /// PaymentMethod for `customer`. Returns the hosted session `url`.
@@ -222,16 +222,16 @@ pub trait StripeApi {
     ) -> Result<Option<String>, StripeError>;
 
     /// Create a DRAFT invoice sweeping `customer`'s pending invoice items.
-    /// Returns the draft `in_…` id. `creator_id` is stamped into
-    /// `metadata.creator_id` so the `invoice.payment_failed` webhook can resolve
-    /// the creator directly. The caller PERSISTS this id BEFORE calling
+    /// Returns the draft `in_…` id. `organization_id` is stamped into
+    /// `metadata.organization_id` so the `invoice.payment_failed` webhook can resolve
+    /// the organization directly. The caller PERSISTS this id BEFORE calling
     /// [`StripeApi::finalize_invoice`], so a crash before finalize re-drives by
     /// finalizing THIS draft (which carries the real items) rather than creating
     /// a fresh empty draft.
     async fn create_invoice(
         &self,
         customer: &str,
-        creator_id: &str,
+        organization_id: &str,
         idempotency_key: &str,
     ) -> Result<String, StripeError>;
 
@@ -289,20 +289,20 @@ pub trait StripeApi {
 
     // ── Stream-2: Connect onboarding + server-stamped application fee (G1) ───
 
-    /// Create an **Express** Connect account for a creator (`POST /v1/accounts`,
-    /// `type=express`). `creator_id` is stamped into `metadata.creator_id` so the
+    /// Create an **Express** Connect account for an organization (`POST /v1/accounts`,
+    /// `type=express`). `organization_id` is stamped into `metadata.organization_id` so the
     /// `callback` can VERIFY ownership server-side (it never trusts a client-POSTed
     /// acct_…). `email` pre-fills the onboarding form. Returns the `acct_…` id.
     async fn create_connect_account(
         &self,
         email: &str,
-        creator_id: &str,
+        organization_id: &str,
         country: &str,
     ) -> Result<String, StripeError>;
 
     /// Create a hosted onboarding **account link** for an existing Connect account
     /// (`POST /v1/account_links`, `type=account_onboarding`). Returns the URL the
-    /// creator visits to complete Stripe-hosted onboarding. This REPLACES the
+    /// organization visits to complete Stripe-hosted onboarding. This REPLACES the
     /// placeholder `connect.stripe.com/express_login?...` URL (ISS-30).
     async fn create_account_link(
         &self,
@@ -312,8 +312,8 @@ pub trait StripeApi {
     ) -> Result<String, StripeError>;
 
     /// Retrieve a Connect account (`GET /v1/accounts/:id`) → its onboarding
-    /// signals + the `metadata.creator_id` we stamped at create time. The
-    /// `callback` uses this to VERIFY the acct_… belongs to the path creator
+    /// signals + the `metadata.organization_id` we stamped at create time. The
+    /// `callback` uses this to VERIFY the acct_… belongs to the path organization
     /// (server-side truth), closing the "callback trusts the POSTed acct_…" hole.
     async fn retrieve_account(&self, account_id: &str) -> Result<ConnectAccount, StripeError>;
 
@@ -372,8 +372,8 @@ pub trait StripeApi {
     /// platform's `application_fee_amount` stamped SERVER-SIDE (`POST
     /// /v1/payment_intents`, `transfer_data[destination]=acct_…`,
     /// `application_fee_amount=<server-resolved fee>`). The fee is computed by the
-    /// platform from the creator's server-held [`crate::fee_policy::FeePolicy`] —
-    /// the SDK/creator code cannot set or override it (ISS-29). `idempotency_key`
+    /// platform from the organization's server-held [`crate::fee_policy::FeePolicy`] —
+    /// the SDK/organization code cannot set or override it (ISS-29). `idempotency_key`
     /// makes the create replay-safe. Returns the intent id + client_secret.
     #[allow(clippy::too_many_arguments)]
     async fn create_connect_payment_intent(
@@ -718,9 +718,9 @@ fn extract_id(json: &serde_json::Value, what: &str) -> Result<String, StripeErro
 }
 
 impl StripeApi for StripeClient {
-    async fn create_customer(&self, email: &str, creator_id: &str) -> Result<String, StripeError> {
-        // DETERMINISTIC key, keyed on the creator. The previous note here said
-        // the caller "ensures at-most-once via the `creator_billing` row
+    async fn create_customer(&self, email: &str, organization_id: &str) -> Result<String, StripeError> {
+        // DETERMINISTIC key, keyed on the organization. The previous note here said
+        // the caller "ensures at-most-once via the `organization_billing` row
         // check" and therefore needed no key. The caller does a plain
         // check-then-act - `get_customer` -> None -> `create_customer` ->
         // `set_customer` (stripe_handlers.rs:245/253/257) - with no lock
@@ -735,10 +735,10 @@ impl StripeApi for StripeClient {
         // Bounded honestly: Stripe's Idempotency-Key window is 24h, so a replay
         // beyond that can still create a second Customer. The row check is what
         // covers the sequential case. The two together, not either alone.
-        let idempotency_key = format!("zs_customer_create:{creator_id}");
+        let idempotency_key = format!("zs_customer_create:{organization_id}");
         let form = vec![
             ("email".to_string(), email.to_string()),
-            ("metadata[creator_id]".to_string(), creator_id.to_string()),
+            ("metadata[organization_id]".to_string(), organization_id.to_string()),
         ];
         let json = self
             .post_form("/v1/customers", &form, Some(&idempotency_key))
@@ -825,7 +825,7 @@ impl StripeApi for StripeClient {
         // List the customer's PENDING (not-yet-invoiced) items and match on the
         // deterministic metadata key. `pending=true` keeps the page small and
         // bounded to items not yet swept onto an invoice. Stripe caps `limit` at
-        // 100; a single creator's monthly per-app item count is far below that.
+        // 100; a single organization's monthly per-app item count is far below that.
         let enc_customer = encode_query_component(customer);
         let path = format!("/v1/invoiceitems?customer={enc_customer}&pending=true&limit=100");
         let json = self.get_json(&path).await?;
@@ -861,17 +861,17 @@ impl StripeApi for StripeClient {
     async fn create_invoice(
         &self,
         customer: &str,
-        creator_id: &str,
+        organization_id: &str,
         idempotency_key: &str,
     ) -> Result<String, StripeError> {
         // Create a draft invoice sweeping the customer's pending items.
         // auto_advance=false so WE control finalization (no surprise charge
         // timing); the deterministic key makes the create replay-safe within 24h.
-        // metadata[creator_id] lets invoice.payment_failed resolve the creator.
+        // metadata[organization_id] lets invoice.payment_failed resolve the organization.
         // `metadata[invoice_kind]=infra` is the POSITIVE infra signal (critic #6):
         // the `invoice.paid` recovery path only un-suspends when THIS marker is
         // present, so a Connect end-user `invoice.paid` whose customer happens to
-        // collide with a platform `creator_billing.stripe_customer_id` can never
+        // collide with a platform `organization_billing.stripe_customer_id` can never
         // falsely recover a suspension. Stripe copies invoice metadata onto the
         // `invoice.paid`/`invoice.payment_failed` events, so the webhook sees it.
         let create_form = vec![
@@ -889,7 +889,7 @@ impl StripeApi for StripeClient {
                 "pending_invoice_items_behavior".to_string(),
                 "include".to_string(),
             ),
-            ("metadata[creator_id]".to_string(), creator_id.to_string()),
+            ("metadata[organization_id]".to_string(), organization_id.to_string()),
             ("metadata[invoice_kind]".to_string(), "infra".to_string()),
         ];
         let invoice = self
@@ -989,23 +989,23 @@ impl StripeApi for StripeClient {
     async fn create_connect_account(
         &self,
         email: &str,
-        creator_id: &str,
+        organization_id: &str,
         country: &str,
     ) -> Result<String, StripeError> {
-        // Express Connect account. metadata[creator_id] is the OWNERSHIP signal
-        // the callback verifies (the account belongs to THIS creator).
+        // Express Connect account. metadata[organization_id] is the OWNERSHIP signal
+        // the callback verifies (the account belongs to THIS organization).
         //
         // DETERMINISTIC key, same reasoning as `create_customer`. The previous
-        // note said the caller "ensures at-most-once via the `creator_accounts`
+        // note said the caller "ensures at-most-once via the `organization_accounts`
         // row check (reuse an existing acct_… on re-onboard)", but `onboard`
         // reuses only what it can SEE: two concurrent onboards both read no
         // row and both post, leaving a second Express account on the platform.
-        let idempotency_key = format!("zs_connect_account_create:{creator_id}");
+        let idempotency_key = format!("zs_connect_account_create:{organization_id}");
         let form = vec![
             ("type".to_string(), "express".to_string()),
             ("email".to_string(), email.to_string()),
             ("country".to_string(), country.to_string()),
-            ("metadata[creator_id]".to_string(), creator_id.to_string()),
+            ("metadata[organization_id]".to_string(), organization_id.to_string()),
         ];
         let json = self
             .post_form("/v1/accounts", &form, Some(&idempotency_key))
@@ -1037,9 +1037,9 @@ impl StripeApi for StripeClient {
         let json = self.get_json(&format!("/v1/accounts/{enc}")).await?;
         let id = extract_id(&json, "account retrieve")?;
         let bool_field = |k: &str| json.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
-        let creator_id = json
+        let organization_id = json
             .get("metadata")
-            .and_then(|m| m.get("creator_id"))
+            .and_then(|m| m.get("organization_id"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
         Ok(ConnectAccount {
@@ -1047,7 +1047,7 @@ impl StripeApi for StripeClient {
             charges_enabled: bool_field("charges_enabled"),
             payouts_enabled: bool_field("payouts_enabled"),
             details_submitted: bool_field("details_submitted"),
-            creator_id,
+            organization_id,
         })
     }
 
@@ -1071,8 +1071,8 @@ impl StripeApi for StripeClient {
                 "application_fee_cents {application_fee_cents} exceeds i64::MAX — refusing to clamp"
             ))
         })?;
-        // The fee is the SERVER-resolved value (from the creator's FeePolicy); the
-        // SDK/creator code never reaches this. `transfer_data[destination]` routes
+        // The fee is the SERVER-resolved value (from the organization's FeePolicy); the
+        // SDK/organization code never reaches this. `transfer_data[destination]` routes
         // the charge (minus fee) to the connected account; `application_fee_amount`
         // is the platform's cut.
         let form = vec![
@@ -1264,7 +1264,7 @@ fn encode_query_component(s: &str) -> String {
 
 /// `application/x-www-form-urlencoded` encode `(key, value)` pairs with Stripe's
 /// expected percent-escaping. Keys are already in Stripe bracket form
-/// (`period[start]`, `metadata[creator_id]`); both key and value are escaped.
+/// (`period[start]`, `metadata[organization_id]`); both key and value are escaped.
 fn encode_form(pairs: &[(String, String)]) -> Vec<u8> {
     let mut out = String::new();
     for (i, (k, v)) in pairs.iter().enumerate() {
@@ -1312,13 +1312,13 @@ mod tests {
         let pairs = vec![
             ("period[start]".to_string(), "1700000000".to_string()),
             ("description".to_string(), "infra usage Jun 2026".to_string()),
-            ("metadata[creator_id]".to_string(), "abc/def".to_string()),
+            ("metadata[organization_id]".to_string(), "abc/def".to_string()),
         ];
         let encoded = String::from_utf8(encode_form(&pairs)).unwrap();
         // Brackets are percent-escaped; spaces become '+'; '/' becomes %2F.
         assert_eq!(
             encoded,
-            "period%5Bstart%5D=1700000000&description=infra+usage+Jun+2026&metadata%5Bcreator_id%5D=abc%2Fdef",
+            "period%5Bstart%5D=1700000000&description=infra+usage+Jun+2026&metadata%5Borganization_id%5D=abc%2Fdef",
         );
     }
 

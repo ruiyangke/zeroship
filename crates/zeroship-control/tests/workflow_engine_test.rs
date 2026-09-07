@@ -525,8 +525,8 @@ async fn seed_app_and_deploy_on_plan(
     let project = common::unowned_project(fx.pg.inner.as_ref()).await;
     fx.pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled, project_id) \
-             VALUES ($1, $2, $3, true, $4)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled, project_id, organization_id) \
+             SELECT $1, $2, $3, true, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[&app_id, &name, &plan_id, &project],
         )
         .await

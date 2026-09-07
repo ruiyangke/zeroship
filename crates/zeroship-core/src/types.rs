@@ -179,9 +179,9 @@ pub enum SpendState {
     Block,
 }
 
-/// Per-creator payment/account-enforcement state (billing G2), derived by the
+/// Per-organization payment/account-enforcement state (billing G2), derived by the
 /// control plane from Stripe webhook truth and projected onto the gateway's
-/// pulled [`RouteEntry`] (creator-keyed in the DB, surfaced per-app via the
+/// pulled [`RouteEntry`] (organization-keyed in the DB, surfaced per-app via the
 /// owner join).
 ///
 /// This is ORTHOGONAL to [`SpendState`]: spend caps USAGE within a paid
@@ -248,16 +248,18 @@ pub struct RouteEntry {
     /// for an app with no spend row or a wire payload predating the field.
     #[serde(default)]
     pub spend_state: SpendState,
-    /// Current payment/account-enforcement state for the app's CREATOR (billing
-    /// G2), JOINed from `zeroship.creator_billing_status` by the control-plane
-    /// registry via the app's one path to a human: its project, that project's
-    /// organization, and that organization's owner. An organization may hold
-    /// several owners, so the registry collapses them and the MOST RESTRICTIVE
-    /// state wins - adding an owner whose card is good can never un-suspend an
-    /// app. The
+    /// Current payment/account-enforcement state for the app's ORGANIZATION
+    /// (billing G2), JOINed from `zeroship.organization_billing_status` by the
+    /// control-plane registry on `apps.organization_id`.
+    ///
+    /// It used to be reached through the app's project, that project's
+    /// organization, and that organization's OWNERS - which fanned out, so the
+    /// registry had to collapse the result most-restrictive-first or seating an
+    /// owner with a good card could un-suspend an app. An organization has one
+    /// status row, so there is no fan-out and no collapse. The
     /// gateway gates on this BEFORE spend (an outer AND): `Suspended` → 402
     /// `ACCOUNT_SUSPENDED`; `PastDue`/`Active` pass (PastDue is the grace
-    /// window). `#[serde(default)]` ⇒ `Active` for an app whose creator has no
+    /// window). `#[serde(default)]` ⇒ `Active` for an app whose organization has no
     /// status row (free/cardless, the common case) or a wire payload predating
     /// the field.
     #[serde(default)]

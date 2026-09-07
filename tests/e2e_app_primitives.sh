@@ -80,10 +80,10 @@ BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
 # `zeroship.app_members` is deleted; an app reaches the people who answer for it
-# through its project's organization. `seat_app_owner_sql` emits that join AND a
-# check that raises when it matches nothing - an INSERT ... SELECT over no rows
-# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
-# surfaces far from here.
+# through its project's organization. `seat_app_owner` writes that join, reads
+# the seat back out of the database and exits when it is not there - an
+# INSERT ... SELECT over no rows is a SUCCESSFUL statement that seats nobody,
+# and the 403 it later produces surfaces far from here.
 source "$ROOT/tests/lib/organization_fixture.sh"
 STRICT="${STRICT:-0}"
 
@@ -291,9 +291,8 @@ echo "$DEP" | grep -q "deploy_hash" && pass "deployed db-todos .zship" || fail "
 # its own, while migrated ALSO requires a literal `role = 'owner'` row
 # (crates/zeroship-migrate-server/src/auth.rs, `requires_app_owner`). A platform admin with no
 # membership row can therefore deploy an app and be refused when migrating it.
-docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-$(seat_app_owner_sql "$APP_ID" "$OWNER")
-SQL
+seat_app_owner "$APP_ID" "$OWNER" owner \
+  docker exec -i "$PG_CONTAINER" psql -U postgres -d zeroship -v ON_ERROR_STOP=1
 
 # Build a worker dispatch frame for the pre-migrate diagnostic probes.
 zs_unmigrated_frame() {

@@ -208,7 +208,7 @@ impl Meter for LagoProvider {
         for event in batch {
             self.post_usage_event(
                 &event.event_id,
-                &event.creator_subject(),
+                crate::metering::provider::event_subject("lago", event)?,
                 &event.meter,
                 event.event_time,
                 event.value,

@@ -23,13 +23,12 @@
 //! A crash AFTER `Mailer::send` succeeds but BEFORE the `sent` flip commits leaves a
 //! `pending` row whose `claimed_at` is past [`NOTIFY_REDRIVE_HORIZON`] (= 15min) → the
 //! next tick RE-DRIVES the SAME row (re-claims via UPDATE, re-sends). The provider-side
-//! `Idempotency-Key = (creator_id, kind, transition_id)` the notifier passes makes the
+//! `Idempotency-Key = (organization_id, kind, transition_id)` the notifier passes makes the
 //! re-send an effective no-op at any provider that honours it.
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use uuid::Uuid;
 
 use crate::notify::{BillingNotificationKind, Notification, NotificationDetail};
 use crate::registry::RegistryError;
@@ -79,7 +78,7 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
 
 /// One candidate notification scanned from the source tables (before claim/send).
 struct Candidate {
-    creator_id: Uuid,
+    organization_id: String,
     kind: BillingNotificationKind,
     transition_id: String,
     detail: NotificationDetail,
@@ -142,12 +141,12 @@ pub async fn sweep(state: &AppState) -> Result<usize, RegistryError> {
         // a deliverability skip — we still flip to `sent` (the suppression is permanent;
         // re-driving would never succeed). On any other transport error we LEAVE the row
         // `pending` so the next tick (past the horizon) re-drives the SAME row.
-        let Some((email, name)) = resolve_recipient(state, c.creator_id).await? else {
+        let Some((email, name)) = resolve_recipient(state, &c.organization_id).await? else {
             // No email on file — nothing to deliver; flip to `sent` so it is not retried.
             mark_sent(state, &c).await?;
             continue;
         };
-        let idempotency_key = format!("{}:{}:{}", c.creator_id, c.kind.as_str(), c.transition_id);
+        let idempotency_key = format!("{}:{}:{}", c.organization_id, c.kind.as_str(), c.transition_id);
         let notification = Notification {
             to_email: email,
             to_name: name,
@@ -164,7 +163,7 @@ pub async fn sweep(state: &AppState) -> Result<usize, RegistryError> {
                 // Leave `pending`; the next tick past NOTIFY_REDRIVE_HORIZON re-drives.
                 tracing::warn!(
                     error = %e,
-                    creator_id = %c.creator_id,
+                    organization_id = %c.organization_id,
                     kind = c.kind.as_str(),
                     "billing-notify: send failed — leaving pending for re-drive",
                 );
@@ -184,16 +183,16 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     let horizon_secs = i64::try_from(NOTIFY_REDRIVE_HORIZON.as_secs()).unwrap_or(900);
     let mut out = Vec::new();
 
-    // (a) Dunning-driven kinds from creator_billing_status_history. `to_state`/`reason`
+    // (a) Dunning-driven kinds from organization_billing_status_history. `to_state`/`reason`
     // map to the notification kind. We notify the actionable edges: →past_due,
     // →suspended, →active (recovered). The notification kind is the dedup `kind`; the
     // transition row's surrogate `id` is the `transition_id`.
     let rows = conn
         .query(
-            "SELECT h.id, h.creator_id, h.to_state, h.reason \
-               FROM zeroship.creator_billing_status_history h \
+            "SELECT h.id, h.organization_id, h.to_state, h.reason \
+               FROM zeroship.organization_billing_status_history h \
                LEFT JOIN zeroship.billing_notifications n \
-                 ON n.creator_id = h.creator_id \
+                 ON n.organization_id = h.organization_id \
                 AND n.transition_id = h.id \
                 AND n.kind = CASE h.to_state \
                       WHEN 'past_due'  THEN 'past_due' \
@@ -216,7 +215,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
             _ => continue,
         };
         out.push(Candidate {
-            creator_id: r.get("creator_id"),
+            organization_id: r.get("organization_id"),
             kind,
             transition_id: r.get("id"),
             detail: NotificationDetail::default(),
@@ -227,10 +226,10 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     // formatted into the body (never re-priced).
     let rows = conn
         .query(
-            "SELECT i.id, i.creator_id, i.period, i.total_cents, i.currency \
+            "SELECT i.id, i.organization_id, i.period, i.total_cents, i.currency \
                FROM zeroship.invoices i \
                LEFT JOIN zeroship.billing_notifications n \
-                 ON n.creator_id = i.creator_id \
+                 ON n.organization_id = i.organization_id \
                 AND n.transition_id = i.id \
                 AND n.kind = 'invoice_finalized'::zeroship.billing_notification_kind \
               WHERE i.status = 'finalized' \
@@ -245,7 +244,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
         let total: i64 = r.get("total_cents");
         let period: chrono::NaiveDate = r.get("period");
         out.push(Candidate {
-            creator_id: r.get("creator_id"),
+            organization_id: r.get("organization_id"),
             kind: BillingNotificationKind::InvoiceFinalized,
             transition_id: r.get("id"),
             detail: NotificationDetail {
@@ -257,14 +256,14 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
         });
     }
 
-    // (c) Newly-issued refunds. transition_id = refund id; creator via the invoice FK.
+    // (c) Newly-issued refunds. transition_id = refund id; organization via the invoice FK.
     let rows = conn
         .query(
-            "SELECT r.id, i.creator_id, r.amount_cents, r.currency, r.destination \
+            "SELECT r.id, i.organization_id, r.amount_cents, r.currency, r.destination \
                FROM zeroship.refunds r \
                JOIN zeroship.invoices i ON i.id = r.invoice_id \
                LEFT JOIN zeroship.billing_notifications n \
-                 ON n.creator_id = i.creator_id \
+                 ON n.organization_id = i.organization_id \
                 AND n.transition_id = r.id \
                 AND n.kind = 'refunded'::zeroship.billing_notification_kind \
               WHERE r.status = 'issued' \
@@ -284,7 +283,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
             "credit to your balance"
         };
         out.push(Candidate {
-            creator_id: r.get("creator_id"),
+            organization_id: r.get("organization_id"),
             kind: BillingNotificationKind::Refunded,
             transition_id: r.get("id"),
             detail: NotificationDetail {
@@ -296,18 +295,18 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
         });
     }
 
-    // (d) Newly-opened disputes (PR-8). transition_id = the `dsp_…` dispute id; creator
+    // (d) Newly-opened disputes (PR-8). transition_id = the `dsp_…` dispute id; organization
     // via the invoice FK. We notify ONLY the open-dispute event (the cardholder disputed a
-    // charge) — won/lost resolutions are not separate creator emails (they're operator
+    // charge) — won/lost resolutions are not separate organization emails (they're operator
     // bookkeeping). The disputed amount is formatted into the body (frozen, never
     // re-priced).
     let rows = conn
         .query(
-            "SELECT d.id, i.creator_id, d.amount_cents, d.currency \
+            "SELECT d.id, i.organization_id, d.amount_cents, d.currency \
                FROM zeroship.billing_disputes d \
                JOIN zeroship.invoices i ON i.id = d.invoice_id \
                LEFT JOIN zeroship.billing_notifications n \
-                 ON n.creator_id = i.creator_id \
+                 ON n.organization_id = i.organization_id \
                 AND n.transition_id = d.id \
                 AND n.kind = 'disputed'::zeroship.billing_notification_kind \
               WHERE d.created_at > NOW() - $1::text::interval \
@@ -320,7 +319,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     for r in &rows {
         let amount: i64 = r.get("amount_cents");
         out.push(Candidate {
-            creator_id: r.get("creator_id"),
+            organization_id: r.get("organization_id"),
             kind: BillingNotificationKind::Disputed,
             transition_id: r.get("id"),
             detail: NotificationDetail {
@@ -333,14 +332,14 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     }
 
     // (e) Failed payouts (webhook follow-up: payout.failed). transition_id = the `pof_…`
-    // payout-failure id; creator is on the row directly (a connected-account creator). We
-    // notify the creator so they learn their payout bounced and can fix their bank details.
+    // payout-failure id; organization is on the row directly (a connected-account organization). We
+    // notify the organization so they learn their payout bounced and can fix their bank details.
     let rows = conn
         .query(
-            "SELECT pf.id, pf.creator_id, pf.amount_cents, pf.currency \
+            "SELECT pf.id, pf.organization_id, pf.amount_cents, pf.currency \
                FROM zeroship.payout_failures pf \
                LEFT JOIN zeroship.billing_notifications n \
-                 ON n.creator_id = pf.creator_id \
+                 ON n.organization_id = pf.organization_id \
                 AND n.transition_id = pf.id \
                 AND n.kind = 'payout_failed'::zeroship.billing_notification_kind \
               WHERE pf.created_at > NOW() - $1::text::interval \
@@ -353,7 +352,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     for r in &rows {
         let amount: i64 = r.get("amount_cents");
         out.push(Candidate {
-            creator_id: r.get("creator_id"),
+            organization_id: r.get("organization_id"),
             kind: BillingNotificationKind::PayoutFailed,
             transition_id: r.get("id"),
             detail: NotificationDetail {
@@ -366,14 +365,14 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     }
 
     // (f) Failed end-user checkouts (webhook follow-up: payment_intent.payment_failed).
-    // transition_id = the `cof_…` checkout-failure id; creator on the row. Informational —
-    // no money moved — but surfaced to the creator for visibility.
+    // transition_id = the `cof_…` checkout-failure id; organization on the row. Informational —
+    // no money moved — but surfaced to the organization for visibility.
     let rows = conn
         .query(
-            "SELECT cf.id, cf.creator_id, cf.amount_cents, cf.currency \
+            "SELECT cf.id, cf.organization_id, cf.amount_cents, cf.currency \
                FROM zeroship.connect_checkout_failures cf \
                LEFT JOIN zeroship.billing_notifications n \
-                 ON n.creator_id = cf.creator_id \
+                 ON n.organization_id = cf.organization_id \
                 AND n.transition_id = cf.id \
                 AND n.kind = 'checkout_failed'::zeroship.billing_notification_kind \
               WHERE cf.created_at > NOW() - $1::text::interval \
@@ -386,7 +385,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     for r in &rows {
         let amount: i64 = r.get("amount_cents");
         out.push(Candidate {
-            creator_id: r.get("creator_id"),
+            organization_id: r.get("organization_id"),
             kind: BillingNotificationKind::CheckoutFailed,
             transition_id: r.get("id"),
             detail: NotificationDetail {
@@ -403,34 +402,31 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
     // (`block→degrade`, `degrade→warn`, `*→allow`) once the deadband relaxes. We notify ONLY
     // on ESCALATION: an edge where severity rises (`allow<warn<degrade<block`). A recovery /
     // de-escalation, and any `*→allow`, are silent — emailing "you're approaching your limit"
-    // to a creator whose app is RECOVERING is wrong. The escalation gate is encoded in SQL via
+    // to an organization whose app is RECOVERING is wrong. The escalation gate is encoded in SQL via
     // a CASE-rank on both `h.from_state` and `h.to_state`: we emit iff rank(to) > rank(from).
     // (The row stores both endpoints — 0041 DDL — so no prior-state derivation is needed.)
     //
-    // Unlike the other (creator-keyed) kinds, the spend source is PER-APP, so we resolve the
-    // creator through `crate::organizations::app_owner_map` — the app's project, its
-    // organization, and that organization's longest-standing owner, collapsed to one row per
-    // app so a multi-owner organization never double-notifies. The tiebreak is that function's
-    // and no longer a copy: it was previously spelled here, in `cron/billing_reconcile.rs` and
-    // in `cron/metering_export.rs`, each with a comment asking the next editor to keep the
-    // three matching. The spend notice reaches the SAME creator who is billed because there is
-    // one rule, not three that agree. An app whose organization has no owner, or an owner with
-    // no `creator_billing` identity (the `billing_notifications` FK target), is skipped (the
-    // INNER JOINs drop it). The app NAME + the effective limit are formatted into the body
-    // (frozen at the transition; never re-priced here).
+    // Unlike the other (subject-keyed) kinds the spend source is PER-APP, so the
+    // subject comes off the app row: `apps.organization_id`. This used to resolve
+    // a HUMAN through `app_owner_map` - project, organization, longest-standing
+    // owner - and needed that map's DISTINCT ON so a multi-owner organization did
+    // not get notified twice about one app. There is one organization per app, so
+    // the collapse is gone with the fan-out, and the spend notice reaches exactly
+    // the subject that is billed because both read the same column.
+    //
+    // An app whose organization has no `organization_billing` identity (the
+    // `billing_notifications` FK target) is still skipped - the INNER JOIN drops
+    // it. The app NAME and the effective limit are formatted into the body,
+    // frozen at the transition and never re-priced here.
     let rows = conn
         .query(
-            &format!(
             "SELECT h.id, h.to_state, h.spend_cents, h.limit_cents, a.name AS app_name, \
-                    o.creator_id \
+                    a.organization_id \
                FROM zeroship.spend_state_history h \
                JOIN zeroship.apps a ON a.id = h.app_id \
-               JOIN ( SELECT owner_map.app_id, owner_map.user_id AS creator_id \
-                        FROM {owner_map} owner_map \
-               ) o ON o.app_id = h.app_id \
-               JOIN zeroship.creator_billing cb ON cb.creator_id = o.creator_id \
+               JOIN zeroship.organization_billing cb ON cb.organization_id = a.organization_id \
                LEFT JOIN zeroship.billing_notifications n \
-                 ON n.creator_id = o.creator_id \
+                 ON n.organization_id = a.organization_id \
                 AND n.transition_id = h.id \
                 AND n.kind = CASE h.to_state \
                       WHEN 'warn'    THEN 'spend_warn' \
@@ -444,8 +440,6 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
                                       WHEN 'degrade' THEN 2 WHEN 'block' THEN 3 END \
                 AND ( n.status IS NULL \
                    OR (n.status = 'pending' AND n.claimed_at < NOW() - make_interval(secs => $2::double precision)) )",
-                owner_map = crate::organizations::app_owner_map(),
-            ),
             &[&NOTIFY_SCAN_WINDOW, &(horizon_secs as f64)],
         )
         .await
@@ -461,7 +455,7 @@ async fn scan_unsent(state: &AppState) -> Result<Vec<Candidate>, RegistryError> 
         let spend: i64 = r.get("spend_cents");
         let limit: Option<i64> = r.get("limit_cents");
         out.push(Candidate {
-            creator_id: r.get("creator_id"),
+            organization_id: r.get("organization_id"),
             kind,
             transition_id: r.get("id"),
             detail: NotificationDetail {
@@ -490,14 +484,14 @@ async fn claim(state: &AppState, c: &Candidate) -> Result<bool, RegistryError> {
     let rows = conn
         .query(
             "INSERT INTO zeroship.billing_notifications \
-                (creator_id, kind, transition_id, status, claimed_at) \
+                (organization_id, kind, transition_id, status, claimed_at) \
              VALUES ($1, $2::text::zeroship.billing_notification_kind, $3, 'pending', NOW()) \
-             ON CONFLICT (creator_id, kind, transition_id) DO UPDATE \
+             ON CONFLICT (organization_id, kind, transition_id) DO UPDATE \
                 SET claimed_at = NOW() \
               WHERE zeroship.billing_notifications.status = 'pending' \
                 AND zeroship.billing_notifications.claimed_at < NOW() - make_interval(secs => $4::double precision) \
              RETURNING transition_id",
-            &[&c.creator_id, &c.kind.as_str(), &c.transition_id, &horizon_secs],
+            &[&c.organization_id, &c.kind.as_str(), &c.transition_id, &horizon_secs],
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
@@ -511,29 +505,38 @@ async fn mark_sent(state: &AppState, c: &Candidate) -> Result<(), RegistryError>
     conn.execute(
         "UPDATE zeroship.billing_notifications \
             SET status = 'sent', sent_at = NOW() \
-          WHERE creator_id = $1 \
+          WHERE organization_id = $1 \
             AND kind = $2::text::zeroship.billing_notification_kind \
             AND transition_id = $3",
-        &[&c.creator_id, &c.kind.as_str(), &c.transition_id],
+        &[&c.organization_id, &c.kind.as_str(), &c.transition_id],
     )
     .await
     .map_err(|e| RegistryError::Database(e.to_string()))?;
     Ok(())
 }
 
-/// Resolve the creator's email + display name from `users` (creator_id == users.id).
-/// `None` ⇒ no user row (e.g. an erased creator) — the cron flips the claim to `sent`
-/// without sending.
+/// The address a billing notice for this organization goes to.
+///
+/// It reads `organizations.billing_email` and `organizations.name`, NOT a
+/// member's `users` row. The billed party and the notified party are the same
+/// entity again - an organization - which is what makes this correct rather than
+/// merely equivalent: the previous version resolved whichever HUMAN happened to
+/// be the longest-standing owner, so transferring ownership silently redirected
+/// the invoice mail, and erasing that user silently stopped it.
+///
+/// `None` means no such organization row; the cron flips the claim to `sent`
+/// without sending rather than retrying forever.
 #[allow(clippy::future_not_send)]
 async fn resolve_recipient(
     state: &AppState,
-    creator_id: Uuid,
+    organization_id: &str,
 ) -> Result<Option<(String, Option<String>)>, RegistryError> {
     let conn = state.registry.conn().await?;
     let rows = conn
         .query(
-            "SELECT email::text AS email, name FROM zeroship.users WHERE id = $1",
-            &[&creator_id],
+            "SELECT billing_email::text AS email, name FROM zeroship.organizations \
+              WHERE id = $1",
+            &[&organization_id],
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;

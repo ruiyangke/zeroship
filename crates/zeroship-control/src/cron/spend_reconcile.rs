@@ -84,7 +84,7 @@ async fn emit_transition(state: &AppState, t: &SpendTransition) {
         &state.registry,
         AuditEntry {
             app_id: Some(t.app_id),
-            creator_id: None,
+            organization_id: None,
             actor_user_id: None,
             action: Action::SpendStateChange,
             resource: Some("spend_state"),

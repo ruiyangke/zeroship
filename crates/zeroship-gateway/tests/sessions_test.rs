@@ -188,8 +188,9 @@ async fn insert_app(client: &compio_postgres::Client, app_id: Uuid) {
     let project_id = common::unowned_project(client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, project_id) \
-             VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
+             SELECT $1, $2, p.id, p.organization_id \
+               FROM zeroship.projects p WHERE p.id = $3",
             &[
                 &app_id,
                 &format!("gateway-session-app-{}", app_id.simple()),

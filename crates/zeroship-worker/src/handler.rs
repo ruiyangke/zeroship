@@ -3950,8 +3950,8 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
         .await
         .expect("seed worker workflow test project");
         conn.execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled, project_id) \
-             VALUES ($1, $3, $2, true, $4) \
+            "INSERT INTO zeroship.apps (id, name, plan_id, workflows_enabled, project_id, organization_id) \
+             SELECT $1, $3, $2, true, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4 \
              ON CONFLICT (id) DO UPDATE SET plan_id = EXCLUDED.plan_id, workflows_enabled = true",
             &[app_id, &WORKFLOW_TEST_PLAN, &app_name, &project_id],
         )

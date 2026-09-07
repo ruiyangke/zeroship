@@ -60,14 +60,14 @@ async fn backdate_schedule(db: &Client, user_id: Uuid) {
 #[allow(clippy::future_not_send)]
 async fn cleanup(db: &Client, ids: &[Uuid]) {
     for id in ids {
-        // Best-effort teardown. creator_accounts/payouts FK creator_id, so
+        // Best-effort teardown. organization_accounts/payouts FK organization_id, so
         // drop those first for the anonymized creator.
         let _ = db
-            .execute("DELETE FROM zeroship.payouts WHERE creator_id = $1", &[id])
+            .execute("DELETE FROM zeroship.payouts WHERE organization_id = $1", &[id])
             .await;
         let _ = db
             .execute(
-                "DELETE FROM zeroship.creator_accounts WHERE creator_id = $1",
+                "DELETE FROM zeroship.organization_accounts WHERE organization_id = $1",
                 &[id],
             )
             .await;
@@ -239,8 +239,9 @@ async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
     // is left member-less.
     let project_id = common::unowned_project(&db).await;
     db.execute(
-        "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
-         VALUES ($1, $2, 'free', $3)",
+        "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+         SELECT $1, $2, 'free', p.id, p.organization_id \
+           FROM zeroship.projects p WHERE p.id = $3",
         &[&app_id, &format!("acctdel-app-{tag}"), &project_id],
     )
     .await
@@ -406,9 +407,9 @@ async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
     let email = format!("acctdel-creator-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Creator Person", Some("phc")).await.unwrap();
 
-    // Stripe-Connect financial history: a creator_accounts row + a payout.
+    // Stripe-Connect financial history: a organization_accounts row + a payout.
     db.execute(
-        "INSERT INTO zeroship.creator_accounts (creator_id, stripe_account_id) \
+        "INSERT INTO zeroship.organization_accounts (organization_id, stripe_account_id) \
          VALUES ($1, $2)",
         &[&user.id, &format!("acct_{tag}")],
     )
@@ -416,7 +417,7 @@ async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
     .unwrap();
     db.execute(
         "INSERT INTO zeroship.payouts \
-            (creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at) \
+            (organization_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at) \
          VALUES ($1, $2, 'payout.paid', 1000, 150, 850, 'usd', NOW())",
         &[&user.id, &format!("evt_{tag}")],
     )
@@ -463,18 +464,18 @@ async fn reaper_anonymizes_creator_with_billing_and_retains_financials() {
 
     // Financial rows RETAINED (Art. 17(3)(b)).
     let payouts = db
-        .query("SELECT 1 FROM zeroship.payouts WHERE creator_id = $1", &[&user.id])
+        .query("SELECT 1 FROM zeroship.payouts WHERE organization_id = $1", &[&user.id])
         .await
         .unwrap();
     assert_eq!(payouts.len(), 1, "payout retained for legal-obligation");
     let acct = db
         .query(
-            "SELECT 1 FROM zeroship.creator_accounts WHERE creator_id = $1",
+            "SELECT 1 FROM zeroship.organization_accounts WHERE organization_id = $1",
             &[&user.id],
         )
         .await
         .unwrap();
-    assert_eq!(acct.len(), 1, "creator_accounts retained");
+    assert_eq!(acct.len(), 1, "organization_accounts retained");
 
     cleanup(&db, &[user.id]).await;
 }
@@ -618,10 +619,10 @@ async fn reaper_ignores_a_schedule_without_a_deletion_request() {
 
 // ---------------------------------------------------------------------------
 // Redesign regression (change 8): `user_has_financial_history` is widened to
-// `creator_accounts OR invoices`. A creator with an INVOICE (the durable
+// `organization_accounts OR invoices`. A creator with an INVOICE (the durable
 // infra-billing artifact) but NO Connect account must ANONYMIZE-retain (so the
-// invoice's creator_id FK target survives), NOT hard-delete. (RED before the
-// widening: only creator_accounts counted, so an invoiced-but-not-Connected
+// invoice's organization_id FK target survives), NOT hard-delete. (RED before the
+// widening: only organization_accounts counted, so an invoiced-but-not-Connected
 // creator would be hard-deleted and the CASCADE would reap the invoice.)
 // ---------------------------------------------------------------------------
 
@@ -635,17 +636,17 @@ async fn reaper_anonymizes_invoiced_creator_with_no_connect_account() {
     let email = format!("acctdel-inv-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Invoiced Creator", Some("phc")).await.unwrap();
 
-    // Infra-billing financial history: a creator_billing identity + a finalized
-    // invoice. NO creator_accounts (this creator never used Connect).
+    // Infra-billing financial history: a organization_billing identity + a finalized
+    // invoice. NO organization_accounts (this creator never used Connect).
     db.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1)",
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1)",
         &[&user.id],
     )
     .await
     .unwrap();
     let inv_id = format!("inv_reaper_{tag}");
     db.execute(
-        "INSERT INTO zeroship.invoices (id, creator_id, period, status, subtotal_cents, total_cents, finalized_at) \
+        "INSERT INTO zeroship.invoices (id, organization_id, period, status, subtotal_cents, total_cents, finalized_at) \
          VALUES ($1, $2, date_trunc('month', NOW())::date, 'finalized', 500, 500, NOW())",
         &[&inv_id, &user.id],
     )
@@ -684,6 +685,6 @@ async fn reaper_anonymizes_invoiced_creator_with_no_connect_account() {
 
     // Teardown: drop the billing rows then the user.
     let _ = db.execute("DELETE FROM zeroship.invoices WHERE id = $1", &[&inv_id]).await;
-    let _ = db.execute("DELETE FROM zeroship.creator_billing WHERE creator_id = $1", &[&user.id]).await;
+    let _ = db.execute("DELETE FROM zeroship.organization_billing WHERE organization_id = $1", &[&user.id]).await;
     cleanup(&db, &[user.id]).await;
 }

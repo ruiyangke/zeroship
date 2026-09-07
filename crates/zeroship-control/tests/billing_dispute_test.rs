@@ -25,7 +25,7 @@
 //!   (c) `.closed won` appends a `dispute_reversal` restoring cash_collected; `.closed
 //!       lost` leaves the debit.
 //!   (d) the dispute produces exactly ONE `disputed` notification (asserted off the DB
-//!       ledger, per-creator, via the REAL notify cron tick).
+//!       ledger, per-organization, via the REAL notify cron tick).
 //!   (e) a dispute on a credited/refunded invoice doesn't corrupt credit/refund balances.
 //!   (f) the PR-8 schema objects exist on the migrated DB.
 //!   (g) LIFECYCLE (CRITICAL-3): a won→(late/replayed)lost reorder is rejected — the row
@@ -34,9 +34,9 @@
 //!       won, debit + reversal both present (net cash restored), and the late `.created`
 //!       does not resurrect it to `open`.
 //!
-//! Parallel-safe: every test seeds its OWN creator (unique email) + its own invoice +
+//! Parallel-safe: every test seeds its OWN organization (unique email) + its own invoice +
 //! globally-unique Stripe ids (`du_…`/`evt_…`/`in_…`/`pi_…` carry a fresh UUID), and every
-//! assertion is scoped to that creator/invoice — so the DEFAULT parallel cargo runner
+//! assertion is scoped to that organization/invoice — so the DEFAULT parallel cargo runner
 //! (and the shared notify cron sweep) never causes cross-test interference.
 
 #![allow(clippy::future_not_send)]
@@ -193,7 +193,7 @@ fn stripe_signature(secret: &str, timestamp: i64, body: &str) -> String {
     format!("t={timestamp},v1={}", hex::encode(mac.finalize().into_bytes()))
 }
 
-// ─── seeding helpers (parallel-safe: unique creator/invoice/refs per call) ───
+// ─── seeding helpers (parallel-safe: unique organization/invoice/refs per call) ───
 
 async fn side_conn(db_url: &str) -> compio_postgres::Client {
     let (conn, driver) = compio_postgres::connect(db_url, compio_postgres::NoTls)
@@ -206,43 +206,44 @@ async fn side_conn(db_url: &str) -> compio_postgres::Client {
     conn
 }
 
-async fn make_creator(conn: &compio_postgres::Client) -> Uuid {
-    let creator: Uuid = conn
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, 'dispute-test') RETURNING id",
-            &[&format!("dsp-{}@test.invalid", Uuid::new_v4().simple())],
-        )
-        .await
-        .expect("insert user")[0]
-        .get("id");
+async fn make_organization(conn: &compio_postgres::Client) -> String {
+    let organization = zeroship_core::typed_id::generate("org");
+    let slug = format!("dsp-{}", Uuid::new_v4().simple());
     conn.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        &[&creator],
+        "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+         VALUES ($1, $2, 'dispute-test', $3)",
+        &[&organization, &slug, &format!("{slug}@test.invalid")],
     )
     .await
-    .expect("creator_billing");
-    // A `cus_…` ↔ creator mapping so the REAL infra `invoice.paid` path resolves the
-    // creator via CUSTOMER reverse-resolve (the genuine infra-invoice shape: Stripe's
-    // auto-generated subscription invoices carry no creator metadata). This keeps the seed
+    .expect("insert organization");
+    conn.execute(
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&organization],
+    )
+    .await
+    .expect("organization_billing");
+    // A `cus_…` ↔ organization mapping so the REAL infra `invoice.paid` path resolves the
+    // organization via CUSTOMER reverse-resolve (the genuine infra-invoice shape: Stripe's
+    // auto-generated subscription invoices carry no organization metadata). This keeps the seed
     // off the Stream-2 Connect payout fall-through entirely.
     let cus = format!("cus_dsp_{}", Uuid::new_v4().simple());
     conn.execute(
-        "INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id) \
+        "INSERT INTO zeroship.billing_customer_refs (organization_id, provider, external_id) \
          VALUES ($1, 'stripe', $2) ON CONFLICT DO NOTHING",
-        &[&creator, &cus],
+        &[&organization, &cus],
     )
     .await
     .expect("customer ref");
-    creator
+    organization
 }
 
-/// Resolve the `cus_…` mapped to a creator (seeded in `make_creator`) — the infra
-/// `invoice.paid` body names it so the handler reverse-resolves the creator.
-async fn creator_customer(conn: &compio_postgres::Client, creator: Uuid) -> String {
+/// Resolve the `cus_…` mapped to a organization (seeded in `make_organization`) — the infra
+/// `invoice.paid` body names it so the handler reverse-resolves the organization.
+async fn creator_customer(conn: &compio_postgres::Client, organization: &str) -> String {
     conn.query(
         "SELECT external_id FROM zeroship.billing_customer_refs \
-         WHERE creator_id = $1 AND provider = 'stripe'",
-        &[&creator],
+         WHERE organization_id = $1 AND provider = 'stripe'",
+        &[&organization],
     )
     .await
     .expect("customer ref")[0]
@@ -253,8 +254,8 @@ fn this_period() -> chrono::NaiveDate {
     period_offset(0)
 }
 
-/// A first-of-month period `months` before this month — lets one creator hold several
-/// distinct-period invoices without colliding on the `invoices_active_period_claim`
+/// A first-of-month period `months` before this month — lets one organization hold several
+/// distinct-period invoices without colliding on the `invoices_organization_active_period_claim`
 /// partial unique index.
 fn period_offset(months: i64) -> chrono::NaiveDate {
     use chrono::Datelike;
@@ -271,20 +272,20 @@ fn period_offset(months: i64) -> chrono::NaiveDate {
 /// the settling `payment_intent` (`pi_…`)→invoice `billing_provider_refs` linkage that
 /// dispute resolution depends on. Yields `(internal_invoice_id, pi_id)` — the `pi_…` is what
 /// the dispute object then names (NEVER an `in_…`, which a Stripe dispute never carries). A
-/// per-creator-unique `period` avoids the partial-unique-index collision.
+/// per-organization-unique `period` avoids the partial-unique-index collision.
 ///
 /// A macro (not a fn) so it can drive the REAL webhook through `$app` without naming ntex's
 /// opaque `init_service` Service type.
 macro_rules! seed_paid_invoice_period {
-    ($app:expr, $conn:expr, $creator:expr, $total:expr, $period:expr) => {{
+    ($app:expr, $conn:expr, $organization:expr, $total:expr, $period:expr) => {{
         let inv = zeroship_core::typed_id::new_invoice_id();
         $conn
             .execute(
                 "INSERT INTO zeroship.invoices \
-                   (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                   (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
                     total_cents, finalized_at) \
                  VALUES ($1, $2, $3::date, 'finalized', $4, 0, 0, $4, NOW())",
-                &[&inv, &$creator, &$period, &($total as i64)],
+                &[&inv, &$organization, &$period, &($total as i64)],
             )
             .await
             .expect("finalized invoice");
@@ -299,10 +300,10 @@ macro_rules! seed_paid_invoice_period {
             .expect("provider ref");
 
         // Drive the REAL invoice.paid webhook — the genuine infra shape: invoice_kind=infra
-        // marker + a `customer` (cus_…) the handler reverse-resolves to the creator (NO
-        // creator metadata, so no Stream-2 payout fall-through), naming the settling
+        // marker + a `customer` (cus_…) the handler reverse-resolves to the organization (NO
+        // organization metadata, so no Stream-2 payout fall-through), naming the settling
         // payment_intent (pi_…) which the handler persists as the resolution linkage.
-        let cus = creator_customer(&$conn, $creator).await;
+        let cus = creator_customer(&$conn, $organization).await;
         let pi = format!("pi_dsp_{}", Uuid::new_v4().simple());
         let paid_body = json!({
             "id": format!("evt_paid_{}", Uuid::new_v4().simple()),
@@ -335,8 +336,8 @@ macro_rules! seed_paid_invoice_period {
 
 /// The common case: a paid infra invoice for THIS month.
 macro_rules! seed_paid_invoice {
-    ($app:expr, $conn:expr, $creator:expr, $total:expr) => {
-        seed_paid_invoice_period!($app, $conn, $creator, $total, this_period())
+    ($app:expr, $conn:expr, $organization:expr, $total:expr) => {
+        seed_paid_invoice_period!($app, $conn, $organization, $total, this_period())
     };
 }
 
@@ -439,8 +440,9 @@ async fn dispute_created_records_debit_and_is_idempotent() {
     let fx = Fixture::new(&url, "created-idem").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
-    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
+    let (inv, pi) = seed_paid_invoice!(app, conn, organization, 6000);
 
     assert_eq!(cash_collected(&conn, &inv).await, 6000, "cash starts at the charge");
 
@@ -506,8 +508,9 @@ async fn dispute_debit_tightens_over_refund_cap() {
     let fx = Fixture::new(&url, "cap-tighten").await;
     let app = init_control!(fx);
     let mut conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
-    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
+    let (inv, pi) = seed_paid_invoice!(app, conn, organization, 6000);
 
     // PRE-dispute: a $50 cash refund fits the $60 cash cap. (Prove the baseline fits by
     // checking cash_collected, then NOT issuing — we want the dispute to flip it.)
@@ -574,10 +577,11 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
     let fx = Fixture::new(&url, "closed").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
 
     // --- WON path --- (distinct periods so both invoices fit the partial unique index)
-    let (inv_won, pi_won) = seed_paid_invoice_period!(app, conn, creator, 6000, period_offset(0));
+    let (inv_won, pi_won) = seed_paid_invoice_period!(app, conn, organization, 6000, period_offset(0));
     let du_won = format!("du_won_{}", Uuid::new_v4().simple());
     let status = post_webhook!(
         app,
@@ -602,7 +606,7 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
     assert_eq!(cash_collected(&conn, &inv_won).await, 6000);
 
     // --- LOST path ---
-    let (inv_lost, pi_lost) = seed_paid_invoice_period!(app, conn, creator, 5000, period_offset(1));
+    let (inv_lost, pi_lost) = seed_paid_invoice_period!(app, conn, organization, 5000, period_offset(1));
     let du_lost = format!("du_lost_{}", Uuid::new_v4().simple());
     post_webhook!(
         app,
@@ -622,7 +626,7 @@ async fn dispute_closed_won_restores_cash_lost_leaves_debit() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// (d) the dispute produces exactly ONE `disputed` notification (per-creator ledger).
+// (d) the dispute produces exactly ONE `disputed` notification (per-organization ledger).
 // ───────────────────────────────────────────────────────────────────────────
 
 #[compio::test]
@@ -631,8 +635,9 @@ async fn dispute_produces_exactly_one_disputed_notification() {
     let fx = Fixture::new(&url, "notify").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
-    let (_inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
+    let (_inv, pi) = seed_paid_invoice!(app, conn, organization, 6000);
 
     let du = format!("du_{}", Uuid::new_v4().simple());
     let status = post_webhook!(
@@ -642,7 +647,7 @@ async fn dispute_produces_exactly_one_disputed_notification() {
     .status();
     assert_eq!(status, StatusCode::OK);
 
-    // Resolve our dsp_… id for the per-creator ledger / key-prefix assertions.
+    // Resolve our dsp_… id for the per-organization ledger / key-prefix assertions.
     let dsp_id: String = conn
         .query(
             "SELECT id FROM zeroship.billing_disputes WHERE provider_dispute_id = $1",
@@ -652,30 +657,30 @@ async fn dispute_produces_exactly_one_disputed_notification() {
         .expect("dsp id")[0]
         .get("id");
 
-    // Drive the REAL notify cron tick (it sweeps the shared DB; we scope by creator).
-    let key_prefix = format!("{creator}:disputed:");
+    // Drive the REAL notify cron tick (it sweeps the shared DB; we scope by organization).
+    let key_prefix = format!("{organization}:disputed:");
     let _ = zeroship_control::cron::billing_notify::tick(&fx.state)
         .await
         .expect("notify tick 1");
 
-    // Exactly one `disputed` ledger row for THIS creator, marked sent, keyed on the dsp_…
+    // Exactly one `disputed` ledger row for THIS organization, marked sent, keyed on the dsp_…
     let ledger = conn
         .query(
             "SELECT status::text AS s, transition_id FROM zeroship.billing_notifications \
-             WHERE creator_id = $1 AND kind = 'disputed'",
-            &[&creator],
+             WHERE organization_id = $1 AND kind = 'disputed'",
+            &[&organization],
         )
         .await
         .expect("ledger");
-    assert_eq!(ledger.len(), 1, "exactly one disputed ledger row for this creator");
+    assert_eq!(ledger.len(), 1, "exactly one disputed ledger row for this organization");
     assert_eq!(ledger[0].get::<_, String>("transition_id"), dsp_id, "keyed on the dsp_… id");
     assert_eq!(ledger[0].get::<_, String>("s"), "sent");
 
-    // Exactly one delivery for THIS creator's disputed key (scoped, parallel-safe).
+    // Exactly one delivery for THIS organization's disputed key (scoped, parallel-safe).
     assert_eq!(
         fx.notifier.delivered_for_key_prefix(&key_prefix),
         1,
-        "exactly one disputed email delivered for this creator"
+        "exactly one disputed email delivered for this organization"
     );
 
     // A second cron tick must NOT re-send (claim ledger already `sent`).
@@ -708,7 +713,8 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     let fx = Fixture::new(&url, "credited").await;
     let app = init_control!(fx);
     let mut conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
 
     // A partially-credit-covered invoice: subtotal 8000, credit 2000, total 6000, cash 6000.
     // Seed the invoice + its 'invoice' ref, then drive the REAL invoice.paid (naming pi_…)
@@ -716,9 +722,9 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     let inv = zeroship_core::typed_id::new_invoice_id();
     conn.execute(
         "INSERT INTO zeroship.invoices \
-           (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
+           (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
          VALUES ($1, $2, $3::date, 'finalized', 8000, 2000, 0, 6000, NOW())",
-        &[&inv, &creator, &this_period()],
+        &[&inv, &organization, &this_period()],
     )
     .await
     .expect("finalized credited invoice");
@@ -730,7 +736,7 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     )
     .await
     .expect("provider ref");
-    let cus = creator_customer(&conn, creator).await;
+    let cus = creator_customer(&conn, organization).await;
     let pi = format!("pi_dsp_{}", Uuid::new_v4().simple());
     let paid_body = json!({
         "id": format!("evt_paid_{}", Uuid::new_v4().simple()),
@@ -768,7 +774,7 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     assert!(matches!(credit_refund, RefundOutcome::Issued { .. }));
 
     // Snapshot credit balance + refund count BEFORE the dispute.
-    let credit_before = credit_balance(&conn, creator).await;
+    let credit_before = credit_balance(&conn, organization).await;
     let refunds_before = refund_count(&conn, &inv).await;
     assert_eq!(credit_before, 2000, "the refund_to_credit grant is on the balance");
     assert_eq!(refunds_before, 1);
@@ -786,7 +792,7 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     // Cash dropped, but credit balance + refund rows are UNCHANGED (no double-count / corruption).
     assert_eq!(cash_collected(&conn, &inv).await, 0, "dispute_debit lowered cash to 0");
     assert_eq!(
-        credit_balance(&conn, creator).await,
+        credit_balance(&conn, organization).await,
         credit_before,
         "the dispute did NOT touch the credit ledger"
     );
@@ -804,10 +810,10 @@ async fn dispute_on_credited_refunded_invoice_preserves_balances() {
     common::drain_pg().await;
 }
 
-async fn credit_balance(conn: &compio_postgres::Client, creator: Uuid) -> i64 {
+async fn credit_balance(conn: &compio_postgres::Client, organization: &str) -> i64 {
     conn.query(
-        "SELECT COALESCE(SUM(amount_cents), 0)::bigint AS b FROM zeroship.credit_ledger WHERE creator_id = $1",
-        &[&creator],
+        "SELECT COALESCE(SUM(amount_cents), 0)::bigint AS b FROM zeroship.credit_ledger WHERE organization_id = $1",
+        &[&organization],
     )
     .await
     .expect("credit balance")[0]
@@ -838,8 +844,9 @@ async fn dispute_won_then_late_lost_is_rejected_cash_stays_restored() {
     let fx = Fixture::new(&url, "won-then-lost").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
-    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
+    let (inv, pi) = seed_paid_invoice!(app, conn, organization, 6000);
 
     let du = format!("du_wl_{}", Uuid::new_v4().simple());
     // created → open, debit to 0.
@@ -892,8 +899,9 @@ async fn dispute_closed_won_before_created_is_order_independent() {
     let fx = Fixture::new(&url, "close-first").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
-    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
+    let (inv, pi) = seed_paid_invoice!(app, conn, organization, 6000);
     assert_eq!(cash_collected(&conn, &inv).await, 6000);
 
     let du = format!("du_cf_{}", Uuid::new_v4().simple());
@@ -944,15 +952,15 @@ async fn dispute_closed_won_before_created_is_order_independent() {
 /// name. Yields `(internal_invoice_id, provider_invoice_id (in_…), pi_…)`. This lets a test
 /// deliver a dispute on that `pi_…` BEFORE the linkage exists (the out-of-order case).
 macro_rules! seed_finalized_unpaid_invoice {
-    ($conn:expr, $creator:expr, $total:expr) => {{
+    ($conn:expr, $organization:expr, $total:expr) => {{
         let inv = zeroship_core::typed_id::new_invoice_id();
         $conn
             .execute(
                 "INSERT INTO zeroship.invoices \
-                   (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+                   (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
                     total_cents, finalized_at) \
                  VALUES ($1, $2, $3::date, 'finalized', $4, 0, 0, $4, NOW())",
-                &[&inv, &$creator, &this_period(), &($total as i64)],
+                &[&inv, &$organization, &this_period(), &($total as i64)],
             )
             .await
             .expect("finalized invoice");
@@ -975,8 +983,8 @@ macro_rules! seed_finalized_unpaid_invoice {
 /// records the charge row + the `pi_…`→invoice linkage AND (post-fix) promotes any parked
 /// dispute matching that `pi_…`.
 macro_rules! drive_invoice_paid_for {
-    ($app:expr, $conn:expr, $creator:expr, $provider_invoice:expr, $pi:expr, $total:expr) => {{
-        let cus = creator_customer(&$conn, $creator).await;
+    ($app:expr, $conn:expr, $organization:expr, $provider_invoice:expr, $pi:expr, $total:expr) => {{
+        let cus = creator_customer(&$conn, $organization).await;
         let paid_body = json!({
             "id": format!("evt_paid_{}", Uuid::new_v4().simple()),
             "type": "invoice.paid",
@@ -1012,8 +1020,9 @@ async fn dispute_created_before_invoice_paid_resolves_on_linkage() {
     let fx = Fixture::new(&url, "created-before-paid").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
-    let (inv, provider_invoice, pi) = seed_finalized_unpaid_invoice!(conn, creator, 6000);
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
+    let (inv, provider_invoice, pi) = seed_finalized_unpaid_invoice!(conn, organization, 6000);
 
     // (1) The dispute arrives FIRST — its pi_… has NO linkage yet. Pre-fix this dropped the
     // dispute; post-fix it PARKS it: no billing_disputes row, no debit, but a pending row.
@@ -1032,7 +1041,7 @@ async fn dispute_created_before_invoice_paid_resolves_on_linkage() {
     // (2) Now invoice.paid arrives and writes the pi_…→invoice linkage. It MUST promote the
     // parked dispute: a billing_disputes row (open) + the dispute_debit tightening the cap,
     // and the holding row is consumed.
-    drive_invoice_paid_for!(app, conn, creator, provider_invoice, pi, 6000);
+    drive_invoice_paid_for!(app, conn, organization, provider_invoice, pi, 6000);
     assert_eq!(cash_collected(&conn, &inv).await, 0, "charge 6000 then dispute_debit -6000 = 0");
     assert_eq!(dispute_row_count(&conn, &du).await, 1, "the parked dispute was promoted");
     assert_eq!(dispute_status(&conn, &du).await.as_deref(), Some("open"));
@@ -1076,7 +1085,7 @@ async fn dispute_created_before_invoice_paid_resolves_on_linkage() {
     )
     .status();
     assert_eq!(status_redeliver, StatusCode::OK);
-    drive_invoice_paid_for!(app, conn, creator, provider_invoice, pi, 6000);
+    drive_invoice_paid_for!(app, conn, organization, provider_invoice, pi, 6000);
     assert_eq!(dispute_row_count(&conn, &du).await, 1, "still exactly one dispute row");
     assert_eq!(payment_kind_count(&conn, &inv, "dispute_debit").await, 1, "still exactly one debit");
     assert_eq!(pending_dispute_count(&conn, &du).await, 0, "no re-park");
@@ -1197,44 +1206,45 @@ async fn pr8_schema_objects_present() {
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// C1: the dispute money-write rail takes the SAME per-creator advisory lock every
+// C1: the dispute money-write rail takes the SAME per-organization advisory lock every
 //     sibling money path (refund/credit/void/proration) takes — so a dispute's
 //     `dispute_debit` cannot interleave with a concurrent refund reading the cap
 //     anchor (`cash = Σ(invoice_payments)`) pre-debit. We prove the lock by holding
-//     the per-creator key on an observer txn and showing `record_dispute_created`
-//     BLOCKS (its `lock_dispute_creator` waits on the held key) until we release it.
+//     the per-organization key on an observer txn and showing `record_dispute_created`
+//     BLOCKS (its `lock_dispute_organization` waits on the held key) until we release it.
 //
 // RED pre-fix: `disputes.rs` took NO advisory lock, so `record_dispute_created`
-//     would commit the dispute row WHILE the observer held the creator key — the
+//     would commit the dispute row WHILE the observer held the organization key — the
 //     `timeout` would NOT elapse and the post-release assert that the row appears
 //     "only after release" would be false (the row exists during the held window).
 // ───────────────────────────────────────────────────────────────────────────
 
 #[compio::test]
-async fn dispute_created_takes_per_creator_advisory_lock() {
+async fn dispute_created_takes_per_organization_advisory_lock() {
     let url = db_url();
     let fx = Fixture::new(&url, "dsp-lock").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
-    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 9000);
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
+    let (inv, pi) = seed_paid_invoice!(app, conn, organization, 9000);
     assert_eq!(cash_collected(&conn, &inv).await, 9000, "cash starts at the charge");
 
-    // (1) An OBSERVER connection takes the per-creator advisory lock in an OPEN txn and
+    // (1) An OBSERVER connection takes the per-organization advisory lock in an OPEN txn and
     // HOLDS it — exactly the key every sibling money path (and now the dispute rail) takes.
     let mut obs = side_conn(&url).await;
     let obs_tx = obs.transaction().await.expect("observer tx");
     obs_tx
         .execute(
             "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
-            &[&creator.to_string()],
+            &[&organization.to_string()],
         )
         .await
-        .expect("observer takes the creator lock");
+        .expect("observer takes the organization lock");
 
     // (2) On a DEDICATED connection, call the REAL dispute money-write. It must BLOCK on
-    // `lock_dispute_creator` while the observer holds the key. A bounded `timeout` therefore
-    // ELAPSES — the strongest faithful proof the path waits on the per-creator lock.
+    // `lock_dispute_organization` while the observer holds the key. A bounded `timeout` therefore
+    // ELAPSES — the strongest faithful proof the path waits on the per-organization lock.
     let mut writer = side_conn(&url).await;
     let du = format!("du_lock_{}", Uuid::new_v4().simple());
     let blocked = compio::time::timeout(
@@ -1246,15 +1256,16 @@ async fn dispute_created_takes_per_creator_advisory_lock() {
     .await;
     assert!(
         blocked.is_err(),
-        "record_dispute_created must BLOCK on the held per-creator advisory lock — it returned \
+        "record_dispute_created must BLOCK on the held per-organization advisory lock — it returned \
          while the observer held the key, so the dispute rail took NO lock (the C1 bug)",
     );
     // While blocked, NOTHING was written (the txn is still waiting on the lock).
     assert_eq!(dispute_row_count(&conn, &du).await, 0, "no dispute row written while blocked");
     assert_eq!(cash_collected(&conn, &inv).await, 9000, "cash untouched while blocked");
 
-    // A DIFFERENT creator's key is free — the lock serializes per creator only.
-    let other = make_creator(&conn).await;
+    // A DIFFERENT organization's key is free — the lock serializes per organization only.
+    let other = make_organization(&conn).await;
+    let other = other.as_str();
     let other_free: bool = conn
         .query(
             "SELECT pg_try_advisory_xact_lock(hashtext($1::text)::bigint) AS got",
@@ -1263,7 +1274,7 @@ async fn dispute_created_takes_per_creator_advisory_lock() {
         .await
         .expect("try other")[0]
         .get("got");
-    assert!(other_free, "a DIFFERENT creator's advisory lock is free — per-creator, not global");
+    assert!(other_free, "a DIFFERENT organization's advisory lock is free — per-organization, not global");
 
     // Drop the blocked writer's connection so its abandoned (timed-out) txn can't race the
     // retry for the lock once it's released — the retry below owns the write deterministically.
@@ -1368,8 +1379,9 @@ async fn dispute_lost_then_late_won_is_rejected_cash_stays_clawed_back() {
     let fx = Fixture::new(&url, "lost-then-won").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
-    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
+    let (inv, pi) = seed_paid_invoice!(app, conn, organization, 6000);
 
     let du = format!("du_lw_{}", Uuid::new_v4().simple());
     // created → open, debit to 0.
@@ -1424,8 +1436,9 @@ async fn dispute_closed_lost_before_created_seeds_terminal_debit_only() {
     let fx = Fixture::new(&url, "close-lost-first").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
-    let (inv, pi) = seed_paid_invoice!(app, conn, creator, 6000);
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
+    let (inv, pi) = seed_paid_invoice!(app, conn, organization, 6000);
     assert_eq!(cash_collected(&conn, &inv).await, 6000);
 
     let du = format!("du_clf_{}", Uuid::new_v4().simple());
@@ -1528,11 +1541,12 @@ async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations(
     let fx = Fixture::new(&url, "trigger").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
     // Distinct periods so each seeded invoice fits the partial-unique-period index.
-    let (inv_a, _pa) = seed_paid_invoice_period!(app, conn, creator, 6000, period_offset(0));
-    let (inv_b, _pb) = seed_paid_invoice_period!(app, conn, creator, 6000, period_offset(1));
-    let (inv_c, _pc) = seed_paid_invoice_period!(app, conn, creator, 6000, period_offset(2));
+    let (inv_a, _pa) = seed_paid_invoice_period!(app, conn, organization, 6000, period_offset(0));
+    let (inv_b, _pb) = seed_paid_invoice_period!(app, conn, organization, 6000, period_offset(1));
+    let (inv_c, _pc) = seed_paid_invoice_period!(app, conn, organization, 6000, period_offset(2));
 
     // (1) won → lost is rejected (the classic stale-lost-after-won that would strand cash).
     let du_won = seed_dispute_row_direct(&conn, &inv_a, "won", 6000).await;
@@ -1616,44 +1630,45 @@ async fn billing_disputes_controlled_update_trigger_raises_on_illegal_mutations(
 }
 
 // ───────────────────────────────────────────────────────────────────────────
-// GAP #22: `record_dispute_closed` (the close rail) takes the SAME per-creator advisory lock
+// GAP #22: `record_dispute_closed` (the close rail) takes the SAME per-organization advisory lock
 // the create rail does. C1 was proven only on the CREATED rail (the existing
-// `dispute_created_takes_per_creator_advisory_lock`); the close rail moves cash too — the won
+// `dispute_created_takes_per_organization_advisory_lock`); the close rail moves cash too — the won
 // reversal (RAISES the cap) and the close-before-create debit (LOWERS it) must serialize
-// against a concurrent refund. We hold the creator's `pg_advisory_xact_lock` key on an
+// against a concurrent refund. We hold the organization's `pg_advisory_xact_lock` key on an
 // observer txn and assert `record_dispute_closed` BLOCKS until release, for BOTH the won path
-// (existing-open-row) and the close-before-create path. A different creator's key is free.
+// (existing-open-row) and the close-before-create path. A different organization's key is free.
 //
-// RED-if-removed: drop `lock_dispute_creator(&tx, inv)` from `record_dispute_closed` and the
+// RED-if-removed: drop `lock_dispute_organization(&tx, inv)` from `record_dispute_closed` and the
 // timeout would NOT elapse (the close commits while the observer holds the key) — `is_err()`
 // flips false.
 // ───────────────────────────────────────────────────────────────────────────
 
 #[compio::test]
-async fn dispute_closed_takes_per_creator_advisory_lock() {
+async fn dispute_closed_takes_per_organization_advisory_lock() {
     let url = db_url();
     let fx = Fixture::new(&url, "dsp-close-lock").await;
     let app = init_control!(fx);
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
 
     // ---- WON path (existing open row): seed an open dispute, then close it WON under lock. ----
-    let (inv_won, pi_won) = seed_paid_invoice_period!(app, conn, creator, 9000, period_offset(0));
+    let (inv_won, pi_won) = seed_paid_invoice_period!(app, conn, organization, 9000, period_offset(0));
     let du_won = format!("du_clk_won_{}", Uuid::new_v4().simple());
     let status = post_webhook!(app, dispute_created_body(&format!("evt_clk_w0_{}", Uuid::new_v4().simple()), &du_won, &pi_won, 9000)).status();
     assert_eq!(status, StatusCode::OK);
     assert_eq!(cash_collected(&conn, &inv_won).await, 0, "debited to 0 on created");
 
-    // Observer holds the per-creator key.
+    // Observer holds the per-organization key.
     let mut obs = side_conn(&url).await;
     let obs_tx = obs.transaction().await.expect("observer tx");
     obs_tx
         .execute(
             "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
-            &[&creator.to_string()],
+            &[&organization.to_string()],
         )
         .await
-        .expect("observer takes the creator lock");
+        .expect("observer takes the organization lock");
 
     // The won close (which appends a reversal RAISING the cap) must BLOCK on the held key.
     let mut writer = side_conn(&url).await;
@@ -1675,21 +1690,22 @@ async fn dispute_closed_takes_per_creator_advisory_lock() {
     .await;
     assert!(
         blocked.is_err(),
-        "record_dispute_closed (won) must BLOCK on the held per-creator advisory lock — the \
+        "record_dispute_closed (won) must BLOCK on the held per-organization advisory lock — the \
          close rail took NO lock if it returned while the observer held the key",
     );
     // While blocked, nothing moved: still terminal-pending, no reversal, cash still 0.
     assert_eq!(dispute_status(&conn, &du_won).await.as_deref(), Some("open"), "still open while blocked");
     assert_eq!(payment_kind_count(&conn, &inv_won, "dispute_reversal").await, 0, "no reversal while blocked");
 
-    // A DIFFERENT creator's key is free — per-creator, not global.
-    let other = make_creator(&conn).await;
+    // A DIFFERENT organization's key is free — per-organization, not global.
+    let other = make_organization(&conn).await;
+    let other = other.as_str();
     let other_free: bool = conn
         .query("SELECT pg_try_advisory_xact_lock(hashtext($1::text)::bigint) AS got", &[&other.to_string()])
         .await
         .expect("try other")[0]
         .get("got");
-    assert!(other_free, "a DIFFERENT creator's advisory lock is free");
+    assert!(other_free, "a DIFFERENT organization's advisory lock is free");
 
     // Drop the blocked writer so its abandoned txn can't race the retry for the key.
     drop(writer);
@@ -1709,16 +1725,16 @@ async fn dispute_closed_takes_per_creator_advisory_lock() {
     assert_eq!(cash_collected(&conn, &inv_won).await, 9000, "cash restored on won");
 
     // ---- CLOSE-BEFORE-CREATE path: no row yet; the terminal-seed debit LOWERS the cap. ----
-    let (inv_cbc, pi_cbc) = seed_paid_invoice_period!(app, conn, creator, 7000, period_offset(1));
+    let (inv_cbc, pi_cbc) = seed_paid_invoice_period!(app, conn, organization, 7000, period_offset(1));
     let du_cbc = format!("du_clk_cbc_{}", Uuid::new_v4().simple());
     assert_eq!(cash_collected(&conn, &inv_cbc).await, 7000);
 
     let mut obs2 = side_conn(&url).await;
     let obs2_tx = obs2.transaction().await.expect("observer2 tx");
     obs2_tx
-        .execute("SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)", &[&creator.to_string()])
+        .execute("SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)", &[&organization.to_string()])
         .await
-        .expect("observer2 takes the creator lock");
+        .expect("observer2 takes the organization lock");
 
     let mut writer3 = side_conn(&url).await;
     let ctx3 = zeroship_control::disputes::DisputeCloseContext {
@@ -1733,7 +1749,7 @@ async fn dispute_closed_takes_per_creator_advisory_lock() {
     .await;
     assert!(
         blocked2.is_err(),
-        "record_dispute_closed (close-before-create) must BLOCK on the held per-creator lock",
+        "record_dispute_closed (close-before-create) must BLOCK on the held per-organization lock",
     );
     assert_eq!(dispute_row_count(&conn, &du_cbc).await, 0, "no row seeded while blocked");
     assert_eq!(cash_collected(&conn, &inv_cbc).await, 7000, "cap untouched while blocked");
@@ -1776,20 +1792,21 @@ async fn dispute_closed_takes_per_creator_advisory_lock() {
 async fn resolve_invoice_for_dispute_prefers_payment_intent_over_charge() {
     let url = db_url();
     let conn = side_conn(&url).await;
-    let creator = make_creator(&conn).await;
+    let organization = make_organization(&conn).await;
+    let organization = organization.as_str();
 
     // Two distinct finalized invoices for distinct periods (partial-unique-period index).
     let inv_pi = zeroship_core::typed_id::new_invoice_id();
     let inv_ch = zeroship_core::typed_id::new_invoice_id();
     conn.execute(
-        "INSERT INTO zeroship.invoices (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
+        "INSERT INTO zeroship.invoices (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
          VALUES ($1, $2, $3::date, 'finalized', 6000, 0, 0, 6000, NOW())",
-        &[&inv_pi, &creator, &period_offset(0)],
+        &[&inv_pi, &organization, &period_offset(0)],
     ).await.expect("invoice A");
     conn.execute(
-        "INSERT INTO zeroship.invoices (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
+        "INSERT INTO zeroship.invoices (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
          VALUES ($1, $2, $3::date, 'finalized', 6000, 0, 0, 6000, NOW())",
-        &[&inv_ch, &creator, &period_offset(1)],
+        &[&inv_ch, &organization, &period_offset(1)],
     ).await.expect("invoice B");
 
     let pi = format!("pi_pref_{}", Uuid::new_v4().simple());

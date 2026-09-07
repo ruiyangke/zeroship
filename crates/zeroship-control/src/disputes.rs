@@ -6,7 +6,7 @@
 //! initiated — it is a FORCED reversal — so it is its OWN append-only fact, FK→the
 //! disputed invoice, mirroring the refund discipline. The cash clawback is recorded as a
 //! SEPARATE negative `invoice_payments` row (`kind='dispute_debit'`), so
-//! `Σ(invoice_payments)` (PR-3's over-refund anchor) tightens AUTOMATICALLY — a creator
+//! `Σ(invoice_payments)` (PR-3's over-refund anchor) tightens AUTOMATICALLY — an organization
 //! can't refund cash that was charged back. No cross-table trigger.
 //!
 //! The whole flow is driven by the webhook (`stripe_handlers`), claim-after-success on
@@ -34,43 +34,43 @@ use compio_postgres::GenericClient;
 use crate::invoice_payments::{append_dispute_row, DisputePaymentKind};
 use crate::registry::RegistryError;
 
-/// SERIALIZE a dispute cash-write against every sibling money path for the same creator.
+/// SERIALIZE a dispute cash-write against every sibling money path for the same organization.
 ///
 /// Every other path that mutates the over-refund cap anchor (`cash = Σ(invoice_payments)`)
-/// takes `pg_advisory_xact_lock(hashtext(creator_id::text)::bigint)` as the FIRST statement
+/// takes `pg_advisory_xact_lock(hashtext(organization_id::text)::bigint)` as the FIRST statement
 /// of its txn: [`crate::refund::claim_refund_locked`], [`crate::credit::consume_at_finalize`],
 /// [`crate::void_reissue`], [`crate::proration::record_plan_change`]. The dispute rail appends
 /// `dispute_debit`/`dispute_reversal` rows that LOWER/RAISE that same anchor, so it MUST take
 /// the IDENTICAL lock or a concurrent refund (reading `cash` pre-debit) can claim cash the
 /// dispute is simultaneously clawing back — both commit, and the platform over-refunds against
 /// money it never kept. The lock is the design's stated correctness mechanism (the `0049`/`0042`
-/// trigger comments require "a future line writer MUST take the same per-creator advisory lock").
+/// trigger comments require "a future line writer MUST take the same per-organization advisory lock").
 ///
-/// `creator_id` is resolved from the dispute's anchor invoice (`zeroship.invoices.creator_id`).
+/// `organization_id` is resolved from the dispute's anchor invoice (`zeroship.invoices.organization_id`).
 /// The lock is `pg_advisory_xact_lock` — re-entrant and auto-released at commit/rollback — so it
 /// is safe to take inside a caller-owned txn that may already hold it (the linkage-writer path).
-async fn lock_dispute_creator<C: GenericClient + Sync>(
+async fn lock_dispute_organization<C: GenericClient + Sync>(
     tx: &C,
     invoice_id: &str,
 ) -> Result<(), RegistryError> {
     let rows = tx
         .query(
-            "SELECT creator_id FROM zeroship.invoices WHERE id = $1",
+            "SELECT organization_id FROM zeroship.invoices WHERE id = $1",
             &[&invoice_id],
         )
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
-    let creator_id: uuid::Uuid = rows
+    let organization_id: String = rows
         .first()
-        .map(|r| r.get::<_, uuid::Uuid>("creator_id"))
+        .map(|r| r.get::<_, String>("organization_id"))
         .ok_or_else(|| {
             RegistryError::InvalidInput(format!(
-                "dispute anchor invoice {invoice_id} not found — cannot resolve creator for the lock"
+                "dispute anchor invoice {invoice_id} not found — cannot resolve organization for the lock"
             ))
         })?;
     tx.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
-        &[&creator_id.to_string()],
+        &[&organization_id.to_string()],
     )
     .await
     .map_err(|e| RegistryError::Database(e.to_string()))?;
@@ -263,10 +263,10 @@ pub async fn record_dispute_created<C: GenericClient + Sync>(
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
 
-    // SERIALIZE per creator BEFORE touching the cash anchor — the same lock every sibling
+    // SERIALIZE per organization BEFORE touching the cash anchor — the same lock every sibling
     // money path takes (refund/credit/void/proration). Must be the FIRST statement so a
     // concurrent refund cannot read cash pre-debit and over-refund against clawed-back cash.
-    lock_dispute_creator(&tx, invoice_id).await?;
+    lock_dispute_organization(&tx, invoice_id).await?;
 
     // UPSERT the dispute row keyed on the Stripe du_…. ON CONFLICT DO NOTHING: a
     // redelivery returns 0 rows and we read back the existing id.
@@ -507,14 +507,14 @@ async fn promote_pending_dispute_in_tx<C: GenericClient + Sync>(
             "dispute amount must be > 0 to promote a pending dispute (got {amount_cents})"
         )));
     }
-    // SERIALIZE per creator before appending the dispute_debit. This runs in its OWN
+    // SERIALIZE per organization before appending the dispute_debit. This runs in its OWN
     // per-dispute txn (opened by `resolve_pending_disputes_for_linkage`), so the lock is taken
     // here as the txn's first statement and auto-releases at this txn's commit. The
     // linkage-writer's `charge` append that created the pi_/ch_→invoice binding was a monotonic
     // cash INCREASE committed earlier (conservative for the cap, so it need not have been
     // pre-locked); the DECREASE we are about to append DOES need serializing against a
     // concurrent refund — which is exactly what this lock provides.
-    lock_dispute_creator(tx, invoice_id).await?;
+    lock_dispute_organization(tx, invoice_id).await?;
     let dsp_id = zeroship_core::typed_id::new_dispute_id();
     // ON CONFLICT DO NOTHING: a racing in-order `.created` may already hold the row. We don't
     // need the id back here (the holding-row delete keys on the du_…), so a plain upsert is
@@ -600,10 +600,10 @@ pub async fn record_dispute_closed<C: GenericClient + Sync>(
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
 
-    // SERIALIZE per creator BEFORE any cash movement (the `won` reversal / the
+    // SERIALIZE per organization BEFORE any cash movement (the `won` reversal / the
     // close-before-create debit+reversal all LOWER/RAISE the cap anchor). Resolve the anchor
     // invoice from the EXISTING dispute row if present, else from the close-before-create ctx;
-    // take the same per-creator lock every sibling money path takes. The gated UPDATE below
+    // take the same per-organization lock every sibling money path takes. The gated UPDATE below
     // is then serialized against a concurrent refund just like the create rail.
     let anchor_invoice: Option<String> = {
         let existing = tx
@@ -619,7 +619,7 @@ pub async fn record_dispute_closed<C: GenericClient + Sync>(
             .or_else(|| ctx.as_ref().map(|c| c.invoice_id.to_string()))
     };
     if let Some(inv) = anchor_invoice.as_deref() {
-        lock_dispute_creator(&tx, inv).await?;
+        lock_dispute_organization(&tx, inv).await?;
     }
 
     // (1) Progress an OPEN row to the terminal status. The `WHERE status='open'` gate makes

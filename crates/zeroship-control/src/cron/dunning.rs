@@ -1,10 +1,10 @@
 //! Dunning-timeout cron (billing G2).
 //!
-//! Every ~hour it runs the dunning sweep: each creator in `past_due` whose
+//! Every ~hour it runs the dunning sweep: each organization in `past_due` whose
 //! dunning window has elapsed (`NOW() - past_due_since > max_dunning_days`) is
 //! transitioned to `suspended`. The gateway picks up the new state on its next
-//! `/internal/routes` pull (the registry JOINs `creator_billing_status` via the
-//! owner membership) and 402s the creator's apps. We do NOT touch Stripe —
+//! `/internal/routes` pull (the registry JOINs `organization_billing_status` via the
+//! owner membership) and 402s the organization's apps. We do NOT touch Stripe —
 //! Stripe's own retry/dunning schedule keeps running; this is purely the
 //! platform's stop-eating-infra-cost deadline.
 //!
@@ -20,7 +20,7 @@
 //! same "derive-then-persist, gateway reads" shape — so account state and spend
 //! state are surfaced identically. That is the simpler CORRECT option.
 //!
-//! Each transition writes a `creator_billing_status_history` row (in the store)
+//! Each transition writes a `organization_billing_status_history` row (in the store)
 //! + an `AccountStateChange` audit row (here).
 
 use std::sync::Arc;
@@ -47,7 +47,7 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
     loop {
         match tick(&state, DEFAULT_MAX_DUNNING_DAYS).await {
             Ok(n) if n > 0 => {
-                tracing::info!(suspensions = n, "control dunning sweep suspended past_due creators");
+                tracing::info!(suspensions = n, "control dunning sweep suspended past_due organizations");
             }
             Ok(_) => { /* steady state; stay quiet */ }
             Err(e) => {
@@ -60,7 +60,7 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
 
 /// Run one dunning sweep. Exposed so an integration test can drive a single tick
 /// deterministically without sitting on the cron sleep. Returns the number of
-/// creators suspended this tick.
+/// organizations suspended this tick.
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState, max_dunning_days: i64) -> Result<usize, RegistryError> {
     // Multi-instance safety: hold a session-scoped advisory lock on a dedicated
@@ -101,7 +101,7 @@ pub async fn tick(state: &AppState, max_dunning_days: i64) -> Result<usize, Regi
             &state.registry,
             AuditEntry {
                 app_id: None,
-                creator_id: Some(t.creator_id),
+                organization_id: Some(t.organization_id.as_str()),
                 actor_user_id: None,
                 action: Action::AccountStateChange,
                 resource: Some("dunning"),
@@ -111,7 +111,7 @@ pub async fn tick(state: &AppState, max_dunning_days: i64) -> Result<usize, Regi
                 "from": account_state_str(t.from),
                 "to": account_state_str(t.to),
                 "reason": t.reason,
-                "creator_id": t.creator_id.to_string(),
+                "organization_id": t.organization_id.as_str(),
             }),
         )
         .await;

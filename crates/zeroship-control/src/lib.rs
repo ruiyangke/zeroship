@@ -577,7 +577,7 @@ pub struct AppState {
     /// The billing notifier, built once at boot. The `cron::billing_notify` sweep
     /// renders a per-kind template and sends it through this seam (over the relocated
     /// `zeroship-mailer` `Mailer`), passing a provider-side `Idempotency-Key =
-    /// (creator_id, kind, transition_id)` so a re-driven send is idempotent at the
+    /// (organization_id, kind, transition_id)` so a re-driven send is idempotent at the
     /// provider (billing-ops gap #26, PR-6, MAJOR-A). See [`notify::BillingNotifier`].
     pub notifier: Arc<dyn notify::BillingNotifier>,
     /// Platform-wide pairwise salt (auth-sdk §6.2), derived from the SAME

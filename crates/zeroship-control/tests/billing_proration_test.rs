@@ -6,7 +6,7 @@
 //! mock-Stripe HTTP server, and the REAL `billing_reconcile::tick_with` /
 //! `proration::record_plan_change` — NO shims. The plan-change write path is the
 //! exact server-side code `api.rs::set_plan` runs (`record_plan_change` in a
-//! per-creator-advisory-locked txn). Real Postgres via a configured test
+//! per-organization-advisory-locked txn). Real Postgres via a configured test
 //! database (`zeroship_core::config::test_database_url_opt`); a refusal
 //! otherwise. The DB must have changesets 0050 + 0051 applied.
 
@@ -436,6 +436,33 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 // DB seeding helpers.
 // ---------------------------------------------------------------------------
 
+/// A fresh billing subject for this test file.
+///
+/// The billing subject is an ORGANIZATION, so a fixture that minted a user and
+/// used its uuid here would name a row `organizations` does not have. The
+/// foreign keys refuse that rather than mis-attributing it, but the refusal
+/// names the constraint and not the mistake, so the fixture is the place to be
+/// unambiguous.
+async fn make_organization(state: &AppState, label: &str) -> String {
+    let organization_id = zeroship_core::typed_id::generate("org");
+    let slug = format!("{label}-{}", Uuid::new_v4().simple());
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &organization_id,
+                &slug,
+                &label.to_string(),
+                &format!("{slug}@example.test"),
+            ],
+        )
+        .await
+        .expect("insert organization");
+    organization_id
+}
+
 async fn make_user(state: &AppState, label: &str) -> Uuid {
     let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
     let rows = state
@@ -489,11 +516,17 @@ async fn seed_plan(
     plan_id
 }
 
-async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
+/// An app the given ORGANIZATION bills.
+///
+/// It used to seed an app in a fresh organization and then seat a human owner in
+/// it, because the reconciler found the subject by walking to that owner. The
+/// subject is now the app row's own `organization_id`, so an app seeded into
+/// one organization and asserted against another would simply never be billed -
+/// the test would go green on an empty sweep. Placing it in the caller's
+/// organization is what keeps the assertion attached to anything.
+async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> Uuid {
     let name = format!("pror-{}", Uuid::new_v4());
-    let app_id = common::seed_app(&state.control_pg, &name, plan_id).await;
-    common::seat_app_organization_member(&state.control_pg, &app_id, &owner, "owner").await;
-    app_id
+    common::seed_app_in_organization(&state.control_pg, &name, plan_id, organization).await
 }
 
 /// Ingest usage at a given period_start (the CLOSED period the reconciler bills).
@@ -532,14 +565,14 @@ fn dummy_passthrough(fx: &Fixture) -> StripeClient {
 
 /// Drive the REAL server-side plan-change path EXACTLY as `api.rs::set_plan` does:
 /// resolve the catalog base fees server-side, then call the SHARED
-/// `proration::record_plan_change_tx` (which takes the per-creator advisory lock,
+/// `proration::record_plan_change_tx` (which takes the per-organization advisory lock,
 /// snapshots usage server-side, flips apps.plan_id, and appends the event in one
 /// txn). The `effective_at` is `now_unix` (so tests can pin the segment day). This
 /// is the identical code path the handler runs — no shim.
 async fn record_plan_change_like_set_plan(
     state: &AppState,
     app: Uuid,
-    creator: Uuid,
+    organization: &str,
     to_plan: &str,
     now_unix: i64,
 ) -> PlanChangeOutcome {
@@ -554,7 +587,7 @@ async fn record_plan_change_like_set_plan(
     proration::record_plan_change_tx(
         &state.registry,
         &app,
-        &creator,
+        &organization,
         from_plan_id.as_deref(),
         to_plan,
         now_unix,
@@ -563,12 +596,12 @@ async fn record_plan_change_like_set_plan(
     .expect("record_plan_change_tx")
 }
 
-/// Read all invoice-line snapshots for `(creator, app)` ordered by segment_no.
+/// Read all invoice-line snapshots for `(organization, app)` ordered by segment_no.
 /// Returns `(segment_no, plan_id, included_units, fx, base_fee, amount, usage_snapshot)`.
 #[allow(clippy::type_complexity)]
 async fn read_segment_lines(
     state: &AppState,
-    creator: Uuid,
+    organization: &str,
     app: Uuid,
 ) -> Vec<(i16, String, i64, i64, i64, i64, serde_json::Value)> {
     state
@@ -578,9 +611,9 @@ async fn read_segment_lines(
                     l.base_fee_cents, l.amount_cents, l.usage_snapshot \
              FROM zeroship.invoice_lines l \
              JOIN zeroship.invoices i ON i.id = l.invoice_id \
-             WHERE i.creator_id = $1 AND l.app_id = $2 \
+             WHERE i.organization_id = $1 AND l.app_id = $2 \
              ORDER BY l.segment_no",
-            &[&creator, &app],
+            &[&organization, &app],
         )
         .await
         .expect("read segment lines")
@@ -599,15 +632,15 @@ async fn read_segment_lines(
         .collect()
 }
 
-async fn confirmed_item_refs(state: &AppState, creator: Uuid, app: Uuid) -> i64 {
+async fn confirmed_item_refs(state: &AppState, organization: &str, app: Uuid) -> i64 {
     state
         .control_pg
         .query(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_line_provider_refs r \
              JOIN zeroship.invoices i ON i.id = r.invoice_id \
-             WHERE i.creator_id = $1 AND r.app_id = $2 \
+             WHERE i.organization_id = $1 AND r.app_id = $2 \
                AND r.provider = 'stripe' AND r.ref_kind = 'invoice_item'",
-            &[&creator, &app],
+            &[&organization, &app],
         )
         .await
         .expect("count refs")[0]
@@ -671,11 +704,12 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     let free = seed_plan(&fx.state, "free", 0, 1_000, one_cent).await;
     let pro = seed_plan(&fx.state, "pro", 3_000, 10_000, one_cent * 2).await;
 
-    let creator = make_user(&fx.state, "twoseg").await;
-    let app = make_owned_app(&fx.state, &free, creator).await;
+    let organization = make_organization(&fx.state, "twoseg").await;
+    let organization = organization.as_str();
+    let app = make_owned_app(&fx.state, &free, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_test_twoseg_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_test_twoseg_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 
@@ -688,7 +722,7 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
         .with_ymd_and_hms(pstart.year(), pstart.month(), 11, 0, 0, 0)
         .unwrap()
         .timestamp();
-    let outcome = record_plan_change_like_set_plan(&fx.state, app, creator, &pro, day11).await;
+    let outcome = record_plan_change_like_set_plan(&fx.state, app, organization, &pro, day11).await;
     assert!(
         matches!(outcome, PlanChangeOutcome::Recorded { .. }),
         "the change is recorded (under the cap)"
@@ -699,7 +733,7 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "one creator billed");
+    assert_eq!(billed, 1, "one organization billed");
 
     // EXACTLY 2 distinct Stripe invoice-items (one per segment) + EXACTLY 2 lines.
     assert_eq!(
@@ -714,7 +748,7 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     assert!(keys.iter().any(|k| k.ends_with(":0")), "segment 0 key");
     assert!(keys.iter().any(|k| k.ends_with(":1")), "segment 1 key");
 
-    let lines = read_segment_lines(&fx.state, creator, app).await;
+    let lines = read_segment_lines(&fx.state, organization, app).await;
     assert_eq!(lines.len(), 2, "two invoice_lines rows (segment 0 and 1)");
 
     // Re-derive the worked-example numbers for a 30-day month. (The closed period
@@ -753,8 +787,8 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
             .state
             .control_pg
             .query(
-                "SELECT total_cents FROM zeroship.invoices WHERE creator_id = $1 AND period = $2::date",
-                &[&creator, &period_d(period)],
+                "SELECT total_cents FROM zeroship.invoices WHERE organization_id = $1 AND period = $2::date",
+                &[&organization, &period_d(period)],
             )
             .await
             .unwrap();
@@ -801,11 +835,12 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     let free = seed_plan(&fx.state, "free", 0, 1_000, one_cent).await;
     let pro = seed_plan(&fx.state, "pro", 3_000, 10_000, one_cent * 2).await;
 
-    let creator = make_user(&fx.state, "segcu").await;
-    let app = make_owned_app(&fx.state, &free, creator).await;
+    let organization = make_organization(&fx.state, "segcu").await;
+    let organization = organization.as_str();
+    let app = make_owned_app(&fx.state, &free, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_test_segcu_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_test_segcu_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 
@@ -816,13 +851,13 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
         .with_ymd_and_hms(pstart.year(), pstart.month(), 11, 0, 0, 0)
         .unwrap()
         .timestamp();
-    record_plan_change_like_set_plan(&fx.state, app, creator, &pro, day11).await;
+    record_plan_change_like_set_plan(&fx.state, app, organization, &pro, day11).await;
     ingest_at(&fx.state, app, 26_000, period, 2).await;
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
         .expect("tick");
-    assert_eq!(billed, 1, "one creator billed");
+    assert_eq!(billed, 1, "one organization billed");
 
     // Find the two item POSTs by their segment-aware Idempotency-Key.
     let reqs = fx.mock.requests();
@@ -860,7 +895,7 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     );
 
     // The authoritative AMOUNT on each item is unchanged (== the frozen line amount).
-    let lines = read_segment_lines(&fx.state, creator, app).await;
+    let lines = read_segment_lines(&fx.state, organization, app).await;
     let amt0: i64 = lines[0].5;
     let amt1: i64 = lines[1].5;
     assert_eq!(
@@ -941,11 +976,12 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
     seed_weight(&fx.state).await;
     let one_cent: i64 = 1_000_000_000_000;
     let plan = seed_plan(&fx.state, "flat", 0, 0, one_cent).await;
-    let creator = make_user(&fx.state, "nochange").await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let organization = make_organization(&fx.state, "nochange").await;
+    let organization = organization.as_str();
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_nc_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_nc_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
     ingest_at(&fx.state, app, 750, period, 1).await; // 750c, no plan change
@@ -960,14 +996,14 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
     assert_eq!(keys.len(), 1);
     assert!(keys[0].ends_with(":0"), "single segment is segment_no 0");
 
-    let lines = read_segment_lines(&fx.state, creator, app).await;
+    let lines = read_segment_lines(&fx.state, organization, app).await;
     assert_eq!(lines.len(), 1, "exactly one line");
     assert_eq!(lines[0].0, 0, "segment_no 0");
     assert_eq!(lines[0].1, plan, "the app's current plan");
     assert_eq!(lines[0].5, 750, "full-period charge");
     let usage: HashMap<String, i64> = serde_json::from_value(lines[0].6.clone()).unwrap();
     assert_eq!(usage.get("requests"), Some(&750), "full-period usage (delta from 0)");
-    assert_eq!(confirmed_item_refs(&fx.state, creator, app).await, 1, "one provider-ref");
+    assert_eq!(confirmed_item_refs(&fx.state, organization, app).await, 1, "one provider-ref");
 
     drop(fx);
     common::drain_pg().await;
@@ -990,11 +1026,12 @@ async fn reconcile_rerun_does_not_double_post_segments() {
     let one_cent: i64 = 1_000_000_000_000;
     let free = seed_plan(&fx.state, "free", 0, 0, one_cent).await;
     let pro = seed_plan(&fx.state, "pro", 0, 0, one_cent).await;
-    let creator = make_user(&fx.state, "rerun").await;
-    let app = make_owned_app(&fx.state, &free, creator).await;
+    let organization = make_organization(&fx.state, "rerun").await;
+    let organization = organization.as_str();
+    let app = make_owned_app(&fx.state, &free, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_rr_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_rr_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
     ingest_at(&fx.state, app, 1_000, period, 1).await;
@@ -1004,7 +1041,7 @@ async fn reconcile_rerun_does_not_double_post_segments() {
         .with_ymd_and_hms(pstart.year(), pstart.month(), 15, 0, 0, 0)
         .unwrap()
         .timestamp();
-    record_plan_change_like_set_plan(&fx.state, app, creator, &pro, mid).await;
+    record_plan_change_like_set_plan(&fx.state, app, organization, &pro, mid).await;
     ingest_at(&fx.state, app, 2_000, period, 2).await; // cumulative 3000
 
     let billed1 = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
@@ -1023,7 +1060,7 @@ async fn reconcile_rerun_does_not_double_post_segments() {
         2,
         "no double-post: each segment item created exactly once across two runs"
     );
-    let lines = read_segment_lines(&fx.state, creator, app).await;
+    let lines = read_segment_lines(&fx.state, organization, app).await;
     assert_eq!(lines.len(), 2, "still exactly two lines");
 
     drop(fx);
@@ -1046,14 +1083,15 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
     let one_cent: i64 = 1_000_000_000_000;
     let free = seed_plan(&fx.state, "free", 0, 0, one_cent).await;
     let pro = seed_plan(&fx.state, "pro", 3_000, 0, one_cent).await;
-    let creator = make_user(&fx.state, "snap").await;
-    let app = make_owned_app(&fx.state, &free, creator).await;
+    let organization = make_organization(&fx.state, "snap").await;
+    let organization = organization.as_str();
+    let app = make_owned_app(&fx.state, &free, organization).await;
 
     // CURRENT-period usage the snapshot must capture (server-side).
     let current_period = zeroship_control::metering::current_period_start_unix();
     ingest_at(&fx.state, app, 1234, current_period, 1).await;
 
-    let outcome = record_plan_change_like_set_plan(&fx.state, app, creator, &pro, now).await;
+    let outcome = record_plan_change_like_set_plan(&fx.state, app, organization, &pro, now).await;
     assert!(matches!(outcome, PlanChangeOutcome::Recorded { .. }));
 
     let (ev_period, usage_at_change, from_plan, to_plan) =
@@ -1076,25 +1114,25 @@ async fn set_plan_snapshots_server_side_and_finalized_period_attributes_next() {
     fx.state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
-             ON CONFLICT (creator_id) DO NOTHING",
-            &[&creator],
+            "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) \
+             ON CONFLICT (organization_id) DO NOTHING",
+            &[&organization],
         )
         .await
-        .expect("ensure creator_billing row");
+        .expect("ensure organization_billing row");
     let inv_id = zeroship_core::typed_id::new_invoice_id();
     fx.state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.invoices (id, creator_id, period, status, subtotal_cents, \
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status, subtotal_cents, \
              credit_cents, tax_cents, total_cents, finalized_at) \
              VALUES ($1, $2, $3::date, 'finalized', 0, 0, 0, 0, NOW())",
-            &[&inv_id, &creator, &period_d(current_period)],
+            &[&inv_id, &organization, &period_d(current_period)],
         )
         .await
         .expect("finalize current-period invoice");
 
-    let back_to_free = record_plan_change_like_set_plan(&fx.state, app, creator, &free, now).await;
+    let back_to_free = record_plan_change_like_set_plan(&fx.state, app, organization, &free, now).await;
     assert!(matches!(back_to_free, PlanChangeOutcome::Recorded { period, .. }
         if period == proration::next_period_date(period_d(current_period))),
         "a change in an already-finalized period attributes to the NEXT period");
@@ -1132,11 +1170,12 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
     // the expensive running plan, not the cheap last-recorded one.
     let cheap = seed_plan(&fx.state, "cheap", 0, 0, one_cent).await;
     let pricey = seed_plan(&fx.state, "pricey", 0, 0, one_cent * 5).await;
-    let creator = make_user(&fx.state, "cap").await;
-    let app = make_owned_app(&fx.state, &cheap, creator).await;
+    let organization = make_organization(&fx.state, "cap").await;
+    let organization = organization.as_str();
+    let app = make_owned_app(&fx.state, &cheap, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_cap_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_cap_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 
@@ -1152,7 +1191,7 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
         // flips") — this burns the per-period cap without touching the expensive plan,
         // which is flipped to separately below, past the cap.
         let to = &cheap;
-        record_plan_change_like_set_plan(&fx.state, app, creator, to, when).await;
+        record_plan_change_like_set_plan(&fx.state, app, organization, to, when).await;
     }
     // Count recorded events: capped at MAX_PLAN_CHANGES_PER_PERIOD.
     let n_events: i64 = fx
@@ -1174,7 +1213,7 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
         .with_ymd_and_hms(pstart.year(), pstart.month(), 20, 0, 0, 0)
         .unwrap()
         .timestamp();
-    let outcome = record_plan_change_like_set_plan(&fx.state, app, creator, &pricey, late).await;
+    let outcome = record_plan_change_like_set_plan(&fx.state, app, organization, &pricey, late).await;
     assert!(
         matches!(outcome, PlanChangeOutcome::FlippedNoSnapshotCapHit),
         "past the cap: flip the plan, record no snapshot"
@@ -1208,7 +1247,7 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
         .expect("tick");
     assert_eq!(billed, 1);
 
-    let lines = read_segment_lines(&fx.state, creator, app).await;
+    let lines = read_segment_lines(&fx.state, organization, app).await;
     let last = lines.last().expect("at least one segment");
     assert_eq!(
         last.3,
@@ -1237,11 +1276,12 @@ async fn end_missing_metric_does_not_credit_the_bill() {
     let one_cent: i64 = 1_000_000_000_000;
     let free = seed_plan(&fx.state, "free", 0, 0, one_cent).await;
     let pro = seed_plan(&fx.state, "pro", 0, 0, one_cent).await;
-    let creator = make_user(&fx.state, "floor").await;
-    let app = make_owned_app(&fx.state, &free, creator).await;
+    let organization = make_organization(&fx.state, "floor").await;
+    let organization = organization.as_str();
+    let app = make_owned_app(&fx.state, &free, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_floor_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_floor_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 
@@ -1258,7 +1298,7 @@ async fn end_missing_metric_does_not_credit_the_bill() {
         .with_ymd_and_hms(pstart.year(), pstart.month(), 15, 0, 0, 0)
         .unwrap()
         .timestamp();
-    record_plan_change_like_set_plan(&fx.state, app, creator, &pro, mid).await;
+    record_plan_change_like_set_plan(&fx.state, app, organization, &pro, mid).await;
     // No further ingest: period-end requests == 5000 (== the snapshot).
 
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
@@ -1266,7 +1306,7 @@ async fn end_missing_metric_does_not_credit_the_bill() {
         .expect("tick");
     assert_eq!(billed, 1, "billed (segment 0 has the 5000 usage)");
 
-    let lines = read_segment_lines(&fx.state, creator, app).await;
+    let lines = read_segment_lines(&fx.state, organization, app).await;
     // Segment 0 charged 5000c; segment 1's delta is 0 ⇒ $0 ⇒ NO line (skipped),
     // and crucially NO negative usage that would CREDIT the bill.
     let total: i64 = lines.iter().map(|l| l.5).sum();
@@ -1305,11 +1345,12 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
     // not the change-time value (3000) — proving pricing is NOT frozen at change.
     let free = seed_plan(&fx.state, "free", 0, 1_000, one_cent).await;
     let pro = seed_plan(&fx.state, "pro", 3_000, 10_000, one_cent).await;
-    let creator = make_user(&fx.state, "catalogtime").await;
-    let app = make_owned_app(&fx.state, &free, creator).await;
+    let organization = make_organization(&fx.state, "catalogtime").await;
+    let organization = organization.as_str();
+    let app = make_owned_app(&fx.state, &free, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_ct_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_ct_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 
@@ -1320,7 +1361,7 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
         .with_ymd_and_hms(pstart.year(), pstart.month(), 11, 0, 0, 0)
         .unwrap()
         .timestamp();
-    record_plan_change_like_set_plan(&fx.state, app, creator, &pro, day11).await;
+    record_plan_change_like_set_plan(&fx.state, app, organization, &pro, day11).await;
     ingest_at(&fx.state, app, 26_000, period, 2).await;
 
     // OPERATOR mid-month edit: raise Pro's base fee in the catalog AFTER the change
@@ -1341,7 +1382,7 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
         .expect("tick");
     assert_eq!(billed, 1);
 
-    let lines = read_segment_lines(&fx.state, creator, app).await;
+    let lines = read_segment_lines(&fx.state, organization, app).await;
     let pro_line = lines.iter().find(|l| l.1 == pro).expect("a Pro segment line");
     if days_in_period == 30 {
         // Pro base day-weighted 20/30 of the RECONCILE-time fee (9000), not 3000:
@@ -1388,10 +1429,11 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     let one_cent: i64 = 1_000_000_000_000;
     // No-change app: the real build is EXACTLY one segment (segment_no 0).
     let plan = seed_plan(&fx.state, "flat", 0, 0, one_cent).await;
-    let creator = make_user(&fx.state, "orphan").await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let organization = make_organization(&fx.state, "orphan").await;
+    let organization = organization.as_str();
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     let customer = format!("cus_orphan_{}", Uuid::new_v4().simple());
-    fx.state.stripe_store.set_customer(creator, &customer).await.unwrap();
+    fx.state.stripe_store.set_customer(organization, &customer).await.unwrap();
     ingest_at(&fx.state, app, 1_000, period, 1).await; // 1000c, one segment
 
     // SEED a crash-window draft: a draft invoice claim, a REAL segment_no=0 line,
@@ -1401,9 +1443,9 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     fx.state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv_id, &creator, &period_d(period)],
+            &[&inv_id, &organization, &period_d(period)],
         )
         .await
         .expect("seed draft invoice");
@@ -1426,7 +1468,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     // deterministic metadata key so the orphan-reconciler can DELETE it, and a
     // provider-ref so the reconciler knows its external id directly.
     let orphan_key =
-        billing_reconcile::invoice_item_idempotency_key(&creator, &app, period, 1);
+        billing_reconcile::invoice_item_idempotency_key(&organization, &app, period, 1);
     let orphan_item_id = fx.mock.preload_invoice_item(&customer, &orphan_key);
     fx.state
         .control_pg
@@ -1453,7 +1495,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     );
 
     // Exactly the current segment set (segment 0 only) persists.
-    let lines = read_segment_lines(&fx.state, creator, app).await;
+    let lines = read_segment_lines(&fx.state, organization, app).await;
     assert_eq!(lines.len(), 1, "exactly one segment line persists (orphan removed)");
     assert_eq!(lines[0].0, 0, "the surviving line is segment 0");
 
@@ -1471,7 +1513,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     assert_eq!(inv_total, 1_000, "finalized subtotal is the single real segment");
     // The orphan's provider-ref is gone too.
     assert_eq!(
-        confirmed_item_refs(&fx.state, creator, app).await,
+        confirmed_item_refs(&fx.state, organization, app).await,
         1,
         "only the surviving segment's provider-ref remains"
     );
@@ -1483,7 +1525,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
 /// (j) MINOR-4: a corrupt `usage_at_change` (valid JSONB but NOT a {metric: int}
 /// object) must ABORT/SKIP that app's billing rather than silently becoming `{}`
 /// (which would zero the segment START and massively over-count). Assert: the
-/// creator is NOT billed, no Stripe item is posted, and no finalized invoice.
+/// organization is NOT billed, no Stripe item is posted, and no finalized invoice.
 // See the allow on `two_segment_change_with_different_fx_posts_two_items_two_lines` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
@@ -1498,11 +1540,12 @@ async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
     let one_cent: i64 = 1_000_000_000_000;
     let free = seed_plan(&fx.state, "free", 0, 0, one_cent).await;
     let pro = seed_plan(&fx.state, "pro", 0, 0, one_cent).await;
-    let creator = make_user(&fx.state, "corrupt").await;
-    let app = make_owned_app(&fx.state, &pro, creator).await;
+    let organization = make_organization(&fx.state, "corrupt").await;
+    let organization = organization.as_str();
+    let app = make_owned_app(&fx.state, &pro, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_corrupt_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_corrupt_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
     // Big cumulative usage so a silent {}-start would over-bill from 0.
@@ -1529,12 +1572,12 @@ async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
         .await
         .expect("seed corrupt event");
 
-    // The reconcile must NOT bill this creator (the parse error aborts/skips the
+    // The reconcile must NOT bill this organization (the parse error aborts/skips the
     // app) — it does NOT silently price off an empty snapshot.
     let billed = billing_reconcile::tick_with(&fx.state, &dummy_passthrough(&fx), now)
         .await
-        .expect("tick returns (per-creator error is logged + skipped)");
-    assert_eq!(billed, 0, "the creator with a corrupt snapshot is NOT billed (no over-bill)");
+        .expect("tick returns (per-organization error is logged + skipped)");
+    assert_eq!(billed, 0, "the organization with a corrupt snapshot is NOT billed (no over-bill)");
     assert_eq!(
         fx.mock.count_created("POST", "/v1/invoiceitems"),
         0,
@@ -1545,13 +1588,13 @@ async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
         .control_pg
         .query(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices \
-             WHERE creator_id = $1 AND status = 'finalized'",
-            &[&creator],
+             WHERE organization_id = $1 AND status = 'finalized'",
+            &[&organization],
         )
         .await
         .unwrap()[0]
         .get("n");
-    assert_eq!(finalized, 0, "no finalized invoice for the skipped creator");
+    assert_eq!(finalized, 0, "no finalized invoice for the skipped organization");
 
     drop(fx);
     common::drain_pg().await;

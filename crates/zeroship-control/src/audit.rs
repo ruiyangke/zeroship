@@ -30,7 +30,7 @@ pub enum Action {
     /// creator has opted to surface in `process.env`. Audited so ops
     /// can answer "when did we let X out of the secret namespace."
     SetEnvExpose,
-    /// A Connect Express account was MINTED on Stripe for a creator (the
+    /// A Connect Express account was MINTED on Stripe for an organization (the
     /// `onboard` handler created a new `acct_…`). Distinct from `LinkAccount`
     /// (which records the verified-link in `callback`) so the trail separates
     /// "account minted" from "account verified-linked" (m6).
@@ -50,10 +50,10 @@ pub enum Action {
     /// A finalized infra-billing invoice could not be charged
     /// (`invoice.payment_failed` webhook).
     InvoicePaymentFailed,
-    /// A creator payment/account-state transition (billing G2): the
+    /// An organization payment/account-state transition (billing G2): the
     /// active→past_due→suspended→active dunning lifecycle. Written by the
     /// webhook (`invoice.payment_failed`/`invoice.paid`) and the dunning cron.
-    /// The detail JSON carries `{ from, to, reason, creator_id }`.
+    /// The detail JSON carries `{ from, to, reason, organization_id }`.
     AccountStateChange,
     /// An operator created or updated a plan in the catalog via `PUT
     /// /api/plans/:id` (billing-v2 MINOR-1). The plan's FX/price is the
@@ -63,9 +63,9 @@ pub enum Action {
     /// An operator archived a plan via `DELETE /api/plans/:id` (billing-v2
     /// MINOR-1). Audited with the actor + the plan id.
     PlanArchived,
-    /// An operator set a creator's application-fee policy via `PUT
-    /// /api/creators/:id/fee-policy` (billing G1, ISS-29). The fee is
-    /// server-authoritative + operator-only — a creator may never lower it — so
+    /// An operator set an organization's application-fee policy via `PUT
+    /// /api/organizations/:id/fee-policy` (billing G1, ISS-29). The fee is
+    /// server-authoritative + operator-only — an organization may never lower it — so
     /// every change is audited with the actor + the new policy in the detail JSON.
     SetFeePolicy,
     /// An operator changed the GLOBAL default FX via `PUT /api/pricing-config`
@@ -73,10 +73,10 @@ pub enum Action {
     /// every plan that inherits (`fx == None`) — so the write is audited with the
     /// actor + the old→new value in the detail JSON.
     SetGlobalFx,
-    /// An operator granted a creator credit via `POST /api/billing/credit`
+    /// An operator granted an organization credit via `POST /api/billing/credit`
     /// (billing-ops gap #26, PR-2). Credit is a money lever (it reduces a future
     /// bill), operator-only, so every grant is audited with the actor + the
-    /// creator / amount / kind in the detail JSON.
+    /// organization / amount / kind in the detail JSON.
     CreditGranted,
     /// An operator refunded a finalized invoice via `POST
     /// /api/invoices/{id}/refunds` (billing-ops gap #26, PR-3). A refund moves
@@ -101,11 +101,11 @@ pub enum Action {
     /// cardholder, so the refund is reversed (status→failed; a credit-destination grant
     /// clawed back). Audited with the refund / terminal status / clawback in the detail JSON.
     RefundFailed,
-    /// A payout to a creator's connected account FAILED (`payout.failed`, webhook
-    /// follow-up). Audited with the creator / payout / amount / failure code.
+    /// A payout to an organization's connected account FAILED (`payout.failed`, webhook
+    /// follow-up). Audited with the organization / payout / amount / failure code.
     PayoutFailed,
     /// An end-user's Connect checkout charge FAILED (`payment_intent.payment_failed`,
-    /// webhook follow-up). Informational; audited with the creator / PI / amount.
+    /// webhook follow-up). Informational; audited with the organization / PI / amount.
     CheckoutFailed,
     // -- Authority changes -------------------------------------------------
     //
@@ -192,7 +192,14 @@ impl Action {
 #[derive(Debug)]
 pub struct AuditEntry<'a> {
     pub app_id: Option<Uuid>,
-    pub creator_id: Option<Uuid>,
+    /// The organization the event is attributed to (`org_…`).
+    ///
+    /// Borrowed, not owned, for the same reason `resource` is: an audit entry is
+    /// built at a call site that already holds the id and is consumed
+    /// immediately. `app_audit.organization_id` is deliberately key-less and
+    /// nullable - an audit row must stay readable after the organization it
+    /// names is gone.
+    pub organization_id: Option<&'a str>,
     pub actor_user_id: Option<Uuid>,
     pub action: Action,
     pub resource: Option<&'a str>,
@@ -231,7 +238,7 @@ pub async fn log(registry: &Registry, entry: AuditEntry<'_>) {
 pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail: &Value) {
     let stdout_payload = json!({
         "app_id": entry.app_id,
-        "creator_id": entry.creator_id,
+        "organization_id": entry.organization_id,
         "actor_user_id": entry.actor_user_id,
         "action": entry.action.as_str(),
         "resource": entry.resource,
@@ -254,11 +261,11 @@ pub async fn log_with_detail(registry: &Registry, entry: AuditEntry<'_>, detail:
             // which makes PG infer the param OID as `inet` and reject the `&str`
             // bind at serialize time ("error serializing parameter"). The latter
             // silently broke EVERY detail-audit insert (best-effort path).
-            "INSERT INTO zeroship.app_audit(app_id, creator_id, actor_user_id, action, resource, source_ip, detail)
+            "INSERT INTO zeroship.app_audit(app_id, organization_id, actor_user_id, action, resource, source_ip, detail)
              VALUES($1, $2, $3, $4, $5, $6::text::inet, $7)",
             &[
                 &entry.app_id,
-                &entry.creator_id,
+                &entry.organization_id,
                 &entry.actor_user_id,
                 &entry.action.as_str(),
                 &entry.resource,
@@ -305,7 +312,7 @@ pub async fn log_in_tx<C: compio_postgres::GenericClient + Sync>(
 ) {
     let stdout_payload = json!({
         "app_id": entry.app_id,
-        "creator_id": entry.creator_id,
+        "organization_id": entry.organization_id,
         "actor_user_id": entry.actor_user_id,
         "action": entry.action.as_str(),
         "resource": entry.resource,
@@ -319,11 +326,11 @@ pub async fn log_in_tx<C: compio_postgres::GenericClient + Sync>(
             // `$6::text::inet` for the reason `log_with_detail` states: binding
             // an `Option<&str>` against an inferred `inet` OID fails at
             // serialize time.
-            "INSERT INTO zeroship.app_audit(app_id, creator_id, actor_user_id, action, resource, source_ip, detail)
+            "INSERT INTO zeroship.app_audit(app_id, organization_id, actor_user_id, action, resource, source_ip, detail)
              VALUES($1, $2, $3, $4, $5, $6::text::inet, $7)",
             &[
                 &entry.app_id,
-                &entry.creator_id,
+                &entry.organization_id,
                 &entry.actor_user_id,
                 &entry.action.as_str(),
                 &entry.resource,

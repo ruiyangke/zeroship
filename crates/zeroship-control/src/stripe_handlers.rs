@@ -1,10 +1,10 @@
 //! HTTP handlers for Stripe Connect onboarding + webhook ingest.
 //!
-//! User-facing (AuthzGuard):
-//!   POST   /api/creators/:id/stripe/onboard    → return onboarding URL
-//!   POST   /api/creators/:id/stripe/callback   → link acct_xxx
-//!   GET    /api/creators/:id/earnings          → totals + recent payouts
-//!   DELETE /api/creators/:id/stripe            → unlink
+//! User-facing (AuthzGuard); `:id` is an ORGANIZATION id (`org_…`):
+//!   POST   /api/organizations/:id/stripe/onboard    → return onboarding URL
+//!   POST   /api/organizations/:id/stripe/callback   → link acct_xxx
+//!   GET    /api/organizations/:id/earnings          → totals + recent payouts
+//!   DELETE /api/organizations/:id/stripe            → unlink
 //!
 //! Unauthenticated (signature-verified):
 //!   POST   /internal/webhooks/stripe           → Stripe-delivered events
@@ -16,7 +16,8 @@ use ntex::util::Bytes;
 use ntex::web::{self, types::{Path, State}};
 use serde::Deserialize;
 use sha2::Sha256;
-use uuid::Uuid;
+use zeroship_authz::{Action as AuthzAction, Resource};
+use zeroship_core::organization_id::OrganizationId;
 
 
 use crate::audit::{self, Action, AuditEntry};
@@ -74,14 +75,40 @@ fn stripe_err_response(e: StripeError) -> web::HttpResponse {
     }
 }
 
-fn bad_creator_id() -> web::HttpResponse { err_json(400, "bad creator_id") }
+fn bad_organization_id() -> web::HttpResponse { err_json(400, "bad organization_id") }
 
-/// Refusal for a principal-bound `:id` route reached for SOMEONE ELSE.
+/// Parse the `:id` path segment as an organization id and prove the caller holds
+/// the money authority `action` names AT THAT ORGANIZATION.
 ///
-/// These routes have no cross-creator arm at all now, so this is the whole
-/// answer rather than a fallback before an operator probe.
-fn forbidden_other_creator() -> web::HttpResponse {
-    err_json(403, "creator id does not match the authenticated principal")
+/// This replaces `authz.principal_id != <path id>`. That comparison was right
+/// while the billing subject WAS the principal - one human, one bill - and it
+/// cannot survive the subject becoming an organization for two independent
+/// reasons: a user id and an organization id are not the same value, and an
+/// organization legitimately has several people who answer for its money.
+///
+/// The authority that replaces it is the role ladder's SECOND integer,
+/// `billing_rank`, which orders authority over money separately from authority
+/// over apps - so the `billing` seat outranks `admin` here while `admin`
+/// outranks it everywhere else. `Resource::Organization` is the only resource
+/// shape that carries it, which is why the probe names the organization rather
+/// than an app.
+async fn organization_money_guard(
+    authz: &AuthzGuard,
+    state: &AppState,
+    path: &str,
+    action: AuthzAction,
+) -> Result<OrganizationId, web::HttpResponse> {
+    let organization = OrganizationId::parse(path).map_err(|_| bad_organization_id())?;
+    authz
+        .require(
+            action,
+            Resource::Organization {
+                id: organization.as_str().to_owned(),
+            },
+            state,
+        )
+        .await?;
+    Ok(organization)
 }
 
 /// `true` iff `s` is a 3-letter lowercase ISO currency code (`^[a-z]{3}$`).
@@ -113,17 +140,17 @@ fn cap_stripe_description(s: &str) -> &str {
 /// supported country at account-create time; US is the launch market.
 const CONNECT_ACCOUNT_COUNTRY: &str = "US";
 
-/// `POST /api/creators/:id/stripe/onboard` — start (or resume) Stripe **Connect**
-/// onboarding for a creator (billing G1, Stream-2, ISS-30).
+/// `POST /api/organizations/:id/stripe/onboard` — start (or resume) Stripe **Connect**
+/// onboarding for an organization (billing G1, Stream-2, ISS-30).
 ///
 /// REPLACES the old placeholder `connect.stripe.com/express_login?...` URL with a
-/// REAL flow: ensure the creator has a Connect `acct_…` (create an Express
-/// account once, stamping `metadata.creator_id` for ownership verification),
+/// REAL flow: ensure the organization has a Connect `acct_…` (create an Express
+/// account once, stamping `metadata.organization_id` for ownership verification),
 /// persist it, then return a real `account_links` hosted-onboarding URL.
 ///
 /// **`:id` is bound to the principal** (self-service, like `billing_setup`): a
-/// creator onboards their OWN account, and only their own. A creator calling
-/// onboard for a DIFFERENT creator's id is denied - closing the cross-creator
+/// organization onboards their OWN account, and only their own. An organization calling
+/// onboard for a DIFFERENT organization's id is denied - closing the cross-organization
 /// hole - and there is no operator-on-behalf arm behind that denial any more.
 pub async fn onboard(
     req: web::HttpRequest,
@@ -132,14 +159,12 @@ pub async fn onboard(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
-
-    // `:id` is bound to the principal. The cross-creator arm behind this used
-    // to probe BillingWrite on Resource::Any; no principal can hold that now,
-    // so it was a branch that could only ever deny.
-    if authz.principal_id != creator_id {
-        return forbidden_other_creator();
-    }
+    let organization =
+        match organization_money_guard(&authz, &state, &path, AuthzAction::BillingWrite).await {
+            Ok(organization) => organization,
+            Err(response) => return response,
+        };
+    let organization_id = organization.as_str();
 
     if state.stripe_secret_key.expose_secret().is_empty() {
         tracing::error!("stripe: onboard called with no ZEROSHIP_CONTROL_STRIPE_SECRET_KEY configured");
@@ -150,20 +175,20 @@ pub async fn onboard(
     ))
     .with_base_url(state.stripe_base_url.clone());
 
-    // Reuse the creator's existing Connect account if onboarding was already
+    // Reuse the organization's existing Connect account if onboarding was already
     // started (idempotent — re-onboarding resumes the SAME acct_…). Otherwise
-    // create an Express account stamped with metadata.creator_id (the ownership
+    // create an Express account stamped with metadata.organization_id (the ownership
     // signal the callback verifies) and persist it.
-    let account_id = match state.stripe_store.get_account(creator_id).await {
+    let account_id = match state.stripe_store.get_account(organization_id).await {
         Ok(Some(acct)) => acct.stripe_account_id,
         Ok(None) => {
-            let email = match creator_email(&state, creator_id).await {
+            let email = match organization_billing_email(&state, organization_id).await {
                 Ok(Some(e)) => e,
-                Ok(None) => return err_json(404, "creator not found"),
+                Ok(None) => return err_json(404, "organization not found"),
                 Err(e) => return stripe_err_response(e),
             };
             let acct = match stripe
-                .create_connect_account(&email, &creator_id.to_string(), CONNECT_ACCOUNT_COUNTRY)
+                .create_connect_account(&email, &organization_id.to_string(), CONNECT_ACCOUNT_COUNTRY)
                 .await
             {
                 Ok(a) => a,
@@ -171,13 +196,13 @@ pub async fn onboard(
             };
             // Persist via the verified-link path (history + live row). The acct_…
             // here is SERVER-MINTED (we just created it on Stripe), not client input.
-            if let Err(e) = state.stripe_store.link_account(creator_id, &acct).await {
+            if let Err(e) = state.stripe_store.link_account(organization_id, &acct).await {
                 return stripe_err_response(e);
             }
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
-                creator_id: Some(creator_id),
+                organization_id: Some(organization_id),
                 actor_user_id: Some(authz.principal_id),
                 action: Action::CreateAccount,
                 resource: Some(&acct),
@@ -189,7 +214,7 @@ pub async fn onboard(
     };
 
     // Build the hosted onboarding link. refresh_url is re-entered if the link
-    // expires; return_url is where Stripe sends the creator when done (the
+    // expires; return_url is where Stripe sends the organization when done (the
     // dashboard then POSTs callback to refresh status).
     let base = format!("{}://console.{}", state.app_scheme(), state.app_base_domain);
     let refresh_url = format!("{base}/billing/connect?refresh=1");
@@ -210,11 +235,11 @@ pub async fn onboard(
 // Infrastructure-billing setup
 // ----------------------------------------------------------------
 
-/// `POST /api/creators/:id/billing/setup` — ensure the creator has a platform
+/// `POST /api/organizations/:id/billing/setup` — ensure the organization has a platform
 /// Stripe **Customer** (`cus_…`), then return a Checkout **setup-mode** session
 /// URL so the dashboard can collect + save a PaymentMethod.
 ///
-/// Idempotent on the Customer: if a `cus_…` already exists for the creator
+/// Idempotent on the Customer: if a `cus_…` already exists for the organization
 /// (`billing_customer_refs`), reuse it — a second call does NOT
 /// create a second Customer. This infrastructure-cost identity is wholly
 /// distinct from the Connect `acct_…` `onboard` flow above.
@@ -225,16 +250,15 @@ pub async fn billing_setup(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    // Parse + bind the path id BEFORE authz so we can enforce ownership.
-    let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
-
-    // CRIT-10: billing/setup is SELF-SERVICE — a creator sets up their OWN card.
-    // `:id` is bound to the principal, which closes the cross-creator hole. The
-    // operator-acts-on-behalf arm that used to sit here probed BillingWrite on
-    // Resource::Any; nothing grants that now, so it only ever denied.
-    if authz.principal_id != creator_id {
-        return forbidden_other_creator();
-    }
+    // Attaching a card is money authority over the ORGANIZATION being billed,
+    // so it is `billing_rank` at `Resource::Organization` rather than a
+    // principal-equals-path comparison.
+    let organization =
+        match organization_money_guard(&authz, &state, &path, AuthzAction::BillingWrite).await {
+            Ok(organization) => organization,
+            Err(response) => return response,
+        };
+    let organization_id = organization.as_str();
 
     if state.stripe_secret_key.is_empty() {
         tracing::error!("stripe: billing_setup called with no ZEROSHIP_CONTROL_STRIPE_SECRET_KEY configured");
@@ -246,19 +270,19 @@ pub async fn billing_setup(
     .with_base_url(state.stripe_base_url.clone());
 
     // Ensure a Customer exists (create lazily, once).
-    let customer = match state.stripe_store.get_customer(creator_id).await {
+    let customer = match state.stripe_store.get_customer(organization_id).await {
         Ok(Some(c)) => c,
         Ok(None) => {
-            let email = match creator_email(&state, creator_id).await {
+            let email = match organization_billing_email(&state, organization_id).await {
                 Ok(Some(e)) => e,
-                Ok(None) => return err_json(404, "creator not found"),
+                Ok(None) => return err_json(404, "organization not found"),
                 Err(e) => return stripe_err_response(e),
             };
-            let cus = match stripe.create_customer(&email, &creator_id.to_string()).await {
+            let cus = match stripe.create_customer(&email, &organization_id.to_string()).await {
                 Ok(c) => c,
                 Err(e) => return stripe_err_response(e),
             };
-            if let Err(e) = state.stripe_store.set_customer(creator_id, &cus).await {
+            if let Err(e) = state.stripe_store.set_customer(organization_id, &cus).await {
                 return stripe_err_response(e);
             }
             cus
@@ -282,9 +306,18 @@ pub async fn billing_setup(
     }
 }
 
-/// Look up a creator's email (the creator is a user — D4). `None` if no such
-/// user row.
-async fn creator_email(state: &AppState, creator_id: Uuid) -> Result<Option<String>, StripeError> {
+/// The address Stripe should reach for this organization's money.
+///
+/// It reads `organizations.billing_email`, NOT a member's `users.email`. That is
+/// the separation the organization model exists to make: the party that is
+/// billed is a company, and the address on its Stripe Customer must not silently
+/// become whichever human happened to mint it. `organizations.billing_email` is
+/// `NOT NULL` and seeded from the minter's own address, so this is never empty
+/// for a live organization; `None` means no such organization row.
+async fn organization_billing_email(
+    state: &AppState,
+    organization_id: &str,
+) -> Result<Option<String>, StripeError> {
     let conn = state
         .registry
         .conn()
@@ -292,8 +325,8 @@ async fn creator_email(state: &AppState, creator_id: Uuid) -> Result<Option<Stri
         .map_err(|e| StripeError::Db(format!("{e}")))?;
     let rows = conn
         .query(
-            "SELECT email::text AS email FROM zeroship.users WHERE id = $1",
-            &[&creator_id],
+            "SELECT billing_email::text AS email FROM zeroship.organizations WHERE id = $1",
+            &[&organization_id],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -304,24 +337,24 @@ async fn creator_email(state: &AppState, creator_id: Uuid) -> Result<Option<Stri
 pub struct CallbackBody {
     /// OPTIONAL hint from the dashboard's return URL. It is NEVER trusted to
     /// LINK an account: ownership is verified SERVER-SIDE against the acct_… we
-    /// minted in `onboard` (stored on `creator_accounts`) + Stripe's
-    /// `metadata.creator_id`. A mismatching/forged acct_… is rejected (ISS-30).
+    /// minted in `onboard` (stored on `organization_accounts`) + Stripe's
+    /// `metadata.organization_id`. A mismatching/forged acct_… is rejected (ISS-30).
     #[serde(default)]
     pub stripe_account_id: Option<String>,
 }
 
-/// `POST /api/creators/:id/stripe/callback` — refresh Connect onboarding status
-/// after the creator returns from the Stripe-hosted flow (billing G1, ISS-30).
+/// `POST /api/organizations/:id/stripe/callback` — refresh Connect onboarding status
+/// after the organization returns from the Stripe-hosted flow (billing G1, ISS-30).
 ///
 /// **SECURITY (ISS-30 fix).** The old handler blindly `link_account`'d a POSTed
-/// `acct_…` — a creator could bind an account they don't control. This handler
+/// `acct_…` — an organization could bind an account they don't control. This handler
 /// instead drives the verification SERVER-SIDE:
-///   1. Load the acct_… we MINTED for this creator in `onboard` (server truth on
-///      `creator_accounts`). No stored account ⇒ 400 (onboard first).
+///   1. Load the acct_… we MINTED for this organization in `onboard` (server truth on
+///      `organization_accounts`). No stored account ⇒ 400 (onboard first).
 ///   2. If the body carries an acct_… hint, it MUST equal the stored one — a
 ///      foreign/forged acct_… is REJECTED (403), never linked.
-///   3. `retrieve_account` from Stripe and verify `metadata.creator_id` (which we
-///      stamped at create) equals this creator — REJECT (403) otherwise.
+///   3. `retrieve_account` from Stripe and verify `metadata.organization_id` (which we
+///      stamped at create) equals this organization — REJECT (403) otherwise.
 ///   4. Persist the verified `charges_enabled`/`payouts_enabled`/`details_submitted`
 ///      flags from Stripe's truth.
 ///
@@ -334,14 +367,12 @@ pub async fn callback(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
-
-    // `:id` is bound to the principal. The cross-creator arm behind this used
-    // to probe BillingWrite on Resource::Any; no principal can hold that now,
-    // so it was a branch that could only ever deny.
-    if authz.principal_id != creator_id {
-        return forbidden_other_creator();
-    }
+    let organization =
+        match organization_money_guard(&authz, &state, &path, AuthzAction::BillingWrite).await {
+            Ok(organization) => organization,
+            Err(response) => return response,
+        };
+    let organization_id = organization.as_str();
 
     if state.stripe_secret_key.expose_secret().is_empty() {
         tracing::error!("stripe: callback called with no ZEROSHIP_CONTROL_STRIPE_SECRET_KEY configured");
@@ -349,7 +380,7 @@ pub async fn callback(
     }
 
     // (1) The acct_… is SERVER TRUTH — the one we minted in `onboard`.
-    let stored = match state.stripe_store.get_account(creator_id).await {
+    let stored = match state.stripe_store.get_account(organization_id).await {
         Ok(Some(acct)) => acct.stripe_account_id,
         Ok(None) => return err_json(400, "no connect account; call onboard first"),
         Err(e) => return stripe_err_response(e),
@@ -360,16 +391,16 @@ pub async fn callback(
     if let Some(claimed) = body.stripe_account_id.as_deref() {
         if claimed != stored {
             tracing::warn!(
-                creator_id = %creator_id,
+                organization_id = %organization_id,
                 claimed = %stripe_store::sanitize_for_display(claimed),
-                "stripe: callback rejected — POSTed acct_… does not match the creator's onboarded account"
+                "stripe: callback rejected — POSTed acct_… does not match the organization's onboarded account"
             );
-            return err_json(403, "stripe account not owned by this creator");
+            return err_json(403, "stripe account not owned by this organization");
         }
     }
 
     // (3) Verify ownership against Stripe's truth: retrieve the account and confirm
-    // metadata.creator_id (stamped at create) is THIS creator.
+    // metadata.organization_id (stamped at create) is THIS organization.
     let stripe = crate::stripe_client::StripeClient::new(crate::SecretString::new(
         state.stripe_secret_key.expose_secret().to_string(),
     ))
@@ -378,24 +409,20 @@ pub async fn callback(
         Ok(a) => a,
         Err(e) => return stripe_err_response(e),
     };
-    let owner_ok = account
-        .creator_id
-        .as_deref()
-        .and_then(|s| Uuid::parse_str(s).ok())
-        == Some(creator_id);
+    let owner_ok = account.organization_id.as_deref() == Some(organization_id);
     if !owner_ok {
         tracing::warn!(
-            creator_id = %creator_id,
-            "stripe: callback rejected — retrieved account metadata.creator_id does not match"
+            organization_id = %organization_id,
+            "stripe: callback rejected — retrieved account metadata.organization_id does not match"
         );
-        return err_json(403, "stripe account not owned by this creator");
+        return err_json(403, "stripe account not owned by this organization");
     }
 
     // (4) Persist Stripe's verified onboarding flags.
     match state
         .stripe_store
         .set_account_flags(
-            creator_id,
+            organization_id,
             &stored,
             account.charges_enabled,
             account.payouts_enabled,
@@ -407,7 +434,7 @@ pub async fn callback(
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
-                creator_id: Some(creator_id),
+                organization_id: Some(organization_id),
                 actor_user_id: Some(authz.principal_id),
                 action: Action::LinkAccount,
                 resource: Some(&stored),
@@ -430,8 +457,8 @@ pub async fn callback(
 
 #[derive(Debug, Deserialize)]
 pub struct ConnectCheckoutBody {
-    /// The amount the creator charges THEIR end-user, in cents. BUSINESS input —
-    /// the creator names what to charge their customer.
+    /// The amount the organization charges THEIR end-user, in cents. BUSINESS input —
+    /// the organization names what to charge their customer.
     pub amount_cents: u64,
     /// ISO currency (e.g. "usd").
     pub currency: String,
@@ -444,14 +471,14 @@ pub struct ConnectCheckoutBody {
     pub cart_id: Option<String>,
 }
 
-/// `POST /api/creators/:id/connect/checkout` — create a Connect PaymentIntent
+/// `POST /api/organizations/:id/connect/checkout` — create a Connect PaymentIntent
 /// with the platform's `application_fee_amount` stamped **SERVER-SIDE** (billing
 /// G1, ISS-29 fix).
 ///
 /// **The fee is server-authoritative.** The body carries only BUSINESS params
-/// (amount, currency, end-user). The platform resolves the creator's server-held
+/// (amount, currency, end-user). The platform resolves the organization's server-held
 /// [`crate::fee_policy::FeePolicy`] and computes `application_fee_amount` itself;
-/// the SDK/creator code can NOT name, set, or override the fee. Any
+/// the SDK/organization code can NOT name, set, or override the fee. Any
 /// `application_fee*` a client tries to send is simply not read here (the body
 /// has no such field) — there is no wire path for it.
 ///
@@ -464,12 +491,12 @@ pub async fn connect_checkout(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
-
-    // `:id` is bound to the principal; the operator-on-behalf arm is deleted.
-    if authz.principal_id != creator_id {
-        return forbidden_other_creator();
-    }
+    let organization =
+        match organization_money_guard(&authz, &state, &path, AuthzAction::BillingWrite).await {
+            Ok(organization) => organization,
+            Err(response) => return response,
+        };
+    let organization_id = organization.as_str();
 
     if body.amount_cents == 0 {
         return err_json(400, "amount_cents must be positive");
@@ -480,7 +507,7 @@ pub async fn connect_checkout(
         return err_json(400, "currency must be a 3-letter ISO code (lowercase)");
     }
     // M2: a non-empty `cart_id` is REQUIRED. Without it every checkout for a
-    // creator collapses onto one idempotency key, replaying the first
+    // organization collapses onto one idempotency key, replaying the first
     // PaymentIntent (a different-amount charge silently returns a stale intent).
     let cart = body.cart_id.as_deref().map(str::trim).unwrap_or("");
     if cart.is_empty() {
@@ -493,23 +520,23 @@ pub async fn connect_checkout(
 
     // The connected account must exist + be ready to take charges. This is
     // server truth (the acct_… we minted + verified), never client input.
-    let account = match state.stripe_store.get_account(creator_id).await {
+    let account = match state.stripe_store.get_account(organization_id).await {
         Ok(Some(a)) => a,
-        Ok(None) => return err_json(400, "creator has no connected stripe account"),
+        Ok(None) => return err_json(400, "organization has no connected stripe account"),
         Err(e) => return stripe_err_response(e),
     };
     // M1: the `charges_enabled` flag (verified by `callback` from Stripe's truth)
-    // gates the charge path. A creator who ran `onboard` but never finished
+    // gates the charge path. An organization who ran `onboard` but never finished
     // Stripe onboarding has the account row but charges_enabled=false — reject
     // BEFORE any PaymentIntent POST.
     if !account.charges_enabled {
-        return err_json(400, "creator stripe account not ready (complete onboarding)");
+        return err_json(400, "organization stripe account not ready (complete onboarding)");
     }
 
     // Resolve the SERVER-HELD fee policy and compute the fee. The default (no
-    // row) is 15%. The creator cannot influence this value.
+    // row) is 15%. The organization cannot influence this value.
     let store = crate::fee_policy::FeePolicyStore::new(state.registry.clone());
-    let policy = match store.get(creator_id).await {
+    let policy = match store.get(organization_id).await {
         Ok(p) => p,
         Err(e) => return stripe_err_response(e),
     };
@@ -520,18 +547,18 @@ pub async fn connect_checkout(
     ))
     .with_base_url(state.stripe_base_url.clone());
 
-    // Deterministic idempotency key per (creator, cart, amount, currency) so an
+    // Deterministic idempotency key per (organization, cart, amount, currency) so an
     // at-least-once retry of the SAME cart replays the same PaymentIntent, but a
     // changed amount/currency (or a different cart) gets a DISTINCT key — Stripe
     // can no longer replay a stale intent for a different charge (M2). `cart` is
     // guaranteed non-empty (validated above).
     let idempotency_key = format!(
-        "connect_pi:{creator_id}:{cart}:{}:{}",
+        "connect_pi:{organization_id}:{cart}:{}:{}",
         body.amount_cents, body.currency
     );
     // m4: cap the description before it hits the wire. Stripe's PaymentIntent
     // `description` max is 1000 chars; a longer one is a 400 `string_too_long`.
-    // Done here (not in the client) so the cap is visible at the creator-facing
+    // Done here (not in the client) so the cap is visible at the organization-facing
     // boundary where the value originates.
     let raw_description = body.description.as_deref().unwrap_or("zeroship connect charge");
     let description: &str = cap_stripe_description(raw_description);
@@ -560,9 +587,9 @@ pub async fn connect_checkout(
 /// Dashboard earnings view.
 ///
 /// **`:id` is bound to the principal** (self-service, like `billing_setup` and
-/// `onboard`): a creator reads their OWN earnings, and nobody reads anyone
+/// `onboard`): an organization reads their OWN earnings, and nobody reads anyone
 /// else's. This used to require `BillingRead` on `Resource::Any` - an operator
-/// grant - which meant a creator could not read their own earnings at all and
+/// grant - which meant an organization could not read their own earnings at all and
 /// the whole route hung off the platform staff roles. Reading your own payout
 /// history is self-service; it was mis-gated, not operator-shaped.
 pub async fn earnings(
@@ -572,16 +599,18 @@ pub async fn earnings(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
-    if authz.principal_id != creator_id {
-        return forbidden_other_creator();
-    }
+    let organization =
+        match organization_money_guard(&authz, &state, &path, AuthzAction::BillingRead).await {
+            Ok(organization) => organization,
+            Err(response) => return response,
+        };
+    let organization_id = organization.as_str();
 
-    let totals = match state.stripe_store.total_earnings(creator_id).await {
+    let totals = match state.stripe_store.total_earnings(organization_id).await {
         Ok(t) => t,
         Err(e) => return stripe_err_response(e),
     };
-    let recent = match state.stripe_store.recent_payouts(creator_id, 50).await {
+    let recent = match state.stripe_store.recent_payouts(organization_id, 50).await {
         Ok(r) => r,
         Err(e) => return stripe_err_response(e),
     };
@@ -605,13 +634,13 @@ pub async fn earnings(
     }))
 }
 
-/// Unlink the creator's Stripe account. Cascades and deletes payouts.
+/// Unlink the organization's Stripe account. Cascades and deletes payouts.
 ///
-/// **`:id` is bound to the principal** (self-service, like `onboard`): a creator
+/// **`:id` is bound to the principal** (self-service, like `onboard`): an organization
 /// disconnects their OWN Stripe account. It used to require `BillingWrite` on
-/// `Resource::Any`, so the creator who linked the account could not unlink it -
+/// `Resource::Any`, so the organization who linked the account could not unlink it -
 /// only platform staff could. Disconnecting your own payment account is the
-/// creator's call.
+/// organization's call.
 pub async fn unlink(
     req: web::HttpRequest,
     path: Path<String>,
@@ -619,17 +648,19 @@ pub async fn unlink(
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
     if let Some(r) = rate_limit(&req, &state.admin_limiter, "admin", &state).await { return r; }
-    let Ok(creator_id) = Uuid::parse_str(&path) else { return bad_creator_id(); };
-    if authz.principal_id != creator_id {
-        return forbidden_other_creator();
-    }
+    let organization =
+        match organization_money_guard(&authz, &state, &path, AuthzAction::BillingWrite).await {
+            Ok(organization) => organization,
+            Err(response) => return response,
+        };
+    let organization_id = organization.as_str();
 
-    match state.stripe_store.unlink_account(creator_id).await {
+    match state.stripe_store.unlink_account(organization_id).await {
         Ok(true) => {
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: None,
-                creator_id: Some(creator_id),
+                organization_id: Some(organization_id),
                 actor_user_id: Some(authz.principal_id),
                 action: Action::UnlinkAccount,
                 resource: None,
@@ -637,7 +668,7 @@ pub async fn unlink(
             }).await;
             web::HttpResponse::NoContent().finish()
         }
-        Ok(false) => err_json(404, "creator not linked"),
+        Ok(false) => err_json(404, "organization not linked"),
         Err(e) => stripe_err_response(e),
     }
 }
@@ -747,7 +778,7 @@ struct StripeEvent {
     /// account the event came from (verified docs.stripe.com/connect/webhooks: "Each event
     /// for a connected account contains a top-level `account` property"). The Connect
     /// failure handlers (`payout.failed` / `payment_intent.payment_failed`) resolve the
-    /// creator through this when the object itself doesn't carry the `acct_…`. Absent on
+    /// organization through this when the object itself doesn't carry the `acct_…`. Absent on
     /// platform-account events.
     #[serde(default)]
     account: Option<String>,
@@ -769,8 +800,8 @@ struct StripeObject {
     #[serde(default)]
     currency: Option<String>,
     /// The Stripe Customer (`cus_…`) the invoice belongs to. Infrastructure
-    /// billing invoices carry this; we reverse-resolve it to a creator via
-    /// `billing_customer_refs` when no `metadata.creator_id` is set.
+    /// billing invoices carry this; we reverse-resolve it to an organization via
+    /// `billing_customer_refs` when no `metadata.organization_id` is set.
     #[serde(default)]
     customer: Option<String>,
     /// Invoice's own metadata (generally empty — Stripe doesn't copy
@@ -829,8 +860,8 @@ struct StripeObject {
     /// The connected account the charge settled ON BEHALF OF (`acct_…`). On a
     /// Connect-revenue invoice / charge this is the destination account that
     /// actually received the funds. The payout handler confirms it matches the
-    /// claimed creator's `creator_accounts.stripe_account_id` before crediting —
-    /// so a forged `metadata.creator_id` cannot attribute another account's
+    /// claimed organization's `organization_accounts.stripe_account_id` before crediting —
+    /// so a forged `metadata.organization_id` cannot attribute another account's
     /// revenue to itself.
     #[serde(default)]
     on_behalf_of: Option<String>,
@@ -906,15 +937,15 @@ struct SubscriptionDetails {
     metadata: Option<serde_json::Map<String, serde_json::Value>>,
 }
 
-/// Look up the `creator_id` across all known metadata locations.
+/// Look up the `organization_id` across all known metadata locations.
 /// Stripe's webhook wire has moved around — check every reasonable
 /// spot so callers only have to set metadata ONCE (on the session)
 /// and the SDK writes it to `subscription_data[metadata]` which
 /// propagates to both `parent.subscription_details.metadata` and
 /// the subscription itself.
-fn extract_creator_id(obj: &StripeObject) -> Option<String> {
+fn extract_organization_id(obj: &StripeObject) -> Option<String> {
     let get = |m: &serde_json::Map<String, serde_json::Value>| {
-        m.get("creator_id").and_then(|v| v.as_str()).map(str::to_string)
+        m.get("organization_id").and_then(|v| v.as_str()).map(str::to_string)
     };
     obj.metadata.as_ref().and_then(get)
         .or_else(|| obj.parent.as_ref().and_then(|p| p.subscription_details.as_ref())
@@ -928,8 +959,8 @@ fn extract_creator_id(obj: &StripeObject) -> Option<String> {
 /// `create_invoice`). This is the recovery gate: an `invoice.paid`
 /// without this marker is NOT a platform infra invoice — even if its Stripe
 /// Customer reverse-resolves through `billing_customer_refs` (a Connect
-/// end-user invoice could collide) — so it must NOT un-suspend a creator. The
-/// marker is checked across the same wire locations as `creator_id` because
+/// end-user invoice could collide) — so it must NOT un-suspend an organization. The
+/// marker is checked across the same wire locations as `organization_id` because
 /// Stripe surfaces invoice metadata directly and via subscription details.
 fn is_infra_invoice(obj: &StripeObject) -> bool {
     let has = |m: &serde_json::Map<String, serde_json::Value>| {
@@ -1113,8 +1144,8 @@ async fn dispatch_event(
     let obj = &event.data.object;
 
     // Stream-1 (infra-billing) lifecycle events. These ride the SAME verified
-    // ingest path and resolve the creator via the same `extract_creator_id`
-    // (metadata.creator_id, stamped by `create_customer`).
+    // ingest path and resolve the organization via the same `extract_organization_id`
+    // (metadata.organization_id, stamped by `create_customer`).
     match event.event_type.as_str() {
         "setup_intent.succeeded" => {
             return handle_setup_intent_succeeded(req, state, event, obj).await;
@@ -1161,24 +1192,24 @@ async fn dispatch_event(
         }
         // `invoice.paid` carries TWO concerns:
         //   * Stream-1 (infra recovery, G2): a previously-failed infra invoice
-        //     was paid → recover the creator's account status (past_due/suspended
+        //     was paid → recover the organization's account status (past_due/suspended
         //     → active). This is the REVERSIBILITY rail. Handled here for the
-        //     infra creator (resolved by metadata OR customer reverse-resolve)
+        //     infra organization (resolved by metadata OR customer reverse-resolve)
         //     regardless of whether the event also carries Connect metadata.
         //   * Stream-2 (Connect revenue): the payout-ledger record below (only
-        //     when `metadata.creator_id` is present).
+        //     when `metadata.organization_id` is present).
         "invoice.paid" => {
             // RECOVERY GATE: only a PLATFORM INFRA invoice may
-            // un-suspend a creator. Gate on the POSITIVE `invoice_kind=infra`
+            // un-suspend an organization. Gate on the POSITIVE `invoice_kind=infra`
             // marker the reconciler stamps — NOT on the mere absence of Connect
             // metadata. A Connect end-user `invoice.paid` whose Stripe Customer
             // happens to collide with an id in `billing_customer_refs`
             // lacks this marker, so it can never falsely recover a suspension.
             // The marker is present on every reconciler-created invoice.
             if is_infra_invoice(obj) {
-                if let Some(cid) = resolve_infra_creator(state, obj).await {
+                if let Some(cid) = resolve_infra_organization(state, obj).await {
                     let store = crate::account_status::AccountStatusStore::new(state.registry.clone());
-                    match store.record_payment_recovered(cid, event.created).await {
+                    match store.record_payment_recovered(&cid, event.created).await {
                         Ok(Some(t)) => audit_account_transition(req, state, &t, &event.id).await,
                         Ok(None) => { /* nothing to recover (already active / no row) */ }
                         Err(e) => {
@@ -1209,8 +1240,8 @@ async fn dispatch_event(
                 }
                 // D3: an INFRA `invoice.paid` is FULLY handled here — ACK 200 and
                 // RETURN. It must NOT fall through to the Stream-2 `record_payout`
-                // path below, whose `payouts.creator_id → creator_accounts(creator_id)`
-                // FK an infra-only creator (no Connect account) cannot satisfy. The
+                // path below, whose `payouts.organization_id → organization_accounts(organization_id)`
+                // FK an infra-only organization (no Connect account) cannot satisfy. The
                 // fall-through 500'd AFTER the infra writes committed (non-atomic),
                 // so the event never acked and Stripe retried forever (poison). The
                 // payout path is for Connect REVENUE events, which are NOT infra
@@ -1221,21 +1252,21 @@ async fn dispatch_event(
         // MONEY-CRITICAL: a refund we recorded `issued` that LATER transitioned to a
         // terminal FAILURE (`failed`/`canceled`) — the cash did NOT return to the
         // cardholder. Reconcile our ledger: flip the refund to failed (so the over-refund
-        // cap stops counting it → the creator can re-refund) and, for a credit-destination
+        // cap stops counting it → the organization can re-refund) and, for a credit-destination
         // refund, claw back the minted `refund_to_credit` grant. Idempotent + fail-closed.
         "charge.refund.updated" => {
             return handle_refund_updated(req, state, event, obj).await;
         }
-        // A payout to a creator's connected account FAILED (bad bank details / closed
+        // A payout to an organization's connected account FAILED (bad bank details / closed
         // account). Record it in `payout_failures` (idempotent on the `po_…`) and notify
-        // the creator via the `payout_failed` notification (off the new row, by the cron).
+        // the organization via the `payout_failed` notification (off the new row, by the cron).
         "payout.failed" => {
             return handle_payout_failed(req, state, event, obj).await;
         }
         // An end-user's Connect checkout charge FAILED. No money moved (informational), but
         // it must be SURFACED, not silently dropped — record it in
         // `connect_checkout_failures` (idempotent on the `pi_…`) + a `checkout_failed`
-        // creator notification.
+        // organization notification.
         "payment_intent.payment_failed" => {
             return handle_payment_intent_failed(req, state, event, obj).await;
         }
@@ -1255,30 +1286,31 @@ async fn dispatch_event(
     let fee = obj.application_fee_amount.unwrap_or(0);
     let currency = obj.currency.clone().unwrap_or_else(|| "usd".into());
 
-    // creator_id flows from the SDK's `buildCheckoutSession` via BOTH
+    // organization_id flows from the SDK's `buildCheckoutSession` via BOTH
     // session metadata AND `subscription_data[metadata]` — the latter
     // is what actually propagates to invoices. Check multiple wire
     // shapes to be version-robust.
-    let Some(creator_id_str) = extract_creator_id(obj) else {
+    let Some(organization_id_str) = extract_organization_id(obj) else {
         tracing::warn!(
             event_id = %sanitize_event_id(&event.id),
-            "stripe: event missing metadata.creator_id (checked invoice.metadata, \
+            "stripe: event missing metadata.organization_id (checked invoice.metadata, \
              invoice.parent.subscription_details.metadata, invoice.subscription_details.metadata) — ignored"
         );
-        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_creator_id"}));
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_organization_id"}));
     };
-    let Ok(creator_id) = Uuid::parse_str(&creator_id_str) else {
+    let Ok(organization) = OrganizationId::parse(&organization_id_str) else {
         return err_json(
             400,
-            format!("bad creator_id in metadata: {}", stripe_store::sanitize_for_display(&creator_id_str)),
+            format!("bad organization_id in metadata: {}", stripe_store::sanitize_for_display(&organization_id_str)),
         );
     };
+    let organization_id = organization.as_str();
 
-    // M4 (payout attribution): `metadata.creator_id` is CLIENT-influenced — a
+    // M4 (payout attribution): `metadata.organization_id` is CLIENT-influenced — a
     // forged or copy-pasted id could attribute ANOTHER account's revenue to a
-    // different creator. Resolve the connected account the charge actually settled
+    // different organization. Resolve the connected account the charge actually settled
     // ON BEHALF OF (`on_behalf_of`, else `transfer_data.destination`) and confirm it
-    // is the claimed creator's OWN live `creator_accounts.stripe_account_id` before
+    // is the claimed organization's OWN live `organization_accounts.stripe_account_id` before
     // crediting earnings. A mismatch (or a missing settling account on a revenue
     // event) is REJECTED — not credited.
     let settling_account = obj
@@ -1302,16 +1334,16 @@ async fn dispatch_event(
     };
     match state
         .stripe_store
-        .account_belongs_to_creator(creator_id, settling_account)
+        .account_belongs_to_organization(organization_id, settling_account)
         .await
     {
-        Ok(true) => { /* attribution verified — the claimed creator owns the settling account */ }
+        Ok(true) => { /* attribution verified — the claimed organization owns the settling account */ }
         Ok(false) => {
             tracing::warn!(
                 event_id = %sanitize_event_id(&event.id),
-                creator_id = %creator_id,
+                organization_id = %organization_id,
                 settling_account = %stripe_store::sanitize_for_display(settling_account),
-                "stripe: payout attribution MISMATCH — claimed creator does not own the settling account; refusing to credit"
+                "stripe: payout attribution MISMATCH — claimed organization does not own the settling account; refusing to credit"
             );
             return web::HttpResponse::Ok().json(&serde_json::json!({"status": "attribution_mismatch"}));
         }
@@ -1331,7 +1363,7 @@ async fn dispatch_event(
     match state
         .stripe_store
         .record_payout(
-            creator_id,
+            organization_id,
             &event.id,
             &event.event_type,
             gross,
@@ -1345,7 +1377,7 @@ async fn dispatch_event(
         Ok(rec) => {
             let ip = source_ip(req, state);
             let detail = serde_json::json!({
-                "creator_id": creator_id.to_string(),
+                "organization_id": organization_id.to_string(),
                 "amount_cents": rec.gross_amount,
                 "platform_fee_cents": rec.platform_fee,
                 "net_amount_cents": rec.net_amount,
@@ -1360,7 +1392,7 @@ async fn dispatch_event(
                 &state.registry,
                 AuditEntry {
                     app_id: None,
-                    creator_id: Some(creator_id),
+                    organization_id: Some(organization_id),
                     actor_user_id: None,
                     action: Action::RecordPayout,
                     resource: Some(&event.id),
@@ -1383,32 +1415,33 @@ async fn dispatch_event(
     }
 }
 
-/// `setup_intent.succeeded` — the creator finished the Checkout setup flow and
-/// has a saved default PaymentMethod. Mark `creator_billing.default_pm_set`.
+/// `setup_intent.succeeded` — the organization finished the Checkout setup flow and
+/// has a saved default PaymentMethod. Mark `organization_billing.default_pm_set`.
 async fn handle_setup_intent_succeeded(
     req: &web::HttpRequest,
     state: &AppState,
     event: &StripeEvent,
     obj: &StripeObject,
 ) -> web::HttpResponse {
-    let Some(creator_id_str) = extract_creator_id(obj) else {
+    let Some(organization_id_str) = extract_organization_id(obj) else {
         tracing::warn!(
             event_id = %sanitize_event_id(&event.id),
-            "stripe: setup_intent.succeeded missing metadata.creator_id — ignored"
+            "stripe: setup_intent.succeeded missing metadata.organization_id — ignored"
         );
-        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_creator_id"}));
+        return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_organization_id"}));
     };
-    let Ok(creator_id) = Uuid::parse_str(&creator_id_str) else {
-        return err_json(400, "bad creator_id in metadata");
+    let Ok(organization) = OrganizationId::parse(&organization_id_str) else {
+        return err_json(400, "bad organization_id in metadata");
     };
-    match state.stripe_store.set_default_pm(creator_id).await {
+    let organization_id = organization.as_str();
+    match state.stripe_store.set_default_pm(organization_id).await {
         Ok(()) => {
             let ip = source_ip(req, state);
             audit::log_with_detail(
                 &state.registry,
                 AuditEntry {
                     app_id: None,
-                    creator_id: Some(creator_id),
+                    organization_id: Some(organization_id),
                     actor_user_id: None,
                     action: Action::SetupIntentSucceeded,
                     resource: Some(&event.id),
@@ -1416,7 +1449,7 @@ async fn handle_setup_intent_succeeded(
                 },
                 &serde_json::json!({
                     "stripe_event_type": "setup_intent.succeeded",
-                    "creator_id": creator_id.to_string(),
+                    "organization_id": organization_id.to_string(),
                     "default_pm_set": true,
                 }),
             )
@@ -1436,7 +1469,7 @@ async fn handle_setup_intent_succeeded(
 ///
 /// The account object's `id` IS the `acct_…`; we update the live row by that id
 /// (globally unique). An `account.updated` for an `acct_…` we never linked (a
-/// platform/express account not in `creator_accounts`) is a benign no-op ack.
+/// platform/express account not in `organization_accounts`) is a benign no-op ack.
 async fn handle_account_updated(
     req: &web::HttpRequest,
     state: &AppState,
@@ -1470,7 +1503,7 @@ async fn handle_account_updated(
                     &state.registry,
                     AuditEntry {
                         app_id: None,
-                        creator_id: None,
+                        organization_id: None,
                         actor_user_id: None,
                         action: Action::AccountStateChange,
                         resource: Some(&event.id),
@@ -1500,12 +1533,12 @@ async fn handle_account_updated(
 }
 
 /// `invoice.payment_failed` — a finalized infra-billing invoice could not be
-/// charged. Audit it AND (billing G2) move the creator's account status to
+/// charged. Audit it AND (billing G2) move the organization's account status to
 /// `past_due`, starting the dunning window. We do NOT mark the Stripe invoice
 /// uncollectible — Stripe's own retry/dunning keeps running; the platform's
 /// `max_dunning_days` timeout (the dunning cron) is the suspension deadline.
 ///
-/// `past_due` is the GRACE state — the gateway STILL serves the creator's apps.
+/// `past_due` is the GRACE state — the gateway STILL serves the organization's apps.
 /// Only the later dunning-exhaustion sweep suspends (402). Reversible: a recovery
 /// (`invoice.paid`) clears it back to active.
 async fn handle_invoice_payment_failed(
@@ -1514,19 +1547,19 @@ async fn handle_invoice_payment_failed(
     event: &StripeEvent,
     obj: &StripeObject,
 ) -> web::HttpResponse {
-    let creator_id = resolve_infra_creator(state, obj).await;
-    if creator_id.is_none() {
+    let organization_id = resolve_infra_organization(state, obj).await;
+    if organization_id.is_none() {
         tracing::warn!(
             event_id = %sanitize_event_id(&event.id),
-            "stripe: invoice.payment_failed could not resolve creator_id (no metadata, no matching customer)"
+            "stripe: invoice.payment_failed could not resolve organization_id (no metadata, no matching customer)"
         );
     }
 
-    // G2 state mutation — only with a resolved creator. The signature was already
+    // G2 state mutation — only with a resolved organization. The signature was already
     // verified by `webhook` before we got here (webhook-truth-only); a forged /
     // unsigned event never reaches this function. Order-safe: `event.created` is
     // threaded so a stale failure that predates a recovery can't re-arm past_due.
-    if let Some(cid) = creator_id {
+    if let Some(cid) = organization_id.as_deref() {
         let store = crate::account_status::AccountStatusStore::new(state.registry.clone());
         match store.record_payment_failed(cid, obj.id.as_deref(), event.created).await {
             Ok(Some(t)) => {
@@ -1536,7 +1569,7 @@ async fn handle_invoice_payment_failed(
             Err(e) => {
                 // M1: FAIL CLOSED. A transient error recording the dunning transition
                 // must NOT be swallowed-then-acked — that would mark the event processed
-                // (claim-after-success), Stripe would never redeliver, and the creator
+                // (claim-after-success), Stripe would never redeliver, and the organization
                 // would never enter dunning (keeps consuming free infra on a dead card).
                 // Return 5xx so the event is left UNCLAIMED for retry, matching the
                 // infra-`invoice.paid` discipline. The transition is idempotent
@@ -1553,7 +1586,7 @@ async fn handle_invoice_payment_failed(
         &state.registry,
         AuditEntry {
             app_id: None,
-            creator_id,
+            organization_id: organization_id.as_deref(),
             actor_user_id: None,
             action: Action::InvoicePaymentFailed,
             resource: Some(&event.id),
@@ -1561,7 +1594,7 @@ async fn handle_invoice_payment_failed(
         },
         &serde_json::json!({
             "stripe_event_type": "invoice.payment_failed",
-            "creator_id": creator_id.map(|c| c.to_string()),
+            "organization_id": organization_id.as_deref(),
             "stripe_invoice_id": obj.id.as_deref(),
         }),
     )
@@ -1569,16 +1602,18 @@ async fn handle_invoice_payment_failed(
     web::HttpResponse::Ok().json(&serde_json::json!({"status": "payment_failed_recorded"}))
 }
 
-/// Resolve the creator owning an infra-billing invoice: prefer
-/// `metadata.creator_id`, else reverse-resolve the Customer (`cus_…`) via
-/// `billing_customer_refs` when Stripe surfaces `customer` but no creator
+/// Resolve the organization owning an infra-billing invoice: prefer
+/// `metadata.organization_id`, else reverse-resolve the Customer (`cus_…`) via
+/// `billing_customer_refs` when Stripe surfaces `customer` but no organization
 /// metadata on the invoice.
-async fn resolve_infra_creator(state: &AppState, obj: &StripeObject) -> Option<Uuid> {
-    if let Some(cid) = extract_creator_id(obj).and_then(|s| Uuid::parse_str(&s).ok()) {
-        return Some(cid);
+async fn resolve_infra_organization(state: &AppState, obj: &StripeObject) -> Option<String> {
+    if let Some(organization) = extract_organization_id(obj)
+        .and_then(|s| OrganizationId::parse(&s).ok())
+    {
+        return Some(organization.as_str().to_owned());
     }
     if let Some(customer) = obj.customer.as_deref() {
-        match state.stripe_store.get_creator_by_customer(customer).await {
+        match state.stripe_store.get_organization_by_customer(customer).await {
             Ok(c) => return c,
             Err(e) => {
                 tracing::warn!(error = %e, "stripe: infra-invoice customer reverse-resolve failed");
@@ -1890,7 +1925,7 @@ async fn handle_dispute_created(
         &state.registry,
         AuditEntry {
             app_id: None,
-            creator_id: None,
+            organization_id: None,
             actor_user_id: None,
             action: Action::RecordDispute,
             resource: Some(&event.id),
@@ -1994,7 +2029,7 @@ async fn handle_dispute_closed_or_updated(
         &state.registry,
         AuditEntry {
             app_id: None,
-            creator_id: None,
+            organization_id: None,
             actor_user_id: None,
             action: Action::RecordDispute,
             resource: Some(&event.id),
@@ -2022,7 +2057,7 @@ async fn handle_dispute_closed_or_updated(
 ///
 /// On failure we [`crate::refund::reconcile_failed_refund`] (idempotent, in one txn):
 ///   * flip our `refunds` row to the terminal status (so the over-refund cap STOPS counting
-///     it → a failed cash refund no longer permanently reduces refundable cash; the creator
+///     it → a failed cash refund no longer permanently reduces refundable cash; the organization
 ///     CAN re-refund),
 ///   * for a `destination='credit'` refund, claw back the minted `refund_to_credit` grant
 ///     via a compensating negative `refund_clawback` entry (the credit must not survive a
@@ -2061,7 +2096,7 @@ async fn handle_refund_updated(
                 &state.registry,
                 AuditEntry {
                     app_id: None,
-                    creator_id: None,
+                    organization_id: None,
                     actor_user_id: None,
                     action: Action::RefundFailed,
                     resource: Some(&event.id),
@@ -2114,8 +2149,8 @@ fn connect_account_for<'a>(event: &'a StripeEvent, obj: &'a StripeObject) -> Opt
         })
 }
 
-/// `payout.failed` (webhook follow-up). A payout to a creator's connected account bounced.
-/// Resolve the creator from the connected account, record an idempotent `payout_failures`
+/// `payout.failed` (webhook follow-up). A payout to an organization's connected account bounced.
+/// Resolve the organization from the connected account, record an idempotent `payout_failures`
 /// row, and let the notify cron emit the `payout_failed` notification off it. FAIL-CLOSED on
 /// a DB error.
 async fn handle_payout_failed(
@@ -2132,14 +2167,14 @@ async fn handle_payout_failed(
         tracing::warn!(event_id = %sanitize_event_id(&event.id), "stripe: payout.failed carries no connected account (top-level account / transfer_data) — acked, not attributable");
         return web::HttpResponse::Ok().json(&serde_json::json!({"status": "no_connected_account"}));
     };
-    let creator_id = match state.stripe_store.get_creator_by_account(account_id).await {
+    let organization_id = match state.stripe_store.get_organization_by_account(account_id).await {
         Ok(Some(c)) => c,
         Ok(None) => {
             tracing::warn!(event_id = %sanitize_event_id(&event.id), account = %stripe_store::sanitize_for_display(account_id), "stripe: payout.failed for an account we don't have linked — acked");
             return web::HttpResponse::Ok().json(&serde_json::json!({"status": "account_not_linked"}));
         }
         Err(e) => {
-            tracing::error!(error = %e, "stripe: payout.failed creator resolve failed — failing closed for retry");
+            tracing::error!(error = %e, "stripe: payout.failed organization resolve failed — failing closed for retry");
             return err_json(500, "internal error");
         }
     };
@@ -2148,7 +2183,7 @@ async fn handle_payout_failed(
     match state
         .stripe_store
         .record_payout_failure(
-            creator_id,
+            &organization_id,
             po_id,
             account_id,
             amount,
@@ -2166,7 +2201,7 @@ async fn handle_payout_failed(
                     &state.registry,
                     AuditEntry {
                         app_id: None,
-                        creator_id: Some(creator_id),
+                        organization_id: Some(organization_id.as_str()),
                         actor_user_id: None,
                         action: Action::PayoutFailed,
                         resource: Some(&event.id),
@@ -2174,7 +2209,7 @@ async fn handle_payout_failed(
                     },
                     &serde_json::json!({
                         "stripe_event_type": "payout.failed",
-                        "creator_id": creator_id.to_string(),
+                        "organization_id": organization_id.to_string(),
                         "stripe_payout_id": po_id,
                         "stripe_account_id": account_id,
                         "amount_cents": amount,
@@ -2195,8 +2230,8 @@ async fn handle_payout_failed(
 }
 
 /// `payment_intent.payment_failed` (webhook follow-up). An end-user's Connect checkout
-/// charge failed. No money moved — informational — but surfaced (recorded + a creator
-/// notification) rather than silently dropped. Resolve the creator from the PI's
+/// charge failed. No money moved — informational — but surfaced (recorded + an organization
+/// notification) rather than silently dropped. Resolve the organization from the PI's
 /// destination account (or the Connect event's top-level account), record an idempotent
 /// `connect_checkout_failures` row. FAIL-CLOSED on a DB error.
 async fn handle_payment_intent_failed(
@@ -2210,18 +2245,18 @@ async fn handle_payment_intent_failed(
         return web::HttpResponse::Ok().json(&serde_json::json!({"status": "missing_pi_id"}));
     };
     let Some(account_id) = connect_account_for(event, obj) else {
-        // A PLATFORM (non-Connect) PI failure is not creator-attributable here — ack.
+        // A PLATFORM (non-Connect) PI failure is not organization-attributable here — ack.
         tracing::info!(event_id = %sanitize_event_id(&event.id), "stripe: payment_intent.payment_failed carries no connected account — acked (not a Connect checkout)");
         return web::HttpResponse::Ok().json(&serde_json::json!({"status": "no_connected_account"}));
     };
-    let creator_id = match state.stripe_store.get_creator_by_account(account_id).await {
+    let organization_id = match state.stripe_store.get_organization_by_account(account_id).await {
         Ok(Some(c)) => c,
         Ok(None) => {
             tracing::warn!(event_id = %sanitize_event_id(&event.id), account = %stripe_store::sanitize_for_display(account_id), "stripe: payment_intent.payment_failed for an unlinked account — acked");
             return web::HttpResponse::Ok().json(&serde_json::json!({"status": "account_not_linked"}));
         }
         Err(e) => {
-            tracing::error!(error = %e, "stripe: payment_intent.payment_failed creator resolve failed — failing closed for retry");
+            tracing::error!(error = %e, "stripe: payment_intent.payment_failed organization resolve failed — failing closed for retry");
             return err_json(500, "internal error");
         }
     };
@@ -2236,7 +2271,7 @@ async fn handle_payment_intent_failed(
     match state
         .stripe_store
         .record_checkout_failure(
-            creator_id,
+            &organization_id,
             pi_id,
             account_id,
             amount,
@@ -2254,7 +2289,7 @@ async fn handle_payment_intent_failed(
                     &state.registry,
                     AuditEntry {
                         app_id: None,
-                        creator_id: Some(creator_id),
+                        organization_id: Some(organization_id.as_str()),
                         actor_user_id: None,
                         action: Action::CheckoutFailed,
                         resource: Some(&event.id),
@@ -2262,7 +2297,7 @@ async fn handle_payment_intent_failed(
                     },
                     &serde_json::json!({
                         "stripe_event_type": "payment_intent.payment_failed",
-                        "creator_id": creator_id.to_string(),
+                        "organization_id": organization_id.to_string(),
                         "stripe_payment_intent_id": pi_id,
                         "stripe_account_id": account_id,
                         "amount_cents": amount,
@@ -2283,7 +2318,7 @@ async fn handle_payment_intent_failed(
 }
 
 /// Audit one account-state transition (G2). The detail carries the edge + reason
-/// so ops can answer "when/why was this creator past_due/suspended/recovered."
+/// so ops can answer "when/why was this organization past_due/suspended/recovered."
 async fn audit_account_transition(
     req: &web::HttpRequest,
     state: &AppState,
@@ -2296,7 +2331,7 @@ async fn audit_account_transition(
         &state.registry,
         AuditEntry {
             app_id: None,
-            creator_id: Some(t.creator_id),
+            organization_id: Some(t.organization_id.as_str()),
             actor_user_id: None,
             action: Action::AccountStateChange,
             resource: Some(event_id),
@@ -2306,7 +2341,7 @@ async fn audit_account_transition(
             "from": account_state_str(t.from),
             "to": account_state_str(t.to),
             "reason": t.reason,
-            "creator_id": t.creator_id.to_string(),
+            "organization_id": t.organization_id.to_string(),
         }),
     )
     .await;

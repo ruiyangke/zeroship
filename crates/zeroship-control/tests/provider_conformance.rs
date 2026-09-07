@@ -385,10 +385,10 @@ fn assert_correction_capability_matches_docs(provider: &Arc<dyn MeteringProvider
 async fn assert_meter_retry_idempotency(fx: &Fixture) {
     let meter = fx.provider.as_meter().expect("meter capability");
     let subject = subject_ref("retry");
-    let mut batch = events_for_meter("retry", subject_uuid(&subject), METER, &[3, 5, 7]);
+    let mut batch = events_for_meter("retry", subject_id(&subject), METER, &[3, 5, 7]);
     batch.extend(events_for_meter(
         "retry",
-        subject_uuid(&subject),
+        subject_id(&subject),
         SECOND_METER,
         &[11, 13],
     ));
@@ -429,10 +429,10 @@ async fn assert_meter_retry_idempotency(fx: &Fixture) {
 async fn assert_meter_read_back(fx: &Fixture) {
     let meter = fx.provider.as_meter().expect("meter capability");
     let subject = subject_ref("readback");
-    let mut batch = events_for_meter("readback", subject_uuid(&subject), METER, &[11, 13]);
+    let mut batch = events_for_meter("readback", subject_id(&subject), METER, &[11, 13]);
     batch.extend(events_for_meter(
         "readback",
-        subject_uuid(&subject),
+        subject_id(&subject),
         SECOND_METER,
         &[17, 19],
     ));
@@ -462,7 +462,7 @@ async fn assert_meter_read_back(fx: &Fixture) {
 async fn assert_dedup_ttl_switchover(fx: &Fixture) {
     let meter = fx.provider.as_meter().expect("meter capability");
     let subject = subject_ref("ttl");
-    let batch = events_for_meter("ttl", subject_uuid(&subject), METER, &[17]);
+    let batch = events_for_meter("ttl", subject_id(&subject), METER, &[17]);
     let q = aggregate_query_for_meter(&subject, METER);
 
     forward_under_contract(fx.provider.as_ref(), &batch, &q, false)
@@ -709,12 +709,23 @@ async fn assert_stripe_meters_missing_metric_fails_closed(fx: &Fixture) {
     );
 }
 
+/// A deterministic ORGANIZATION id for one conformance label.
+///
+/// Deterministic because several assertions in this file re-derive the same
+/// subject and expect the store to have seen it; base62 over the label digest
+/// because an organization id is text with a fixed prefix, not a uuid.
 fn subject_ref(label: &str) -> SubjectRef {
-    SubjectRef(stable_uuid(&format!("provider-conformance-{label}")).to_string())
+    let digest = Sha256::digest(format!("provider-conformance-{label}").as_bytes());
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    SubjectRef(format!(
+        "org_{}",
+        zeroship_core::typed_id::uuid_to_base62(&Uuid::from_bytes(bytes))
+    ))
 }
 
-fn subject_uuid(subject: &SubjectRef) -> Uuid {
-    Uuid::parse_str(subject.as_str()).expect("test subject is UUID")
+fn subject_id(subject: &SubjectRef) -> String {
+    subject.as_str().to_owned()
 }
 
 fn aggregate_query_for_meter(subject: &SubjectRef, meter: &str) -> AggregateQuery {
@@ -725,7 +736,12 @@ fn aggregate_query_for_meter(subject: &SubjectRef, meter: &str) -> AggregateQuer
     }
 }
 
-fn events_for_meter(label: &str, creator: Uuid, meter: &str, values: &[u64]) -> Vec<UsageEvent> {
+fn events_for_meter(
+    label: &str,
+    organization: String,
+    meter: &str,
+    values: &[u64],
+) -> Vec<UsageEvent> {
     values
         .iter()
         .enumerate()
@@ -739,7 +755,7 @@ fn events_for_meter(label: &str, creator: Uuid, meter: &str, values: &[u64]) -> 
                 source: "provider-conformance".to_string(),
                 subject: UsageSubject {
                     app: Some(app),
-                    creator,
+                    organization: Some(organization.clone()),
                 },
                 meter: meter.to_string(),
                 value: *value,
@@ -760,8 +776,8 @@ fn stable_uuid(label: &str) -> Uuid {
 #[derive(Default)]
 struct FakeLiteStore {
     seen: Mutex<HashSet<(String, String)>>,
-    totals: Mutex<HashMap<(Uuid, i64, String), u64>>,
-    invoices: Mutex<HashMap<(Uuid, i64, i64), InvoiceRef>>,
+    totals: Mutex<HashMap<(String, i64, String), u64>>,
+    invoices: Mutex<HashMap<(String, i64, i64), InvoiceRef>>,
 }
 
 impl FakeLiteStore {
@@ -792,7 +808,14 @@ impl LiteStore for FakeLiteStore {
                 .and_then(|v| v.parse::<i64>().ok())
                 .unwrap_or_else(|| zeroship_control::metering::period_start_unix(event.event_time));
             *totals
-                .entry((event.subject.creator, period_start, event.meter.clone()))
+                .entry((
+                    event
+                        .organization_subject()
+                        .expect("conformance events carry a subject")
+                        .to_owned(),
+                    period_start,
+                    event.meter.clone(),
+                ))
                 .or_insert(0) += event.value;
         }
         Ok(IngestAck {
@@ -801,20 +824,20 @@ impl LiteStore for FakeLiteStore {
         })
     }
 
-    async fn owned_app_ids(&self, _creator: &Uuid) -> Result<Vec<Uuid>, ProviderError> {
+    async fn owned_app_ids(&self, _organization: &str) -> Result<Vec<Uuid>, ProviderError> {
         Ok(Vec::new())
     }
 
     async fn period_billable_units(
         &self,
-        creator: &Uuid,
+        organization: &str,
         period_start: i64,
     ) -> Result<u64, ProviderError> {
         let totals = self.totals.lock().expect("totals poisoned");
         Ok(totals
             .iter()
-            .filter(|((stored_creator, stored_period, _meter), _)| {
-                stored_creator == creator && *stored_period == period_start
+            .filter(|((stored_organization, stored_period, _meter), _)| {
+                stored_organization == organization && *stored_period == period_start
             })
             .map(|(_, total)| *total)
             .sum())
@@ -822,28 +845,28 @@ impl LiteStore for FakeLiteStore {
 
     async fn period_meter_units(
         &self,
-        creator: &Uuid,
+        organization: &str,
         period_start: i64,
         meter: &str,
     ) -> Result<u64, ProviderError> {
         let totals = self.totals.lock().expect("totals poisoned");
         Ok(totals
-            .get(&(*creator, period_start, meter.to_string()))
+            .get(&(organization.to_owned(), period_start, meter.to_string()))
             .copied()
             .unwrap_or(0))
     }
 
     async fn close_period_invoice(
         &self,
-        creator: &Uuid,
+        organization: &str,
         period: BillingPeriod,
     ) -> Result<InvoiceRef, ProviderError> {
         let mut invoices = self.invoices.lock().expect("invoices poisoned");
-        let key = (*creator, period.start, period.end);
+        let key = (organization.to_owned(), period.start, period.end);
         let invoice = invoices.entry(key).or_insert_with(|| {
             InvoiceRef(Some(format!(
                 "in_fake_{}_{}_{}",
-                creator.simple(),
+                organization,
                 period.start,
                 period.end
             )))
@@ -853,15 +876,15 @@ impl LiteStore for FakeLiteStore {
 
     async fn adjustment_note_invoice(
         &self,
-        creator: &Uuid,
+        organization: &str,
         note: &zeroship_control::metering::provider::AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
         let mut invoices = self.invoices.lock().expect("invoices poisoned");
-        let key = (*creator, note.period.end, note.period.end);
+        let key = (organization.to_owned(), note.period.end, note.period.end);
         let invoice = invoices.entry(key).or_insert_with(|| {
             InvoiceRef(Some(format!(
                 "in_adjustment_{}_{}_{}",
-                creator.simple(),
+                organization,
                 note.period.start,
                 note.correction_seq
             )))

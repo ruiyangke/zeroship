@@ -24,10 +24,10 @@ BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
 # `zeroship.app_members` is deleted; an app reaches the people who answer for it
-# through its project's organization. `seat_app_owner_sql` emits that join AND a
-# check that raises when it matches nothing - an INSERT ... SELECT over no rows
-# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
-# surfaces far from here.
+# through its project's organization. `seat_app_owner` writes that join, reads
+# the seat back out of the database and exits when it is not there - an
+# INSERT ... SELECT over no rows is a SUCCESSFUL statement that seats nobody,
+# and the 403 it later produces surfaces far from here.
 source "$ROOT/tests/lib/organization_fixture.sh"
 GP_SECURITY_DIR="/tmp/zeroship-golden-security-$$"
 
@@ -2675,8 +2675,9 @@ if [ "$DB9_BUILD_RC" = "0" ] && [ -f "$TODOS/dist/app.zship" ]; then
     DB9_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
     docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$DB9_CREATOR','golden-db9-$DB9_CREATOR@zeroship.test'::citext,'Golden DB9',NOW());
-$(seat_app_owner_sql "$DB9_APP_ID" "$DB9_CREATOR")
 SQL
+    seat_app_owner "$DB9_APP_ID" "$DB9_CREATOR" owner \
+      docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1
     DB9_TOKEN="$(e2e_mint_platform_bearer "$DB9_CREATOR" "$DB9_SCOPE" 2>/tmp/gp-dbtodos9-mint.log)"
 
     # THE BUILD'S OWN APPLY BODY, not a second recording of the same sources.
@@ -3061,8 +3062,9 @@ else
   SC_CREATOR="$(node -e 'console.log(require("crypto").randomUUID())')"
   docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
 INSERT INTO zeroship.users (id,email,name,email_verified_at) VALUES ('$SC_CREATOR','golden-scaffold-$SC_CREATOR@zeroship.test'::citext,'Golden Scaffold',NOW());
-$(seat_app_owner_sql "$SC_APP_ID" "$SC_CREATOR")
 SQL
+  seat_app_owner "$SC_APP_ID" "$SC_CREATOR" owner \
+    docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1
   SC_TOKEN="$(e2e_mint_platform_bearer "$SC_CREATOR" "$SC_SCOPE" 2>/tmp/gp-scaffold-mint.log)"
   # The BUILD's apply body, not a second recording of the same sources: it
   # carries `descriptor_sha256`, the hash of the `schema.runtime.json` the same
@@ -3421,9 +3423,8 @@ else
     # membership row is per-app. Migrations travel through zeroship-migrate-server --
     # a hand-rolled CREATE TABLE here would create the table with whatever
     # collation THIS script chose, which is precisely the thing under test.
-    docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-$(seat_app_owner_sql "$DB_APP_ID" "$SC_CREATOR")
-SQL
+    seat_app_owner "$DB_APP_ID" "$SC_CREATOR" owner \
+      docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1
     # The build's own apply body - it carries the `descriptor_sha256` that the
     # .zship's manifest is content-addressed by, which the activation below
     # requires. A re-recording of the same sources carries no descriptor.
@@ -3755,9 +3756,8 @@ else
   # Harness setup, not a product claim: give the bearer's principal membership on
   # the starter app so the token is authorized here the same way step 10c does
   # for the scaffold. The SCOPE already carries deployments:read (1974406b0).
-  docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1 >/dev/null 2>&1 <<SQL
-$(seat_app_owner_sql "$APP_ID" "$SC_CREATOR")
-SQL
+  seat_app_owner "$APP_ID" "$SC_CREATOR" owner \
+    docker exec -i "$PG_CONTAINER" psql -U "$PG_USER" -d "$PG_DB" -v ON_ERROR_STOP=1
 
   # --- DEV arm: what step 6 already printed to the creator's terminal --------
   LOG_DEV=$(grep -cF -- "$GP_LOG_MARK" /tmp/gp-dev.log 2>/dev/null || echo 0)

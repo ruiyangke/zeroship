@@ -1,4 +1,4 @@
-//! Billing-notification seam — map a billing lifecycle/money event to a creator
+//! Billing-notification seam — map a billing lifecycle/money event to an organization
 //! email, with a provider-side idempotency key (billing-ops gap #26, PR-6; design
 //! §"0051 notifications" + flow F + the template inventory).
 //!
@@ -22,7 +22,7 @@
 //! flip commits leaves a `pending` row that re-drives past `NOTIFY_REDRIVE_HORIZON` →
 //! a SECOND send (at-least-once DELIVERY). To make the delivery EFFECT idempotent, the
 //! notifier passes a provider-side [`Email::idempotency_key`] =
-//! `(creator_id, kind, transition_id)` — the SAME tuple as the claim PK. A provider
+//! `(organization_id, kind, transition_id)` — the SAME tuple as the claim PK. A provider
 //! that honours it (Resend) drops the duplicate, so the recipient sees ONE email. The
 //! stdout/SMTP dev drivers do not dedup (documented, not a launch blocker).
 
@@ -41,15 +41,15 @@ use zeroship_mailer::{Address, Email, Mailer, MailerError};
 /// `spend_state_history` (the per-app spend transitions) — see the cron's scan set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BillingNotificationKind {
-    /// First failed charge — `creator_billing_status_history` (`*→past_due`, the
+    /// First failed charge — `organization_billing_status_history` (`*→past_due`, the
     /// reason carries the failure). v1 maps the active→past_due edge to `past_due`;
     /// `payment_failed` is reserved for an explicit first-failure signal.
     PaymentFailed,
-    /// active→past_due transition (`creator_billing_status_history`).
+    /// active→past_due transition (`organization_billing_status_history`).
     PastDue,
-    /// Dunning exhausted → suspended (`creator_billing_status_history`).
+    /// Dunning exhausted → suspended (`organization_billing_status_history`).
     Suspended,
-    /// past_due/suspended→active recovery (`creator_billing_status_history`).
+    /// past_due/suspended→active recovery (`organization_billing_status_history`).
     Recovered,
     /// A newly-finalized invoice (`invoices`, incl. $0 paid-by-credit).
     InvoiceFinalized,
@@ -58,14 +58,14 @@ pub enum BillingNotificationKind {
     /// A newly-opened dispute / chargeback (`billing_disputes`; PR-8). transition_id =
     /// the `dsp_…` dispute id.
     Disputed,
-    /// A payout to the creator's connected account FAILED (`payout_failures`; webhook
+    /// A payout to the organization's connected account FAILED (`payout_failures`; webhook
     /// follow-up). transition_id = the `pof_…` payout-failure id.
     PayoutFailed,
     /// An end-user's Connect checkout charge failed (`connect_checkout_failures`; webhook
     /// follow-up). transition_id = the `cof_…` checkout-failure id. Informational.
     CheckoutFailed,
     /// An app crossed the spend WARN threshold (`spend_state_history` `*→warn`). The
-    /// creator is approaching their spend limit; apps still run normally. transition_id =
+    /// organization is approaching their spend limit; apps still run normally. transition_id =
     /// the `she_…` spend-transition id.
     SpendWarn,
     /// An app crossed the spend DEGRADE threshold (`spend_state_history` `*→degrade`). The
@@ -128,15 +128,15 @@ impl BillingNotificationKind {
 /// invoice/refund fields by the cron (never re-priced here).
 #[derive(Debug, Clone)]
 pub struct Notification {
-    /// The creator's email (resolved from `users` by the cron).
+    /// The organization's email (resolved from `users` by the cron).
     pub to_email: String,
-    /// The creator's display name, if known (`users.name`).
+    /// The organization's display name, if known (`users.name`).
     pub to_name: Option<String>,
     pub kind: BillingNotificationKind,
     /// Detail rendered into the template body. Pre-formatted strings (e.g. a money
     /// amount `"$12.34"`, a month `"June 2026"`) so the seam stays string-only.
     pub detail: NotificationDetail,
-    /// `(creator_id, kind, transition_id)` — the claim PK, threaded into the
+    /// `(organization_id, kind, transition_id)` — the claim PK, threaded into the
     /// provider-side `Idempotency-Key` so a re-driven send is idempotent at the
     /// provider (MAJOR-A).
     pub idempotency_key: String,
@@ -152,9 +152,9 @@ pub struct NotificationDetail {
     pub amount_label: Option<String>,
     /// For `refunded`: `"cash to your card"` / `"credit to your balance"`.
     pub refund_destination_label: Option<String>,
-    /// For the `spend_*` kinds: the app's name (e.g. `"my-store"`) so the creator knows
+    /// For the `spend_*` kinds: the app's name (e.g. `"my-store"`) so the organization knows
     /// WHICH app crossed the threshold. The spend source is per-app, unlike the other
-    /// (creator-level) kinds.
+    /// (organization-level) kinds.
     pub app_label: Option<String>,
     /// For the `spend_*` kinds: the effective spend limit, pre-formatted (e.g. `"$50.00"`).
     pub limit_label: Option<String>,
@@ -316,7 +316,7 @@ pub trait BillingNotifier: Send + Sync + std::fmt::Debug {
 }
 
 /// The production notifier: wraps the relocated `zeroship-mailer` `Mailer`. Renders the
-/// template, builds an `Email` carrying the `(creator_id, kind, transition_id)`
+/// template, builds an `Email` carrying the `(organization_id, kind, transition_id)`
 /// idempotency key, and delegates to `Mailer::send` (which enforces the suppression
 /// contract first).
 #[derive(Clone)]
@@ -433,8 +433,8 @@ impl RecordingNotifier {
         self.inner.lock().unwrap().attempts.iter().filter(|a| a.2 == key).count()
     }
 
-    /// Delivered count for a key PREFIX (e.g. `"{creator_id}:{kind}:"`) — lets a test
-    /// scope assertions to its OWN seeded creators when the cron sweeps a shared DB.
+    /// Delivered count for a key PREFIX (e.g. `"{organization_id}:{kind}:"`) — lets a test
+    /// scope assertions to its OWN seeded organizations when the cron sweeps a shared DB.
     #[must_use]
     pub fn delivered_for_key_prefix(&self, prefix: &str) -> usize {
         self.inner

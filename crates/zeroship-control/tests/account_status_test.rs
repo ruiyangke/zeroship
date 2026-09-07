@@ -50,25 +50,28 @@ async fn fx() -> Fx {
     Fx { registry, pg }
 }
 
-/// Insert a fresh `zeroship.users` row (the FK target of `creator_billing_status`)
-/// and return its id. Unique email per call so tests never collide.
-async fn make_creator(pg: &compio_postgres::Client) -> Uuid {
-    let rows = pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) \
-             VALUES ($1, 'acct-status-test') RETURNING id",
-            &[&format!("acct-{}@test.invalid", Uuid::new_v4().simple())],
-        )
-        .await
-        .expect("insert user");
-    rows[0].get("id")
+/// A fresh `zeroship.organizations` row: the subject
+/// `organization_billing_status` keys on and the FK target its parent
+/// `organization_billing` points at. Unique slug/email per call so tests never
+/// collide.
+async fn make_organization(pg: &compio_postgres::Client) -> String {
+    let organization_id = zeroship_core::typed_id::generate("org");
+    let slug = format!("acct-{}", Uuid::new_v4().simple());
+    pg.execute(
+        "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+         VALUES ($1, $2, 'acct-status-test', $3)",
+        &[&organization_id, &slug, &format!("{slug}@test.invalid")],
+    )
+    .await
+    .expect("insert organization");
+    organization_id
 }
 
-/// Read the persisted state TEXT for a creator (None ⇒ no row).
-async fn db_state(pg: &compio_postgres::Client, creator: Uuid) -> Option<String> {
+/// Read the persisted state TEXT for a organization (None ⇒ no row).
+async fn db_state(pg: &compio_postgres::Client, organization: &str) -> Option<String> {
     pg.query(
-        "SELECT state FROM zeroship.creator_billing_status WHERE creator_id = $1",
-        &[&creator],
+        "SELECT state FROM zeroship.organization_billing_status WHERE organization_id = $1",
+        &[&organization],
     )
     .await
     .expect("read state")
@@ -77,12 +80,12 @@ async fn db_state(pg: &compio_postgres::Client, creator: Uuid) -> Option<String>
 }
 
 /// Force the dunning clock back `days` so the window is exhausted without sleeping.
-async fn backdate_past_due(pg: &compio_postgres::Client, creator: Uuid, days: i64) {
+async fn backdate_past_due(pg: &compio_postgres::Client, organization: &str, days: i64) {
     pg.execute(
-        "UPDATE zeroship.creator_billing_status \
+        "UPDATE zeroship.organization_billing_status \
          SET past_due_since = NOW() - make_interval(days => $2::int) \
-         WHERE creator_id = $1",
-        &[&creator, &(days as i32)],
+         WHERE organization_id = $1",
+        &[&organization, &(days as i32)],
     )
     .await
     .expect("backdate past_due_since");
@@ -95,11 +98,12 @@ async fn payment_failed_moves_to_past_due() {
     let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
-    let creator = make_creator(&f.pg).await;
+    let organization = make_organization(&f.pg).await;
+    let organization = organization.as_str();
 
     // active (no row) → past_due.
     let t = store
-        .record_payment_failed(creator, Some("in_first"), T0)
+        .record_payment_failed(organization, Some("in_first"), T0)
         .await
         .expect("record failure")
         .expect("a transition occurred");
@@ -107,9 +111,9 @@ async fn payment_failed_moves_to_past_due() {
     assert_eq!(t.to, AccountState::PastDue);
     assert_eq!(t.reason, "payment_failed");
 
-    assert_eq!(db_state(&f.pg, creator).await.as_deref(), Some("past_due"));
+    assert_eq!(db_state(&f.pg, organization).await.as_deref(), Some("past_due"));
     assert_eq!(
-        store.get_state(creator).await.expect("get_state"),
+        store.get_state(organization).await.expect("get_state"),
         Some(AccountState::PastDue)
     );
 
@@ -118,8 +122,8 @@ async fn payment_failed_moves_to_past_due() {
         .pg
         .query(
             "SELECT from_state, to_state, reason \
-             FROM zeroship.creator_billing_status_history WHERE creator_id = $1",
-            &[&creator],
+             FROM zeroship.organization_billing_status_history WHERE organization_id = $1",
+            &[&organization],
         )
         .await
         .expect("read history");
@@ -140,19 +144,20 @@ async fn repeated_failure_is_idempotent() {
     let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
-    let creator = make_creator(&f.pg).await;
+    let organization = make_organization(&f.pg).await;
+    let organization = organization.as_str();
 
     // First failure arms the window.
     store
-        .record_payment_failed(creator, Some("in_a"), T0)
+        .record_payment_failed(organization, Some("in_a"), T0)
         .await
         .expect("first failure")
         .expect("active→past_due");
     let since_after_first: chrono::DateTime<chrono::Utc> = f
         .pg
         .query(
-            "SELECT past_due_since FROM zeroship.creator_billing_status WHERE creator_id = $1",
-            &[&creator],
+            "SELECT past_due_since FROM zeroship.organization_billing_status WHERE organization_id = $1",
+            &[&organization],
         )
         .await
         .unwrap()[0]
@@ -161,7 +166,7 @@ async fn repeated_failure_is_idempotent() {
     // A redelivered / subsequent failure (later event.created) must NOT restart
     // the clock and must NOT report a transition (already past_due).
     let again = store
-        .record_payment_failed(creator, Some("in_a"), T0 + 100)
+        .record_payment_failed(organization, Some("in_a"), T0 + 100)
         .await
         .expect("repeat failure");
     assert!(again.is_none(), "no state change on a repeat failure");
@@ -169,8 +174,8 @@ async fn repeated_failure_is_idempotent() {
     let since_after_second: chrono::DateTime<chrono::Utc> = f
         .pg
         .query(
-            "SELECT past_due_since FROM zeroship.creator_billing_status WHERE creator_id = $1",
-            &[&creator],
+            "SELECT past_due_since FROM zeroship.organization_billing_status WHERE organization_id = $1",
+            &[&organization],
         )
         .await
         .unwrap()[0]
@@ -184,8 +189,8 @@ async fn repeated_failure_is_idempotent() {
     let n: i64 = f
         .pg
         .query(
-            "SELECT COUNT(*) AS n FROM zeroship.creator_billing_status_history WHERE creator_id = $1",
-            &[&creator],
+            "SELECT COUNT(*) AS n FROM zeroship.organization_billing_status_history WHERE organization_id = $1",
+            &[&organization],
         )
         .await
         .unwrap()[0]
@@ -203,19 +208,21 @@ async fn dunning_exhaustion_suspends() {
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
 
-    // A past_due creator inside the window is NOT suspended; one past the window IS.
-    let fresh = make_creator(&f.pg).await;
+    // A past_due organization inside the window is NOT suspended; one past the window IS.
+    let fresh = make_organization(&f.pg).await;
+    let fresh = fresh.as_str();
     store
         .record_payment_failed(fresh, Some("in_fresh"), T0)
         .await
         .expect("fresh failure");
 
-    let stale = make_creator(&f.pg).await;
+    let stale = make_organization(&f.pg).await;
+    let stale = stale.as_str();
     store
         .record_payment_failed(stale, Some("in_stale"), T0)
         .await
         .expect("stale failure");
-    // Push the stale creator's window past max_dunning_days.
+    // Push the stale organization's window past max_dunning_days.
     backdate_past_due(&f.pg, stale, DEFAULT_MAX_DUNNING_DAYS + 1).await;
 
     let transitions = store
@@ -223,17 +230,17 @@ async fn dunning_exhaustion_suspends() {
         .await
         .expect("dunning sweep");
 
-    // The stale creator (and ONLY it among ours) is suspended.
+    // The stale organization (and ONLY it among ours) is suspended.
     assert!(
-        transitions.iter().any(|t| t.creator_id == stale
+        transitions.iter().any(|t| t.organization_id == stale
             && t.from == AccountState::PastDue
             && t.to == AccountState::Suspended
             && t.reason == "dunning_exhausted"),
-        "the exhausted-window creator is suspended"
+        "the exhausted-window organization is suspended"
     );
     assert!(
-        !transitions.iter().any(|t| t.creator_id == fresh),
-        "the in-window creator is NOT suspended"
+        !transitions.iter().any(|t| t.organization_id == fresh),
+        "the in-window organization is NOT suspended"
     );
 
     assert_eq!(db_state(&f.pg, stale).await.as_deref(), Some("suspended"));
@@ -243,7 +250,7 @@ async fn dunning_exhaustion_suspends() {
     let suspended_at: Option<chrono::DateTime<chrono::Utc>> = f
         .pg
         .query(
-            "SELECT suspended_at FROM zeroship.creator_billing_status WHERE creator_id = $1",
+            "SELECT suspended_at FROM zeroship.organization_billing_status WHERE organization_id = $1",
             &[&stale],
         )
         .await
@@ -261,23 +268,24 @@ async fn payment_success_reactivates() {
     let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
-    let creator = make_creator(&f.pg).await;
+    let organization = make_organization(&f.pg).await;
+    let organization = organization.as_str();
 
     // Drive all the way to suspended: fail, exhaust window, sweep.
     store
-        .record_payment_failed(creator, Some("in_x"), T0)
+        .record_payment_failed(organization, Some("in_x"), T0)
         .await
         .expect("failure");
-    backdate_past_due(&f.pg, creator, DEFAULT_MAX_DUNNING_DAYS + 1).await;
+    backdate_past_due(&f.pg, organization, DEFAULT_MAX_DUNNING_DAYS + 1).await;
     store
         .suspend_exhausted(DEFAULT_MAX_DUNNING_DAYS)
         .await
         .expect("sweep");
-    assert_eq!(db_state(&f.pg, creator).await.as_deref(), Some("suspended"));
+    assert_eq!(db_state(&f.pg, organization).await.as_deref(), Some("suspended"));
 
     // Recovery (invoice.paid) un-suspends straight back to active (REVERSIBILITY).
     let t = store
-        .record_payment_recovered(creator, T0 + 1_000)
+        .record_payment_recovered(organization, T0 + 1_000)
         .await
         .expect("recover")
         .expect("suspended→active transition");
@@ -285,14 +293,14 @@ async fn payment_success_reactivates() {
     assert_eq!(t.to, AccountState::Active);
     assert_eq!(t.reason, "payment_recovered");
 
-    assert_eq!(db_state(&f.pg, creator).await.as_deref(), Some("active"));
+    assert_eq!(db_state(&f.pg, organization).await.as_deref(), Some("active"));
     // Window + suspension cleared.
     let row = &f
         .pg
         .query(
             "SELECT past_due_since, suspended_at, failed_invoice_id \
-             FROM zeroship.creator_billing_status WHERE creator_id = $1",
-            &[&creator],
+             FROM zeroship.organization_billing_status WHERE organization_id = $1",
+            &[&organization],
         )
         .await
         .unwrap()[0];
@@ -307,35 +315,43 @@ async fn payment_success_reactivates() {
 
     // A second recovery is a no-op (already active).
     let again = store
-        .record_payment_recovered(creator, T0 + 2_000)
+        .record_payment_recovered(organization, T0 + 2_000)
         .await
         .expect("idempotent recover");
-    assert!(again.is_none(), "recovery of an already-active creator is a no-op");
+    assert!(again.is_none(), "recovery of an already-active organization is a no-op");
 
     drop(store);
     drop(f);
     common::drain_pg().await;
 }
 
-/// MAJOR #5 regression — `registry.get_routes` must be DETERMINISTIC under an
-/// owner fan-out (a data-integrity multi-`role='owner'` situation), and on a
-/// fan-out must surface the MOST-RESTRICTIVE account_state (suspended > past_due
-/// > active) so a fan-out can never un-suspend a suspended creator.
+/// `registry.get_routes` must report EACH app the account state of ITS OWN
+/// organization, and no other.
 ///
-/// We seed ONE app with TWO owner rows: one creator suspended, one active. The
-/// LATERAL `DISTINCT ON (app_id)` + restrictiveness ORDER BY must always pick
-/// `suspended` regardless of which owner row the planner would otherwise pick.
+/// This replaced a fan-out determinism test, and the replacement is narrower
+/// because the hazard is. While the billing subject was a human, one app
+/// reached several `organization_billing_status` rows through its
+/// organization's owners, so the join needed a LIMIT 1 ordered
+/// most-restrictive-first to stop a second owner with a good card from
+/// un-suspending everyone. `apps.organization_id` is single-valued and the
+/// status table keys on it, so no app can reach two states and there is nothing
+/// to order.
+///
+/// What CAN still go wrong is the join naming the wrong column, which would
+/// leak one organization's enforcement onto another's apps or drop it
+/// entirely. Two organizations, one suspended and one not, with an app each,
+/// bind exactly that: the assertion fails in both directions.
 #[compio::test]
-async fn get_routes_fanout_picks_most_restrictive_account_state() {
+async fn get_routes_reports_each_app_its_own_organization_state() {
     let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
 
-    // Two creators: one we'll suspend, one stays active.
-    let suspended = make_creator(&f.pg).await;
-    let active = make_creator(&f.pg).await;
+    let suspended = make_organization(&f.pg).await;
+    let suspended = suspended.as_str();
+    let active = make_organization(&f.pg).await;
+    let active = active.as_str();
 
-    // Drive `suspended` to suspended.
     store
         .record_payment_failed(suspended, Some("in_s"), T0)
         .await
@@ -359,29 +375,32 @@ async fn get_routes_fanout_picks_most_restrictive_account_state() {
         .expect("read a plan")[0]
         .get("id");
 
-    // One app with BOTH creators as owner rows (the fan-out).
-    let app_id = common::seed_app(
+    let suspended_app = common::seed_app_in_organization(
         &f.pg,
-        &format!("fanout-{}", Uuid::new_v4().simple()),
+        &format!("suspended-{}", Uuid::new_v4().simple()),
         &plan_id,
+        suspended,
     )
     .await;
-    for owner in [active, suspended] {
-        common::seat_app_organization_member(&f.pg, &app_id, &owner, "owner").await;
-    }
+    let active_app = common::seed_app_in_organization(
+        &f.pg,
+        &format!("active-{}", Uuid::new_v4().simple()),
+        &plan_id,
+        active,
+    )
+    .await;
 
-    // get_routes must surface the MOST-RESTRICTIVE state (suspended), not a
-    // last-write-wins coin flip. Run several times to defeat planner luck.
-    for _ in 0..5 {
-        let routes = f.registry.get_routes().await.expect("get_routes");
-        let entry = routes.get(&app_id).expect("our app is present");
-        assert_eq!(
-            entry.account_state,
-            AccountState::Suspended,
-            "a fan-out must resolve to the most-restrictive account_state (suspended), \
-             never un-suspend via last-write-wins"
-        );
-    }
+    let routes = f.registry.get_routes().await.expect("get_routes");
+    assert_eq!(
+        routes.get(&suspended_app).expect("suspended app present").account_state,
+        AccountState::Suspended,
+        "an app must carry ITS organization's suspension"
+    );
+    assert_eq!(
+        routes.get(&active_app).expect("active app present").account_state,
+        AccountState::Active,
+        "a suspension must not leak onto another organization's app"
+    );
 
     drop(store);
     drop(f);
@@ -390,24 +409,25 @@ async fn get_routes_fanout_picks_most_restrictive_account_state() {
 
 /// CRITICAL #1 regression — an out-of-order/redelivered `payment_failed` whose
 /// Stripe `event.created` predates a recovery MUST NOT re-arm `past_due` on an
-/// already-recovered (paying) creator, and the dunning sweep must therefore NOT
+/// already-recovered (paying) organization, and the dunning sweep must therefore NOT
 /// suspend them.
 ///
 /// RED before the fix: `record_payment_failed` guarded only on `state`, so a
 /// stale failure delivered AFTER recovery would flip active→past_due and the
-/// sweep would suspend a paying creator. GREEN: the `last_recovered_at`
+/// sweep would suspend a paying organization. GREEN: the `last_recovered_at`
 /// high-water (stamped from `event.created`) makes the stale failure a no-op.
 #[compio::test]
 async fn out_of_order_paid_then_failed_does_not_resuspend() {
     let _ = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
-    let creator = make_creator(&f.pg).await;
+    let organization = make_organization(&f.pg).await;
+    let organization = organization.as_str();
 
     // A real failure arms past_due at an EARLY event time.
     let early = T0;
     store
-        .record_payment_failed(creator, Some("in_dunning"), early)
+        .record_payment_failed(organization, Some("in_dunning"), early)
         .await
         .expect("failure")
         .expect("active→past_due");
@@ -416,17 +436,17 @@ async fn out_of_order_paid_then_failed_does_not_resuspend() {
     // stamps last_recovered_at = recover_at.
     let recover_at = T0 + 500;
     store
-        .record_payment_recovered(creator, recover_at)
+        .record_payment_recovered(organization, recover_at)
         .await
         .expect("recover")
         .expect("past_due→active");
-    assert_eq!(db_state(&f.pg, creator).await.as_deref(), Some("active"));
+    assert_eq!(db_state(&f.pg, organization).await.as_deref(), Some("active"));
 
     // Now a STALE/redelivered `payment_failed` for the SAME invoice arrives, but
     // its event.created PREDATES the recovery (early < recover_at). The
     // order-safety guard must IGNORE it: no transition, stays active, NOT re-armed.
     let stale = store
-        .record_payment_failed(creator, Some("in_dunning"), early)
+        .record_payment_failed(organization, Some("in_dunning"), early)
         .await
         .expect("stale failure handled");
     assert!(
@@ -434,44 +454,44 @@ async fn out_of_order_paid_then_failed_does_not_resuspend() {
         "a failure predating the recovery must NOT produce a transition"
     );
     assert_eq!(
-        db_state(&f.pg, creator).await.as_deref(),
+        db_state(&f.pg, organization).await.as_deref(),
         Some("active"),
-        "the stale failure must NOT re-arm past_due on a recovered creator"
+        "the stale failure must NOT re-arm past_due on a recovered organization"
     );
     // past_due_since must still be NULL (window not re-armed).
     let since: Option<chrono::DateTime<chrono::Utc>> = f
         .pg
         .query(
-            "SELECT past_due_since FROM zeroship.creator_billing_status WHERE creator_id = $1",
-            &[&creator],
+            "SELECT past_due_since FROM zeroship.organization_billing_status WHERE organization_id = $1",
+            &[&organization],
         )
         .await
         .unwrap()[0]
         .get("past_due_since");
     assert!(since.is_none(), "dunning window must not be re-armed by a stale failure");
 
-    // And the dunning sweep must NOT suspend this paying creator even if a
+    // And the dunning sweep must NOT suspend this paying organization even if a
     // (hypothetically) old window existed — the guard kept state active.
     let transitions = store
         .suspend_exhausted(DEFAULT_MAX_DUNNING_DAYS)
         .await
         .expect("sweep");
     assert!(
-        !transitions.iter().any(|t| t.creator_id == creator),
-        "the dunning cron must NOT suspend a recovered creator hit by a stale failure"
+        !transitions.iter().any(|t| t.organization_id == organization),
+        "the dunning cron must NOT suspend a recovered organization hit by a stale failure"
     );
-    assert_eq!(db_state(&f.pg, creator).await.as_deref(), Some("active"));
+    assert_eq!(db_state(&f.pg, organization).await.as_deref(), Some("active"));
 
     // A FRESH failure (event.created AFTER the recovery) DOES legitimately re-arm
     // — the guard only blocks STALE events, not genuine post-recovery failures.
     let fresh_fail_at = recover_at + 100;
     let re = store
-        .record_payment_failed(creator, Some("in_new"), fresh_fail_at)
+        .record_payment_failed(organization, Some("in_new"), fresh_fail_at)
         .await
         .expect("fresh failure")
         .expect("active→past_due on a genuine post-recovery failure");
     assert_eq!(re.to, AccountState::PastDue);
-    assert_eq!(db_state(&f.pg, creator).await.as_deref(), Some("past_due"));
+    assert_eq!(db_state(&f.pg, organization).await.as_deref(), Some("past_due"));
 
     drop(store);
     drop(f);
@@ -479,45 +499,46 @@ async fn out_of_order_paid_then_failed_does_not_resuspend() {
 }
 
 // ---------------------------------------------------------------------------
-// Redesign regression (change 7a): `creator_billing_status.creator_id` now FKs
-// `creator_billing(creator_id)` (NOT users directly). A payment failure can be
-// the FIRST billing signal for a creator with NO prior `creator_billing` row, so
+// Redesign regression (change 7a): `organization_billing_status.organization_id` now FKs
+// `organization_billing(organization_id)` (NOT users directly). A payment failure can be
+// the FIRST billing signal for a organization with NO prior `organization_billing` row, so
 // `record_payment_failed` must create the FK parent FIRST. (RED before the
 // parent-first insert: the status INSERT FK-violates and the call errors.)
 // ---------------------------------------------------------------------------
 
 #[compio::test]
-async fn payment_failed_creates_creator_billing_parent_first() {
+async fn payment_failed_creates_organization_billing_parent_first() {
     let _url = db_url();
     let f = fx().await;
     let store = AccountStatusStore::new(f.registry.clone());
 
-    // A creator with a users row but NO creator_billing row yet (never ran
+    // A organization with a users row but NO organization_billing row yet (never ran
     // billing/setup) — the common "first billing signal is a failure" case.
-    let creator = make_creator(&f.pg).await;
+    let organization = make_organization(&f.pg).await;
+    let organization = organization.as_str();
     let pre = f
         .pg
-        .query("SELECT 1 FROM zeroship.creator_billing WHERE creator_id = $1", &[&creator])
+        .query("SELECT 1 FROM zeroship.organization_billing WHERE organization_id = $1", &[&organization])
         .await
         .unwrap();
-    assert!(pre.is_empty(), "precondition: no creator_billing row yet");
+    assert!(pre.is_empty(), "precondition: no organization_billing row yet");
 
-    // The failure must SUCCEED (parent-first), moving the creator to past_due.
+    // The failure must SUCCEED (parent-first), moving the organization to past_due.
     let t = store
-        .record_payment_failed(creator, Some("in_first"), 1_000)
+        .record_payment_failed(organization, Some("in_first"), 1_000)
         .await
-        .expect("payment failure must succeed even with no prior creator_billing row")
+        .expect("payment failure must succeed even with no prior organization_billing row")
         .expect("active→past_due");
     assert_eq!(t.to, AccountState::PastDue);
-    assert_eq!(db_state(&f.pg, creator).await.as_deref(), Some("past_due"));
+    assert_eq!(db_state(&f.pg, organization).await.as_deref(), Some("past_due"));
 
     // The FK parent was created.
     let parent = f
         .pg
-        .query("SELECT 1 FROM zeroship.creator_billing WHERE creator_id = $1", &[&creator])
+        .query("SELECT 1 FROM zeroship.organization_billing WHERE organization_id = $1", &[&organization])
         .await
         .unwrap();
-    assert_eq!(parent.len(), 1, "record_payment_failed created the creator_billing FK parent");
+    assert_eq!(parent.len(), 1, "record_payment_failed created the organization_billing FK parent");
 
     drop(store);
     drop(f);

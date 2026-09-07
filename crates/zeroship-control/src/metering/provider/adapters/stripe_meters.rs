@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
-use uuid::Uuid;
+use zeroship_core::organization_id::OrganizationId;
 
 use crate::metering::provider::{
     AggregateQuery, BillingPeriod, Capabilities, CorrectionCapability, DedupContract, DedupKey,
@@ -107,7 +107,7 @@ impl Meter for StripeMetersProvider {
                     // Direct per-metric mapping: zeroship metric name == Stripe
                     // meter event name.
                     &event.meter,
-                    &event.creator_subject(),
+                    crate::metering::provider::event_subject("stripe_meters", event)?,
                     event.value,
                     &event.event_id,
                     event.event_time,
@@ -159,10 +159,10 @@ impl crate::metering::provider::Invoicer for StripeMetersProvider {
         subject: &SubjectRef,
         note: &crate::metering::provider::AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
-        let creator = Uuid::parse_str(subject.as_str()).map_err(|e| {
-            ProviderError::Config(format!("stripe_meters: subject is not a creator UUID: {e}"))
+        let organization = OrganizationId::parse(subject.as_str()).map_err(|e| {
+            ProviderError::Config(format!("stripe_meters: subject is not an organization id: {e}"))
         })?;
-        self.store.adjustment_note_invoice(&creator, note).await
+        self.store.adjustment_note_invoice(organization.as_str(), note).await
     }
 }
 

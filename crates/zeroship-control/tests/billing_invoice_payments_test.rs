@@ -11,7 +11,7 @@
 //! These FAIL against the pre-reshape schema:
 //!   (a) `invoice_payments` UPDATE/DELETE is rejected by the immutability trigger
 //!       (no trigger pre-fix → the UPDATE would succeed).
-//!   (b) the partial unique index lets a 2nd `(creator, period)` invoice exist ONLY
+//!   (b) the partial unique index lets a 2nd `(organization, period)` invoice exist ONLY
 //!       when the first is `void`; two non-void are still blocked (pre-fix the
 //!       unconditional UNIQUE blocks BOTH the void-then-reissue AND the second
 //!       non-void, so the reissue assertion fails).
@@ -48,37 +48,38 @@ fn first_of_this_month() -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap()
 }
 
-/// Seed a user → creator_billing, returning the creator id.
-async fn seed_creator(client: &compio_postgres::Client) -> Uuid {
-    let email = format!("ip-{}@test.invalid", Uuid::new_v4().simple());
-    let creator: Uuid = client
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, 'invoice-payments') RETURNING id",
-            &[&email],
-        )
-        .await
-        .expect("insert user")[0]
-        .get("id");
+/// Seed a user → organization_billing, returning the organization id.
+async fn seed_organization(client: &compio_postgres::Client) -> String {
+    let slug = format!("ip-{}", Uuid::new_v4().simple());
+    let organization = zeroship_core::typed_id::generate("org");
     client
         .execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
-             ON CONFLICT (creator_id) DO NOTHING",
-            &[&creator],
+            "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+             VALUES ($1, $2, 'invoice-payments', $3)",
+            &[&organization, &slug, &format!("{slug}@test.invalid")],
         )
         .await
-        .expect("insert creator_billing");
-    creator
+        .expect("insert organization");
+    client
+        .execute(
+            "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) \
+             ON CONFLICT (organization_id) DO NOTHING",
+            &[&organization],
+        )
+        .await
+        .expect("insert organization_billing");
+    organization
 }
 
-/// Claim a draft invoice for `(creator, period)`; uniquify the period per call so
-/// independent tests never collide on the (creator, period) claim.
-async fn claim_draft(client: &compio_postgres::Client, creator: Uuid, period: chrono::NaiveDate) -> String {
+/// Claim a draft invoice for `(organization, period)`; uniquify the period per call so
+/// independent tests never collide on the (organization, period) claim.
+async fn claim_draft(client: &compio_postgres::Client, organization: &str, period: chrono::NaiveDate) -> String {
     let id = zeroship_core::typed_id::new_invoice_id();
     client
         .execute(
-            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&id, &creator, &period],
+            &[&id, &organization, &period],
         )
         .await
         .expect("claim draft");
@@ -107,8 +108,9 @@ async fn finalize(client: &compio_postgres::Client, inv: &str, total: i64) {
 async fn invoice_payments_is_append_only() {
     let url = db_url();
     let client = pg(&url).await;
-    let creator = seed_creator(&client).await;
-    let inv = claim_draft(&client, creator, first_of_this_month()).await;
+    let organization = seed_organization(&client).await;
+    let organization = organization.as_str();
+    let inv = claim_draft(&client, organization, first_of_this_month()).await;
     finalize(&client, &inv, 6000).await;
 
     // Append a charge row via the REAL helper.
@@ -149,33 +151,34 @@ async fn invoice_payments_is_append_only() {
 
 // ---------------------------------------------------------------------------
 // (b) the partial unique index: void releases the period claim for reissue,
-//     but two NON-void invoices for the same (creator, period) are still blocked.
+//     but two NON-void invoices for the same (organization, period) are still blocked.
 // ---------------------------------------------------------------------------
 
 #[compio::test]
 async fn partial_unique_index_releases_period_only_on_void() {
     let url = db_url();
     let client = pg(&url).await;
-    let creator = seed_creator(&client).await;
+    let organization = seed_organization(&client).await;
+    let organization = organization.as_str();
     let period = first_of_this_month();
 
     // First invoice, finalized then voided (the legal correction transition).
-    let inv1 = claim_draft(&client, creator, period).await;
+    let inv1 = claim_draft(&client, organization, period).await;
     finalize(&client, &inv1, 5000).await;
 
     // While inv1 is NON-void (finalized), a SECOND non-void invoice for the same
-    // (creator, period) is BLOCKED by the partial unique index.
+    // (organization, period) is BLOCKED by the partial unique index.
     let inv2_id = zeroship_core::typed_id::new_invoice_id();
     let blocked = client
         .execute(
-            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv2_id, &creator, &period],
+            &[&inv2_id, &organization, &period],
         )
         .await;
     assert!(
         blocked.is_err(),
-        "a second NON-void invoice for the same (creator, period) must be rejected by the partial unique index",
+        "a second NON-void invoice for the same (organization, period) must be rejected by the partial unique index",
     );
 
     // Void inv1 (finalized→void, money held equal — the only legal finalized
@@ -190,16 +193,16 @@ async fn partial_unique_index_releases_period_only_on_void() {
 
     // NOW a fresh invoice can take the released period slot (RED pre-fix: the
     // unconditional UNIQUE would still block this).
-    let inv_reissue = claim_draft(&client, creator, period).await;
+    let inv_reissue = claim_draft(&client, organization, period).await;
     assert_ne!(inv_reissue, inv1, "the reissue must be a NEW invoice id");
 
     // And a SECOND non-void invoice on top of the live reissue is STILL blocked.
     let inv4_id = zeroship_core::typed_id::new_invoice_id();
     let blocked2 = client
         .execute(
-            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv4_id, &creator, &period],
+            &[&inv4_id, &organization, &period],
         )
         .await;
     assert!(
@@ -207,14 +210,14 @@ async fn partial_unique_index_releases_period_only_on_void() {
         "after reissue, a further non-void invoice must still be rejected (one live claim per period)",
     );
 
-    // Exactly one non-void + one void row exist for this (creator, period).
+    // Exactly one non-void + one void row exist for this (organization, period).
     let counts = client
         .query(
             "SELECT \
                COUNT(*) FILTER (WHERE status <> 'void')::bigint AS active, \
                COUNT(*) FILTER (WHERE status = 'void')::bigint AS voided \
-             FROM zeroship.invoices WHERE creator_id = $1 AND period = $2::date",
-            &[&creator, &period],
+             FROM zeroship.invoices WHERE organization_id = $1 AND period = $2::date",
+            &[&organization, &period],
         )
         .await
         .expect("count")[0]
@@ -235,8 +238,9 @@ async fn partial_unique_index_releases_period_only_on_void() {
 async fn cash_collected_sums_payments_without_touching_finalized_invoice() {
     let url = db_url();
     let client = pg(&url).await;
-    let creator = seed_creator(&client).await;
-    let inv = claim_draft(&client, creator, first_of_this_month()).await;
+    let organization = seed_organization(&client).await;
+    let organization = organization.as_str();
+    let inv = claim_draft(&client, organization, first_of_this_month()).await;
     finalize(&client, &inv, 6000).await;
 
     // No payments yet ⇒ cash-collected is 0.
@@ -300,7 +304,7 @@ async fn pr1_schema_objects_present() {
     let partial: i64 = client
         .query(
             "SELECT COUNT(*)::bigint AS n FROM pg_indexes \
-             WHERE schemaname = 'zeroship' AND indexname = 'invoices_active_period_claim'",
+             WHERE schemaname = 'zeroship' AND indexname = 'invoices_organization_active_period_claim'",
             &[],
         )
         .await
@@ -311,7 +315,7 @@ async fn pr1_schema_objects_present() {
     let old_unique: i64 = client
         .query(
             "SELECT COUNT(*)::bigint AS n FROM pg_constraint \
-             WHERE conname = 'invoices_creator_id_period_key'",
+             WHERE conname = 'invoices_organization_id_period_key'",
             &[],
         )
         .await
