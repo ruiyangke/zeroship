@@ -350,6 +350,127 @@ fn dev_init_rejects_an_empty_pairwise_file_before_creating_siblings() {
     assert!(!env_file.exists());
 }
 
+/// ONE KEY AT TWO SERVICE PATHS MUST REFUSE, and this is a one-variable
+/// control: the only difference between the two halves is whether one of the
+/// four files was overwritten with a copy of another.
+///
+/// WHAT WENT WRONG. `SERVICE_KEY_FILES`'s own rustdoc has always said four
+/// keys and not one shared file, "because a peer must be able to VERIFY a
+/// service without being able to IMPERSONATE it" - and nothing enforced it.
+/// `ensure_secret_file` keeps whatever exists, `validate_signing_key` asks
+/// only whether it parses, and `write_service_peers` published each path under
+/// its own issuer. So one key copied to all four paths - what a secret manager
+/// or a compose override produces when it maps one secret onto the four
+/// `ZEROSHIP_*_SERVICE_KEY_FILE` mounts - exited 0, printed "kept" four times
+/// and emitted a peer document with ONE key under FOUR issuers.
+///
+/// WHY THAT DOCUMENT IS THE WHOLE ATTACK. The envelope and assertion wire
+/// formats carry a key id derived from the public bytes and no issuer, and the
+/// verifiers resolve material by issuer string alone. Under a one-key document
+/// every issuer resolves to the same key, so the worker's own signer stamps
+/// exactly the key id its own verifier looks up: it can mint the
+/// `ZeroShip-User` envelope it then accepts, which fence F4 of
+/// `docs/proposals/2026-09-05-auth-foundation-redesign.md` exists to forbid.
+/// Wider still, possession of any one service key file becomes the ability to
+/// present as any service to any service.
+///
+/// A WARNING WOULD NOT HAVE DONE. This run WRITES the credential document; a
+/// message printed beside a document with that property is how the shape
+/// arrived. So the assertions below are on the exit code and on the directory
+/// being byte-for-byte untouched, not on the text alone.
+///
+/// Does NOT cover: whether any binary refuses to LOAD such a document. That is
+/// `tests/service_peer_boot_gate.sh`'s `forged` arm, against the real binaries.
+#[test]
+fn dev_init_refuses_when_two_service_key_paths_hold_the_same_key() {
+    const SERVICE_KEYS: [&str; 4] = [
+        "svc-auth.pem",
+        "svc-control.pem",
+        "svc-gateway.pem",
+        "svc-worker.pem",
+    ];
+
+    // The control half. Four distinct keys, which is what a run generates.
+    let temp = tempfile::tempdir().expect("create temp directory");
+    let secrets_dir = temp.path().join("secrets");
+    let env_file = temp.path().join("dev.env");
+    assert_success(
+        &run_dev_init(&secrets_dir, &env_file),
+        "first zeroship dev init",
+    );
+    assert_success(
+        &run_dev_init(&secrets_dir, &env_file),
+        "re-run over four DISTINCT service keys",
+    );
+    let public_keys = SERVICE_KEYS
+        .iter()
+        .map(|name| service_public_key(&secrets_dir.join(name)))
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        public_keys.len(),
+        SERVICE_KEYS.len(),
+        "the control half must start from four DISTINCT keys, or the refusal \
+         below proves nothing"
+    );
+
+    // The case half, one variable changed: svc-worker's key copied over
+    // svc-gateway. Every other byte in the directory is the one the control
+    // just accepted.
+    for victim in ["svc-gateway.pem", "svc-control.pem", "svc-auth.pem"] {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let secrets_dir = temp.path().join("secrets");
+        let env_file = temp.path().join("dev.env");
+        assert_success(&run_dev_init(&secrets_dir, &env_file), "seed the directory");
+
+        let source = secrets_dir.join("svc-worker.pem");
+        let target = secrets_dir.join(victim);
+        std::fs::copy(&source, &target).expect("copy one service key over another");
+        let before = snapshot(&secrets_dir, &env_file);
+
+        let output = run_dev_init(&secrets_dir, &env_file);
+        assert!(
+            !output.status.success(),
+            "zeroship dev init ACCEPTED one key at both svc-worker.pem and \
+             {victim}, so it can still emit a document that collapses two \
+             issuers onto one key\nstdout={}\nstderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+
+        // Both colliding paths by name: the operator's next action is deleting
+        // one of two files, and this message is the only thing that says which.
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        for named in [&source, &target] {
+            assert!(
+                stderr.contains(&named.display().to_string()),
+                "the refusal does not name the colliding path {}\nstderr={stderr}",
+                named.display()
+            );
+        }
+
+        // Refused BEFORE anything was written, not after. A refusal that had
+        // already republished the peer document would leave the collapsed
+        // credential on disk for whatever reads it next.
+        assert_eq!(
+            snapshot(&secrets_dir, &env_file),
+            before,
+            "the refusal changed the secrets directory"
+        );
+    }
+}
+
+/// The public half of a PKCS#8 Ed25519 private key file, as the peer document
+/// spells it. Comparing PUBLIC keys and not file bytes is deliberate: the same
+/// credential written once as PEM and once as DER is two files and one
+/// identity.
+fn service_public_key(path: &Path) -> String {
+    let bytes =
+        std::fs::read(path).unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+    let text = std::str::from_utf8(&bytes).expect("service key file is PEM text");
+    let signing = SigningKey::from_pkcs8_pem(text).expect("Ed25519 PKCS#8 PEM");
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes())
+}
+
 /// Both privileged readers take the superuser DSN from the ONE file dev init
 /// writes, and neither inlines it.
 ///

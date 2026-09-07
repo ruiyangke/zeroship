@@ -186,6 +186,13 @@ fn init_dev_secrets(secrets_dir: &Path, env_file: &Path) -> Result<InitOutcome, 
         validate_existing_secret(&secrets_dir.join(name), name, *validate)?;
     }
 
+    // A service key file that parses is not thereby a service key: four paths
+    // holding ONE key is the shape that collapses four issuers onto one. It is
+    // a property OF THE SET, so no per-file validator above can see it. Refused
+    // here, in the same before-anything-is-created phase, because the run that
+    // would proceed publishes the collapsed document.
+    reject_shared_service_keys(&existing_service_public_keys(secrets_dir)?)?;
+
     let mut desired_env = existing_env.clone();
     for name in env_keys() {
         if !desired_env.contains_key(name) {
@@ -269,6 +276,22 @@ fn validate_migrate_dsn(bytes: &[u8]) -> Result<(), String> {
 /// One key held by four processes would put every service's identity in every
 /// service's memory and turn the assertion back into a shared secret with more
 /// ceremony.
+///
+/// THAT PARAGRAPH WAS A COMMENT AND NOTHING ELSE UNTIL 2026-09-07, and the
+/// difference was reachable with this very command. `ensure_secret_file` keeps
+/// whatever file it finds and `validate_signing_key` only asks whether it
+/// parses, so one key copied to all four paths - the shape a secret manager or
+/// a compose override produces when it maps one secret onto the four
+/// `ZEROSHIP_*_SERVICE_KEY_FILE` mounts - exited 0, printed "kept" four times
+/// and published that key under all four issuers. `reject_shared_service_keys`
+/// now refuses it, before anything is created and again before the document is
+/// written.
+///
+/// Why refuse rather than warn: the run EMITS A CREDENTIAL DOCUMENT. Under a
+/// one-key document every issuer resolves to the same key, so a peer holding
+/// any one service key can present as any service to any service, and a worker
+/// can mint the identity envelope its own verifier accepts. A warning printed
+/// beside a document with that property is how this arrived.
 ///
 /// The names match `zeroship_core::service_peers`, and
 /// `tests/lib/runtime_secrets.sh` writes the same set under the same names for
@@ -642,28 +665,113 @@ fn append_env_values(
 fn write_service_peers(secrets_dir: &Path) -> Result<(), String> {
     use base64::Engine as _;
 
-    let mut entries = Vec::with_capacity(SERVICE_KEY_FILES.len());
-    for (file, service) in SERVICE_KEY_FILES {
+    let mut keys = Vec::with_capacity(SERVICE_KEY_FILES.len());
+    for (file, _) in SERVICE_KEY_FILES {
         let path = secrets_dir.join(file);
-        let bytes = std::fs::read(&path)
-            .map_err(|error| format!("read {}: {error}", path.display()))?;
-        let signing = if let Ok(text) = std::str::from_utf8(&bytes) {
-            SigningKey::from_pkcs8_pem(text)
-                .map_err(|error| format!("{}: Ed25519 PKCS#8 PEM: {error}", path.display()))?
-        } else {
-            SigningKey::from_pkcs8_der(&bytes)
-                .map_err(|error| format!("{}: Ed25519 PKCS#8 DER: {error}", path.display()))?
-        };
-        let x = base64::engine::general_purpose::URL_SAFE_NO_PAD
-            .encode(signing.verifying_key().to_bytes());
-        entries.push(format!(
-            r#"{{"kty":"OKP","crv":"Ed25519","iss":"spiffe://zeroship.ai/{service}","x":"{x}"}}"#
-        ));
+        let public = read_service_public_key(&path)?;
+        keys.push((path, public));
     }
+    // THE LAST FENCE BEFORE THE DOCUMENT EXISTS, and it is not a duplicate of
+    // the one `init_dev_secrets` runs. That one rules on the directory it
+    // FOUND; this one rules on the bytes about to be published, so no future
+    // caller of this function can emit a document with one key under two
+    // issuers by reaching it another way.
+    reject_shared_service_keys(&keys)?;
+
+    let entries = SERVICE_KEY_FILES
+        .iter()
+        .zip(&keys)
+        .map(|((_, service), (_, public))| {
+            let x = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(public);
+            format!(
+                r#"{{"kty":"OKP","crv":"Ed25519","iss":"spiffe://zeroship.ai/{service}","x":"{x}"}}"#
+            )
+        })
+        .collect::<Vec<_>>();
     let document = format!("{{\"keys\":[{}]}}\n", entries.join(","));
     let path = secrets_dir.join(SERVICE_PEERS_FILE);
     std::fs::write(&path, document)
         .map_err(|error| format!("write {}: {error}", path.display()))
+}
+
+/// The public half of one service key file, as the raw Ed25519 point.
+///
+/// The PUBLIC key is the comparison subject, never the file bytes: the same
+/// credential spelled once as PKCS#8 PEM and once as PKCS#8 DER is two
+/// different files and one identity, and a byte comparison would call that
+/// distinct and publish it under two issuers.
+fn read_service_public_key(path: &Path) -> Result<[u8; 32], String> {
+    let bytes = std::fs::read(path).map_err(|error| format!("read {}: {error}", path.display()))?;
+    let signing = if let Ok(text) = std::str::from_utf8(&bytes) {
+        SigningKey::from_pkcs8_pem(text)
+            .map_err(|error| format!("{}: Ed25519 PKCS#8 PEM: {error}", path.display()))?
+    } else {
+        SigningKey::from_pkcs8_der(&bytes)
+            .map_err(|error| format!("{}: Ed25519 PKCS#8 DER: {error}", path.display()))?
+    };
+    Ok(signing.verifying_key().to_bytes())
+}
+
+/// The service key files that are already on disk, paired with their public
+/// halves.
+///
+/// Only the ones that EXIST: a path this run is about to generate cannot
+/// collide with anything, because `generate_signing_key` draws from `OsRng`.
+/// What the operator supplied is the whole population worth judging.
+fn existing_service_public_keys(secrets_dir: &Path) -> Result<Vec<(PathBuf, [u8; 32])>, String> {
+    let mut keys = Vec::new();
+    for (file, _) in SERVICE_KEY_FILES {
+        let path = secrets_dir.join(file);
+        if path.exists() {
+            let public = read_service_public_key(&path)?;
+            keys.push((path, public));
+        }
+    }
+    Ok(keys)
+}
+
+/// Refuse a set of service key files in which two paths hold the same key.
+///
+/// This is the enforcement `SERVICE_KEY_FILES`'s rustdoc has always claimed.
+/// The consequence it prevents is not a hygiene one: the envelope and
+/// assertion wire formats carry a key id derived from the public bytes and no
+/// issuer, and the verifiers resolve material by issuer string alone, so a
+/// document publishing one key under several issuers makes every one of those
+/// identities interchangeable - including the process's own, which is the
+/// worker minting a `ZeroShip-User` envelope that its own verifier accepts.
+///
+/// The paths are NAMED, both of them and not just the fact of a collision,
+/// because the operator's next action is deleting one of two files and the
+/// message is the only thing that says which two.
+fn reject_shared_service_keys(keys: &[(PathBuf, [u8; 32])]) -> Result<(), String> {
+    let mut by_public: BTreeMap<[u8; 32], Vec<&Path>> = BTreeMap::new();
+    for (path, public) in keys {
+        by_public.entry(*public).or_default().push(path.as_path());
+    }
+    let collisions = by_public
+        .values()
+        .filter(|paths| paths.len() > 1)
+        .map(|paths| {
+            paths
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(" and ")
+        })
+        .collect::<Vec<_>>();
+    if collisions.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "service key files hold the same key: {}. Every service needs its own \
+         key, because a peer must be able to verify a service without being \
+         able to impersonate it; one key under several issuers lets the holder \
+         of any of these files present as any of these services. Give each path \
+         a distinct key - deleting the duplicate and re-running generates one - \
+         and check whether one secret is mounted at several \
+         ZEROSHIP_*_SERVICE_KEY_FILE paths. Nothing was created or changed.",
+        collisions.join("; ")
+    ))
 }
 
 fn generate_signing_key() -> Result<Vec<u8>, String> {
