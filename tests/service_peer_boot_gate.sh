@@ -109,6 +109,7 @@
 set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/target/debug"
+REBUILD_CMD="nix develop -c cargo build -p zeroship-worker -p zeroship-gateway"
 TMP="$(mktemp -d -t zeroship-peer-gate-XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -279,10 +280,28 @@ worker_run() {
   echo "$?"
 }
 
-if [ ! -x "$BIN/zeroship-worker" ]; then
-  echo "REFUSED: $BIN/zeroship-worker is not built; run cargo build -p zeroship-worker" >&2
-  exit 1
-fi
+# This gate LAUNCHES binaries rather than building them, so what it rules on is
+# whatever is on disk. Absence and STALENESS are different failures and only one
+# of them used to be caught: a binary older than the sources it was built from
+# prints exactly what a correct clean tree prints, so a mutation run against it
+# reports green while proving nothing. That happened - a run with both key-reuse
+# refusals deleted passed all six arms, because the worker on disk predated the
+# deletion by half an hour. Refuse both, naming the rebuild.
+for prog in zeroship-worker zeroship-gate; do
+  if [ ! -x "$BIN/$prog" ]; then
+    echo "REFUSED: $BIN/$prog is not built; run $REBUILD_CMD" >&2
+    exit 1
+  fi
+  # The crates whose behaviour these arms rule on. A newer source file in any of
+  # them means the binary cannot answer for the tree you are asking about.
+  stale=$(find "$ROOT/crates/zeroship-core/src" "$ROOT/crates/zeroship-worker/src" \
+    "$ROOT/crates/zeroship-gateway/src" -name '*.rs' -newer "$BIN/$prog" \
+    -print -quit 2>/dev/null)
+  if [ -n "$stale" ]; then
+    echo "REFUSED: $BIN/$prog is OLDER than $stale, so it cannot rule on this tree; run $REBUILD_CMD" >&2
+    exit 1
+  fi
+done
 
 # --- ARM: unset ------------------------------------------------------------
 status=$(worker_run "$TMP/wk_unset.log")
