@@ -7223,6 +7223,7 @@ dependencies = [
  "zeroship-core",
  "zeroship-mailer",
  "zeroship-test-support",
+ "zeroship-testkit",
 ]
 
 [[package]]
