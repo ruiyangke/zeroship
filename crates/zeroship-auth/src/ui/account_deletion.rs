@@ -95,6 +95,7 @@ pub async fn request(
     refresh_pool: web::types::State<RefreshSessionPool>,
     mailer: web::types::State<Arc<dyn Mailer>>,
     issuer: web::types::State<Arc<oidc::Issuer>>,
+    service_keyring: web::types::State<Arc<zeroship_core::service_peers::ServiceKeyring>>,
 ) -> HttpResponse {
     if !csrf_ok(&req, &form.csrf) {
         return redirect_to_login();
@@ -105,13 +106,7 @@ pub async fn request(
 
     // The ownership precondition, before anything is written. Every arm that is
     // not a clear answer is a refusal.
-    match control_client::erasure_preflight(
-        cfg.control_url(),
-        cfg.settings.control_key.expose_secret().map(String::as_str),
-        user.id,
-    )
-    .await
-    {
+    match control_client::erasure_preflight(cfg.control_url(), &service_keyring, user.id).await {
         Ok(report) if report.is_clear() => {}
         Ok(report) => {
             let blockers = report
@@ -180,13 +175,13 @@ pub async fn request(
             });
         }
         Err(e) => {
-            // NoCredential is a deployment fault and the others are transport;
-            // both mean the same thing to the person in front of the form, and
-            // neither is a licence to proceed.
+            // NoCredential is a signing fault on this process and the others are
+            // transport; both mean the same thing to the person in front of the
+            // form, and neither is a licence to proceed.
             tracing::error!(
                 error = %e,
                 user_id = %user.id,
-                credentialed = !matches!(e, PreflightError::NoCredential),
+                credentialed = !matches!(e, PreflightError::NoCredential(_)),
                 "account deletion refused: erasure preflight unavailable"
             );
             audit::emit(

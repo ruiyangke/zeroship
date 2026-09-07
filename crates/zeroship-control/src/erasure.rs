@@ -77,7 +77,7 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::billing_read::{self, BillingRemedy, LocalInvoicing, OutstandingBilling};
-use crate::internal::check_auth;
+use crate::internal::check_service_auth;
 use crate::registry::RegistryError;
 use crate::AppState;
 
@@ -309,17 +309,35 @@ async fn billing_blockers(
 
 /// `GET /internal/principals/{principal_id}/erasure-preflight`.
 ///
-/// Control-key authenticated, like every other `/internal/*` route: there is no
-/// user principal on this call, and the principal in the path is the SUBJECT,
-/// never the caller. A driver failure answers 500, NEVER an empty blocker list
-/// -- a preflight that cannot be computed must not be indistinguishable from
-/// one that came back clear.
+/// SERVICE-authenticated, not control-key authenticated: the caller presents its
+/// own ed25519 assertion and the allowlist grants this endpoint to `svc/auth`
+/// alone. There is no user principal on this call, and the principal in the path
+/// is the SUBJECT, never the caller -- so the credential is the only thing
+/// deciding who may ask about whom, and it has to name ONE service.
+///
+/// The shared control key would not have. It is one identity four processes
+/// already hold, so putting this route on it means either the auth service holds
+/// that key -- and with it the route table, the version feed and both reconcile
+/// triggers -- or the erasure preflight is unreachable. Neither is the trade
+/// this route is worth, and the assertion mechanism costs nothing extra here:
+/// `zeroship dev init` already writes `svc-auth.pem` and publishes its public
+/// half in the peer document control verifies against.
+///
+/// A driver failure answers 500, NEVER an empty blocker list -- a preflight that
+/// cannot be computed must not be indistinguishable from one that came back
+/// clear.
 pub async fn erasure_preflight(
     req: web::HttpRequest,
     state: State<Arc<AppState>>,
     principal_id: Path<String>,
 ) -> web::HttpResponse {
-    if let Some(resp) = check_auth(&req, &state) {
+    if let Some(resp) = check_service_auth(
+        &req,
+        &state.service_auth,
+        zeroship_core::service_identity::endpoints::CONTROL_ERASURE_PREFLIGHT,
+    )
+    .await
+    {
         return resp;
     }
     let Ok(principal) = Uuid::parse_str(&principal_id) else {

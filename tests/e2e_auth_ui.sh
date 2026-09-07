@@ -272,6 +272,8 @@ export ZEROSHIP_AUTH_DATABASE_URL="$DSN"
     --broker-secret-file "$SECRETS_DIR/broker-secret" \
     --refresh-hash-key-file "$SECRETS_DIR/refresh-hash-key" \
     --refresh-idem-key-file "$SECRETS_DIR/refresh-idem-key" \
+    --service-key-file "$SECRETS_DIR/svc-auth.pem" \
+    --service-peers-file "$SECRETS_DIR/service-peers.json" \
     --mailer stdout \
     --relay-forward-mailer stdout
 ) >"$AUTH_LOG" 2>&1 &

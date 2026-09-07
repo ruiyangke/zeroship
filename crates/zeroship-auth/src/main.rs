@@ -132,6 +132,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "refresh_idem_key_file_configured",
             CheckValue::Secret(cfg.refresh_idem_key_file().is_some()),
         );
+        // The service identity this process presents to the control plane. Both
+        // are reported because an absent one REFUSES the boot, so an operator
+        // reading a dry-run needs to see which half is missing.
+        report.field(
+            "service_key_file_configured",
+            CheckValue::Secret(!cfg.settings.service_key_file.get().as_os_str().is_empty()),
+        );
+        report.field(
+            "service_peers_file_configured",
+            CheckValue::Secret(!cfg.settings.service_peers_file.get().as_os_str().is_empty()),
+        );
         report.field(
             "refresh_pool_size",
             CheckValue::Plain(cfg.refresh_pool_size().to_string()),
@@ -248,6 +259,39 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let op_issuer = Arc::new(op_issuer);
 
+    // This service's OWN identity for the one hop it makes into the control
+    // plane. `ServiceKeyring::load` refuses an unconfigured, unreadable or
+    // group-readable path itself, so there is no keyless mode to get wrong: an
+    // auth service that booted without it would answer every liveness probe
+    // while every account deletion failed its precondition check.
+    //
+    // It is NOT the shared control key, which is what this hop used to present.
+    // That key is one identity four other processes hold, so it cannot say WHICH
+    // caller is asking - and control would have had to admit the holder of it
+    // everywhere, not just here.
+    let service_keyring = Arc::new(
+        zeroship_core::service_peers::ServiceKeyring::load(
+            zeroship_core::service_peers::service_issuer(
+                zeroship_core::service_peers::AUTH_SERVICE_NAME,
+            )
+            .map_err(|error| {
+                AuthError::Config(format!("auth service issuer is malformed: {error}"))
+            })?,
+            cfg.settings.service_key_file.get(),
+            cfg.settings.service_peers_file.get(),
+        )
+        .map_err(|error| {
+            AuthError::Config(format!(
+                "service key material rejected: {error}; set auth.service_key_file and \
+                 auth.service_peers_file"
+            ))
+        })?,
+    );
+    tracing::info!(
+        issuer = %service_keyring.issuer().as_str(),
+        "service identity loaded"
+    );
+
     // 2. Build the Google JWKS cache. Only constructed when Google OAuth
     //    is wired up — the cache eagerly does nothing (lazy refresh on
     //    first verify), so we don't burn a startup roundtrip on Google.
@@ -274,7 +318,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     //    dedicated sessions when they require exclusive connection state.
     let cfg = Arc::new(cfg);
     let db = Arc::new(client);
-    cron::spawn_all(db.clone(), cfg.clone(), refresh_pool.clone());
+    cron::spawn_all(
+        db.clone(),
+        cfg.clone(),
+        refresh_pool.clone(),
+        service_keyring.clone(),
+    );
     tracing::info!("cron tasks spawned");
 
     // 4. Serve. `Arc`s keep the PG client + config alive across the
@@ -291,6 +340,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         relay_forward_mailer,
         op_issuer,
         refresh_pool,
+        service_keyring,
     )
     .await?;
     Ok::<(), Box<dyn std::error::Error>>(())

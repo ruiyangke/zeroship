@@ -12,9 +12,12 @@
 //! JSON parse are all exercised. What it does NOT exercise is control's SQL -
 //! that belongs to `crates/zeroship-control/tests/`, where the tables are.
 //!
-//! It also enforces the bearer token, so a test can prove the auth service
-//! actually presents its control key rather than reaching an endpoint that
-//! never looked.
+//! It also runs the REAL inbound guard - `verify_service_call` against a trust
+//! bundle holding this fixture's auth public key, audienced to the control
+//! plane's issuer and gated on `CONTROL_ERASURE_PREFLIGHT` - so a test can prove
+//! the auth service presents an assertion naming itself, not merely that it
+//! reached an endpoint which never looked. A credential this fixture refuses is
+//! refused for the same reason control would refuse it.
 
 // Test-only fixture: structural `future_not_send` is inherited from ntex.
 #![allow(clippy::future_not_send, dead_code)]
@@ -23,6 +26,14 @@ use std::sync::{Arc, Mutex};
 
 use ntex::web::{self, HttpRequest, HttpResponse};
 use serde_json::json;
+use zeroship_core::service_assertion::{
+    InMemoryReplayStore, ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
+    ServiceTrustBundle,
+};
+use zeroship_core::service_identity::{endpoints, verify_service_call};
+use zeroship_core::service_peers::{
+    service_issuer, ServiceKeyring, AUTH_SERVICE_NAME, CONTROL_SERVICE_NAME,
+};
 
 /// What the mock answers with.
 #[derive(Debug, Clone)]
@@ -42,7 +53,8 @@ pub enum Answer {
 }
 
 struct State {
-    key: String,
+    verifier: ServiceAssertionVerifier,
+    control_issuer: ServiceIssuer,
     answer: Mutex<Answer>,
     /// Every principal id the mock was asked about, in order. A test asserting
     /// "the preflight ran" reads this rather than inferring it from an outcome
@@ -54,17 +66,46 @@ pub struct MockControl {
     /// Loopback base URL - what `--control-url` / `ControlAccess.control_url`
     /// is pointed at.
     pub base: String,
-    /// The bearer token the mock demands. A request without it gets `401`.
-    pub key: String,
+    /// The auth-side keyring whose public half this mock trusts. Handed to
+    /// `ControlAccess`; a keyring built anywhere else is refused.
+    keyring: Arc<ServiceKeyring>,
     state: Arc<State>,
     pub srv: ntex::web::test::TestServer,
 }
 
+/// A keyring for `svc/auth` that NO mock trusts.
+///
+/// The negative control: same shape, same code path, one variable changed. A
+/// test using it proves the refusal comes from the credential rather than from
+/// the fixture being unreachable.
+#[must_use]
+pub fn untrusted_auth_keyring() -> Arc<ServiceKeyring> {
+    let issuer = service_issuer(AUTH_SERVICE_NAME).expect("auth issuer");
+    Arc::new(
+        ServiceKeyring::from_parts(issuer, ServiceSigningKey::generate(), ServiceTrustBundle::new())
+            .expect("build an untrusted auth keyring"),
+    )
+}
+
 impl MockControl {
     pub async fn start(answer: Answer) -> Self {
-        let key = format!("mock-control-key-{}", uuid::Uuid::new_v4().simple());
+        let auth_issuer = service_issuer(AUTH_SERVICE_NAME).expect("auth issuer");
+        let control_issuer = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+        let signing = ServiceSigningKey::generate();
+        let mut trusted = ServiceTrustBundle::new();
+        trusted
+            .trust_signing_key(&auth_issuer, signing.key_id(), &signing)
+            .expect("trust the fixture's auth key");
+        let keyring = Arc::new(
+            ServiceKeyring::from_parts(auth_issuer, signing, ServiceTrustBundle::new())
+                .expect("build the auth keyring"),
+        );
         let state = Arc::new(State {
-            key: key.clone(),
+            verifier: ServiceAssertionVerifier::new(
+                trusted,
+                Arc::new(InMemoryReplayStore::new()),
+            ),
+            control_issuer,
             answer: Mutex::new(answer),
             asked: Mutex::new(Vec::new()),
         });
@@ -82,10 +123,16 @@ impl MockControl {
         let base = format!("http://{}", srv.addr());
         Self {
             base,
-            key,
+            keyring,
             state,
             srv,
         }
+    }
+
+    /// The keyring whose assertions this mock accepts.
+    #[must_use]
+    pub fn keyring(&self) -> Arc<ServiceKeyring> {
+        self.keyring.clone()
     }
 
     /// Change the answer between calls - the reaper asks again after the
@@ -108,9 +155,19 @@ async fn preflight(
     let presented = req
         .headers()
         .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    if presented != format!("Bearer {}", state.key) {
+        .and_then(|v| v.to_str().ok());
+    // The SAME guard control runs on this route: the assertion must verify under
+    // a trusted issuer, be audienced to the control plane, and carry the
+    // endpoint grant. Nothing here special-cases the fixture.
+    if verify_service_call(
+        &state.verifier,
+        presented,
+        state.control_issuer.as_str(),
+        endpoints::CONTROL_ERASURE_PREFLIGHT,
+    )
+    .await
+    .is_err()
+    {
         return HttpResponse::Unauthorized().json(&json!({"error": "unauthorized"}));
     }
     state

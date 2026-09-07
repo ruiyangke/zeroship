@@ -76,7 +76,7 @@ async fn clear_control() -> (MockControl, ControlAccess) {
     let mock = MockControl::start(Answer::Clear).await;
     let access = ControlAccess {
         control_url: mock.base.clone(),
-        control_key: Some(mock.key.clone()),
+        keyring: mock.keyring(),
     };
     (mock, access)
 }
@@ -1163,7 +1163,7 @@ async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
     let mock = MockControl::start(Answer::Clear).await;
     let control = ControlAccess {
         control_url: mock.base.clone(),
-        control_key: Some(mock.key.clone()),
+        keyring: mock.keyring(),
     };
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(
@@ -1229,7 +1229,7 @@ async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
     let mock = MockControl::start(Answer::Unavailable).await;
     let control = ControlAccess {
         control_url: mock.base.clone(),
-        control_key: Some(mock.key.clone()),
+        keyring: mock.keyring(),
     };
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(
@@ -1262,12 +1262,18 @@ async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
     cleanup(&db, &[user.id]).await;
 }
 
-/// A configured control plane that never gets a valid key is the deployment
-/// fault arm. It must refuse rather than proceed, and it must NOT be
-/// distinguishable from a clear answer only by a log line.
+/// A credential the control plane does not trust is the deployment-fault arm.
+/// It must refuse rather than proceed, and it must NOT be distinguishable from
+/// a clear answer only by a log line.
+///
+/// The keyring here is a well-formed `svc/auth` identity under a key this mock
+/// never trusted - the one variable that differs from the clear-answer fixture.
+/// A missing credential cannot be expressed any more: `ServiceKeyring::load`
+/// refuses the boot, so the arm that survives is a REJECTED one, and it is the
+/// stronger arm because the round trip really happens.
 #[ntex::test]
 #[allow(clippy::future_not_send)]
-async fn reaper_refuses_without_a_control_key() {
+async fn reaper_refuses_when_the_control_plane_rejects_its_credential() {
     let Some(mut db) = pg().await else {
         return;
     };
@@ -1275,7 +1281,7 @@ async fn reaper_refuses_without_a_control_key() {
     let mock = MockControl::start(Answer::Clear).await;
     let control = ControlAccess {
         control_url: mock.base.clone(),
-        control_key: None,
+        keyring: common::mock_control::untrusted_auth_keyring(),
     };
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(
@@ -1303,7 +1309,8 @@ async fn reaper_refuses_without_a_control_key() {
     );
     assert!(
         mock.asked().is_empty(),
-        "no credential means no round trip, not a guessed answer"
+        "a refused credential must not reach the answer: the 401 comes before \
+         the handler records the principal"
     );
 
     cleanup(&db, &[user.id]).await;

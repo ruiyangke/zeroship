@@ -6,7 +6,7 @@ use zeroship_core::service_identity::{
 };
 
 /// Every operation the catalog names, in one place for the table-wide guards.
-const CATALOG: [ServiceEndpoint; 12] = [
+const CATALOG: [ServiceEndpoint; 13] = [
     endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
     endpoints::GATEWAY_WORKFLOW_ADVANCE,
     endpoints::CONTROL_ROUTES,
@@ -16,6 +16,7 @@ const CATALOG: [ServiceEndpoint; 12] = [
     endpoints::CONTROL_APP_ENV,
     endpoints::CONTROL_BILLING_RECONCILE,
     endpoints::CONTROL_SPEND_RECONCILE,
+    endpoints::CONTROL_ERASURE_PREFLIGHT,
     endpoints::WORKER_DISPATCH,
     endpoints::WORKER_WORKFLOW_ADVANCE,
     endpoints::WORKER_APP_LOGS,
@@ -124,6 +125,12 @@ fn endpoint_catalog_records_exact_measured_operations() {
             "/internal/spend/reconcile",
         ),
         (
+            endpoints::CONTROL_ERASURE_PREFLIGHT,
+            "control",
+            "GET",
+            "/internal/principals/{principal_id}/erasure-preflight",
+        ),
+        (
             endpoints::WORKER_DISPATCH,
             "worker",
             "POST",
@@ -161,7 +168,10 @@ fn measured_allowlist_is_encoded_and_enforced_row_by_row() {
     );
     assert_allowlist_row(
         "svc/auth",
-        &[endpoints::GATEWAY_BACKCHANNEL_LOGOUT],
+        &[
+            endpoints::GATEWAY_BACKCHANNEL_LOGOUT,
+            endpoints::CONTROL_ERASURE_PREFLIGHT,
+        ],
         &all,
     );
     assert_allowlist_row("svc/migrate-server", &[], &all);

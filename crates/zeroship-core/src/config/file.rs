@@ -134,6 +134,11 @@ pub struct ControlSection {
     pub smtp_password: Option<String>,
     /// Billing-notification Resend API key.
     pub resend_api_key: Option<String>,
+    /// This control plane's OWN ed25519 assertion key FILE. See
+    /// `AuthSection::service_key_file` for why the pair lives here.
+    pub service_key_file: Option<std::path::PathBuf>,
+    /// See `AuthSection::service_key_file`.
+    pub service_peers_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
     pub port: Option<u16>,
     /// Bind address.
@@ -209,6 +214,11 @@ pub struct GatewaySection {
     pub signing_key_file: Option<std::path::PathBuf>,
     /// PEM/PKCS#8 PREVIOUS signing key FILE for the rotation overlap.
     pub prev_signing_key_file: Option<std::path::PathBuf>,
+    /// This gateway's OWN ed25519 assertion key FILE. See
+    /// `AuthSection::service_key_file` for why the pair lives here.
+    pub service_key_file: Option<std::path::PathBuf>,
+    /// See `AuthSection::service_key_file`.
+    pub service_peers_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
     pub port: Option<u16>,
     /// Bind address.
@@ -238,6 +248,11 @@ pub struct WorkerSection {
     pub database_url: Option<String>,
     /// App-runtime KV (Redis) connection URL. May carry credentials.
     pub kv_url: Option<String>,
+    /// This worker's OWN ed25519 assertion key FILE. See
+    /// `AuthSection::service_key_file` for why the pair lives here.
+    pub service_key_file: Option<std::path::PathBuf>,
+    /// See `AuthSection::service_key_file`.
+    pub service_peers_file: Option<std::path::PathBuf>,
     /// HTTP listen port.
     pub port: Option<u16>,
     /// Bind address.
@@ -477,6 +492,19 @@ pub struct AuthSection {
     pub relay_smtp_password: Option<String>,
     /// PEM/PKCS#8 signing key FILE. See `GatewaySection::signing_key_file`.
     pub signing_key_file: Option<std::path::PathBuf>,
+    /// This service's OWN ed25519 assertion key FILE, and the JWKS-shaped
+    /// document naming every peer's public key.
+    ///
+    /// Present on all four platform sections for the same reason
+    /// `GatewaySection::broker_secret_file` is: the binaries DECLARE these
+    /// overlay paths, so leaving them out of this schema does not make them
+    /// optional, it makes `deny_unknown_fields` reject any overlay that uses
+    /// them - the tier the contract advertises would not exist. The four
+    /// sections' pairs were missing together and `zeroship-config-contract
+    /// audit` named all of them.
+    pub service_key_file: Option<std::path::PathBuf>,
+    /// See `service_key_file`.
+    pub service_peers_file: Option<std::path::PathBuf>,
     /// Platform auth provider backend (`native` or `supabase`).
     ///
     /// `provider`, not `auth_provider`: the canonical identity is
