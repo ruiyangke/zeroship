@@ -183,12 +183,6 @@ pub(crate) const SHARED_IDENTITIES: &[SharedIdentity] = &[
         inner: "String",
     },
     SharedIdentity {
-        symbol: "WORKER_KEY",
-        canonical: "worker_key",
-        wrapper: "Secret",
-        inner: "String",
-    },
-    SharedIdentity {
         symbol: "PAIRWISE_SALT",
         canonical: "pairwise_salt",
         wrapper: "Secret",

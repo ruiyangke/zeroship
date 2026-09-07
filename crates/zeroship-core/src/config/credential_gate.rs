@@ -205,7 +205,7 @@ impl fmt::Display for BuildProfile {
 #[derive(Debug)]
 pub struct SubsystemCredential<'a> {
     /// The subsystem the credential belongs to, in the operator's vocabulary
-    /// (`worker-dispatch`, `route-sync`, `app-migrations`). Named in the banner
+    /// (`route-sync`, `app-migrations`, `pairwise-subject-anchor`). Named in the banner
     /// so a deployer who does not run that subsystem knows what to turn off
     /// instead of what to provision.
     pub subsystem: &'static str,
@@ -216,7 +216,7 @@ pub struct SubsystemCredential<'a> {
     /// service they never enabled.
     pub enabled: bool,
     /// The operator-facing spelling, the same string the validator interpolates
-    /// (`ZEROSHIP_WORKER_KEY / --worker-key-file`).
+    /// (`ZEROSHIP_PAIRWISE_SALT`).
     pub label: &'static str,
     /// The resolved secret. `None` material on a `--check-config` run for a
     /// source that would need I/O; see [`audit_credentials`].
@@ -460,10 +460,10 @@ mod tests {
     use crate::config::names::{Secret, SourceKind};
     use crate::config::source::ConfigSource;
     use crate::config::{
-        require_nonempty, validate_worker_key, MIN_SECRET_BYTES, PLATFORM_SECRETS,
+        require_nonempty, validate_pairwise_salt, MIN_SECRET_BYTES, PLATFORM_SECRETS,
     };
 
-    const LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
+    const LABEL: &str = "ZEROSHIP_PAIRWISE_SALT";
     const STRONG: &str = "0123456789abcdef0123456789abcdef";
 
     fn supplied(value: &str) -> Secret<String> {
@@ -472,11 +472,11 @@ mod tests {
 
     fn one(secret: &Secret<String>, enabled: bool) -> Vec<SubsystemCredential<'_>> {
         vec![SubsystemCredential {
-            subsystem: "worker-dispatch",
+            subsystem: "pairwise-subject-anchor",
             enabled,
             label: LABEL,
             secret,
-            validate: validate_worker_key,
+            validate: validate_pairwise_salt,
         }]
     }
 
@@ -528,7 +528,7 @@ mod tests {
             SERVICE_CREDENTIAL_SENTINEL.len() < MIN_SECRET_BYTES,
             "the premise of this test is that the sentinel is under the floor"
         );
-        let message = validate_worker_key(LABEL, SERVICE_CREDENTIAL_SENTINEL)
+        let message = validate_pairwise_salt(LABEL, SERVICE_CREDENTIAL_SENTINEL)
             .expect_err("the sentinel is refused");
         assert_eq!(message, unset_credential_message(LABEL));
         assert!(!message.contains("too short"), "{message}");
@@ -537,7 +537,7 @@ mod tests {
         // refused for being too short, which is the branch this test asserts the
         // sentinel does not take.
         let short = "a".repeat(SERVICE_CREDENTIAL_SENTINEL.len());
-        assert!(validate_worker_key(LABEL, &short)
+        assert!(validate_pairwise_salt(LABEL, &short)
             .expect_err("30 bytes is under the floor")
             .contains("too short"));
     }
@@ -617,11 +617,11 @@ mod tests {
         let unread: Secret<String> = Secret::supplied(SourceKind::CliFile, None);
         let credentials = vec![
             SubsystemCredential {
-                subsystem: "worker-dispatch",
+                subsystem: "pairwise-subject-anchor",
                 enabled: true,
                 label: LABEL,
                 secret: &read,
-                validate: validate_worker_key,
+                validate: validate_pairwise_salt,
             },
             SubsystemCredential {
                 subsystem: "route-sync",
@@ -699,10 +699,10 @@ mod tests {
         let banner = posture
             .banner("zeroship-gate", &overlay, CredentialVerdict::Refuse)
             .expect("a weak posture has a banner");
-        assert!(banner.contains("ZEROSHIP_WORKER_KEY"), "{banner}");
+        assert!(banner.contains("ZEROSHIP_PAIRWISE_SALT"), "{banner}");
         assert!(banner.contains("/etc/zeroship/zeroship.toml"), "{banner}");
         assert!(banner.contains("zeroship dev init"), "{banner}");
-        assert!(banner.contains("worker-dispatch"), "{banner}");
+        assert!(banner.contains("pairwise-subject-anchor"), "{banner}");
         assert!(banner.contains("REFUSES TO START"), "{banner}");
         assert!(banner.contains(SERVICE_CREDENTIAL_SENTINEL), "{banner}");
     }
@@ -742,11 +742,11 @@ mod tests {
                 validate: require_nonempty,
             },
             SubsystemCredential {
-                subsystem: "worker-dispatch",
+                subsystem: "pairwise-subject-anchor",
                 enabled: true,
                 label: LABEL,
                 secret: &b,
-                validate: validate_worker_key,
+                validate: validate_pairwise_salt,
             },
         ];
         let posture = audit_credentials(&credentials);

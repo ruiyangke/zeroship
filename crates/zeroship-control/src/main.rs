@@ -114,11 +114,6 @@ const PLATFORM_ISSUER_INPUT: &str = "--auth-platform-issuer / ZEROSHIP_AUTH_PLAT
 const MASTER_KEY_LABEL: &str = "ZEROSHIP_CONTROL_MASTER_KEY";
 /// Same, for the rotation list. The index is appended per entry.
 const LEGACY_MASTER_KEYS_LABEL: &str = "ZEROSHIP_CONTROL_LEGACY_MASTER_KEYS";
-/// Operator-facing spelling of the worker dispatch key. The shared identity in
-/// `crates/zeroship-config-macros/src/shared.rs` (`canonical: "worker_key"`) projects to
-/// this environment name. The bare `WORKER_KEY` the shared validator used to
-/// interpolate is not settable.
-const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
 /// Same, for the shared pairwise salt (`canonical: "pairwise_salt"`).
 const PAIRWISE_SALT_LABEL: &str = "ZEROSHIP_PAIRWISE_SALT / --pairwise-salt-file";
 /// Operator-facing spelling of the shared internal control key.
@@ -126,11 +121,12 @@ const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
 
 /// Every credential the control plane needs, tagged by subsystem.
 ///
-/// All four are unconditional. The control plane is the ONE service that
-/// cannot have a disabled subsystem here: it mints the app-scoped tokens
-/// (`worker_key`), serves the internal route registry (`control_key`),
-/// decrypts creator environments (`master_key`) and seeds every app's pairwise
-/// anchor (`pairwise_salt`). Optional credentials it does have - the Stripe
+/// All three are unconditional. The control plane is the ONE service that
+/// cannot have a disabled subsystem here: it serves the internal route registry
+/// (`control_key`), decrypts creator environments (`master_key`) and seeds every
+/// app's pairwise anchor (`pairwise_salt`). Its call to the worker is NOT a row:
+/// that edge is an ed25519 service assertion now, minted from the key file
+/// `build_service_auth` loads. Optional credentials it does have - the Stripe
 /// webhook secret, the Stripe API key, the mailer credentials - are NOT rows
 /// here, because a deployment without Stripe is a supported deployment and the
 /// webhook handler already fails closed on an empty secret
@@ -200,13 +196,6 @@ fn control_credentials(settings: &ControlSettings) -> Vec<SubsystemCredential<'_
             label: CONTROL_KEY_LABEL,
             secret: &settings.control_key,
             validate: require_nonempty,
-        },
-        SubsystemCredential {
-            subsystem: "worker-token-derivation",
-            enabled: true,
-            label: WORKER_KEY_LABEL,
-            secret: &settings.worker_key,
-            validate: zeroship_core::config::validate_worker_key,
         },
         SubsystemCredential {
             subsystem: "app-env-encryption",
@@ -445,7 +434,6 @@ fn main() -> std::io::Result<()> {
     let master_key = settings.master_key.expose_str().to_owned();
     let workers_str = settings.worker_urls.get().clone();
     let gateway_url = settings.gateway_url.get().trim_end_matches('/').to_string();
-    let worker_key = settings.worker_key.expose_str().to_owned();
     let stripe_webhook_secret = settings.stripe_webhook_secret.expose_str().to_owned();
     let stripe_secret_key = settings.stripe_secret_key.expose_str().to_owned();
     let stripe_base_url = settings.stripe_base_url.get().clone();
@@ -1062,7 +1050,6 @@ fn main() -> std::io::Result<()> {
             .filter(|s| !s.is_empty())
             .map(ToOwned::to_owned)
             .collect(),
-        worker_key: zeroship_control::SecretString::new(worker_key),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(30, 60))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(50, 600))),
         trust_proxy,
@@ -1573,12 +1560,8 @@ mod tests {
             supabase_config_error("https://p.supabase.co", Some(strong), None, ""),
             supabase_config_error("https://p.supabase.co", Some("short"), None, "https://i.test"),
             supabase_config_error("https://p.supabase.co", None, Some(""), "https://i.test"),
-            // Secret strength. The shared validators used to interpolate a bare
-            // `WORKER_KEY` / `PAIRWISE_SALT`; they now carry control's label.
-            zeroship_core::config::validate_worker_key(WORKER_KEY_LABEL, "")
-                .expect_err("an unset worker key must fail closed"),
-            zeroship_core::config::validate_worker_key(WORKER_KEY_LABEL, "short")
-                .expect_err("a weak worker key must fail closed"),
+            // Secret strength. The shared validator used to interpolate a bare
+            // `PAIRWISE_SALT`; it now carries control's label.
             zeroship_core::config::validate_pairwise_salt(PAIRWISE_SALT_LABEL, "")
                 .expect_err("an unset pairwise salt must fail closed"),
             validate_master_key_material(MASTER_KEY_LABEL, "YWJj")
@@ -1598,7 +1581,7 @@ mod tests {
         //
         // EXTENDED 2026-08-13 to the Supabase provider config and the
         // secret-strength refusals, which carried the same defect: bare
-        // `SUPABASE_JWT_SECRET`, `WORKER_KEY` and `PAIRWISE_SALT` spellings that
+        // `SUPABASE_JWT_SECRET` and `PAIRWISE_SALT` spellings that
         // no binary reads. Extending this test rather than writing a second one
         // is deliberate - the scanner and the derived readable set are the parts
         // worth having exactly once.
@@ -1607,7 +1590,7 @@ mod tests {
         // really does read but that is the WRONG one for the failure at hand,
         // any stale name in a diagnostic outside the two sets driven below, and
         // a stale spelling that happens to be a SUBSTRING of a live name (the
-        // scanner tokenises, so `WORKER_KEY` inside `ZEROSHIP_WORKER_KEY` is not
+        // scanner tokenises, so `CONTROL_KEY` inside `ZEROSHIP_CONTROL_KEY` is not
         // a separate token and is invisible here).
         let readable = env_names_control_reads();
         assert!(
@@ -1777,7 +1760,6 @@ mod tests {
             .collect::<Vec<_>>();
         for expected in [
             "control-key-file",
-            "worker-key-file",
             "master-key-file",
             "database-url-file",
             "pairwise-salt-file",
@@ -1789,7 +1771,6 @@ mod tests {
         }
         for gone in [
             "control-key",
-            "worker-key",
             "master-key",
             "db",
             "pairwise-salt",
@@ -1822,7 +1803,6 @@ mod tests {
             .collect::<Vec<_>>();
         for expected in [
             "ZEROSHIP_CONTROL_KEY",
-            "ZEROSHIP_WORKER_KEY",
             "ZEROSHIP_CONTROL_MASTER_KEY",
             "ZEROSHIP_CONTROL_DATABASE_URL",
             "ZEROSHIP_PAIRWISE_SALT",
@@ -1835,7 +1815,7 @@ mod tests {
                 "{name} is not a canonical projection"
             );
         }
-        for gone in ["MASTER_KEY", "DATABASE_URL", "CONTROL_KEY", "WORKER_KEY"] {
+        for gone in ["MASTER_KEY", "DATABASE_URL", "CONTROL_KEY", "PAIRWISE_SALT"] {
             assert!(
                 !declared.contains(&(*gone).to_owned()),
                 "the bare name {gone} survives"

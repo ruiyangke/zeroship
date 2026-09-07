@@ -16,7 +16,7 @@
 /// The substrings of `text` that are shaped like an environment variable name.
 ///
 /// A maximal run of `[A-Z0-9_]` at least four characters long and holding at
-/// least one underscore. That shape admits `WORKER_KEY` and
+/// least one underscore. That shape admits `CONTROL_KEY` and
 /// `ZEROSHIP_AUTH_PLATFORM_ISSUER` while excluding ordinary prose and bare
 /// acronyms such as `URL`, `JWKS` or `HMAC`.
 ///
@@ -46,8 +46,8 @@ mod tests {
     #[test]
     fn the_scanner_sees_env_names_and_ignores_prose() {
         assert_eq!(
-            env_like_tokens("ZEROSHIP_WORKER_KEY is required; set a strong value"),
-            vec!["ZEROSHIP_WORKER_KEY".to_owned()]
+            env_like_tokens("ZEROSHIP_CONTROL_KEY is required; set a strong value"),
+            vec!["ZEROSHIP_CONTROL_KEY".to_owned()]
         );
 
         // The three bare spellings this module's callers were caught printing.
@@ -67,7 +67,7 @@ mod tests {
         assert!(env_like_tokens("refusing to start; the JWKS URL is unset").is_empty());
         assert!(env_like_tokens("").is_empty());
 
-        // Does NOT cover: a lowercase or dotted canonical spelling (`worker_key`,
+        // Does NOT cover: a lowercase or dotted canonical spelling (`control_key`,
         // `gateway.stash_signing_key`). Those are TOML/flag tiers, and a refusal
         // naming one is not the defect this scanner exists to catch.
     }
@@ -88,10 +88,10 @@ mod tests {
 
         assert_eq!(
             env_like_tokens(&format!(
-                "ZEROSHIP_WORKER_KEY is required and is not configured: it is empty \
+                "ZEROSHIP_CONTROL_KEY is required and is not configured: it is empty \
                  or still the {SERVICE_CREDENTIAL_SENTINEL} placeholder"
             )),
-            vec!["ZEROSHIP_WORKER_KEY".to_owned()],
+            vec!["ZEROSHIP_CONTROL_KEY".to_owned()],
             "the refusal names one settable variable; the placeholder it quotes is not one"
         );
 
