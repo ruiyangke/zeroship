@@ -1916,6 +1916,44 @@ mod tests {
         assert_eq!(outcome.deploy_hash.as_deref(), Some("sha256:typed"));
     }
 
+    /// The refusal is WIRED, not merely defined.
+    ///
+    /// `app_id_or_refuse` having the right opinion proves nothing if the deploy
+    /// target is resolved around it, and a predicate whose call site stops
+    /// being reached leaves every predicate test green. Both halves go through
+    /// `resolve_deploy_app`, one variable apart: the same value, the other flag.
+    #[test]
+    fn the_id_flag_refuses_a_name_and_the_name_flag_takes_it() {
+        let by_id = s(&["zeroship", "deploy", "dist/app.zship", "--app=my-app"]);
+        let err = resolve_deploy_app(&by_id, None).expect_err("--app=<name> must be refused");
+        assert!(
+            err.contains("--app-name"),
+            "the refusal must point at the flag that does take a name: {err}"
+        );
+
+        let by_name = s(&["zeroship", "deploy", "dist/app.zship", "--app-name=my-app"]);
+        let (sourced, target) =
+            resolve_deploy_app(&by_name, None).expect("--app-name takes a name");
+        assert_eq!(target, AppTarget::Name("my-app".to_string()));
+        assert_eq!(sourced.source, project_config::Source::Flag("--app-name"));
+    }
+
+    /// Naming a target twice is a refusal, not a precedence rule. Silently
+    /// preferring one is how a deploy lands somewhere the creator did not read
+    /// on the command line.
+    #[test]
+    fn the_two_app_flags_cannot_both_be_given() {
+        let args = s(&[
+            "zeroship",
+            "deploy",
+            "dist/app.zship",
+            "--app=11111111-1111-4111-8111-111111111111",
+            "--app-name=my-app",
+        ]);
+        let err = resolve_deploy_app(&args, None).expect_err("two targets must be refused");
+        assert!(err.contains("--app") && err.contains("--app-name"), "{err}");
+    }
+
     // -----------------------------------------------------------------------
     // Existing tests
     // -----------------------------------------------------------------------
