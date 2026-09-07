@@ -214,8 +214,21 @@ fn an_alias_may_carry_a_platform_underscore_name_that_a_column_may_not() {
 /// does not have.
 #[test]
 fn the_system_field_names_are_referenceable_columns() {
+    // Spelled locally on purpose. This crate held its own copy of this list and
+    // unioned it into every row projection until 2026-09-07; the list was
+    // platform policy and left with the union. What survives is a claim about
+    // the IDENTIFIER FENCE - that these ordinary names are not reserved - and
+    // that claim needs a witness, not a shared constant.
     let mut ruled_on = 0_usize;
-    for name in zeroship_data_query_builder::PLATFORM_FIELD_NAMES {
+    for name in [
+        "id",
+        "created_at",
+        "updated_at",
+        "created_by",
+        "updated_by",
+        "version",
+        "deleted_at",
+    ] {
         assert!(
             Ident::parse_as(name, IdentRole::Column).is_ok(),
             "the platform field {name:?} is not referenceable as a column"

@@ -10,7 +10,7 @@ use zeroship_data_query_builder::{
     AggregateRef, Arithmetic, ArithmeticOp, Assignment, BindBudget, ColumnAssignment, ColumnValue,
     CompareOp, Delete, FieldPath, Ident, IdentRole, Insert, JsonKey, Literal, Operand, PlanError,
     Predicate, ProjectedField, Projection, Returning, RowLimit, Update, WriteError, WriteValue,
-    MAX_INSERT_ROWS, MAX_ROW_LIMIT, PLATFORM_FIELD_NAMES,
+    MAX_INSERT_ROWS, MAX_ROW_LIMIT,
 };
 
 fn column(name: &str) -> Ident {
@@ -31,8 +31,18 @@ fn field(name: &str) -> ProjectedField {
 
 /// A `RETURNING` list of one declared column plus the platform union.
 fn returning_name() -> Returning {
-    Returning::rows(Projection::rows(vec![field("name")]).expect("row projection"))
-        .expect("returning")
+    // `id` is supplied EXPLICITLY, and has to be: the projection appended it on
+    // the caller's behalf until 2026-09-07. Every consumer that needs it - the
+    // change-event publication, the unmask handle's `row_pk`, an encrypted
+    // column's AEAD tag - now names it.
+    Returning::rows(
+        Projection::rows(vec![
+            field("name"),
+            ProjectedField::platform(column("id")).expect("platform field"),
+        ])
+        .expect("row projection"),
+    )
+    .expect("returning")
 }
 
 fn cell(name: &str, value: i64) -> ColumnValue {
@@ -109,7 +119,7 @@ fn no_write_renders_a_returning_star() {
         // Not merely "no star": the explicit list must actually be there, or a
         // renderer that dropped the clause entirely would pass the arm above.
         assert!(
-            sql.contains(r#"RETURNING "created_at" AS "created_at""#),
+            sql.contains(r#"RETURNING "id" AS "id""#),
             "the explicit RETURNING list is missing: {sql}"
         );
         ruled_on += 1;
@@ -160,25 +170,40 @@ fn a_returning_list_over_a_stored_column_renders_the_physical_name() {
     println!("ruled on {ruled_on} stored write statements");
 }
 
-/// The platform-field union reaches a write's returned row too, which is what
-/// keeps `id` present - and `id` is what the change-event publication
-/// correlates on, what the unmask handle plucks `row_pk` from, and what an
-/// encrypted column binds into its AEAD tag.
+/// A `RETURNING` list carries exactly the fields it was given, platform-marked
+/// ones included, and nothing more.
+///
+/// This asserted a UNION until 2026-09-07: the projection appended seven system
+/// fields of its own, so `id` was present whether or not a caller asked. `id` is
+/// what the change-event publication correlates on, what the unmask handle
+/// plucks `row_pk` from, and what an encrypted column binds into its AEAD tag,
+/// so it still has to be there - but keeping it is now the caller's obligation,
+/// and that is the point. A grammar that silently adds columns cannot express a
+/// narrowing, which is what made `distinct` unrepresentable.
 #[test]
-fn a_returning_list_keeps_every_platform_field() {
+fn a_returning_list_carries_exactly_the_fields_it_was_given() {
     let sql = sql_of(&zeroship_data_query_builder::DbPlan::Insert(insert_one(
         returning_name(),
     )));
     let mut ruled_on = 0_usize;
-    for required in PLATFORM_FIELD_NAMES {
+    for required in ["name", "id"] {
         assert!(
             sql.contains(&format!(r#""{required}" AS "{required}""#)),
-            "the RETURNING list dropped the platform field {required}: {sql}"
+            "the RETURNING list dropped {required}: {sql}"
         );
         ruled_on += 1;
     }
-    assert_eq!(ruled_on, 7);
-    println!("ruled on {ruled_on} platform fields in a RETURNING list");
+    // The control, and the whole behaviour change: a field NOBODY supplied is
+    // absent. Under the union this assertion could not have held.
+    for absent in ["created_at", "updated_at", "version", "deleted_at"] {
+        assert!(
+            !sql.contains(&format!(r#""{absent}""#)),
+            "the RETURNING list added {absent}, which no caller asked for: {sql}"
+        );
+        ruled_on += 1;
+    }
+    assert_eq!(ruled_on, 6);
+    println!("ruled on {ruled_on} returning-list fields");
 }
 
 /// A write returns the rows it touched, so a `RETURNING` list cannot aggregate.

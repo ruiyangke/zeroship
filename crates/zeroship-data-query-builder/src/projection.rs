@@ -56,23 +56,6 @@ use crate::path::FieldPath;
 use crate::predicate::AggregateRef;
 use core::fmt;
 
-/// The seven platform-managed system fields, unioned into every row
-/// projection.
-///
-/// Mirrors `SYSTEM_FIELD_NAMES` (`query.rs:723-731`). Re-stated rather than
-/// imported for the same reason as the identifier fences: this crate takes no
-/// dependency on `zeroship-schema`. When SC-3's port lands, one of the two
-/// copies must be deleted rather than both maintained.
-pub const PLATFORM_FIELD_NAMES: &[&str] = &[
-    "id",
-    "created_at",
-    "updated_at",
-    "created_by",
-    "updated_by",
-    "version",
-    "deleted_at",
-];
-
 /// Why a field is in the list.
 ///
 /// This answers a question the union rule states but does not resolve: whether
@@ -202,6 +185,30 @@ impl ProjectedField {
         })
     }
 
+    /// A column the PLATFORM manages, projected under its own name.
+    ///
+    /// Identical to [`Self::column`] except for the exposure, which is what
+    /// [`Projection::visible_aliases`] filters on: a platform field is selected
+    /// and is not part of what the caller asked to see.
+    ///
+    /// WHICH fields those are is deliberately not a fact this crate holds. It
+    /// kept its own list until 2026-09-07 and unioned it into every row
+    /// projection; see [`Projection::rows`] for what that cost. The caller
+    /// names them because the caller is the one that knows.
+    ///
+    /// # Errors
+    ///
+    /// [`ProjectionError::Alias`] if the column name is not a legal alias.
+    pub fn platform(name: Ident) -> Result<Self, ProjectionError> {
+        let alias = Ident::parse_as(name.as_str(), IdentRole::Alias)
+            .map_err(|source| ProjectionError::Alias { source })?;
+        Ok(Self {
+            source: ProjectionSource::Column(name),
+            alias,
+            exposure: Exposure::Platform,
+        })
+    }
+
     /// A column whose PHYSICAL name differs from the LOGICAL name it is
     /// returned under: `"<physical>" AS "<logical>"`.
     ///
@@ -275,51 +282,51 @@ pub struct Projection {
 }
 
 impl Projection {
-    /// A row projection: the caller's declared fields, unioned with every
-    /// platform field.
+    /// A row projection: exactly the fields the caller supplies.
     ///
-    /// A field the caller already declared **wins** over the platform entry of
-    /// the same name, so a schema that names `deleted_at` gets it with
-    /// [`Exposure::Declared`] and it reaches user code.
+    /// # This unioned a list of platform fields until 2026-09-07
     ///
-    /// An empty `declared` list is legal and yields the platform fields alone;
-    /// the non-empty invariant holds after the union, which is where it
-    /// matters.
+    /// It held its own copy of the seven system-field names and appended any the
+    /// caller had not already declared. Two defects came from that, and both
+    /// were silent. `distinct("role")` was unrepresentable, because the union
+    /// widened a one-column projection back to eight. And an explicit
+    /// `select: ["email"]` returned eight columns rather than one, so a caller
+    /// asking to narrow got a row shape it did not ask for.
+    ///
+    /// The deeper problem is that the list was platform policy living in a
+    /// grammar. Which fields a platform manages is not a property of SQL, this
+    /// crate had no way to be told the answer, and its own copy was a duplicate
+    /// of `zeroship-schema`'s `SYSTEM_FIELD_NAMES` that nothing kept in step -
+    /// the constant's doc comment said one of the two had to go.
+    ///
+    /// So the caller supplies the whole list now, and marks the platform's own
+    /// entries with [`ProjectedField::platform`] so [`Self::visible_aliases`]
+    /// can still tell them apart. The schema-aware layer above knows which
+    /// fields those are; this one does not and should not.
     ///
     /// # Errors
     ///
-    /// [`ProjectionError::DuplicateAlias`] if two declared fields share an
-    /// alias - two columns arriving under one name is an ambiguous row, not a
-    /// narrowing. [`ProjectionError::AggregateInRowProjection`] if a declared
-    /// field aggregates.
+    /// [`ProjectionError::Empty`] if the list is empty. This refusal is NEW and
+    /// it is not optional: the non-empty invariant used to be maintained by the
+    /// union, which could not produce an empty projection, so removing the union
+    /// removed the invariant with it. Without this arm an empty list renders
+    /// `SELECT  FROM`, which is a syntax error the grammar exists to prevent.
+    ///
+    /// [`ProjectionError::DuplicateAlias`] if two fields share an alias - two
+    /// columns arriving under one name is an ambiguous row, not a narrowing.
+    /// [`ProjectionError::AggregateInRowProjection`] if a field aggregates.
     pub fn rows(declared: Vec<ProjectedField>) -> Result<Self, ProjectionError> {
+        if declared.is_empty() {
+            return Err(ProjectionError::Empty);
+        }
         if let Some(field) = declared.iter().find(|f| f.is_aggregate()) {
             return Err(ProjectionError::AggregateInRowProjection {
                 alias: field.alias.as_str().to_string(),
             });
         }
         Self::refuse_search_scalar(&declared)?;
-        let mut fields = declared;
+        let fields = declared;
         Self::refuse_duplicate_aliases(&fields)?;
-        for name in PLATFORM_FIELD_NAMES {
-            if fields.iter().any(|f| f.alias.as_str() == *name) {
-                continue;
-            }
-            // Infallible in practice - the seven names are ASCII, short, and
-            // hit no reservation - but built through the same validating
-            // constructor as everything else rather than bypassing it. If one
-            // of them ever stopped being a legal identifier, that is a fact
-            // worth an error rather than a silent omission.
-            let column = Ident::parse_as(name, IdentRole::Column)
-                .map_err(|source| ProjectionError::Alias { source })?;
-            let alias = Ident::parse_as(name, IdentRole::Alias)
-                .map_err(|source| ProjectionError::Alias { source })?;
-            fields.push(ProjectedField {
-                source: ProjectionSource::Column(column),
-                alias,
-                exposure: Exposure::Platform,
-            });
-        }
         Ok(Self {
             fields: Self::canonicalise(fields),
             kind: ProjectionKind::Rows,
@@ -459,6 +466,8 @@ impl Projection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionError {
     Alias { source: crate::ident::IdentError },
+    /// A row projection was given no fields at all.
+    Empty,
     DuplicateAlias { alias: String },
     AggregateInRowProjection { alias: String },
     StoredInAggregate { alias: String },
@@ -471,6 +480,11 @@ impl fmt::Display for ProjectionError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Alias { source } => write!(f, "projection alias is invalid: {source}"),
+            Self::Empty => write!(
+                f,
+                "a row projection needs at least one field; an empty list would render \
+                 a select with no columns"
+            ),
             Self::DuplicateAlias { alias } => write!(
                 f,
                 "two projected fields share the alias '{alias}'; the row would be ambiguous"

@@ -16,7 +16,7 @@
 use zeroship_data_query_builder::render::postgres;
 use zeroship_data_query_builder::{
     AggregateFunc, AggregateRef, Exposure, Ident, IdentRole, ProjectedField, Projection,
-    ProjectionError, ProjectionKind, Select, PLATFORM_FIELD_NAMES,
+    ProjectionError, ProjectionKind, Select,
 };
 
 fn column(name: &str) -> Ident {
@@ -31,56 +31,67 @@ fn field(name: &str) -> ProjectedField {
     ProjectedField::column(column(name)).expect("projectable")
 }
 
-/// Narrowing to one column still carries all seven platform fields, because
-/// the union is in the constructor rather than in a caller's memory.
+/// A row projection carries exactly what it was given, and a platform field is
+/// carried but not visible.
+///
+/// This asserted the opposite until 2026-09-07: the constructor appended seven
+/// system fields of its own, so narrowing to one column produced eight. That
+/// made `distinct("role")` unrepresentable and silently widened every explicit
+/// `select`. Which fields a platform manages is not a fact a SQL grammar can
+/// hold, so the caller supplies them and marks them.
 #[test]
-fn a_narrowed_projection_keeps_every_platform_field() {
-    let projection = Projection::rows(vec![field("name")]).expect("row projection");
+fn a_row_projection_carries_exactly_what_it_was_given() {
+    let projection = Projection::rows(vec![
+        field("name"),
+        ProjectedField::platform(column("id")).expect("platform field"),
+    ])
+    .expect("row projection");
+
     let aliases: Vec<&str> = projection
         .fields()
         .iter()
         .map(|f| f.alias.as_str())
         .collect();
+    assert_eq!(aliases.len(), 2, "the projection widened: {aliases:?}");
+    assert!(aliases.contains(&"name") && aliases.contains(&"id"));
 
-    let mut ruled_on = 0_usize;
-    for required in PLATFORM_FIELD_NAMES {
-        assert!(
-            aliases.contains(required),
-            "narrowing dropped the platform field {required}; present: {aliases:?}"
-        );
-        ruled_on += 1;
-    }
-    assert_eq!(ruled_on, 7);
-    assert_eq!(
-        projection.fields().len(),
-        8,
-        "expected one declared column plus seven platform fields"
-    );
-    println!("ruled on {ruled_on} platform fields");
+    // The exposure split survives the union's removal: `id` is selected and is
+    // not part of what the caller asked to see.
+    assert_eq!(projection.visible_aliases(), vec!["name"]);
+
+    // A single-column narrowing is now expressible at all, which is the defect
+    // this replaced. `distinct` needs exactly this.
+    let narrowed = Projection::rows(vec![field("role")]).expect("row projection");
+    assert_eq!(narrowed.fields().len(), 1);
+    println!("ruled on 2 projections");
 }
 
-/// `id` in particular, because it is load-bearing in four independent ways -
-/// the relation stitch, the unmask handle's `row_pk`, the AEAD tag via
-/// `canonical_aad`, and change-event correlation - and a narrowing
-/// implementation could be written, reviewed and shipped against any one of
-/// them with the other three never exercised.
+/// An empty projection is refused rather than rendered.
+///
+/// The non-empty invariant used to be a side effect of the platform-field
+/// union, which could not produce an empty list. Removing the union removed the
+/// invariant, so it is now stated. Without this, `SELECT  FROM "t"` is
+/// constructible.
+///
+/// The obligation this test used to carry - that `id` survives the narrowest
+/// projection, because it is load-bearing for the relation stitch, the unmask
+/// handle's `row_pk`, the AEAD tag via `canonical_aad` and change-event
+/// correlation - has MOVED to the caller, and that is the real cost of this
+/// change. A grammar cannot keep a column it has no way to be told about.
 #[test]
-fn the_primary_key_survives_the_narrowest_possible_projection() {
-    let projection = Projection::rows(vec![]).expect("row projection");
-    assert!(projection
-        .fields()
-        .iter()
-        .any(|f| f.alias.as_str() == "id"));
-    assert_eq!(
-        projection.fields().len(),
-        7,
-        "an empty declared list must still yield the platform fields"
-    );
-    println!("ruled on 1 empty projection");
+fn an_empty_row_projection_is_refused() {
+    assert!(matches!(
+        Projection::rows(vec![]),
+        Err(ProjectionError::Empty)
+    ));
+    // The control: one field is enough.
+    assert!(Projection::rows(vec![field("name")]).is_ok());
+    println!("ruled on 2 projections");
 }
 
-/// The union is not a blanket overwrite: a schema that declares a platform name
-/// keeps it as its own, and it reaches user code.
+/// A schema that declares a platform name keeps it as its own, and it reaches
+/// user code. The union used to have to avoid overwriting it; now nothing can,
+/// because nothing is added.
 #[test]
 fn a_declared_platform_field_stays_declared() {
     let projection = Projection::rows(vec![field("deleted_at")]).expect("row projection");
@@ -95,17 +106,26 @@ fn a_declared_platform_field_stays_declared() {
     println!("ruled on 1 declared platform field");
 }
 
-/// The other half of the union rule: what the planner added is projected and
-/// then stripped, so the SQL is correct and the creator sees what they asked
-/// for.
+/// A platform-marked field is projected and then stripped, so the SQL is
+/// correct and the creator sees what they asked for.
+///
+/// The exposure split is the half of the old union rule that SURVIVES it. The
+/// list moved to the caller; the distinction between "selected" and "visible"
+/// did not, because it is a property of the projection rather than of the
+/// platform.
 #[test]
 fn planner_added_fields_are_not_visible_to_user_code() {
-    let projection = Projection::rows(vec![field("name")]).expect("row projection");
+    let projection = Projection::rows(vec![
+        field("name"),
+        ProjectedField::platform(column("id")).expect("platform field"),
+        ProjectedField::platform(column("version")).expect("platform field"),
+    ])
+    .expect("row projection");
     assert_eq!(projection.visible_aliases(), vec!["name"]);
     assert_eq!(
         projection.fields().len() - projection.visible_aliases().len(),
-        7,
-        "seven platform fields must be projected and stripped"
+        2,
+        "both platform fields must be projected and stripped"
     );
     println!("ruled on 1 projection");
 }
