@@ -52,6 +52,23 @@
 //! than a silently preferred value - an operator who edits a `kid` by hand is
 //! saying something about which key this is, and the two answers must agree.
 //!
+//! # A missing or unparseable document REFUSES STARTUP
+//!
+//! Both paths are mandatory in [`ServiceKeyring::load`], and the empty string
+//! each setting defaults to is refused there rather than in the three `main`s
+//! that call it. Fence F4 of
+//! `docs/proposals/2026-09-05-auth-foundation-redesign.md` words the rule for
+//! the worker - "absent a configured gateway public key the worker refuses to
+//! start" - and it holds for every binary that mints or verifies, because the
+//! failure it names has nothing to do with which service is holding the
+//! material: a process that boots and then refuses every guarded edge is
+//! indistinguishable from a healthy one until traffic arrives.
+//!
+//! [`ServiceAuth::unconfigured`] is unchanged and still refuses at request
+//! time. The two are not alternatives - one is loud at deploy time and the
+//! other at request time - and the request-time one is now unreachable from any
+//! binary.
+//!
 //! ONE document is handed to every service. That grants nothing extra: a
 //! verified identity still has to pass `aud` equality with the callee's own
 //! issuer and the endpoint allowlist in
@@ -110,6 +127,20 @@ pub fn service_issuer(name: &str) -> Result<ServiceIssuer, AssertionError> {
 /// presented.
 #[derive(Debug, thiserror::Error)]
 pub enum PeerKeyError {
+    /// The setting naming this file was left empty, so there is nothing to
+    /// read.
+    ///
+    /// SEPARATE from [`PeerKeyError::Read`], and the separation is what makes
+    /// the refusal actionable. An empty path reaches the filesystem as `""`
+    /// and comes back as a not-found naming no file at all, which is the least
+    /// useful sentence a boot log can carry: the operator has to be told that
+    /// a SETTING is unset, not that a nameless file is absent.
+    #[error("no {which} is configured, and this binary cannot run without one")]
+    NotConfigured {
+        /// Which of the two documents was never configured, in the operator's
+        /// vocabulary.
+        which: &'static str,
+    },
     /// The file could not be read.
     #[error("read {path}: {source}")]
     Read {
@@ -176,15 +207,38 @@ pub struct ServiceKeyring {
 impl ServiceKeyring {
     /// Load this service's private key and the peer bundle from two files.
     ///
+    /// # An unconfigured path is a REFUSAL, not a mode
+    ///
+    /// Both paths are required, and the empty path each setting defaults to is
+    /// refused here rather than handled by the caller. That is fence F4 of
+    /// `docs/proposals/2026-09-05-auth-foundation-redesign.md`, and the reason
+    /// it lives in the loader is that the alternative shape is the defect the
+    /// fence exists to remove: every `main` that reads two paths would need its
+    /// own "neither was configured" branch, and the natural body of that branch
+    /// is to carry on with no key material. A process that starts and then
+    /// refuses every guarded edge looks healthy to an orchestrator, answers a
+    /// liveness probe, and fails only where an end user sees it.
+    ///
+    /// [`ServiceAuth::unconfigured`] still refuses at request time. That is the
+    /// SECOND fence, not this one, and no binary reaches it: the difference is
+    /// that this one is loud at deploy time, when someone is watching.
+    ///
+    /// [`ServiceKeyring::from_parts`] takes material already in memory and so
+    /// has no path to judge. It is the test and generator door, and it is the
+    /// one way to a keyring that does not pass through this refusal.
+    ///
     /// # Errors
     ///
-    /// Returns [`PeerKeyError`] when either file is unreadable, insecurely
+    /// Returns [`PeerKeyError::NotConfigured`] when either path is empty, and
+    /// [`PeerKeyError`] otherwise when either file is unreadable, insecurely
     /// permissioned, or does not hold what it claims to.
     pub fn load(
         issuer: ServiceIssuer,
         key_path: &Path,
         peers_path: &Path,
     ) -> Result<Self, PeerKeyError> {
+        require_configured(key_path, "service key file")?;
+        require_configured(peers_path, "service peer document")?;
         Self::from_parts(
             issuer,
             load_signing_key(key_path)?,
@@ -277,14 +331,22 @@ impl ServiceKeyring {
 ///
 /// # Absence refuses; it does not disable
 ///
-/// [`ServiceAuth::unconfigured`] is what a process holds when no key material
-/// was configured. Every [`ServiceAuth::verify`] then returns a refusal and
-/// every [`ServiceAuth::authorization_for`] returns `None`, so an unconfigured
-/// process serves no guarded edge and reaches no guarded peer. That is the
-/// opposite of the shared secrets this replaces, whose empty value turned the
-/// check OFF - and it is the whole reason the unconfigured state is a named
-/// constructor rather than two `Option` fields a call site might forget to
-/// check.
+/// [`ServiceAuth::unconfigured`] holds no key material. Every
+/// [`ServiceAuth::verify`] then returns a refusal and every
+/// [`ServiceAuth::authorization_for`] returns `None`, so it serves no guarded
+/// edge and reaches no guarded peer. That is the opposite of the shared secrets
+/// this replaces, whose empty value turned the check OFF - and it is the whole
+/// reason the unconfigured state is a named constructor rather than two
+/// `Option` fields a call site might forget to check.
+///
+/// **NO BINARY REACHES IT.** It described what a `main` held when neither key
+/// file was configured until fence F4 landed the startup refusal in
+/// [`ServiceKeyring::load`]; a process with no key material now exits instead
+/// of booting into this state. What survives is the request-time half, which is
+/// still worth having and is still exercised - the gateway's advance edge and
+/// the worker's dispatch edge each have a test that hands them exactly this
+/// value and requires a refusal, so the two fences are independent rather than
+/// one resting on the other.
 pub struct ServiceAuth {
     keyring: Option<ServiceKeyring>,
     verifier: Option<Arc<dyn IdentityVerifier + Send + Sync>>,
@@ -497,6 +559,19 @@ pub fn load_peer_bundle(path: &Path) -> Result<ServiceTrustBundle, PeerKeyError>
         bundle.trust(&issuer, key_id, public)?;
     }
     Ok(bundle)
+}
+
+/// Refuse a path whose setting was never filled in.
+///
+/// Takes `which` as a `&'static str` rather than deriving it from the issuer:
+/// the issuer is a security identity and the trust domain travels with the name
+/// for a reason, so spelling a config word out of it would couple the operator
+/// vocabulary to the SPIFFE path and read a name out of its scope to do it.
+fn require_configured(path: &Path, which: &'static str) -> Result<(), PeerKeyError> {
+    if path.as_os_str().is_empty() {
+        return Err(PeerKeyError::NotConfigured { which });
+    }
+    Ok(())
 }
 
 fn read_file(path: &Path) -> Result<Vec<u8>, PeerKeyError> {

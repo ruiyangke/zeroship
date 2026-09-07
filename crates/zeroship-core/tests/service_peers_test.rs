@@ -262,6 +262,70 @@ fn a_group_readable_private_key_is_refused() {
     ));
 }
 
+/// Fence F4's startup half, at the one function every `main` loads through.
+///
+/// The three refusals are one case in the shape that matters - a process that
+/// cannot verify what it is told - and they are asserted TOGETHER because the
+/// defect this fence removes was a deployment distinguishing between them: an
+/// unset path used to boot into a process refusing every guarded edge, while a
+/// wrong path exited. Both are the same operator mistake and both now exit.
+///
+/// The MISSING and MALFORMED arms additionally require the message to carry the
+/// PATH. An operator reading a boot log needs the file, and the unset arm cannot
+/// supply one, which is exactly why it is a separate variant naming the setting
+/// instead.
+#[test]
+fn a_peer_document_that_is_unset_missing_or_malformed_refuses_to_load() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let worker = write_key(dir.path(), "worker.pem");
+    let issuer = || service_issuer(WORKER_SERVICE_NAME).expect("worker issuer");
+
+    // THE ONE-VARIABLE CONTROL, first: the same key and a well-formed document
+    // load. Every refusal below changes the peer document and nothing else, so
+    // a loader that refused everything cannot print what this test prints.
+    let good = write_peers(dir.path(), &[entry(WORKER_SERVICE_NAME, &worker.public)]);
+    assert!(ServiceKeyring::load(issuer(), &worker.path, &good).is_ok());
+
+    // UNSET. The default of both settings is an empty `PathBuf`, which reaches
+    // the filesystem as `""` and returns a not-found naming no file at all.
+    let unset = ServiceKeyring::load(issuer(), &worker.path, std::path::Path::new(""));
+    assert!(
+        matches!(unset, Err(PeerKeyError::NotConfigured { which }) if which.contains("peer")),
+        "an unconfigured peer document must refuse, naming the setting: {unset:?}"
+    );
+    // And the same for this service's own key, so the pair cannot end up with
+    // one half guarded.
+    let unset_key = ServiceKeyring::load(issuer(), std::path::Path::new(""), &good);
+    assert!(
+        matches!(unset_key, Err(PeerKeyError::NotConfigured { which }) if which.contains("key")),
+        "an unconfigured service key must refuse, naming the setting: {unset_key:?}"
+    );
+
+    // MISSING: a path the operator did configure, pointing at nothing.
+    let absent = dir.path().join("no-such-service-peers.json");
+    assert!(!absent.exists(), "the fixture path must really be absent");
+    let missing = ServiceKeyring::load(issuer(), &worker.path, &absent);
+    let message = missing.expect_err("a missing peer document refuses").to_string();
+    assert!(
+        message.contains(&absent.display().to_string()),
+        "the refusal must name the file it could not read: {message}"
+    );
+
+    // MALFORMED: the path resolves, the bytes are not a peer document.
+    let malformed = dir.path().join("malformed-service-peers.json");
+    fs::write(&malformed, "{ this is not a JWKS document").expect("write the malformed document");
+    let bad = ServiceKeyring::load(issuer(), &worker.path, &malformed);
+    let message = bad.expect_err("a malformed peer document refuses").to_string();
+    assert!(
+        message.contains(&malformed.display().to_string()),
+        "the refusal must name the file it could not parse: {message}"
+    );
+
+    // Does NOT cover whether the three `main`s CALL this loader rather than
+    // building a keyring some other way. That link is
+    // `tests/service_peer_boot_gate.sh`, against the real binaries.
+}
+
 fn worker_principal() -> ServicePrincipal {
     ServicePrincipal::new(
         TrustDomain::new("zeroship.ai"),
