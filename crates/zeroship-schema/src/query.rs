@@ -3263,7 +3263,7 @@ pub fn build_write_target_probe(
     let select = serde_json::json!(["id"]);
     let mut built =
         build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling(
-            &schema_name,
+            schema_name,
             collection,
             filter,
             Some(limit),
@@ -6850,7 +6850,7 @@ mod tests {
         select: Option<&Value>,
     ) -> Result<BuiltQuery, QueryError> {
         build_find_with_schema(
-            &schema_name,
+            schema_name,
             collection,
             filter,
             limit,
