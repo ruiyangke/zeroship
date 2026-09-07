@@ -21,7 +21,7 @@ use ntex::web;
 use zeroship_worker::config::{WorkerSettings, WorkerSettingsSources, WorkerSettingsConsumer};
 use zeroship_core::config::{
     audit_credentials, bootstrap_or_exit, mark_dev_escape_active, require_nonempty,
-    validate_worker_key, BuildProfile, CheckConfigReport, CheckValue, CredentialPosture,
+    BuildProfile, CheckConfigReport, CheckValue, CredentialPosture,
     CredentialVerdict, SubsystemCredential,
 };
 use zeroship_bundle::{
@@ -38,10 +38,6 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 /// Operator-facing spelling of the control key, for a diagnostic that has to
 /// name something the operator can actually set.
 const CONTROL_KEY_LABEL: &str = "ZEROSHIP_CONTROL_KEY / --control-key-file";
-/// Operator-facing spelling of the worker dispatch key. The shared identity in
-/// `crates/zeroship-config-macros/src/shared.rs` (`canonical: "worker_key"`) projects to
-/// this environment name; the flag comes from the same declaration.
-const WORKER_KEY_LABEL: &str = "ZEROSHIP_WORKER_KEY / --worker-key-file";
 
 type SlotReaperTask = compio::runtime::JoinHandle<Result<(), zeroship_data_core::error::DbError>>;
 
@@ -77,8 +73,12 @@ where
 
 /// Every credential the worker needs, tagged by the subsystem that needs it.
 ///
-/// Both are unconditional: a worker that cannot poll control for versions and
-/// cannot authenticate dispatch is a worker with nothing to do.
+/// ONE, and unconditional: a worker that cannot poll control for versions is a
+/// worker with nothing to do. The dispatch credential is NOT here and is not an
+/// omission - it is an ed25519 key file loaded by
+/// [`build_service_auth`], which refuses a file it cannot read or that other
+/// local users can, checks this audit cannot express and a strength floor on a
+/// shared string cannot replace.
 /// [`zeroship_core::config::audit_credentials`] handles the three material
 /// cases, so a `--check-config` run still never judges a secret it deliberately
 /// did not read.
@@ -92,16 +92,6 @@ fn worker_credentials(
             label: CONTROL_KEY_LABEL,
             secret: &settings.control_key,
             validate: require_nonempty,
-        },
-        // The worker key authenticates dispatch and the ZeroShip-User HMAC, so
-        // every worker requires the same 32-byte floor regardless of bind
-        // address.
-        SubsystemCredential {
-            subsystem: "gateway-dispatch",
-            enabled: true,
-            label: WORKER_KEY_LABEL,
-            secret: &settings.worker_key,
-            validate: validate_worker_key,
         },
     ]
 }
@@ -159,7 +149,7 @@ fn worker_rejects_db_url(db_url: &str) -> bool {
 /// direction for both callers.
 ///
 /// Extracted so the two guards that need it cannot drift apart. The set used to be
-/// inlined at the `WORKER_KEY` guard only; a second copy at the unsigned-advance
+/// inlined at the credential guard only; a second copy at the unsigned-advance
 /// guard would have been one edit away from disagreeing about what counts as local.
 fn is_loopback_bind(bind_host: &str) -> bool {
     bind_host == "127.0.0.1" || bind_host == "::1" || bind_host == "localhost"
@@ -192,7 +182,7 @@ pub struct WorkerConfig {
     /// once per app load.
     ///
     /// `ServiceAuth::unconfigured()` refuses every inbound call and mints
-    /// nothing outbound. Unlike `worker_key`, absence is a closed door.
+    /// nothing outbound. Absence is a CLOSED DOOR: it refuses, never disables.
     pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub control_url: String,
     pub control_key: String,
@@ -207,11 +197,6 @@ pub struct WorkerConfig {
     pub max_isolates: usize,
     pub max_pinned_isolates_per_app: usize,
     pub poll_interval_secs: u64,
-    /// Shared secret with the gateway. When non-empty, every /dispatch call
-    /// must present `Authorization: Bearer <worker_key>` and the
-    /// `ZeroShip-User` header must carry a valid HMAC. When empty, both
-    /// checks are bypassed — dev mode only.
-    pub worker_key: String,
     /// Seconds ntex will wait after SIGTERM for in-flight requests to
     /// finish. Requests still running after the deadline are dropped and
     /// the worker exits. `0` means "wait forever" — useful locally but
@@ -245,17 +230,26 @@ pub struct WorkerConfig {
 /// Neither file configured: boot, and refuse every guarded edge. Configured but
 /// unloadable: exit, because a wrong path must not be indistinguishable from an
 /// unadopted deployment.
+///
+/// The same peer document also supplies the GATEWAY's public key for the
+/// `ZeroShip-User` identity envelope, and a document that omits it is a HARD
+/// STOP rather than a warning. The predecessor's failure mode was exactly the
+/// opposite - an empty `worker_key` turned the envelope check off and the
+/// bearer check with it - so the missing-key branch here is the point of the
+/// change, not an edge case of it.
 fn build_service_auth(
     key_file: &std::path::Path,
     peers_file: &std::path::Path,
 ) -> zeroship_core::service_peers::ServiceAuth {
     use zeroship_core::service_assertion::TransportAssertionVerifier;
     use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+    use zeroship_core::user_envelope::UserEnvelopeVerifier;
 
     if key_file.as_os_str().is_empty() && peers_file.as_os_str().is_empty() {
         tracing::error!(
-            "worker: no service key material configured; dispatch and the control-plane \
-             app reads will refuse. Set worker.service_key_file and worker.service_peers_file."
+            "worker: no service key material configured; dispatch, the identity envelope \
+             and the control-plane app reads will all refuse. Set worker.service_key_file \
+             and worker.service_peers_file."
         );
         return ServiceAuth::unconfigured();
     }
@@ -263,6 +257,13 @@ fn build_service_auth(
         Ok(issuer) => issuer,
         Err(error) => {
             tracing::error!(%error, "worker: refusing to start - worker service issuer is malformed");
+            std::process::exit(1);
+        }
+    };
+    let gateway = match service_issuer(zeroship_core::service_peers::GATEWAY_SERVICE_NAME) {
+        Ok(issuer) => issuer,
+        Err(error) => {
+            tracing::error!(%error, "worker: refusing to start - gateway service issuer is malformed");
             std::process::exit(1);
         }
     };
@@ -277,7 +278,24 @@ fn build_service_auth(
         tracing::error!("worker: refusing to start - peer bundle already taken");
         std::process::exit(1);
     };
+    // Built BEFORE the bundle is consumed, and fatal if it cannot be. A worker
+    // that came up without it would verify the dispatch hop and then have no
+    // way to check who the request is FOR - and the only shapes available then
+    // are "trust the header" or "drop every user to anonymous", one unsafe and
+    // one silently wrong.
+    let user_envelope = match UserEnvelopeVerifier::for_issuer(&bundle, &gateway) {
+        Ok(verifier) => verifier,
+        Err(error) => {
+            tracing::error!(
+                %error,
+                "worker: refusing to start - the peer document must publish the gateway's \
+                 public key, which is what identity envelopes are verified under"
+            );
+            std::process::exit(1);
+        }
+    };
     ServiceAuth::new(keyring, Arc::new(TransportAssertionVerifier::new(bundle)))
+        .verifying_user_envelopes(user_envelope)
 }
 
 fn main() -> std::io::Result<()> {
@@ -308,7 +326,6 @@ fn main() -> std::io::Result<()> {
         }
     };
     let db_url = settings.database_url.expose_str().to_owned();
-    let worker_key = settings.worker_key.expose_str().to_owned();
     let shutdown_timeout = *settings.shutdown_timeout.get();
     let blob_store_root = settings.blob_store.get().clone();
     // `s3://…` → remote S3 store, bare path → local disk (dev default).
@@ -348,7 +365,7 @@ fn main() -> std::io::Result<()> {
 
     // THE BOOT GATE, before the bind guard below and before the
     // `--check-config` report, so a dry run over a placeholder credential exits
-    // non-zero. The worker_key strength check used to sit AFTER the bind guard;
+    // non-zero. The credential strength check used to sit AFTER the bind guard;
     // the two are independent refusals and only the order in which a
     // doubly-misconfigured launch reports changes.
     let credentials =
@@ -563,7 +580,6 @@ fn main() -> std::io::Result<()> {
         max_isolates,
         max_pinned_isolates_per_app,
         poll_interval_secs: poll_interval,
-        worker_key,
         shutdown_timeout_secs: shutdown_timeout,
         blob_store,
         workflow_blob_store,
@@ -928,7 +944,7 @@ mod tests {
     /// registered unconditionally, so the flag is the only thing between an
     /// unauthenticated caller and workflow replay.
     ///
-    /// This mirrors the `WORKER_KEY` guard above: same hazard class -
+    /// This mirrors the credential guard above: same hazard class -
     /// unauthenticated mutation reachable over the network - so the same posture.
     ///
     /// Cost of the guard measured, not assumed: nothing under `deploy/` passes the
@@ -1033,107 +1049,58 @@ mod tests {
 
     // --- Secret<T> conversion: the guards still run on the resolved material ---
 
-    /// The `WORKER_KEY` strength guard, driven end to end through the REAL
-    /// declaration: a `--worker-key-file` path is resolved by the generated
-    /// resolver and `validate_worker_secrets` hands the material it produced to
-    /// `validate_worker_key`.
+    /// The boot gate, driven end to end through the REAL declaration: a
+    /// `--control-key-file` path is resolved by the generated resolver and the
+    /// audit hands the material it produced to `require_nonempty`.
+    ///
+    /// It drives `control_key` because that is now the worker's ONLY audited
+    /// credential. Its predecessor drove the worker key, whose length floor is
+    /// gone with the secret itself: the dispatch hop is authenticated by an
+    /// ed25519 service assertion, and the file it loads is refused for being
+    /// unreadable or wrongly permissioned rather than for being short.
     ///
     /// Three cases plus a one-variable partner, because "the guard rejects
     /// everything" and "the guard rejects nothing" both satisfy a single case.
     #[test]
-    fn a_weak_or_absent_worker_key_still_fails_the_boot_guard() {
-        let strong = "0123456789abcdef0123456789abcdef";
-        let control = SecretFile::new("control", "control-key-material");
-        let good = SecretFile::new("worker_ok", strong);
-        let weak = SecretFile::new("worker_weak", "short");
+    fn a_missing_or_placeholder_control_key_still_fails_the_boot_guard() {
+        let good = SecretFile::new("control_ok", "control-key-material");
 
-        // 1. WEAK material, read from the file the flag named: rejected.
-        let settings = resolve(&[
-            "--control-key-file",
-            control.arg(),
-            "--worker-key-file",
-            weak.arg(),
-        ]);
-        assert_eq!(settings.worker_key.source(), Some(SourceKind::CliFile));
-        let posture = audit_credentials(&worker_credentials(&settings));
-        assert_eq!(posture.weak().len(), 1, "{posture:?}");
-        assert_eq!(posture.weak()[0].subsystem, "gateway-dispatch");
-        assert!(posture.weak()[0].message.contains("too short"), "{posture:?}");
-
-        // 1b. The one-variable partner: same flags, a strong key at the path.
-        let ok = audit_credentials(&worker_credentials(&resolve(&[
-            "--control-key-file",
-            control.arg(),
-            "--worker-key-file",
-            good.arg(),
-        ])));
-        assert!(ok.is_ok(), "a strong worker key passes every guard: {ok:?}");
-        assert_eq!(ok.checked(), 2, "both worker credentials were judged");
-
-        // 2. ABSENT: nothing supplies the worker key. The audit runs the
+        // 1. ABSENT: nothing supplies the control key. The audit runs the
         // validator on "", which is how it produces its own "is required".
-        let settings = resolve(&["--control-key-file", control.arg()]);
-        assert!(!settings.worker_key.is_configured());
+        let settings = resolve(&[]);
+        assert!(!settings.control_key.is_configured());
         let absent = audit_credentials(&worker_credentials(&settings));
         assert_eq!(absent.weak().len(), 1, "{absent:?}");
-        assert_eq!(absent.weak()[0].subsystem, "gateway-dispatch");
+        assert_eq!(absent.weak()[0].subsystem, "control-version-poll");
         assert!(absent.weak()[0].unset);
         assert!(absent.weak()[0].message.contains("required"), "{absent:?}");
+        assert!(
+            absent.weak()[0].message.contains("ZEROSHIP_CONTROL_KEY"),
+            "{absent:?}"
+        );
 
-        // 2b. THE SENTINEL, on the same credential: the SAME message as absent,
-        // because empty and the placeholder are one branch. A gate that gave
-        // them separate branches is the Gitaly defect.
-        let sentinel = SecretFile::new("worker_sentinel", SERVICE_CREDENTIAL_SENTINEL);
-        let settings = resolve(&[
-            "--control-key-file",
-            control.arg(),
-            "--worker-key-file",
-            sentinel.arg(),
-        ]);
+        // 2. THE SENTINEL on a credential with NO length floor. `control_key`
+        // is `SecretStrength::Unrestricted`, so nothing but the sentinel branch
+        // can refuse a placeholder here - which is the case the gate exists for,
+        // and it must produce the SAME message as absent.
+        let sentinel = SecretFile::new("control_sentinel", SERVICE_CREDENTIAL_SENTINEL);
+        let settings = resolve(&["--control-key-file", sentinel.arg()]);
+        assert_eq!(settings.control_key.source(), Some(SourceKind::CliFile));
         let placeholder = audit_credentials(&worker_credentials(&settings));
         assert_eq!(placeholder.weak().len(), 1, "{placeholder:?}");
         assert_eq!(placeholder.weak()[0].message, absent.weak()[0].message);
 
-        // 3. The CONTROL key is a separate subsystem, so a test that only ever
-        // saw the worker-key message could not tell the two apart.
-        let settings = resolve(&["--worker-key-file", good.arg()]);
-        let control_only = audit_credentials(&worker_credentials(&settings));
-        assert_eq!(control_only.weak().len(), 1, "{control_only:?}");
-        assert_eq!(control_only.weak()[0].subsystem, "control-version-poll");
-        assert!(
-            control_only.weak()[0].message.contains("ZEROSHIP_CONTROL_KEY"),
-            "{control_only:?}"
-        );
-
-        // 3b. THE SENTINEL ON A CREDENTIAL WITH NO LENGTH FLOOR. `control_key`
-        // is `SecretStrength::Unrestricted`, so nothing but the sentinel branch
-        // can refuse a placeholder here - which is the case this whole gate
-        // exists for.
-        let sentinel_control = SecretFile::new("control_sentinel", SERVICE_CREDENTIAL_SENTINEL);
-        let settings = resolve(&[
+        // 3. The one-variable partner: real material at the same path passes,
+        // so the two refusals above are about the material and not about the
+        // guard refusing everything it is handed.
+        let ok = audit_credentials(&worker_credentials(&resolve(&[
             "--control-key-file",
-            sentinel_control.arg(),
-            "--worker-key-file",
             good.arg(),
-        ]);
-        let floorless = audit_credentials(&worker_credentials(&settings));
-        assert_eq!(floorless.weak().len(), 1, "{floorless:?}");
-        assert_eq!(floorless.weak()[0].subsystem, "control-version-poll");
-        assert_eq!(floorless.weak()[0].message, control_only.weak()[0].message);
+        ])));
+        assert!(ok.is_ok(), "a real control key passes every guard: {ok:?}");
+        assert_eq!(ok.checked(), 1, "the worker audits exactly one credential");
 
-        // 3c. The one-variable partner for 3b: one byte of REAL material in the
-        // same floorless credential passes, so the refusal is about the
-        // placeholder and not about length.
-        let one_byte = SecretFile::new("control_one_byte", "x");
-        let settings = resolve(&[
-            "--control-key-file",
-            one_byte.arg(),
-            "--worker-key-file",
-            good.arg(),
-        ]);
-        assert!(audit_credentials(&worker_credentials(&settings)).is_ok());
-
-        // Does NOT cover the environment or TOML tiers of these secrets: the env
+        // Does NOT cover the environment or TOML tiers of this secret: the env
         // tier is process-global and would race sibling tests, and the overlay
         // tier is `resolve_secret_sources`'s, asserted in core. It also does not
         // prove `main` calls `worker_credentials` - only that the function main
@@ -1147,15 +1114,15 @@ mod tests {
     /// mode, not of the guard having been removed.
     #[test]
     fn a_check_config_run_neither_reads_nor_judges_a_secret_file() {
-        let missing = std::env::temp_dir().join("zeroship_worker_absent_worker_key");
+        let missing = std::env::temp_dir().join("zeroship_worker_absent_control_key");
         let _ = std::fs::remove_file(&missing);
         assert!(!missing.exists(), "the fixture path must really be absent");
         let missing = missing.to_str().expect("utf8 path").to_owned();
 
-        let dry = resolve(&["--check-config", "--worker-key-file", &missing]);
-        assert!(dry.worker_key.is_configured());
+        let dry = resolve(&["--check-config", "--control-key-file", &missing]);
+        assert!(dry.control_key.is_configured());
         assert_eq!(
-            dry.worker_key.expose_secret(),
+            dry.control_key.expose_secret(),
             None,
             "--check-config must not have read the file"
         );
@@ -1164,16 +1131,19 @@ mod tests {
             posture
                 .weak()
                 .iter()
-                .all(|weak| weak.subsystem != "gateway-dispatch"),
+                .all(|weak| weak.subsystem != "control-version-poll"),
             "an unread secret must not be judged: {posture:?}"
         );
         assert_eq!(posture.unread(), 1, "and it must be COUNTED as unread");
 
         // The one-variable partner: only `--check-config` differs, and the boot
         // run does try to open the same path.
-        let boot =
-            WorkerSettingsSources::try_parse_from(["zeroship-worker", "--worker-key-file", &missing])
-                .expect("worker sources parse");
+        let boot = WorkerSettingsSources::try_parse_from([
+            "zeroship-worker",
+            "--control-key-file",
+            &missing,
+        ])
+        .expect("worker sources parse");
         assert!(WorkerSettings::resolve_config(boot, None).is_err());
 
         // Does NOT cover whether `main` routes `--check-config` to the report
@@ -1239,7 +1209,7 @@ mod tests {
             .get_arguments()
             .filter_map(|arg| arg.get_long().map(str::to_owned))
             .collect::<Vec<_>>();
-        for secret in ["control-key", "worker-key", "database-url", "kv-url"] {
+        for secret in ["control-key", "database-url", "kv-url"] {
             assert!(
                 longs.iter().any(|long| long == &format!("{secret}-file")),
                 "{secret} must offer a -file path flag: {longs:?}"

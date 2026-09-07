@@ -1091,26 +1091,45 @@ pub struct WorkerUser<'a> {
 }
 
 /// Serialize the authenticated user as
-/// `base64(JSON).<request_id>.<iat>.<hex-hmac>` for the `ZeroShip-User`
-/// header. The worker decodes the base64 portion and verifies the HMAC
-/// against the same `worker_key` before trusting the identity.
+/// `base64(JSON).<request_id>.<iat>.<kid>.<base64url-ed25519-signature>` for
+/// the `ZeroShip-User` header. The worker decodes the base64 portion and
+/// verifies the signature under the GATEWAY's published public key before
+/// trusting the identity.
 ///
 /// Signing prevents a caller with direct network access to the worker
 /// from forging a user identity, even if the worker's endpoint bearer-auth
 /// were ever bypassed. The request id and timestamp binding limit replay if
 /// a header leaks through logs or a proxy.
+///
+/// # That guarantee is now true, and was not
+///
+/// The paragraph above shipped for as long as this function has existed, and
+/// under the previous envelope it was FALSE BY CONSTRUCTION: the signature was
+/// an HMAC keyed by `worker_key`, the very secret that bearer-authenticated the
+/// dispatch endpoint. A caller who had bypassed - or simply held - that bearer
+/// held the minting key too, so "even if the bearer were bypassed" described a
+/// defence that did not exist. Worse, an empty `worker_key` disabled the bearer
+/// check while the worker went on verifying envelopes under the same empty key.
+///
+/// The identity envelope is asymmetric as of this change
+/// ([`zeroship_core::user_envelope`]). The gateway holds the only private key
+/// that can produce one; the worker holds the public half and can check but not
+/// mint. The claim is a property of the key model now rather than a hope about
+/// the transport.
+///
+/// Returns `None` when this gateway loaded no service key material and so
+/// cannot sign. Callers MUST fail the request rather than forward an unsigned
+/// identity - and such a gateway also mints no dispatch credential, so the
+/// worker refuses the hop outright.
 #[must_use]
 pub fn encode_user_header(
     user: &WorkerUser<'_>,
-    worker_key: &str,
+    signer: Option<&zeroship_core::user_envelope::UserEnvelopeSigner>,
     request_id: uuid::Uuid,
-) -> String {
+) -> Option<String> {
+    let signer = signer?;
     let json = serde_json::to_string(user).unwrap_or_default();
-    zeroship_core::auth::sign_zeroship_user_header(
-        worker_key.as_bytes(),
-        json.as_bytes(),
-        request_id,
-    )
+    Some(signer.sign(json.as_bytes(), request_id))
 }
 
 #[cfg(test)]
