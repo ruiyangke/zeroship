@@ -40,7 +40,7 @@ note() { printf '  %s\n' "$1"; }
 
 # --- derive the allowed flag set from the CLI's own help lines ----------------
 # Each line looks like:
-#   zeroship deploy   <path-to-.zship> --app=<name> [--control=URL] [--token=PAT] [--no-create]
+#   zeroship deploy   <path-to-.zship> --app=<id> [--control=URL] [--token=PAT] [--no-create]
 # The set is the UNION of every such line, not the first one. main.rs states the
 # deploy usage in THREE places - the module doc, the `expect` on the missing-path
 # argument, and the top-level help - and when this gate was written they did not
@@ -53,7 +53,12 @@ note() { printf '  %s\n' "$1"; }
 # narrower message and silently drop a real flag from the allowed set, still
 # printing "passed". That was found by RUNNING the refusal arm below, not by
 # reading it, which is the only reason it is not still in here.
-HELP_LINES="$(grep -oE 'zeroship deploy[^"]*--app=<name>[^"]*' "$CLI_MAIN" || true)"
+# The anchor is `--app=<id>`, and it changed from `--app=<name>` when the CLI
+# stopped guessing which of the two a value was. That guess is what the anchor
+# has to track: a help line still promising `--app=<name>` would be describing a
+# call the parser now refuses, so this gate going dark on the rename is the
+# right failure - it says the prose and the parser have parted company.
+HELP_LINES="$(grep -oE 'zeroship deploy[^"]*--app=<id>[^"]*' "$CLI_MAIN" || true)"
 if [ -z "$HELP_LINES" ]; then
   echo "FAIL: could not find any deploy help line in $CLI_MAIN." >&2
   echo "      This gate derives its allowed flags from those lines; with none it" >&2
@@ -65,7 +70,7 @@ fi
 # that routinely prints warnings teaches its readers to ignore its stderr.
 ALLOWED="$(printf '%s\n' "$HELP_LINES" | grep -oE '[-][-][a-z-]+' | sort -u)"
 ALLOWED_COUNT="$(printf '%s\n' "$ALLOWED" | grep -c . || true)"
-# MEASURED 2026-08-20: 6 flags parsed from the deploy help lines. Floor 2 is
+# MEASURED 2026-09-06: 7 flags parsed from the deploy help lines. Floor 2 is
 # reused unchanged from the pre-library hand-rolled check this replaces -
 # below it there are too few flags to tell "the flag set shrank" from "the
 # help-line regex stopped matching".
@@ -100,7 +105,7 @@ fi
 PARSER_FLAGS="$(sed -n '/^const DEPLOY_KNOWN_FLAGS/,/^];/p' "$CLI_MAIN" \
   | grep -oE '"[-][-][a-z-]+"' | tr -d '"' | sort -u || true)"
 PARSER_COUNT="$(printf '%s\n' "$PARSER_FLAGS" | grep -c . || true)"
-# MEASURED 2026-08-20: 6 flags parsed from DEPLOY_KNOWN_FLAGS. Floor 2 is
+# MEASURED 2026-09-06: 7 flags parsed from DEPLOY_KNOWN_FLAGS. Floor 2 is
 # reused unchanged from the pre-library hand-rolled check this replaces, for
 # the same reason as help_flags above: too few flags to tell "the const
 # shrank" from "the sed range stopped matching the const block".
