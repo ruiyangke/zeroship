@@ -27,6 +27,7 @@
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
+use zeroship_control::billing_read::LocalInvoicing;
 use zeroship_control::organizations::{
     self as organizations, AddMemberBody, AddProjectMemberBody, ChangeRoleBody, CreateInviteBody,
     CreateOrganizationBody, CreateProjectBody, OrganizationError, RedeemInviteBody,
