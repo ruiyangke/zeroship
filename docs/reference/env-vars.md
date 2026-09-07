@@ -312,6 +312,8 @@ by the generator.
 | `control.port` | operational | `ZEROSHIP_CONTROL_PORT` | `control.port` | zeroship-control `--port` | `9090` |
 | `control.provider_config` | operational | `ZEROSHIP_CONTROL_PROVIDER_CONFIG` | `control.provider_config` | zeroship-control `--provider-config` | `{}` |
 | `control.resend_api_key` | secret | `ZEROSHIP_CONTROL_RESEND_API_KEY` | `control.resend_api_key` | zeroship-control `--resend-api-key-file` | - |
+| `control.service_key_file` | operational | `ZEROSHIP_CONTROL_SERVICE_KEY_FILE` | `control.service_key_file` | zeroship-control `--service-key-file` | empty |
+| `control.service_peers_file` | operational | `ZEROSHIP_CONTROL_SERVICE_PEERS_FILE` | `control.service_peers_file` | zeroship-control `--service-peers-file` | empty |
 | `control.smtp_host` | operational | `ZEROSHIP_CONTROL_SMTP_HOST` | `control.smtp_host` | zeroship-control `--smtp-host` | empty |
 | `control.smtp_password` | secret | `ZEROSHIP_CONTROL_SMTP_PASSWORD` | `control.smtp_password` | zeroship-control `--smtp-password-file` | - |
 | `control.smtp_port` | operational | `ZEROSHIP_CONTROL_SMTP_PORT` | `control.smtp_port` | zeroship-control `--smtp-port` | `587` |
@@ -348,6 +350,8 @@ by the generator.
 | `gateway.port` | operational | `ZEROSHIP_GATEWAY_PORT` | `gateway.port` | zeroship-gate `--port` | `80` |
 | `gateway.prev_signing_key_file` | operational | `ZEROSHIP_GATEWAY_PREV_SIGNING_KEY_FILE` | `gateway.prev_signing_key_file` | zeroship-gate `--prev-signing-key-file` | empty |
 | `gateway.public_url` | operational | `ZEROSHIP_GATEWAY_PUBLIC_URL` | `gateway.public_url` | zeroship-gate `--public-url` | `https://api.zeroship.ai` |
+| `gateway.service_key_file` | operational | `ZEROSHIP_GATEWAY_SERVICE_KEY_FILE` | `gateway.service_key_file` | zeroship-gate `--service-key-file` | empty |
+| `gateway.service_peers_file` | operational | `ZEROSHIP_GATEWAY_SERVICE_PEERS_FILE` | `gateway.service_peers_file` | zeroship-gate `--service-peers-file` | empty |
 | `gateway.signing_key_file` | operational | `ZEROSHIP_GATEWAY_SIGNING_KEY_FILE` | `gateway.signing_key_file` | zeroship-gate `--signing-key-file` | empty |
 | `gateway.stash_signing_key` | secret | `ZEROSHIP_GATEWAY_STASH_SIGNING_KEY` | `gateway.stash_signing_key` | zeroship-gate `--stash-signing-key-file` | - |
 
@@ -392,6 +396,8 @@ by the generator.
 | `worker.max_pinned_isolates_per_app` | operational | `ZEROSHIP_WORKER_MAX_PINNED_ISOLATES_PER_APP` | `worker.max_pinned_isolates_per_app` | zeroship-worker `--max-pinned-isolates-per-app` | `4` |
 | `worker.max_step_blob_bytes` | operational | `ZEROSHIP_WORKER_MAX_STEP_BLOB_BYTES` | `worker.max_step_blob_bytes` | zeroship-worker `--max-step-blob-bytes` | `67_108_864` |
 | `worker.port` | operational | `ZEROSHIP_WORKER_PORT` | `worker.port` | zeroship-worker `--port` | `8080` |
+| `worker.service_key_file` | operational | `ZEROSHIP_WORKER_SERVICE_KEY_FILE` | `worker.service_key_file` | zeroship-worker `--service-key-file` | empty |
+| `worker.service_peers_file` | operational | `ZEROSHIP_WORKER_SERVICE_PEERS_FILE` | `worker.service_peers_file` | zeroship-worker `--service-peers-file` | empty |
 | `worker.shutdown_timeout` | operational | `ZEROSHIP_WORKER_SHUTDOWN_TIMEOUT` | `worker.shutdown_timeout` | zeroship-worker `--shutdown-timeout` | `30` |
 | `worker.socket` | operational | `ZEROSHIP_WORKER_SOCKET` | `worker.socket` | zeroship-worker `--socket` | empty |
 | `worker.storage_url` | operational | `ZEROSHIP_WORKER_STORAGE_URL` | `worker.storage_url` | zeroship-worker `--storage-url` | empty |
