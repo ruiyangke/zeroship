@@ -633,6 +633,26 @@ impl ServiceTrustBundle {
         self.issuers.get(issuer).map(Vec::as_slice)
     }
 
+    /// Every issuer this bundle publishes `public_key` under, in name order.
+    ///
+    /// The index this type is built around answers "which keys for this
+    /// issuer"; this is the same relation read the other way, and it exists
+    /// because the question a LOADER has to ask is the reverse one. A key that
+    /// appears under two issuers makes both of them verifiable by whoever holds
+    /// the one private half - which is the shared-bearer property the per-issuer
+    /// index exists to remove, reintroduced one row lower down.
+    ///
+    /// Public key material in, issuer names out, so this concedes nothing: the
+    /// caller already holds the bundle.
+    #[must_use]
+    pub fn issuers_publishing(&self, public_key: &[u8; 32]) -> Vec<&str> {
+        self.issuers
+            .iter()
+            .filter(|(_, keys)| keys.iter().any(|key| key.public == *public_key))
+            .map(|(issuer, _)| issuer.as_str())
+            .collect()
+    }
+
     /// The raw public keys trusted for exactly `issuer`, each with the `kid` it
     /// is indexed under.
     ///
