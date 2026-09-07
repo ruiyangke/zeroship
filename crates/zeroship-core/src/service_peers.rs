@@ -72,6 +72,7 @@ use crate::service_assertion::{
 use crate::service_identity::{
     verify_service_call, AuthError, IdentityVerifier, ServiceEndpoint, ServiceIdentity,
 };
+use crate::user_envelope::{EnvelopeKeyError, UserEnvelopeSigner, UserEnvelopeVerifier};
 
 /// The trust domain every platform service issuer sits in.
 pub const SERVICE_TRUST_DOMAIN: &str = "zeroship.ai";
@@ -136,6 +137,9 @@ pub enum PeerKeyError {
     /// The key material was rejected by the assertion mechanism.
     #[error("service key material: {0}")]
     Material(#[from] AssertionError),
+    /// The key material was rejected by the identity-envelope mechanism.
+    #[error("identity envelope key material: {0}")]
+    Envelope(#[from] EnvelopeKeyError),
 }
 
 /// One published peer key.
@@ -165,6 +169,7 @@ struct PeerKeyDocument {
 pub struct ServiceKeyring {
     issuer: ServiceIssuer,
     minter: ServiceAssertionMinter,
+    envelope: UserEnvelopeSigner,
     bundle: Option<ServiceTrustBundle>,
 }
 
@@ -182,7 +187,7 @@ impl ServiceKeyring {
     ) -> Result<Self, PeerKeyError> {
         Self::from_parts(
             issuer,
-            &load_signing_key(key_path)?,
+            load_signing_key(key_path)?,
             load_peer_bundle(peers_path)?,
         )
     }
@@ -200,14 +205,21 @@ impl ServiceKeyring {
     /// signing.
     pub fn from_parts(
         issuer: ServiceIssuer,
-        signing_key: &ServiceSigningKey,
+        signing_key: ServiceSigningKey,
         bundle: ServiceTrustBundle,
     ) -> Result<Self, PeerKeyError> {
         let minter =
-            ServiceAssertionMinter::new(issuer.clone(), signing_key.key_id(), signing_key)?;
+            ServiceAssertionMinter::new(issuer.clone(), signing_key.key_id(), &signing_key)?;
+        // The key is MOVED in rather than borrowed, because this process signs
+        // two different things with it: service assertions (the minter) and, at
+        // the gateway, the `ZeroShip-User` identity envelope. Loading the file
+        // twice to get two owners is how the two would drift onto different
+        // key material after a rotation.
+        let envelope = UserEnvelopeSigner::new(signing_key)?;
         Ok(Self {
             issuer,
             minter,
+            envelope,
             bundle: Some(bundle),
         })
     }
@@ -225,6 +237,19 @@ impl ServiceKeyring {
     /// Returns [`AssertionError::Signing`] when the JWT cannot be signed.
     pub fn mint_for(&self, audience: &ServiceIssuer) -> Result<String, AssertionError> {
         self.minter.mint(audience)
+    }
+
+    /// This service's signer for `ZeroShip-User` identity envelopes.
+    ///
+    /// Every keyring can build one, and only the GATEWAY's envelopes are
+    /// trusted anywhere: a callee's [`UserEnvelopeVerifier`] is built for the
+    /// gateway issuer alone, so an envelope another service signed resolves to
+    /// no key and is refused. Withholding the signer here would look like a
+    /// second fence and would not be one - the fence is on the verifying side,
+    /// where it can be checked.
+    #[must_use]
+    pub const fn user_envelope_signer(&self) -> &UserEnvelopeSigner {
+        &self.envelope
     }
 
     /// Take the peer trust bundle, leaving the minter behind.
@@ -263,6 +288,7 @@ impl ServiceKeyring {
 pub struct ServiceAuth {
     keyring: Option<ServiceKeyring>,
     verifier: Option<Arc<dyn IdentityVerifier + Send + Sync>>,
+    user_envelope: Option<UserEnvelopeVerifier>,
 }
 
 impl fmt::Debug for ServiceAuth {
@@ -271,6 +297,7 @@ impl fmt::Debug for ServiceAuth {
             .debug_struct("ServiceAuth")
             .field("issuer", &self.keyring.as_ref().map(|k| k.issuer().as_str()))
             .field("can_verify", &self.verifier.is_some())
+            .field("user_envelope", &self.user_envelope)
             .finish()
     }
 }
@@ -285,7 +312,21 @@ impl ServiceAuth {
         Self {
             keyring: Some(keyring),
             verifier: Some(verifier),
+            user_envelope: None,
         }
+    }
+
+    /// Declare that this process also verifies `ZeroShip-User` identity
+    /// envelopes issued by whichever service `verifier` was built for.
+    ///
+    /// Opt-in per process, and taken only by the WORKER. A callee that does not
+    /// declare it refuses every envelope, which is the right answer for a
+    /// service no identity is forwarded to: a verifier nobody asked for would
+    /// be an accepting path nobody reviewed.
+    #[must_use]
+    pub fn verifying_user_envelopes(mut self, verifier: UserEnvelopeVerifier) -> Self {
+        self.user_envelope = Some(verifier);
+        self
     }
 
     /// The state of a process that was given no service key material.
@@ -294,6 +335,7 @@ impl ServiceAuth {
         Self {
             keyring: None,
             verifier: None,
+            user_envelope: None,
         }
     }
 
@@ -319,6 +361,25 @@ impl ServiceAuth {
                 None
             }
         }
+    }
+
+    /// This process's signer for `ZeroShip-User` identity envelopes, or `None`
+    /// when it holds no key.
+    ///
+    /// `None` means EMIT NOTHING, never emit unsigned. A caller that cannot get
+    /// a signer must fail the request rather than forward an identity the
+    /// callee has no way to check - which is the same rule as
+    /// [`ServiceAuth::authorization_for`], for the same reason.
+    #[must_use]
+    pub fn user_envelope_signer(&self) -> Option<&UserEnvelopeSigner> {
+        self.keyring.as_ref().map(ServiceKeyring::user_envelope_signer)
+    }
+
+    /// The verifier for inbound `ZeroShip-User` identity envelopes, or `None`
+    /// when this process was not configured to accept any.
+    #[must_use]
+    pub const fn user_envelope_verifier(&self) -> Option<&UserEnvelopeVerifier> {
+        self.user_envelope.as_ref()
     }
 
     /// Verify an inbound caller's credential and its grant on `endpoint`.
