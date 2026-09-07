@@ -2,7 +2,7 @@
 //! database.
 //!
 //! Shape:
-//!   zeroship migrate [path-to-migrations.ir.json] [--app=<name|uuid>]
+//!   zeroship migrate [path-to-migrations.ir.json] [--app=<id>] [--app-name=<name>]
 //!                    [--control=URL] [--token=TOKEN] [--config=PATH] [--env=NAME] [--yes]
 //!
 //! The path comes from `zeroship.jsonc`'s `migrations.out` unless a positional
@@ -37,7 +37,8 @@ use std::path::PathBuf;
 
 use crate::project_config::{self, ProjectConfig, Resolved};
 use crate::{
-    flag_str, is_uuid, parse_app_id, resolve_bearer_token, run_curl, ControlResponse,
+    app_id_or_refuse, flag_str, parse_app_id, parse_flag, resolve_bearer_token, run_curl,
+    AppTarget, ControlResponse,
 };
 
 /// The migration set to post: a positional path, else `<migrations.out>/<IR_FILENAME>`.
@@ -76,7 +77,7 @@ pub const IR_FILENAME: &str = "migrations.ir.json";
 /// control plane named on the command line, and applying a migration set to
 /// the wrong database is not something an error message afterwards can undo.
 const MIGRATE_KNOWN_FLAGS: &[&str] = &[
-    "--app", "--control", "--token", "--config", "--env", "--yes",
+    "--app", "--app-name", "--control", "--token", "--config", "--env", "--yes",
 ];
 
 pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
@@ -99,15 +100,7 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
         (None, None) => None,
     };
 
-    let app = project_config::resolve_value(
-        args,
-        "--app",
-        None,
-        None,
-        resolved.as_ref(),
-        "app",
-        None,
-    )?;
+    let (app, target) = resolve_migrate_app(args, resolved.as_ref())?;
     let control_url = project_config::resolve_control(args, resolved.as_ref())?;
     let token = resolve_bearer_token(args)?;
 
@@ -147,7 +140,7 @@ pub fn cmd_migrate(args: &[String]) -> Result<(), String> {
     })?;
 
     let mut client = CurlMigrateClient;
-    let outcome = apply_migrations(&mut client, &control_url, &app, &token, &body)?;
+    let outcome = apply_migrations(&mut client, &control_url, &target, &token, &body)?;
 
     eprintln!(
         "Applied {} migration op(s) to app {} ({} skipped).",
@@ -262,7 +255,40 @@ impl MigrateClient for CurlMigrateClient {
     }
 }
 
-/// Resolve `--app` to an id and POST the body.
+/// Decide WHAT `migrate` was pointed at, from which input carried the value.
+///
+/// The same rule as `deploy`'s `resolve_deploy_app` and one deliberate
+/// difference: there is NO `name` fallback. `migrate`'s `app` key is required,
+/// because the fallback's purpose - a brand-new project that has no id yet -
+/// is a deploy affordance, and letting it apply here is the mint-and-migrate
+/// failure the command's own docs describe.
+fn resolve_migrate_app(
+    args: &[String],
+    resolved: Option<&Resolved>,
+) -> Result<(project_config::Sourced, AppTarget), String> {
+    if let Some(name) = parse_flag(args, "--app-name") {
+        if parse_flag(args, "--app").is_some() {
+            return Err(
+                "--app and --app-name both name a target; pass one. --app takes the \
+                 app's ID (the identity), --app-name its routing label."
+                    .to_string(),
+            );
+        }
+        return Ok((
+            project_config::Sourced {
+                value: name.clone(),
+                source: project_config::Source::Flag("--app-name"),
+            },
+            AppTarget::Name(name),
+        ));
+    }
+
+    let sourced = project_config::resolve_value(args, "--app", None, None, resolved, "app", None)?;
+    let id = app_id_or_refuse(&sourced.value)?;
+    Ok((sourced, AppTarget::Id(id)))
+}
+
+/// POST the body to the app `app` names, resolving a name through the app list.
 ///
 /// Deliberately NOT auto-creating a missing app, unlike `deploy`: creating an
 /// app is the right answer to "push this code somewhere new", and the wrong
@@ -272,14 +298,13 @@ impl MigrateClient for CurlMigrateClient {
 pub(crate) fn apply_migrations<C: MigrateClient>(
     client: &mut C,
     control_url: &str,
-    app: &str,
+    app: &AppTarget,
     token: &str,
     body: &str,
 ) -> Result<MigrateOutcome, String> {
-    let app_id = if is_uuid(app) {
-        app.to_string()
-    } else {
-        resolve_app_id_by_name(client, control_url, token, app)?
+    let app_id = match app {
+        AppTarget::Id(id) => id.clone(),
+        AppTarget::Name(name) => resolve_app_id_by_name(client, control_url, token, name)?,
     };
 
     let response = client.apply(control_url, &app_id, token, body)?;
@@ -317,7 +342,7 @@ fn resolve_app_id_by_name<C: MigrateClient>(
     }
     Err(format!(
         "app `{name}` not found; `zeroship migrate` never creates an app - \
-         deploy it first, or pass its uuid with --app="
+         deploy it first, or pass its id with --app="
     ))
 }
 
@@ -416,8 +441,14 @@ mod tests {
             r#"{"migration_id":"0197f8a1-2b3c-7d4e-8f90-1a2b3c4d5e6f","applied":["20260101000000_create_todos"],"skipped":[],"pending_contract":[]}"#,
         );
 
-        let outcome = apply_migrations(&mut client, "http://control.test", app, "tok", "{}")
-            .expect("apply by id");
+        let outcome = apply_migrations(
+            &mut client,
+            "http://control.test",
+            &AppTarget::Id(app.to_string()),
+            "tok",
+            "{}",
+        )
+        .expect("apply by id");
 
         assert_eq!(outcome.applied, 1);
         assert_eq!(outcome.skipped, 0);
@@ -445,8 +476,14 @@ mod tests {
             )
             .with_apply(200, r#"{"applied":[],"skipped":["a","b"]}"#);
 
-        let outcome = apply_migrations(&mut client, "http://control.test", "todos", "tok", "{}")
-            .expect("apply by name");
+        let outcome = apply_migrations(
+            &mut client,
+            "http://control.test",
+            &AppTarget::Name("todos".to_string()),
+            "tok",
+            "{}",
+        )
+        .expect("apply by name");
 
         assert_eq!(outcome.applied, 0);
         assert_eq!(outcome.skipped, 2);
@@ -466,8 +503,14 @@ mod tests {
     fn unknown_name_fails_without_creating_anything() {
         let mut client = FakeMigrateClient::default().with_list(200, "[]");
 
-        let err = apply_migrations(&mut client, "http://control.test", "typo", "tok", "{}")
-            .expect_err("unknown app must fail");
+        let err = apply_migrations(
+            &mut client,
+            "http://control.test",
+            &AppTarget::Name("typo".to_string()),
+            "tok",
+            "{}",
+        )
+        .expect_err("unknown app must fail");
 
         assert!(err.contains("never creates an app"), "{err}");
         assert_eq!(client.calls, vec![FakeCall::List]);
@@ -484,8 +527,14 @@ mod tests {
             r#"{"error":"migration_malformed","detail":"malformed IR document (20260101000000_create_todos.ir.json): unknown op"}"#,
         );
 
-        let err = apply_migrations(&mut client, "http://control.test", app, "tok", "{}")
-            .expect_err("422 must fail");
+        let err = apply_migrations(
+            &mut client,
+            "http://control.test",
+            &AppTarget::Id(app.to_string()),
+            "tok",
+            "{}",
+        )
+        .expect_err("422 must fail");
 
         assert!(err.contains("HTTP 422"), "{err}");
         assert!(err.contains("20260101000000_create_todos.ir.json"), "{err}");
