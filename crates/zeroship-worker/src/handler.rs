@@ -3018,11 +3018,39 @@ pub(crate) mod tests {
                  even when the TRANSPORT credential is the gateway's genuine one"
             );
 
+            // THE SAME FORGERY, RELABELLED with the gateway's real `kid`.
+            //
+            // Without this arm the one above is bound by KEY RESOLUTION rather
+            // than by the signature: an unknown `kid` resolves to no key and is
+            // refused before any verification runs, so neutralising the
+            // signature check leaves it green. Measured, not assumed - deleting
+            // `verify_strict` from `UserEnvelopeVerifier` kept the arm above
+            // passing and this one is what goes red.
+            let mut parts: Vec<&str> = forged.split('.').collect();
+            parts[3] = identity.gateway.user_envelope_signer().key_id();
+            let relabelled = parts.join(".");
+            let resp = test::call_service(
+                &app,
+                test::TestRequest::post()
+                    .uri(&format!("/dispatch/{}", worker_app_path(&app_id)))
+                    .header("authorization", gateway_authorization())
+                    .header("x-request-id", request_id.to_string().as_str())
+                    .header("zeroship-user", relabelled.as_str())
+                    .set_payload(dispatch_frame("GET", "http://example.test/", b""))
+                    .to_request(),
+            )
+            .await;
+            assert_eq!(
+                resp.status(),
+                StatusCode::UNAUTHORIZED,
+                "naming a trusted kid must not admit an envelope signed by another key"
+            );
+
             // THE CONTROL, one variable apart: the SAME payload, the SAME
             // request id, the SAME transport credential - signed by the gateway.
             // It gets past the identity check and fails on the missing app
-            // instead, so the refusal above is the signature and not the shape
-            // of the envelope or the reachability of the route.
+            // instead, so the refusals above are the credential and not the
+            // shape of the envelope or the reachability of the route.
             let genuine = identity.gateway.user_envelope_signer().sign(USER, request_id);
             assert_ne!(genuine, forged, "the two signers must differ");
             let resp = test::call_service(
