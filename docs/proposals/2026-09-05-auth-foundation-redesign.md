@@ -289,13 +289,19 @@ the point of definition so it is not reopened later as taste. What lands with it
 it is **UNVERIFIED** that the namespaces are shared in the tree TODAY - that
 marker stands as a measurement, its experiment is in section 11, and its answer
 tells step 5 whether it adopts an existing shared namespace or has to merge
-separate ones. And the membership edge the settled model names does not exist at
-the project level: the corpus has `zeroship.app_members` with roles owner, editor
-and viewer in `db/migrations-ts/20260702000200_control_tables.ts`, which is
-APP-scoped. "A membership edge on a project" therefore implies moving that edge
-onto D-B's unit, and neither decision performs that move. That move is
-independent of D-E: an audience-scoped suspension reads the grant row, not a
-membership edge, so it needs no per-role handle.
+separate ones. **The membership edge the settled model names now EXISTS at the
+project level, and this paragraph said it did not** - see C9.
+`db/migrations-ts/20260906000000_organization_entity_model.ts` drops the
+APP-scoped `zeroship.app_members` that
+`db/migrations-ts/20260702000200_control_tables.ts` created and replaces it with
+organization membership NARROWED per project: `zeroship.organization_members`
+carries the seat, `zeroship.project_members` reduces it, and
+`zeroship_authz::authority::effective_project_rank` composes the pair by minimum
+so a project row can grant or ceiling but never widen. So "a membership edge on
+a project" is a description of the tree rather than an implication this design
+has to discharge. It remains independent of D-E either way: an audience-scoped
+suspension reads the grant row, not a membership edge, so it needs no per-role
+handle.
 
 Carries `credential_epoch` (the generalised `credential_version`) and
 `account_status`, a state machine over `active`, `deletion_scheduled` and
@@ -334,24 +340,54 @@ unit a subject and a grant are scoped to, and it replaces `sector_identifier`,
 the per-app OAuth `client_id`, and the CLI pseudo-client with one value.
 
 **Settled by the operator as decision D-B** (section 10): the audience unit is the
-Project, with no organization container above it for now, and task #82 stays
-deferred. The sum's variants are a decision, not a design premise. **The
+Project. The sum's variants are a decision, not a design premise. **The
 choice is recoverable, and that is why the sum can be closed now:** a later
 organization layer would be a NEW audience variant rather than a re-derivation of
 the sum.
+
+**That recoverability clause has stopped being hypothetical.** An organization
+layer HAS landed, above the project rather than beside it. The CHOICE recorded in
+D-B is untouched by this document - the audience unit is still the Project - but
+the condition it was recorded under is gone, and section 10.2 item 10 puts the
+consequent question to the operator instead of answering it here.
 
 `Project`, not `App`. That is task #72, and the unit is settled rather than
 contingent: with app-scoped sectors there is no unit between "one app" and "the
 platform", so cross-app teardown has no object.
 
-**This design CREATES the Project entity.** `db/migrations-ts/` contains no
-projects table. The only project shape in the corpus is a `project_id` text
-column under a `prj_` regular-expression check on the sandbox table in
-`db/migrations-ts/20260702000500_sandbox_tables.ts`, belonging to a subsystem
-extracted to a sibling repository. Read every `projects.id` foreign key in the
-sketches below as pointing at a table this design introduces, and reconcile the
-id spelling against `prj_` when it is introduced; nothing in the corpus supplies
-it today. Creating the entity is tracked as task #210 and is not designed here.
+**THE PROJECT ENTITY EXISTS. This paragraph asserted the opposite, and the
+correction is C9.** `db/migrations-ts/20260906000000_organization_entity_model.ts`
+creates `zeroship.projects`: `id` text PRIMARY KEY under a `projects_id_shape`
+check for `^prj_[0-9A-Za-z]{22}$`, minted by
+`zeroship_core::project_id::ProjectId` in `crates/zeroship-core/src/project_id.rs`,
+a `slug` unique per organization, and `projects_organization_identity_key` over
+`(id, organization_id)`. Membership landed with it as `zeroship.project_members`,
+and `zeroship.app_members` was DROPPED in the same migration. `Resource::Project`
+is live in `crates/zeroship-authz/src/resource.rs`, the narrowing rule is
+`zeroship_authz::authority::effective_project_rank` in
+`crates/zeroship-authz/src/authority.rs`, and
+`crates/zeroship-control/src/organizations.rs` serves the create, read and
+membership routes. So every `projects.id` foreign key in the sketches below
+points at a live table carrying exactly the `prj_` spelling this paragraph used
+to tell a reader to reconcile. The prefix collision it warned about is still
+live and still not a join: `zeroship.sandboxes.project_id` in
+`db/migrations-ts/20260702000500_sandbox_tables.ts` carries its own `prj_` check
+for a derived dedup key belonging to the extracted sandbox subsystem, with no
+foreign key into this corpus.
+
+**What the landed entity leaves for step 9, and it is a real obligation rather
+than nothing.** `projects.id` carries a NON-DEFAULT catalog collation: the
+migration applies `COLLATE "C"` through a `raw` island, which the migration
+engine's pre-migration catalog snapshot cannot see. A `sessions.project_id` or
+`grants.project_id` authored as plain `text` and given its foreign key in the
+SAME migration will be REFUSED, because the lowering compares a freshly authored
+`text` against a live `text COLLATE "C"`. That is not a hazard being predicted
+here; it is why `db/migrations-ts/20260906000200_apps_project_ownership_key.ts`
+exists as its own file. Step 9 therefore adds and collates the column in one
+migration and adds the foreign key in a later one. A second mismatch to carry
+into the sketches: `zeroship.users.id` is still `uuid`, so `person_id` stays
+`uuid` while `project_id` is collated text - the two id domains do not match, by
+design.
 
 *Without it:* subjects are either global, so apps correlate users across the
 platform, or per-app, so a project's apps cannot agree on a user.
@@ -401,10 +437,12 @@ amr, acr, auth_time, scopes, label
 created_at, idle_expires_at, absolute_expires_at, revoked_at
 ```
 
-`projects.id` here, and on the grant row below, is the entity this design creates
-- see AUDIENCE above. Nothing in `db/migrations-ts/` supplies it today, so the
-foreign key is an obligation of step 9 rather than a reference to something that
-already exists.
+`projects.id` here, and on the grant row below, resolves to a LIVE table - see
+AUDIENCE above, and C9 for what this paragraph used to say. What step 9 still
+owes is not the entity but the ORDERING: the column is authored and collated
+`C` in one migration and the foreign key added in a later one, because the
+engine cannot see a `raw` collation island inside the migration it is lowering
+against.
 
 **`grant_id` is NOT NULL, and stating why is the point of this paragraph.** Every
 audience has a grant row, Platform included: the grant is one row per (person,
@@ -1957,13 +1995,27 @@ suspend the platform audience, assert the platform session is refused and the
 project session still refreshes. That direction is what proves the deploy-authority
 act has a writer, and it is unwritable unless `grant_id` is NOT NULL.
 
-**Step 9. Audience becomes the project.** Task #72. The unit is settled by D-B,
-so this step carries no decision blocker; it carries ENTITY blockers instead,
-and settling the unit is what makes them load-bearing rather than academic.
-*Premise:* step 5 and step 7, because the sector is stored on the grant row; plus
-creating the Project entity, which `db/migrations-ts/` does not have, and moving
-the membership edge off the app-scoped `zeroship.app_members` in
-`db/migrations-ts/20260702000200_control_tables.ts` onto the project.
+**Step 9. Audience becomes the project.** Task #72. The unit is settled by D-B and
+the entity now EXISTS, so this step carries neither a decision blocker nor an
+entity blocker. **Both former blockers were discharged outside this design, not
+by it**, which is why the step got smaller without anyone working on it:
+`db/migrations-ts/20260906000000_organization_entity_model.ts` creates
+`zeroship.projects` and `zeroship.project_members` and DROPS the app-scoped
+`zeroship.app_members` from
+`db/migrations-ts/20260702000200_control_tables.ts`, so the membership edge this
+step used to have to move has already moved. The step is now unblocked and
+unstarted, which is a different status from blocked.
+*Premise:* step 5 and step 7, because the sector is stored on the grant row.
+*What is left, stated as work rather than as a dependency.* First, move the
+sector off the app: `crates/zeroship-auth/src/oidc/authorization_code.rs` and its
+siblings `crates/zeroship-auth/src/oidc/refresh.rs` and
+`crates/zeroship-auth/src/oidc/backchannel_logout.rs` still resolve it per app as
+`COALESCE(aoc.sector_identifier, ac.client_id)` over `zeroship.app_oauth_clients`,
+and a project-level sector is named under DELIBERATELY NOT HERE in the entity
+migration's own header. Second, author `grants.project_id` and
+`sessions.project_id` under the collation ordering the AUDIENCE section states -
+add-and-collate in one migration, foreign key in a later one - or the lowering
+refuses the pair.
 *Red test:* a control differing in one variable - apps of one project produce
 equal subjects, distinct projects produce unequal ones. Moving the sector back to
 the app apex fails each half.
@@ -2125,14 +2177,29 @@ asked about. The live arms stay:
 `crates/zeroship-auth/src/identity/linker.rs`. There is no SAML anywhere in the
 tree, so "SSO" here means those OAuth arms and nothing more.
 
-**D-B. The audience unit is the Project.** Decided by the operator: project level,
-with no organization container above it for now, and task #82 stays deferred.
+**D-B. The audience unit is the Project.** Decided by the operator: project level.
+
+*The second half of this decision as originally recorded - "with no organization
+container above it for now, and task #82 stays deferred" - is now FALSE as a
+statement about the tree, and is struck rather than reworded.* Organizations
+landed on main in
+`db/migrations-ts/20260906000000_organization_entity_model.ts` with rows,
+membership, a closed role ladder, invites and a re-rooted billing subject; #82 is
+not deferred. **The operator's CHOICE is untouched by that and is not reopened
+here: the audience unit is still the Project.** What changed is the condition the
+choice was recorded under, and item 10 below puts the consequent question to the
+operator.
 
 *Why the choice is recoverable, which is the reason it can be settled now:* a
 later organization layer would be a NEW audience variant rather than a
-re-derivation of the closed sum. *What the settlement does NOT answer:* whether
-subjects are stable across a project reparent. That consequence is an unresolved
-design question, not a decision, and nothing else in this document states it.
+re-derivation of the closed sum. That escape hatch is the one this document
+still relies on, and it is now the live question rather than the contingency.
+*What the settlement does NOT answer:* whether subjects are stable across a
+project reparent. That consequence is an unresolved design question, not a
+decision, and nothing else in this document states it. It is also currently
+UNPERFORMABLE: `crates/zeroship-control/src/registry.rs` writes `apps.project_id`
+once, at create, and no route updates it - so the operation the open question
+asks about cannot be exercised even to observe what it does.
 
 *What the unit enables, recorded and deliberately not designed here.* Per-project
 external identity - "this project's users authenticate against this customer's own
@@ -2214,9 +2281,12 @@ from the foreign key every other session carries. See the `grant_id` paragraph i
 2. **SETTLED as D-C.** No external signer; the reopening condition is recorded in
    D-C and in section 9.
 
-3. **SETTLED as D-B.** Project level, no organization container for now, task #82
-   deferred. The reparent-stability consequence recorded under D-B is still
-   unresolved.
+3. **SETTLED as D-B.** Project level. The clause about no organization container
+   is SUPERSEDED rather than reworded: organizations landed, task #82 is not
+   deferred, and the question that raises is item 10. The reparent-stability
+   consequence recorded under D-B is still unresolved, and is now also
+   unperformable - nothing updates `apps.project_id`, so the operation the
+   question asks about cannot be exercised.
 
 4. **The access-assertion TTL and the feed staleness budget.** OPEN, and
    deferrable to when step 6 is written. The first is the mint-load and
@@ -2256,14 +2326,71 @@ from the foreign key every other session carries. See the `grant_id` paragraph i
    and the `jti` claim rides whichever direction carries the request. Appended
    rather than inserted, per the numbering rule above.
 
+10. **Now that organizations EXIST, does an organization layer change what a
+    SUBJECT or a SUSPENSION is scoped to - or is Project still the right unit,
+    with organizations sitting above it for ownership and billing?** OPEN, and
+    deliberately not answered in this document. **This is not a request to
+    re-litigate a settled decision.** D-B and D-E stand exactly as recorded. It
+    is put here because both were decided when an organization above the project
+    was a hypothetical the operator was choosing AGAINST, and it is now a live
+    entity with rows, membership, a role ladder and the platform's entire billing
+    subject re-rooted onto it. The operator answered a question about a choice;
+    this is a question about a fact. Appended rather than inserted, per the
+    numbering rule above.
+
+    *The reading that keeps Project, and it is the stronger one on privacy.* An
+    organization is a company and may run unrelated products; correlating one
+    human across them is a leak rather than a feature, and an
+    organization-scoped subject produces exactly that correlation by
+    construction. That argument is already written into the tree - the module
+    documentation of `crates/zeroship-core/src/organization_id.rs` states the id
+    seeds no subject derivation, appears in no token `aud`, and is never handed
+    to app code. On this reading nothing in section 3.2 moves: the audience sum
+    stays closed as `Platform | Project(pid)`, and the organization is an
+    ownership and billing root that identity never sees. D-E follows unchanged,
+    because a conduct suspension belongs where the conduct happened.
+
+    *The reading that reopens it, which is about suspension rather than about
+    subjects.* A creator-side suspension is ALREADY organization-scoped and
+    already shipped:
+    `db/migrations-ts/20260906000100_apps_organization_and_billing_subject.ts`
+    declares `organization_billing_status` with one row per organization over
+    `active | past_due | suspended`, and
+    `crates/zeroship-control/src/registry.rs` reaches every app of that
+    organization by a plain equi-join on `apps.organization_id`. So the platform
+    already stops a party at organization granularity for money, and D-E would
+    stop a person at project granularity for conduct. Two suspensions at two
+    scopes may be exactly right - they answer different questions about
+    different parties, and this design argues elsewhere that a person-scoped
+    column cannot express an audience-scoped state - or it may be the seam where
+    a later reader finds two stop mechanisms and cannot say which governs.
+    There is also one shape the Project unit cannot express at all: banning a
+    person from every product a single company runs is, under D-E, a repeated act
+    with no object that names it once.
+
+    *Why the tree's own answer does not settle this.* The
+    `crates/zeroship-core/src/organization_id.rs` paragraph RESTATES D-B; it does
+    not re-derive it with organizations present. Reading it as the answer would
+    be taking a consequence of the decision as evidence for the decision.
+
+    *What is NOT in tension, stated so the question stays narrow.* The audience
+    sum's closedness is unaffected either way - D-B's own recoverability clause
+    says an organization audience would be a NEW variant, not a re-derivation.
+    And pairwise subjects are still APP-scoped in the tree today
+    (`crates/zeroship-auth/src/oidc/authorization_code.rs`), so whichever way
+    this goes, step 9 is a move rather than a rewrite.
+
 ---
 
 ## 11. Corrections
 
 Claims made during this investigation that turned out wrong, and what is true.
-Each was established by reading the working tree today. Nothing was executed.
-C8 is a different kind of entry and is marked as such: it records an error in
-what this document PRESCRIBED, not in what it observed.
+Each was established by reading the working tree. Nothing was executed.
+Two entries are a different kind and are marked as such. C8 records an error in
+what this document PRESCRIBED, not in what it observed. C9 records an
+observation that was CORRECT WHEN TAKEN and was then repeated until it was not,
+which is a failure of process rather than of reading, and is the only entry here
+whose lesson outlives its subject.
 
 **C1. The service-assertion replay table IS provisioned. Earlier write-ups said it
 exists only as a DDL string inside a test, and that claim was published carrying a
@@ -2367,6 +2494,52 @@ by call rate and rules on the membership of the `/internal/` family; F6 is
 restated by edge and by guard kind; step 4 becomes a lease. The security
 properties are unchanged - this is a revision of which mechanism carries which
 property on which edge.
+
+**C9. THE PROJECT ENTITY EXISTS, AND THE PROCESS FAILURE THAT PUT ITS ABSENCE IN
+THIS DOCUMENT IS THE DURABLE PART OF THIS ENTRY.** The stale claim itself is
+trivia; how it survived is not.
+
+*What is true.* `zeroship.organizations`, `zeroship.projects`,
+`zeroship.project_members`, `zeroship.organization_members`,
+`zeroship.organization_roles` and `zeroship.organization_invites` are created by
+`db/migrations-ts/20260906000000_organization_entity_model.ts`, which also DROPS
+`zeroship.app_members`. `db/migrations-ts/20260906000100_apps_organization_and_billing_subject.ts`
+re-roots the billing subject from a human onto the organization, and
+`db/migrations-ts/20260906000200_apps_project_ownership_key.ts` binds an app to
+its project and organization with one composite key. `Resource::Project` and
+`Resource::Organization` are live in `crates/zeroship-authz/src/resource.rs`. The
+AUDIENCE section, the session sketch, step 9, decision D-B and numbered item 3
+each asserted the absence; each is corrected in place.
+
+*The failure.* The absence was established once, early, by a single grep for a
+projects table in the migration corpus. **It was true when it was taken.** It was
+then reported as a standing fact and repeated for hours - into this document,
+into a task, into a sibling proposal - without ever being re-derived, while the
+tree moved underneath it. Every downstream conclusion inherited the staleness
+rather than the measurement: step 9's "ENTITY blockers" clause, D-B's deferral
+half, and the repeated report that the organization container was deferred.
+
+*The rule it violated, which this project already holds and was applying to
+figures the whole time: a number carried forward goes stale.* A NEGATIVE
+existence result is the worst case of that rule, and worth stating as its own
+discipline. A figure at least invites "as of when"; an absence does not.
+"There is no projects table" reads identically whether it was measured a minute
+ago or a day ago, and it carries no version, no timestamp and no unit that
+would look wrong once it drifted. So the discipline is stricter for an absence
+than for a count: **re-derive it at the moment it is USED to block something,
+not at the moment it is discovered.** The instrument here was one grep, and it
+cost nothing to re-run.
+
+*Blast radius outside this file, recorded rather than repaired here.*
+`docs/proposals/2026-09-05-app-metadata-distribution.md` still presents the
+`app_members` and `creator_billing_status` join as a measured current fact; both
+of those tables are gone or re-rooted. It survives the citation gate because
+that gate checks that a cited PATH exists, never that a described SHAPE still
+does - which is the same blindness in a different instrument.
+
+*What C9 does not license.* It re-decides nothing. The landed model contradicts
+the CONDITION D-B was recorded under, not its content; section 10.2 item 10
+states that as a question for the operator and leaves it open.
 
 **Still UNVERIFIED, with the experiment for each.**
 
