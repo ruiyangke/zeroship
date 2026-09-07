@@ -295,9 +295,6 @@ pub struct ControlSettings {
     #[config(name = "control.service_peers_file", default = PathBuf::new())]
     pub service_peers_file: Operational<PathBuf>,
 
-    /// Shared secret for worker admin endpoints.
-    #[config(shared = WORKER_KEY)]
-    pub worker_key: Secret<String>,
 
     /// Master key used for control-plane encrypted env/secrets.
     #[config(name = "control.master_key")]

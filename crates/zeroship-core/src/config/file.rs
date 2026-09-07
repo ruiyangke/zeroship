@@ -58,8 +58,6 @@ pub struct FileConfig {
     /// the overlay may itself BE a mounted Kubernetes Secret; the prohibition on
     /// a plaintext secret applies to a TRACKED file, not to this format.
     pub control_key: Option<String>,
-    /// Platform-wide shared secret for worker admin endpoints.
-    pub worker_key: Option<String>,
     /// Dedicated PERMANENT pairwise-salt secret (auth-sdk 6.2). The per-app
     /// `pws_` identity anchor seed, identical on auth, gateway, and control, never
     /// rotated without a migration.
@@ -826,7 +824,6 @@ log_format = "json"
         // that happens to precede it. TOML scoping makes that a real hazard: a
         // root key written after a table header silently joins that table.
         assert!(config.control_key.is_some(), "control_key must be a root key");
-        assert!(config.worker_key.is_some());
         assert!(config.pairwise_salt.is_some());
         // A per-binary secret sits in that binary's table.
         assert!(config.control.master_key.is_some());

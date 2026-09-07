@@ -46,14 +46,6 @@ pub struct WorkerSettings {
     #[config(shared = CONTROL_KEY)]
     pub control_key: Secret<String>,
 
-    /// Shared secret for the gateway dispatch endpoints.
-    ///
-    /// It authenticates the dispatch bearer AND keys the per-request
-    /// `ZeroShip-User` HMAC, so it carries a 32-byte strength floor rather than
-    /// a presence check.
-    #[config(shared = WORKER_KEY)]
-    pub worker_key: Secret<String>,
-
     /// PKCS#8 PEM/DER FILE holding this process's own ed25519 service key.
     ///
     /// A PATH, not a `Secret<String>`: the loader sniffs PEM against DER and
@@ -63,7 +55,8 @@ pub struct WorkerSettings {
     /// Empty (the default) means this process can neither mint an assertion nor
     /// verify a peer's, so every internal edge guarded by one REFUSES - the
     /// dispatch endpoint included. Absence never admits; that is the difference
-    /// between this and `worker_key`, whose empty value disabled the check.
+    /// between this and the shared dispatch secret it replaced, whose empty
+    /// value disabled the check.
     #[config(name = "worker.service_key_file", default = PathBuf::new())]
     pub service_key_file: Operational<PathBuf>,
 

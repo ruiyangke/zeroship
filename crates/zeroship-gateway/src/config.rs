@@ -45,10 +45,6 @@ pub struct GateSettings {
     #[config(shared = CONTROL_KEY)]
     pub control_key: Secret<String>,
 
-    /// Shared secret for worker admin endpoints.
-    #[config(shared = WORKER_KEY)]
-    pub worker_key: Secret<String>,
-
     /// `PostgreSQL` DSN for gateway session validation. A DSN grammar admits
     /// userinfo, so it is secret-classed whether or not a given value carries a
     /// password.

@@ -509,8 +509,6 @@ pub struct AppState {
     pub gateway_url: String,
     /// Worker HTTP base URLs used for admin log fan-out.
     pub worker_urls: Vec<String>,
-    /// Shared secret for worker admin endpoints.
-    pub worker_key: SecretString,
     /// Per-IP rate limiter for mutating admin endpoints. Burst 30,
     /// 60/min steady — generous for honest tooling, fatal for loops.
     pub admin_limiter: Arc<RateLimiter>,

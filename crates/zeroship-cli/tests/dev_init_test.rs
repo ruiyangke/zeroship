@@ -8,7 +8,7 @@ use ed25519_dalek::pkcs8::DecodePrivateKey as _;
 use ed25519_dalek::SigningKey;
 use zeroship_core::config::{
     validate_master_key_material, validate_pairwise_salt,
-    validate_stash_key, validate_worker_key,
+    validate_stash_key,
 };
 
 // `migrate-dsn` is the one entry that is NOT generated key material: it is the
@@ -61,7 +61,7 @@ const PUBLIC_FILES: [&str; 1] = ["service-peers.json"];
 // Sorted, and every one is a canonical `ZEROSHIP_` name that some binary
 // declares. `GATEWAY_OIDC_SECRET` was dropped rather than renamed: nothing in
 // the tree reads it, so generating it only made an unread slot look configured.
-const ENV_KEYS: [&str; 8] = [
+const ENV_KEYS: [&str; 7] = [
     "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
     "ZEROSHIP_AUTH_TOTP_ENC_KEY",
     "ZEROSHIP_CONTROL_KEY",
@@ -69,7 +69,6 @@ const ENV_KEYS: [&str; 8] = [
     "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY",
     "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY",
     "ZEROSHIP_PAIRWISE_SALT",
-    "ZEROSHIP_WORKER_KEY",
 ];
 
 const WEAK_LITERALS: [&str; 6] = [
@@ -195,8 +194,6 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
 
     validate_master_key_material("ZEROSHIP_CONTROL_MASTER_KEY", &overlay["ZEROSHIP_CONTROL_MASTER_KEY"])
         .expect("generated master key must pass the production boot guard");
-    validate_worker_key("ZEROSHIP_WORKER_KEY", &overlay["ZEROSHIP_WORKER_KEY"])
-        .expect("generated worker key must pass the production boot guard");
     validate_stash_key(
         "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY",
         &overlay["ZEROSHIP_GATEWAY_STASH_SIGNING_KEY"],
