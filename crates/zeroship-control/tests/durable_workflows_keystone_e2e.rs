@@ -298,7 +298,7 @@ impl CrashOnceDispatcher {
         let (release_tx, release_rx) = oneshot::channel();
         (
             Self {
-                inner: GatewayStepDispatcher::new(gateway_url),
+                inner: GatewayStepDispatcher::new(gateway_url, test_control_service_auth()),
                 release: Arc::new(Mutex::new(Some(release_rx))),
                 dropped: Arc::new(Mutex::new(Some(drop_tx))),
             },
@@ -340,7 +340,7 @@ impl DropOnceDispatcher {
         let (drop_tx, drop_rx) = oneshot::channel();
         (
             Self {
-                inner: GatewayStepDispatcher::new(gateway_url),
+                inner: GatewayStepDispatcher::new(gateway_url, test_control_service_auth()),
                 dropped: Arc::new(Mutex::new(Some(drop_tx))),
             },
             drop_rx,
@@ -373,7 +373,7 @@ struct CountingDispatcher {
 impl CountingDispatcher {
     fn new(gateway_url: String) -> Self {
         Self {
-            inner: GatewayStepDispatcher::new(gateway_url),
+            inner: GatewayStepDispatcher::new(gateway_url, test_control_service_auth()),
             count: Arc::new(AtomicUsize::new(0)),
         }
     }
@@ -400,7 +400,7 @@ struct CapturingDispatcher {
 impl CapturingDispatcher {
     fn new(gateway_url: String) -> Self {
         Self {
-            inner: GatewayStepDispatcher::new(gateway_url),
+            inner: GatewayStepDispatcher::new(gateway_url, test_control_service_auth()),
             outcomes: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -435,7 +435,7 @@ struct TimingGatewayDispatcher {
 impl TimingGatewayDispatcher {
     fn new(gateway_url: String) -> Self {
         Self {
-            inner: GatewayStepDispatcher::new(gateway_url),
+            inner: GatewayStepDispatcher::new(gateway_url, test_control_service_auth()),
             latencies: Arc::new(Mutex::new(Vec::new())),
         }
     }
@@ -2787,7 +2787,7 @@ async fn keystone_real_spine() {
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
     prepare_side_effect_table(&fx.pg).await;
 
-    let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
+    let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone(), test_control_service_auth()));
     rollout_switch_drill(
         &fx,
         &control_url,
@@ -4960,7 +4960,7 @@ async fn scheduler_misfire_lost_register_recovers() {
     let first_claimed = workflow_engine::fire_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(GatewayStepDispatcher::new(gateway_url.clone())),
+        Arc::new(GatewayStepDispatcher::new(gateway_url.clone(), test_control_service_auth())),
         single_dispatch_config("scheduler-misfire-a"),
     )
     .await
@@ -5007,7 +5007,7 @@ async fn scheduler_misfire_lost_register_recovers() {
     let reaped = workflow_engine::reap_lapsed_inflight_once(
         &fx.scheduler_store,
         &fx.state,
-        Arc::new(GatewayStepDispatcher::new(gateway_url.clone())),
+        Arc::new(GatewayStepDispatcher::new(gateway_url.clone(), test_control_service_auth())),
         single_dispatch_config("scheduler-misfire-reaper"),
         8,
     )
@@ -5025,7 +5025,7 @@ async fn scheduler_misfire_lost_register_recovers() {
 
     drive_until_completed(
         &fx,
-        Arc::new(GatewayStepDispatcher::new(gateway_url)),
+        Arc::new(GatewayStepDispatcher::new(gateway_url, test_control_service_auth())),
         single_dispatch_config("scheduler-misfire-complete"),
         &run_id,
     )
@@ -5117,7 +5117,7 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
     }
     let _ = release_tx.send(());
     compio::time::sleep(Duration::from_millis(150)).await;
-    let redrive_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
+    let redrive_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone(), test_control_service_auth()));
     drive_until_completed(
         &fx,
         redrive_dispatcher,
@@ -5165,7 +5165,7 @@ async fn compensation_saga_rollback_real_spine() {
 
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
     prepare_side_effect_table(&fx.pg).await;
-    let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone()));
+    let real_dispatcher = Arc::new(GatewayStepDispatcher::new(gateway_url.clone(), test_control_service_auth()));
 
     let failed_run = seed_workflow_run(
         &fx,
@@ -5373,4 +5373,30 @@ async fn compensation_saga_rollback_real_spine() {
 
     drop(fx);
     common::drain_pg().await;
+}
+
+/// A control-plane identity for fixtures that drive a STUB gateway.
+///
+/// It MINTS and verifies nobody: the bundle is empty on purpose, because the
+/// stub these tests point at does no verification and a fixture that pretended
+/// otherwise would be asserting against itself. What it does bind is that the
+/// dispatcher can produce a credential at all - an unconfigured `ServiceAuth`
+/// turns every advance into backpressure, so without this the fixtures would
+/// measure the mint failing rather than the workflow advancing.
+fn test_control_service_auth() -> std::sync::Arc<zeroship_core::service_peers::ServiceAuth> {
+    use zeroship_core::service_assertion::{
+        ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
+    };
+    use zeroship_core::service_peers::{
+        service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME,
+    };
+
+    let issuer = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+    let key = ServiceSigningKey::generate();
+    let keyring = ServiceKeyring::from_parts(issuer, &key, ServiceTrustBundle::new())
+        .expect("control keyring");
+    std::sync::Arc::new(ServiceAuth::new(
+        keyring,
+        std::sync::Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+    ))
 }
