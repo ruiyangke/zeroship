@@ -1911,6 +1911,38 @@ service assertion to it: implemented as "also accept a service assertion", that
 sentence adds an additional accepted credential to an externally reachable
 route, which is worse than the delivery outage it was trying to avoid.
 
+*Landed. Where peer keys come from, and two things the step surfaced.*
+
+**Peer keys are CONFIGURED, not fetched, and this contradicts 3.5's "JWKS rides
+the same poll".** Each binary takes two paths - its own PKCS#8 private key and
+one JWKS-shaped document naming every peer's public half - through
+`crates/zeroship-core/src/service_peers.rs`. Three reasons, and the first is the
+decisive one: internal hops are cleartext HTTP here, so a polled JWKS is
+substitutable by exactly the adversary an asymmetric peer credential exists to
+stop. Second, the only feed reaching both the gateway and the worker is served by
+CONTROL, so distributing the GATEWAY's identity key over it would let control
+substitute the gateway's identity - a trust root 3.4 places nowhere near control.
+Third, F4 words step 3's fence as "absent a CONFIGURED gateway public key the
+worker refuses to start", and a fetch has not happened at startup. The trust
+bundle's own rustdoc already argued this and was already right. **3.5 should be
+corrected rather than implemented as written.** The cost is unattended rotation;
+the bundle carries several keys per issuer, so a rotation is still expressible
+without downtime.
+
+**F3 and the advance edge are incompatible in the END STATE, and step 6 inherits
+the problem.** `workflow_advance_internal`'s inbound edge takes the full profile,
+so the GATEWAY must claim a `jti` in a store every gateway replica shares. F3
+says the gateway holds no database credential at all. Both cannot be true. The
+implementation uses the gateway's existing per-thread pool and says so at
+`PoolReplayStore` in `crates/zeroship-gateway/src/main.rs`; whoever lands step 6
+has to move this edge off the gateway or re-tier it, and that comment is where
+they will find out.
+
+**Absence refuses rather than disabling, and that is the inversion.** A process
+with no key material serves no guarded edge and reaches no guarded peer
+(`ServiceAuth::unconfigured`). Step 3 still owes the STARTUP refusal F4 names;
+what step 2 delivers is that the request-time answer is already no.
+
 **Step 3. Make the identity envelope asymmetric.** The gateway signs with its own
 Ed25519 private key; the worker verifies under the public half; the empty-key
 escape is deleted and a missing public key refuses startup.
