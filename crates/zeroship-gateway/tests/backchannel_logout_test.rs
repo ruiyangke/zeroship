@@ -227,8 +227,9 @@ async fn seed_app(client: &Client, app_id: Uuid, name: &str) {
     let project_id = common::unowned_project(client).await;
     client
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
-             VALUES ($1, $2, 'free', $3)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+             SELECT $1, $2, 'free', p.id, p.organization_id \
+               FROM zeroship.projects p WHERE p.id = $3",
             &[
                 &app_id,
                 &name,

@@ -1,31 +1,30 @@
 //! Billing-reconcile cron.
 //!
-//! At month close (UTC), for each creator with billing enabled: sum the
-//! creator's owned apps' usage aggregates for the CLOSED (previous) calendar
-//! month, price each app via the plan catalog into invoice-item lines, push
-//! those lines as Stripe **invoice items** on the creator's platform Customer
-//! (`cus_…`), then create + finalize the invoice. Infra-cost billing ONLY — no
-//! Connect, no `application_fee` (those belong to the separate app-payment flow).
+//! At month close (UTC), for each organization with billing enabled: sum its
+//! apps' usage aggregates for the CLOSED (previous) calendar month, price each
+//! app via the plan catalog into invoice-item lines, push those lines as Stripe
+//! **invoice items** on the organization's platform Customer (`cus_…`), then
+//! create + finalize the invoice. Infra-cost billing ONLY — no Connect, no
+//! `application_fee` (those belong to the separate app-payment flow).
 //!
-//! Creator→app resolution: there is NO `apps.creator_id` column and no
-//! `apps.organization_id` either. Ownership flows along the one path an app has
-//! to a human - `apps.project_id -> projects.organization_id -> the
-//! organization's owners` - collapsed to the longest-standing owner by
-//! [`crate::organizations::app_owner_map`]. We group owned apps by `user_id` ⇒
-//! that user_id is the `creator_id`. An app whose organization has no owner
-//! (e.g. the system console) has no billable creator and is SKIPPED.
+//! ORGANIZATION -> APP RESOLUTION IS ONE COLUMN: `apps.organization_id`, a copy
+//! the composite key `(project_id, organization_id) -> projects(id,
+//! organization_id)` consumes, so it cannot name an organization the app's
+//! project does not belong to.
 //!
-//! THE ORGANIZATION IS THE BILLING SUBJECT IN THE DESIGN, AND IT IS NOT ONE
-//! HERE YET. This module still bills a USER, because moving the subscription to
-//! `organizations.plan_id` is a separate change with its own Stripe-side
-//! consumers. What has changed is only how that user is found. Read
-//! `creator_id` as "the owner who answers for this organization's bill", not as
-//! "the entity the platform bills".
+//! IT WAS NOT ALWAYS ONE COLUMN, AND WHAT THAT COST IS WORTH KNOWING. The
+//! subject used to be a HUMAN, reached by walking `apps.project_id ->
+//! projects.organization_id -> that organization's owners` and collapsing the
+//! fan-out to the longest-standing owner. Every consumer of that walk had to
+//! collapse identically or two of them would bill different people for one app,
+//! and an app whose organization seated nobody had no billable subject at all
+//! and was silently skipped. Neither hazard exists now: an organization is
+//! single-valued and always present.
 //!
 //! Idempotency — three airtight layers under at-least-once delivery (mapped onto
 //! the provider-agnostic invoice model: `invoices` + `invoice_lines` +
 //! `billing_provider_refs` / `billing_line_provider_refs`):
-//!   1. `invoices(creator_id, period)` UNIQUE, claimed BEFORE any Stripe call via
+//!   1. `invoices(organization_id, period)` UNIQUE, claimed BEFORE any Stripe call via
 //!      `INSERT … 'draft' ON CONFLICT DO NOTHING`. A `status='finalized'` row ⇒
 //!      already billed this period ⇒ skip entirely (no pricing, no Stripe call).
 //!      A `status='draft'` row is a crash-window remnant we re-drive.
@@ -52,7 +51,7 @@
 //!      subtotal/credit/tax/total/status/finalized_at in ONE UPDATE so the
 //!      `invoice_total_balances` CHECK never sees a half-written row.
 //!   4. A DETERMINISTIC Stripe `Idempotency-Key` per item/invoice derived from
-//!      `(creator_id, app_id, period_start)` — belt-and-suspenders for the
+//!      `(organization_id, app_id, period_start)` — belt-and-suspenders for the
 //!      <24h replay case (Stripe returns the original object rather than
 //!      creating a duplicate).
 //!
@@ -344,27 +343,27 @@ pub fn period_settled(
 }
 
 /// Deterministic Stripe `Idempotency-Key` for the per-SEGMENT invoice-ITEM create.
-/// Stable for a fixed `(creator, app, period, segment_no)` so a retry replays the
+/// Stable for a fixed `(organization, app, period, segment_no)` so a retry replays the
 /// same item. The key includes `segment_no` because an app posts N+1 items in a
 /// period (one per plan segment), and a segment-blind key would deduplicate them
 /// to a SINGLE Stripe item (only segment 0 would post, silently under-billing).
 /// The N=0 degenerate path passes `segment_no = 0`, so its key is
-/// `billitem:{creator}:{app}:{period}:0`, with segment 0 encoded explicitly.
+/// `billitem:{organization}:{app}:{period}:0`, with segment 0 encoded explicitly.
 #[must_use]
 pub fn invoice_item_idempotency_key(
-    creator_id: &Uuid,
+    organization_id: &str,
     app_id: &Uuid,
     period_start_unix: i64,
     segment_no: i16,
 ) -> String {
-    format!("billitem:{creator_id}:{app_id}:{period_start_unix}:{segment_no}")
+    format!("billitem:{organization_id}:{app_id}:{period_start_unix}:{segment_no}")
 }
 
 /// Deterministic Stripe `Idempotency-Key` for the per-run invoice create.
-/// Stable for a fixed `(creator, period)`.
+/// Stable for a fixed `(organization, period)`.
 #[must_use]
-pub fn invoice_idempotency_key(creator_id: &Uuid, period_start_unix: i64) -> String {
-    format!("billrun:{creator_id}:{period_start_unix}")
+pub fn invoice_idempotency_key(organization_id: &str, period_start_unix: i64) -> String {
+    format!("billrun:{organization_id}:{period_start_unix}")
 }
 
 /// Cron entry point. Loops forever; each iteration runs one [`tick`] then sleeps
@@ -388,7 +387,7 @@ pub async fn run(state: Arc<AppState>, tick_secs: u64) {
 }
 
 /// Run one reconcile sweep against the live Stripe client built from `state`.
-/// Returns the number of creators billed (a freshly-claimed `invoices` row that
+/// Returns the number of organizations billed (a freshly-claimed `invoices` row that
 /// resulted in a finalized invoice).
 #[allow(clippy::future_not_send)]
 pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
@@ -404,7 +403,7 @@ pub async fn tick(state: &AppState) -> Result<usize, RegistryError> {
 /// a mock-Stripe server, or a unit test against a recording fake.
 ///
 /// Takes the advisory lock for the whole sweep (multi-instance safety), bills
-/// the CLOSED previous month, and returns the number of creators billed.
+/// the CLOSED previous month, and returns the number of organizations billed.
 #[allow(clippy::future_not_send)]
 pub async fn tick_with<S: StripeApi>(
     state: &AppState,
@@ -434,7 +433,7 @@ pub async fn tick_with<S: StripeApi>(
     }
 
     // Multi-instance safety: single-flight the sweep fleet-wide. A loser skips
-    // this tick (the per-period `invoices(creator_id, period)` UNIQUE claim still
+    // this tick (the per-period `invoices(organization_id, period)` UNIQUE claim still
     // prevents a double bill, but the lock avoids duplicate Stripe round-trips).
     let lock_conn = state.registry.conn().await?;
     let got = lock_conn
@@ -464,44 +463,46 @@ pub async fn tick_with<S: StripeApi>(
     result
 }
 
-/// The advisory-lock-protected body: group owned apps by creator, bill each.
+/// The advisory-lock-protected body: group owned apps by organization, bill each.
 #[allow(clippy::future_not_send)]
 async fn sweep<S: StripeApi>(
     state: &AppState,
     _stripe: &S,
     period_start: i64,
 ) -> Result<usize, RegistryError> {
-    // Creator→apps via ownership (H1): the app's project, its organization, and
-    // that organization's longest-standing owner
-    // (`crate::organizations::app_owner_map`). An app whose organization has no
-    // owner is absent here and thus skipped.
+    // Organization -> apps is now ONE column read. `apps.organization_id` is a
+    // copy the composite key `(project_id, organization_id) -> projects(id,
+    // organization_id)` consumes, so it cannot disagree with the project's
+    // organization and needs no join to be trusted.
+    //
+    // What that deleted is the whole reason this used to be delicate: the old
+    // read walked apps -> projects -> organization_members, which fans out once
+    // per owner, so it needed `app_owner_map`'s DISTINCT ON to avoid billing a
+    // two-owner organization's apps twice. There is no fan-out to collapse now,
+    // because the subject is the organization rather than one of its humans.
     let conn = state.registry.conn().await?;
-    // The collapse to one row per app is NO LONGER DEFENSIVE. Under
-    // `app_members` a second owner row was a data-integrity fault; an
-    // ORGANIZATION legitimately holds several owners, so without the collapse
-    // an ordinary two-owner organization would bill each of its apps twice.
-    // The rule lives in one function so the sweep, the spend notifier and the
-    // per-creator slice cannot pick different owners for one app.
+    // NO `archived_at` FILTER, AND THAT IS THE POINT. Archiving an app must not
+    // discard the money it already owes: usage accrued before the archive is
+    // still billable, and an open draft for a closed period still has to reach
+    // finalize. `get_routes` filters archived apps because it answers "what
+    // should serve traffic"; this answers "what is owed", and the two are not
+    // the same question.
     let owner_rows = conn
         .query(
-            &format!(
-                "SELECT owner_map.user_id AS creator_id, owner_map.app_id FROM {owner_map} \
-                 owner_map",
-                owner_map = crate::organizations::app_owner_map(),
-            ),
+            "SELECT a.organization_id, a.id AS app_id FROM zeroship.apps a",
             &[],
         )
         .await?;
     // Bulk pre-filter (single fleet-wide query): only apps with at least one
     // `usage_aggregates` row for the CLOSED period can produce a non-zero charge —
     // every other app prices to `total_cents == 0` and is skipped inside
-    // `bill_creator` anyway. Dropping them BEFORE the per-creator/per-app loop
-    // means the per-app pricing reads (each of which opens a fresh,
+    // `bill_organization` anyway. Dropping them BEFORE the per-organization/per-app
+    // loop means the per-app pricing reads (each of which opens a fresh,
     // SCRAM-authenticated PG connection — `Registry` has no pool) run only over
-    // apps that actually accrued usage, not over every app ever owned. A creator
-    // left with no active app would have billed `total_cents == 0` (a no-op), so
-    // skipping them is observably identical (no invoice either way). This keeps
-    // the sweep cost O(apps-with-usage) instead of O(every-app-ever-owned).
+    // apps that actually accrued usage, not over every app ever owned. An
+    // organization left with no active app would have billed `total_cents == 0`
+    // (a no-op), so skipping it is observably identical (no invoice either way).
+    // This keeps the sweep cost O(apps-with-usage) instead of O(every-app-ever-owned).
     let period = period_date(period_start);
     let active_app_rows = conn
         .query(
@@ -512,16 +513,17 @@ async fn sweep<S: StripeApi>(
     let active_apps: std::collections::HashSet<Uuid> =
         active_app_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
 
-    // BTreeMap for deterministic creator ordering (stable invoice sequencing).
-    // Only apps that accrued usage this period are retained (see pre-filter above).
-    let mut apps_by_creator: BTreeMap<Uuid, Vec<Uuid>> = BTreeMap::new();
+    // BTreeMap for deterministic organization ordering (stable invoice
+    // sequencing). Only apps that accrued usage this period are retained (see
+    // pre-filter above).
+    let mut apps_by_organization: BTreeMap<String, Vec<Uuid>> = BTreeMap::new();
     for row in &owner_rows {
         let app_id: Uuid = row.get("app_id");
         if !active_apps.contains(&app_id) {
             continue;
         }
-        let creator_id: Uuid = row.get("creator_id");
-        apps_by_creator.entry(creator_id).or_default().push(app_id);
+        let organization_id: String = row.get("organization_id");
+        apps_by_organization.entry(organization_id).or_default().push(app_id);
     }
 
     let mut billed = 0usize;
@@ -535,8 +537,8 @@ async fn sweep<S: StripeApi>(
         .as_invoicer()
         .ok_or_else(|| RegistryError::Database("billing stack has no invoicer".to_string()))?;
 
-    for creator_id in apps_by_creator.keys() {
-        let subject = crate::metering::provider::SubjectRef(creator_id.to_string());
+    for organization_id in apps_by_organization.keys() {
+        let subject = crate::metering::provider::SubjectRef(organization_id.clone());
         match invoicer.close_period(&subject, billing_period).await.map_err(RegistryError::from)
         {
             Ok(crate::metering::provider::InvoiceRef(Some(_))) => billed += 1,
@@ -544,24 +546,25 @@ async fn sweep<S: StripeApi>(
                 /* nothing to bill / already billed / no customer */
             }
             // MAJOR-2: a missing global default FX means the platform cannot
-            // price ANY inheriting plan — this is NOT a per-creator hiccup. Abort
-            // the WHOLE sweep (bill no one) so we never emit a mix of correct and
-            // silently-$0 invoices. Fail closed.
+            // price ANY inheriting plan — this is NOT a per-organization hiccup.
+            // Abort the WHOLE sweep (bill no one) so we never emit a mix of
+            // correct and silently-$0 invoices. Fail closed.
             Err(e @ RegistryError::FxUnresolved) => {
                 tracing::error!(
-                    creator_id = %creator_id,
+                    organization_id = %organization_id,
                     error = %e,
-                    "billing_reconcile: global default FX missing — ABORTING sweep (no creator billed)"
+                    "billing_reconcile: global default FX missing — ABORTING sweep (nobody billed)"
                 );
                 return Err(e);
             }
             Err(e) => {
-                // A per-creator failure must not abort the whole sweep — log and
-                // continue so one creator's Stripe hiccup doesn't starve others.
+                // A per-organization failure must not abort the whole sweep — log
+                // and continue so one organization's Stripe hiccup doesn't starve
+                // the others.
                 tracing::error!(
-                    creator_id = %creator_id,
+                    organization_id = %organization_id,
                     error = %e,
-                    "billing_reconcile: failed to bill creator — continuing"
+                    "billing_reconcile: failed to bill organization — continuing"
                 );
             }
         }
@@ -774,35 +777,39 @@ pub async fn reconcile_pass_for_meter(
         InvoiceOwnership::OwnedInvoicer
     };
 
-    let mut subjects: HashMap<(Uuid, Uuid), SubjectPeriodTotals> = HashMap::new();
+    // BOTH HALVES OF THE COMPARISON MUST NAME THE SAME SUBJECT, and that is the
+    // whole reason this pass is written as one function. The witness half reads
+    // usage rows and attributes them; the invoiced half reads finalized invoice
+    // lines and attributes them. If one half moved to the organization and the
+    // other kept resolving a human owner, every subject in the fleet would look
+    // like drift and the safety net would report the migration itself as a
+    // fleet-wide `subject_attribution_mismatch`.
+    let mut subjects: HashMap<(String, Uuid), SubjectPeriodTotals> = HashMap::new();
     let local_rows = conn
         .query(
-            &format!(
-                "SELECT owner_map.user_id AS creator_id, u.app_id, \
-                        SUM(u.total)::bigint AS witness_quantity \
-                 FROM zeroship.usage_aggregates u \
-                 JOIN {owner_map} owner_map ON owner_map.app_id = u.app_id \
-                 WHERE u.period = $1::date AND u.metric = $2 \
-                 GROUP BY u.app_id, owner_map.user_id \
-                 ORDER BY u.app_id",
-                owner_map = crate::organizations::app_owner_map(),
-            ),
+            "SELECT a.organization_id, u.app_id, \
+                    SUM(u.total)::bigint AS witness_quantity \
+             FROM zeroship.usage_aggregates u \
+             JOIN zeroship.apps a ON a.id = u.app_id \
+             WHERE u.period = $1::date AND u.metric = $2 \
+             GROUP BY u.app_id, a.organization_id \
+             ORDER BY u.app_id",
             &[&period_date, &meter_name],
         )
         .await?;
     for row in &local_rows {
-        let creator_id: Uuid = row.get("creator_id");
+        let organization_id: String = row.get("organization_id");
         let app_id: Uuid = row.get("app_id");
         let witness_quantity: i64 = row.get("witness_quantity");
         subjects
-            .entry((creator_id, app_id))
-            .or_insert_with(|| SubjectPeriodTotals::new(creator_id, app_id, meter_name))
+            .entry((organization_id.clone(), app_id))
+            .or_insert_with(|| SubjectPeriodTotals::new(organization_id, app_id, meter_name))
             .witness_quantity = witness_quantity;
     }
 
     let line_rows = conn
         .query(
-            "SELECT i.creator_id, l.app_id, l.amount_cents, l.usage_snapshot \
+            "SELECT i.organization_id, l.app_id, l.amount_cents, l.usage_snapshot \
              FROM zeroship.invoices i \
              JOIN zeroship.invoice_lines l ON l.invoice_id = i.id \
              WHERE i.period = $1::date AND i.status = 'finalized' \
@@ -811,7 +818,7 @@ pub async fn reconcile_pass_for_meter(
         )
         .await?;
     for row in &line_rows {
-        let creator_id: Uuid = row.get("creator_id");
+        let organization_id: String = row.get("organization_id");
         let app_id: Uuid = row.get("app_id");
         let usage: serde_json::Value = row.get("usage_snapshot");
         let amount_cents: i64 = row.get("amount_cents");
@@ -819,30 +826,30 @@ pub async fn reconcile_pass_for_meter(
             continue;
         };
         let subject = subjects
-            .entry((creator_id, app_id))
-            .or_insert_with(|| SubjectPeriodTotals::new(creator_id, app_id, meter_name));
+            .entry((organization_id.clone(), app_id))
+            .or_insert_with(|| SubjectPeriodTotals::new(organization_id, app_id, meter_name));
         subject.invoiced_quantity += quantity;
         subject.invoiced_amount_cents += amount_cents;
     }
 
-    let mut apps_by_creator: HashMap<Uuid, HashSet<Uuid>> = HashMap::new();
-    for (creator_id, app_id) in subjects.keys() {
-        apps_by_creator
-            .entry(*creator_id)
+    let mut apps_by_organization: HashMap<&str, HashSet<Uuid>> = HashMap::new();
+    for (organization_id, app_id) in subjects.keys() {
+        apps_by_organization
+            .entry(organization_id.as_str())
             .or_default()
             .insert(*app_id);
     }
 
-    let mut provider_cache: HashMap<Uuid, Option<i64>> = HashMap::new();
+    let mut provider_cache: HashMap<String, Option<i64>> = HashMap::new();
     let mut summary = BillingSafetyNetSummary::default();
     for totals in subjects.values() {
         summary.subjects_checked += 1;
-        let provider_quantity = if apps_by_creator
-            .get(&totals.creator_id)
-            .is_some_and(|apps| apps.len() == 1)
-        {
+        let single_app = apps_by_organization
+            .get(totals.organization_id.as_str())
+            .is_some_and(|apps| apps.len() == 1);
+        let provider_quantity = if single_app {
             provider_cache
-                .entry(totals.creator_id)
+                .entry(totals.organization_id.clone())
                 .or_insert_with(|| None)
                 .to_owned()
         } else {
@@ -850,12 +857,11 @@ pub async fn reconcile_pass_for_meter(
         };
         let provider_quantity = match provider_quantity {
             Some(q) => Some(q),
-            None if apps_by_creator
-                .get(&totals.creator_id)
-                .is_some_and(|apps| apps.len() == 1) =>
-            {
-                let read = read_provider_quantity(state, totals.creator_id, period, meter_name).await?;
-                provider_cache.insert(totals.creator_id, read);
+            None if single_app => {
+                let read =
+                    read_provider_quantity(state, &totals.organization_id, period, meter_name)
+                        .await?;
+                provider_cache.insert(totals.organization_id.clone(), read);
                 read
             }
             None => None,
@@ -939,7 +945,7 @@ pub async fn reconcile_pass_for_meter(
 
 #[derive(Debug, Clone)]
 struct SubjectPeriodTotals {
-    creator_id: Uuid,
+    organization_id: String,
     app_id: Uuid,
     meter: String,
     witness_quantity: i64,
@@ -948,9 +954,9 @@ struct SubjectPeriodTotals {
 }
 
 impl SubjectPeriodTotals {
-    fn new(creator_id: Uuid, app_id: Uuid, meter: &str) -> Self {
+    fn new(organization_id: String, app_id: Uuid, meter: &str) -> Self {
         Self {
-            creator_id,
+            organization_id,
             app_id,
             meter: meter.to_string(),
             witness_quantity: 0,
@@ -975,7 +981,7 @@ impl SubjectPeriodTotals {
 #[allow(clippy::future_not_send)]
 async fn read_provider_quantity(
     state: &AppState,
-    creator_id: Uuid,
+    organization_id: &str,
     period: BillingPeriod,
     meter_name: &str,
 ) -> Result<Option<i64>, RegistryError> {
@@ -984,7 +990,7 @@ async fn read_provider_quantity(
     };
     let quantity = meter
         .read_aggregate(&AggregateQuery {
-            subject: SubjectRef(creator_id.to_string()),
+            subject: SubjectRef(organization_id.to_owned()),
             meter: meter_name.to_string(),
             period,
         })
@@ -1026,7 +1032,7 @@ where
             };
             invoicer
                 .adjustment_note(
-                    &SubjectRef(totals.creator_id.to_string()),
+                    &SubjectRef(totals.organization_id.to_string()),
                     &AdjustmentNote {
                         period,
                         app_id: Some(totals.app_id),
@@ -1056,7 +1062,7 @@ where
             })?;
             backfiller
                 .backfill(
-                    &SubjectRef(totals.creator_id.to_string()),
+                    &SubjectRef(totals.organization_id.to_string()),
                     &totals.meter,
                     period,
                     correct_total,
@@ -1242,22 +1248,22 @@ fn invoice_line_quantity_for_meter(usage: &serde_json::Value, meter: &str) -> Op
     }
 }
 
-/// Bill ONE creator for the closed period. Returns `Ok(true)` if a fresh invoice
+/// Bill ONE organization for the closed period. Returns `Ok(true)` if a fresh invoice
 /// was finalized this call, `Ok(false)` for a no-op (zero charge, already billed,
 /// or no saved customer).
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::future_not_send)]
-pub(crate) async fn bill_creator<S: StripeApi>(
+pub(crate) async fn bill_organization<S: StripeApi>(
     state: &AppState,
     stripe: &S,
     catalog: &PlanCatalog,
     weights: &MetricWeights,
     default_fx: Option<u64>,
-    creator_id: &Uuid,
+    organization_id: &str,
     app_ids: &[Uuid],
     period_start: i64,
 ) -> Result<bool, RegistryError> {
-    bill_creator_with_parts(
+    bill_organization_with_parts(
         &state.registry,
         &state.stripe_store,
         state.tax_provider.as_ref(),
@@ -1265,19 +1271,19 @@ pub(crate) async fn bill_creator<S: StripeApi>(
         catalog,
         weights,
         default_fx,
-        creator_id,
+        organization_id,
         app_ids,
         period_start,
     )
     .await
 }
 
-/// Dependency-injected form of [`bill_creator`]. The Lite/Stripe-invoice
+/// Dependency-injected form of [`bill_organization`]. The Lite/Stripe-invoice
 /// providers use this through `LiteStore`, keeping provider traits free of
 /// `&AppState` while preserving the existing reconciler body and money math.
 #[allow(clippy::too_many_arguments)]
 #[allow(clippy::future_not_send)]
-pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
+pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
     registry: &crate::registry::Registry,
     stripe_store: &crate::stripe_store::StripeStore,
     tax_provider: &dyn crate::tax::TaxProvider,
@@ -1285,7 +1291,7 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
     catalog: &PlanCatalog,
     weights: &MetricWeights,
     default_fx: Option<u64>,
-    creator_id: &Uuid,
+    organization_id: &str,
     app_ids: &[Uuid],
     period_start: i64,
 ) -> Result<bool, RegistryError> {
@@ -1299,11 +1305,11 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
     let mut conn = registry.conn().await?;
 
     // MAJOR-6: short-circuit BEFORE any pricing. A `status='finalized'` invoice
-    // for (creator, period) means this period is fully billed — do no pricing
+    // for (organization, period) means this period is fully billed — do no pricing
     // work at all (== old `stripe_invoice_id NOT NULL`). A `draft` row is a
     // crash-window remnant we re-drive, so we fall through to pricing then.
     // Scope to the ACTIVE (non-void) invoice. After a void+reissue (billing-ops
-    // PR-1) the same (creator, period) can have BOTH a voided audit row AND a live
+    // PR-1) the same (organization, period) can have BOTH a voided audit row AND a live
     // non-void row; the partial unique index `WHERE status <> 'void'` guarantees AT
     // MOST ONE non-void row, so this read is single and the void audit rows are
     // ignored (a re-drive must never pick up the void or it would mis-decide
@@ -1311,8 +1317,8 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
     let existing = conn
         .query(
             "SELECT id, status FROM zeroship.invoices \
-             WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
-            &[creator_id, &period],
+             WHERE organization_id = $1 AND period = $2::date AND status <> 'void'",
+            &[&organization_id, &period],
         )
         .await?;
     let existing_invoice_id: Option<String> = existing.first().map(|r| r.get::<_, String>("id"));
@@ -1325,10 +1331,10 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
         return Ok(false);
     }
 
-    // Resolve the creator's Customer; a creator with no saved payment identity is
-    // skipped. MAJOR-5: if such a creator HAS usage we will surface a warn below
+    // Resolve the organization's Customer; one with no saved payment identity is
+    // skipped. MAJOR-5: if such an organization HAS usage we will surface a warn below
     // (silent under-bill is revenue lost invisibly).
-    let customer = match stripe_store.get_customer(*creator_id).await {
+    let customer = match stripe_store.get_customer(organization_id).await {
         Ok(Some(c)) => Some(c),
         Ok(None) => None,
         Err(e) => return Err(RegistryError::Database(format!("get_customer: {e}"))),
@@ -1382,8 +1388,8 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
             // MINOR-4: a malformed `usage_at_change` MUST NOT silently become `{}` —
             // that would zero the segment START snapshot and over-count the whole
             // segment (every metric billed from 0 instead of its true cumulative
-            // start). Propagate the parse error so the per-creator loop in `sweep`
-            // logs it and SKIPS this creator's billing this tick, rather than
+            // start). Propagate the parse error so the per-organization loop in `sweep`
+            // logs it and SKIPS this organization's billing this tick, rather than
             // emitting an over-bill off a silently-empty snapshot.
             let usage_at_change: std::collections::HashMap<String, i64> =
                 serde_json::from_value(usage_json).map_err(|e| {
@@ -1446,7 +1452,7 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
             };
             // MAJOR-1/MAJOR-2: pricing is fallible and MUST NOT silently clamp.
             //   * UnresolvedFx ⇒ propagate so the sweep ABORTS, never a $0 invoice.
-            //   * ComputeUnitOverflow ⇒ a hard error that skips THIS creator.
+            //   * ComputeUnitOverflow ⇒ a hard error that skips THIS organization.
             let breakdown = match charge_cents(&seg_price, &seg.usage_delta, weights) {
                 Ok(b) => b,
                 Err(crate::pricing::PricingError::UnresolvedFx) => {
@@ -1493,7 +1499,7 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
     }
 
     if total_cents == 0 {
-        // Nothing to bill this period for this creator.
+        // Nothing to bill this period for this organization.
         return Ok(false);
     }
 
@@ -1501,16 +1507,16 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
     // loudly (a missing-customer marker) instead of dropping revenue at debug!.
     let Some(customer) = customer else {
         tracing::warn!(
-            creator_id = %creator_id,
+            organization_id = %organization_id,
             total_cents,
             billing_event = "missing_customer_with_usage",
-            "billing_reconcile: creator has billable usage but no saved Stripe Customer — NOT billed"
+            "billing_reconcile: organization has billable usage but no saved Stripe Customer — NOT billed"
         );
         return Ok(false);
     };
 
     // MAJOR-3: money MUST NOT silently clamp. An overflow here is a hard error
-    // that skips this creator (the per-creator loop catches it + warns), never a
+    // that skips this organization (the per-organization loop catches it + warns), never a
     // clamp to i64::MAX.
     let amount_i64 = i64::try_from(total_cents).map_err(|_| {
         RegistryError::Database(format!(
@@ -1519,29 +1525,29 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
     })?;
 
     // Layer 1: claim the invoice (draft) BEFORE any Stripe call. ON CONFLICT
-    // (creator_id, period) DO NOTHING is the no-double-bill claim. We then read
+    // (organization_id, period) DO NOTHING is the no-double-bill claim. We then read
     // back the id either way (a re-drive reuses the existing draft).
     let invoice_id = match existing_invoice_id {
         Some(id) => {
             tracing::warn!(
-                creator_id = %creator_id,
+                organization_id = %organization_id,
                 "billing_reconcile: re-driving an existing draft invoice (crash-window recovery)"
             );
             id
         }
         None => {
             let new_id = zeroship_core::typed_id::new_invoice_id();
-            // ON CONFLICT targets the PARTIAL unique index `invoices_active_period_claim`
+            // ON CONFLICT targets the PARTIAL unique index `invoices_organization_active_period_claim`
             // (WHERE status <> 'void') the 0042 reshape introduced — NOT the old
             // unconditional UNIQUE (which is gone). The `WHERE status <> 'void'` on the
             // conflict clause names the partial index's predicate so a voided prior
             // invoice does NOT collide: a corrected invoice can reissue into the released
             // period slot (billing-ops PR-1, gap #26 C).
             conn.execute(
-                "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+                "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
                  VALUES ($1, $2, $3::date, 'draft') \
-                 ON CONFLICT (creator_id, period) WHERE status <> 'void' DO NOTHING",
-                &[&new_id, creator_id, &period],
+                 ON CONFLICT (organization_id, period) WHERE status <> 'void' DO NOTHING",
+                &[&new_id, &organization_id, &period],
             )
             .await?;
             // ON CONFLICT may have no-op'd if a concurrent drive claimed it first
@@ -1550,8 +1556,8 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
             // an audit row, but the live claim is the non-void one.
             conn.query(
                 "SELECT id FROM zeroship.invoices \
-                 WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
-                &[creator_id, &period],
+                 WHERE organization_id = $1 AND period = $2::date AND status <> 'void'",
+                &[&organization_id, &period],
             )
             .await?
             .first()
@@ -1628,7 +1634,7 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
             // line-only intent (no confirmed ref): it may STILL have been posted
             // (crash between POST and ref-insert), so look it up by its key.
             let orphan_key =
-                invoice_item_idempotency_key(creator_id, orphan_app, period_start, *orphan_seg);
+                invoice_item_idempotency_key(organization_id, orphan_app, period_start, *orphan_seg);
             stripe
                 .find_invoice_item_by_key(&customer, &orphan_key)
                 .await
@@ -1640,7 +1646,7 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
                 .await
                 .map_err(|e| RegistryError::Database(format!("delete_invoice_item: {e}")))?;
             tracing::warn!(
-                creator_id = %creator_id,
+                organization_id = %organization_id,
                 app_id = %orphan_app,
                 segment_no = orphan_seg,
                 "billing_reconcile: deleted an orphaned Stripe invoice item (re-drive built fewer segments)"
@@ -1722,7 +1728,7 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
         .await?;
 
         let item_key =
-            invoice_item_idempotency_key(creator_id, app_id, period_start, line.segment_no);
+            invoice_item_idempotency_key(organization_id, app_id, period_start, line.segment_no);
 
         // For an intent-only re-drive, first try to ADOPT an already-posted item
         // by its deterministic metadata key (closes the >24h window where the
@@ -1735,7 +1741,7 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
                 .map_err(|e| RegistryError::Database(format!("find_invoice_item_by_key: {e}")))?;
             if item_id.is_some() {
                 tracing::warn!(
-                    creator_id = %creator_id,
+                    organization_id = %organization_id,
                     app_id = %app_id,
                     segment_no = line.segment_no,
                     "billing_reconcile: adopted an already-posted invoice item on re-drive (intent recovery)"
@@ -1803,15 +1809,15 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
     let draft_id = match existing_draft {
         Some(id) => {
             tracing::warn!(
-                creator_id = %creator_id,
+                organization_id = %organization_id,
                 "billing_reconcile: re-finalizing an existing draft invoice (crash-before-finalize recovery)"
             );
             id
         }
         None => {
-            let invoice_key = invoice_idempotency_key(creator_id, period_start);
+            let invoice_key = invoice_idempotency_key(organization_id, period_start);
             let id = stripe
-                .create_invoice(&customer, &creator_id.to_string(), &invoice_key)
+                .create_invoice(&customer, &organization_id.to_string(), &invoice_key)
                 .await
                 .map_err(|e| RegistryError::Database(format!("create_invoice: {e}")))?;
             // Persist the draft id BEFORE finalize. A crash here (post-create,
@@ -1840,7 +1846,7 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
         Ok(id) => id,
         Err(e) if is_already_finalized(&e) => {
             tracing::warn!(
-                creator_id = %creator_id,
+                organization_id = %organization_id,
                 draft_id = %draft_id,
                 "billing_reconcile: invoice already finalized on Stripe (crash-after-finalize \
                  recovery) — converging the local finalize"
@@ -1866,7 +1872,7 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
     // half-written row. The immutability trigger then freezes the invoice + its lines.
     //
     // CREDIT-APPLY AT FINALIZE (billing-ops PR-2, design flow A): just before the
-    // finalize UPDATE, INSIDE this same txn, consume the creator's available credit
+    // finalize UPDATE, INSIDE this same txn, consume the organization's available credit
     // OLDEST-FIRST against the SUBTOTAL (credit applied BEFORE tax, matching the
     // balance CHECK's `total = subtotal − credit + tax` ordering). One `consumed`
     // entry per drawn grant is appended, keyed to THIS invoice id so a reconcile
@@ -1876,7 +1882,7 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
     // TAX AT FINALIZE (billing-ops PR-5, design flow E): AFTER credit is applied and
     // BEFORE the finalize UPDATE — still inside this same txn — call the `TaxProvider`
     // seam over the POST-CREDIT subtotal (`subtotal − applied_credit`, the amount the
-    // creator actually owes; tax is computed on the post-credit base, matching the
+    // organization actually owes; tax is computed on the post-credit base, matching the
     // balance CHECK's `total = subtotal − credit + tax` ordering). The result is frozen
     // into `tax_cents` in the ONE-statement finalize UPDATE (replacing today's hard-wired
     // `0`), so `total = subtotal − credit + tax` holds without the CHECK ever seeing a
@@ -1887,14 +1893,14 @@ pub(crate) async fn bill_creator_with_parts<S: StripeApi>(
     // schema change — `tax_cents` already exists.
     let tx = conn.transaction().await?;
     let credit = crate::credit::consume_at_finalize(
-        &tx, creator_id, &invoice_id, amount_i64, BILLING_CURRENCY,
+        &tx, organization_id, &invoice_id, amount_i64, BILLING_CURRENCY,
     )
     .await?;
     let credit_i64 = credit.applied_cents;
     let taxable_base_cents = (amount_i64 - credit_i64).max(0);
     let tax = tax_provider
         .compute_tax(&crate::tax::TaxContext {
-            creator_id: *creator_id,
+            organization_id: organization_id.to_owned(),
             taxable_base_cents,
             currency: BILLING_CURRENCY,
             period,
@@ -1970,7 +1976,7 @@ struct BilledLine {
 
 /// Per-segment Stripe line-item description (MISSING-3). The no-change path (a
 /// single full-period segment) keeps today's description with no day-span suffix;
-/// a prorated segment carries its plan + half-open day-span so the creator's
+/// a prorated segment carries its plan + half-open day-span so the organization's
 /// Stripe-hosted invoice reads correctly per segment, e.g.
 /// `"Infra usage — app <id> — 2026-05 (pln_… days 11–30)"`.
 fn segment_description(
@@ -2070,47 +2076,45 @@ fn build_invoice_item_enrichment(
     (description, metadata)
 }
 
-/// Resolve the apps owned by ONE creator: the per-creator slice of the SAME
-/// [`crate::organizations::app_owner_map`] the fleet-wide `sweep` reads.
+/// The apps ONE organization owns: the per-subject slice of exactly the read
+/// `sweep` makes fleet-wide.
 ///
-/// Used by [`crate::metering::provider::native::NativeProvider::invoice`] so the
-/// per-creator provider verb bills exactly the creator's owned apps. It matches
-/// `sweep`'s grouping by construction rather than by agreement - it is the same
-/// subquery with a `WHERE` on the owner - so an app can no longer be in one
-/// answer and out of the other.
+/// Used by the `lite` provider's invoice verb so a per-organization close bills
+/// exactly that organization's apps. It matches `sweep`'s grouping by
+/// construction rather than by agreement - the same predicate on the same
+/// column, with a `WHERE` added - so an app cannot be in one answer and out of
+/// the other.
 #[allow(clippy::future_not_send)]
 pub(crate) async fn owned_app_ids(
     state: &AppState,
-    creator_id: &Uuid,
+    organization_id: &str,
 ) -> Result<Vec<Uuid>, RegistryError> {
-    owned_app_ids_for_registry(&state.registry, creator_id).await
+    owned_app_ids_for_registry(&state.registry, organization_id).await
 }
 
 #[allow(clippy::future_not_send)]
 pub(crate) async fn owned_app_ids_for_registry(
     registry: &crate::registry::Registry,
-    creator_id: &Uuid,
+    organization_id: &str,
 ) -> Result<Vec<Uuid>, RegistryError> {
     let conn = registry.conn().await?;
     let rows = conn
         .query(
-            &format!(
-                "SELECT owner_map.app_id FROM {owner_map} owner_map \
-                  WHERE owner_map.user_id = $1 ORDER BY owner_map.app_id",
-                owner_map = crate::organizations::app_owner_map(),
-            ),
-            &[creator_id],
+            "SELECT a.id AS app_id FROM zeroship.apps a \
+              WHERE a.organization_id = $1 \
+              ORDER BY a.id",
+            &[&organization_id],
         )
         .await?;
     Ok(rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect())
 }
 
 /// Read back the finalized Stripe provider invoice id persisted for
-/// `(creator, period)`.
+/// `(organization, period)`.
 #[allow(clippy::future_not_send)]
 pub(crate) async fn lookup_invoice_id_for_registry(
     registry: &crate::registry::Registry,
-    creator_id: &Uuid,
+    organization_id: &str,
     period_start: i64,
 ) -> Result<Option<String>, RegistryError> {
     let period = crate::metering::period_date(period_start);
@@ -2120,10 +2124,10 @@ pub(crate) async fn lookup_invoice_id_for_registry(
             "SELECT r.external_id \
              FROM zeroship.invoices i \
              JOIN zeroship.billing_provider_refs r ON r.invoice_id = i.id \
-             WHERE i.creator_id = $1 AND i.period = $2::date \
+             WHERE i.organization_id = $1 AND i.period = $2::date \
                AND i.status = 'finalized' \
                AND r.provider = 'stripe' AND r.ref_kind = 'invoice'",
-            &[creator_id, &period],
+            &[&organization_id, &period],
         )
         .await?;
     Ok(rows.first().map(|r| r.get::<_, String>("external_id")))
@@ -2181,32 +2185,35 @@ mod tests {
 
     #[test]
     fn idempotency_keys_are_deterministic_and_distinct() {
-        let creator = Uuid::nil();
+        let organization = "org_0000000000000000000001";
         let app_a = Uuid::from_u128(1);
         let app_b = Uuid::from_u128(2);
         let p = 1_700_000_000i64;
         // Stable for a fixed tuple.
         assert_eq!(
-            invoice_item_idempotency_key(&creator, &app_a, p, 0),
-            invoice_item_idempotency_key(&creator, &app_a, p, 0),
+            invoice_item_idempotency_key(organization, &app_a, p, 0),
+            invoice_item_idempotency_key(organization, &app_a, p, 0),
         );
         // Distinct per app and per period.
         assert_ne!(
-            invoice_item_idempotency_key(&creator, &app_a, p, 0),
-            invoice_item_idempotency_key(&creator, &app_b, p, 0),
+            invoice_item_idempotency_key(organization, &app_a, p, 0),
+            invoice_item_idempotency_key(organization, &app_b, p, 0),
         );
         assert_ne!(
-            invoice_item_idempotency_key(&creator, &app_a, p, 0),
-            invoice_item_idempotency_key(&creator, &app_a, p + 1, 0),
+            invoice_item_idempotency_key(organization, &app_a, p, 0),
+            invoice_item_idempotency_key(organization, &app_a, p + 1, 0),
         );
         // Distinct per SEGMENT; otherwise N segments collide into one Stripe
         // item and only segment 0 posts (under-bill).
         assert_ne!(
-            invoice_item_idempotency_key(&creator, &app_a, p, 0),
-            invoice_item_idempotency_key(&creator, &app_a, p, 1),
+            invoice_item_idempotency_key(organization, &app_a, p, 0),
+            invoice_item_idempotency_key(organization, &app_a, p, 1),
         );
         // Invoice key format.
-        assert_eq!(invoice_idempotency_key(&creator, p), format!("billrun:{creator}:{p}"));
+        assert_eq!(
+            invoice_idempotency_key(organization, p),
+            format!("billrun:{organization}:{p}")
+        );
     }
 
     #[test]
@@ -2418,7 +2425,7 @@ mod tests {
     }
 
     impl StripeApi for RecordingStripe {
-        async fn create_customer(&self, _email: &str, _creator: &str) -> Result<String, StripeError> {
+        async fn create_customer(&self, _email: &str, _organization_id: &str) -> Result<String, StripeError> {
             Ok("cus_fake".to_string())
         }
         async fn create_checkout_setup_session(
@@ -2462,7 +2469,7 @@ mod tests {
         async fn create_invoice(
             &self,
             customer: &str,
-            _creator_id: &str,
+            _organization_id: &str,
             idempotency_key: &str,
         ) -> Result<String, StripeError> {
             self.invoices
@@ -2497,7 +2504,7 @@ mod tests {
         async fn create_connect_account(
             &self,
             _email: &str,
-            _creator_id: &str,
+            _organization_id: &str,
             _country: &str,
         ) -> Result<String, StripeError> {
             Ok("acct_fake".to_string())
@@ -2519,7 +2526,7 @@ mod tests {
                 charges_enabled: true,
                 payouts_enabled: true,
                 details_submitted: true,
-                creator_id: None,
+                organization_id: None,
             })
         }
         async fn create_connect_payment_intent(
@@ -2558,7 +2565,7 @@ mod tests {
         // The line logic the sweep applies: charge_cents → one invoice item per
         // app, then one finalized invoice. Drive it against a RECORDING fake
         // (no PG, no cyper) to pin the per-app amount + the deterministic keys.
-        let creator = Uuid::from_u128(0xAA);
+        let organization = "org_00000000000000000000AA";
         let app = Uuid::from_u128(0xBB);
         let period = previous_period_start_unix(
             Utc.with_ymd_and_hms(2026, 6, 13, 0, 0, 0).unwrap().timestamp(),
@@ -2613,7 +2620,7 @@ mod tests {
         let (enriched_desc, metadata) = build_invoice_item_enrichment(&line, period);
 
         let fake = RecordingStripe::default();
-        let item_key = invoice_item_idempotency_key(&creator, &app, period, 0);
+        let item_key = invoice_item_idempotency_key(organization, &app, period, 0);
         fake.create_invoice_item(
             "cus_fake",
             breakdown.total_cents,
@@ -2626,15 +2633,15 @@ mod tests {
         )
         .await
         .unwrap();
-        let invoice_key = invoice_idempotency_key(&creator, period);
-        let draft = fake.create_invoice("cus_fake", &creator.to_string(), &invoice_key).await.unwrap();
+        let invoice_key = invoice_idempotency_key(organization, period);
+        let draft = fake.create_invoice("cus_fake", organization, &invoice_key).await.unwrap();
         fake.finalize_invoice(&draft).await.unwrap();
 
         let items = fake.items.borrow();
         assert_eq!(items.len(), 1);
         assert_eq!(items[0].amount, 750, "the per-app amount equals charge_cents total");
-        assert_eq!(items[0].idempotency_key, format!("billitem:{creator}:{app}:{period}:0"));
-        assert_eq!(fake.invoices.borrow()[0].1, format!("billrun:{creator}:{period}"));
+        assert_eq!(items[0].idempotency_key, format!("billitem:{organization}:{app}:{period}:0"));
+        assert_eq!(fake.invoices.borrow()[0].1, format!("billrun:{organization}:{period}"));
 
         // Enrichment: the description carries the CU, the metadata the full
         // derivation — and NONE of it changed the authoritative amount above.

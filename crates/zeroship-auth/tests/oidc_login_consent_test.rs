@@ -933,8 +933,8 @@ async fn seed_user_client(db: &Client, user_id: Uuid, app_id: Uuid, client_id: &
     // here asserts on authority, so the organization is left member-less.
     let project_id = common::unowned_project(db).await;
     db.execute(
-        "INSERT INTO zeroship.apps (id, name, project_id) \
-         VALUES ($1, $2, $3)",
+        "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
+         SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
         &[
             &app_id,
             &format!("p4-native-app-{}", app_id.simple()),

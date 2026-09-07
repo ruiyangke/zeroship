@@ -9,7 +9,7 @@
 //!   * the REAL `refunds` table / domains / over-refund trigger / immutability trigger;
 //!   * the REAL `refund::issue_refund` + `void_reissue::void_and_reissue` helpers (so the
 //!     claim-then-call, the `void_reversal` append, and the true-up math all run for real);
-//!   * the REAL reconciler `billing_reconcile::bill_creator` for the original bill AND the
+//!   * the REAL reconciler `billing_reconcile::bill_organization` for the original bill AND the
 //!     reissue (so credit consume / finalize-in-one-UPDATE / balance CHECK all validate);
 //!   * the REAL `api::refund_invoice` / `api::void_invoice` HTTP handlers via an `ntex`
 //!     test app (operator authz, idempotency-key header, body fingerprint, 403/409).
@@ -174,7 +174,7 @@ impl StripeApi for RecordingStripe {
             charges_enabled: true,
             payouts_enabled: true,
             details_submitted: true,
-            creator_id: None,
+            organization_id: None,
         })
     }
     async fn create_connect_payment_intent(
@@ -317,6 +317,33 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 // DB seeding helpers (mirror billing_credit_test).
 // ---------------------------------------------------------------------------
 
+/// A fresh billing subject for this test file.
+///
+/// The billing subject is an ORGANIZATION, so a fixture that minted a user and
+/// used its uuid here would name a row `organizations` does not have. The
+/// foreign keys refuse that rather than mis-attributing it, but the refusal
+/// names the constraint and not the mistake, so the fixture is the place to be
+/// unambiguous.
+async fn make_organization(state: &AppState, label: &str) -> String {
+    let organization_id = zeroship_core::typed_id::generate("org");
+    let slug = format!("{label}-{}", Uuid::new_v4().simple());
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &organization_id,
+                &slug,
+                &label.to_string(),
+                &format!("{slug}@example.test"),
+            ],
+        )
+        .await
+        .expect("insert organization");
+    organization_id
+}
+
 async fn make_user(state: &AppState, label: &str) -> Uuid {
     let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
     let rows = state
@@ -330,16 +357,16 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
     rows[0].get("id")
 }
 
-async fn ensure_creator_billing(state: &AppState, creator: Uuid) {
+async fn ensure_organization_billing(state: &AppState, organization: &str) {
     state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
-             ON CONFLICT (creator_id) DO NOTHING",
-            &[&creator],
+            "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) \
+             ON CONFLICT (organization_id) DO NOTHING",
+            &[&organization],
         )
         .await
-        .expect("ensure creator_billing");
+        .expect("ensure organization_billing");
 }
 
 /// A plan charging 1 cent/request, no included CU (fx = 1 cent/CU).
@@ -372,11 +399,17 @@ async fn make_plan(state: &AppState) -> String {
     plan_id
 }
 
-async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
+/// An app the given ORGANIZATION bills.
+///
+/// It used to seed an app in a fresh organization and then seat a human owner in
+/// it, because the reconciler found the subject by walking to that owner. The
+/// subject is now the app row's own `organization_id`, so an app seeded into
+/// one organization and asserted against another would simply never be billed -
+/// the test would go green on an empty sweep. Placing it in the caller's
+/// organization is what keeps the assertion attached to anything.
+async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> Uuid {
     let name = format!("refund-{}", Uuid::new_v4());
-    let app_id = common::seed_app(&state.control_pg, &name, plan_id).await;
-    common::seat_app_organization_member(&state.control_pg, &app_id, &owner, "owner").await;
-    app_id
+    common::seed_app_in_organization(&state.control_pg, &name, plan_id, organization).await
 }
 
 async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
@@ -413,14 +446,14 @@ fn period_d(period_start: i64) -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(dt.year(), dt.month(), 1).unwrap()
 }
 
-/// The active (non-void) invoice id for `(creator, period)`.
-async fn active_invoice_id(state: &AppState, creator: Uuid, period_start: i64) -> Option<String> {
+/// The active (non-void) invoice id for `(organization, period)`.
+async fn active_invoice_id(state: &AppState, organization: &str, period_start: i64) -> Option<String> {
     state
         .control_pg
         .query(
             "SELECT id FROM zeroship.invoices \
-             WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
-            &[&creator, &period_d(period_start)],
+             WHERE organization_id = $1 AND period = $2::date AND status <> 'void'",
+            &[&organization, &period_d(period_start)],
         )
         .await
         .expect("read invoice id")
@@ -463,7 +496,7 @@ async fn append_payment(state: &AppState, invoice_id: &str, amount: i64, provide
 
 async fn insert_grant(
     state: &AppState,
-    creator: Uuid,
+    organization: &str,
     amount: i64,
     created_at: chrono::DateTime<chrono::Utc>,
 ) -> String {
@@ -472,9 +505,9 @@ async fn insert_grant(
         .control_pg
         .execute(
             "INSERT INTO zeroship.credit_ledger \
-               (id, creator_id, kind, amount_cents, currency, created_at) \
+               (id, organization_id, kind, amount_cents, currency, created_at) \
              VALUES ($1, $2, 'grant', $3, 'usd', $4)",
-            &[&id, &creator, &amount, &created_at],
+            &[&id, &organization, &amount, &created_at],
         )
         .await
         .expect("insert grant");
@@ -489,7 +522,7 @@ async fn run_reconcile(state: &AppState, stripe: &RecordingStripe, now: i64) -> 
 }
 
 /// A fresh, OWNED Postgres connection (mutable) — `issue_refund` opens a
-/// `conn.transaction()` internally (CRITICAL-1: precheck + claim under the per-creator
+/// `conn.transaction()` internally (CRITICAL-1: precheck + claim under the per-organization
 /// advisory lock), which needs `&mut`. The shared `Arc<Client>` in `AppState` cannot be
 /// borrowed mutably, so refund-driving tests use a dedicated connection.
 async fn new_conn(url: &str) -> compio_postgres::Client {
@@ -503,11 +536,11 @@ async fn new_conn(url: &str) -> compio_postgres::Client {
     client
 }
 
-/// Set a Stripe customer for the creator (so bill_creator does not skip).
-async fn set_customer(state: &AppState, creator: Uuid) {
+/// Set a Stripe customer for the organization (so bill_organization does not skip).
+async fn set_customer(state: &AppState, organization: &str) {
     state
         .stripe_store
-        .set_customer(creator, &format!("cus_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 }
@@ -533,19 +566,20 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "launder").await;
-    ensure_creator_billing(&fx.state, creator).await;
-    set_customer(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "launder").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
 
     // $40 credit grant; $100 of usage → subtotal 10000, credit 4000, total 6000.
-    insert_grant(&fx.state, creator, 4000, Utc::now() - Duration::hours(2)).await;
+    insert_grant(&fx.state, organization, 4000, Utc::now() - Duration::hours(2)).await;
     ingest_at(&fx.state, app, 10_000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, creator, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
     let (status, subtotal, credit, total) = invoice_money(&fx.state, &inv).await;
     assert_eq!(status, "finalized");
     assert_eq!((subtotal, credit, total), (10_000, 4000, 6000));
@@ -554,7 +588,7 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
     append_payment(&fx.state, &inv, 6000, "in_launder").await;
 
     // The credit-laundering attempt: refund $60 to CREDIT. cash_collected = $60, but
-    // total_cents = $60 too here — the laundering would let the creator net +$60 credit
+    // total_cents = $60 too here — the laundering would let the organization net +$60 credit
     // for $60 cash. The cap is anchored on cash; Σ(credit refunds) would be 6000 ≤ 6000
     // BUT combined with later... here the single $60 credit refund alone is allowed up
     // to cash; the LAUNDERING test is: refund $60 cash AND $60 credit must fail combined.
@@ -628,18 +662,19 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
 async fn cash_refund_targets_recorded_payment_intent_not_invoice() {
     let url = db_url();
     let fx = build_fixture(&url, "refund-target").await;
-    let creator = make_user(&fx.state, "refund-target").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "refund-target").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
     // A finalized invoice (seeded directly — no reconcile needed for the resolver test).
     let inv = zeroship_core::typed_id::new_invoice_id();
     fx.state
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+               (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
                 total_cents, finalized_at) \
              VALUES ($1, $2, DATE '2026-01-01', 'finalized', 10000, 0, 0, 10000, NOW())",
-            &[&inv, &creator],
+            &[&inv, &organization],
         )
         .await
         .expect("seed invoice");
@@ -703,16 +738,17 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "cashcredit").await;
-    ensure_creator_billing(&fx.state, creator).await;
-    set_customer(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "cashcredit").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     ingest_at(&fx.state, app, 10_000, period, 1).await; // $100, no credit
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, creator, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
     append_payment(&fx.state, &inv, 10_000, "in_cashcredit").await;
 
     let mut conn = new_conn(&url).await;
@@ -764,7 +800,7 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
 
     // CREDIT refund of $20 → a refund_to_credit grant, NO Stripe call (refund_count
     // unchanged), balance += $20.
-    let bal_before = zeroship_control::credit::balance(&*fx.state.control_pg, &creator, "usd")
+    let bal_before = zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd")
         .await
         .expect("balance");
     let r2 = refund::issue_refund(
@@ -781,7 +817,7 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
     };
     assert_eq!(stripe.refund_count(), 1, "credit refund must NOT call Stripe (no charge reversal)");
 
-    let bal_after = zeroship_control::credit::balance(&*fx.state.control_pg, &creator, "usd")
+    let bal_after = zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd")
         .await
         .expect("balance");
     assert_eq!(bal_after - bal_before, 2000, "a $20 refund_to_credit grant was appended");
@@ -824,16 +860,17 @@ async fn refund_replay_is_idempotent_exactly_one() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "replay").await;
-    ensure_creator_billing(&fx.state, creator).await;
-    set_customer(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "replay").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     ingest_at(&fx.state, app, 10_000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, creator, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
     append_payment(&fx.state, &inv, 10_000, "in_replay").await;
 
     let mut conn = new_conn(&url).await;
@@ -896,8 +933,9 @@ async fn tax_split_refund_returns_proportional_tax() {
     let url = db_url();
     let fx = build_fixture(&url, "taxsplit").await;
 
-    let creator = make_user(&fx.state, "taxsplit").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "taxsplit").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
 
     // A finalized invoice with subtotal 10000, tax 1000, total 11000 (10% tax). We
     // build it as a draft then finalize-in-one-UPDATE so the immutability trigger + the
@@ -907,9 +945,9 @@ async fn tax_split_refund_returns_proportional_tax() {
     fx.state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv, &creator, &period],
+            &[&inv, &organization, &period],
         )
         .await
         .expect("draft");
@@ -980,7 +1018,7 @@ impl Caller {
 ///
 /// It used to take an optional platform role and seed a `platform_admin_roles`
 /// row for the operator paths. That table and those roles are deleted, so every
-/// principal this mints is an ordinary creator.
+/// principal this mints is an ordinary organization.
 async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
     let _ = state;
     Caller {
@@ -991,11 +1029,11 @@ async fn issue_bearer(state: &AppState, user_id: Uuid, scope: &str) -> Caller {
 // The scope vocabulary is resource-blind: a scope always lowers to
 // `Resource::Any`, so per-app narrowing now comes from Cedar app membership
 // rather than from the caller-supplied wrapper policy a PAT used to carry.
-// The old "creator self" fixture modeled a token holding BillingWrite scoped
+// The old "organization self" fixture modeled a token holding BillingWrite scoped
 // to ONE app only (not Resource::Any) so the operator-only endpoint would
 // deny it; that per-resource narrowing has no OAuth-scope equivalent, so the
 // denied caller below instead carries "billing:read" — a real, plausible
-// creator scope that simply omits the billing:write action under test.
+// organization scope that simply omits the billing:write action under test.
 
 // ===========================================================================
 // (f) void_reversal conserves balance: grant $10 → invoice consumes $6 (bal $4) →
@@ -1013,22 +1051,23 @@ async fn void_reversal_conserves_credit_balance() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "voidrev").await;
-    ensure_creator_billing(&fx.state, creator).await;
-    set_customer(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "voidrev").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
 
     // $10 grant; $6 of usage → subtotal 600, credit 600, total 0 (fully credit-covered).
-    insert_grant(&fx.state, creator, 1000, Utc::now() - Duration::hours(2)).await;
+    insert_grant(&fx.state, organization, 1000, Utc::now() - Duration::hours(2)).await;
     ingest_at(&fx.state, app, 600, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv_a = active_invoice_id(&fx.state, creator, period).await.expect("invoice A");
+    let inv_a = active_invoice_id(&fx.state, organization, period).await.expect("invoice A");
     assert_eq!(invoice_money(&fx.state, &inv_a).await, ("finalized".into(), 600, 600, 0));
 
-    let bal_after_consume = zeroship_control::credit::balance(&*fx.state.control_pg, &creator, "usd")
+    let bal_after_consume = zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd")
         .await
         .expect("bal");
     assert_eq!(bal_after_consume, 400, "balance after consume = $10 − $6 = $4");
@@ -1047,7 +1086,7 @@ async fn void_reversal_conserves_credit_balance() {
     assert_eq!(invoice_money(&fx.state, &reissued).await, ("finalized".into(), 600, 600, 0));
 
     // BALANCE CONSERVED: still $4 (void restored +$6, reissue re-drew $6). Never $-2.
-    let bal_final = zeroship_control::credit::balance(&*fx.state.control_pg, &creator, "usd")
+    let bal_final = zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd")
         .await
         .expect("bal");
     assert_eq!(bal_final, 400, "void_reversal conserves balance: still $4, never the $-2 double-consume");
@@ -1086,17 +1125,18 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "trueup").await;
-    ensure_creator_billing(&fx.state, creator).await;
-    set_customer(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "trueup").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
 
     // First bill: $60 of usage → subtotal 6000, total 6000 (no credit). $60 cash collected.
     ingest_at(&fx.state, app, 6000, period, 1).await;
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv_b = active_invoice_id(&fx.state, creator, period).await.expect("invoice B");
+    let inv_b = active_invoice_id(&fx.state, organization, period).await.expect("invoice B");
     assert_eq!(invoice_money(&fx.state, &inv_b).await, ("finalized".into(), 6000, 0, 6000));
     append_payment(&fx.state, &inv_b, 6000, "in_trueup").await;
 
@@ -1163,14 +1203,14 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
 }
 
 // ===========================================================================
-// H1: the true-up over-collection is computed UNDER the per-creator lock, NOT pre-read.
+// H1: the true-up over-collection is computed UNDER the per-organization lock, NOT pre-read.
 //     A concurrent cash-anchor change (here a dispute_debit) that lands while the lock is
 //     held must be reflected in the claimed amount — proving there is no stale window
 //     between reading the anchor and claiming the refund.
 //
 // Setup: a VOIDED invoice with cash $60 collected, no prior refunds. reissued_total = $10,
 //     so a naive (pre-fix) computation would refund $60 − $0 − $10 = $50. We hold the
-//     creator lock on an observer, start the true-up (it BLOCKS on the lock — proof it
+//     organization lock on an observer, start the true-up (it BLOCKS on the lock — proof it
 //     acquires the lock BEFORE reading the anchor), append a −$20 dispute_debit under the
 //     held lock (cash → $40), then release. The true-up must recompute $40 − $0 − $10 = $30
 //     under the lock — NOT the stale $50.
@@ -1189,8 +1229,9 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
     let fx = build_fixture(&url, "trueup-lock").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let creator = make_user(&fx.state, "trueup-lock").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "trueup-lock").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
 
     // Seed a VOIDED invoice directly (the true-up runs against the voided invoice; its cash
     // anchor survives the void). period far-future to avoid the active-period claim index.
@@ -1199,35 +1240,35 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+               (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
                 total_cents, finalized_at, voided_at) \
              VALUES ($1, $2, DATE '2031-01-01', 'void', 6000, 0, 0, 6000, NOW(), NOW())",
-            &[&inv, &creator],
+            &[&inv, &organization],
         )
         .await
         .expect("seed voided invoice");
     append_payment(&fx.state, &inv, 6000, "in_trueup_lock").await;
 
-    // (1) Observer holds the per-creator advisory lock in an OPEN txn.
+    // (1) Observer holds the per-organization advisory lock in an OPEN txn.
     let mut obs = new_conn(&url).await;
     let obs_tx = obs.transaction().await.expect("observer tx");
     obs_tx
         .execute(
             "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
-            &[&creator.to_string()],
+            &[&organization.to_string()],
         )
         .await
-        .expect("observer takes the creator lock");
+        .expect("observer takes the organization lock");
 
     // (2) SPAWN the true-up on its own connection and keep the SINGLE call alive (no
-    // timeout-cancel). It will read the cash anchor ONLY AFTER it wins the per-creator lock
+    // timeout-cancel). It will read the cash anchor ONLY AFTER it wins the per-organization lock
     // (the H1 fix: lock-then-recompute). We synchronize by polling pg_locks until this call
-    // is provably WAITING on the creator's advisory key — so the debit we append next lands
+    // is provably WAITING on the organization's advisory key — so the debit we append next lands
     // BEFORE the call reads the anchor, all WITHIN that one call.
     let lock_key: i64 = fx
         .state
         .control_pg
-        .query("SELECT hashtext($1::text)::bigint AS k", &[&creator.to_string()])
+        .query("SELECT hashtext($1::text)::bigint AS k", &[&organization.to_string()])
         .await
         .expect("hash key")[0]
         .get("k");
@@ -1243,7 +1284,7 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
         .await
     });
 
-    // Wait until the spawned true-up is BLOCKED waiting on the creator's advisory lock. A
+    // Wait until the spawned true-up is BLOCKED waiting on the organization's advisory lock. A
     // non-granted `advisory` lock on our key in pg_locks proves it reached lock acquisition
     // BEFORE reading the anchor. Bounded poll (no fixed sleep beyond a short yield).
     let mut waiting = false;
@@ -1267,7 +1308,7 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
     }
     assert!(
         waiting,
-        "the true-up must be WAITING on the per-creator advisory lock before reading the cash \
+        "the true-up must be WAITING on the per-organization advisory lock before reading the cash \
          anchor — if it never waits, the over-collection is read OUTSIDE the lock (H1 stale window)",
     );
 
@@ -1320,7 +1361,7 @@ async fn true_up_recomputes_over_collection_under_the_lock() {
 }
 
 // ===========================================================================
-// (h) Two non-void invoices for one (creator, period) impossible; a void releases
+// (h) Two non-void invoices for one (organization, period) impossible; a void releases
 //     the claim for reissue.
 // ===========================================================================
 
@@ -1334,26 +1375,27 @@ async fn one_active_invoice_per_period_void_releases_claim() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "claim").await;
-    ensure_creator_billing(&fx.state, creator).await;
-    set_customer(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "claim").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     ingest_at(&fx.state, app, 5000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv1 = active_invoice_id(&fx.state, creator, period).await.expect("invoice 1");
+    let inv1 = active_invoice_id(&fx.state, organization, period).await.expect("invoice 1");
 
-    // A second NON-void invoice for the same (creator, period) is rejected by the
+    // A second NON-void invoice for the same (organization, period) is rejected by the
     // partial unique index.
     let dup = fx
         .state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'finalized')",
-            &[&zeroship_core::typed_id::new_invoice_id(), &creator, &period_d(period)],
+            &[&zeroship_core::typed_id::new_invoice_id(), &organization, &period_d(period)],
         )
         .await;
     assert!(dup.is_err(), "a second NON-void invoice for the period must be rejected");
@@ -1373,8 +1415,8 @@ async fn one_active_invoice_per_period_void_releases_claim() {
         .control_pg
         .query(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices \
-             WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
-            &[&creator, &period_d(period)],
+             WHERE organization_id = $1 AND period = $2::date AND status <> 'void'",
+            &[&organization, &period_d(period)],
         )
         .await
         .expect("count")[0]
@@ -1386,11 +1428,11 @@ async fn one_active_invoice_per_period_void_releases_claim() {
 }
 
 // ===========================================================================
-// CRITICAL-1 (1a): `claim_refund_locked` takes the SAME per-creator advisory lock
+// CRITICAL-1 (1a): `claim_refund_locked` takes the SAME per-organization advisory lock
 //     `consume_at_finalize` takes — so a refund serializes against a concurrent
-//     consume/refund for the same creator. While the claim tx holds the lock, a
+//     consume/refund for the same organization. While the claim tx holds the lock, a
 //     SECOND connection's `pg_try_advisory_xact_lock(same key)` must FAIL; a
-//     DIFFERENT creator's key is free. Mirrors the PR-2 consume-lock test.
+//     DIFFERENT organization's key is free. Mirrors the PR-2 consume-lock test.
 // (RED pre-fix: the old `issue_refund` took NO lock + opened NO txn, so the
 //  try-lock on the same key would SUCCEED even mid-claim → the over-refund bound
 //  was defeatable by concurrency.)
@@ -1399,25 +1441,26 @@ async fn one_active_invoice_per_period_void_releases_claim() {
 // See the allow on `over_refund_three_way_bound_blocks_credit_laundering` above.
 #[allow(clippy::await_holding_lock)]
 #[compio::test]
-async fn issue_refund_takes_per_creator_advisory_lock() {
+async fn issue_refund_takes_per_organization_advisory_lock() {
     let url = db_url();
     let fx = build_fixture(&url, "rlock").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "rlock").await;
-    let other = make_user(&fx.state, "rlock-other").await;
-    ensure_creator_billing(&fx.state, creator).await;
-    ensure_creator_billing(&fx.state, other).await;
-    set_customer(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "rlock").await;
+    let organization = organization.as_str();
+    let other = make_organization(&fx.state, "rlock-other").await;
+    ensure_organization_billing(&fx.state, organization).await;
+    ensure_organization_billing(&fx.state, &other).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     ingest_at(&fx.state, app, 5000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, creator, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
     append_payment(&fx.state, &inv, 5000, "in_rlock").await;
 
     // A SECOND independent connection used as the lock observer.
@@ -1435,7 +1478,7 @@ async fn issue_refund_takes_per_creator_advisory_lock() {
     let mut conn = new_conn(&url).await;
     let tx = conn.transaction().await.expect("tx");
     let claim = refund::claim_refund_locked(
-        &tx, &creator, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, None,
+        &tx, &organization, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, None,
         &key(&inv, "lock-claim"),
     )
     .await
@@ -1449,17 +1492,17 @@ async fn issue_refund_takes_per_creator_advisory_lock() {
     let key_held: bool = obs_client
         .query(
             "SELECT pg_try_advisory_xact_lock(hashtext($1::text)::bigint) AS got",
-            &[&creator.to_string()],
+            &[&organization.to_string()],
         )
         .await
         .expect("try-lock held")[0]
         .get("got");
     assert!(
         !key_held,
-        "the refund claim tx holds the per-creator advisory lock — a concurrent try-lock must fail",
+        "the refund claim tx holds the per-organization advisory lock — a concurrent try-lock must fail",
     );
 
-    // A DIFFERENT creator's key is free (per-creator, not global).
+    // A DIFFERENT organization's key is free (per-organization, not global).
     let key_other: bool = obs_client
         .query(
             "SELECT pg_try_advisory_xact_lock(hashtext($1::text)::bigint) AS got",
@@ -1468,7 +1511,7 @@ async fn issue_refund_takes_per_creator_advisory_lock() {
         .await
         .expect("try-lock other")[0]
         .get("got");
-    assert!(key_other, "a DIFFERENT creator's advisory lock is free — the lock serializes per creator only");
+    assert!(key_other, "a DIFFERENT organization's advisory lock is free — the lock serializes per organization only");
     obs_client.execute("SELECT pg_advisory_unlock_all()", &[]).await.ok();
 
     tx.commit().await.expect("commit claim");
@@ -1496,16 +1539,17 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "sumcap").await;
-    ensure_creator_billing(&fx.state, creator).await;
-    set_customer(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "sumcap").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     ingest_at(&fx.state, app, 5000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, creator, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
     append_payment(&fx.state, &inv, 5000, "in_sumcap").await;
 
     let mut conn = new_conn(&url).await;
@@ -1563,16 +1607,17 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "rtcdup").await;
-    ensure_creator_billing(&fx.state, creator).await;
-    set_customer(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "rtcdup").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     ingest_at(&fx.state, app, 5000, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv = active_invoice_id(&fx.state, creator, period).await.expect("invoice");
+    let inv = active_invoice_id(&fx.state, organization, period).await.expect("invoice");
     append_payment(&fx.state, &inv, 5000, "in_rtcdup").await;
 
     // Issue a $30 credit refund (drives once → one refund_to_credit grant).
@@ -1612,9 +1657,9 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
         .control_pg
         .execute(
             "INSERT INTO zeroship.credit_ledger \
-               (id, creator_id, kind, amount_cents, currency, applied_invoice_id, note) \
+               (id, organization_id, kind, amount_cents, currency, applied_invoice_id, note) \
              VALUES ($1, $2, 'refund_to_credit', 3000, 'usd', $3, $4)",
-            &[&zeroship_core::typed_id::new_credit_id(), &creator, &inv, &marker],
+            &[&zeroship_core::typed_id::new_credit_id(), &organization, &inv, &marker],
         )
         .await;
     assert!(
@@ -1647,32 +1692,33 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "redrive").await;
-    ensure_creator_billing(&fx.state, creator).await;
-    set_customer(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "redrive").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
 
     // $10 grant; $6 usage → subtotal 600, credit 600, total 0. Balance after consume = $4.
-    insert_grant(&fx.state, creator, 1000, Utc::now() - Duration::hours(2)).await;
+    insert_grant(&fx.state, organization, 1000, Utc::now() - Duration::hours(2)).await;
     ingest_at(&fx.state, app, 600, period, 1).await;
 
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv_a = active_invoice_id(&fx.state, creator, period).await.expect("invoice A");
+    let inv_a = active_invoice_id(&fx.state, organization, period).await.expect("invoice A");
     assert_eq!(invoice_money(&fx.state, &inv_a).await, ("finalized".into(), 600, 600, 0));
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, &creator, "usd").await.expect("bal"),
+        zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd").await.expect("bal"),
         400, "balance after consume = $4",
     );
 
     // ── Simulate a crash AFTER Phase 1 (void + void_reversal committed) but BEFORE the
-    //    reissue: do exactly Phase 1 by hand under the per-creator lock, mirroring the
+    //    reissue: do exactly Phase 1 by hand under the per-organization lock, mirroring the
     //    helper, then leave the invoice void with NO reissue. ──
     {
         let mut c = new_conn(&url).await;
         let tx = c.transaction().await.expect("tx");
-        tx.execute("SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)", &[&creator.to_string()])
+        tx.execute("SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)", &[&organization.to_string()])
             .await
             .expect("lock");
         // void_reversal for each consumed row.
@@ -1690,9 +1736,9 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
             let gid: Option<String> = row.get("consumed_from_grant_id");
             tx.execute(
                 "INSERT INTO zeroship.credit_ledger \
-                   (id, creator_id, kind, amount_cents, currency, applied_invoice_id, consumed_from_grant_id) \
+                   (id, organization_id, kind, amount_cents, currency, applied_invoice_id, consumed_from_grant_id) \
                  VALUES ($1, $2, 'void_reversal', $3, $4, $5, $6)",
-                &[&zeroship_core::typed_id::new_credit_id(), &creator, &(-amt), &cur, &inv_a, &gid],
+                &[&zeroship_core::typed_id::new_credit_id(), &organization, &(-amt), &cur, &inv_a, &gid],
             )
             .await
             .expect("void_reversal");
@@ -1708,7 +1754,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
     // Now the invoice is void, reversal applied (balance back to $10), no reissue yet.
     assert_eq!(invoice_money(&fx.state, &inv_a).await.0, "void");
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, &creator, "usd").await.expect("bal"),
+        zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd").await.expect("bal"),
         1000, "balance restored to $10 after the void_reversal (no reissue yet)",
     );
 
@@ -1739,7 +1785,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
 
     // BALANCE CONSERVED: reissue re-drew $6 → back to $4. Never $-2, never $10.
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, &creator, "usd").await.expect("bal"),
+        zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd").await.expect("bal"),
         400, "re-drive converges: balance back to $4, conserved",
     );
 
@@ -1749,7 +1795,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
         .expect("third invocation converges");
     assert_eq!(again.reissued_invoice_id.as_deref(), Some(reissued.as_str()), "third drive is a stable no-op");
     assert_eq!(
-        zeroship_control::credit::balance(&*fx.state.control_pg, &creator, "usd").await.expect("bal"),
+        zeroship_control::credit::balance(&*fx.state.control_pg, &organization, "usd").await.expect("bal"),
         400, "balance still $4 after a third drive",
     );
 
@@ -1776,8 +1822,9 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
     let url = db_url();
     let fx = build_fixture(&url, "gap5-nonfinal").await;
 
-    let creator = make_user(&fx.state, "gap5").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "gap5").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
 
     // A DRAFT invoice (never finalized). Seed it directly + record cash on it (so the
     // rejection is provably about STATUS, not about a $0 over-refund cap).
@@ -1785,9 +1832,9 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
     fx.state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, DATE '2032-01-01', 'draft')",
-            &[&draft, &creator],
+            &[&draft, &organization],
         )
         .await
         .expect("seed draft");
@@ -1812,10 +1859,10 @@ async fn operator_refund_on_draft_or_void_invoice_is_invalid() {
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+               (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
                 total_cents, finalized_at, voided_at) \
              VALUES ($1, $2, DATE '2032-02-01', 'void', 5000, 0, 0, 5000, NOW(), NOW())",
-            &[&voided, &creator],
+            &[&voided, &organization],
         )
         .await
         .expect("seed void");
@@ -1911,8 +1958,9 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
     let url = db_url();
     let fx = build_fixture(&url, "gap7-immut").await;
 
-    let creator = make_user(&fx.state, "gap7").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "gap7").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
 
     // A finalized invoice with $50 cash collected (so the refund INSERT passes the cap).
     let inv = zeroship_core::typed_id::new_invoice_id();
@@ -1920,10 +1968,10 @@ async fn refunds_immutable_trigger_freezes_money_and_status_lifecycle() {
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+               (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
                 total_cents, finalized_at) \
              VALUES ($1, $2, DATE '2033-01-01', 'finalized', 5000, 0, 0, 5000, NOW())",
-            &[&inv, &creator],
+            &[&inv, &organization],
         )
         .await
         .expect("seed invoice");
@@ -2047,8 +2095,9 @@ async fn true_up_noop_when_over_collection_not_positive() {
     let fx = build_fixture(&url, "gap23-noop").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let creator = make_user(&fx.state, "gap23").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "gap23").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
 
     // A VOIDED invoice with $40 cash collected, no prior refunds.
     let inv = zeroship_core::typed_id::new_invoice_id();
@@ -2056,10 +2105,10 @@ async fn true_up_noop_when_over_collection_not_positive() {
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+               (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
                 total_cents, finalized_at, voided_at) \
              VALUES ($1, $2, DATE '2034-01-01', 'void', 4000, 0, 0, 4000, NOW(), NOW())",
-            &[&inv, &creator],
+            &[&inv, &organization],
         )
         .await
         .expect("seed void invoice");
@@ -2105,15 +2154,15 @@ async fn true_up_noop_when_over_collection_not_positive() {
     // The void+reissue BRIDGE reports the NoOp as no true-up: drive it on a fresh bill
     // where the reissue equals the original (no over-collection) and assert
     // `true_up_refund_id == None && true_up_cents == 0`.
-    set_customer(&fx.state, creator).await;
+    set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     let now = now_for_closed_period();
     let period = prev_period(now);
     ingest_at(&fx.state, app, 3000, period, 1).await; // $30
     let stripe = RecordingStripe::default();
     assert_eq!(run_reconcile(&fx.state, &stripe, now).await, 1);
-    let inv_b = active_invoice_id(&fx.state, creator, period).await.expect("invoice B");
+    let inv_b = active_invoice_id(&fx.state, organization, period).await.expect("invoice B");
     // Cash collected EXACTLY equals the bill ($30); the reissue re-prices the SAME usage
     // (== $30), so over = $30 − $0 − $30 = 0 ⇒ the bridge reports no true-up.
     append_payment(&fx.state, &inv_b, 3000, "in_gap23_b").await;
@@ -2164,8 +2213,9 @@ async fn true_up_redrive_converges_noop_after_issue() {
     let fx = build_fixture(&url, "gap4-redrive").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let creator = make_user(&fx.state, "gap4").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "gap4").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
 
     // A VOIDED invoice with $60 cash collected, no prior refunds.
     let inv = zeroship_core::typed_id::new_invoice_id();
@@ -2173,10 +2223,10 @@ async fn true_up_redrive_converges_noop_after_issue() {
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+               (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
                 total_cents, finalized_at, voided_at) \
              VALUES ($1, $2, DATE '2035-01-01', 'void', 6000, 0, 0, 6000, NOW(), NOW())",
-            &[&inv, &creator],
+            &[&inv, &organization],
         )
         .await
         .expect("seed void invoice");
@@ -2243,8 +2293,9 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
     let fx = build_fixture(&url, "gap4-conflict").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
 
-    let creator = make_user(&fx.state, "gap4c").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "gap4c").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
 
     // A VOIDED invoice with $60 cash collected.
     let inv = zeroship_core::typed_id::new_invoice_id();
@@ -2252,10 +2303,10 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+               (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
                 total_cents, finalized_at, voided_at) \
              VALUES ($1, $2, DATE '2036-01-01', 'void', 6000, 0, 0, 6000, NOW(), NOW())",
-            &[&inv, &creator],
+            &[&inv, &organization],
         )
         .await
         .expect("seed void invoice");
@@ -2271,7 +2322,7 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
     {
         let tx = conn.transaction().await.expect("tx");
         let claim = refund::claim_refund_locked(
-            &tx, &creator, &inv, 1000, 1000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
+            &tx, &organization, &inv, 1000, 1000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
         )
         .await
         .expect("claim");
@@ -2286,7 +2337,7 @@ async fn true_up_claim_key_conflict_on_moved_anchor() {
     {
         let tx = conn.transaction().await.expect("tx2");
         let conflict = refund::claim_refund_locked(
-            &tx, &creator, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
+            &tx, &organization, &inv, 2000, 2000, 0, "usd", RefundDestination::Cash, Some("trueup"), &idem,
         )
         .await
         .expect("conflict claim");

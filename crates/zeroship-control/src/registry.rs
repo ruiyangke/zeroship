@@ -322,8 +322,13 @@ impl Registry {
         let rows = tx
             .query(
                 &format!(
-                    "INSERT INTO zeroship.apps (name, plan_id, project_id) \
-                     SELECT $1, $2, p.id \
+                    // `organization_id` is taken from the SAME project row the
+                    // app is being placed in, so the pair the composite key
+                    // `(project_id, organization_id) -> projects(id,
+                    // organization_id)` checks is true by construction rather
+                    // than by a second lookup that could disagree.
+                    "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
+                     SELECT $1, $2, p.id, p.organization_id \
                        FROM zeroship.projects p \
                        LEFT JOIN zeroship.organization_members m \
                               ON m.organization_id = p.organization_id AND m.user_id = $4 \
@@ -898,48 +903,37 @@ impl Registry {
         // gateway gates dispatch on this pulled value: spend state is PULLed on
         // the RouteEntry, not pushed.
         //
-        // LEFT JOIN zeroship.creator_billing_status: payment/account state
-        // is CREATOR-keyed (one row per creator), so we surface it per-app via
-        // the app's ORGANIZATION owners, reached through its project — the same
-        // mapping the billing reconciler uses (there is no apps.creator_id
-        // column and no apps.organization_id either; the project is the only
-        // path). An app whose organization has no status row (free/cardless,
-        // the common case) yields NULL ⇒ default `AccountState::Active`. The
-        // gateway gates dispatch on this pulled value as an OUTER AND with
-        // spend (Suspended → 402 before spend is even consulted).
+        // LEFT JOIN zeroship.organization_billing_status: payment/account state
+        // is ORGANIZATION-keyed (one row per organization), and `apps` now
+        // carries `organization_id`, so this is a plain equi-join on the row we
+        // already have. An app whose organization has no status row
+        // (free/cardless, the common case) yields NULL ⇒ default
+        // `AccountState::Active`. The gateway gates dispatch on this pulled
+        // value as an OUTER AND with spend (Suspended → 402 before spend is
+        // even consulted).
         //
-        // FAN-OUT SAFETY, AND IT MATTERS MORE NOW THAN IT DID. Under
-        // `app_members` a fan-out needed a second owner row on one app, which
-        // ordinary creation never wrote. An ORGANIZATION legitimately holds
-        // several owners, so the fan-out is now the expected case rather than
-        // the anomalous one. `acct` collapses it to AT MOST ONE row per app and
-        // ORDERs so the MOST-RESTRICTIVE state wins (suspended > past_due >
-        // active > none) — enforcement can never be relaxed by adding an owner
-        // whose card is good. This mirrors the reconciler's collapse.
+        // THE LATERAL THAT USED TO BE HERE IS GONE, AND WITH IT A WHOLE CLASS OF
+        // BUG. While the billing subject was a human, this had to walk
+        // `apps -> projects -> organization_members(role='owner')`, which FANS
+        // OUT once per owner - so it needed a `LIMIT 1` ordered
+        // most-restrictive-first (suspended > past_due > active > none) purely
+        // so that seating a second owner with a good card could not relax
+        // enforcement for everyone. An organization has exactly one billing
+        // status row, so there is no fan-out to collapse and no ordering to get
+        // wrong. `billing_read::billing_status` reads through the identical
+        // join, which is what keeps the edge and the console from disagreeing
+        // about one app.
         let rows = conn
             .query(
                 "SELECT a.id, a.name, a.plan_id, a.deploy_hash, \
                         a.manifest_json, c.client_id AS oauth_client_id, \
                         c.sector_identifier, s.state AS spend_state, \
-                        acct.account_state \
+                        obs.state AS account_state \
                  FROM zeroship.apps a \
                  LEFT JOIN zeroship.app_oauth_clients c ON c.app_id = a.id \
                  LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
-                 LEFT JOIN LATERAL ( \
-                     SELECT cbs.state AS account_state \
-                     FROM zeroship.projects p \
-                     JOIN zeroship.organization_members m \
-                          ON m.organization_id = p.organization_id AND m.role = 'owner' \
-                     LEFT JOIN zeroship.creator_billing_status cbs ON cbs.creator_id = m.user_id \
-                     WHERE p.id = a.project_id \
-                     ORDER BY CASE cbs.state \
-                                  WHEN 'suspended' THEN 0 \
-                                  WHEN 'past_due'  THEN 1 \
-                                  WHEN 'active'    THEN 2 \
-                                  ELSE 3 END, \
-                              m.user_id \
-                     LIMIT 1 \
-                 ) acct ON TRUE \
+                 LEFT JOIN zeroship.organization_billing_status obs \
+                        ON obs.organization_id = a.organization_id \
                  WHERE a.archived_at IS NULL",
                 &[],
             )
@@ -1004,7 +998,7 @@ impl Registry {
                         .as_deref()
                         .map_or(zeroship_core::types::SpendState::Allow, crate::spend::parse_spend_state),
                     // Creator account state from the LEFT-JOINed
-                    // creator_billing_status (via the owner membership). NULL
+                    // organization_billing_status (via the owner membership). NULL
                     // (no status row) ⇒ Active; an unrecognised TEXT value fails
                     // closed to Suspended (defensive — the writer only ever
                     // persists the three known states, guarded by a CHECK).

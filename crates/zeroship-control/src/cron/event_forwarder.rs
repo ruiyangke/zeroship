@@ -242,30 +242,37 @@ pub enum EventForwarderError {
     DeadLetter(String),
 }
 
-/// Resolves the OWNING creator for an app so the forwarder can attribute usage
-/// events to the right provider customer. The worker producer only has the
-/// server-injected `app_id` and stamps `subject.creator = nil`; the control
-/// plane owns the app→creator mapping (the app's project, its organization, and
-/// that organization's owner), so it must enrich the creator here before
-/// forwarding to a per-creator provider.
+/// Resolves the OWNING organization for an app so the forwarder can attribute
+/// usage events to the right provider customer. The worker producer holds only
+/// the server-injected `app_id` and leaves `subject.organization` unset; the
+/// control plane owns the app -> organization mapping, so it must fill it in
+/// here before forwarding to a per-organization provider.
 #[async_trait::async_trait(?Send)]
-pub trait CreatorResolver: Send + Sync {
-    async fn creator_for_app(&self, app_id: Uuid) -> Result<Option<Uuid>, EventForwarderError>;
+pub trait OrganizationResolver: Send + Sync {
+    async fn organization_for_app(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Option<String>, EventForwarderError>;
 }
 
-/// Postgres-backed [`CreatorResolver`], over
-/// [`crate::organizations::app_owner_lateral`].
-pub struct PgCreatorResolver {
+/// Postgres-backed [`OrganizationResolver`], reading `apps.organization_id`.
+///
+/// This used to walk `apps -> projects -> organization_members` and return the
+/// longest-standing OWNER, because the subject was a human. It is now one
+/// column on the row we already have: the copy is consumed by the composite key
+/// `(project_id, organization_id) -> projects(id, organization_id)`, so it
+/// cannot name an organization the project does not belong to.
+pub struct PgOrganizationResolver {
     conn: Arc<compio_postgres::Client>,
 }
 
-impl std::fmt::Debug for PgCreatorResolver {
+impl std::fmt::Debug for PgOrganizationResolver {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PgCreatorResolver").finish_non_exhaustive()
+        f.debug_struct("PgOrganizationResolver").finish_non_exhaustive()
     }
 }
 
-impl PgCreatorResolver {
+impl PgOrganizationResolver {
     #[must_use]
     pub fn new(conn: Arc<compio_postgres::Client>) -> Self {
         Self { conn }
@@ -273,20 +280,22 @@ impl PgCreatorResolver {
 }
 
 #[async_trait::async_trait(?Send)]
-impl CreatorResolver for PgCreatorResolver {
-    async fn creator_for_app(&self, app_id: Uuid) -> Result<Option<Uuid>, EventForwarderError> {
+impl OrganizationResolver for PgOrganizationResolver {
+    async fn organization_for_app(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Option<String>, EventForwarderError> {
         let rows = self
             .conn
             .query(
-                &format!(
-                    "SELECT app_owner.user_id FROM zeroship.apps a {lateral} WHERE a.id = $1",
-                    lateral = crate::organizations::app_owner_lateral(),
-                ),
+                "SELECT a.organization_id FROM zeroship.apps a WHERE a.id = $1",
                 &[&app_id],
             )
             .await
-            .map_err(|e| EventForwarderError::DeadLetter(format!("creator resolve: {e}")))?;
-        Ok(rows.first().and_then(|r| r.get::<_, Option<Uuid>>("user_id")))
+            .map_err(|e| {
+                EventForwarderError::DeadLetter(format!("organization resolve: {e}"))
+            })?;
+        Ok(rows.first().map(|r| r.get::<_, String>("organization_id")))
     }
 }
 
@@ -297,7 +306,7 @@ pub async fn run(
     stream: Arc<dyn StreamTransport>,
     stack: Arc<BillingStack>,
     dead_letters: Arc<dyn DeadLetterSink>,
-    creator_resolver: Arc<dyn CreatorResolver>,
+    organization_resolver: Arc<dyn OrganizationResolver>,
     cfg: EventForwarderConfig,
 ) {
     tracing::info!(
@@ -313,7 +322,7 @@ pub async fn run(
             stream.as_ref(),
             &stack,
             dead_letters.as_ref(),
-            creator_resolver.as_ref(),
+            organization_resolver.as_ref(),
             &cfg,
         )
         .await
@@ -349,7 +358,7 @@ pub async fn run_cycle(
     stream: &dyn StreamTransport,
     stack: &BillingStack,
     dead_letters: &dyn DeadLetterSink,
-    creator_resolver: &dyn CreatorResolver,
+    organization_resolver: &dyn OrganizationResolver,
     cfg: &EventForwarderConfig,
 ) -> Result<EventForwarderCycle, EventForwarderError> {
     let max = cfg.batch_max.max(1);
@@ -360,7 +369,7 @@ pub async fn run_cycle(
 
     let mut events = Vec::with_capacity(records.len());
     let mut event_records = Vec::with_capacity(records.len());
-    let mut creator_cache = std::collections::HashMap::<Uuid, Option<Uuid>>::new();
+    let mut organization_cache = std::collections::HashMap::<Uuid, Option<String>>::new();
     let mut cycle = EventForwarderCycle {
         polled: records.len(),
         ..EventForwarderCycle::default()
@@ -368,33 +377,37 @@ pub async fn run_cycle(
     for record in &records {
         match decode_record(record) {
             Ok(mut event) => {
-                // Attribute the event to its owning creator: the worker stamps
-                // `creator = nil` (it only has the app id), so a per-creator
-                // provider (openmeter/lago/stripe_meters) would otherwise bill
-                // EVERY app's usage to one nil customer. Resolve app→creator and
-                // dead-letter events we cannot attribute rather than mis-bill.
-                if event.subject.creator.is_nil() {
-                    let creator = match event.subject.app {
+                // Attribute the event to its owning organization: the worker
+                // leaves the subject unset (it only has the app id), so a
+                // per-organization provider (openmeter/lago/stripe_meters) has
+                // nothing to bill until this runs. Resolve app -> organization
+                // and dead-letter what we cannot attribute rather than mis-bill.
+                if event.subject.organization.is_none() {
+                    let organization = match event.subject.app {
                         Some(app_id) => {
-                            if let Some(cached) = creator_cache.get(&app_id) {
-                                *cached
+                            if let Some(cached) = organization_cache.get(&app_id) {
+                                cached.clone()
                             } else {
-                                let resolved = creator_resolver.creator_for_app(app_id).await?;
-                                creator_cache.insert(app_id, resolved);
+                                let resolved =
+                                    organization_resolver.organization_for_app(app_id).await?;
+                                organization_cache.insert(app_id, resolved.clone());
                                 resolved
                             }
                         }
                         None => None,
                     };
-                    match creator {
-                        Some(creator_id) => event.subject.creator = creator_id,
+                    match organization {
+                        Some(organization_id) => {
+                            event.subject.organization = Some(organization_id);
+                        }
                         None => {
                             dead_letters
                                 .record_provider_reject(ProviderDeadLetter {
                                     provider_id: stack.meter.id().to_string(),
                                     event: event.clone(),
-                                    reason: "no owning creator for app; cannot attribute usage"
-                                        .to_string(),
+                                    reason:
+                                        "no owning organization for app; cannot attribute usage"
+                                            .to_string(),
                                     partition: record.partition,
                                     offset: record.offset,
                                 })
@@ -405,7 +418,7 @@ pub async fn run_cycle(
                                 app_id = ?event.subject.app,
                                 partition = record.partition,
                                 offset = record.offset,
-                                "usage event has no owning creator; quarantined"
+                                "usage event has no owning organization; quarantined"
                             );
                             continue;
                         }
@@ -659,14 +672,17 @@ mod tests {
     }
 
     #[derive(Debug, Default)]
-    struct MockCreatorResolver {
-        mapping: std::collections::HashMap<Uuid, Uuid>,
+    struct MockOrganizationResolver {
+        mapping: std::collections::HashMap<Uuid, String>,
     }
 
     #[async_trait::async_trait(?Send)]
-    impl CreatorResolver for MockCreatorResolver {
-        async fn creator_for_app(&self, app_id: Uuid) -> Result<Option<Uuid>, EventForwarderError> {
-            Ok(self.mapping.get(&app_id).copied())
+    impl OrganizationResolver for MockOrganizationResolver {
+        async fn organization_for_app(
+            &self,
+            app_id: Uuid,
+        ) -> Result<Option<String>, EventForwarderError> {
+            Ok(self.mapping.get(&app_id).cloned())
         }
     }
 
@@ -680,10 +696,10 @@ mod tests {
         let dead_letters = Arc::new(RecordingDeadLetters::default());
         let cfg = EventForwarderConfig::default();
 
-        let first = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockCreatorResolver::default(), &cfg)
+        let first = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockOrganizationResolver::default(), &cfg)
             .await
             .expect("first cycle");
-        let second = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockCreatorResolver::default(), &cfg)
+        let second = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockOrganizationResolver::default(), &cfg)
             .await
             .expect("redelivery cycle");
 
@@ -731,7 +747,7 @@ mod tests {
         let dead_letters = Arc::new(RecordingDeadLetters::default());
         let cfg = EventForwarderConfig::default();
 
-        let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockCreatorResolver::default(), &cfg)
+        let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockOrganizationResolver::default(), &cfg)
             .await
             .expect("permanent rejects are quarantined");
 
@@ -764,7 +780,7 @@ mod tests {
             StreamRecord {
                 partition: 0,
                 offset: 0,
-                key: good_a.creator_subject().into_bytes(),
+                key: subject_key(&good_a),
                 payload: serde_json::to_vec(&good_a).expect("event serializes"),
             },
             StreamRecord {
@@ -776,7 +792,7 @@ mod tests {
             StreamRecord {
                 partition: 0,
                 offset: 2,
-                key: good_b.creator_subject().into_bytes(),
+                key: subject_key(&good_b),
                 payload: serde_json::to_vec(&good_b).expect("event serializes"),
             },
         ];
@@ -790,7 +806,7 @@ mod tests {
         let dead_letters = Arc::new(RecordingDeadLetters::default());
         let cfg = EventForwarderConfig::default();
 
-        let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockCreatorResolver::default(), &cfg)
+        let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &MockOrganizationResolver::default(), &cfg)
             .await
             .expect("decode poison is quarantined");
 
@@ -846,7 +862,7 @@ mod tests {
                 StreamRecord {
                     partition: 0,
                     offset: offset as i64,
-                    key: event.creator_subject().into_bytes(),
+                    key: subject_key(&event),
                     payload: serde_json::to_vec(&event).expect("event serializes"),
                 }
             })
@@ -857,13 +873,24 @@ mod tests {
         }
     }
 
+    /// The stream partition key an already-attributed event carries. An event
+    /// with no subject would be a producer bug, so the helper panics rather than
+    /// keying every unattributed event alike.
+    fn subject_key(event: &UsageEvent) -> Vec<u8> {
+        event
+            .organization_subject()
+            .expect("test fixture events are attributed")
+            .as_bytes()
+            .to_vec()
+    }
+
     fn usage_event(event_id: &str) -> UsageEvent {
         UsageEvent {
             event_id: event_id.to_string(),
             source: "worker-a".to_string(),
             subject: UsageSubject {
                 app: Some(Uuid::parse_str("aaaaaaaa-aaaa-7aaa-aaaa-aaaaaaaaaaaa").unwrap()),
-                creator: Uuid::parse_str("bbbbbbbb-bbbb-7bbb-bbbb-bbbbbbbbbbbb").unwrap(),
+                organization: Some("org_0000000000000000000001".to_string()),
             },
             meter: "compute_units".to_string(),
             value: 10,
@@ -872,13 +899,14 @@ mod tests {
         }
     }
 
-    fn nil_creator_event(event_id: &str, app: Uuid) -> UsageEvent {
+    fn unattributed_event(event_id: &str, app: Uuid) -> UsageEvent {
         UsageEvent {
             event_id: event_id.to_string(),
             source: "worker-a".to_string(),
             subject: UsageSubject {
                 app: Some(app),
-                creator: Uuid::nil(), // the worker stamps nil; control must enrich
+                // The worker leaves this unset; the forwarder must fill it in.
+                organization: None,
             },
             meter: "requests".to_string(),
             value: 10,
@@ -905,41 +933,42 @@ mod tests {
     }
 
     #[compio::test]
-    async fn run_cycle_enriches_nil_creator_from_app_owner_and_deadletters_orphans() {
+    async fn run_cycle_attributes_unset_subject_and_deadletters_unresolvable_apps() {
         let app_owned = Uuid::parse_str("aaaaaaaa-aaaa-7aaa-aaaa-aaaaaaaaaaaa").unwrap();
         let app_orphan = Uuid::parse_str("cccccccc-cccc-7ccc-cccc-cccccccccccc").unwrap();
-        let owner = Uuid::parse_str("dddddddd-dddd-7ddd-dddd-dddddddddddd").unwrap();
+        let owner = "org_0000000000000000000002".to_string();
         let stream = fake_stream_of(vec![
-            nil_creator_event("evt_owned", app_owned),
-            nil_creator_event("evt_orphan", app_orphan),
+            unattributed_event("evt_owned", app_owned),
+            unattributed_event("evt_orphan", app_orphan),
         ]);
         let meter = Arc::new(RecordingMeter::default());
         let meter_provider: Arc<dyn MeteringProvider> = meter.clone();
         let stack = BillingStack::with_meter_for_tests(meter_provider);
         let dead_letters = Arc::new(RecordingDeadLetters::default());
         let mut mapping = std::collections::HashMap::new();
-        mapping.insert(app_owned, owner); // app_orphan has NO owner
-        let resolver = MockCreatorResolver { mapping };
+        mapping.insert(app_owned, owner.clone()); // app_orphan resolves to nothing
+        let resolver = MockOrganizationResolver { mapping };
         let cfg = EventForwarderConfig::default();
 
         let cycle = run_cycle(&stream, &stack, dead_letters.as_ref(), &resolver, &cfg)
             .await
             .expect("cycle");
 
-        // The owned app's event is forwarded WITH the resolved creator; the
-        // orphan (no owner) is quarantined, never forwarded with a nil customer.
+        // The owned app's event is forwarded WITH its resolved organization; the
+        // orphan is quarantined rather than forwarded with an absent subject.
         assert_eq!(cycle.ingested, 1);
         assert_eq!(cycle.dead_lettered, 1);
         let ingested = meter.ingested_events.lock().expect("ingested poisoned");
         assert_eq!(ingested.len(), 1);
         assert_eq!(ingested[0].event_id, "evt_owned");
         assert_eq!(
-            ingested[0].subject.creator, owner,
-            "nil creator must be enriched to the app's owning creator before forwarding"
+            ingested[0].subject.organization.as_deref(),
+            Some(owner.as_str()),
+            "an unset subject must be filled in from the app's organization before forwarding"
         );
         let dl = dead_letters.entries.lock().expect("dl poisoned");
         assert_eq!(dl.len(), 1);
         assert_eq!(dl[0].event.event_id, "evt_orphan");
-        assert!(dl[0].reason.contains("no owning creator"));
+        assert!(dl[0].reason.contains("no owning organization"));
     }
 }

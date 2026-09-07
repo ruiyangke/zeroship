@@ -69,19 +69,19 @@ impl LiteStore for ControlLiteStore {
         ))
     }
 
-    async fn owned_app_ids(&self, creator: &Uuid) -> Result<Vec<Uuid>, ProviderError> {
-        billing_reconcile::owned_app_ids_for_registry(&self.registry, creator)
+    async fn owned_app_ids(&self, organization: &str) -> Result<Vec<Uuid>, ProviderError> {
+        billing_reconcile::owned_app_ids_for_registry(&self.registry, organization)
             .await
             .map_err(ProviderError::from)
     }
 
     async fn period_billable_units(
         &self,
-        creator: &Uuid,
+        organization: &str,
         period_start: i64,
     ) -> Result<u64, ProviderError> {
         let conn = self.registry.conn().await?;
-        let app_ids = self.owned_app_ids(creator).await?;
+        let app_ids = self.owned_app_ids(organization).await?;
         let pricing = PricingStore::new(self.registry.clone());
         let weights = pricing.weights().await?;
         let catalog = PlanCatalog::new(self.registry.clone());
@@ -107,13 +107,13 @@ impl LiteStore for ControlLiteStore {
 
     async fn period_meter_units(
         &self,
-        creator: &Uuid,
+        organization: &str,
         period_start: i64,
         meter: &str,
     ) -> Result<u64, ProviderError> {
         let conn = self.registry.conn().await?;
         let period = crate::metering::period_date(period_start);
-        let app_ids = self.owned_app_ids(creator).await?;
+        let app_ids = self.owned_app_ids(organization).await?;
         let mut units = 0u64;
         for app_id in app_ids {
             let rows = conn
@@ -140,7 +140,7 @@ impl LiteStore for ControlLiteStore {
 
     async fn close_period_invoice(
         &self,
-        creator: &Uuid,
+        organization: &str,
         period: BillingPeriod,
     ) -> Result<InvoiceRef, ProviderError> {
         let stripe = self.stripe();
@@ -148,9 +148,9 @@ impl LiteStore for ControlLiteStore {
         let pricing = PricingStore::new(self.registry.clone());
         let weights = pricing.weights().await?;
         let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
-        let app_ids = self.owned_app_ids(creator).await?;
+        let app_ids = self.owned_app_ids(organization).await?;
 
-        let billed = billing_reconcile::bill_creator_with_parts(
+        let billed = billing_reconcile::bill_organization_with_parts(
             &self.registry,
             &self.stripe_store,
             self.tax_provider.as_ref(),
@@ -158,14 +158,14 @@ impl LiteStore for ControlLiteStore {
             &catalog,
             &weights,
             default_fx,
-            creator,
+            organization,
             &app_ids,
             period.start,
         )
         .await?;
         if billed {
             let invoice_id =
-                billing_reconcile::lookup_invoice_id_for_registry(&self.registry, creator, period.start)
+                billing_reconcile::lookup_invoice_id_for_registry(&self.registry, organization, period.start)
                     .await?;
             Ok(InvoiceRef(invoice_id))
         } else {
@@ -175,7 +175,7 @@ impl LiteStore for ControlLiteStore {
 
     async fn adjustment_note_invoice(
         &self,
-        creator: &Uuid,
+        organization: &str,
         note: &AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError> {
         let app_id = note.app_id.ok_or_else(|| {
@@ -189,8 +189,8 @@ impl LiteStore for ControlLiteStore {
         let invoice_id = match conn
             .query(
                 "SELECT id FROM zeroship.invoices \
-                 WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
-                &[creator, &adjustment_period],
+                 WHERE organization_id = $1 AND period = $2::date AND status <> 'void'",
+                &[&organization, &adjustment_period],
             )
             .await?
             .first()
@@ -200,16 +200,16 @@ impl LiteStore for ControlLiteStore {
             None => {
                 let new_id = zeroship_core::typed_id::new_invoice_id();
                 conn.execute(
-                    "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+                    "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
                      VALUES ($1, $2, $3::date, 'draft') \
-                     ON CONFLICT (creator_id, period) WHERE status <> 'void' DO NOTHING",
-                    &[&new_id, creator, &adjustment_period],
+                     ON CONFLICT (organization_id, period) WHERE status <> 'void' DO NOTHING",
+                    &[&new_id, &organization, &adjustment_period],
                 )
                 .await?;
                 conn.query(
                     "SELECT id FROM zeroship.invoices \
-                     WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
-                    &[creator, &adjustment_period],
+                     WHERE organization_id = $1 AND period = $2::date AND status <> 'void'",
+                    &[&organization, &adjustment_period],
                 )
                 .await?
                 .first()

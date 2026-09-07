@@ -116,31 +116,61 @@ pub trait Invoicer {
     ) -> Result<InvoiceRef, ProviderError>;
 }
 
+/// The local invoice rail a `lite`-family provider drives.
+///
+/// Every verb is scoped to ONE billing subject, and that subject is an
+/// **organization id** (`org_…`, TEXT) rather than a `users.id` uuid. The change
+/// is not a rename: `SubjectRef` is already a `String`, so a provider handing a
+/// uuid-shaped subject to a store that now keys on `organizations(id)` would
+/// find nothing and bill nobody rather than fail. The signature is therefore the
+/// enforcement — there is no overload taking the old type, and no `From<Uuid>`
+/// that would let one be passed by accident.
 #[async_trait::async_trait(?Send)]
 pub trait LiteStore: Send + Sync {
     async fn ingest_usage_events(&self, batch: &[UsageEvent]) -> Result<IngestAck, ProviderError>;
-    async fn owned_app_ids(&self, creator: &Uuid) -> Result<Vec<Uuid>, ProviderError>;
+    async fn owned_app_ids(&self, organization: &str) -> Result<Vec<Uuid>, ProviderError>;
     async fn period_billable_units(
         &self,
-        creator: &Uuid,
+        organization: &str,
         period_start: i64,
     ) -> Result<u64, ProviderError>;
     async fn period_meter_units(
         &self,
-        creator: &Uuid,
+        organization: &str,
         period_start: i64,
         meter: &str,
     ) -> Result<u64, ProviderError>;
     async fn close_period_invoice(
         &self,
-        creator: &Uuid,
+        organization: &str,
         period: BillingPeriod,
     ) -> Result<InvoiceRef, ProviderError>;
     async fn adjustment_note_invoice(
         &self,
-        creator: &Uuid,
+        organization: &str,
         note: &AdjustmentNote,
     ) -> Result<InvoiceRef, ProviderError>;
+}
+
+/// The organization one forwarded event names, or a refusal.
+///
+/// Every provider ingest path is downstream of [`crate::cron::event_forwarder`],
+/// which fills the subject in from `apps.organization_id` and dead-letters what
+/// it cannot attribute. An unset subject arriving here therefore means an event
+/// reached a provider without passing that step, and the honest outcome is to
+/// refuse it: the previous shape had no way to say this, because an unresolved
+/// subject was `Uuid::nil()` and rendered as a perfectly well-formed customer
+/// key that every app in the fleet shared.
+pub(crate) fn event_subject<'a>(
+    provider: &str,
+    event: &'a UsageEvent,
+) -> Result<&'a str, ProviderError> {
+    event.organization_subject().ok_or_else(|| {
+        ProviderError::Config(format!(
+            "{provider}: usage event {} carries no organization subject",
+            event.event_id
+        ))
+    })
 }
 
 pub fn assert_capability_consistency(p: &dyn MeteringProvider) -> Result<(), ProviderError> {
@@ -690,13 +720,13 @@ mod tests {
             })
         }
 
-        async fn owned_app_ids(&self, _creator: &Uuid) -> Result<Vec<Uuid>, ProviderError> {
+        async fn owned_app_ids(&self, _organization: &str) -> Result<Vec<Uuid>, ProviderError> {
             Ok(Vec::new())
         }
 
         async fn period_billable_units(
             &self,
-            _creator: &Uuid,
+            _organization: &str,
             _period_start: i64,
         ) -> Result<u64, ProviderError> {
             Ok(0)
@@ -704,7 +734,7 @@ mod tests {
 
         async fn period_meter_units(
             &self,
-            _creator: &Uuid,
+            _organization: &str,
             _period_start: i64,
             _meter: &str,
         ) -> Result<u64, ProviderError> {
@@ -713,7 +743,7 @@ mod tests {
 
         async fn close_period_invoice(
             &self,
-            _creator: &Uuid,
+            _organization: &str,
             _period: BillingPeriod,
         ) -> Result<InvoiceRef, ProviderError> {
             Ok(InvoiceRef(Some("dummy-invoice".to_string())))
@@ -721,7 +751,7 @@ mod tests {
 
         async fn adjustment_note_invoice(
             &self,
-            _creator: &Uuid,
+            _organization: &str,
             _note: &AdjustmentNote,
         ) -> Result<InvoiceRef, ProviderError> {
             Ok(InvoiceRef(Some("dummy-adjustment-invoice".to_string())))

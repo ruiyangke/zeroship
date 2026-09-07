@@ -202,7 +202,7 @@ pub fn spawn_all_with_options(
         .detach();
     }
 
-    // Dunning sweep (billing G2) — suspends each `past_due` creator whose
+    // Dunning sweep (billing G2) — suspends each `past_due` organization whose
     // dunning window (`max_dunning_days`, default 7) has elapsed; the gateway
     // 402s their apps on its next /internal/routes poll. Provider-agnostic and
     // ALWAYS spawned (peer of spend_reconcile): payment status is orthogonal to
@@ -215,7 +215,7 @@ pub fn spawn_all_with_options(
 
     // Billing-notify sweep (billing-ops gap #26, PR-6) — turns the already-written
     // billing transition rows (dunning history, newly-finalized invoices, newly-issued
-    // refunds) into creator emails via the `BillingNotifier` seam: claim-before-send
+    // refunds) into an organization's billing address via the `BillingNotifier` seam: claim-before-send
     // under a dedicated advisory lock (multi-node safe), then flip to `sent`.
     // Provider-agnostic and ALWAYS spawned (peer of dunning): notifications are
     // orthogonal to which metering backend is configured. READ-ONLY w.r.t. money.
@@ -280,7 +280,7 @@ pub fn spawn_all_with_options(
             let forwarder_sink = Arc::new(event_forwarder::PgDeadLetterSink::new(Arc::clone(
                 &state.control_pg,
             )));
-            let creator_resolver = Arc::new(event_forwarder::PgCreatorResolver::new(Arc::clone(
+            let organization_resolver = Arc::new(event_forwarder::PgOrganizationResolver::new(Arc::clone(
                 &state.control_pg,
             )));
             compio::runtime::spawn(async move {
@@ -288,7 +288,7 @@ pub fn spawn_all_with_options(
                     forwarder_stream,
                     forwarder_stack,
                     forwarder_sink,
-                    creator_resolver,
+                    organization_resolver,
                     event_forwarder::EventForwarderConfig::default(),
                 )
                 .await;

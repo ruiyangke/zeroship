@@ -915,7 +915,7 @@ async fn log_rule_audit(
         &state.registry,
         AuditEntry {
             app_id: Some(app_id),
-            creator_id: None,
+            organization_id: None,
             actor_user_id: Some(authz.principal_id),
             action,
             resource: Some(resource),

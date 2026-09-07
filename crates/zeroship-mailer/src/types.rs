@@ -44,7 +44,7 @@ pub struct Email {
     ///
     /// `None` for the transactional auth mail (verify / magic-link / reset), which is
     /// not re-driven and carries no notify-ledger transition id — byte-for-byte
-    /// unchanged. Set by `BillingNotifier` to `(creator_id, kind, transition_id)`,
+    /// unchanged. Set by `BillingNotifier` to `(organization_id, kind, transition_id)`,
     /// the same tuple as the `billing_notifications` claim PK.
     pub idempotency_key: Option<String>,
 }

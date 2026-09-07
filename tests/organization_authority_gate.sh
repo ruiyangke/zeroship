@@ -179,15 +179,24 @@ SELECT probe('project_member_naming_a_non_member', $$
   INSERT INTO zeroship.project_members (project_id, organization_id, user_id, role)
   VALUES ('prj_0000000000000000000001','org_0000000000000000000001',
           '22222222-2222-2222-2222-222222222222','developer') $$);
+-- These three name `id`, `name` and `project_id` and NOTHING else. `apps.api_key`
+-- was dropped by db/migrations-ts/20260905000200_drop_app_api_key.ts, and a
+-- column list still naming it does not fail in a way this gate could read: the
+-- statement is refused at PARSE time with 42703, before any of the edges under
+-- test are reached, and `GET STACKED DIAGNOSTICS` carries neither a constraint
+-- nor a column, so every one of these would record `column:?`. That is the
+-- failure this gate's header warns about - a refusal that is not evidence -
+-- and `app_with_no_project` is where it bites hardest, because that case exists
+-- precisely to name `column:project_id` as the witness.
 SELECT probe('app_in_a_project', $$
-  INSERT INTO zeroship.apps (id, name, api_key, project_id)
-  VALUES (gen_random_uuid(), 'gate-app', 'k', 'prj_0000000000000000000001') $$);
+  INSERT INTO zeroship.apps (id, name, project_id)
+  VALUES (gen_random_uuid(), 'gate-app', 'prj_0000000000000000000001') $$);
 SELECT probe('app_naming_an_absent_project', $$
-  INSERT INTO zeroship.apps (id, name, api_key, project_id)
-  VALUES (gen_random_uuid(), 'gate-app-2', 'k', 'prj_0000000000000000000009') $$);
+  INSERT INTO zeroship.apps (id, name, project_id)
+  VALUES (gen_random_uuid(), 'gate-app-2', 'prj_0000000000000000000009') $$);
 SELECT probe('app_with_no_project', $$
-  INSERT INTO zeroship.apps (id, name, api_key)
-  VALUES (gen_random_uuid(), 'gate-app-3', 'k') $$);
+  INSERT INTO zeroship.apps (id, name)
+  VALUES (gen_random_uuid(), 'gate-app-3') $$);
 SELECT probe('delete_a_project_that_still_owns_an_app', $$
   DELETE FROM zeroship.projects WHERE id = 'prj_0000000000000000000001' $$);
 SELECT probe('delete_an_organization_that_still_owns_a_project', $$

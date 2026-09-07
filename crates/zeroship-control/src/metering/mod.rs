@@ -191,7 +191,7 @@ impl Metering {
                 source: "zeroship-control".to_string(),
                 subject: UsageSubject {
                     app: Some(*app_id),
-                    creator: Uuid::nil(),
+                    organization: None,
                 },
                 meter,
                 value,

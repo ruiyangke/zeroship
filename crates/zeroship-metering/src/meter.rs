@@ -284,17 +284,16 @@ impl Meter {
                     return false;
                 }
             };
-            // The worker producer has only the server-injected app id; emitted
-            // events carry `Uuid::nil()` and downstream control resolves the
-            // creator from the app registry before provider forwarding.
-            let creator = Uuid::nil();
+            // The worker producer has only the server-injected app id, so the
+            // subject is left UNSET and the control plane resolves the owning
+            // organization from the app registry before provider forwarding.
             for metric in drained {
                 events.push(UsageEvent {
                     event_id: Uuid::now_v7().to_string(),
                     source: self.source.clone(),
                     subject: UsageSubject {
                         app: Some(app_uuid),
-                        creator,
+                        organization: None,
                     },
                     meter: metric.meter,
                     value: metric.value,
@@ -388,7 +387,7 @@ mod tests {
         assert_eq!(request.value, 5);
         assert_eq!(request.source, "worker-a");
         assert_eq!(request.subject.app, Some(id));
-        assert_eq!(request.subject.creator, Uuid::nil());
+        assert_eq!(request.subject.organization, None);
         assert!(!request.event_id.is_empty());
         assert_eq!(
             Uuid::parse_str(&request.event_id).unwrap().get_version(),

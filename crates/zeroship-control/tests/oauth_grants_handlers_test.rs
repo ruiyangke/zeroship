@@ -683,8 +683,8 @@ async fn insert_app_oauth_client(state: &AppState, client_id: &str, sector: &str
     state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.apps (id, name, plan_id, project_id) \
-             VALUES ($1, $2, $3, $4)",
+            "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+             SELECT $1, $2, $3, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $4",
             &[
                 &app_id,
                 &format!("app-{}", app_id.simple()),

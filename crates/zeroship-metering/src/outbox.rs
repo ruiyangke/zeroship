@@ -1343,7 +1343,7 @@ mod tests {
             source: "test".to_string(),
             subject: zeroship_core::usage_event::UsageSubject {
                 app: Some(app_id),
-                creator: Uuid::now_v7(),
+                organization: Some(zeroship_core::typed_id::generate("org")),
             },
             meter: meter.to_string(),
             value,

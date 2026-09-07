@@ -1,21 +1,20 @@
-//! Server-held, per-creator application-fee policy (billing G1, Stream-2).
+//! Server-held, per-organization application-fee policy (billing G1, Stream-2).
 //!
-//! Stream-2 is the CREATOR-REVENUE rail: a creator charges THEIR end-users via
+//! Stream-2 is the ORGANIZATION-REVENUE rail: an organization charges THEIR end-users via
 //! their own Stripe **Connect** account; the platform takes a fee, stamped on
 //! the Connect charge SERVER-SIDE. Previously the fee was chosen CLIENT-SIDE by
-//! the SDK (`applicationFeePercent ?? 15`) — any creator could set it to 0
+//! the SDK (`applicationFeePercent ?? 15`) — any organization could set it to 0
 //! (ISS-29). This module makes the fee SERVER-AUTHORITATIVE:
 //!
 //! * [`FeePolicy`] is a pure value with [`FeePolicy::fee_cents`] — integer cents,
 //!   round-once, with optional cap/floor clamping. Unit-tested exhaustively.
-//! * [`FeePolicyStore`] persists it in `zeroship.creator_fee_policy` (changeset
+//! * [`FeePolicyStore`] persists it in `zeroship.organization_fee_policy` (changeset
 //!   0044). `get` returns the in-code DEFAULT (`Percent{1500}` = 15%) when no row
-//!   exists, so a brand-new creator still pays 15% without a signup-time INSERT.
+//!   exists, so a brand-new organization still pays 15% without a signup-time INSERT.
 //! * `set` is the OPERATOR-ONLY write — the handler gates it on Cedar
-//!   `BillingWrite` over `Resource::Any` (a creator self-editing their own fee is
-//!   a privilege escalation). There is NO creator-reachable path to lower it.
+//!   `BillingWrite` over `Resource::Any` (an organization self-editing their own fee is
+//!   a privilege escalation). There is NO organization-reachable path to lower it.
 
-use uuid::Uuid;
 
 use crate::registry::Registry;
 use crate::stripe_store::StripeError;
@@ -23,10 +22,10 @@ use crate::stripe_store::StripeError;
 /// Basis points denominator: 10_000 bps = 100%.
 const BPS_DENOM: u128 = 10_000;
 
-/// The platform's default fee when a creator has no explicit policy row: 15%.
+/// The platform's default fee when an organization has no explicit policy row: 15%.
 pub const DEFAULT_PERCENT_BPS: i32 = 1500;
 
-/// A per-creator application-fee policy. Server-held; never client-set.
+/// A per-organization application-fee policy. Server-held; never client-set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FeePolicy {
     /// A flat fee per charge, in cents.
@@ -102,14 +101,14 @@ impl FeePolicyStore {
         Self { registry }
     }
 
-    /// The fee policy for `creator_id`. Returns the in-code DEFAULT
-    /// (`Percent{1500}` = 15%, no cap/floor) when no row exists — a creator with
+    /// The fee policy for `organization_id`. Returns the in-code DEFAULT
+    /// (`Percent{1500}` = 15%, no cap/floor) when no row exists — an organization with
     /// no explicit policy still pays 15% without a signup-time INSERT.
     ///
     /// A row with an unrecognised/inconsistent shape (which the CHECK constraint
     /// already prevents on write) is a corrupt state; we fail CLOSED to the 15%
     /// default rather than silently zero the fee.
-    pub async fn get(&self, creator_id: Uuid) -> Result<FeePolicy, StripeError> {
+    pub async fn get(&self, organization_id: &str) -> Result<FeePolicy, StripeError> {
         let conn = self
             .registry
             .conn()
@@ -118,8 +117,8 @@ impl FeePolicyStore {
         let rows = conn
             .query(
                 "SELECT kind, amount_cents, percent_bps, cap_cents, floor_cents \
-                 FROM zeroship.creator_fee_policy WHERE creator_id = $1",
-                &[&creator_id],
+                 FROM zeroship.organization_fee_policy WHERE organization_id = $1",
+                &[&organization_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -136,11 +135,11 @@ impl FeePolicyStore {
                     }),
                     // CHECK prevents this; fail closed to default if it ever
                     // happens. Failing closed to 15% can silently OVER-charge a
-                    // creator the operator meant to set LOWER, so make the
+                    // organization the operator meant to set LOWER, so make the
                     // corrupt row observable (m3).
                     bad => {
                         tracing::error!(
-                            creator_id = %creator_id,
+                            organization_id = %organization_id,
                             amount_cents = ?bad,
                             "fee_policy: corrupt 'fixed' row (amount_cents not non-negative) — failing closed to 15% default"
                         );
@@ -160,7 +159,7 @@ impl FeePolicyStore {
                     }),
                     bad => {
                         tracing::error!(
-                            creator_id = %creator_id,
+                            organization_id = %organization_id,
                             percent_bps = ?bad,
                             "fee_policy: corrupt 'percent' row (percent_bps out of [0,10000]) — failing closed to 15% default"
                         );
@@ -170,7 +169,7 @@ impl FeePolicyStore {
             }
             other => {
                 tracing::error!(
-                    creator_id = %creator_id,
+                    organization_id = %organization_id,
                     kind = %crate::stripe_store::sanitize_for_display(other),
                     "fee_policy: corrupt row with unknown kind — failing closed to 15% default"
                 );
@@ -179,15 +178,15 @@ impl FeePolicyStore {
         }
     }
 
-    /// Upsert the fee policy for `creator_id`. Idempotent (ON CONFLICT UPDATE).
+    /// Upsert the fee policy for `organization_id`. Idempotent (ON CONFLICT UPDATE).
     ///
     /// There is NO HTTP route to this. The operator PUT that used to front it
     /// was gated on `BillingWrite`/`Resource::Any`, which nothing grants since
     /// the platform staff roles were deleted, so it went with them. The rule it
-    /// enforced still holds and is now structural rather than checked: a creator
+    /// enforced still holds and is now structural rather than checked: an organization
     /// cannot set or lower their own fee because no request path reaches here.
     /// Callers are the reconciler and tests.
-    pub async fn set(&self, creator_id: Uuid, policy: FeePolicy) -> Result<(), StripeError> {
+    pub async fn set(&self, organization_id: &str, policy: FeePolicy) -> Result<(), StripeError> {
         let conn = self
             .registry
             .conn()
@@ -228,17 +227,17 @@ impl FeePolicyStore {
             }
         };
         conn.execute(
-            "INSERT INTO zeroship.creator_fee_policy \
-                (creator_id, kind, amount_cents, percent_bps, cap_cents, floor_cents, updated_at) \
+            "INSERT INTO zeroship.organization_fee_policy \
+                (organization_id, kind, amount_cents, percent_bps, cap_cents, floor_cents, updated_at) \
              VALUES ($1, $2, $3, $4, $5, $6, NOW()) \
-             ON CONFLICT (creator_id) DO UPDATE SET \
+             ON CONFLICT (organization_id) DO UPDATE SET \
                 kind = EXCLUDED.kind, \
                 amount_cents = EXCLUDED.amount_cents, \
                 percent_bps = EXCLUDED.percent_bps, \
                 cap_cents = EXCLUDED.cap_cents, \
                 floor_cents = EXCLUDED.floor_cents, \
                 updated_at = NOW()",
-            &[&creator_id, &kind, &amount, &bps, &cap, &floor],
+            &[&organization_id, &kind, &amount, &bps, &cap, &floor],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;

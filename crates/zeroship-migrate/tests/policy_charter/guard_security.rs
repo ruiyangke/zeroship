@@ -245,7 +245,7 @@ fn alter_default_privileges_denied() {
 
 #[test]
 fn select_control_schema_is_cross_schema() {
-    assert_cross_schema("SELECT * FROM control.creator_billing");
+    assert_cross_schema("SELECT * FROM control.organization_billing");
 }
 
 #[test]
@@ -274,7 +274,7 @@ fn update_billing_schema_is_cross_schema() {
 #[test]
 fn join_into_foreign_schema_is_cross_schema() {
     assert_cross_schema(
-        "SELECT * FROM project_acme.orders o JOIN control.creator_billing b ON b.id = o.cid",
+        "SELECT * FROM project_acme.orders o JOIN control.organization_billing b ON b.id = o.cid",
     );
 }
 
@@ -393,7 +393,7 @@ fn do_block_with_pg_read_file_denied() {
 
 #[test]
 fn do_block_with_cross_schema_denied() {
-    assert_denied("DO $$ BEGIN INSERT INTO control.creator_billing VALUES (1); END $$");
+    assert_denied("DO $$ BEGIN INSERT INTO control.organization_billing VALUES (1); END $$");
 }
 
 #[test]
@@ -736,10 +736,10 @@ fn update_set_dblink_denied() {
 
 #[test]
 fn do_block_format_identifier_to_control_denied() {
-    // s := 'control'; EXECUTE format('UPDATE %I.creator_billing …', s) — the
+    // s := 'control'; EXECUTE format('UPDATE %I.organization_billing …', s) — the
     // target schema is a bare literal, not a schema.ident adjacency.
     assert_denied(
-        "DO $$ DECLARE s text := 'control'; BEGIN EXECUTE format('UPDATE %I.creator_billing SET amount=0', s); END $$",
+        "DO $$ DECLARE s text := 'control'; BEGIN EXECUTE format('UPDATE %I.organization_billing SET amount=0', s); END $$",
     );
 }
 

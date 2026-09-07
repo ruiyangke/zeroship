@@ -358,7 +358,7 @@ impl SpendEngine {
 
             // MAJOR-1: money MUST NOT silently clamp, and the spend sweep must
             // MIRROR billing_reconcile's overflow posture (which SKIPS the
-            // app/creator on a cents→i64 overflow rather than clamping). The old
+            // app/organization on a cents→i64 overflow rather than clamping). The old
             // `i64::try_from(...).unwrap_or(i64::MAX)` silently clamped the
             // stored spend/limit — an overflowing app would be Blocked-via-clamp
             // by enforcement but skipped (unbilled) by reconcile, so the two

@@ -72,10 +72,12 @@ BIN="$ROOT/target/release"
 # shellcheck source=tests/lib/runtime_secrets.sh
 source "$ROOT/tests/lib/runtime_secrets.sh"
 # `zeroship.app_members` is deleted; an app reaches the people who answer for it
-# through its project's organization. `seat_app_owner_sql` emits that join AND a
-# check that raises when it matches nothing - an INSERT ... SELECT over no rows
-# is a SUCCESSFUL statement that seats nobody, and the 403 it later produces
-# surfaces far from here.
+# through its project's organization. `seat_app_owner` writes that join and
+# refuses to be quiet about a seat that matched nothing; `seat_app_owner_sql` is
+# the same join as text, for a seat that has to travel inside the heredoc that
+# writes the app row it depends on. An INSERT ... SELECT over no rows is a
+# SUCCESSFUL statement that seats nobody, and the 403 it later produces surfaces
+# far from here.
 source "$ROOT/tests/lib/organization_fixture.sh"
 # shellcheck source=tests/lib/usage_producer.sh
 source "$ROOT/tests/lib/usage_producer.sh"
@@ -489,9 +491,7 @@ APP="$(echo "$APP_JSON" | jget '.id')"
 # groups it under this creator. control's create-app already mints the
 # principal's personal organization and seats them; this makes it explicit and
 # idempotent, and fails loudly if the app somehow has no project.
-psql_exec >/dev/null 2>&1 <<SQL
-$(seat_app_owner_sql "$APP" "$CREATOR")
-SQL
+seat_app_owner "$APP" "$CREATOR" owner psql_exec
 
 # DATABASE CREATE, THEN MIGRATIONS, THEN DEPLOY. Control refuses a deploy whose
 # runtime schema descriptor is not the one the app's newest applied migration

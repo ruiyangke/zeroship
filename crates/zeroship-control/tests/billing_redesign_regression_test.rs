@@ -39,25 +39,26 @@ async fn pg(db_url: &str) -> compio_postgres::Client {
     client
 }
 
-/// Seed a user → creator_billing → app, returning `(creator_id, app_id)`.
-async fn seed_creator_app(client: &compio_postgres::Client) -> (Uuid, Uuid) {
-    let email = format!("redesign-{}@test.invalid", Uuid::new_v4().simple());
-    let creator: Uuid = client
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, 'redesign') RETURNING id",
-            &[&email],
-        )
-        .await
-        .expect("insert user")[0]
-        .get("id");
+/// Seed a user → organization_billing → app, returning `(organization_id, app_id)`.
+async fn seed_organization_app(client: &compio_postgres::Client) -> (String, Uuid) {
+    let slug = format!("redesign-{}", Uuid::new_v4().simple());
+    let organization = zeroship_core::typed_id::generate("org");
     client
         .execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
-             ON CONFLICT (creator_id) DO NOTHING",
-            &[&creator],
+            "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+             VALUES ($1, $2, 'redesign', $3)",
+            &[&organization, &slug, &format!("{slug}@test.invalid")],
         )
         .await
-        .expect("insert creator_billing");
+        .expect("insert organization");
+    client
+        .execute(
+            "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) \
+             ON CONFLICT (organization_id) DO NOTHING",
+            &[&organization],
+        )
+        .await
+        .expect("insert organization_billing");
     let plan_id = format!("pln_rd_{}", Uuid::new_v4().simple());
     client
         .execute(
@@ -72,7 +73,7 @@ async fn seed_creator_app(client: &compio_postgres::Client) -> (Uuid, Uuid) {
         .expect("seed plan");
     let app: Uuid =
         common::seed_app(client, &format!("rd-{}", Uuid::new_v4()), &plan_id).await;
-    (creator, app)
+    (organization, app)
 }
 
 fn first_of_this_month() -> chrono::NaiveDate {
@@ -81,14 +82,14 @@ fn first_of_this_month() -> chrono::NaiveDate {
     chrono::NaiveDate::from_ymd_opt(now.year(), now.month(), 1).unwrap()
 }
 
-/// Claim a draft invoice for `(creator, period)`, returning its id.
-async fn claim_draft(client: &compio_postgres::Client, creator: Uuid) -> String {
+/// Claim a draft invoice for `(organization, period)`, returning its id.
+async fn claim_draft(client: &compio_postgres::Client, organization: &str) -> String {
     let id = zeroship_core::typed_id::new_invoice_id();
     client
         .execute(
-            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&id, &creator, &first_of_this_month()],
+            &[&id, &organization, &first_of_this_month()],
         )
         .await
         .expect("claim draft");
@@ -103,8 +104,9 @@ async fn claim_draft(client: &compio_postgres::Client, creator: Uuid) -> String 
 async fn nonatomic_finalize_two_statement_subtotal_then_total_is_rejected() {
     let url = db_url();
     let client = pg(&url).await;
-    let (creator, _app) = seed_creator_app(&client).await;
-    let inv = claim_draft(&client, creator).await;
+    let (organization, _app) = seed_organization_app(&client).await;
+    let organization = organization.as_str();
+    let inv = claim_draft(&client, &organization).await;
 
     // A NON-atomic finalize: write the subtotal alone FIRST. The balance CHECK
     // `total = subtotal − credit + tax` is now violated (total=0, subtotal=500),
@@ -155,8 +157,9 @@ async fn nonatomic_finalize_two_statement_subtotal_then_total_is_rejected() {
 async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
     let url = db_url();
     let client = pg(&url).await;
-    let (creator, app) = seed_creator_app(&client).await;
-    let inv = claim_draft(&client, creator).await;
+    let (organization, app) = seed_organization_app(&client).await;
+    let organization = organization.as_str();
+    let inv = claim_draft(&client, &organization).await;
 
     // Build a concrete charge: 750 requests @ weight 1 CU/op, fx = 2 cents/CU,
     // included 100 CU, base 50c ⇒ billable 650 CU × 2c + 50c = 1350c.
@@ -174,7 +177,7 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
     let breakdown = charge_cents(&price, &usage, &weights).expect("charge");
     assert_eq!(breakdown.total_cents, 650 * 2 + 50, "sanity: 1350c");
 
-    // Freeze the snapshot onto the line (exactly what bill_creator writes).
+    // Freeze the snapshot onto the line (exactly what bill_organization writes).
     let usage_json = serde_json::to_value(&usage).unwrap();
     let weights_json = serde_json::to_value(
         weights
@@ -264,9 +267,10 @@ async fn finalized_line_snapshot_replays_amount_cents_bit_for_bit() {
 async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
     let url = db_url();
     let client = pg(&url).await;
-    let (creator, _app) = seed_creator_app(&client).await;
+    let (organization, _app) = seed_organization_app(&client).await;
+    let organization = organization.as_str();
     let period = first_of_this_month();
-    let inv = claim_draft(&client, creator).await;
+    let inv = claim_draft(&client, &organization).await;
     client
         .execute(
             "UPDATE zeroship.invoices SET subtotal_cents = 100, total_cents = 100, \
@@ -292,10 +296,10 @@ async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
             "SELECT r.external_id \
              FROM zeroship.invoices i \
              JOIN zeroship.billing_provider_refs r ON r.invoice_id = i.id \
-             WHERE i.creator_id = $1 AND i.period = $2::date \
+             WHERE i.organization_id = $1 AND i.period = $2::date \
                AND i.status = 'finalized' \
                AND r.provider = 'stripe' AND r.ref_kind = 'invoice'",
-            &[&creator, &period],
+            &[&organization, &period],
         )
         .await
         .expect("lookup")
@@ -308,8 +312,8 @@ async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
     );
 
     // A still-DRAFT invoice must NOT resolve (the status='finalized' gate).
-    let (creator2, _a2) = seed_creator_app(&client).await;
-    let draft = claim_draft(&client, creator2).await;
+    let (creator2, _a2) = seed_organization_app(&client).await;
+    let draft = claim_draft(&client, &creator2).await;
     client
         .execute(
             "INSERT INTO zeroship.billing_provider_refs \
@@ -323,7 +327,7 @@ async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
         .query(
             "SELECT r.external_id FROM zeroship.invoices i \
              JOIN zeroship.billing_provider_refs r ON r.invoice_id = i.id \
-             WHERE i.creator_id = $1 AND i.period = $2::date AND i.status = 'finalized' \
+             WHERE i.organization_id = $1 AND i.period = $2::date AND i.status = 'finalized' \
                AND r.provider = 'stripe' AND r.ref_kind = 'invoice'",
             &[&creator2, &period],
         )
@@ -344,10 +348,10 @@ async fn native_invoice_lookup_resolves_finalized_id_via_provider_refs() {
 /// Finalize a fresh invoice with one line; return `inv_id`.
 async fn finalized_invoice_with_line(
     client: &compio_postgres::Client,
-    creator: Uuid,
+    organization: &str,
     app: Uuid,
 ) -> String {
-    let inv = claim_draft(client, creator).await;
+    let inv = claim_draft(client, organization).await;
     client
         .execute(
             "INSERT INTO zeroship.invoice_lines \
@@ -374,8 +378,9 @@ async fn finalized_invoice_with_line(
 async fn finalized_invoice_rejects_nonvoid_update() {
     let url = db_url();
     let client = pg(&url).await;
-    let (creator, app) = seed_creator_app(&client).await;
-    let inv = finalized_invoice_with_line(&client, creator, app).await;
+    let (organization, app) = seed_organization_app(&client).await;
+    let organization = organization.as_str();
+    let inv = finalized_invoice_with_line(&client, organization, app).await;
 
     // Any non-void mutation of a finalized invoice is rejected by the trigger.
     let res = client
@@ -400,8 +405,9 @@ async fn finalized_invoice_rejects_nonvoid_update() {
 async fn finalized_to_void_is_the_only_legal_transition() {
     let url = db_url();
     let client = pg(&url).await;
-    let (creator, app) = seed_creator_app(&client).await;
-    let inv = finalized_invoice_with_line(&client, creator, app).await;
+    let (organization, app) = seed_organization_app(&client).await;
+    let organization = organization.as_str();
+    let inv = finalized_invoice_with_line(&client, organization, app).await;
 
     // finalized → void (money columns unchanged) is the ONE permitted transition.
     client
@@ -426,8 +432,9 @@ async fn finalized_to_void_is_the_only_legal_transition() {
 async fn finalized_invoice_line_amount_update_is_rejected() {
     let url = db_url();
     let client = pg(&url).await;
-    let (creator, app) = seed_creator_app(&client).await;
-    let inv = finalized_invoice_with_line(&client, creator, app).await;
+    let (organization, app) = seed_organization_app(&client).await;
+    let organization = organization.as_str();
+    let inv = finalized_invoice_with_line(&client, organization, app).await;
 
     // The reproducibility record is frozen: UPDATE of a finalized invoice's line
     // amount is rejected by the line immutability trigger.
@@ -464,12 +471,13 @@ async fn finalized_invoice_rejects_line_insert() {
     // appending a line to a finalized invoice would silently succeed.
     let url = db_url();
     let client = pg(&url).await;
-    let (creator, app) = seed_creator_app(&client).await;
+    let (organization, app) = seed_organization_app(&client).await;
+    let organization = organization.as_str();
     // Finalize an invoice that has one line.
-    let inv = finalized_invoice_with_line(&client, creator, app).await;
+    let inv = finalized_invoice_with_line(&client, organization, app).await;
 
     // Appending a SECOND line to the now-finalized invoice must be rejected.
-    let (_creator2, app2) = seed_creator_app(&client).await;
+    let (_creator2, app2) = seed_organization_app(&client).await;
     let res = client
         .execute(
             "INSERT INTO zeroship.invoice_lines \
@@ -487,8 +495,8 @@ async fn finalized_invoice_rejects_line_insert() {
 
     // Confirm a DRAFT invoice still accepts a line INSERT (the trigger only blocks
     // when the parent is finalized).
-    let (creator3, app3) = seed_creator_app(&client).await;
-    let draft = claim_draft(&client, creator3).await;
+    let (creator3, app3) = seed_organization_app(&client).await;
+    let draft = claim_draft(&client, &creator3).await;
     client
         .execute(
             "INSERT INTO zeroship.invoice_lines \
@@ -509,8 +517,9 @@ async fn finalized_invoice_rejects_line_insert() {
 async fn draft_invoice_lines_stay_mutable_until_finalize() {
     let url = db_url();
     let client = pg(&url).await;
-    let (creator, app) = seed_creator_app(&client).await;
-    let inv = claim_draft(&client, creator).await;
+    let (organization, app) = seed_organization_app(&client).await;
+    let organization = organization.as_str();
+    let inv = claim_draft(&client, &organization).await;
     client
         .execute(
             "INSERT INTO zeroship.invoice_lines \

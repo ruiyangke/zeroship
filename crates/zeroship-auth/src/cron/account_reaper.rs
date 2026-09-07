@@ -13,28 +13,44 @@
 //!
 //! GDPR's right-to-erasure is NOT absolute. Art. 17(3)(b) exempts processing
 //! "necessary for compliance with a legal obligation" — and a marketplace that
-//! has paid a creator via Stripe Connect has tax / anti-money-laundering /
+//! has paid an organization via Stripe Connect has tax / anti-money-laundering /
 //! chargeback-window obligations to retain that financial history. So the
 //! reaper branches (see [`erase_one`] / [`user_has_financial_history`]):
 //!
 //!   * **No financial history** → **hard `DELETE`** of the `zeroship.users`
 //!     row. The 10 `ON DELETE CASCADE` FKs into `users(id)` tear down all
-//!     dependents (identities, sessions, grants, app memberships, …).
+//!     dependents (identities, sessions, grants, memberships, …).
 //!
-//!   * **Has financial history** (owns a `creator_accounts` row, i.e. a
-//!     Stripe-Connect account, possibly with `payouts`) → **ANONYMIZE in place**:
-//!     overwrite the PII (`email` → an irreversible per-row tombstone,
-//!     `name`/`avatar_url`/`password_hash` cleared), stamp `anonymized_at`, and
-//!     RETAIN the `creator_accounts` + `payouts` rows. The financial ledger
-//!     keeps its `creator_id` FK target alive (those rows are `ON DELETE
-//!     RESTRICT` and MUST NOT be deleted), but it can no longer be tied back to
-//!     a natural person.
+//!   * **Has financial history** → **ANONYMIZE in place**: overwrite the PII
+//!     (`email` → an irreversible per-row tombstone, `name`/`avatar_url`/
+//!     `password_hash` cleared) and stamp `anonymized_at`.
+//!
+//! ### HALF THE ORIGINAL REASON FOR THAT BRANCH IS GONE, AND THE OTHER HALF IS NOT
+//!
+//! The branch used to be justified by referential integrity: the billing ledger
+//! pointed at `users(id)` under `ON DELETE RESTRICT`, so a hard delete would
+//! either fail or take financial records with it. **No billing edge points at
+//! `users` any more** — the subject is `organizations(id)` — so a hard delete no
+//! longer threatens a single invoice or payout row, and this predicate is not
+//! keeping the ledger alive.
+//!
+//! What it keeps alive is the ORGANIZATION. `organization_members.user_id` is
+//! `ON DELETE CASCADE`, so hard-deleting the last owner of an organization that
+//! still holds invoices leaves a billed entity with nobody seated on it: nobody
+//! to dispute a charge, nobody to attach a card, and no route by which the
+//! platform can reach the party it is invoicing. That is why the predicate
+//! resolves through membership rather than being deleted along with the FKs that
+//! motivated it.
 //!
 //! **This default is a policy choice, isolated in `user_has_financial_history`
 //! and `erase_one` so an operator / counsel can change it (e.g. add a longer
 //! retention horizon, narrow what counts as "financial history", or hash the
 //! email under a pepper instead of a random tombstone) without touching the
 //! lifecycle plumbing.** Flagged for explicit operator confirmation.
+//!
+//! The cleaner end state is for organization DELETION to answer this, rather
+//! than user deletion inferring it — that decision belongs with the endpoint
+//! that deletes organizations and is deliberately not taken here.
 //!
 //! ## Privilege note
 //!
@@ -269,17 +285,23 @@ async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Resu
     }
 }
 
-/// Whether the user has financial history that GDPR Art. 17(3)(b) lets us
-/// retain. This means EITHER:
-///   * they own a `creator_accounts` row (a Stripe-Connect *payout* account —
-///     payouts FK it, so it anchors the creator-revenue ledger), OR
-///   * they have an `invoices` row (an infra-cost invoice — the durable
-///     marketplace billing artifact, keyed by `creator_id`).
+/// Whether this user is seated on an organization with financial history that
+/// GDPR Art. 17(3)(b) lets us retain.
 ///
-/// Either is a retain-on-erase anchor: an invoiced creator's `users` row is
-/// anonymized-in-place (not hard-deleted) so the invoice's `creator_id` FK
-/// target stays alive. A never-billed creator (neither) is hard-deleted and
-/// CASCADE reaps the empty billing shell.
+/// The predicate is now two hops rather than one, and the hop is the whole
+/// change: financial history belongs to an ORGANIZATION, so the question is not
+/// "does this person own a Stripe account" but "would deleting this person
+/// strand an organization that has been paid or invoiced". It is true when the
+/// user holds ANY seat at an organization that EITHER:
+///   * owns an `organization_accounts` row (a Stripe-Connect *payout* account —
+///     `payouts` FKs it, so it anchors the revenue ledger), OR
+///   * has an `invoices` row (an infra-cost invoice — the durable marketplace
+///     billing artifact).
+///
+/// ANY seat, not just an owner's: an admin or a `billing` seat is equally a
+/// person the ledger's counterparty is reachable through, and narrowing to
+/// `role = 'owner'` would hard-delete them while the organization survives —
+/// which is the narrower-looking choice and the more destructive one.
 ///
 /// **Policy knob (operator-editable).** Widen/narrow this predicate to change
 /// what blocks a hard delete.
@@ -290,9 +312,16 @@ async fn user_has_financial_history(
     let rows = conn
         .query(
             "SELECT 1 WHERE EXISTS ( \
-                SELECT 1 FROM zeroship.creator_accounts WHERE creator_id = $1 \
-             ) OR EXISTS ( \
-                SELECT 1 FROM zeroship.invoices WHERE creator_id = $1 \
+                SELECT 1 FROM zeroship.organization_members m \
+                 WHERE m.user_id = $1 \
+                   AND ( EXISTS ( \
+                            SELECT 1 FROM zeroship.organization_accounts oa \
+                             WHERE oa.organization_id = m.organization_id \
+                         ) \
+                      OR EXISTS ( \
+                            SELECT 1 FROM zeroship.invoices i \
+                             WHERE i.organization_id = m.organization_id \
+                         ) ) \
              )",
             &[&user_id],
         )

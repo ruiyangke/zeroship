@@ -5,7 +5,7 @@
 //! FAITHFUL by construction: every assertion runs against a live, migrated Postgres
 //! (a configured test database, `zeroship_core::config::test_database_url_opt`;
 //! the run refuses otherwise) and exercises the REAL paths --
-//!   * the REAL reconciler `billing_reconcile::tick_with` → `bill_creator` (so the tax
+//!   * the REAL reconciler `billing_reconcile::tick_with` → `bill_organization` (so the tax
 //!     call runs INSIDE the real finalize-in-one-UPDATE and the REAL balance CHECK
 //!     `total = subtotal − credit + tax` validates the row);
 //!   * the REAL `TaxProvider` seam on the REAL `AppState.tax_provider` (the fake is
@@ -108,7 +108,7 @@ impl TaxProvider for FakeTaxProvider {
 }
 
 // ===========================================================================
-// A recording StripeApi fake (no HTTP). `bill_creator` is generic over StripeApi; the
+// A recording StripeApi fake (no HTTP). `bill_organization` is generic over StripeApi; the
 // tax math under test never touches Stripe, so a fake suffices.
 // ===========================================================================
 
@@ -211,7 +211,7 @@ impl StripeApi for RecordingStripe {
             charges_enabled: true,
             payouts_enabled: true,
             details_submitted: true,
-            creator_id: None,
+            organization_id: None,
         })
     }
     async fn create_connect_payment_intent(
@@ -347,6 +347,33 @@ async fn build_fixture(
 // DB seeding helpers (mirror billing_credit_test).
 // ---------------------------------------------------------------------------
 
+/// A fresh billing subject for this test file.
+///
+/// The billing subject is an ORGANIZATION, so a fixture that minted a user and
+/// used its uuid here would name a row `organizations` does not have. The
+/// foreign keys refuse that rather than mis-attributing it, but the refusal
+/// names the constraint and not the mistake, so the fixture is the place to be
+/// unambiguous.
+async fn make_organization(state: &AppState, label: &str) -> String {
+    let organization_id = zeroship_core::typed_id::generate("org");
+    let slug = format!("{label}-{}", Uuid::new_v4().simple());
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+             VALUES ($1, $2, $3, $4)",
+            &[
+                &organization_id,
+                &slug,
+                &label.to_string(),
+                &format!("{slug}@example.test"),
+            ],
+        )
+        .await
+        .expect("insert organization");
+    organization_id
+}
+
 async fn make_user(state: &AppState, label: &str) -> Uuid {
     let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
     let rows = state
@@ -360,16 +387,16 @@ async fn make_user(state: &AppState, label: &str) -> Uuid {
     rows[0].get("id")
 }
 
-async fn ensure_creator_billing(state: &AppState, creator: Uuid) {
+async fn ensure_organization_billing(state: &AppState, organization: &str) {
     state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
-             ON CONFLICT (creator_id) DO NOTHING",
-            &[&creator],
+            "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) \
+             ON CONFLICT (organization_id) DO NOTHING",
+            &[&organization],
         )
         .await
-        .expect("ensure creator_billing");
+        .expect("ensure organization_billing");
 }
 
 /// A plan charging 1 cent/request, no included CU, no base fee (fx = 1 cent/CU).
@@ -402,11 +429,17 @@ async fn make_plan(state: &AppState) -> String {
     plan_id
 }
 
-async fn make_owned_app(state: &AppState, plan_id: &str, owner: Uuid) -> Uuid {
+/// An app the given ORGANIZATION bills.
+///
+/// It used to seed an app in a fresh organization and then seat a human owner in
+/// it, because the reconciler found the subject by walking to that owner. The
+/// subject is now the app row's own `organization_id`, so an app seeded into
+/// one organization and asserted against another would simply never be billed -
+/// the test would go green on an empty sweep. Placing it in the caller's
+/// organization is what keeps the assertion attached to anything.
+async fn make_owned_app(state: &AppState, plan_id: &str, organization: &str) -> Uuid {
     let name = format!("tax-{}", Uuid::new_v4());
-    let app_id = common::seed_app(&state.control_pg, &name, plan_id).await;
-    common::seat_app_organization_member(&state.control_pg, &app_id, &owner, "owner").await;
-    app_id
+    common::seed_app_in_organization(&state.control_pg, &name, plan_id, organization).await
 }
 
 async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64, seq: u64) {
@@ -438,16 +471,16 @@ fn period_d(period_start: i64) -> chrono::NaiveDate {
 /// Read `(status, subtotal, credit, tax, total)` for the active invoice.
 async fn read_invoice(
     state: &AppState,
-    creator: Uuid,
+    organization: &str,
     period_start: i64,
 ) -> Option<(String, i64, i64, i64, i64)> {
     state
         .control_pg
         .query(
             "SELECT status, subtotal_cents, credit_cents, tax_cents, total_cents \
-             FROM zeroship.invoices WHERE creator_id = $1 AND period = $2::date \
+             FROM zeroship.invoices WHERE organization_id = $1 AND period = $2::date \
                AND status <> 'void'",
-            &[&creator, &period_d(period_start)],
+            &[&organization, &period_d(period_start)],
         )
         .await
         .expect("read invoice")
@@ -465,7 +498,7 @@ async fn read_invoice(
 
 async fn insert_grant(
     state: &AppState,
-    creator: Uuid,
+    organization: &str,
     amount_cents: i64,
     currency: &str,
     created_at: chrono::DateTime<chrono::Utc>,
@@ -475,9 +508,9 @@ async fn insert_grant(
         .control_pg
         .execute(
             "INSERT INTO zeroship.credit_ledger \
-               (id, creator_id, kind, amount_cents, currency, created_at) \
+               (id, organization_id, kind, amount_cents, currency, created_at) \
              VALUES ($1, $2, 'grant', $3, $4, $5)",
-            &[&id, &creator, &amount_cents, &currency, &created_at],
+            &[&id, &organization, &amount_cents, &currency, &created_at],
         )
         .await
         .expect("insert grant");
@@ -510,18 +543,19 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "native").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "native").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 
     // $10 of usage, $3 credit grant → subtotal 1000, credit 300, tax 0, total 700.
-    insert_grant(&fx.state, creator, 300, "usd", chrono::Utc::now()).await;
+    insert_grant(&fx.state, organization, 300, "usd", chrono::Utc::now()).await;
     ingest_at(&fx.state, app, 1000, period, 1).await;
 
     let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
@@ -529,7 +563,7 @@ async fn native_tax_is_zero_and_total_is_subtotal_minus_credit() {
         .expect("tick");
     assert_eq!(billed, 1);
 
-    let inv = read_invoice(&fx.state, creator, period).await.expect("invoice");
+    let inv = read_invoice(&fx.state, organization, period).await.expect("invoice");
     assert_eq!(inv.0, "finalized");
     assert_eq!(inv.1, 1000, "subtotal");
     assert_eq!(inv.2, 300, "credit_cents");
@@ -565,19 +599,20 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "fake").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "fake").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 
     // $10 of usage, $3 credit → subtotal 1000, credit 300, post-credit base 700,
     // fake tax 123 → total = 1000 − 300 + 123 = 823.
-    insert_grant(&fx.state, creator, 300, "usd", chrono::Utc::now()).await;
+    insert_grant(&fx.state, organization, 300, "usd", chrono::Utc::now()).await;
     ingest_at(&fx.state, app, 1000, period, 1).await;
 
     let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
@@ -585,7 +620,7 @@ async fn fake_provider_tax_is_frozen_and_total_includes_tax() {
         .expect("tick");
     assert_eq!(billed, 1);
 
-    let inv = read_invoice(&fx.state, creator, period).await.expect("invoice");
+    let inv = read_invoice(&fx.state, organization, period).await.expect("invoice");
     assert_eq!(inv.0, "finalized");
     assert_eq!(inv.1, 1000, "subtotal");
     assert_eq!(inv.2, 300, "credit_cents");
@@ -621,13 +656,14 @@ async fn fake_provider_tax_without_credit_holds_balance_check() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "fake-nocredit").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "fake-nocredit").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 
@@ -639,7 +675,7 @@ async fn fake_provider_tax_without_credit_holds_balance_check() {
         .expect("tick");
     assert_eq!(billed, 1);
 
-    let inv = read_invoice(&fx.state, creator, period).await.expect("invoice");
+    let inv = read_invoice(&fx.state, organization, period).await.expect("invoice");
     assert_eq!(inv.1, 500, "subtotal");
     assert_eq!(inv.2, 0, "no credit");
     assert_eq!(inv.3, 250, "tax frozen");
@@ -659,7 +695,7 @@ async fn fake_provider_tax_without_credit_holds_balance_check() {
 //     ledgered as billed. Tax is computed INSIDE the finalize txn just before the
 //     one-statement UPDATE, so a provider error rolls the whole finalize back (the
 //     `compute_tax(...).map_err(RegistryError::from)?` propagates; the sweep swallows
-//     the per-creator error and the DB stays 'draft').
+//     the per-organization error and the DB stays 'draft').
 //
 //     RED-proof: pins that the reconciler PROPAGATES the tax error (fail-closed). If
 //     the `?` were swallowed (e.g. `unwrap_or(TaxAmount::zero())`), the invoice would
@@ -695,25 +731,26 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
     let now = now_for_closed_period() - 200 * 86_400;
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "tax-err").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "tax-err").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
     ingest_at(&fx.state, app, 500, period, 1).await; // $5
 
-    // The sweep swallows the per-creator tax error → this creator is NOT billed.
+    // The sweep swallows the per-organization tax error → this organization is NOT billed.
     let _ = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
         .await
-        .expect("tick swallows the per-creator tax error and returns Ok");
+        .expect("tick swallows the per-organization tax error and returns Ok");
 
     // The invoice is NOT finalized — fail-closed. (The draft claim may exist, but it is
     // NEVER 'finalized' with a partial/zero tax.)
-    let inv = read_invoice(&fx.state, creator, period).await;
+    let inv = read_invoice(&fx.state, organization, period).await;
     assert_ne!(
         inv.as_ref().map(|i| i.0.as_str()),
         Some("finalized"),
@@ -724,8 +761,8 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
         .control_pg
         .query(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices \
-             WHERE creator_id = $1 AND status = 'finalized'",
-            &[&creator],
+             WHERE organization_id = $1 AND status = 'finalized'",
+            &[&organization],
         )
         .await
         .expect("count")[0]
@@ -737,8 +774,8 @@ async fn tax_provider_error_fails_closed_invoice_not_finalized() {
 }
 
 // ===========================================================================
-// #23/#8 (missing customer with usage): a creator with BILLABLE usage but NO saved
-//     Stripe Customer is SKIPPED - `bill_creator` returns Ok(false) BEFORE any draft
+// #23/#8 (missing customer with usage): a organization with BILLABLE usage but NO saved
+//     Stripe Customer is SKIPPED - `bill_organization` returns Ok(false) BEFORE any draft
 //     claim / Stripe item / finalize, so nothing is billed against a phantom customer.
 //
 // WHAT THIS TEST DOES NOT PIN, measured 2026-08-11 rather than reasoned about. The
@@ -777,29 +814,30 @@ async fn missing_customer_with_usage_is_skipped_no_invoice() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "nocust").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "nocust").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
-    // DELIBERATELY do NOT set a Stripe customer for this creator.
+    let app = make_owned_app(&fx.state, &plan, organization).await;
+    // DELIBERATELY do NOT set a Stripe customer for this organization.
     ingest_at(&fx.state, app, 500, period, 1).await; // $5 of billable usage
 
     let _ = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
         .await
         .expect("tick");
 
-    // NO invoice (draft or finalized) was created for the customer-less creator.
+    // NO invoice (draft or finalized) was created for the customer-less organization.
     let any: i64 = fx
         .state
         .control_pg
         .query(
-            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices WHERE creator_id = $1",
-            &[&creator],
+            "SELECT COUNT(*)::bigint AS n FROM zeroship.invoices WHERE organization_id = $1",
+            &[&organization],
         )
         .await
         .expect("count")[0]
         .get("n");
-    assert_eq!(any, 0, "a creator with usage but no Stripe customer gets NO invoice (skipped + warned)");
+    assert_eq!(any, 0, "a organization with usage but no Stripe customer gets NO invoice (skipped + warned)");
 
     drop(fx);
     common::drain_pg().await;
@@ -831,19 +869,20 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "fullcredit").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "fullcredit").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan, creator).await;
+    let app = make_owned_app(&fx.state, &plan, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 
     // $20 credit grant; $5 of usage → subtotal 500, credit 500 (capped at subtotal),
     // total 0.
-    insert_grant(&fx.state, creator, 2000, "usd", chrono::Utc::now()).await;
+    insert_grant(&fx.state, organization, 2000, "usd", chrono::Utc::now()).await;
     ingest_at(&fx.state, app, 500, period, 1).await;
 
     let billed = billing_reconcile::tick_with(&fx.state, &RecordingStripe::default(), now)
@@ -851,7 +890,7 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
         .expect("tick");
     assert_eq!(billed, 1);
 
-    let inv = read_invoice(&fx.state, creator, period).await.expect("invoice");
+    let inv = read_invoice(&fx.state, organization, period).await.expect("invoice");
     assert_eq!(inv.0, "finalized");
     assert_eq!(inv.1, 500, "subtotal");
     assert_eq!(inv.2, 500, "credit applied == subtotal (capped at subtotal)");
@@ -862,8 +901,8 @@ async fn credit_fully_covers_subtotal_zero_invoice_no_charge_row() {
         .state
         .control_pg
         .query(
-            "SELECT id FROM zeroship.invoices WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
-            &[&creator, &period_d(period)],
+            "SELECT id FROM zeroship.invoices WHERE organization_id = $1 AND period = $2::date AND status <> 'void'",
+            &[&organization, &period_d(period)],
         )
         .await
         .expect("read id")[0]
@@ -913,15 +952,16 @@ async fn tax_computed_once_over_summed_multi_segment_subtotal() {
     let now = now_for_closed_period();
     let period = prev_period(now);
 
-    let creator = make_user(&fx.state, "tax-multiseg").await;
-    ensure_creator_billing(&fx.state, creator).await;
+    let organization = make_organization(&fx.state, "tax-multiseg").await;
+    let organization = organization.as_str();
+    ensure_organization_billing(&fx.state, organization).await;
     // Two plans, both 1 cent/CU, no base fee — so the two segments are easy to sum.
     let plan_a = make_plan(&fx.state).await;
     let plan_b = make_plan(&fx.state).await;
-    let app = make_owned_app(&fx.state, &plan_a, creator).await;
+    let app = make_owned_app(&fx.state, &plan_a, organization).await;
     fx.state
         .stripe_store
-        .set_customer(creator, &format!("cus_{}", Uuid::new_v4().simple()))
+        .set_customer(organization, &format!("cus_{}", Uuid::new_v4().simple()))
         .await
         .unwrap();
 
@@ -944,7 +984,7 @@ async fn tax_computed_once_over_summed_multi_segment_subtotal() {
         .first()
         .map(|r| r.get::<_, String>("plan_id"));
     zeroship_control::proration::record_plan_change_tx(
-        &fx.state.registry, &app, &creator, from_plan.as_deref(), &plan_b, mid,
+        &fx.state.registry, &app, &organization, from_plan.as_deref(), &plan_b, mid,
     )
     .await
     .expect("record plan change");
@@ -956,7 +996,7 @@ async fn tax_computed_once_over_summed_multi_segment_subtotal() {
         .expect("tick");
     assert_eq!(billed, 1);
 
-    let inv = read_invoice(&fx.state, creator, period).await.expect("invoice");
+    let inv = read_invoice(&fx.state, organization, period).await.expect("invoice");
     assert_eq!(inv.0, "finalized");
     assert_eq!(inv.1, 800, "subtotal = segment 0 (300) + segment 1 (500) summed");
     assert_eq!(inv.2, 0, "no credit");
@@ -971,8 +1011,8 @@ async fn tax_computed_once_over_summed_multi_segment_subtotal() {
         .query(
             "SELECT COUNT(*)::bigint AS n FROM zeroship.invoice_lines l \
              JOIN zeroship.invoices i ON i.id = l.invoice_id \
-             WHERE i.creator_id = $1",
-            &[&creator],
+             WHERE i.organization_id = $1",
+            &[&organization],
         )
         .await
         .expect("count lines")[0]

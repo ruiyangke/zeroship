@@ -20,16 +20,16 @@ use zeroship_control::metering::provider::{
 use zeroship_control::Registry;
 use zeroship_stream::{adapters, StreamConfig, StreamRegistry};
 
-/// These tests seed events that already carry a real creator, so the forwarder's
-/// creator-enrichment is a no-op here; a resolver that returns None is never
-/// consulted.
-struct NoopCreatorResolver;
+/// These tests seed events that already carry an organization subject, so the
+/// forwarder's attribution step is a no-op here; a resolver that returns None is
+/// never consulted.
+struct NoopOrganizationResolver;
 #[async_trait::async_trait(?Send)]
-impl event_forwarder::CreatorResolver for NoopCreatorResolver {
-    async fn creator_for_app(
+impl event_forwarder::OrganizationResolver for NoopOrganizationResolver {
+    async fn organization_for_app(
         &self,
         _app: uuid::Uuid,
-    ) -> Result<Option<uuid::Uuid>, event_forwarder::EventForwarderError> {
+    ) -> Result<Option<String>, event_forwarder::EventForwarderError> {
         Ok(None)
     }
 }
@@ -53,15 +53,15 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
     let client = pg(&url).await;
     let registry = Registry::new(&url).await.expect("registry");
     let app = seed_app(&client).await;
-    let creator = Uuid::new_v4();
+    let organization = zeroship_core::typed_id::generate("org");
     let period = chrono::Utc
         .with_ymd_and_hms(2042, 4, 1, 0, 0, 0)
         .unwrap()
         .timestamp();
     let events = vec![
-        event("evt_f1_a", app, creator, "requests", 10, period + 10),
-        event("evt_f1_b", app, creator, "requests", 5, period + 20),
-        event("evt_f1_c", app, creator, "db_reads", 7, period + 30),
+        event("evt_f1_a", app, &organization, "requests", 10, period + 10),
+        event("evt_f1_b", app, &organization, "requests", 5, period + 20),
+        event("evt_f1_c", app, &organization, "db_reads", 7, period + 30),
     ];
 
     let suffix = unique_suffix();
@@ -111,7 +111,7 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
         forwarder_stream.as_ref(),
         &stack,
         &dead_letters,
-        &NoopCreatorResolver,
+        &NoopOrganizationResolver,
         &forward_cfg,
     )
     .await
@@ -154,7 +154,7 @@ async fn memory_forwarder_and_recompute_consumers_do_not_interfere() {
         fresh_forwarder_stream.as_ref(),
         &stack,
         &dead_letters,
-        &NoopCreatorResolver,
+        &NoopOrganizationResolver,
         &forward_cfg,
     )
     .await
@@ -241,7 +241,10 @@ async fn control_direct_usage_event_survives_repeated_snapshot_recompute() {
         serde_json::from_slice(&records[0].payload).expect("decode direct usage event");
     assert_eq!(direct_event.source, "zeroship-control");
     assert_eq!(direct_event.subject.app, Some(app));
-    assert!(direct_event.subject.creator.is_nil());
+    assert_eq!(
+        direct_event.subject.organization, None,
+        "the control-plane producer leaves the subject for the forwarder to fill in"
+    );
     assert_eq!(direct_event.meter, "storage_ops");
     assert_eq!(direct_event.value, 7);
     assert_eq!(direct_event.event_time, period + 30);
@@ -304,7 +307,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
         .build("memory", &config)
         .expect("initial memory stream");
     let app = Uuid::new_v4();
-    let creator = Uuid::new_v4();
+    let organization = zeroship_core::typed_id::generate("org");
     let period = chrono::Utc
         .with_ymd_and_hms(2042, 5, 1, 0, 0, 0)
         .unwrap()
@@ -314,7 +317,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
             event(
                 &format!("evt_f4_crash_{i}"),
                 app,
-                creator,
+                &organization,
                 "requests",
                 1,
                 period + i64::from(i),
@@ -349,7 +352,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
         initial_stream.as_ref(),
         &stack,
         &dead_letters,
-        &NoopCreatorResolver,
+        &NoopOrganizationResolver,
         &forward_cfg,
     )
     .await
@@ -375,7 +378,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
         restarted_stream.as_ref(),
         &stack,
         &dead_letters,
-        &NoopCreatorResolver,
+        &NoopOrganizationResolver,
         &forward_cfg,
     )
     .await
@@ -401,7 +404,7 @@ async fn memory_forwarder_redelivers_uncommitted_tail_after_mid_batch_failure() 
         after_commit.as_ref(),
         &stack,
         &dead_letters,
-        &NoopCreatorResolver,
+        &NoopOrganizationResolver,
         &forward_cfg,
     )
     .await
@@ -440,11 +443,11 @@ async fn pg_dead_letter_sink_persists_provider_reject_and_decode_failure() {
         reject_provider_for_stack,
     );
     let app = Uuid::new_v4();
-    let creator = Uuid::new_v4();
+    let organization = zeroship_core::typed_id::generate("org");
     let event = event(
         "evt_f4_pg_reject",
         app,
-        creator,
+        &organization,
         "requests",
         1,
         1_783_468_800,
@@ -462,7 +465,7 @@ async fn pg_dead_letter_sink_persists_provider_reject_and_decode_failure() {
         reject_stream.as_ref(),
         &reject_stack,
         &sink,
-        &NoopCreatorResolver,
+        &NoopOrganizationResolver,
         &forward_cfg,
     )
     .await
@@ -499,7 +502,7 @@ async fn pg_dead_letter_sink_persists_provider_reject_and_decode_failure() {
         decode_stream.as_ref(),
         &decode_stack,
         &sink,
-        &NoopCreatorResolver,
+        &NoopOrganizationResolver,
         &forward_cfg,
     )
     .await
@@ -748,7 +751,7 @@ async fn seed_app(client: &compio_postgres::Client) -> Uuid {
 fn event(
     id: &str,
     app: Uuid,
-    creator: Uuid,
+    organization: &str,
     meter: &str,
     value: u64,
     event_time: i64,
@@ -758,7 +761,7 @@ fn event(
         source: "worker-test".to_string(),
         subject: UsageSubject {
             app: Some(app),
-            creator,
+            organization: Some(organization.to_owned()),
         },
         meter: meter.to_string(),
         value,

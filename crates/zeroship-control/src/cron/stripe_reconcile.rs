@@ -12,7 +12,7 @@
 //! single conservatively-safe exception is the dispute backstop: a fully-missed dispute
 //! whose settling pi_/ch_ ALREADY links to one of our invoices is APPLIED directly
 //! (`billing_disputes` row + its `dispute_debit`, idempotent on the du_…, under the
-//! per-creator advisory lock) — gated behind a config flag defaulting OFF (FLAG by default).
+//! per-organization advisory lock) — gated behind a config flag defaulting OFF (FLAG by default).
 //! We never mutate a finalized invoice, never issue a refund.
 //!
 //! Three reconcile passes over the recent window (mirroring the webhook events they back
@@ -79,7 +79,7 @@ pub struct ReconcileConfig {
     /// fully-missed dispute is recorded as a `missing_dispute` finding for operator review.
     /// When ON, a missed dispute whose settling pi_/ch_ ALREADY resolves to one of our
     /// invoices is APPLIED DIRECTLY (a `billing_disputes` row + its `dispute_debit`, idempotent
-    /// on the `du_…`, under the per-creator advisory lock) — parking would be a silent no-op
+    /// on the `du_…`, under the per-organization advisory lock) — parking would be a silent no-op
     /// because the only promotion site fires at `invoice.paid`, which already ran. A dispute
     /// that does NOT yet resolve to a linkage is only flagged (the webhook path parks the
     /// genuine pre-`invoice.paid` race; a Connect charge has no linkage to anchor to).
@@ -517,7 +517,7 @@ async fn reconcile_disputes<S: StripeApi>(
 
         // GATED, conservatively-safe AUTO-HEAL (default OFF): if the settling pi_/ch_ ALREADY
         // links to one of our invoices, APPLY the dispute directly (billing_disputes row +
-        // dispute_debit, idempotent on the du_…, under the per-creator lock). Parking it would
+        // dispute_debit, idempotent on the du_…, under the per-organization lock). Parking it would
         // be a silent no-op — the only promotion site fires at invoice.paid, which already ran
         // before this dropped dispute existed. A not-yet-linked dispute is left flagged.
         if cfg.auto_heal_disputes {
@@ -541,7 +541,7 @@ async fn reconcile_disputes<S: StripeApi>(
 ///   * LINKAGE EXISTS NOW (the common backstop case — `invoice.paid` already ran, but the
 ///     `charge.dispute.created` webhook was dropped): APPLY the dispute DIRECTLY via
 ///     [`record_dispute_created`] (UPSERT `billing_disputes` + append the `dispute_debit`,
-///     idempotent on the `du_…`, taking the per-creator advisory lock). Parking here would be a
+///     idempotent on the `du_…`, taking the per-organization advisory lock). Parking here would be a
 ///     SILENT BUG: the ONLY promotion site is `resolve_pending_disputes_for_linkage`, fired
 ///     solely when the linkage is FRESHLY written at `invoice.paid` — which already happened,
 ///     before the dispute existed. A parked row against an already-linked invoice would never
@@ -579,7 +579,7 @@ async fn try_backstop_dispute(
     };
     let evidence_due_at = sd.evidence_due_by.map(unix_to_dt);
     // The linkage EXISTS — apply the dispute directly (idempotent on the du_…, takes the
-    // per-creator advisory lock). `record_dispute_created` needs an owned `&mut` connection.
+    // per-organization advisory lock). `record_dispute_created` needs an owned `&mut` connection.
     let mut conn = conn;
     let rec = record_dispute_created(
         &mut conn,

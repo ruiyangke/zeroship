@@ -481,7 +481,7 @@ async fn audit_log_roundtrip() {
 
     audit::log(&registry, AuditEntry {
         app_id: Some(app),
-        creator_id: None,
+        organization_id: None,
         actor_user_id: Some(first_actor),
         action: Action::SetSecret,
         resource: Some("STRIPE_KEY"),
@@ -489,7 +489,7 @@ async fn audit_log_roundtrip() {
     }).await;
     audit::log(&registry, AuditEntry {
         app_id: Some(app),
-        creator_id: None,
+        organization_id: None,
         actor_user_id: Some(second_actor),
         action: Action::DeleteSecret,
         resource: Some("STRIPE_KEY"),
@@ -527,7 +527,7 @@ async fn app_audit_is_append_only() {
 
     audit::log(&registry, AuditEntry {
         app_id: Some(app),
-        creator_id: None,
+        organization_id: None,
         actor_user_id: Some(Uuid::new_v4()),
         action: Action::SetVar,
         resource: Some("APPEND_ONLY_PROBE"),

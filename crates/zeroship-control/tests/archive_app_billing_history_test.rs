@@ -95,21 +95,29 @@ async fn archive_preserves_finalized_invoice_history() {
         .await
         .expect("create app");
 
+    // The billing subject is the app's OWN organization - the personal one
+    // `create_app` provisioned - read back off the row rather than assumed, so
+    // the invoice below is attached to the app whose archival is under test.
+    let organization: String = client
+        .query("SELECT organization_id FROM zeroship.apps WHERE id = $1", &[&app.id])
+        .await
+        .expect("read app organization")[0]
+        .get("organization_id");
     client
         .execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
-             ON CONFLICT (creator_id) DO NOTHING",
-            &[&owner],
+            "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) \
+             ON CONFLICT (organization_id) DO NOTHING",
+            &[&organization],
         )
         .await
-        .expect("creator_billing");
+        .expect("organization_billing");
     let invoice_id = zeroship_core::typed_id::new_invoice_id();
     let period = first_of_this_month();
     client
         .execute(
-            "INSERT INTO zeroship.invoices (id, creator_id, period, status) \
+            "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&invoice_id, &owner, &period],
+            &[&invoice_id, &organization, &period],
         )
         .await
         .expect("seed draft invoice");

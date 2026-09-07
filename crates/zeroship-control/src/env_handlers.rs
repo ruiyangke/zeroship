@@ -124,7 +124,7 @@ pub async fn set_var(
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
-                creator_id: None,
+                organization_id: None,
                 actor_user_id: Some(authz.principal_id),
                 action: Action::SetVar,
                 resource: Some(&body.key),
@@ -156,7 +156,7 @@ pub async fn delete_var(
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
-                creator_id: None,
+                organization_id: None,
                 actor_user_id: Some(authz.principal_id),
                 action: Action::DeleteVar,
                 resource: Some(&key),
@@ -213,7 +213,7 @@ pub async fn set_secret(
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
-                creator_id: None,
+                organization_id: None,
                 actor_user_id: Some(authz.principal_id),
                 action: Action::SetSecret,
                 resource: Some(&body.key),
@@ -295,7 +295,7 @@ pub async fn set_expose(
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
-                creator_id: None,
+                organization_id: None,
                 actor_user_id: Some(authz.principal_id),
                 action: Action::SetEnvExpose,
                 resource: Some(&resource),
@@ -376,7 +376,7 @@ pub async fn delete_secret(
             let ip = source_ip(&req, &state);
             audit::log(&state.registry, AuditEntry {
                 app_id: Some(id),
-                creator_id: None,
+                organization_id: None,
                 actor_user_id: Some(authz.principal_id),
                 action: Action::DeleteSecret,
                 resource: Some(&key),

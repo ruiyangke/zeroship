@@ -118,7 +118,7 @@ fn drop_index_sql_is_reversible_structure_not_data_loss() {
 
 #[test]
 fn select_collects_referenced_schema() {
-    let c = one("SELECT * FROM control.creator_billing");
+    let c = one("SELECT * FROM control.organization_billing");
     assert_eq!(c.kind, DdlKind::Select);
     assert_eq!(c.referenced_schemas, vec!["control".to_string()]);
 }

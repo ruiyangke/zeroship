@@ -102,5 +102,11 @@
   "organization_members": "zeroship_platform",
   "organization_invites": "zeroship_platform",
   "projects": "zeroship_platform",
-  "project_members": "zeroship_platform"
+  "project_members": "zeroship_platform",
+  "organization_billing": "zeroship_platform",
+  "organization_billing_status": "zeroship_platform",
+  "organization_billing_status_history": "zeroship_platform",
+  "organization_accounts": "zeroship_platform",
+  "organization_account_history": "zeroship_platform",
+  "organization_fee_policy": "zeroship_platform"
 }

@@ -9,13 +9,13 @@
 //!    like the base-usage path, and reproducibility comes from the `invoice_lines`
 //!    snapshot at finalize). Per-period change cap
 //!    ([`MAX_PLAN_CHANGES_PER_PERIOD`]); past the cap
-//!    the plan still flips (the creator IS on the new plan) but NO snapshot is
+//!    the plan still flips (the organization IS on the new plan) but NO snapshot is
 //!    recorded, so the tail prices under the actually-running plan. The
-//!    whole write takes the per-creator advisory lock so it cannot interleave with
+//!    whole write takes the per-organization advisory lock so it cannot interleave with
 //!    a month-end reconcile, and a change whose effective period is
 //!    already finalized is attributed to the NEXT period.
 //!
-//! 2. **The read/price side** ([`build_segments_with_prior`]) — invoked by `bill_creator`.
+//! 2. **The read/price side** ([`build_segments_with_prior`]) — invoked by `bill_organization`.
 //!    An app with N change events in the period splits into N+1 segments (ordered
 //!    by `effective_at`). Each segment's usage is the cumulative DELTA between
 //!    consecutive snapshots, floored at `max(0, …)`. Day-spans are a
@@ -38,7 +38,7 @@ use crate::registry::{Registry, RegistryError};
 
 /// Per-period plan-change cap (design decision; default 8). Past the cap a
 /// `set_plan` still flips `apps.plan_id` but records NO new `plan_change_events`
-/// snapshot — so a creator cannot manufacture an unbounded number of favourable
+/// snapshot — so an organization cannot manufacture an unbounded number of favourable
 /// micro-segments, and the over-cap tail merges into the final segment priced
 /// under the actually-running plan, never under a cheaper recorded plan.
 pub const MAX_PLAN_CHANGES_PER_PERIOD: i64 = 8;
@@ -83,8 +83,8 @@ pub fn next_period_date(period: chrono::NaiveDate) -> chrono::NaiveDate {
 
 /// Record a plan change on a transaction the caller owns (so the snapshot read,
 /// the `apps.plan_id` flip, and the `plan_change_events` INSERT all commit
-/// together). Takes the per-creator advisory lock FIRST so it serializes against
-/// a month-end reconcile for the same creator.
+/// together). Takes the per-organization advisory lock FIRST so it serializes against
+/// a month-end reconcile for the same organization.
 ///
 /// `now_unix` is the effective instant. The row does NOT freeze either plan's
 /// base fee — segment pricing reads the live catalog at reconcile time (like the
@@ -98,13 +98,13 @@ pub fn next_period_date(period: chrono::NaiveDate) -> chrono::NaiveDate {
 pub async fn record_plan_change<C: GenericClient + Sync>(
     tx: &C,
     app_id: &Uuid,
-    creator_id: &Uuid,
+    organization_id: &str,
     from_plan_id: Option<&str>,
     to_plan_id: &str,
     now_unix: i64,
 ) -> Result<PlanChangeOutcome, RegistryError> {
-    // SERIALIZE against the month-end reconcile for THIS creator. The reconcile takes the
-    // same per-creator advisory lock inside its LOCAL finalize txn (`consume_at_finalize`),
+    // SERIALIZE against the month-end reconcile for THIS organization. The reconcile takes the
+    // same per-organization advisory lock inside its LOCAL finalize txn (`consume_at_finalize`),
     // NOT across the whole build (the Stripe create/finalize calls run BEFORE the lock is
     // taken — a network call never holds a DB txn open). So a plan change cannot interleave
     // INSIDE that locked finalize txn — the credit-draw + invoice money math lands fully
@@ -113,7 +113,7 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
     // Identical keying to `credit::consume_at_finalize`, so the two contend on the SAME lock.
     tx.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
-        &[&creator_id.to_string()],
+        &[&organization_id.to_string()],
     )
     .await
     .map_err(|e| RegistryError::Database(e.to_string()))?;
@@ -141,8 +141,8 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
     let finalized = tx
         .query(
             "SELECT 1 FROM zeroship.invoices \
-             WHERE creator_id = $1 AND period = $2::date AND status = 'finalized'",
-            &[creator_id, &period],
+             WHERE organization_id = $1 AND period = $2::date AND status = 'finalized'",
+            &[&organization_id, &period],
         )
         .await?;
     if !finalized.is_empty() {
@@ -214,7 +214,7 @@ pub async fn record_plan_change<C: GenericClient + Sync>(
 pub async fn record_plan_change_tx(
     registry: &Registry,
     app_id: &Uuid,
-    creator_id: &Uuid,
+    organization_id: &str,
     from_plan_id: Option<&str>,
     to_plan_id: &str,
     now_unix: i64,
@@ -227,7 +227,7 @@ pub async fn record_plan_change_tx(
     let outcome = record_plan_change(
         &tx,
         app_id,
-        creator_id,
+        organization_id,
         from_plan_id,
         to_plan_id,
         now_unix,

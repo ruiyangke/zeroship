@@ -749,7 +749,8 @@ impl Fixture {
         .expect("insert project");
 
         pg.execute(
-            "INSERT INTO zeroship.apps (id, name, project_id) VALUES ($1, $2, $3)",
+            "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
+             SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
             &[
                 &app_uuid,
                 &format!("authz-{label}-{}", Uuid::new_v4().simple()),

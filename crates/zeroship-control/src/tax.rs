@@ -30,7 +30,7 @@
 //! plus a `build_tax_provider` arm) would implement [`TaxProvider::compute_tax`] by
 //! calling Stripe's `automatic_tax` (`POST /v1/invoices` with
 //! `automatic_tax[enabled]=true`, or the Tax `calculations` API) using the
-//! `TaxContext`'s creator/period/address to resolve the jurisdiction, and return the
+//! `TaxContext`'s organization/period/address to resolve the jurisdiction, and return the
 //! computed `tax_cents`. **No schema change** — the result lands in the existing
 //! `tax_cents` column through the same finalize UPDATE; only this seam's
 //! `build_tax_provider` and the new provider impl change. The refund path's proportional
@@ -45,17 +45,17 @@ use crate::metering::provider::ProviderError;
 pub type BillingPeriodDate = chrono::NaiveDate;
 
 /// The inputs a [`TaxProvider`] computes tax over — the post-credit subtotal plus the
-/// creator/period context a real provider needs to resolve a jurisdiction.
+/// organization/period context a real provider needs to resolve a jurisdiction.
 ///
 /// `taxable_base_cents` is the **post-credit subtotal** (credit is applied BEFORE tax,
 /// matching the balance CHECK's `total = subtotal − credit + tax` ordering — see flow E /
-/// design principle 6): tax is computed on the amount the creator actually owes after
+/// design principle 6): tax is computed on the amount the organization actually owes after
 /// credit, not the gross subtotal. For the usage-segment design the base is the sum of the
 /// segment lines' subtotal minus applied credit — computed once per invoice.
 #[derive(Debug, Clone)]
 pub struct TaxContext<'a> {
-    /// The creator the invoice bills (the customer whose tax jurisdiction applies).
-    pub creator_id: uuid::Uuid,
+    /// The organization the invoice bills (the customer whose tax jurisdiction applies).
+    pub organization_id: String,
     /// The post-credit subtotal tax is computed over (`subtotal − applied_credit`,
     /// floored at 0). For Native this is unused (tax is always 0); a real provider
     /// taxes this base.
@@ -106,7 +106,7 @@ pub trait TaxProvider: Send + Sync {
     ///
     /// # Errors
     /// Returns [`ProviderError`] if a real provider's tax call fails (Native never
-    /// errors). A failure here aborts the per-creator finalize (fail-closed: never
+    /// errors). A failure here aborts the per-organization finalize (fail-closed: never
     /// finalize an invoice with an unknown tax).
     async fn compute_tax(&self, ctx: &TaxContext<'_>) -> Result<TaxAmount, ProviderError>;
 }
@@ -234,7 +234,7 @@ mod tests {
         let provider = NativeTaxProvider;
         for base in [0_i64, 1, 100, 999_999] {
             let ctx = TaxContext {
-                creator_id: uuid::Uuid::nil(),
+                organization_id: String::new(),
                 taxable_base_cents: base,
                 currency: "usd",
                 period: chrono::NaiveDate::from_ymd_opt(2026, 6, 1).unwrap(),

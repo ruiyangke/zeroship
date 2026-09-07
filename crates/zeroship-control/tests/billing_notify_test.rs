@@ -5,7 +5,7 @@
 //! FAITHFUL by construction: every assertion runs against a LIVE, migrated Postgres
 //! (a configured test database, `zeroship_core::config::test_database_url_opt`;
 //! the run refuses otherwise) and exercises the REAL paths --
-//!   * the REAL `account_status::AccountStatusStore` (mints the `cbh_…` surrogate id);
+//!   * the REAL `account_status::AccountStatusStore` (mints the `obh_…` surrogate id);
 //!   * the REAL `cron::billing_notify::{tick, sweep}` (advisory lock, claim-before-send,
 //!     scan → send → flip, the `NOTIFY_REDRIVE_HORIZON` re-drive);
 //!   * the REAL `billing_notifications` table / domains / two-phase claim;
@@ -19,7 +19,7 @@
 //!
 //! Brief regression coverage:
 //!   (a) claim-before-send is multi-node-safe — two concurrent tick attempts: only one
-//!       holds the advisory lock + sends; a duplicate (creator,kind,transition_id) claim
+//!       holds the advisory lock + sends; a duplicate (organization,kind,transition_id) claim
 //!       is rejected (exactly-once claim). → `concurrent_ticks_send_each_event_once`
 //!   (b) a crash after send before the `sent` flip → the `pending` row past
 //!       NOTIFY_REDRIVE_HORIZON is re-driven, and the Mailer Idempotency-Key makes the
@@ -57,7 +57,7 @@ fn db_url() -> String {
 ///
 /// The notify cron is FLEET-WIDE by design: one tick scans ALL creators and sends every
 /// pending row through the `AppState.notifier` of whichever fixture drove that tick. Under
-/// the default parallel runner that means a sibling test's tick can deliver MY creator's
+/// the default parallel runner that means a sibling test's tick can deliver MY organization's
 /// email into the SIBLING's `RecordingNotifier` and flip the shared-DB row to `sent` —
 /// invisible to my recorder. The DB ledger is immune (assert there where we can), but the
 /// re-drive test must observe TWO send attempts for the SAME key on ITS OWN recorder to
@@ -198,55 +198,56 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 }
 
 // ---------------------------------------------------------------------------
-// Seeding helpers — a creator (= a user) with a creator_billing identity row.
+// Seeding helpers — a organization (= a user) with a organization_billing identity row.
 // ---------------------------------------------------------------------------
 
-async fn make_creator(pg: &compio_postgres::Client) -> Uuid {
-    let rows = pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, 'Notify Creator') RETURNING id",
-            &[&format!("notify-{}@test.invalid", Uuid::new_v4().simple())],
-        )
-        .await
-        .expect("insert user");
-    let id: Uuid = rows[0].get("id");
+async fn make_organization(pg: &compio_postgres::Client) -> String {
+    let id = zeroship_core::typed_id::generate("org");
+    let slug = format!("notify-{}", Uuid::new_v4().simple());
     pg.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
-         ON CONFLICT (creator_id) DO NOTHING",
+        "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+         VALUES ($1, $2, 'Notify Organization', $3)",
+        &[&id, &slug, &format!("{slug}@test.invalid")],
+    )
+    .await
+    .expect("insert organization");
+    pg.execute(
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) \
+         ON CONFLICT (organization_id) DO NOTHING",
         &[&id],
     )
     .await
-    .expect("ensure creator_billing");
+    .expect("ensure organization_billing");
     id
 }
 
-/// Drive the dunning lifecycle for a creator to produce `creator_billing_status_history`
-/// rows (each minting a `cbh_…` surrogate id). `event` is a monotonically increasing
+/// Drive the dunning lifecycle for a organization to produce `organization_billing_status_history`
+/// rows (each minting a `obh_…` surrogate id). `event` is a monotonically increasing
 /// unix ts for the Stripe order-safety high-water.
-async fn fail_payment(state: &AppState, creator: Uuid, event: i64) {
+async fn fail_payment(state: &AppState, organization: &str, event: i64) {
     AccountStatusStore::new(state.registry.clone())
-        .record_payment_failed(creator, Some("in_test"), event)
+        .record_payment_failed(organization, Some("in_test"), event)
         .await
         .expect("record_payment_failed");
 }
 
-async fn recover_payment(state: &AppState, creator: Uuid, event: i64) {
+async fn recover_payment(state: &AppState, organization: &str, event: i64) {
     AccountStatusStore::new(state.registry.clone())
-        .record_payment_recovered(creator, event)
+        .record_payment_recovered(organization, event)
         .await
         .expect("record_payment_recovered");
 }
 
-/// Seed a finalized invoice for a creator and return its id (the `invoice_finalized`
+/// Seed a finalized invoice for a organization and return its id (the `invoice_finalized`
 /// transition id). Writes the frozen total directly (the notifier reads it, never
 /// re-prices). period is first-of-month.
-async fn finalize_invoice(pg: &compio_postgres::Client, creator: Uuid, total_cents: i64) -> String {
+async fn finalize_invoice(pg: &compio_postgres::Client, organization: &str, total_cents: i64) -> String {
     let id = zeroship_core::typed_id::new_invoice_id();
     pg.execute(
         "INSERT INTO zeroship.invoices \
-            (id, creator_id, period, status, currency, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
+            (id, organization_id, period, status, currency, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
          VALUES ($1, $2, date_trunc('month', NOW())::date, 'finalized', 'usd', $3, 0, 0, $3, NOW())",
-        &[&id, &creator, &total_cents],
+        &[&id, &organization, &total_cents],
     )
     .await
     .expect("insert finalized invoice");
@@ -285,44 +286,44 @@ async fn issue_refund(
     id
 }
 
-/// Count ledger rows of a given status for a creator.
-async fn ledger_count(pg: &compio_postgres::Client, creator: Uuid, status: &str) -> i64 {
+/// Count ledger rows of a given status for a organization.
+async fn ledger_count(pg: &compio_postgres::Client, organization: &str, status: &str) -> i64 {
     pg.query(
         "SELECT COUNT(*) AS c FROM zeroship.billing_notifications \
-          WHERE creator_id = $1 AND status = $2::text::zeroship.notification_status",
-        &[&creator, &status],
+          WHERE organization_id = $1 AND status = $2::text::zeroship.notification_status",
+        &[&organization, &status],
     )
     .await
     .expect("count ledger")[0]
         .get::<_, i64>("c")
 }
 
-/// Count `sent` ledger rows for a creator of a given kind. This is the AUTHORITATIVE,
+/// Count `sent` ledger rows for a organization of a given kind. This is the AUTHORITATIVE,
 /// cross-fixture-safe record of "a notification was claimed AND delivered" — the cron
 /// only flips a row to `sent` AFTER a successful (or suppressed/no-recipient) send. We
-/// assert delivery off the shared DB ledger (per-creator, per-kind) rather than off the
+/// assert delivery off the shared DB ledger (per-organization, per-kind) rather than off the
 /// per-fixture `RecordingNotifier`, because the cron is FLEET-WIDE: under the default
 /// parallel runner, whichever test's tick wins the global advisory lock sends ALL
 /// creators' pending rows through ITS OWN recorder — so a sibling's tick can deliver MY
-/// creator's email and record it in the sibling's recorder, never mine. The ledger row,
-/// keyed by my creator_id + kind, is immune to that and is the real artifact under test.
+/// organization's email and record it in the sibling's recorder, never mine. The ledger row,
+/// keyed by my organization_id + kind, is immune to that and is the real artifact under test.
 async fn sent_count_kind(
     pg: &compio_postgres::Client,
-    creator: Uuid,
+    organization: &str,
     kind: BillingNotificationKind,
 ) -> i64 {
     pg.query(
         "SELECT COUNT(*) AS c FROM zeroship.billing_notifications \
-          WHERE creator_id = $1 AND status = 'sent' \
+          WHERE organization_id = $1 AND status = 'sent' \
             AND kind = $2::text::zeroship.billing_notification_kind",
-        &[&creator, &kind.as_str()],
+        &[&organization, &kind.as_str()],
     )
     .await
     .expect("count sent-by-kind")[0]
         .get::<_, i64>("c")
 }
 
-/// Drive `billing_notify::tick` until every `(creator, expected_sent)` in `want` has at
+/// Drive `billing_notify::tick` until every `(organization, expected_sent)` in `want` has at
 /// least `expected_sent` `sent` ledger rows AND zero `pending` rows — i.e. THIS test's
 /// own transitions are fully delivered.
 ///
@@ -331,7 +332,7 @@ async fn sent_count_kind(
 /// concurrent `tick` (or its held side-lock) can own the lock when this test ticks, so a
 /// given `tick` legitimately wins nothing and returns 0 — exactly the multi-node
 /// "loser skips this tick" path the production cron retries on its next ~5min cycle. We
-/// reproduce that retry here so the assertion is scoped to THIS creator's settled state,
+/// reproduce that retry here so the assertion is scoped to THIS organization's settled state,
 /// never to a global per-tick send count. The cron, the claim-before-send, and the lock
 /// are exercised UNCHANGED — only the test waits out lock contention instead of assuming
 /// one tick wins. The bound keeps a genuine bug (rows that never settle) from hanging.
@@ -340,16 +341,16 @@ async fn sent_count_kind(
 // single-threaded runtime, so the held guard cannot deadlock another task's poll the
 // way it could under a work-stealing executor.
 #[allow(clippy::await_holding_lock)]
-async fn tick_until_sent(state: &AppState, pg: &compio_postgres::Client, want: &[(Uuid, i64)]) {
+async fn tick_until_sent(state: &AppState, pg: &compio_postgres::Client, want: &[(&str, i64)]) {
     for _ in 0..200 {
         {
             let _gate = lock_tick_gate();
             billing_notify::tick(state).await.expect("tick");
         }
         let mut all_settled = true;
-        for &(creator, expected_sent) in want {
-            let sent = ledger_count(pg, creator, "sent").await;
-            let pending = ledger_count(pg, creator, "pending").await;
+        for &(organization, expected_sent) in want {
+            let sent = ledger_count(pg, organization, "sent").await;
+            let pending = ledger_count(pg, organization, "pending").await;
             if sent < expected_sent || pending > 0 {
                 all_settled = false;
                 break;
@@ -363,13 +364,13 @@ async fn tick_until_sent(state: &AppState, pg: &compio_postgres::Client, want: &
 }
 
 /// Force a pending claim's `claimed_at` back so it is past the re-drive horizon.
-async fn age_pending(pg: &compio_postgres::Client, creator: Uuid) {
+async fn age_pending(pg: &compio_postgres::Client, organization: &str) {
     let back = i64::try_from(NOTIFY_REDRIVE_HORIZON.as_secs()).unwrap() + 60;
     pg.execute(
         "UPDATE zeroship.billing_notifications \
             SET claimed_at = NOW() - make_interval(secs => $2::double precision) \
-          WHERE creator_id = $1 AND status = 'pending'",
-        &[&creator, &(back as f64)],
+          WHERE organization_id = $1 AND status = 'pending'",
+        &[&organization, &(back as f64)],
     )
     .await
     .expect("age pending");
@@ -386,22 +387,25 @@ async fn each_kind_produces_exactly_one_notification() {
     let fx = build_fixture(&url, "each-kind").await;
     let st = &*fx.state;
 
-    // past_due: active→past_due (one cbh_ history row).
-    let c_pd = make_creator(&fx.pg).await;
+    // past_due: active→past_due (one obh_ history row).
+    let c_pd = make_organization(&fx.pg).await;
+    let c_pd = c_pd.as_str();
     fail_payment(st, c_pd, 1_000).await;
 
     // recovered: past_due→active.
-    let c_rec = make_creator(&fx.pg).await;
+    let c_rec = make_organization(&fx.pg).await;
+    let c_rec = c_rec.as_str();
     fail_payment(st, c_rec, 1_000).await;
     recover_payment(st, c_rec, 2_000).await;
 
-    // suspended: drive a creator to past_due, then exhaust the dunning window.
-    let c_susp = make_creator(&fx.pg).await;
+    // suspended: drive a organization to past_due, then exhaust the dunning window.
+    let c_susp = make_organization(&fx.pg).await;
+    let c_susp = c_susp.as_str();
     fail_payment(st, c_susp, 1_000).await;
     fx.pg
         .execute(
-            "UPDATE zeroship.creator_billing_status \
-                SET past_due_since = NOW() - make_interval(days => 30) WHERE creator_id = $1",
+            "UPDATE zeroship.organization_billing_status \
+                SET past_due_since = NOW() - make_interval(days => 30) WHERE organization_id = $1",
             &[&c_susp],
         )
         .await
@@ -412,7 +416,8 @@ async fn each_kind_produces_exactly_one_notification() {
         .expect("suspend_exhausted");
 
     // invoice_finalized + refunded.
-    let c_inv = make_creator(&fx.pg).await;
+    let c_inv = make_organization(&fx.pg).await;
+    let c_inv = c_inv.as_str();
     let inv = finalize_invoice(&fx.pg, c_inv, 1_234).await;
     let _refund = issue_refund(&fx.pg, &inv, 500, "cash").await;
 
@@ -420,7 +425,7 @@ async fn each_kind_produces_exactly_one_notification() {
     // a SHARED test DB and single-flights on a FLEET-WIDE advisory lock, so a single tick
     // can lose the lock to a concurrent sibling test and win nothing for my creators — we
     // tick until MY creators settle (the production cron's next-cycle retry), then assert
-    // per-MY-creator (the idempotency key is `{creator}:{kind}:{transition}`) rather than
+    // per-MY-organization (the idempotency key is `{organization}:{kind}:{transition}`) rather than
     // on any global per-kind or global-total count that a sibling could perturb.
     //   c_pd:   1 transition (past_due)
     //   c_rec:  2 (active→past_due AND past_due→active)
@@ -435,18 +440,18 @@ async fn each_kind_produces_exactly_one_notification() {
 
     // Each of MY seeded creators gets exactly one notification of its kind. We assert off
     // the shared DB LEDGER (cross-fixture-safe; see `sent_count_kind`) — exactly one `sent`
-    // row of the kind for my creator — not off the per-fixture recorder, since a sibling's
-    // tick can deliver my creator's email into the sibling's recorder.
+    // row of the kind for my organization — not off the per-fixture recorder, since a sibling's
+    // tick can deliver my organization's email into the sibling's recorder.
     use BillingNotificationKind::{InvoiceFinalized, PastDue, Recovered, Refunded, Suspended};
     assert_eq!(
         sent_count_kind(&fx.pg, c_pd, PastDue).await,
         1,
-        "the active→past_due creator gets exactly one past_due notification"
+        "the active→past_due organization gets exactly one past_due notification"
     );
     assert_eq!(
         sent_count_kind(&fx.pg, c_rec, Recovered).await,
         1,
-        "the recovered creator gets exactly one recovered notification"
+        "the recovered organization gets exactly one recovered notification"
     );
     // c_susp legitimately has BOTH a past_due AND a suspended transition — each fires its
     // own kind exactly once.
@@ -454,24 +459,24 @@ async fn each_kind_produces_exactly_one_notification() {
     assert_eq!(
         sent_count_kind(&fx.pg, c_susp, Suspended).await,
         1,
-        "the dunning-exhausted creator gets exactly one suspended notification"
+        "the dunning-exhausted organization gets exactly one suspended notification"
     );
     assert_eq!(
         sent_count_kind(&fx.pg, c_inv, InvoiceFinalized).await,
         1,
-        "the finalized-invoice creator gets exactly one invoice_finalized notification"
+        "the finalized-invoice organization gets exactly one invoice_finalized notification"
     );
     assert_eq!(
         sent_count_kind(&fx.pg, c_inv, Refunded).await,
         1,
-        "the refunded creator gets exactly one refunded notification"
+        "the refunded organization gets exactly one refunded notification"
     );
 
     // A SECOND sweep delivers NOTHING NEW for MY creators: every ledger row is `sent`, none
-    // `pending`, and the per-(creator,kind) `sent` counts are unchanged. Read off the
-    // ledger (per-creator) — a global recorder count would move if this tick swept a
+    // `pending`, and the per-(organization,kind) `sent` counts are unchanged. Read off the
+    // ledger (per-organization) — a global recorder count would move if this tick swept a
     // sibling's freshly-pending rows in the shared DB.
-    let pre: Vec<(Uuid, BillingNotificationKind, i64)> = {
+    let pre: Vec<(&str, BillingNotificationKind, i64)> = {
         let mut v = Vec::new();
         for (c, k) in [
             (c_pd, PastDue),
@@ -493,12 +498,12 @@ async fn each_kind_produces_exactly_one_notification() {
         assert_eq!(
             sent_count_kind(&fx.pg, c, k).await,
             before,
-            "second sweep must not produce a new {k:?} sent row for creator {c}"
+            "second sweep must not produce a new {k:?} sent row for organization {c}"
         );
         assert_eq!(
             ledger_count(&fx.pg, c, "pending").await,
             0,
-            "no pending rows remain for creator {c} after settle"
+            "no pending rows remain for organization {c} after settle"
         );
     }
 
@@ -523,8 +528,9 @@ async fn concurrent_ticks_send_each_event_once() {
     // Hold the notify-family advisory lock on a SIDE session; a tick that cannot acquire
     // it skips entirely (the multi-node loser path) — proving only ONE instance sweeps
     // per tick. The lock key is the cron's `NOTIFY_SWEEP_ADVISORY_LOCK_KEY` ("zsnotf").
-    let creator = make_creator(&fx.pg).await;
-    fail_payment(st, creator, 1_000).await;
+    let organization = make_organization(&fx.pg).await;
+    let organization = organization.as_str();
+    fail_payment(st, organization, 1_000).await;
     const NOTIFY_LOCK_KEY: i64 = 0x7a73_6e6f_7466_0001;
     let (side, side_conn) = compio_postgres::connect(&url, compio_postgres::NoTls)
         .await
@@ -541,14 +547,14 @@ async fn concurrent_ticks_send_each_event_once() {
     assert!(held);
     let blocked = billing_notify::tick(st).await.expect("tick while lock held");
     assert_eq!(blocked, 0, "a tick that loses the advisory lock must send NOTHING");
-    assert_eq!(ledger_count(&fx.pg, creator, "pending").await, 0, "no claim while locked out");
+    assert_eq!(ledger_count(&fx.pg, organization, "pending").await, 0, "no claim while locked out");
     side.execute("SELECT pg_advisory_unlock($1)", &[&NOTIFY_LOCK_KEY])
         .await
         .expect("release notify lock");
 
     // --- Guard 2: exactly-once CLAIM under genuine dual-flight. ---
     // Two ticks racing on the SAME state. Whatever the interleaving, the claim INSERT
-    // (the PK `(creator, kind, transition_id)`) arbitrates: the row is claimed by exactly
+    // (the PK `(organization, kind, transition_id)`) arbitrates: the row is claimed by exactly
     // ONE flight, and the provider Idempotency-Key dedups any duplicate send so the
     // recipient sees ONE email.
     //
@@ -557,31 +563,31 @@ async fn concurrent_ticks_send_each_event_once() {
     // ticks can lose the lock to a concurrent sibling test and win nothing this round —
     // the multi-node loser path. So we do NOT assert on the per-tick send count of this
     // one race (it can be 0, 1, or 2 depending on lock ownership); instead we run the
-    // genuine race and THEN drain until MY creator settles. The exactly-once GUARANTEE is
+    // genuine race and THEN drain until MY organization settles. The exactly-once GUARANTEE is
     // unchanged: no matter how many ticks (racing or retried) touch this transition, the
     // PK admits exactly ONE ledger row and the Idempotency-Key dedups to ONE delivery.
     let (a, b) = futures::future::join(billing_notify::tick(st), billing_notify::tick(st)).await;
     a.expect("tick a");
     b.expect("tick b");
-    // Drain MY creator's single past_due transition to `sent` (retrying past any sibling
+    // Drain MY organization's single past_due transition to `sent` (retrying past any sibling
     // lock contention — the production cron's next-cycle retry).
-    tick_until_sent(st, &fx.pg, &[(creator, 1)]).await;
+    tick_until_sent(st, &fx.pg, &[(organization, 1)]).await;
 
     // Exactly-once claim + delivery, asserted off the shared DB ledger scoped to THIS
-    // creator (cross-fixture-safe): the PK `(creator, kind, transition_id)` admits exactly
+    // organization (cross-fixture-safe): the PK `(organization, kind, transition_id)` admits exactly
     // ONE row for the past_due transition no matter how many racing/retried ticks touch it,
     // and the cron only flips it to `sent` after a successful send — so exactly one `sent`
-    // past_due row for my creator proves "the recipient sees ONE past_due email."
+    // past_due row for my organization proves "the recipient sees ONE past_due email."
     assert_eq!(
-        sent_count_kind(&fx.pg, creator, BillingNotificationKind::PastDue).await,
+        sent_count_kind(&fx.pg, organization, BillingNotificationKind::PastDue).await,
         1,
         "exactly-once claim + idempotent delivery: ONE past_due notification even under \
          dual-flight (the duplicate claim is rejected by the PK; a duplicate send is \
          deduped by the Idempotency-Key)"
     );
     // The PK guarantees exactly ONE ledger row for the transition, now `sent`.
-    assert_eq!(ledger_count(&fx.pg, creator, "sent").await, 1);
-    assert_eq!(ledger_count(&fx.pg, creator, "pending").await, 0);
+    assert_eq!(ledger_count(&fx.pg, organization, "sent").await, 1);
+    assert_eq!(ledger_count(&fx.pg, organization, "pending").await, 0);
 
     drop(side);
     drop(fx);
@@ -611,20 +617,21 @@ async fn crash_before_flip_redrives_idempotent() {
     // cron's own "one sweeper per tick" invariant, made deterministic for the binary.
     let _gate = lock_tick_gate();
 
-    let creator = make_creator(&fx.pg).await;
-    fail_payment(st, creator, 1_000).await;
+    let organization = make_organization(&fx.pg).await;
+    let organization = organization.as_str();
+    fail_payment(st, organization, 1_000).await;
 
     // Simulate a CRASH after send but before the flip: drive the FIRST send to the
     // notifier (delivered once) but force the ledger row to stay `pending` by failing
     // the flip. We model the crash by sending via the notifier directly through the
     // sweep, then resetting the row to pending + aging it.
-    // The cron sweeps a shared test DB; scope all assertions to THIS creator's key.
+    // The cron sweeps a shared test DB; scope all assertions to THIS organization's key.
     let key = format!(
         "{}:{}:{}",
-        creator,
+        organization,
         BillingNotificationKind::PastDue.as_str(),
-        // the transition_id is the cbh_ id of the only history row for this creator
-        cbh_id(&fx.pg, creator).await,
+        // the transition_id is the obh_ id of the only history row for this organization
+        obh_id(&fx.pg, organization).await,
     );
 
     // FIRST send: drive (gated) ticks until MY transition is delivered+settled. With the
@@ -632,8 +639,8 @@ async fn crash_before_flip_redrives_idempotent() {
     let mut settled = false;
     for _ in 0..200 {
         billing_notify::tick(st).await.expect("first tick");
-        if ledger_count(&fx.pg, creator, "sent").await >= 1
-            && ledger_count(&fx.pg, creator, "pending").await == 0
+        if ledger_count(&fx.pg, organization, "sent").await >= 1
+            && ledger_count(&fx.pg, organization, "pending").await == 0
         {
             settled = true;
             break;
@@ -643,7 +650,7 @@ async fn crash_before_flip_redrives_idempotent() {
     assert_eq!(
         fx.notifier.delivered_for_key(&key),
         1,
-        "the Idempotency-Key tuple (creator:kind:transition_id) is passed and delivered once"
+        "the Idempotency-Key tuple (organization:kind:transition_id) is passed and delivered once"
     );
 
     // CRASH model: the `sent` flip never committed → roll the row back to pending and
@@ -651,12 +658,12 @@ async fn crash_before_flip_redrives_idempotent() {
     fx.pg
         .execute(
             "UPDATE zeroship.billing_notifications SET status = 'pending', sent_at = NULL \
-              WHERE creator_id = $1",
-            &[&creator],
+              WHERE organization_id = $1",
+            &[&organization],
         )
         .await
         .expect("reset to pending");
-    age_pending(&fx.pg, creator).await;
+    age_pending(&fx.pg, organization).await;
 
     // The next sweep RE-DRIVES the SAME row (re-claims past the horizon, re-sends). The
     // recording notifier dedups on the SAME Idempotency-Key, so the recipient sees ONE
@@ -677,20 +684,20 @@ async fn crash_before_flip_redrives_idempotent() {
         "the provider Idempotency-Key dedups the re-send: ONE delivery across re-drives"
     );
     // The row is now `sent` (the re-drive flipped it).
-    assert_eq!(ledger_count(&fx.pg, creator, "sent").await, 1);
+    assert_eq!(ledger_count(&fx.pg, organization, "sent").await, 1);
 
     drop(fx);
     common::drain_pg().await;
 }
 
-/// The cbh_ surrogate id of the single history row for a creator.
-async fn cbh_id(pg: &compio_postgres::Client, creator: Uuid) -> String {
+/// The obh_ surrogate id of the single history row for a organization.
+async fn obh_id(pg: &compio_postgres::Client, organization: &str) -> String {
     pg.query(
-        "SELECT id FROM zeroship.creator_billing_status_history WHERE creator_id = $1 ORDER BY at LIMIT 1",
-        &[&creator],
+        "SELECT id FROM zeroship.organization_billing_status_history WHERE organization_id = $1 ORDER BY at LIMIT 1",
+        &[&organization],
     )
     .await
-    .expect("read cbh id")[0]
+    .expect("read obh id")[0]
         .get::<_, String>("id")
 }
 
@@ -705,23 +712,24 @@ async fn history_surrogate_ids_carry_disjoint_prefixes() {
     let fx = build_fixture(&url, "prefixes").await;
     let st = &*fx.state;
 
-    let creator = make_creator(&fx.pg).await;
-    fail_payment(st, creator, 1_000).await;
-    let cbh = cbh_id(&fx.pg, creator).await;
-    assert!(cbh.starts_with("cbh_"), "creator-billing-history id must be cbh_: {cbh}");
+    let organization = make_organization(&fx.pg).await;
+    let organization = organization.as_str();
+    fail_payment(st, organization, 1_000).await;
+    let obh = obh_id(&fx.pg, organization).await;
+    assert!(obh.starts_with("obh_"), "organization-billing-history id must be obh_: {obh}");
 
     // A spend-state-history row (minted by spend.rs) carries `she_`. We assert the
     // prefix from a directly-seeded row so this test does not require the spend engine.
     let she = zeroship_core::typed_id::new_spend_history_id();
     assert!(she.starts_with("she_"), "spend-history id must be she_: {she}");
 
-    // The notify dedup key is (creator_id, kind, transition_id). Two transition ids from
+    // The notify dedup key is (organization_id, kind, transition_id). Two transition ids from
     // DIFFERENT sources can never collide because their prefixes differ — proving the
     // cross-source dedup is collision-proof.
-    assert_ne!(&cbh[..4], &she[..4], "cbh_ and she_ prefixes must differ");
+    assert_ne!(&obh[..4], &she[..4], "obh_ and she_ prefixes must differ");
     let inv = zeroship_core::typed_id::new_invoice_id();
     let refund = zeroship_core::typed_id::new_refund_id();
-    let prefixes = [&cbh[..3], &she[..3], &inv[..3], &refund[..3]];
+    let prefixes = [&obh[..3], &she[..3], &inv[..3], &refund[..3]];
     for (i, a) in prefixes.iter().enumerate() {
         for b in &prefixes[i + 1..] {
             assert_ne!(a, b, "notification source prefixes must be pairwise-disjoint");
@@ -738,7 +746,7 @@ async fn history_surrogate_ids_carry_disjoint_prefixes() {
 // HOLD) through the REAL spend_reconcile cron on live PG, then runs the REAL notify
 // cron and asserts EXACTLY ONE notification of the right kind per transition,
 // idempotent across ticks. Authoritative assertions are off the `billing_notifications`
-// ledger (per-creator, per-kind), cross-fixture-safe exactly like the other kinds.
+// ledger (per-organization, per-kind), cross-fixture-safe exactly like the other kinds.
 //
 // RED pre-wiring: before the BillingNotificationKind::Spend* variants + the scan arm (g)
 // existed, `scan_unsent` never read `spend_state_history`, so ZERO spend notifications
@@ -754,13 +762,17 @@ fn lock_spend_gate() -> std::sync::MutexGuard<'static, ()> {
     SPEND_TICK_GATE.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-/// Seed a plan charging 1 cent/request with `limit_cents` default spend cap, an
-/// app on that plan, and an `owner` SEAT tying the app to `creator` - the
-/// organization behind the app's project is the join the notify scan resolves
-/// the creator through. Returns the app id.
+/// Seed a plan charging 1 cent/request with `limit_cents` default spend cap and
+/// an app on that plan IN `organization`.
+///
+/// The link used to be an `owner` seat, because the notify scan walked the app
+/// to a human. It scans `apps.organization_id` now, so the app has to be placed
+/// in the organization under test - an app in some other organization would
+/// simply produce no notification for this one and the sweep would time out
+/// rather than fail on a value.
 async fn make_spend_app_owned_by(
     pg: &compio_postgres::Client,
-    creator: Uuid,
+    organization: &str,
     limit_cents: i64,
 ) -> (Uuid, String) {
     pg.execute(
@@ -784,8 +796,8 @@ async fn make_spend_app_owned_by(
     .await
     .expect("seed priced plan");
     let app_name = format!("spend-notify-{}", Uuid::new_v4());
-    let app_id = common::seed_app(pg, &app_name, &plan_id).await;
-    common::seat_app_organization_member(pg, &app_id, &creator, "owner").await;
+    let app_id =
+        common::seed_app_in_organization(pg, &app_name, &plan_id, organization).await;
     (app_id, app_name)
 }
 
@@ -880,9 +892,10 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
     let fx = build_fixture(&url, "spend-band").await;
     let st = &*fx.state;
 
-    // A creator (user + creator_billing) owning one app on a 100-cent-cap plan.
-    let creator = make_creator(&fx.pg).await;
-    let (app, app_name) = make_spend_app_owned_by(&fx.pg, creator, 100).await;
+    // A organization (user + organization_billing) owning one app on a 100-cent-cap plan.
+    let organization = make_organization(&fx.pg).await;
+    let organization = organization.as_str();
+    let (app, app_name) = make_spend_app_owned_by(&fx.pg, organization, 100).await;
 
     // --- Walk the band: Allow→Warn (80%)→Degrade (95%)→Block (100%). Each tick is a REAL
     //     evaluate_all sweep; position spend at each boundary, tick, and confirm the
@@ -915,38 +928,38 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
     assert_eq!(spend_hist_count(&fx.pg, app, "degrade").await, 1, "one →degrade transition");
     assert_eq!(spend_hist_count(&fx.pg, app, "block").await, 1, "one →block transition");
 
-    // --- Now the notify cron. Drive it until MY creator's three spend transitions are all
+    // --- Now the notify cron. Drive it until MY organization's three spend transitions are all
     //     delivered (and zero pending), retrying past sibling lock contention.
-    tick_until_sent(st, &fx.pg, &[(creator, 3)]).await;
+    tick_until_sent(st, &fx.pg, &[(organization, 3)]).await;
 
     use BillingNotificationKind::{SpendBlock, SpendDegrade, SpendWarn};
     assert_eq!(
-        sent_count_kind(&fx.pg, creator, SpendWarn).await,
+        sent_count_kind(&fx.pg, organization, SpendWarn).await,
         1,
         "exactly one spend_warn notification for the →warn transition"
     );
     assert_eq!(
-        sent_count_kind(&fx.pg, creator, SpendDegrade).await,
+        sent_count_kind(&fx.pg, organization, SpendDegrade).await,
         1,
         "exactly one spend_degrade notification for the →degrade transition"
     );
     assert_eq!(
-        sent_count_kind(&fx.pg, creator, SpendBlock).await,
+        sent_count_kind(&fx.pg, organization, SpendBlock).await,
         1,
         "exactly one spend_block notification for the →block transition"
     );
     // The deadband hold produced no transition ⇒ no extra notification of any spend kind.
-    let total_spend_sent = sent_count_kind(&fx.pg, creator, SpendWarn).await
-        + sent_count_kind(&fx.pg, creator, SpendDegrade).await
-        + sent_count_kind(&fx.pg, creator, SpendBlock).await;
+    let total_spend_sent = sent_count_kind(&fx.pg, organization, SpendWarn).await
+        + sent_count_kind(&fx.pg, organization, SpendDegrade).await
+        + sent_count_kind(&fx.pg, organization, SpendBlock).await;
     assert_eq!(total_spend_sent, 3, "exactly three spend notifications total (hold added none)");
 
     // --- Idempotent across ticks: a SECOND notify sweep produces nothing new for MY
-    //     creator (every ledger row is `sent`, none `pending`).
+    //     organization (every ledger row is `sent`, none `pending`).
     let pre = [
-        (SpendWarn, sent_count_kind(&fx.pg, creator, SpendWarn).await),
-        (SpendDegrade, sent_count_kind(&fx.pg, creator, SpendDegrade).await),
-        (SpendBlock, sent_count_kind(&fx.pg, creator, SpendBlock).await),
+        (SpendWarn, sent_count_kind(&fx.pg, organization, SpendWarn).await),
+        (SpendDegrade, sent_count_kind(&fx.pg, organization, SpendDegrade).await),
+        (SpendBlock, sent_count_kind(&fx.pg, organization, SpendBlock).await),
     ];
     {
         let _gate = lock_tick_gate();
@@ -954,12 +967,12 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
     }
     for (k, before) in pre {
         assert_eq!(
-            sent_count_kind(&fx.pg, creator, k).await,
+            sent_count_kind(&fx.pg, organization, k).await,
             before,
             "second sweep must not produce a new {k:?} sent row"
         );
     }
-    assert_eq!(ledger_count(&fx.pg, creator, "pending").await, 0, "no pending rows remain");
+    assert_eq!(ledger_count(&fx.pg, organization, "pending").await, 0, "no pending rows remain");
 
     // The app NAME made it into the dedup transition_id mapping (sanity: the ledger rows
     // are keyed by the she_ transition id, one per band).
@@ -976,7 +989,7 @@ async fn spend_band_walk_produces_one_notification_per_transition() {
 // INCLUDING de-escalations (`block→degrade`, `degrade→warn`, `warn→allow`) once the
 // effective limit rises and the deadband bypass relaxes the band. The notify scan arm (g)
 // must email ONLY on ESCALATION (severity(to) > severity(from)). A recovery edge whose
-// `to_state` is still warn/degrade/block must NOT email — telling a creator whose app is
+// `to_state` is still warn/degrade/block must NOT email — telling a organization whose app is
 // RECOVERING that it "is being throttled" / "approaching the limit" is wrong.
 //
 // RED proof: the original arm (g) filtered solely on `to_state IN ('warn','degrade','block')`
@@ -994,8 +1007,9 @@ async fn spend_band_recovery_walk_sends_no_notifications() {
     let fx = build_fixture(&url, "spend-recovery").await;
     let st = &*fx.state;
 
-    let creator = make_creator(&fx.pg).await;
-    let (app, _app_name) = make_spend_app_owned_by(&fx.pg, creator, 100).await;
+    let organization = make_organization(&fx.pg).await;
+    let organization = organization.as_str();
+    let (app, _app_name) = make_spend_app_owned_by(&fx.pg, organization, 100).await;
 
     use BillingNotificationKind::{SpendBlock, SpendDegrade, SpendWarn};
 
@@ -1006,10 +1020,10 @@ async fn spend_band_recovery_walk_sends_no_notifications() {
     set_spend_cents(&fx.pg, app, 100).await;
     spend_tick(st).await;
     assert_eq!(spend_state_of(&fx.pg, app).await.as_deref(), Some("block"), "→block");
-    tick_until_sent(st, &fx.pg, &[(creator, 1)]).await; // the single allow→block escalation
-    let base_warn = sent_count_kind(&fx.pg, creator, SpendWarn).await;
-    let base_degrade = sent_count_kind(&fx.pg, creator, SpendDegrade).await;
-    let base_block = sent_count_kind(&fx.pg, creator, SpendBlock).await;
+    tick_until_sent(st, &fx.pg, &[(organization, 1)]).await; // the single allow→block escalation
+    let base_warn = sent_count_kind(&fx.pg, organization, SpendWarn).await;
+    let base_degrade = sent_count_kind(&fx.pg, organization, SpendDegrade).await;
+    let base_block = sent_count_kind(&fx.pg, organization, SpendBlock).await;
     assert_eq!(
         (base_warn, base_degrade, base_block),
         (0, 0, 1),
@@ -1049,9 +1063,9 @@ async fn spend_band_recovery_walk_sends_no_notifications() {
         billing_notify::tick(st).await.expect("second notify tick");
     }
 
-    let warn = sent_count_kind(&fx.pg, creator, SpendWarn).await;
-    let degrade = sent_count_kind(&fx.pg, creator, SpendDegrade).await;
-    let block = sent_count_kind(&fx.pg, creator, SpendBlock).await;
+    let warn = sent_count_kind(&fx.pg, organization, SpendWarn).await;
+    let degrade = sent_count_kind(&fx.pg, organization, SpendDegrade).await;
+    let block = sent_count_kind(&fx.pg, organization, SpendBlock).await;
     // DELTA vs the baseline (the upward allow→block): the recovery walk must add NOTHING.
     // Pre-fix, block→degrade adds a SpendDegrade and degrade→warn adds a SpendWarn.
     assert_eq!(warn, base_warn, "NO new spend_warn on the degrade→warn recovery edge");
@@ -1065,7 +1079,7 @@ async fn spend_band_recovery_walk_sends_no_notifications() {
     // And no half-claimed pending rows linger either (claim-before-send would have inserted
     // one per spurious candidate; the gate must drop them before the claim).
     assert_eq!(
-        ledger_count(&fx.pg, creator, "pending").await,
+        ledger_count(&fx.pg, organization, "pending").await,
         0,
         "no pending spend notification rows for a recovery walk"
     );
@@ -1075,18 +1089,18 @@ async fn spend_band_recovery_walk_sends_no_notifications() {
 }
 
 // ===========================================================================
-// (#6 watermark) a creator_billing_status_history transition aged past the
+// (#6 watermark) a organization_billing_status_history transition aged past the
 // 30-day NOTIFY_SCAN_WINDOW is NOT picked up by the notify scan — the watermark
 // caps the sweep so long-dead transitions are abandoned, never belatedly emailed.
 // ===========================================================================
 
-/// Age a creator's `creator_billing_status_history` rows back `days` so the source
+/// Age a organization's `organization_billing_status_history` rows back `days` so the source
 /// transition falls outside the notify scan window (the `h.at > NOW() - 30 days` bound).
-async fn age_history(pg: &compio_postgres::Client, creator: Uuid, days: i64) {
+async fn age_history(pg: &compio_postgres::Client, organization: &str, days: i64) {
     pg.execute(
-        "UPDATE zeroship.creator_billing_status_history \
-            SET at = NOW() - make_interval(days => $2::int) WHERE creator_id = $1",
-        &[&creator, &(days as i32)],
+        "UPDATE zeroship.organization_billing_status_history \
+            SET at = NOW() - make_interval(days => $2::int) WHERE organization_id = $1",
+        &[&organization, &(days as i32)],
     )
     .await
     .expect("age history");
@@ -1101,36 +1115,37 @@ async fn aged_transition_past_scan_window_is_not_notified() {
     let st = &*fx.state;
     let _gate = lock_tick_gate(); // own the sweep so a sibling can't claim my aged row
 
-    // A creator with ONE past_due transition (a cbh_ history row).
-    let creator = make_creator(&fx.pg).await;
-    fail_payment(st, creator, 1_000).await;
+    // A organization with ONE past_due transition (a obh_ history row).
+    let organization = make_organization(&fx.pg).await;
+    let organization = organization.as_str();
+    fail_payment(st, organization, 1_000).await;
     // Age the transition WELL past the 30-day NOTIFY_SCAN_WINDOW.
-    age_history(&fx.pg, creator, 45).await;
+    age_history(&fx.pg, organization, 45).await;
 
     // Sweep a few times: the aged transition must NEVER be scanned/claimed/sent.
     for _ in 0..3 {
         billing_notify::sweep(st).await.expect("sweep");
     }
     assert_eq!(
-        sent_count_kind(&fx.pg, creator, BillingNotificationKind::PastDue).await,
+        sent_count_kind(&fx.pg, organization, BillingNotificationKind::PastDue).await,
         0,
         "a transition aged past the 30-day scan window is abandoned — never notified",
     );
     assert_eq!(
-        ledger_count(&fx.pg, creator, "pending").await,
+        ledger_count(&fx.pg, organization, "pending").await,
         0,
         "the aged transition is never even claimed (no pending ledger row)",
     );
 
-    // Control: a FRESH transition for the same creator IS picked up — proving the
+    // Control: a FRESH transition for the same organization IS picked up — proving the
     // sweep is working and the watermark (not some other reason) excluded the aged row.
-    fail_payment(st, creator, 2_000).await; // a new past_due edge is a no-op state-wise,
+    fail_payment(st, organization, 2_000).await; // a new past_due edge is a no-op state-wise,
     // but to get a fresh actionable edge, drive a recovery then a re-failure.
-    recover_payment(st, creator, 3_000).await; // past_due→active (a fresh `recovered` cbh row, at=NOW)
+    recover_payment(st, organization, 3_000).await; // past_due→active (a fresh `recovered` obh row, at=NOW)
     let mut settled = false;
     for _ in 0..50 {
         billing_notify::sweep(st).await.expect("sweep fresh");
-        if sent_count_kind(&fx.pg, creator, BillingNotificationKind::Recovered).await >= 1 {
+        if sent_count_kind(&fx.pg, organization, BillingNotificationKind::Recovered).await >= 1 {
             settled = true;
             break;
         }
@@ -1138,7 +1153,7 @@ async fn aged_transition_past_scan_window_is_not_notified() {
     assert!(settled, "a FRESH (in-window) transition IS notified — the sweep works");
     // The aged past_due STILL never fired.
     assert_eq!(
-        sent_count_kind(&fx.pg, creator, BillingNotificationKind::PastDue).await,
+        sent_count_kind(&fx.pg, organization, BillingNotificationKind::PastDue).await,
         0,
         "the aged past_due remains un-notified even after the sweep delivered a fresh row",
     );
@@ -1159,15 +1174,16 @@ async fn dunning_tick_skips_when_advisory_lock_held() {
     let fx = build_fixture(&url, "dunning-lock").await;
     let st = &*fx.state;
 
-    // A creator past the dunning window — `suspend_exhausted` WOULD suspend it if the
+    // A organization past the dunning window — `suspend_exhausted` WOULD suspend it if the
     // sweep ran. (Drive a real past_due, then backdate the dunning clock.)
-    let creator = make_creator(&fx.pg).await;
-    fail_payment(st, creator, 1_000).await;
+    let organization = make_organization(&fx.pg).await;
+    let organization = organization.as_str();
+    fail_payment(st, organization, 1_000).await;
     fx.pg
         .execute(
-            "UPDATE zeroship.creator_billing_status \
-                SET past_due_since = NOW() - make_interval(days => $2::int) WHERE creator_id = $1",
-            &[&creator, &((DEFAULT_MAX_DUNNING_DAYS + 1) as i32)],
+            "UPDATE zeroship.organization_billing_status \
+                SET past_due_since = NOW() - make_interval(days => $2::int) WHERE organization_id = $1",
+            &[&organization, &((DEFAULT_MAX_DUNNING_DAYS + 1) as i32)],
         )
         .await
         .expect("backdate past_due");
@@ -1188,26 +1204,26 @@ async fn dunning_tick_skips_when_advisory_lock_held() {
         .get("locked");
     assert!(got, "side conn acquires the dunning lock");
 
-    // A tick that loses the lock must NO-OP: zero suspensions, creator stays past_due.
+    // A tick that loses the lock must NO-OP: zero suspensions, organization stays past_due.
     let n = dunning::tick(st, DEFAULT_MAX_DUNNING_DAYS).await.expect("tick while locked");
     assert_eq!(n, 0, "a dunning tick that loses the advisory lock suspends NOBODY");
-    let state = db_state_of(&fx.pg, creator).await;
+    let state = db_state_of(&fx.pg, organization).await;
     assert_eq!(
         state.as_deref(),
         Some("past_due"),
-        "the exhausted creator is NOT suspended while the lock is held elsewhere",
+        "the exhausted organization is NOT suspended while the lock is held elsewhere",
     );
 
-    // Release the lock; now a tick proceeds and suspends the exhausted creator.
+    // Release the lock; now a tick proceeds and suspends the exhausted organization.
     side.execute("SELECT pg_advisory_unlock($1)", &[&DUNNING_LOCK_KEY])
         .await
         .expect("release dunning lock");
     let n2 = dunning::tick(st, DEFAULT_MAX_DUNNING_DAYS).await.expect("tick runs");
-    assert!(n2 >= 1, "after release, the sweep runs and suspends our exhausted creator");
+    assert!(n2 >= 1, "after release, the sweep runs and suspends our exhausted organization");
     assert_eq!(
-        db_state_of(&fx.pg, creator).await.as_deref(),
+        db_state_of(&fx.pg, organization).await.as_deref(),
         Some("suspended"),
-        "the exhausted creator is suspended once the lock is free",
+        "the exhausted organization is suspended once the lock is free",
     );
 
     drop(side);
@@ -1215,11 +1231,11 @@ async fn dunning_tick_skips_when_advisory_lock_held() {
     common::drain_pg().await;
 }
 
-/// Read the persisted account state for a creator (None ⇒ no row).
-async fn db_state_of(pg: &compio_postgres::Client, creator: Uuid) -> Option<String> {
+/// Read the persisted account state for a organization (None ⇒ no row).
+async fn db_state_of(pg: &compio_postgres::Client, organization: &str) -> Option<String> {
     pg.query(
-        "SELECT state FROM zeroship.creator_billing_status WHERE creator_id = $1",
-        &[&creator],
+        "SELECT state FROM zeroship.organization_billing_status WHERE organization_id = $1",
+        &[&organization],
     )
     .await
     .expect("read state")

@@ -154,8 +154,10 @@ async fn insert_app(
         .execute(
             &format!(
                 "INSERT INTO zeroship.apps \
-                     (id, name, plan_id, system, created_at, project_id) \
-                 VALUES ($1, $2, $4, $3, NOW() - INTERVAL '{created_age}', $5)"
+                     (id, name, plan_id, system, created_at, project_id, organization_id) \
+                 SELECT $1, $2, $4, $3, NOW() - INTERVAL '{created_age}', p.id, \
+                        p.organization_id \
+                   FROM zeroship.projects p WHERE p.id = $5"
             ),
             &[id, &name, &system, &free, &project],
         )

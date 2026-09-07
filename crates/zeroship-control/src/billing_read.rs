@@ -1,14 +1,14 @@
-//! Creator-facing billing READ surface (billing-ops gap #26, PR-7).
+//! Organization-facing billing READ surface (billing-ops gap #26, PR-7).
 //!
 //! The data layer behind the six `BillingRead` endpoints in [`crate::api`]:
 //! invoice history, frozen-snapshot line detail, the current-period projected
 //! charge, credit balance, payment-method status, and plan/spend-state. Every
-//! HTTP handler is creator-scoped to OWNED apps (the `Resource::App{id}`
+//! HTTP handler is organization-scoped to OWNED apps (the `Resource::App{id}`
 //! membership gate `get_spend_limit` uses) with operators reading any via
 //! `Resource::Any`; this module holds the SQL + DTO assembly + the
 //! projected-charge budget cache, keeping the handlers thin.
 //!
-//! SECURITY: nothing here leaks a raw Stripe id, another creator's data, or an
+//! SECURITY: nothing here leaks a raw Stripe id, another organization's data, or an
 //! internal-only column — the DTOs are hand-shaped projections, never `SELECT *`.
 
 use std::collections::HashMap;
@@ -51,7 +51,7 @@ struct CachedProjection {
 /// In-process TTL cache for the open-period projected charge, keyed
 /// `(app_id, period)` — the budget backstop for read API G (MAJOR-5).
 ///
-/// Re-pricing on EVERY poll is an unbudgeted compute amplifier (a creator or a
+/// Re-pricing on EVERY poll is an unbudgeted compute amplifier (an organization or a
 /// script can hammer a full `charge_cents` pass over live aggregates). This
 /// cache bounds that: within [`PROJECTED_CHARGE_TTL_SECS`] a second call for the
 /// same `(app, period)` returns the memoised value WITHOUT touching Postgres or
@@ -252,7 +252,7 @@ pub async fn projected_charge(
 // Invoice history + frozen-snapshot line detail
 // ---------------------------------------------------------------------------
 
-/// One row of a creator's invoice history (read API: invoice history).
+/// One row of an organization's invoice history (read API: invoice history).
 #[derive(Debug, Clone, Serialize)]
 pub struct InvoiceSummary {
     pub id: String,
@@ -266,15 +266,15 @@ pub struct InvoiceSummary {
     pub finalized_at: Option<String>,
 }
 
-/// List a creator's invoices newest-first, scoped to the apps they OWN through
-/// the invoice's `creator_id`. `limit`/`offset` paginate (clamped by the
-/// handler). The invoice is creator-keyed, so the scope is `creator_id = $1`.
+/// List an organization's invoices newest-first, scoped to the apps they OWN through
+/// the invoice's `organization_id`. `limit`/`offset` paginate (clamped by the
+/// handler). The invoice is organization-keyed, so the scope is `organization_id = $1`.
 ///
 /// # Errors
 /// [`RegistryError`] on a DB failure.
-pub async fn list_invoices_for_creator(
+pub async fn list_invoices_for_organization(
     registry: &Registry,
-    creator_id: &Uuid,
+    organization_id: &str,
     limit: i64,
     offset: i64,
 ) -> Result<Vec<InvoiceSummary>, RegistryError> {
@@ -285,10 +285,10 @@ pub async fn list_invoices_for_creator(
                     subtotal_cents, credit_cents, tax_cents, total_cents, \
                     finalized_at::text AS finalized_at \
              FROM zeroship.invoices \
-             WHERE creator_id = $1 \
+             WHERE organization_id = $1 \
              ORDER BY period DESC, created_at DESC \
              LIMIT $2 OFFSET $3",
-            &[creator_id, &limit, &offset],
+            &[&organization_id, &limit, &offset],
         )
         .await?;
     Ok(rows
@@ -324,7 +324,7 @@ pub struct InvoiceLineDetail {
     pub weights_snapshot: serde_json::Value,
     /// Gross compute units derived from the frozen `usage_snapshot` +
     /// `weights_snapshot` — the SAME CU shown on the Stripe invoice line, so the
-    /// dashboard agrees with what the creator sees on Stripe. `None` only if the
+    /// dashboard agrees with what the organization sees on Stripe. `None` only if the
     /// frozen snapshot is malformed (an impossible state for a posted line).
     pub compute_units: Option<u64>,
     /// `max(0, compute_units − included_units)` — the post-included-units billable
@@ -367,11 +367,11 @@ fn derive_line_cu(
 pub struct InvoiceDetail {
     #[serde(flatten)]
     pub summary: InvoiceSummary,
-    pub creator_id: Uuid,
+    pub organization_id: String,
     pub lines: Vec<InvoiceLineDetail>,
 }
 
-/// Load one invoice's money envelope + frozen lines, returning its `creator_id`
+/// Load one invoice's money envelope + frozen lines, returning its `organization_id`
 /// so the handler can authz-scope by app membership. `Ok(None)` when the
 /// invoice does not exist.
 ///
@@ -384,7 +384,7 @@ pub async fn get_invoice_detail(
     let conn = registry.conn().await?;
     let inv_rows = conn
         .query(
-            "SELECT id, creator_id, period::text AS period, status, currency, \
+            "SELECT id, organization_id, period::text AS period, status, currency, \
                     subtotal_cents, credit_cents, tax_cents, total_cents, \
                     finalized_at::text AS finalized_at \
              FROM zeroship.invoices WHERE id = $1",
@@ -394,7 +394,7 @@ pub async fn get_invoice_detail(
     let Some(inv) = inv_rows.first() else {
         return Ok(None);
     };
-    let creator_id: Uuid = inv.get("creator_id");
+    let organization_id: String = inv.get("organization_id");
     let summary = InvoiceSummary {
         id: inv.get("id"),
         period: inv.get("period"),
@@ -443,7 +443,7 @@ pub async fn get_invoice_detail(
 
     Ok(Some(InvoiceDetail {
         summary,
-        creator_id,
+        organization_id,
         lines,
     }))
 }
@@ -467,7 +467,7 @@ pub struct CreditLedgerEntry {
     pub created_at: String,
 }
 
-/// A creator's credit balance (USD) + their most-recent ledger entries.
+/// An organization's credit balance (USD) + their most-recent ledger entries.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreditBalance {
     /// `SUM(credit_ledger.amount_cents)` filtered to USD — the consumable
@@ -477,7 +477,7 @@ pub struct CreditBalance {
     pub recent: Vec<CreditLedgerEntry>,
 }
 
-/// Read a creator's USD credit balance + recent ledger entries. Reuses
+/// Read an organization's USD credit balance + recent ledger entries. Reuses
 /// [`crate::credit::balance`] for the authoritative SUM, then loads up to
 /// `recent_limit` newest entries for transparency.
 ///
@@ -485,20 +485,20 @@ pub struct CreditBalance {
 /// [`RegistryError`] on a DB failure.
 pub async fn credit_balance(
     registry: &Registry,
-    creator_id: &Uuid,
+    organization_id: &str,
     recent_limit: i64,
 ) -> Result<CreditBalance, RegistryError> {
     let conn = registry.conn().await?;
-    let balance_cents = crate::credit::balance(&conn, creator_id, "usd").await?;
+    let balance_cents = crate::credit::balance(&conn, organization_id, "usd").await?;
     let rows = conn
         .query(
             "SELECT id, kind, amount_cents, currency, applied_invoice_id, note, \
                     expires_at::text AS expires_at, created_at::text AS created_at \
              FROM zeroship.credit_ledger \
-             WHERE creator_id = $1 AND currency = 'usd' \
+             WHERE organization_id = $1 AND currency = 'usd' \
              ORDER BY created_at DESC, id DESC \
              LIMIT $2",
-            &[creator_id, &recent_limit],
+            &[&organization_id, &recent_limit],
         )
         .await?;
     let recent = rows
@@ -529,20 +529,20 @@ pub async fn credit_balance(
 /// `cus_…`/`external_id` is NEVER surfaced (only its presence, as a bool).
 #[derive(Debug, Clone, Serialize)]
 pub struct PaymentMethodStatus {
-    /// `creator_billing.default_pm_set` — has the creator attached a default PM.
+    /// `organization_billing.default_pm_set` — has the organization attached a default PM.
     pub default_pm_set: bool,
-    /// Whether a Stripe customer ref exists for this creator (presence only).
+    /// Whether a Stripe customer ref exists for this organization (presence only).
     pub customer_ref_present: bool,
 }
 
-/// Read a creator's payment-method STATUS: the `default_pm_set` flag plus
+/// Read an organization's payment-method STATUS: the `default_pm_set` flag plus
 /// whether a `billing_customer_refs` row exists — never the raw provider id.
 ///
 /// # Errors
 /// [`RegistryError`] on a DB failure.
 pub async fn payment_method_status(
     registry: &Registry,
-    creator_id: &Uuid,
+    organization_id: &str,
 ) -> Result<PaymentMethodStatus, RegistryError> {
     let conn = registry.conn().await?;
     let rows = conn
@@ -550,13 +550,13 @@ pub async fn payment_method_status(
             "SELECT cb.default_pm_set, \
                     EXISTS ( \
                        SELECT 1 FROM zeroship.billing_customer_refs r \
-                       WHERE r.creator_id = cb.creator_id AND r.provider = 'stripe' \
+                       WHERE r.organization_id = cb.organization_id AND r.provider = 'stripe' \
                     ) AS customer_ref_present \
-             FROM zeroship.creator_billing cb WHERE cb.creator_id = $1",
-            &[creator_id],
+             FROM zeroship.organization_billing cb WHERE cb.organization_id = $1",
+            &[&organization_id],
         )
         .await?;
-    // No creator_billing row yet ⇒ no PM, no ref. A creator who has never been
+    // No organization_billing row yet ⇒ no PM, no ref. An organization who has never been
     // billed simply has nothing on file (not an error).
     let Some(row) = rows.first() else {
         return Ok(PaymentMethodStatus {
@@ -584,13 +584,13 @@ pub struct BillingStatus {
     pub plan_default_cents: u64,
     /// `app_spend_state.state` — one of `allow`/`warn`/`degrade`/`block`.
     pub spend_state: String,
-    /// `creator_billing_status.state` — one of `active`/`past_due`/`suspended`.
+    /// `organization_billing_status.state` — one of `active`/`past_due`/`suspended`.
     pub account_state: String,
 }
 
 /// Read an app's plan + effective spend limit + spend/account state. Mirrors
 /// `get_spend_limit`'s resolution (`override ?? plan_default`) and joins the
-/// owning creator's account state. `Ok(None)` when the app row is missing.
+/// owning organization's account state. `Ok(None)` when the app row is missing.
 ///
 /// # Errors
 /// [`RegistryError`] on a DB failure.
@@ -601,24 +601,22 @@ pub async fn billing_status(
     let conn = registry.conn().await?;
     let rows = conn
         .query(
-            // The account state is CREATOR-keyed and reached through the app's
-            // organization. The lateral collapses a multi-owner organization to
-            // one row, so this read cannot fan out and report two states for
-            // one app.
-            &format!(
-                "SELECT a.plan_id, \
-                        l.spend_limit_cents AS override_cents, \
-                        COALESCE(s.state, 'allow')   AS spend_state, \
-                        COALESCE(cbs.state, 'active') AS account_state \
-                 FROM zeroship.apps a \
-                 LEFT JOIN zeroship.app_spend_limit l ON l.app_id = a.id \
-                 LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
-                 {lateral} \
-                 LEFT JOIN zeroship.creator_billing_status cbs \
-                        ON cbs.creator_id = app_owner.user_id \
-                 WHERE a.id = $1",
-                lateral = crate::organizations::app_owner_lateral(),
-            ),
+            // THE ACCOUNT-STATE JOIN IS BYTE-FOR-BYTE THE ONE
+            // `registry::get_routes` USES: `organization_billing_status` keyed
+            // on `apps.organization_id`. That identity is the point - this read
+            // backs the console and that one backs the edge, so any difference
+            // between them is a console that disagrees with what a request
+            // actually gets.
+            "SELECT a.plan_id, \
+                    l.spend_limit_cents AS override_cents, \
+                    COALESCE(s.state, 'allow')   AS spend_state, \
+                    COALESCE(obs.state, 'active') AS account_state \
+             FROM zeroship.apps a \
+             LEFT JOIN zeroship.app_spend_limit l ON l.app_id = a.id \
+             LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
+             LEFT JOIN zeroship.organization_billing_status obs \
+                    ON obs.organization_id = a.organization_id \
+             WHERE a.id = $1",
             &[app_id],
         )
         .await?;

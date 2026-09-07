@@ -29,7 +29,7 @@
 //! ## Claim-then-call idempotency (mirrors the line provider-refs)
 //!
 //! 1. **Idempotency precheck + claim** (in [`claim_refund_locked`], run inside a
-//!    transaction that takes the per-creator advisory lock as its FIRST act —
+//!    transaction that takes the per-organization advisory lock as its FIRST act —
 //!    mirroring [`crate::credit::consume_at_finalize`]): `INSERT refunds (…, 'pending',
 //!    idempotency_key, request_fingerprint) ON CONFLICT (idempotency_key) DO NOTHING
 //!    RETURNING`. 0 rows ⇒ a key hit ⇒ compare the stored fingerprint: matches → re-drive
@@ -42,16 +42,16 @@
 //!    refund `pending` with no ref → a re-drive re-issues it (idempotent on the
 //!    deterministic Stripe `Idempotency-Key`); a refund WITH a ref is skipped.
 //!
-//! ## The per-creator advisory lock (over-refund correctness under concurrency)
+//! ## The per-organization advisory lock (over-refund correctness under concurrency)
 //!
 //! The over-refund cap is enforced by both the Rust precheck and the `0049`
 //! BEFORE-INSERT trigger, each reading `Σ(invoice_payments)` against `Σ(refunds)`. Under
 //! READ COMMITTED neither can see a CONCURRENT, still-uncommitted sibling refund: two
 //! simultaneous refunds could each pass the 3-way bound and together exceed
 //! `cash_collected`. So the precheck + claim INSERT run inside a transaction whose FIRST
-//! statement is `pg_advisory_xact_lock(hashtext(creator_id::text)::bigint)` — the SAME
-//! per-creator key [`crate::credit::consume_at_finalize`] takes. Two refunds for one
-//! creator therefore SERIALIZE: the second's precheck/claim sees the first's committed
+//! statement is `pg_advisory_xact_lock(hashtext(organization_id::text)::bigint)` — the SAME
+//! per-organization key [`crate::credit::consume_at_finalize`] takes. Two refunds for one
+//! organization therefore SERIALIZE: the second's precheck/claim sees the first's committed
 //! `pending` row and is rejected. The trigger is a single-statement BACKSTOP; the
 //! application-side lock is what makes the bound hold under concurrency. The provider
 //! (network) call runs AFTER the claim txn commits — a network call never holds a DB txn
@@ -68,7 +68,7 @@ use crate::stripe_store::StripeError;
 /// v1 is USD-pinned: every refund is USD (the invoice it refunds is USD).
 pub const REFUND_CURRENCY: &str = "usd";
 
-/// Where a refund's value goes: back to the card (`Cash`) or onto the creator's
+/// Where a refund's value goes: back to the card (`Cash`) or onto the organization's
 /// credit balance (`Credit`). The string forms match the `refund_destination`
 /// domain in `0049`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -298,7 +298,7 @@ pub use crate::invoice_payments::cash_collected;
 /// true-up bridge's `cash_refunds_already_issued`.
 ///
 /// EXCLUDES `failed`/`canceled` refunds (0054): a refund the bank later rejected
-/// returned NO cash, so it must not consume the over-refund cap — otherwise a creator
+/// returned NO cash, so it must not consume the over-refund cap — otherwise an organization
 /// whose refund bounced could never re-refund. This filter mirrors the
 /// `refunds_no_over_refund` trigger (which applies the same `status NOT IN
 /// ('failed','canceled')` filter) so the Rust precheck and the DB backstop agree.
@@ -354,10 +354,10 @@ pub enum RefundFailureOutcome {
 ///      ('failed','canceled')`, so a redelivery is a 0-row no-op) and stamps `failed_at`.
 ///      This makes the over-refund cap STOP counting the refund (the trigger + the Rust
 ///      precheck exclude failed/canceled) — so a failed CASH refund no longer permanently
-///      reduces refundable cash; the creator CAN re-refund.
+///      reduces refundable cash; the organization CAN re-refund.
 ///   2. for a `destination='credit'` refund, appends a compensating NEGATIVE
 ///      `credit_ledger('refund_clawback')` entry that offsets the `refund_to_credit` grant
-///      (the cash never left Stripe, so the creator must not keep the minted credit). The
+///      (the cash never left Stripe, so the organization must not keep the minted credit). The
 ///      clawback NAMES the original grant via `consumed_from_grant_id` and is idempotent on
 ///      the `refund_clawback:<refund_id>` note (the partial UNIQUE makes a double-claw
 ///      impossible). Balance is conserved: grant (+amount) + clawback (−amount) = 0.
@@ -380,12 +380,12 @@ pub async fn reconcile_failed_refund<C: GenericClient + Sync>(
         .await
         .map_err(|e| RegistryError::Database(e.to_string()))?;
 
-    // Resolve our refund row from the re_… cash ref, joining the invoice for the creator
-    // (the clawback needs creator_id) and the grant we may need to claw back.
+    // Resolve our refund row from the re_… cash ref, joining the invoice for the organization
+    // (the clawback needs organization_id) and the grant we may need to claw back.
     let resolved = tx
         .query(
             "SELECT r.id, r.destination::text AS destination, r.amount_cents, r.currency, \
-                    r.status::text AS status, r.invoice_id, i.creator_id \
+                    r.status::text AS status, r.invoice_id, i.organization_id \
              FROM zeroship.refund_provider_refs pr \
              JOIN zeroship.refunds r ON r.id = pr.refund_id \
              JOIN zeroship.invoices i ON i.id = r.invoice_id \
@@ -405,7 +405,7 @@ pub async fn reconcile_failed_refund<C: GenericClient + Sync>(
     let currency: String = row.get("currency");
     let status: String = row.get("status");
     let invoice_id: String = row.get("invoice_id");
-    let creator_id: uuid::Uuid = row.get("creator_id");
+    let organization_id: String = row.get("organization_id");
 
     if status == "failed" || status == "canceled" {
         // Already reconciled — a redelivered charge.refund.updated. No double-reversal.
@@ -454,14 +454,14 @@ pub async fn reconcile_failed_refund<C: GenericClient + Sync>(
             let inserted = tx
                 .query(
                     "INSERT INTO zeroship.credit_ledger \
-                       (id, creator_id, kind, amount_cents, currency, applied_invoice_id, \
+                       (id, organization_id, kind, amount_cents, currency, applied_invoice_id, \
                         consumed_from_grant_id, note) \
                      VALUES ($1, $2, 'refund_clawback', $3, $4, $5, $6, $7) \
                      ON CONFLICT (note) WHERE kind = 'refund_clawback' DO NOTHING \
                      RETURNING id",
                     &[
                         &clawback_id,
-                        &creator_id,
+                        &organization_id,
                         &(-amount_cents),
                         &currency,
                         &invoice_id,
@@ -496,15 +496,15 @@ pub fn stripe_refund_failure_status(stripe_status: &str) -> Option<&'static str>
 /// Issue a refund against a finalized invoice — the operator flow's core helper.
 ///
 /// `conn` MUST be a live, OWNED connection (`&mut`): the precheck + claim INSERT run
-/// inside a `conn.transaction()` whose first act is the per-creator advisory lock
+/// inside a `conn.transaction()` whose first act is the per-organization advisory lock
 /// (mirroring [`crate::credit::consume_at_finalize`]), so the over-refund bound holds
 /// under concurrency. The provider (network) call happens AFTER that txn commits —
 /// a network call must never hold a DB txn (or the lock) open. Generic over the
 /// [`StripeApi`] so a test drives a recording fake.
 ///
 /// Steps (claim-then-call):
-///   1. Validate the invoice is finalized + read its creator_id/currency.
-///   2. Open a txn, take `pg_advisory_xact_lock(creator)`, run the Rust-side
+///   1. Validate the invoice is finalized + read its organization_id/currency.
+///   2. Open a txn, take `pg_advisory_xact_lock(organization)`, run the Rust-side
 ///      over-refund precheck against `Σ(invoice_payments)` (the DB trigger is the
 ///      backstop) and claim the `refunds` row `ON CONFLICT (idempotency_key) DO NOTHING`
 ///      → Duplicate/Conflict on a key hit (fingerprint compare); OverRefund if the
@@ -538,7 +538,7 @@ pub async fn issue_refund<C: GenericClient + Sync, P: RefundProvider>(
 ///
 /// STALE-WINDOW SAFE (H1). The over-collection
 /// `over = cash_collected(old) − cash_refunds_already(old) − reissued_total`, floored at 0,
-/// is recomputed INSIDE the same per-creator-locked txn that claims the refund — NOT read by
+/// is recomputed INSIDE the same per-organization-locked txn that claims the refund — NOT read by
 /// the caller before the lock. Caller-side computation opened a window where a concurrent
 /// refund/dispute landing between the read and the claim's lock re-acquire made `over` stale:
 /// the claim would then either trip the over-refund trigger (the "impossible by construction"
@@ -563,10 +563,10 @@ pub async fn issue_true_up_refund<C: GenericClient + Sync, P: RefundProvider>(
         ));
     }
 
-    // (1) The voided invoice must exist; read its creator (keys the lock) + currency.
+    // (1) The voided invoice must exist; read its organization (keys the lock) + currency.
     let inv = conn
         .query(
-            "SELECT creator_id, currency, status FROM zeroship.invoices WHERE id = $1",
+            "SELECT organization_id, currency, status FROM zeroship.invoices WHERE id = $1",
             &[&invoice_id],
         )
         .await
@@ -574,7 +574,7 @@ pub async fn issue_true_up_refund<C: GenericClient + Sync, P: RefundProvider>(
     let Some(row) = inv.first() else {
         return Ok(RefundOutcome::InvalidInvoice(format!("no invoice {invoice_id}")));
     };
-    let creator_id: uuid::Uuid = row.get("creator_id");
+    let organization_id: String = row.get("organization_id");
     let currency: String = row.get("currency");
     let status: String = row.get("status");
     // The true-up runs against the deliberately-VOIDED invoice (or, defensively, a still
@@ -585,12 +585,12 @@ pub async fn issue_true_up_refund<C: GenericClient + Sync, P: RefundProvider>(
         )));
     }
 
-    // (2)+(3) Recompute the over-collection AND claim, both under the per-creator lock in ONE
+    // (2)+(3) Recompute the over-collection AND claim, both under the per-organization lock in ONE
     // txn — no stale window (H1). The claim commits before the provider call.
     let claim = {
         let tx = conn.transaction().await.map_err(|e| RegistryError::Database(e.to_string()))?;
         let claim = claim_true_up_locked(
-            &tx, &creator_id, invoice_id, reissued_total, &currency, reason, idempotency_key,
+            &tx, &organization_id, invoice_id, reissued_total, &currency, reason, idempotency_key,
         )
         .await?;
         tx.commit().await.map_err(|e| RegistryError::Database(e.to_string()))?;
@@ -610,7 +610,7 @@ pub async fn issue_true_up_refund<C: GenericClient + Sync, P: RefundProvider>(
     }
 }
 
-/// Recompute the over-collection and claim the true-up `refunds` row, SERIALIZED per creator
+/// Recompute the over-collection and claim the true-up `refunds` row, SERIALIZED per organization
 /// (H1). Like [`claim_refund_locked`] but the AMOUNT is derived UNDER the lock from the cash
 /// anchor, so it can never be stale:
 ///
@@ -624,17 +624,17 @@ pub async fn issue_true_up_refund<C: GenericClient + Sync, P: RefundProvider>(
 /// construction: `cash_refunds_already + over = cash_collected − reissued_total ≤ cash_collected`.
 async fn claim_true_up_locked<C: GenericClient + Sync>(
     tx: &C,
-    creator_id: &uuid::Uuid,
+    organization_id: &str,
     invoice_id: &str,
     reissued_total: i64,
     currency: &str,
     reason: Option<&str>,
     idempotency_key: &str,
 ) -> Result<ClaimResult, RegistryError> {
-    // SERIALIZE per creator — the first act of the txn (mirrors claim_refund_locked).
+    // SERIALIZE per organization — the first act of the txn (mirrors claim_refund_locked).
     tx.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
-        &[&creator_id.to_string()],
+        &[&organization_id.to_string()],
     )
     .await
     .map_err(|e| RegistryError::Database(e.to_string()))?;
@@ -653,7 +653,7 @@ async fn claim_true_up_locked<C: GenericClient + Sync>(
     // the SAME locked precheck + claim as the operator path, so the over-refund trigger backs
     // it up identically.
     claim_refund_locked(
-        tx, creator_id, invoice_id, over, over, 0, currency, RefundDestination::Cash, reason,
+        tx, organization_id, invoice_id, over, over, 0, currency, RefundDestination::Cash, reason,
         idempotency_key,
     )
     .await
@@ -688,11 +688,11 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
     }
 
     // (1) The invoice must exist and be finalized. A void/draft invoice is not
-    // refundable. Read its currency + creator: the creator_id keys the advisory lock
+    // refundable. Read its currency + organization: the organization_id keys the advisory lock
     // the claim txn takes (CRITICAL-1).
     let inv = conn
         .query(
-            "SELECT creator_id, currency, status FROM zeroship.invoices WHERE id = $1",
+            "SELECT organization_id, currency, status FROM zeroship.invoices WHERE id = $1",
             &[&invoice_id],
         )
         .await
@@ -700,12 +700,12 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
     let Some(row) = inv.first() else {
         return Ok(RefundOutcome::InvalidInvoice(format!("no invoice {invoice_id}")));
     };
-    let creator_id: uuid::Uuid = row.get("creator_id");
+    let organization_id: String = row.get("organization_id");
     let currency: String = row.get("currency");
     let status: String = row.get("status");
     // Only a finalized invoice is refundable here; a draft or void invoice is not. (The
     // true-up bridge refunds a VOIDED invoice's over-collection, but it no longer routes
-    // through this function — it recomputes under the per-creator lock via
+    // through this function — it recomputes under the per-organization lock via
     // `claim_true_up_locked` (HIGH-1), so this path is finalized-only.)
     let refundable = status == "finalized";
     if !refundable {
@@ -714,14 +714,14 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
         )));
     }
 
-    // (2)+(3) CRITICAL-1: precheck + claim under the per-creator advisory lock so the
+    // (2)+(3) CRITICAL-1: precheck + claim under the per-organization advisory lock so the
     // over-refund bound holds under concurrency. The claim runs in its OWN txn (a
     // trigger RAISE rolls back only the claim, never the caller's connection state) and
     // commits BEFORE the provider call — a network call must never hold the lock open.
     let claim = {
         let tx = conn.transaction().await.map_err(|e| RegistryError::Database(e.to_string()))?;
         let claim = claim_refund_locked(
-            &tx, &creator_id, invoice_id, amount_cents, subtotal_cents, tax_cents, &currency,
+            &tx, &organization_id, invoice_id, amount_cents, subtotal_cents, tax_cents, &currency,
             destination, reason, idempotency_key,
         )
         .await?;
@@ -747,7 +747,7 @@ async fn issue_refund_inner<C: GenericClient + Sync, P: RefundProvider>(
 
 /// The outcome of [`claim_refund_locked`]: the locked precheck + claim step.
 /// `pub` so the lock regression test can drive the claim on a caller-held tx and
-/// observe the per-creator advisory lock (mirroring the PR-2 consume-lock test); not
+/// observe the per-organization advisory lock (mirroring the PR-2 consume-lock test); not
 /// part of the operator surface.
 #[derive(Debug)]
 pub enum ClaimResult {
@@ -765,12 +765,12 @@ pub enum ClaimResult {
     NoOp,
 }
 
-/// Precheck the over-refund bound and claim the `refunds` row, SERIALIZED per creator.
+/// Precheck the over-refund bound and claim the `refunds` row, SERIALIZED per organization.
 ///
 /// MUST run inside a transaction (`tx`): the FIRST statement is
-/// `pg_advisory_xact_lock(hashtext(creator_id::text)::bigint)` — the SAME key
+/// `pg_advisory_xact_lock(hashtext(organization_id::text)::bigint)` — the SAME key
 /// [`crate::credit::consume_at_finalize`] takes — so two concurrent refunds for one
-/// creator serialize and the second sees the first's committed `pending` row. The
+/// organization serialize and the second sees the first's committed `pending` row. The
 /// over-refund trigger (`0049`) is the single-statement BACKSTOP; this lock is what
 /// makes the cap hold under concurrency.
 ///
@@ -780,7 +780,7 @@ pub enum ClaimResult {
 #[allow(clippy::too_many_arguments)]
 pub async fn claim_refund_locked<C: GenericClient + Sync>(
     tx: &C,
-    creator_id: &uuid::Uuid,
+    organization_id: &str,
     invoice_id: &str,
     amount_cents: i64,
     subtotal_cents: i64,
@@ -790,10 +790,10 @@ pub async fn claim_refund_locked<C: GenericClient + Sync>(
     reason: Option<&str>,
     idempotency_key: &str,
 ) -> Result<ClaimResult, RegistryError> {
-    // SERIALIZE per creator — the first act of the txn (mirrors consume_at_finalize).
+    // SERIALIZE per organization — the first act of the txn (mirrors consume_at_finalize).
     tx.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
-        &[&creator_id.to_string()],
+        &[&organization_id.to_string()],
     )
     .await
     .map_err(|e| RegistryError::Database(e.to_string()))?;
@@ -895,7 +895,7 @@ async fn drive_pending_refund<C: GenericClient + Sync, P: RefundProvider>(
     let row = conn
         .query(
             "SELECT r.invoice_id, r.amount_cents, r.currency, r.destination::text AS destination, \
-                    r.status, i.creator_id, \
+                    r.status, i.organization_id, \
                     pr.external_id AS existing_ref \
              FROM zeroship.refunds r \
              JOIN zeroship.invoices i ON i.id = r.invoice_id \
@@ -914,7 +914,7 @@ async fn drive_pending_refund<C: GenericClient + Sync, P: RefundProvider>(
     let currency: String = r.get("currency");
     let destination: String = r.get("destination");
     let status: String = r.get("status");
-    let creator_id: uuid::Uuid = r.get("creator_id");
+    let organization_id: String = r.get("organization_id");
     let existing_ref: Option<String> = r.get("existing_ref");
 
     if status == "issued" && (destination == "credit" || existing_ref.is_some()) {
@@ -989,10 +989,10 @@ async fn drive_pending_refund<C: GenericClient + Sync, P: RefundProvider>(
                 let grant_id = zeroship_core::typed_id::new_credit_id();
                 conn.execute(
                     "INSERT INTO zeroship.credit_ledger \
-                       (id, creator_id, kind, amount_cents, currency, applied_invoice_id, note) \
+                       (id, organization_id, kind, amount_cents, currency, applied_invoice_id, note) \
                      VALUES ($1, $2, 'refund_to_credit', $3, $4, $5, $6) \
                      ON CONFLICT (note) WHERE kind = 'refund_to_credit' DO NOTHING",
-                    &[&grant_id, &creator_id, &amount_cents, &currency, &invoice_id, &marker],
+                    &[&grant_id, &organization_id, &amount_cents, &currency, &invoice_id, &marker],
                 )
                 .await
                 .map_err(|e| RegistryError::Database(e.to_string()))?;

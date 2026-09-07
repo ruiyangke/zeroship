@@ -1,11 +1,11 @@
-//! Stripe Connect ledger + creator-account linkage.
+//! Stripe Connect ledger + organization-account linkage.
 //!
 //! Two tables (migrations in `registry.rs`):
 //!
-//! - `control.creator_accounts(creator_id UUID PK, stripe_account_id TEXT, onboarded_at)`
-//!   One row per creator once they finish Stripe onboarding.
+//! - `control.organization_accounts(organization_id UUID PK, stripe_account_id TEXT, onboarded_at)`
+//!   One row per organization once they finish Stripe onboarding.
 //!
-//! - `control.payouts(id, creator_id FK, event_id UNIQUE, event_type, gross_amount,
+//! - `control.payouts(id, organization_id FK, event_id UNIQUE, event_type, gross_amount,
 //!    platform_fee, net_amount, currency, occurred_at, created_at)`
 //!   One row per Stripe webhook event that moves money. `event_id` is
 //!   Stripe's `evt_...` — the UNIQUE constraint makes retries idempotent.
@@ -34,7 +34,7 @@ impl std::fmt::Display for StripeError {
         match self {
             Self::Db(m) => write!(f, "{m}"),
             Self::Duplicate => write!(f, "event already recorded"),
-            Self::NotFound => write!(f, "creator not linked"),
+            Self::NotFound => write!(f, "organization not linked"),
             Self::Validation(m) => write!(f, "{m}"),
             Self::Api { status, code } => match code {
                 Some(c) => write!(f, "stripe API error {status} ({c})"),
@@ -47,13 +47,13 @@ impl std::fmt::Display for StripeError {
 impl std::error::Error for StripeError {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CreatorAccount {
-    pub creator_id: Uuid,
+pub struct OrganizationAccount {
+    pub organization_id: String,
     pub stripe_account_id: String,
     pub onboarded_at: String, // RFC3339 — callers can parse as needed
     /// Stripe's verified onboarding signal (changeset 0044), written by the
     /// `callback` handler from a server-side `retrieve_account`. `false` until
-    /// the creator finishes onboarding — the charge path MUST gate on this so a
+    /// the organization finishes onboarding — the charge path MUST gate on this so a
     /// half-onboarded account can't reach a PaymentIntent (M1).
     pub charges_enabled: bool,
 }
@@ -69,7 +69,7 @@ pub struct AccountHistoryRow {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayoutRecord {
     pub id: Uuid,
-    pub creator_id: Uuid,
+    pub organization_id: String,
     pub event_id: String,
     pub event_type: String,
     pub gross_amount: i64,
@@ -95,12 +95,12 @@ impl StripeStore {
     pub fn new(registry: Registry) -> Self { Self { registry } }
 
     // ------------------------------------------------------------------
-    // Creator ↔ Stripe account linkage
+    // Organization <-> Stripe account linkage
     // ------------------------------------------------------------------
 
     pub async fn link_account(
         &self,
-        creator_id: Uuid,
+        organization_id: &str,
         stripe_account_id: &str,
     ) -> Result<(), StripeError> {
         if !is_valid_stripe_account_id(stripe_account_id) {
@@ -114,11 +114,11 @@ impl StripeStore {
 
         // Wrap the live-row check and history mutation in one transaction.
         // Existing links are read FOR UPDATE so concurrent relinks for the
-        // same creator serialize before closing/opening history spans.
+        // same organization serialize before closing/opening history spans.
         conn.execute("BEGIN", &[])
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        let txn_result = link_account_txn(&conn, creator_id, stripe_account_id).await;
+        let txn_result = link_account_txn(&conn, organization_id, stripe_account_id).await;
         match &txn_result {
             Ok(()) => {
                 conn.execute("COMMIT", &[])
@@ -138,12 +138,12 @@ impl StripeStore {
     /// every payouts FK pointing at it. `link_account` later re-opens
     /// the row by clearing `unlinked_at`. Wrapped in a transaction so
     /// the live-table close + history close happen atomically.
-    pub async fn unlink_account(&self, creator_id: Uuid) -> Result<bool, StripeError> {
+    pub async fn unlink_account(&self, organization_id: &str) -> Result<bool, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         conn.execute("BEGIN", &[])
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        let result = unlink_account_txn(&conn, creator_id).await;
+        let result = unlink_account_txn(&conn, organization_id).await;
         match &result {
             Ok(_) => {
                 conn.execute("COMMIT", &[])
@@ -157,40 +157,40 @@ impl StripeStore {
         result
     }
 
-    pub async fn get_account(&self, creator_id: Uuid) -> Result<Option<CreatorAccount>, StripeError> {
+    pub async fn get_account(&self, organization_id: &str) -> Result<Option<OrganizationAccount>, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                // Return None for a soft-deleted creator — caller treats
+                // Return None for a soft-deleted organization — caller treats
                 // the link as gone. History is still queryable via
                 // get_account_history.
-                "SELECT creator_id, stripe_account_id, charges_enabled,
+                "SELECT organization_id, stripe_account_id, charges_enabled,
                     to_char(onboarded_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS onboarded_at
-                 FROM zeroship.creator_accounts
-                 WHERE creator_id = $1 AND unlinked_at IS NULL",
-                &[&creator_id],
+                 FROM zeroship.organization_accounts
+                 WHERE organization_id = $1 AND unlinked_at IS NULL",
+                &[&organization_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        Ok(rows.first().map(|r| CreatorAccount {
-            creator_id: r.get("creator_id"),
+        Ok(rows.first().map(|r| OrganizationAccount {
+            organization_id: r.get("organization_id"),
             stripe_account_id: r.get("stripe_account_id"),
             onboarded_at: r.get("onboarded_at"),
             charges_enabled: r.get("charges_enabled"),
         }))
     }
 
-    /// Update the Connect onboarding verification flags for a creator's CURRENT
+    /// Update the Connect onboarding verification flags for an organization's CURRENT
     /// (not-unlinked) account (billing G1, ISS-30). The `callback` handler calls
     /// this AFTER a server-side `retrieve_account` confirmed the `acct_…` belongs
-    /// to this creator — so the flags reflect Stripe's truth, not a client claim.
+    /// to this organization — so the flags reflect Stripe's truth, not a client claim.
     ///
     /// Guarded on `stripe_account_id` so a stale/racing callback for a DIFFERENT
     /// acct_… cannot flip the flags on the current link. Returns `true` iff a live
     /// row matched and was updated.
     pub async fn set_account_flags(
         &self,
-        creator_id: Uuid,
+        organization_id: &str,
         stripe_account_id: &str,
         charges_enabled: bool,
         payouts_enabled: bool,
@@ -199,11 +199,11 @@ impl StripeStore {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let n = conn
             .execute(
-                "UPDATE zeroship.creator_accounts \
+                "UPDATE zeroship.organization_accounts \
                     SET charges_enabled = $3, payouts_enabled = $4, details_submitted = $5 \
-                 WHERE creator_id = $1 AND stripe_account_id = $2 AND unlinked_at IS NULL",
+                 WHERE organization_id = $1 AND stripe_account_id = $2 AND unlinked_at IS NULL",
                 &[
-                    &creator_id,
+                    &organization_id,
                     &stripe_account_id,
                     &charges_enabled,
                     &payouts_enabled,
@@ -219,7 +219,7 @@ impl StripeStore {
     /// `acct_…` id (M2 `account.updated` webhook). Unlike [`Self::set_account_flags`]
     /// this keys on the globally-unique `stripe_account_id` alone — the
     /// `account.updated` event is delivered for the account object and does not carry
-    /// a creator id on the wire reliably. Only the not-unlinked row is touched.
+    /// an organization id on the wire reliably. Only the not-unlinked row is touched.
     ///
     /// This is the money-hole closer: when Stripe flips `charges_enabled`/
     /// `payouts_enabled` to FALSE (risk/KYC), the cached flag `connect_checkout`
@@ -241,7 +241,7 @@ impl StripeStore {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let n = conn
             .execute(
-                "UPDATE zeroship.creator_accounts \
+                "UPDATE zeroship.organization_accounts \
                     SET charges_enabled = $2, payouts_enabled = $3, details_submitted = $4 \
                  WHERE stripe_account_id = $1 AND unlinked_at IS NULL",
                 &[
@@ -256,12 +256,12 @@ impl StripeStore {
         Ok(n > 0)
     }
 
-    /// Return the link-history rows for a creator (newest first).
+    /// Return the link-history rows for an organization (newest first).
     /// Each row spans `[linked_at, unlinked_at)` for a single
     /// stripe_account_id binding.
     pub async fn account_history(
         &self,
-        creator_id: Uuid,
+        organization_id: &str,
     ) -> Result<Vec<AccountHistoryRow>, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
@@ -271,10 +271,10 @@ impl StripeStore {
                     CASE WHEN unlinked_at IS NULL THEN NULL
                          ELSE to_char(unlinked_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"')
                     END AS unlinked_at_text
-                 FROM zeroship.creator_account_history
-                 WHERE creator_id = $1
+                 FROM zeroship.organization_account_history
+                 WHERE organization_id = $1
                  ORDER BY linked_at DESC",
-                &[&creator_id],
+                &[&organization_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -287,60 +287,60 @@ impl StripeStore {
     }
 
     /// `true` iff `stripe_account_id` is the LIVE (not-unlinked) Connect account of
-    /// `creator_id` (M4 payout attribution). The payout handler calls this with the
+    /// `organization_id` (M4 payout attribution). The payout handler calls this with the
     /// connected account that actually settled the charge (`on_behalf_of` /
-    /// `transfer_data.destination`) to confirm the claimed `metadata.creator_id`
-    /// OWNS that account before crediting earnings — so a forged creator id cannot
+    /// `transfer_data.destination`) to confirm the claimed `metadata.organization_id`
+    /// OWNS that account before crediting earnings — so a forged organization id cannot
     /// attribute another account's revenue to itself.
-    pub async fn account_belongs_to_creator(
+    pub async fn account_belongs_to_organization(
         &self,
-        creator_id: Uuid,
+        organization_id: &str,
         stripe_account_id: &str,
     ) -> Result<bool, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT 1 FROM zeroship.creator_accounts \
-                 WHERE creator_id = $1 AND stripe_account_id = $2 AND unlinked_at IS NULL",
-                &[&creator_id, &stripe_account_id],
+                "SELECT 1 FROM zeroship.organization_accounts \
+                 WHERE organization_id = $1 AND stripe_account_id = $2 AND unlinked_at IS NULL",
+                &[&organization_id, &stripe_account_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
         Ok(!rows.is_empty())
     }
 
-    /// Reverse-resolve the creator who owns a connected account (`acct_…`), live link
+    /// Reverse-resolve the organization who owns a connected account (`acct_…`), live link
     /// only (`unlinked_at IS NULL`). Used by the Connect failure handlers (`payout.failed`
     /// / `payment_intent.payment_failed`), which carry the `acct_…` via the Connect event's
     /// top-level `account` or the charge's `transfer_data.destination`/`on_behalf_of`.
-    pub async fn get_creator_by_account(
+    pub async fn get_organization_by_account(
         &self,
         stripe_account_id: &str,
-    ) -> Result<Option<Uuid>, StripeError> {
+    ) -> Result<Option<String>, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT creator_id FROM zeroship.creator_accounts \
+                "SELECT organization_id FROM zeroship.organization_accounts \
                  WHERE stripe_account_id = $1 AND unlinked_at IS NULL",
                 &[&stripe_account_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        Ok(rows.first().map(|r| r.get::<_, Uuid>("creator_id")))
+        Ok(rows.first().map(|r| r.get::<_, String>("organization_id")))
     }
 
     // ------------------------------------------------------------------
     // Connect failure ledgers (webhook follow-ups, 0054)
     // ------------------------------------------------------------------
 
-    /// Record a `payout.failed` (a creator's connected-account payout bounced). Idempotent
+    /// Record a `payout.failed` (an organization's connected-account payout bounced). Idempotent
     /// on the Stripe payout id (`po_…`): a redelivery returns `Ok(false)` (no new row) so the
     /// notify cron never emits a second `payout_failed`. Returns `Ok(true)` iff THIS call
     /// inserted the row (the notify cron picks it up off the new `pof_…` transition_id).
     #[allow(clippy::too_many_arguments)]
     pub async fn record_payout_failure(
         &self,
-        creator_id: Uuid,
+        organization_id: &str,
         provider_payout_id: &str,
         stripe_account_id: &str,
         amount_cents: i64,
@@ -352,27 +352,27 @@ impl StripeStore {
         let mut conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let id = zeroship_core::typed_id::new_payout_failure_id();
         let tx = conn.transaction().await.map_err(|e| StripeError::Db(e.to_string()))?;
-        // Ensure the `creator_billing` identity exists so the notify cron's
-        // `billing_notifications(creator_id → creator_billing)` FK is satisfiable for a
-        // Connect-only creator (one with a `creator_accounts` row but no billing row yet).
+        // Ensure the `organization_billing` identity exists so the notify cron's
+        // `billing_notifications(organization_id → organization_billing)` FK is satisfiable for a
+        // Connect-only organization (one with a `organization_accounts` row but no billing row yet).
         tx.execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) \
-             VALUES ($1) ON CONFLICT (creator_id) DO NOTHING",
-            &[&creator_id],
+            "INSERT INTO zeroship.organization_billing (organization_id) \
+             VALUES ($1) ON CONFLICT (organization_id) DO NOTHING",
+            &[&organization_id],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;
         let rows = tx
             .query(
                 "INSERT INTO zeroship.payout_failures \
-                   (id, creator_id, provider_payout_id, stripe_account_id, amount_cents, \
+                   (id, organization_id, provider_payout_id, stripe_account_id, amount_cents, \
                     currency, failure_code, failure_message, occurred_at) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9::double precision)) \
                  ON CONFLICT (provider_payout_id) DO NOTHING \
                  RETURNING id",
                 &[
                     &id,
-                    &creator_id,
+                    &organization_id,
                     &provider_payout_id,
                     &stripe_account_id,
                     &amount_cents.max(0),
@@ -395,7 +395,7 @@ impl StripeStore {
     #[allow(clippy::too_many_arguments)]
     pub async fn record_checkout_failure(
         &self,
-        creator_id: Uuid,
+        organization_id: &str,
         provider_payment_intent_id: &str,
         stripe_account_id: &str,
         amount_cents: i64,
@@ -407,25 +407,25 @@ impl StripeStore {
         let mut conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let id = zeroship_core::typed_id::new_checkout_failure_id();
         let tx = conn.transaction().await.map_err(|e| StripeError::Db(e.to_string()))?;
-        // Ensure the `creator_billing` identity exists (notify FK; see record_payout_failure).
+        // Ensure the `organization_billing` identity exists (notify FK; see record_payout_failure).
         tx.execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) \
-             VALUES ($1) ON CONFLICT (creator_id) DO NOTHING",
-            &[&creator_id],
+            "INSERT INTO zeroship.organization_billing (organization_id) \
+             VALUES ($1) ON CONFLICT (organization_id) DO NOTHING",
+            &[&organization_id],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;
         let rows = tx
             .query(
                 "INSERT INTO zeroship.connect_checkout_failures \
-                   (id, creator_id, provider_payment_intent_id, stripe_account_id, \
+                   (id, organization_id, provider_payment_intent_id, stripe_account_id, \
                     amount_cents, currency, failure_code, failure_message, occurred_at) \
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, to_timestamp($9::double precision)) \
                  ON CONFLICT (provider_payment_intent_id) DO NOTHING \
                  RETURNING id",
                 &[
                     &id,
-                    &creator_id,
+                    &organization_id,
                     &provider_payment_intent_id,
                     &stripe_account_id,
                     &amount_cents.max(0),
@@ -456,7 +456,7 @@ impl StripeStore {
     #[allow(clippy::too_many_arguments)]
     pub async fn record_payout(
         &self,
-        creator_id: Uuid,
+        organization_id: &str,
         event_id: &str,
         event_type: &str,
         gross_amount: i64,
@@ -485,12 +485,12 @@ impl StripeStore {
         // `occurred_at::text` was timezone-dependent.
         let rows = conn
             .query(
-                "INSERT INTO zeroship.payouts(creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at, payload_hash)
+                "INSERT INTO zeroship.payouts(organization_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency, occurred_at, payload_hash)
                  VALUES($1, $2, $3, $4, $5, $6, $7, to_timestamp($8::double precision), $9)
                  ON CONFLICT (event_id) DO NOTHING
                  RETURNING id,
                    to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS occurred_at_text",
-                &[&creator_id, &event_id, &event_type, &gross_amount, &platform_fee, &net, &currency, &(occurred_at_unix as f64), &payload_hash.map(|b| b.to_vec())],
+                &[&organization_id, &event_id, &event_type, &gross_amount, &platform_fee, &net, &currency, &(occurred_at_unix as f64), &payload_hash.map(|b| b.to_vec())],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -528,7 +528,7 @@ impl StripeStore {
         };
         Ok(PayoutRecord {
             id: row.get("id"),
-            creator_id,
+            organization_id: organization_id.to_string(),
             event_id: event_id.to_string(),
             event_type: event_type.to_string(),
             gross_amount,
@@ -540,7 +540,7 @@ impl StripeStore {
     }
 
     /// Aggregate totals (sum over `control.payouts`).
-    pub async fn total_earnings(&self, creator_id: Uuid) -> Result<Totals, StripeError> {
+    pub async fn total_earnings(&self, organization_id: &str) -> Result<Totals, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         // SUM(BIGINT) returns NUMERIC in Postgres — cast back to BIGINT
         // so compio-postgres can decode it as i64.
@@ -550,8 +550,8 @@ impl StripeStore {
                     COALESCE(SUM(gross_amount), 0)::BIGINT AS gross,
                     COALESCE(SUM(platform_fee), 0)::BIGINT AS fee,
                     COALESCE(SUM(net_amount), 0)::BIGINT AS net
-                 FROM zeroship.payouts WHERE creator_id = $1",
-                &[&creator_id],
+                 FROM zeroship.payouts WHERE organization_id = $1",
+                &[&organization_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -566,20 +566,20 @@ impl StripeStore {
     /// Recent ledger events, newest first, capped at `limit`.
     pub async fn recent_payouts(
         &self,
-        creator_id: Uuid,
+        organization_id: &str,
         limit: i64,
     ) -> Result<Vec<PayoutRecord>, StripeError> {
         let limit = limit.clamp(1, 500);
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT id, creator_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency,
+                "SELECT id, organization_id, event_id, event_type, gross_amount, platform_fee, net_amount, currency,
                     to_char(occurred_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.MS\"Z\"') AS occurred_at
                  FROM zeroship.payouts
-                 WHERE creator_id = $1
+                 WHERE organization_id = $1
                  ORDER BY occurred_at DESC
                  LIMIT $2",
-                &[&creator_id, &limit],
+                &[&organization_id, &limit],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -587,7 +587,7 @@ impl StripeStore {
             .iter()
             .map(|r| PayoutRecord {
                 id: r.get("id"),
-                creator_id: r.get("creator_id"),
+                organization_id: r.get("organization_id"),
                 event_id: r.get("event_id"),
                 event_type: r.get("event_type"),
                 gross_amount: r.get("gross_amount"),
@@ -600,62 +600,62 @@ impl StripeStore {
     }
 
     // ------------------------------------------------------------------
-    // Creator billing identity — the platform Customer (cus_…).
+    // Organization billing identity — the platform Customer (cus_…).
     //
     // Distinct from the Connect `acct_…` above: this is the PLATFORM-side
-    // Customer the infra-cost reconciler invoices. Keyed by creator_id (a user
-    // id), one row per creator, created lazily on first `billing/setup`.
+    // Customer the infra-cost reconciler invoices. Keyed by organization_id (a user
+    // id), one row per organization, created lazily on first `billing/setup`.
     // ------------------------------------------------------------------
 
-    /// The creator's platform Stripe Customer id (`cus_…`), or `None` if no ref
+    /// The organization's platform Stripe Customer id (`cus_…`), or `None` if no ref
     /// exists yet. The id now lives in the provider-ref side table
     /// `billing_customer_refs` (the Native invoice rail AND Stripe Billing Meters
     /// share the single `provider='stripe'` ref).
-    pub async fn get_customer(&self, creator_id: Uuid) -> Result<Option<String>, StripeError> {
+    pub async fn get_customer(&self, organization_id: &str) -> Result<Option<String>, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
             .query(
                 "SELECT external_id FROM zeroship.billing_customer_refs \
-                 WHERE creator_id = $1 AND provider = 'stripe'",
-                &[&creator_id],
+                 WHERE organization_id = $1 AND provider = 'stripe'",
+                &[&organization_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
         Ok(rows.first().map(|r| r.get::<_, String>("external_id")))
     }
 
-    /// Reverse-resolve a creator from their platform Customer id
+    /// Reverse-resolve an organization from their platform Customer id
     /// (`cus_…`). Used by `invoice.payment_failed` ingest when the event
-    /// carries no `metadata.creator_id` but does carry the `customer`. Returns
-    /// `None` if no creator owns that customer.
+    /// carries no `metadata.organization_id` but does carry the `customer`. Returns
+    /// `None` if no organization owns that customer.
     ///
     /// The caller has NO provider in hand — a provider customer id (`cus_…`) is
     /// globally unique, so the lookup is `WHERE external_id = $1`. The standalone
     /// `UNIQUE(external_id)` constraint on `billing_customer_refs` makes this
     /// providerless probe constraint-guaranteed-singular.
-    pub async fn get_creator_by_customer(
+    pub async fn get_organization_by_customer(
         &self,
         stripe_customer_id: &str,
-    ) -> Result<Option<Uuid>, StripeError> {
+    ) -> Result<Option<String>, StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         let rows = conn
             .query(
-                "SELECT creator_id FROM zeroship.billing_customer_refs WHERE external_id = $1",
+                "SELECT organization_id FROM zeroship.billing_customer_refs WHERE external_id = $1",
                 &[&stripe_customer_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
-        Ok(rows.first().map(|r| r.get::<_, Uuid>("creator_id")))
+        Ok(rows.first().map(|r| r.get::<_, String>("organization_id")))
     }
 
-    /// Upsert the creator's platform Customer id. A 2-statement transaction: the
-    /// `creator_billing` identity row (the FK parent) is created first, THEN the
-    /// `billing_customer_refs(creator_id,'stripe',cus_…)` mapping. Idempotent:
+    /// Upsert the organization's platform Customer id. A 2-statement transaction: the
+    /// `organization_billing` identity row (the FK parent) is created first, THEN the
+    /// `billing_customer_refs(organization_id,'stripe',cus_…)` mapping. Idempotent:
     /// re-setting the same id is a no-op write (ON CONFLICT). The customer id no
-    /// longer lives on `creator_billing` — it is fully relocated to the side table.
+    /// longer lives on `organization_billing` — it is fully relocated to the side table.
     pub async fn set_customer(
         &self,
-        creator_id: Uuid,
+        organization_id: &str,
         stripe_customer_id: &str,
     ) -> Result<(), StripeError> {
         let mut conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
@@ -665,19 +665,19 @@ impl StripeStore {
             .map_err(|e| StripeError::Db(e.to_string()))?;
         // 1. Ensure the identity (FK parent) exists.
         tx.execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) \
-             VALUES ($1) ON CONFLICT (creator_id) DO NOTHING",
-            &[&creator_id],
+            "INSERT INTO zeroship.organization_billing (organization_id) \
+             VALUES ($1) ON CONFLICT (organization_id) DO NOTHING",
+            &[&organization_id],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;
-        // 2. Map the customer ref. ON CONFLICT (creator_id, provider) keeps it
+        // 2. Map the customer ref. ON CONFLICT (organization_id, provider) keeps it
         //    idempotent on re-set.
         tx.execute(
-            "INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id) \
+            "INSERT INTO zeroship.billing_customer_refs (organization_id, provider, external_id) \
              VALUES ($1, 'stripe', $2) \
-             ON CONFLICT (creator_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id",
-            &[&creator_id, &stripe_customer_id],
+             ON CONFLICT (organization_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id",
+            &[&organization_id, &stripe_customer_id],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -685,16 +685,16 @@ impl StripeStore {
         Ok(())
     }
 
-    /// Mark that the creator has a saved default PaymentMethod (set on the
+    /// Mark that the organization has a saved default PaymentMethod (set on the
     /// `setup_intent.succeeded` webhook). Creates the row if absent so a webhook
     /// arriving before any local row still records the fact.
-    pub async fn set_default_pm(&self, creator_id: Uuid) -> Result<(), StripeError> {
+    pub async fn set_default_pm(&self, organization_id: &str) -> Result<(), StripeError> {
         let conn = self.registry.conn().await.map_err(|e| StripeError::Db(format!("{e}")))?;
         conn.execute(
-            "INSERT INTO zeroship.creator_billing (creator_id, default_pm_set) \
+            "INSERT INTO zeroship.organization_billing (organization_id, default_pm_set) \
              VALUES ($1, true) \
-             ON CONFLICT (creator_id) DO UPDATE SET default_pm_set = true, updated_at = NOW()",
-            &[&creator_id],
+             ON CONFLICT (organization_id) DO UPDATE SET default_pm_set = true, updated_at = NOW()",
+            &[&organization_id],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -787,18 +787,18 @@ impl StripeStore {
 /// (not an idempotent same-account replay). Runs under BEGIN/COMMIT.
 async fn link_account_txn(
     conn: &compio_postgres::Client,
-    creator_id: Uuid,
+    organization_id: &str,
     stripe_account_id: &str,
 ) -> Result<(), StripeError> {
-    // Same-account idempotency: a creator double-clicking "Connect
+    // Same-account idempotency: an organization double-clicking "Connect
     // Stripe" should NOT pollute the audit history with duplicate rows.
-    // FOR UPDATE serializes genuine relinks for creators with a live row.
+    // FOR UPDATE serializes genuine relinks for organizations with a live row.
     let current = conn
         .query(
-            "SELECT stripe_account_id FROM zeroship.creator_accounts
-             WHERE creator_id = $1 AND unlinked_at IS NULL
+            "SELECT stripe_account_id FROM zeroship.organization_accounts
+             WHERE organization_id = $1 AND unlinked_at IS NULL
              FOR UPDATE",
-            &[&creator_id],
+            &[&organization_id],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -806,8 +806,8 @@ async fn link_account_txn(
         let current_acct: String = row.get("stripe_account_id");
         if current_acct == stripe_account_id {
             conn.execute(
-                "UPDATE zeroship.creator_accounts SET onboarded_at = NOW() WHERE creator_id = $1",
-                &[&creator_id],
+                "UPDATE zeroship.organization_accounts SET onboarded_at = NOW() WHERE organization_id = $1",
+                &[&organization_id],
             )
             .await
             .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -817,28 +817,28 @@ async fn link_account_txn(
 
     // Close any open history row.
     conn.execute(
-        "UPDATE zeroship.creator_account_history SET unlinked_at = NOW()
-         WHERE creator_id = $1 AND unlinked_at IS NULL",
-        &[&creator_id],
+        "UPDATE zeroship.organization_account_history SET unlinked_at = NOW()
+         WHERE organization_id = $1 AND unlinked_at IS NULL",
+        &[&organization_id],
     )
     .await
     .map_err(|e| StripeError::Db(e.to_string()))?;
     // Open new history row.
     conn.execute(
-        "INSERT INTO zeroship.creator_account_history(creator_id, stripe_account_id) VALUES($1, $2)",
-        &[&creator_id, &stripe_account_id],
+        "INSERT INTO zeroship.organization_account_history(organization_id, stripe_account_id) VALUES($1, $2)",
+        &[&organization_id, &stripe_account_id],
     )
     .await
     .map_err(|e| StripeError::Db(e.to_string()))?;
     // Upsert live row.
     conn.execute(
-        "INSERT INTO zeroship.creator_accounts(creator_id, stripe_account_id, unlinked_at)
+        "INSERT INTO zeroship.organization_accounts(organization_id, stripe_account_id, unlinked_at)
          VALUES($1, $2, NULL)
-         ON CONFLICT (creator_id) DO UPDATE
+         ON CONFLICT (organization_id) DO UPDATE
             SET stripe_account_id = EXCLUDED.stripe_account_id,
                 onboarded_at = NOW(),
                 unlinked_at = NULL",
-        &[&creator_id, &stripe_account_id],
+        &[&organization_id, &stripe_account_id],
     )
     .await
     .map_err(|e| StripeError::Db(e.to_string()))?;
@@ -848,21 +848,21 @@ async fn link_account_txn(
 /// Body of `unlink_account` under BEGIN/COMMIT.
 async fn unlink_account_txn(
     conn: &compio_postgres::Client,
-    creator_id: Uuid,
+    organization_id: &str,
 ) -> Result<bool, StripeError> {
     let n = conn
         .execute(
-            "UPDATE zeroship.creator_accounts SET unlinked_at = NOW()
-             WHERE creator_id = $1 AND unlinked_at IS NULL",
-            &[&creator_id],
+            "UPDATE zeroship.organization_accounts SET unlinked_at = NOW()
+             WHERE organization_id = $1 AND unlinked_at IS NULL",
+            &[&organization_id],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;
     if n > 0 {
         conn.execute(
-            "UPDATE zeroship.creator_account_history SET unlinked_at = NOW()
-             WHERE creator_id = $1 AND unlinked_at IS NULL",
-            &[&creator_id],
+            "UPDATE zeroship.organization_account_history SET unlinked_at = NOW()
+             WHERE organization_id = $1 AND unlinked_at IS NULL",
+            &[&organization_id],
         )
         .await
         .map_err(|e| StripeError::Db(e.to_string()))?;

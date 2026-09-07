@@ -355,7 +355,7 @@ pub fn group_thousands(n: u64) -> String {
 ///
 /// This is THE single authoritative per-app billable-CU definition — shared by
 /// [`charge_cents`] (spend cap + invoicing) and the metering export's
-/// per-creator sum — so all three rails agree exactly. The included subtraction
+/// per-organization sum — so all three rails agree exactly. The included subtraction
 /// is per-app and MUST be floored per-app: summing gross across a creator's apps
 /// and subtracting one summed quota lets one app's unused quota offset another
 /// app's overage (under-billing). Callers that aggregate across apps sum THIS

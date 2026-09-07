@@ -13,7 +13,7 @@
 //! the run refuses otherwise) with real `invoices` / `refunds` /
 //! `billing_disputes` / `billing_provider_refs` / `billing_reconciliation_findings` rows.
 //!
-//! The required cases (each seeds its OWN creator + globally-unique Stripe ids, so the
+//! The required cases (each seeds its OWN organization + globally-unique Stripe ids, so the
 //! DEFAULT parallel cargo runner never causes cross-test interference):
 //!   (a) Stripe says an invoice is PAID but we have no charge row → `missed_invoice_payment`.
 //!   (b) Stripe says a refund `failed` but we hold it `issued` → `refund_status_drift`.
@@ -391,40 +391,41 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
 // Seeding helpers.
 // ---------------------------------------------------------------------------
 
-async fn make_creator(state: &AppState, label: &str) -> Uuid {
-    let email = format!("{label}-{}@example.test", Uuid::new_v4().simple());
-    let rows = state
-        .control_pg
-        .query(
-            "INSERT INTO zeroship.users (email, name) VALUES ($1, 'Recon Creator') RETURNING id",
-            &[&email],
-        )
-        .await
-        .expect("insert user");
-    let creator: Uuid = rows[0].get("id");
+async fn make_organization(state: &AppState, label: &str) -> String {
+    let slug = format!("{label}-{}", Uuid::new_v4().simple());
+    let organization = zeroship_core::typed_id::generate("org");
     state
         .control_pg
         .execute(
-            "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-            &[&creator],
+            "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+             VALUES ($1, $2, 'Recon Organization', $3)",
+            &[&organization, &slug, &format!("{slug}@example.test")],
         )
         .await
-        .expect("insert creator_billing");
-    creator
+        .expect("insert organization");
+    state
+        .control_pg
+        .execute(
+            "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+            &[&organization],
+        )
+        .await
+        .expect("insert organization_billing");
+    organization
 }
 
 /// Seed a finalized invoice + its Stripe `in_…` provider ref. Returns `(our_invoice_id, in_…)`.
-async fn seed_finalized_invoice(state: &AppState, creator: Uuid, total: i64) -> (String, String) {
+async fn seed_finalized_invoice(state: &AppState, organization: &str, total: i64) -> (String, String) {
     let inv = zeroship_core::typed_id::new_invoice_id();
     let stripe_in = format!("in_recon_{}", short());
     state
         .control_pg
         .execute(
             "INSERT INTO zeroship.invoices \
-               (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+               (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
                 total_cents, finalized_at) \
              VALUES ($1, $2, DATE '2026-05-01', 'finalized', $3, 0, 0, $3, NOW())",
-            &[&inv, &creator, &total],
+            &[&inv, &organization, &total],
         )
         .await
         .expect("seed invoice");
@@ -517,8 +518,9 @@ async fn missed_invoice_payment_is_flagged() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "missed-inv").await;
-    let creator = make_creator(&fx.state, "missed-inv").await;
-    let (_inv, stripe_in) = seed_finalized_invoice(&fx.state, creator, 5000).await;
+    let organization = make_organization(&fx.state, "missed-inv").await;
+    let organization = organization.as_str();
+    let (_inv, stripe_in) = seed_finalized_invoice(&fx.state, organization, 5000).await;
     // Stripe says PAID with amount_paid>0; we recorded NO charge row → drift.
     fx.mock.set_invoice(&stripe_in, MockInvoice {
         status: "paid".into(), amount_due: 0, amount_paid: 5000, total: 5000,
@@ -554,8 +556,9 @@ async fn refund_failed_at_stripe_but_issued_locally_is_flagged() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "refund-drift").await;
-    let creator = make_creator(&fx.state, "refund-drift").await;
-    let (inv, _in) = seed_finalized_invoice(&fx.state, creator, 10_000).await;
+    let organization = make_organization(&fx.state, "refund-drift").await;
+    let organization = organization.as_str();
+    let (inv, _in) = seed_finalized_invoice(&fx.state, organization, 10_000).await;
     append_charge(&fx.state, &inv, 10_000, &format!("ch_{}", short())).await;
     let (_rf, stripe_re) = seed_issued_refund(&fx.state, &inv, 4000).await;
     // Stripe says the refund FAILED; we still hold it `issued` → drift.
@@ -585,7 +588,8 @@ async fn stripe_dispute_with_no_internal_row_is_flagged() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "missing-dispute").await;
-    let _creator = make_creator(&fx.state, "missing-dispute").await;
+    let _creator = make_organization(&fx.state, "missing-dispute").await;
+    let _creator = _creator.as_str();
     let du = format!("du_recon_{}", short());
     // A Stripe dispute in the window with NO billing_disputes / pending_disputes row.
     fx.mock.list_dispute(&du, MockDispute {
@@ -630,8 +634,9 @@ async fn missing_dispute_backstop_applies_when_enabled_and_linkage_exists() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "dispute-heal").await;
-    let creator = make_creator(&fx.state, "dispute-heal").await;
-    let (inv, _in) = seed_finalized_invoice(&fx.state, creator, 8000).await;
+    let organization = make_organization(&fx.state, "dispute-heal").await;
+    let organization = organization.as_str();
+    let (inv, _in) = seed_finalized_invoice(&fx.state, organization, 8000).await;
     // The invoice is PAID: a charge row records the cash (the cap anchor starts at 8000).
     let pi = format!("pi_heal_{}", short());
     append_charge(&fx.state, &inv, 8000, &pi).await;
@@ -721,7 +726,8 @@ async fn missing_dispute_backstop_does_not_park_when_unresolved() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "no-park").await;
-    let _creator = make_creator(&fx.state, "no-park").await;
+    let _creator = make_organization(&fx.state, "no-park").await;
+    let _creator = _creator.as_str();
 
     // A dispute whose settling pi_/ch_ links to NO invoice (no billing_provider_refs seeded).
     let du = format!("du_nopark_{}", short());
@@ -771,8 +777,9 @@ async fn backstop_then_live_webhook_does_not_double_apply() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "no-double-apply").await;
-    let creator = make_creator(&fx.state, "no-double-apply").await;
-    let (inv, _in) = seed_finalized_invoice(&fx.state, creator, 8000).await;
+    let organization = make_organization(&fx.state, "no-double-apply").await;
+    let organization = organization.as_str();
+    let (inv, _in) = seed_finalized_invoice(&fx.state, organization, 8000).await;
     let pi = format!("pi_dbl_{}", short());
     append_charge(&fx.state, &inv, 8000, &pi).await;
     fx.state.control_pg
@@ -861,8 +868,9 @@ async fn open_dispute_resolved_at_stripe_is_flagged_status_drift() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "status-drift").await;
-    let creator = make_creator(&fx.state, "status-drift").await;
-    let (inv, _in) = seed_finalized_invoice(&fx.state, creator, 6000).await;
+    let organization = make_organization(&fx.state, "status-drift").await;
+    let organization = organization.as_str();
+    let (inv, _in) = seed_finalized_invoice(&fx.state, organization, 6000).await;
 
     // A locally-OPEN dispute (seeded directly, status open).
     let du = format!("du_drift_{}", short());
@@ -905,10 +913,11 @@ async fn fully_consistent_state_produces_no_findings() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "consistent").await;
-    let creator = make_creator(&fx.state, "consistent").await;
+    let organization = make_organization(&fx.state, "consistent").await;
+    let organization = organization.as_str();
 
     // Consistent invoice: Stripe paid AND we recorded the charge.
-    let (inv, stripe_in) = seed_finalized_invoice(&fx.state, creator, 6000).await;
+    let (inv, stripe_in) = seed_finalized_invoice(&fx.state, organization, 6000).await;
     append_charge(&fx.state, &inv, 6000, &format!("ch_{}", short())).await;
     fx.mock.set_invoice(&stripe_in, MockInvoice {
         status: "paid".into(), amount_due: 0, amount_paid: 6000, total: 6000,
@@ -938,7 +947,7 @@ async fn fully_consistent_state_produces_no_findings() {
     assert_eq!(finding_count(&fx.state, "refund_status_drift", &stripe_re).await, 0, "no refund finding");
     assert_eq!(finding_count(&fx.state, "dispute_status_drift", &du).await, 0, "no dispute finding");
     assert_eq!(finding_count(&fx.state, "missing_dispute", &du).await, 0, "known dispute not flagged missing");
-    // Scoped: this creator's entities contributed zero findings.
+    // Scoped: this organization's entities contributed zero findings.
     let _ = summary;
 
     drop(fx);
@@ -956,8 +965,9 @@ async fn second_sweep_does_not_duplicate_findings() {
     let url = db_url();
     let _sweep_guard = serialize_sweeps();
     let fx = build_fixture(&url, "idem").await;
-    let creator = make_creator(&fx.state, "idem").await;
-    let (_inv, stripe_in) = seed_finalized_invoice(&fx.state, creator, 7000).await;
+    let organization = make_organization(&fx.state, "idem").await;
+    let organization = organization.as_str();
+    let (_inv, stripe_in) = seed_finalized_invoice(&fx.state, organization, 7000).await;
     fx.mock.set_invoice(&stripe_in, MockInvoice {
         status: "paid".into(), amount_due: 0, amount_paid: 7000, total: 7000,
     });

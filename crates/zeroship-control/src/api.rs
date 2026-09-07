@@ -11,6 +11,7 @@ use ntex::web::types::{Json, Path, State};
 use serde::Deserialize;
 use uuid::Uuid;
 use zeroship_authz::{Action, Resource};
+use zeroship_core::organization_id::OrganizationId;
 
 use crate::app_oauth_client;
 use crate::authz_guard::AuthzGuard;
@@ -58,8 +59,8 @@ pub struct SetPlanBody {
 /// `Idempotency-Key` header (not the body) so a retried POST is a no-op.
 #[derive(Debug, Deserialize)]
 pub struct GrantCreditBody {
-    /// The creator (a `users.id` UUID — the `creator_billing` key).
-    pub creator_id: Uuid,
+    /// The creator (a `users.id` UUID — the `organization_billing` key).
+    pub organization_id: Uuid,
     /// Positive grant amount in cents.
     pub amount_cents: i64,
     /// Grant kind — one of `grant`/`promo`/`goodwill`. Defaults to `grant`.
@@ -1078,7 +1079,7 @@ pub async fn set_plan(
 
     // Record a plan-change event with a cumulative usage_at_change snapshot IN
     // THE SAME TXN as the apps.plan_id
-    // flip, under the per-creator advisory lock. The target plan must be a real,
+    // flip, under the per-organization advisory lock. The target plan must be a real,
     // non-archived plan; validate it via the catalog (segment pricing reads the
     // live catalog at reconcile time — the row freezes NO base fee).
     //
@@ -1103,57 +1104,43 @@ pub async fn set_plan(
         Err(e) => return error_response(e),
     }
 
-    // Resolve the app's current plan (the from-plan) and its owning creator (for
-    // the advisory lock + period attribution). An app with NO owner row (e.g. the
-    // system console) has no billable creator — flip the plan without recording a
-    // proration timeline (there is no creator to bill).
+    // Resolve the app's current plan (the from-plan) and the organization billed
+    // for it (for the advisory lock + period attribution). Both come off the
+    // `apps` row: `organization_id` is `NOT NULL` and consumed by the composite
+    // key into `projects`, so unlike the owner lookup it replaced there is no
+    // ownerless arm to handle — an app that exists has a billing subject.
     let conn = match state.registry.conn().await {
         Ok(c) => c,
         Err(e) => return error_response(RegistryError::Database(e.to_string())),
     };
-    let from_plan_id: Option<String> = match conn
-        .query("SELECT plan_id FROM zeroship.apps WHERE id = $1", &[&uid])
-        .await
-    {
-        Ok(rows) => rows.first().map(|r| r.get::<_, String>("plan_id")),
-        Err(e) => return error_response(RegistryError::Database(e.to_string())),
-    };
-    if from_plan_id.is_none() {
-        // The app row does not exist at all.
-        return web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}));
-    }
-    let owner: Option<Uuid> = match conn
+    let app_row = match conn
         .query(
-            &format!(
-                "SELECT app_owner.user_id FROM zeroship.apps a {lateral} WHERE a.id = $1",
-                lateral = crate::organizations::app_owner_lateral(),
-            ),
+            "SELECT plan_id, organization_id FROM zeroship.apps WHERE id = $1",
             &[&uid],
         )
         .await
     {
-        Ok(rows) => rows.first().and_then(|r| r.get::<_, Option<Uuid>>("user_id")),
+        Ok(rows) => rows.first().map(|r| {
+            (
+                r.get::<_, String>("plan_id"),
+                r.get::<_, String>("organization_id"),
+            )
+        }),
         Err(e) => return error_response(RegistryError::Database(e.to_string())),
     };
     drop(conn);
-
-    let Some(creator_id) = owner else {
-        // No billable creator (system app): plain flip, no proration timeline.
-        return match state.registry.set_plan(&uid, &body.plan_id).await {
-            Ok(true) => web::HttpResponse::Ok().json(&serde_json::json!({"updated": true})),
-            Ok(false) => {
-                web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}))
-            }
-            Err(e) => error_response(e),
-        };
+    let Some((from_plan_id, organization_id)) = app_row else {
+        // The app row does not exist at all.
+        return web::HttpResponse::NotFound().json(&serde_json::json!({"error":"app not found"}));
     };
+    let from_plan_id = Some(from_plan_id);
 
     // The shared server-side write path (advisory lock + server-derived usage
     // snapshot + plan flip + cap + finalized-period attribution) in ONE txn.
     match crate::proration::record_plan_change_tx(
         &state.registry,
         &uid,
-        &creator_id,
+        &organization_id,
         from_plan_id.as_deref(),
         &body.plan_id,
         chrono::Utc::now().timestamp(),
@@ -1241,7 +1228,7 @@ pub async fn set_spend_limit(
                 &state.registry,
                 crate::audit::AuditEntry {
                     app_id: Some(uid),
-                    creator_id: None,
+                    organization_id: None,
                     // #7 — populate the actor from the AuthzGuard so a
                     // billing-write audit row records WHO changed the cap.
                     actor_user_id: Some(authz.principal_id),
@@ -1334,7 +1321,7 @@ pub async fn get_spend_limit(
 // OWNED apps and an operator (`Resource::Any`) sees any. The CREATOR-keyed reads
 // (credit-balance, payment-method) gate `can_act_anywhere(BillingRead)` (the
 // caller must be a billing-capable creator) and force the target creator to
-// `self` UNLESS the caller is an operator, who may target any via `?creator_id`.
+// `self` UNLESS the caller is an operator, who may target any via `?organization_id`.
 //
 // SECURITY: no raw Stripe ids, no other creator's data, no app-token escalation.
 // Every response is a clean DTO from `crate::billing_read` (no internal columns).
@@ -1350,12 +1337,15 @@ pub struct InvoiceListQuery {
     pub offset: Option<i64>,
 }
 
-/// Optional `?creator_id=` for the creator-keyed reads. Honoured ONLY for an
+/// Optional `?organization_id=` for the creator-keyed reads. Honoured ONLY for an
 /// operator (`Resource::Any`); a non-operator caller is always forced to self.
 #[derive(Debug, Deserialize)]
-pub struct CreatorScopeQuery {
-    #[serde(default)]
-    pub creator_id: Option<Uuid>,
+pub struct OrganizationScopeQuery {
+    /// REQUIRED. It was optional while the billing subject was the caller, and
+    /// absent meant "me" - one user, one bill, one defensible default. A user
+    /// holds seats at several organizations, so "me" no longer names a subject
+    /// and the parameter has to be supplied.
+    pub organization_id: String,
 }
 
 /// The resource a BILLING action on `app_id` must name.
@@ -1387,42 +1377,19 @@ async fn billing_resource(state: &AppState, app_id: Uuid) -> Result<Resource, we
     }
 }
 
-/// Resolve the creator who answers for an app, or `None` when the app does not
-/// exist or its organization holds no owner.
-///
-/// The join is [`crate::organizations::app_owner_lateral`] - through the
-/// project to the organization, longest-standing owner first - and it is that
-/// one definition rather than a copy so this and the billing crons cannot come
-/// to disagree about who is billed.
-async fn owner_of_app(state: &AppState, app_id: &Uuid) -> Result<Option<Uuid>, RegistryError> {
-    let conn = state.registry.conn().await?;
-    let rows = conn
-        .query(
-            &format!(
-                "SELECT app_owner.user_id FROM zeroship.apps a {lateral} WHERE a.id = $1",
-                lateral = crate::organizations::app_owner_lateral(),
-            ),
-            &[app_id],
-        )
-        .await
-        .map_err(|e| RegistryError::Database(e.to_string()))?;
-    Ok(rows.first().and_then(|r| r.get::<_, Option<Uuid>>("user_id")))
-}
-
 /// `GET /api/apps/{id}/invoices` — invoice history for the OWNER of app `{id}`,
 /// newest-first, paginated.
 ///
-/// AUTHZ GRAIN — OWNER-LEVEL (SEC). The response is the OWNER's entire cross-app
-/// invoice history (an invoice is creator-keyed), so a non-owner app member
-/// (editor/viewer with `billing:read` on this one app) must NOT see the owner's
-/// whole billing envelope. We gate `BillingRead on App{id}` (capability +
-/// existence), then require the caller to BE the owner of `{id}`
-/// (`owner_of_app(id) == principal_id`).
+/// AUTHZ GRAIN — ORGANIZATION-LEVEL. The response is the owning ORGANIZATION's
+/// entire cross-app invoice history, so the grain of the gate has to be the
+/// organization and not the app: a developer seated on this one app must not
+/// read the whole envelope.
 ///
-/// There is no operator escape from that any more. The arm that let a
-/// `BillingRead`-on-`Resource::Any` caller read another creator's invoices was
-/// satisfiable only by the deleted universal-allow policy, so it was a
-/// cross-tenant read with no remaining principal behind it.
+/// [`billing_resource`] resolves `{id}` to its organization and the probe is
+/// `BillingRead` on THAT, which is the only resource shape carrying the ladder's
+/// `billing_rank`. What this replaced was a second, redundant check that the
+/// caller WAS the owner - correct while an invoice was keyed on one human, and
+/// unspellable now that it is keyed on the organization the caller is seated at.
 pub async fn list_app_invoices(
     id: Path<String>,
     query: web::types::Query<InvoiceListQuery>,
@@ -1440,25 +1407,19 @@ pub async fn list_app_invoices(
         Ok(scope) => scope,
         Err(resp) => return resp,
     };
+    let billing_scope_owner = billing_scope.clone();
     if let Err(resp) = authz
         .require(Action::BillingRead, billing_scope, &state)
         .await
     {
         return resp;
     }
-    let creator_id = match owner_of_app(&state, &uid).await {
-        Ok(Some(c)) => c,
-        Ok(None) => return web::HttpResponse::Ok().json(&serde_json::json!({ "invoices": [] })),
-        Err(e) => return error_response(e),
+    let Resource::Organization { id: organization_id } = billing_scope_owner else {
+        return web::HttpResponse::NotFound().json(&serde_json::json!({"error": "app not found"}));
     };
-    // OWNER only: the app's OWNER is the invoice creator and reads their own
-    // cross-app invoice history; a non-owner member does not.
-    if creator_id != authz.principal_id {
-        return web::HttpResponse::Forbidden().json(&serde_json::json!({"error": "forbidden"}));
-    }
     let limit = query.limit.unwrap_or(50).clamp(1, 200);
     let offset = query.offset.unwrap_or(0).max(0);
-    match crate::billing_read::list_invoices_for_creator(&state.registry, &creator_id, limit, offset)
+    match crate::billing_read::list_invoices_for_organization(&state.registry, &organization_id, limit, offset)
         .await
     {
         Ok(invoices) => web::HttpResponse::Ok().json(&serde_json::json!({ "invoices": invoices })),
@@ -1469,15 +1430,15 @@ pub async fn list_app_invoices(
 /// `GET /api/invoices/{id}` — frozen-snapshot line detail. The `{id}` is the
 /// internal `inv_…` id.
 ///
-/// AUTHZ GRAIN — CREATOR-LEVEL (SEC, CRITICAL-1). An invoice is creator-keyed:
-/// the reconciler stamps `invoice.creator_id` as the `role='owner'` user
-/// (`cron/billing_reconcile.rs`). The invoice envelope spans EVERY app that
-/// creator owns, so the caller must BE that creator. We do NOT loop the
-/// creator's apps and accept any `BillingRead` grant: `list_apps_for_owner` is
-/// role-AGNOSTIC, so a creator who is merely a viewer/editor on the attacker's
-/// app would appear in the list and let the attacker read the victim's whole
-/// invoice. A single `creator_id == principal_id` check closes that
-/// cross-creator hole AND removes the per-app Cedar-loop audit amplification.
+/// AUTHZ GRAIN — ORGANIZATION-LEVEL. An invoice is keyed on the organization it
+/// bills, and its envelope spans every app that organization owns, so the probe
+/// names the invoice's OWN organization rather than any app.
+///
+/// The hole this shape closes is unchanged and worth restating: looping the
+/// subject's apps and accepting any `BillingRead` grant would admit an attacker
+/// who is merely a viewer on one shared app, because app membership is
+/// role-agnostic. One probe against `Resource::Organization` also keeps the
+/// audit trail to a single decision instead of one per app.
 pub async fn get_invoice(
     id: Path<String>,
     authz: AuthzGuard,
@@ -1503,9 +1464,18 @@ pub async fn get_invoice(
         Err(e) => return error_response(e),
     };
 
-    // The caller is the invoice's creator. Nothing else reads it.
-    if detail.creator_id != authz.principal_id {
-        return web::HttpResponse::Forbidden().json(&serde_json::json!({"error": "forbidden"}));
+    // Money authority at the organization the invoice bills. Nothing else reads it.
+    if let Err(resp) = authz
+        .require(
+            Action::BillingRead,
+            Resource::Organization {
+                id: detail.organization_id.clone(),
+            },
+            &state,
+        )
+        .await
+    {
+        return resp;
     }
     web::HttpResponse::Ok().json(&detail)
 }
@@ -1552,17 +1522,17 @@ pub async fn get_projected_charge(
 
 /// `GET /api/billing/credit-balance` — the caller's USD credit balance + recent
 /// ledger. Creator-keyed: gated `can_act_anywhere(BillingRead)`; the target is
-/// `self` unless the caller is an operator passing `?creator_id=`.
+/// `self` unless the caller is an operator passing `?organization_id=`.
 pub async fn get_credit_balance(
-    query: web::types::Query<CreatorScopeQuery>,
+    query: web::types::Query<OrganizationScopeQuery>,
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    let target = match resolve_creator_target(&authz, &state, query.creator_id).await {
+    let target = match resolve_billing_organization(&authz, &state, &query.organization_id).await {
         Ok(t) => t,
         Err(resp) => return resp,
     };
-    match crate::billing_read::credit_balance(&state.registry, &target, 50).await {
+    match crate::billing_read::credit_balance(&state.registry, target.as_str(), 50).await {
         Ok(balance) => web::HttpResponse::Ok().json(&balance),
         Err(e) => error_response(e),
     }
@@ -1571,15 +1541,15 @@ pub async fn get_credit_balance(
 /// `GET /api/billing/payment-method` — the caller's PM status (presence only,
 /// never the raw provider id). Creator-keyed, scoped exactly like credit-balance.
 pub async fn get_payment_method(
-    query: web::types::Query<CreatorScopeQuery>,
+    query: web::types::Query<OrganizationScopeQuery>,
     authz: AuthzGuard,
     state: State<Arc<AppState>>,
 ) -> web::HttpResponse {
-    let target = match resolve_creator_target(&authz, &state, query.creator_id).await {
+    let target = match resolve_billing_organization(&authz, &state, &query.organization_id).await {
         Ok(t) => t,
         Err(resp) => return resp,
     };
-    match crate::billing_read::payment_method_status(&state.registry, &target).await {
+    match crate::billing_read::payment_method_status(&state.registry, target.as_str()).await {
         Ok(status) => web::HttpResponse::Ok().json(&status),
         Err(e) => error_response(e),
     }
@@ -1619,31 +1589,33 @@ pub async fn get_billing_status(
 /// Resolve the target creator for a creator-keyed billing read.
 ///
 /// The caller is ALWAYS forced to `self`: they must be billing-capable on at
-/// least one owned app, and a `creator_id` naming ANOTHER creator is 403. A
+/// least one owned app, and a `organization_id` naming ANOTHER creator is 403. A
 /// caller with no billing capability anywhere is 403.
 ///
-/// The `?creator_id=` parameter therefore now only confirms or contradicts the
+/// The `?organization_id=` parameter therefore now only confirms or contradicts the
 /// caller's own id. It is kept rather than removed because the contradiction is
 /// worth answering with a 403 instead of silently reading the caller's own
 /// data under someone else's name.
-async fn resolve_creator_target(
+async fn resolve_billing_organization(
     authz: &AuthzGuard,
     state: &AppState,
-    requested: Option<Uuid>,
-) -> Result<Uuid, web::HttpResponse> {
-    if !authz.can_act_anywhere(Action::BillingRead, state).await? {
-        return Err(web::HttpResponse::Forbidden()
-            .json(&serde_json::json!({"error": "forbidden"})));
-    }
-    if let Some(req) = requested {
-        if req != authz.principal_id {
-            return Err(web::HttpResponse::Forbidden().json(&serde_json::json!({
-                "error": "forbidden",
-                "detail": "a creator may read only their own billing",
-            })));
-        }
-    }
-    Ok(authz.principal_id)
+    requested: &str,
+) -> Result<OrganizationId, web::HttpResponse> {
+    let Ok(organization) = OrganizationId::parse(requested) else {
+        return Err(web::HttpResponse::BadRequest().json(&serde_json::json!({
+            "error": "invalid_organization_id",
+        })));
+    };
+    authz
+        .require(
+            Action::BillingRead,
+            Resource::Organization {
+                id: organization.as_str().to_owned(),
+            },
+            state,
+        )
+        .await?;
+    Ok(organization)
 }
 
 /// Resolve an app's plan-default spend limit. `Ok(None)` when the app row is

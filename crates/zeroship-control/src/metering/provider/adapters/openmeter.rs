@@ -64,7 +64,7 @@ impl Meter for OpenMeterProvider {
                 // Direct per-metric mapping: zeroship metric name == OpenMeter
                 // event type and meter slug.
                 event_type: event.meter.clone(),
-                subject: event.creator_subject(),
+                subject: crate::metering::provider::event_subject("openmeter", event)?.to_string(),
                 time_unix: event.event_time,
                 value: event.value,
                 period_start_unix: event

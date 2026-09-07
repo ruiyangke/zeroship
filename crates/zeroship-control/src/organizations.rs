@@ -233,7 +233,7 @@ pub(crate) fn ladder_rank_of(role: &str) -> String {
 /// same statement still resolve deterministically.
 ///
 /// The billing subsystems required this rule to be IDENTICAL across the sweep,
-/// the notifier and the per-creator slice, and used to guarantee it by three
+/// the notifier and the per-organization slice, and used to guarantee it by three
 /// matching copies with comments asking future editors to keep them matching.
 /// It is now guaranteed by there being one.
 const APP_OWNER_ORDER: &str = "owner_member.added_at, owner_member.user_id";
@@ -764,9 +764,11 @@ pub async fn organization_of_app<C: GenericClient + Sync>(
 ) -> Result<Option<String>, OrganizationError> {
     let rows = pg
         .query(
-            "SELECT p.organization_id FROM zeroship.apps a \
-               JOIN zeroship.projects p ON p.id = a.project_id \
-              WHERE a.id = $1",
+            // `apps.organization_id` rather than the hop through `projects`: the
+            // copy is consumed by the composite key into
+            // `projects(id, organization_id)`, so the two cannot disagree and the
+            // join proved nothing the constraint does not already enforce.
+            "SELECT a.organization_id FROM zeroship.apps a WHERE a.id = $1",
             &[&app_id],
         )
         .await
@@ -2427,7 +2429,7 @@ async fn audit_authority_change<C: GenericClient + Sync>(
         tx,
         AuditEntry {
             app_id: None,
-            creator_id: None,
+            organization_id: None,
             actor_user_id: Some(actor),
             action,
             resource: Some(organization_id),

@@ -1,6 +1,6 @@
 //! Void + reissue + the negative-invoice true-up bridge.
 //!
-//! A void releases the `(creator, period)` claim, while `invoice_payments` stores
+//! A void releases the `(organization, period)` claim, while `invoice_payments` stores
 //! cash-collected side facts. This module owns the operator void path, the
 //! `void_reversal` credit-conservation entry, the reissue, and the true-up.
 //!
@@ -14,10 +14,10 @@
 //! ## Re-drivable to completion
 //!
 //! The sequence is three phases — Phase 1 (void + `void_reversal`), Phase 2 (reissue),
-//! Phase 3 (true-up) — and each MONEY mutation is individually serialized per creator:
-//!   * Phase 1 takes the per-creator advisory lock and appends `void_reversal` + flips
+//! Phase 3 (true-up) — and each MONEY mutation is individually serialized per organization:
+//!   * Phase 1 takes the per-organization advisory lock and appends `void_reversal` + flips
 //!     the invoice to `void` in ONE txn.
-//!   * Phase 2's `bill_creator` re-acquires the SAME lock inside its own `consume_at_finalize`
+//!   * Phase 2's `bill_organization` re-acquires the SAME lock inside its own `consume_at_finalize`
 //!     txn (a separate session — it CANNOT share Phase 1's txn, so a single all-phases
 //!     transaction would self-deadlock; hence the phases stay separate but each is locked).
 //!   * Phase 3's true-up refund takes the SAME lock inside `claim_refund_locked`.
@@ -28,7 +28,7 @@
 //! sweep) on the voided invoice completes the reissue + true-up idempotently:
 //!   * Phase 1 is skipped when the invoice is already void (the `already_reversed` guard
 //!     also makes the `void_reversal` append a no-op on re-drive);
-//!   * Phase 2's `bill_creator` short-circuits on an already-finalized active invoice for
+//!   * Phase 2's `bill_organization` short-circuits on an already-finalized active invoice for
 //!     the period (it never double-reissues);
 //!   * Phase 3's true-up is idempotency-keyed on `trueup:{invoice_id}` (it never
 //!     double-refunds).
@@ -49,7 +49,7 @@
 //! ## The true-up bridge
 //!
 //! A reissue can be LOWER than what was already collected on the voided invoice. The
-//! over-collection must come back to the creator. The bridge auto-issues a cash refund
+//! over-collection must come back to the organization. The bridge auto-issues a cash refund
 //! against the VOIDED invoice of:
 //!
 //! ```text
@@ -65,7 +65,7 @@
 //! `cash_refunds_already_issued + over = cash_paid(old) − total(new) ≤ cash_paid(old)`.
 //!
 //! That `over` is recomputed INSIDE `refund::issue_true_up_refund`'s
-//! per-creator-locked claim transaction from the live cash anchor — Phase 3 passes
+//! per-organization-locked claim transaction from the live cash anchor — Phase 3 passes
 //! only the immutable `reissued_total` and never pre-reads the cash. A concurrent
 //! refund/dispute landing between Phase 2 and the claim therefore cannot make the
 //! claimed amount stale, trip the over-refund trigger, or under-refund.
@@ -95,25 +95,25 @@ pub struct VoidReissueOutcome {
     pub true_up_cents: i64,
 }
 
-/// The per-creator advisory-lock key, IDENTICAL to the one
+/// The per-organization advisory-lock key, IDENTICAL to the one
 /// [`crate::credit::consume_at_finalize`] takes (`pg_advisory_xact_lock(
-/// hashtext(creator_id::text)::bigint)`), so void+reissue serializes against a
-/// concurrent reconcile consume/finalize for the same creator. Taken as the first act
+/// hashtext(organization_id::text)::bigint)`), so void+reissue serializes against a
+/// concurrent reconcile consume/finalize for the same organization. Taken as the first act
 /// of the void txn.
-async fn take_per_creator_lock<C: GenericClient + Sync>(
+async fn take_per_organization_lock<C: GenericClient + Sync>(
     conn: &C,
-    creator_id: &uuid::Uuid,
+    organization_id: &str,
 ) -> Result<(), RegistryError> {
     conn.execute(
         "SELECT pg_advisory_xact_lock(hashtext($1::text)::bigint)",
-        &[&creator_id.to_string()],
+        &[&organization_id.to_string()],
     )
     .await
     .map_err(|e| RegistryError::Database(e.to_string()))?;
     Ok(())
 }
 
-/// Void a finalized invoice and reissue a corrected one for the same `(creator,
+/// Void a finalized invoice and reissue a corrected one for the same `(organization,
 /// period)`, conserving consumed credit (`void_reversal`) and auto-refunding any
 /// over-collection (the true-up bridge). Operator-only (the caller gates authz).
 ///
@@ -126,11 +126,11 @@ pub async fn void_and_reissue<S: StripeApi>(
     stripe: &S,
     invoice_id: &str,
 ) -> Result<VoidReissueOutcome, RegistryError> {
-    // Read the invoice to void: must exist + be finalized; capture creator/period.
+    // Read the invoice to void: must exist + be finalized; capture organization/period.
     let mut conn = state.registry.conn().await?;
     let inv = conn
         .query(
-            "SELECT creator_id, period, status, \
+            "SELECT organization_id, period, status, \
                     subtotal_cents, credit_cents, tax_cents, total_cents \
              FROM zeroship.invoices WHERE id = $1",
             &[&invoice_id],
@@ -139,7 +139,7 @@ pub async fn void_and_reissue<S: StripeApi>(
     let Some(row) = inv.first() else {
         return Err(RegistryError::InvalidInput(format!("no invoice {invoice_id}")));
     };
-    let creator_id: uuid::Uuid = row.get("creator_id");
+    let organization_id: String = row.get("organization_id");
     let period: chrono::NaiveDate = row.get("period");
     let status: String = row.get("status");
     // MAJOR-2: a `finalized` invoice is voided then reissued. An ALREADY-`void` invoice
@@ -153,12 +153,12 @@ pub async fn void_and_reissue<S: StripeApi>(
     }
     let needs_void = status == "finalized";
 
-    // ── Phase 1: void + void_reversal, in ONE txn, under the per-creator lock ──
+    // ── Phase 1: void + void_reversal, in ONE txn, under the per-organization lock ──
     // Skipped on a re-drive (already void): the `void_reversal` is already appended and
     // the invoice is already flipped — Phase 1 has nothing left to do.
     if needs_void {
         let tx = conn.transaction().await?;
-        take_per_creator_lock(&tx, &creator_id).await?;
+        take_per_organization_lock(&tx, &organization_id).await?;
 
         // CRITICAL-2: restore the credit the voided invoice consumed BEFORE it is voided,
         // so the reissue re-consumes from the restored balance. One positive `void_reversal`
@@ -199,10 +199,10 @@ pub async fn void_and_reissue<S: StripeApi>(
                 let entry_id = zeroship_core::typed_id::new_credit_id();
                 tx.execute(
                     "INSERT INTO zeroship.credit_ledger \
-                       (id, creator_id, kind, amount_cents, currency, applied_invoice_id, \
+                       (id, organization_id, kind, amount_cents, currency, applied_invoice_id, \
                         consumed_from_grant_id) \
                      VALUES ($1, $2, 'void_reversal', $3, $4, $5, $6)",
-                    &[&entry_id, &creator_id, &(-amount), &currency, &invoice_id, &grant_id],
+                    &[&entry_id, &organization_id, &(-amount), &currency, &invoice_id, &grant_id],
                 )
                 .await?;
             }
@@ -220,20 +220,20 @@ pub async fn void_and_reissue<S: StripeApi>(
         tx.commit().await?;
     }
 
-    // ── Phase 2: reissue via the REAL reconciler path for the same (creator, period) ──
+    // ── Phase 2: reissue via the REAL reconciler path for the same (organization, period) ──
     // The void released the period claim (the partial unique index `WHERE status <>
-    // 'void'`), so bill_creator can claim + re-price + re-consume + finalize a fresh
-    // invoice. It takes the per-creator advisory lock again (inside consume), so it
+    // 'void'`), so bill_organization can claim + re-price + re-consume + finalize a fresh
+    // invoice. It takes the per-organization advisory lock again (inside consume), so it
     // can't race a concurrent reconcile.
     let period_start = period_start_unix_for(period);
     let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
     let pricing = crate::pricing_store::PricingStore::new(state.registry.clone());
     let weights = pricing.weights().await?;
     let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
-    let app_ids = billing_reconcile::owned_app_ids(state, &creator_id).await?;
+    let app_ids = billing_reconcile::owned_app_ids(state, &organization_id).await?;
 
-    let _reissued = billing_reconcile::bill_creator(
-        state, stripe, &catalog, &weights, default_fx, &creator_id, &app_ids, period_start,
+    let _reissued = billing_reconcile::bill_organization(
+        state, stripe, &catalog, &weights, default_fx, &organization_id, &app_ids, period_start,
     )
     .await?;
 
@@ -242,8 +242,8 @@ pub async fn void_and_reissue<S: StripeApi>(
     let reissued = conn2
         .query(
             "SELECT id, total_cents FROM zeroship.invoices \
-             WHERE creator_id = $1 AND period = $2::date AND status <> 'void'",
-            &[&creator_id, &period],
+             WHERE organization_id = $1 AND period = $2::date AND status <> 'void'",
+            &[&organization_id, &period],
         )
         .await?;
     let reissued_invoice_id: Option<String> = reissued.first().map(|r| r.get::<_, String>("id"));
@@ -252,7 +252,7 @@ pub async fn void_and_reissue<S: StripeApi>(
     // ── Phase 3: the true-up bridge ──
     // over = cash_paid(old) − cash_refunds_already_issued(old) − total(new), floored at 0.
     //
-    // H1: the over-collection is recomputed INSIDE `issue_true_up_refund`'s per-creator-locked
+    // H1: the over-collection is recomputed INSIDE `issue_true_up_refund`'s per-organization-locked
     // claim txn from the live cash anchor — NOT pre-read here — so a concurrent refund/dispute
     // landing between Phase 2 and Phase 3 cannot make the claimed amount stale. We pass only the
     // immutable `reissued_total`; the bridge returns the actual cents refunded (0 if the
@@ -289,7 +289,7 @@ pub async fn void_and_reissue<S: StripeApi>(
         }
         RefundOutcome::OverRefund(msg) => {
             // Should be impossible by construction (the amount is recomputed under the lock);
-            // surface loudly rather than silently leaving the creator out-of-pocket.
+            // surface loudly rather than silently leaving the organization out-of-pocket.
             return Err(RegistryError::Database(format!(
                 "true-up over-refund rejected (BUG — cap math): {msg}"
             )));
@@ -331,7 +331,7 @@ async fn true_up_amount_for<C: GenericClient + Sync>(
 }
 
 /// Unix-seconds start of a `billing_period` DATE (the first-of-month, UTC midnight).
-/// The inverse of `metering::period_date`, used to drive `bill_creator` (which takes
+/// The inverse of `metering::period_date`, used to drive `bill_organization` (which takes
 /// `period_start` unix seconds).
 fn period_start_unix_for(period: chrono::NaiveDate) -> i64 {
     use chrono::TimeZone;

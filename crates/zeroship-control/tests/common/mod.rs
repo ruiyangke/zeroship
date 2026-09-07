@@ -341,20 +341,52 @@ pub async fn personal_project_for(registry: &Registry, owner: Uuid) -> String {
 /// owner-less organization is precisely what this is for.
 #[allow(dead_code)]
 pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
+    unowned_project_in(pg, &seed_organization(pg).await).await
+}
+
+/// A fresh member-less `zeroship.organizations` row: THE BILLING SUBJECT.
+///
+/// Every billing fixture in this crate starts here rather than at
+/// `zeroship.users`. That is the shape change, not a rename: the party an
+/// invoice, a payout, a Connect account and a `billing_notifications` claim key
+/// on is an organization, and a test that mints a user and passes its uuid as
+/// the subject would not fail loudly - the column is `text`, so the id would
+/// simply match no organization row and the FK would refuse it at write time
+/// with an error about the wrong thing.
+///
+/// The address is `billing_email`, which is where notices go now, so a notify
+/// test can assert on it without inventing a member.
+#[allow(dead_code)]
+pub async fn seed_organization(pg: &compio_postgres::Client) -> String {
     let organization_id = zeroship_core::typed_id::generate("org");
-    let project_id = zeroship_core::typed_id::generate("prj");
     let slug = format!("fixture-{}", Uuid::new_v4().simple());
     pg.execute(
         "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
-         VALUES ($1, $2, 'Fixture Organization', 'fixture@zeroship.test')",
-        &[&organization_id, &slug],
+         VALUES ($1, $2, 'Fixture Organization', $3)",
+        &[
+            &organization_id,
+            &slug,
+            &format!("{slug}@zeroship.test"),
+        ],
     )
     .await
     .expect("seed fixture organization");
+    organization_id
+}
+
+/// A project inside an organization the caller already has, for a test that
+/// needs several apps to share ONE billing subject.
+#[allow(dead_code)]
+pub async fn unowned_project_in(
+    pg: &compio_postgres::Client,
+    organization_id: &str,
+) -> String {
+    let project_id = zeroship_core::typed_id::generate("prj");
+    let slug = format!("prj-{}", Uuid::new_v4().simple());
     pg.execute(
         "INSERT INTO zeroship.projects (id, organization_id, slug, name) \
-         VALUES ($1, $2, 'default', 'Default')",
-        &[&project_id, &organization_id],
+         VALUES ($1, $2, $3, 'Default')",
+        &[&project_id, &organization_id, &slug],
     )
     .await
     .expect("seed fixture project");
@@ -382,16 +414,71 @@ pub async fn unowned_project(pg: &compio_postgres::Client) -> String {
 /// for, and for what to do instead when the placement IS the thing under test.
 #[allow(dead_code)]
 pub async fn seed_app(pg: &compio_postgres::Client, name: &str, plan_id: &str) -> Uuid {
-    let project_id = unowned_project(pg).await;
+    let organization_id = seed_organization(pg).await;
+    seed_app_in_organization(pg, name, plan_id, &organization_id).await
+}
+
+/// A fixture app whose BILLING SUBJECT the caller names.
+///
+/// `apps.organization_id` is `NOT NULL` and consumed by the composite key
+/// `(project_id, organization_id) -> projects(id, organization_id)`, so it is
+/// written here from the same value the project was created under. Passing a
+/// different organization is not a fixture that mis-attributes usage; it is a
+/// row PostgreSQL refuses.
+#[allow(dead_code)]
+pub async fn seed_app_in_organization(
+    pg: &compio_postgres::Client,
+    name: &str,
+    plan_id: &str,
+    organization_id: &str,
+) -> Uuid {
+    let project_id = unowned_project_in(pg, organization_id).await;
     let rows = pg
         .query(
-            "INSERT INTO zeroship.apps (name, plan_id, project_id) \
-             VALUES ($1, $2, $3) RETURNING id",
-            &[&name, &plan_id, &project_id],
+            "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
+             VALUES ($1, $2, $3, $4) RETURNING id",
+            &[&name, &plan_id, &project_id, &organization_id],
         )
         .await
         .expect("seed fixture app");
     rows[0].get("id")
+}
+
+/// Seat `user` directly in `organization` at `role`.
+///
+/// The peer of [`seat_app_organization_member`] for a fixture that has an
+/// organization but no app: the billing routes gate on money authority at
+/// `Resource::Organization`, so a token with no seat there is refused however
+/// many apps its holder owns elsewhere.
+#[allow(dead_code)]
+pub async fn seat_organization_member(
+    pg: &compio_postgres::Client,
+    organization_id: &str,
+    user: &Uuid,
+    role: &str,
+) {
+    pg.execute(
+        "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+         VALUES ($1, $2, $3) \
+         ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
+        &[&organization_id, user, &role],
+    )
+    .await
+    .expect("seat organization member");
+}
+
+/// The organization one fixture app bills, read back off the app row.
+#[allow(dead_code)]
+pub async fn app_organization(pg: &compio_postgres::Client, app: &Uuid) -> String {
+    pg.query(
+        "SELECT organization_id FROM zeroship.apps WHERE id = $1",
+        &[app],
+    )
+    .await
+    .expect("read app organization")
+    .first()
+    .expect("fixture app exists")
+    .get("organization_id")
 }
 
 /// Seat `user` in the organization behind `app`'s project, at `role`.

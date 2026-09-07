@@ -332,13 +332,14 @@ async fn invoice_paid_webhook_records_app_audit_row() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "record-audit").await;
     let app = init_control!(fx);
-    // `creator_accounts.creator_id` FKs to `users(id)` — seed a real user so
+    // `organization_accounts.organization_id` FKs to `users(id)` — seed a real user so
     // `link_account` satisfies the constraint on a freshly-migrated DB.
     let seed = side_conn(&db_url).await;
-    let creator_id = make_user(&seed).await;
+    let organization_id = make_organization(&seed).await;
+    let organization_id = organization_id.as_str();
     fx.state
         .stripe_store
-        .link_account(creator_id, "acct_webhookAudit1")
+        .link_account(organization_id, "acct_webhookAudit1")
         .await
         .expect("link stripe account");
 
@@ -354,10 +355,10 @@ async fn invoice_paid_webhook_records_app_audit_row() {
                 "amount_paid": 1234,
                 "application_fee_amount": 185,
                 "currency": "usd",
-                // M4: the settling account must be the claimed creator's own account.
+                // M4: the settling account must be the claimed organization's own account.
                 "on_behalf_of": "acct_webhookAudit1",
                 "metadata": {
-                    "creator_id": creator_id.to_string(),
+                    "organization_id": organization_id.to_string(),
                 }
             }
         }
@@ -390,14 +391,14 @@ async fn invoice_paid_webhook_records_app_audit_row() {
         .query(
             "SELECT resource, detail \
              FROM zeroship.app_audit \
-             WHERE creator_id = $1 AND action = 'record_payout' AND resource = $2",
-            &[&creator_id, &event_id],
+             WHERE organization_id = $1 AND action = 'record_payout' AND resource = $2",
+            &[&organization_id, &event_id],
         )
         .await
         .expect("select payout audit");
     assert_eq!(rows.len(), 1);
     let detail: Value = rows[0].get("detail");
-    assert_eq!(detail["creator_id"], creator_id.to_string());
+    assert_eq!(detail["organization_id"], organization_id.to_string());
     assert_eq!(detail["amount_cents"], 1234);
     assert_eq!(detail["stripe_event_id"], event_id);
     assert_eq!(detail["stripe_object_id"], stripe_object_id);
@@ -427,21 +428,22 @@ async fn infra_invoice_paid_appends_charge_payment_row() {
     let fx = Fixture::new(&db_url, "infra-payment").await;
     let app = init_control!(fx);
     let seed = side_conn(&db_url).await;
-    let creator_id = make_user(&seed).await;
+    let organization_id = make_organization(&seed).await;
+    let organization_id = organization_id.as_str();
     seed.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) \
-         ON CONFLICT (creator_id) DO NOTHING",
-        &[&creator_id],
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) \
+         ON CONFLICT (organization_id) DO NOTHING",
+        &[&organization_id],
     )
     .await
-    .expect("creator_billing");
+    .expect("organization_billing");
     // Post-D3 an INFRA `invoice.paid` is fully handled by the infra branch and
     // returns 200 BEFORE the Stream-2 `record_payout` path — so no Connect link is
     // needed. (Kept linked here only to keep the fixture's account state realistic;
     // the assertion under test is the infra `invoice_payments` append, PR-1.)
     fx.state
         .stripe_store
-        .link_account(creator_id, &format!("acct_{}", Uuid::new_v4().simple()))
+        .link_account(organization_id, &format!("acct_{}", Uuid::new_v4().simple()))
         .await
         .expect("link stripe account");
 
@@ -455,10 +457,10 @@ async fn infra_invoice_paid_appends_charge_payment_row() {
     let inv_id = zeroship_core::typed_id::new_invoice_id();
     seed.execute(
         "INSERT INTO zeroship.invoices \
-           (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+           (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
             total_cents, finalized_at) \
          VALUES ($1, $2, $3::date, 'finalized', 4500, 0, 0, 4500, NOW())",
-        &[&inv_id, &creator_id, &period],
+        &[&inv_id, &organization_id, &period],
     )
     .await
     .expect("finalized invoice");
@@ -481,7 +483,7 @@ async fn infra_invoice_paid_appends_charge_payment_row() {
             "id": provider_invoice_id,
             "amount_paid": 4500,
             "currency": "usd",
-            "metadata": { "creator_id": creator_id.to_string(), "invoice_kind": "infra" }
+            "metadata": { "organization_id": organization_id.to_string(), "invoice_kind": "infra" }
         }}
     });
     // Signed: unsigned, this now fails verification with 400.
@@ -587,16 +589,16 @@ fn period_first_of_month() -> chrono::NaiveDate {
 /// `(internal_invoice_id, provider_invoice_id)`.
 async fn seed_finalized_infra_invoice(
     conn: &compio_postgres::Client,
-    creator_id: Uuid,
+    organization_id: &str,
     total: i64,
 ) -> (String, String) {
     let inv_id = zeroship_core::typed_id::new_invoice_id();
     conn.execute(
         "INSERT INTO zeroship.invoices \
-           (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, \
+           (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, \
             total_cents, finalized_at) \
          VALUES ($1, $2, $3::date, 'finalized', $4, 0, 0, $4, NOW())",
-        &[&inv_id, &creator_id, &period_first_of_month(), &total],
+        &[&inv_id, &organization_id, &period_first_of_month(), &total],
     )
     .await
     .expect("finalized invoice");
@@ -615,7 +617,7 @@ async fn seed_finalized_infra_invoice(
 fn infra_invoice_paid_body(
     event_id: &str,
     provider_invoice_id: &str,
-    creator_id: Uuid,
+    organization_id: &str,
     amount_paid: i64,
 ) -> String {
     json!({
@@ -626,7 +628,7 @@ fn infra_invoice_paid_body(
             "id": provider_invoice_id,
             "amount_paid": amount_paid,
             "currency": "usd",
-            "metadata": { "creator_id": creator_id.to_string(), "invoice_kind": "infra" }
+            "metadata": { "organization_id": organization_id.to_string(), "invoice_kind": "infra" }
         }}
     })
     .to_string()
@@ -659,19 +661,20 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
     let fx = Fixture::new(&db_url, "idem-distinct-evt").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     conn.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        &[&creator_id],
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&organization_id],
     )
     .await
-    .expect("creator_billing");
+    .expect("organization_billing");
     // Post-D3 the infra branch returns before the payout FK, so no Connect link is
     // needed for these infra deliveries to 200; this test isolates the PR-1 append
     // idempotency across two DISTINCT event ids for the same Stripe invoice.
 
     let (inv_id, provider_invoice_id) =
-        seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+        seed_finalized_infra_invoice(&conn, organization_id, 4500).await;
 
     // Delivery #1 — fresh event id, full cash.
     let evt1 = format!("evt_idem1_{}", Uuid::new_v4().simple());
@@ -679,7 +682,7 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
     // Postgres client - alive past the teardown at the end of this test.
     let status1 = post_webhook!(
         app,
-        infra_invoice_paid_body(&evt1, &provider_invoice_id, creator_id, 4500),
+        infra_invoice_paid_body(&evt1, &provider_invoice_id, organization_id, 4500),
         None
     )
     .status();
@@ -689,7 +692,7 @@ async fn distinct_events_same_invoice_append_one_charge_row() {
     let evt2 = format!("evt_idem2_{}", Uuid::new_v4().simple());
     let status2 = post_webhook!(
         app,
-        infra_invoice_paid_body(&evt2, &provider_invoice_id, creator_id, 4500),
+        infra_invoice_paid_body(&evt2, &provider_invoice_id, organization_id, 4500),
         None
     )
     .status();
@@ -736,20 +739,21 @@ async fn same_event_retry_after_later_failure_appends_one_charge_row() {
     let fx = Fixture::new_with_stripe(&db_url, "idem-same-evt-retry", "sk_test_mock", &base_url).await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     conn.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        &[&creator_id],
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&organization_id],
     )
     .await
-    .expect("creator_billing");
+    .expect("organization_billing");
 
     let (inv_id, provider_invoice_id) =
-        seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+        seed_finalized_infra_invoice(&conn, organization_id, 4500).await;
 
     let evt = format!("evt_idem_retry_{}", Uuid::new_v4().simple());
     // No inline pi_/ch_ → the handler MUST do the (flaky) settlement fetch.
-    let body = infra_invoice_paid_body(&evt, &provider_invoice_id, creator_id, 4500);
+    let body = infra_invoice_paid_body(&evt, &provider_invoice_id, organization_id, 4500);
 
     // First delivery: the charge row is appended, THEN the settlement-id fetch 500s
     // → 500, event NOT claimed.
@@ -814,14 +818,14 @@ async fn same_event_retry_after_later_failure_appends_one_charge_row() {
 /// append: a dropped conn, a lock timeout, etc.)
 ///
 /// The object carries the `invoice_kind=infra` marker (so the infra branch + its
-/// append run) but NO `metadata.creator_id` and NO `customer` — so the fall-through
-/// Stream-2 `record_payout` path returns early (`missing_creator_id`) WITHOUT
+/// append run) but NO `metadata.organization_id` and NO `customer` — so the fall-through
+/// Stream-2 `record_payout` path returns early (`missing_organization_id`) WITHOUT
 /// touching the DB. The append is therefore the SOLE DB write, isolating its
-/// failure: pre-fix the webhook would 200/`missing_creator_id` and claim the event;
+/// failure: pre-fix the webhook would 200/`missing_organization_id` and claim the event;
 /// post-fix the append error 500s before that.
 ///
 /// RED pre-fix: `record_infra_payment` swallowed the error and returned `()`, the
-/// webhook fell through to `missing_creator_id` (200), and `mark_event_processed`
+/// webhook fell through to `missing_organization_id` (200), and `mark_event_processed`
 /// CLAIMED the event — so the cash row was dropped AND never retried.
 #[compio::test]
 async fn append_failure_leaves_event_unclaimed_not_silently_dropped() {
@@ -829,22 +833,23 @@ async fn append_failure_leaves_event_unclaimed_not_silently_dropped() {
     let fx = Fixture::new(&db_url, "fail-closed-append").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     conn.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        &[&creator_id],
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&organization_id],
     )
     .await
-    .expect("creator_billing");
+    .expect("organization_billing");
 
     // A REAL finalized invoice + provider ref so the lookup resolves; the append
     // itself fails on the invalid currency CHECK (stand-in for a transient append error).
     let (inv_id, provider_invoice_id) =
-        seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+        seed_finalized_infra_invoice(&conn, organization_id, 4500).await;
 
     let evt = format!("evt_failclosed_{}", Uuid::new_v4().simple());
-    // invoice_kind=infra marker WITHOUT creator metadata/customer → infra append
-    // runs, then record_payout is skipped (missing_creator_id). Invalid currency
+    // invoice_kind=infra marker WITHOUT organization metadata/customer → infra append
+    // runs, then record_payout is skipped (missing_organization_id). Invalid currency
     // `"USD"` → invoice_payments.currency CHECK violation on the append INSERT.
     let body = json!({
         "id": evt,
@@ -881,22 +886,22 @@ async fn append_failure_leaves_event_unclaimed_not_silently_dropped() {
     common::drain_pg().await;
 }
 
-/// Count payout-ledger rows for a creator.
-async fn payout_row_count(conn: &compio_postgres::Client, creator_id: Uuid) -> i64 {
+/// Count payout-ledger rows for a organization.
+async fn payout_row_count(conn: &compio_postgres::Client, organization_id: &str) -> i64 {
     conn.query(
-        "SELECT COUNT(*)::bigint AS n FROM zeroship.payouts WHERE creator_id = $1",
-        &[&creator_id],
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.payouts WHERE organization_id = $1",
+        &[&organization_id],
     )
     .await
     .expect("count payouts")[0]
         .get::<_, i64>("n")
 }
 
-/// D3 (real-Stripe regression): an INFRA `invoice.paid` for a creator with NO
-/// `creator_accounts` (Connect) row must ACK 200 and NOT touch the Stream-2 payout
+/// D3 (real-Stripe regression): an INFRA `invoice.paid` for a organization with NO
+/// `organization_accounts` (Connect) row must ACK 200 and NOT touch the Stream-2 payout
 /// path. Pre-fix `dispatch_event` did not `return` after the infra branch, so it fell
-/// through to `record_payout`, whose `payouts.creator_id → creator_accounts(creator_id)`
-/// FK an infra-only creator cannot satisfy → 500 AFTER the infra writes committed
+/// through to `record_payout`, whose `payouts.organization_id → organization_accounts(organization_id)`
+/// FK an infra-only organization cannot satisfy → 500 AFTER the infra writes committed
 /// (non-atomic; the event never acked → Stripe retried forever — a poison loop).
 ///
 /// RED pre-fix: HTTP 500 + the event left UNCLAIMED (poison). Post-fix: 200, the
@@ -907,19 +912,20 @@ async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
     let fx = Fixture::new(&db_url, "d3-infra-no-connect").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     conn.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        &[&creator_id],
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&organization_id],
     )
     .await
-    .expect("creator_billing");
-    // Deliberately NO link_account → no creator_accounts row (an infra-only creator).
+    .expect("organization_billing");
+    // Deliberately NO link_account → no organization_accounts row (an infra-only organization).
     let (inv_id, provider_invoice_id) =
-        seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+        seed_finalized_infra_invoice(&conn, organization_id, 4500).await;
 
     let evt = format!("evt_d3_{}", Uuid::new_v4().simple());
-    let body = infra_invoice_paid_body(&evt, &provider_invoice_id, creator_id, 4500);
+    let body = infra_invoice_paid_body(&evt, &provider_invoice_id, organization_id, 4500);
     let r = post_webhook!(app, &body, None);
 
     // ACKED 200 (no poison loop) — the infra branch returned before the payout FK.
@@ -931,7 +937,7 @@ async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
     assert_eq!(charge_row_count(&conn, &inv_id).await, 1, "the infra charge row was appended");
     // …and the payout path was NEVER reached (no FK violation, no payout row).
     assert_eq!(
-        payout_row_count(&conn, creator_id).await,
+        payout_row_count(&conn, organization_id).await,
         0,
         "an infra invoice.paid must NOT write a payout row (it returns before record_payout)",
     );
@@ -943,8 +949,8 @@ async fn infra_invoice_paid_without_connect_account_acks_200_no_payout() {
 }
 
 /// D3 (no-regression companion): a NON-infra `invoice.paid` (a real Connect-revenue
-/// event — `metadata.creator_id` present, NO `invoice_kind=infra`) MUST still route to
-/// the Stream-2 `record_payout` path and record a payout for a creator with a linked
+/// event — `metadata.organization_id` present, NO `invoice_kind=infra`) MUST still route to
+/// the Stream-2 `record_payout` path and record a payout for a organization with a linked
 /// Connect account. This proves the D3 `return` is scoped to infra invoices only and
 /// did NOT break the legitimate Connect payout path.
 #[compio::test]
@@ -953,17 +959,18 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
     let fx = Fixture::new(&db_url, "d3-connect-payout").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
-    // A real Connect creator: linked account so the payout FK is satisfied.
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
+    // A real Connect organization: linked account so the payout FK is satisfied.
     let acct = format!("acct_{}", Uuid::new_v4().simple());
     fx.state
         .stripe_store
-        .link_account(creator_id, &acct)
+        .link_account(organization_id, &acct)
         .await
         .expect("link stripe account");
 
-    // NON-infra invoice.paid: creator_id present, NO invoice_kind=infra marker.
-    // M4: the settling account (on_behalf_of) is the creator's OWN account, so
+    // NON-infra invoice.paid: organization_id present, NO invoice_kind=infra marker.
+    // M4: the settling account (on_behalf_of) is the organization's OWN account, so
     // attribution passes and the payout is credited.
     let evt = format!("evt_connect_{}", Uuid::new_v4().simple());
     let body = json!({
@@ -976,7 +983,7 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
             "application_fee_amount": 150,
             "currency": "usd",
             "on_behalf_of": acct,
-            "metadata": { "creator_id": creator_id.to_string() }
+            "metadata": { "organization_id": organization_id.to_string() }
         }}
     })
     .to_string();
@@ -986,9 +993,9 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
     let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
     assert_eq!(b["status"], "recorded", "routed through the Stream-2 record_payout path");
     assert_eq!(
-        payout_row_count(&conn, creator_id).await,
+        payout_row_count(&conn, organization_id).await,
         1,
-        "a real Connect creator's invoice.paid still records a payout (D3 did not break this)",
+        "a real Connect organization's invoice.paid still records a payout (D3 did not break this)",
     );
 
     drop(conn);
@@ -998,12 +1005,12 @@ async fn non_infra_invoice_paid_still_routes_to_payout() {
 }
 
 /// M4 (payout attribution): a Connect-revenue `invoice.paid` whose settling account
-/// (`on_behalf_of`) is NOT the claimed `metadata.creator_id`'s own account must be
-/// REJECTED — no payout credited. A forged creator id cannot steal another account's
+/// (`on_behalf_of`) is NOT the claimed `metadata.organization_id`'s own account must be
+/// REJECTED — no payout credited. A forged organization id cannot steal another account's
 /// revenue.
 ///
-/// RED pre-fix: `record_payout` trusted `metadata.creator_id` with no ownership
-/// check, so a payout was credited to the forged creator regardless of which account
+/// RED pre-fix: `record_payout` trusted `metadata.organization_id` with no ownership
+/// check, so a payout was credited to the forged organization regardless of which account
 /// actually settled the charge.
 #[compio::test]
 async fn payout_with_mismatched_settling_account_is_rejected() {
@@ -1012,13 +1019,15 @@ async fn payout_with_mismatched_settling_account_is_rejected() {
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
 
-    // The CLAIMED creator owns acct A.
-    let claimed_creator = make_user(&conn).await;
+    // The CLAIMED organization owns acct A.
+    let claimed_creator = make_organization(&conn).await;
+    let claimed_creator = claimed_creator.as_str();
     let acct_a = format!("acct_{}", Uuid::new_v4().simple());
     fx.state.stripe_store.link_account(claimed_creator, &acct_a).await.expect("link A");
 
     // But the charge settled on behalf of acct B (a DIFFERENT account).
-    let other_creator = make_user(&conn).await;
+    let other_creator = make_organization(&conn).await;
+    let other_creator = other_creator.as_str();
     let acct_b = format!("acct_{}", Uuid::new_v4().simple());
     fx.state.stripe_store.link_account(other_creator, &acct_b).await.expect("link B");
 
@@ -1032,9 +1041,9 @@ async fn payout_with_mismatched_settling_account_is_rejected() {
             "amount_paid": 9999,
             "application_fee_amount": 100,
             "currency": "usd",
-            // Settled on B, but metadata CLAIMS the (different) creator who owns A.
+            // Settled on B, but metadata CLAIMS the (different) organization who owns A.
             "on_behalf_of": acct_b,
-            "metadata": { "creator_id": claimed_creator.to_string() }
+            "metadata": { "organization_id": claimed_creator.to_string() }
         }}
     })
     .to_string();
@@ -1046,12 +1055,12 @@ async fn payout_with_mismatched_settling_account_is_rejected() {
     assert_eq!(
         payout_row_count(&conn, claimed_creator).await,
         0,
-        "no payout credited to the claimed creator whose account did NOT settle the charge",
+        "no payout credited to the claimed organization whose account did NOT settle the charge",
     );
     assert_eq!(
         payout_row_count(&conn, other_creator).await,
         0,
-        "and certainly none mis-credited to the real settling account's creator",
+        "and certainly none mis-credited to the real settling account's organization",
     );
 
     drop(conn);
@@ -1076,19 +1085,20 @@ async fn infra_invoice_paid_fetches_settlement_linkage_when_payload_omits_it() {
     let fx = Fixture::new_with_stripe(&db_url, "d2-fetch-linkage", "sk_test_mock", &base_url).await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     conn.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        &[&creator_id],
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&organization_id],
     )
     .await
-    .expect("creator_billing");
+    .expect("organization_billing");
     let (inv_id, provider_invoice_id) =
-        seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+        seed_finalized_infra_invoice(&conn, organization_id, 4500).await;
 
     // Payload OMITS pi_/ch_ entirely (the real-Stripe shape) — forces the fetch.
     let evt = format!("evt_d2_{}", Uuid::new_v4().simple());
-    let body = infra_invoice_paid_body(&evt, &provider_invoice_id, creator_id, 4500);
+    let body = infra_invoice_paid_body(&evt, &provider_invoice_id, organization_id, 4500);
     // Status only: a retained `WebResponse` keeps the app state - and its
     // Postgres client - alive past the teardown at the end of this test.
     let status = post_webhook!(app, &body, None).status();
@@ -1149,16 +1159,17 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
     let fx = Fixture::new_with_stripe(&db_url, "c2-poison", "sk_test_mock", &base_url).await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     conn.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        &[&creator_id],
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&organization_id],
     )
     .await
-    .expect("creator_billing");
+    .expect("organization_billing");
 
     // Invoice A: finalized, with the shared pi_ ALREADY linked (the prior settlement).
-    let (inv_a, _provider_a) = seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+    let (inv_a, _provider_a) = seed_finalized_infra_invoice(&conn, organization_id, 4500).await;
     conn.execute(
         "INSERT INTO zeroship.billing_provider_refs (invoice_id, provider, ref_kind, external_id) \
          VALUES ($1, 'stripe', 'payment_intent', $2)",
@@ -1169,7 +1180,7 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
 
     // Invoice B: a DIFFERENT internal invoice (the reissue), whose invoice.paid
     // fetches the SAME shared pi_ from the mock. Seeded in a DISTINCT period so the
-    // (creator, period) partial-unique index does not block the second invoice (the
+    // (organization, period) partial-unique index does not block the second invoice (the
     // void+reissue scenario the C2 fix targets is about the SHARED pi_, not the period).
     let inv_b = zeroship_core::typed_id::new_invoice_id();
     let period_b = {
@@ -1181,9 +1192,9 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
     };
     conn.execute(
         "INSERT INTO zeroship.invoices \
-           (id, creator_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
+           (id, organization_id, period, status, subtotal_cents, credit_cents, tax_cents, total_cents, finalized_at) \
          VALUES ($1, $2, $3::date, 'finalized', 4500, 0, 0, 4500, NOW())",
-        &[&inv_b, &creator_id, &period_b],
+        &[&inv_b, &organization_id, &period_b],
     )
     .await
     .expect("finalized invoice B");
@@ -1197,7 +1208,7 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
     .expect("provider ref B");
     let evt = format!("evt_c2_{}", Uuid::new_v4().simple());
     // Body omits inline pi_/ch_ → the handler MUST fetch (gets the shared pi_).
-    let body = infra_invoice_paid_body(&evt, &provider_b, creator_id, 4500);
+    let body = infra_invoice_paid_body(&evt, &provider_b, organization_id, 4500);
 
     // Status only: a retained `WebResponse` keeps the app state - and its
     // Postgres client - alive past the teardown at the end of this test.
@@ -1236,12 +1247,13 @@ async fn settling_pi_reused_across_invoices_does_not_poison_webhook() {
 /// M1 (dunning must fail-closed): an error from `record_payment_failed` during an
 /// `invoice.payment_failed` webhook must FAIL CLOSED — return 5xx and leave the
 /// event UNCLAIMED so Stripe retries. Otherwise the event is marked processed,
-/// Stripe never redelivers, and the creator never enters dunning (consuming free
+/// Stripe never redelivers, and the organization never enters dunning (consuming free
 /// infra on a dead card).
 ///
-/// We force the error with a `metadata.creator_id` that is a well-formed UUID but
+/// We force the error with a `metadata.organization_id` that is a well-formed UUID but
 /// NOT a real `users` row: `record_payment_failed`'s parent-first
-/// `INSERT INTO creator_billing (creator_id)` FK-violates `users(id)` → Err.
+/// `INSERT INTO organization_billing (organization_id)` FK-violates
+/// `organizations(id)` → Err.
 ///
 /// RED pre-fix: the handler logged the error and fell through to 200; the event was
 /// CLAIMED (1 ledger row) and dunning never armed.
@@ -1252,9 +1264,12 @@ async fn payment_failed_record_error_fails_closed_unclaimed() {
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
 
-    // A creator_id that is NOT a real user → the parent-first creator_billing insert
-    // FK-violates → record_payment_failed errors.
-    let bogus_creator = Uuid::new_v4();
+    // A WELL-FORMED organization id with no `organizations` row, so the
+    // parent-first `organization_billing` insert FK-violates and
+    // `record_payment_failed` errors. It has to be well formed: a malformed id is
+    // refused earlier, by `OrganizationId::parse`, and would exercise the
+    // metadata guard instead of the fail-closed path this test is about.
+    let bogus_organization = zeroship_core::typed_id::generate("org");
     let evt = format!("evt_pf_failclosed_{}", Uuid::new_v4().simple());
     let body = json!({
         "id": evt,
@@ -1263,7 +1278,7 @@ async fn payment_failed_record_error_fails_closed_unclaimed() {
         "data": { "object": {
             "id": format!("in_pf_{}", Uuid::new_v4().simple()),
             "currency": "usd",
-            "metadata": { "creator_id": bogus_creator.to_string(), "invoice_kind": "infra" }
+            "metadata": { "organization_id": bogus_organization, "invoice_kind": "infra" }
         }}
     })
     .to_string();
@@ -1279,7 +1294,7 @@ async fn payment_failed_record_error_fails_closed_unclaimed() {
     assert_eq!(
         ledger_count(&conn, &evt).await,
         0,
-        "the event must NOT be claimed — Stripe retries so the creator still enters dunning",
+        "the event must NOT be claimed — Stripe retries so the organization still enters dunning",
     );
 
     drop(conn);
@@ -1290,7 +1305,7 @@ async fn payment_failed_record_error_fails_closed_unclaimed() {
 
 /// M2 (the money hole): an `account.updated` flipping `charges_enabled=false`
 /// (Stripe risk/KYC hold) must update the CACHED flag so the `connect_checkout`
-/// gate (which reads `creator_accounts.charges_enabled`) now blocks the account.
+/// gate (which reads `organization_accounts.charges_enabled`) now blocks the account.
 ///
 /// RED pre-fix: `account.updated` fell into the silent `_ => ignored` arm — the
 /// cached `charges_enabled` stayed `true`, and a disabled account kept passing the
@@ -1301,18 +1316,19 @@ async fn account_updated_disables_cached_charges_flag() {
     let fx = Fixture::new(&db_url, "m2-account-updated").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     let acct = format!("acct_{}", Uuid::new_v4().simple());
     // Link + mark the account fully enabled (the state before the risk hold).
-    fx.state.stripe_store.link_account(creator_id, &acct).await.expect("link");
+    fx.state.stripe_store.link_account(organization_id, &acct).await.expect("link");
     fx.state
         .stripe_store
-        .set_account_flags(creator_id, &acct, true, true, true)
+        .set_account_flags(organization_id, &acct, true, true, true)
         .await
         .expect("enable flags");
     // Sanity: the gate would pass right now.
     assert!(
-        fx.state.stripe_store.get_account(creator_id).await.unwrap().unwrap().charges_enabled,
+        fx.state.stripe_store.get_account(organization_id).await.unwrap().unwrap().charges_enabled,
         "precondition: account is charges_enabled before the risk hold",
     );
 
@@ -1338,7 +1354,7 @@ async fn account_updated_disables_cached_charges_flag() {
     assert_eq!(ledger_count(&conn, &evt).await, 1, "event claimed");
 
     // The CACHED flag the connect_checkout gate reads is now FALSE → gate blocks.
-    let acct_row = fx.state.stripe_store.get_account(creator_id).await.unwrap().unwrap();
+    let acct_row = fx.state.stripe_store.get_account(organization_id).await.unwrap().unwrap();
     assert!(
         !acct_row.charges_enabled,
         "account.updated must flip the cached charges_enabled to false so checkout is blocked",
@@ -1365,16 +1381,17 @@ async fn dispute_funds_event_does_not_double_debit() {
     let fx = Fixture::new(&db_url, "m2-funds-nodouble").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     conn.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        &[&creator_id],
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&organization_id],
     )
     .await
-    .expect("creator_billing");
+    .expect("organization_billing");
 
     // A finalized invoice with a charge collected + the ch_ linkage the dispute resolves through.
-    let (inv_id, _provider) = seed_finalized_infra_invoice(&conn, creator_id, 4500).await;
+    let (inv_id, _provider) = seed_finalized_infra_invoice(&conn, organization_id, 4500).await;
     append_charge_via_helper(&conn, &inv_id, 4500).await;
     let ch = format!("ch_funds_{}", Uuid::new_v4().simple());
     conn.execute(
@@ -1460,7 +1477,7 @@ async fn dispute_debit_count(conn: &compio_postgres::Client, invoice_id: &str) -
 /// M3 (dedup concurrency): `lock_event` takes a SESSION advisory lock keyed on the
 /// event id, so a SECOND connection's `pg_try_advisory_lock` on the SAME key FAILS
 /// while it is held — the same-event redeliveries serialize. Mirrors the PR-2
-/// consume-lock test (`issue_refund_takes_per_creator_advisory_lock`).
+/// consume-lock test (`issue_refund_takes_per_organization_advisory_lock`).
 ///
 /// RED pre-fix: there was no lock around the check-then-act, so the try-lock on the
 /// same key would succeed (no serialization).
@@ -1529,18 +1546,24 @@ async fn side_conn(db_url: &str) -> compio_postgres::Client {
     conn
 }
 
-/// Insert a fresh `zeroship.users` row (FK target of `creator_billing`) and
+/// Insert a fresh `zeroship.users` row (FK target of `organization_billing`) and
 /// return its id. Unique email per call.
-async fn make_user(conn: &compio_postgres::Client) -> Uuid {
-    let rows = conn
-        .query(
-            "INSERT INTO zeroship.users (email, name) \
-             VALUES ($1, 'g6-dedup-test') RETURNING id",
-            &[&format!("g6-{}@test.invalid", Uuid::new_v4().simple())],
-        )
-        .await
-        .expect("insert user");
-    rows[0].get("id")
+/// A billing subject for the webhook fixtures.
+///
+/// Every table these handlers write - `organization_accounts`,
+/// `organization_billing`, `payouts`, `invoices` - keys on
+/// `organizations(id)`, so the fixture mints one of those rather than a user.
+async fn make_organization(conn: &compio_postgres::Client) -> String {
+    let organization_id = zeroship_core::typed_id::generate("org");
+    let slug = format!("g6-{}", Uuid::new_v4().simple());
+    conn.execute(
+        "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+         VALUES ($1, $2, 'g6-dedup-test', $3)",
+        &[&organization_id, &slug, &format!("{slug}@test.invalid")],
+    )
+    .await
+    .expect("insert organization");
+    organization_id
 }
 
 /// Count rows in the dedup ledger for a given event-id (0 ⇒ not yet claimed).
@@ -1554,27 +1577,27 @@ async fn ledger_count(conn: &compio_postgres::Client, event_id: &str) -> i64 {
         .get::<_, i64>("n")
 }
 
-/// Count `setup_intent_succeeded` audit rows for a creator+event — the proof
+/// Count `setup_intent_succeeded` audit rows for a organization+event — the proof
 /// the handler ran (one row per actual processing).
-async fn setup_audit_count(conn: &compio_postgres::Client, creator_id: Uuid, event_id: &str) -> i64 {
+async fn setup_audit_count(conn: &compio_postgres::Client, organization_id: &str, event_id: &str) -> i64 {
     conn.query(
         "SELECT COUNT(*)::bigint AS n FROM zeroship.app_audit \
-         WHERE creator_id = $1 AND action = 'setup_intent_succeeded' AND resource = $2",
-        &[&creator_id, &event_id],
+         WHERE organization_id = $1 AND action = 'setup_intent_succeeded' AND resource = $2",
+        &[&organization_id, &event_id],
     )
     .await
     .expect("count audit")[0]
         .get::<_, i64>("n")
 }
 
-fn setup_intent_body(event_id: &str, creator_id: Uuid) -> String {
+fn setup_intent_body(event_id: &str, organization_id: &str) -> String {
     json!({
         "id": event_id,
         "type": "setup_intent.succeeded",
         "created": 1_777_017_600i64,
         "data": { "object": {
             "id": format!("seti_{}", Uuid::new_v4().simple()),
-            "metadata": { "creator_id": creator_id.to_string() }
+            "metadata": { "organization_id": organization_id.to_string() }
         }}
     })
     .to_string()
@@ -1590,9 +1613,10 @@ async fn redelivered_event_is_deduped_handler_not_rerun() {
     let fx = Fixture::new(&db_url, "dedup-replay").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     let event_id = format!("evt_dedup_{}", Uuid::new_v4().simple());
-    let body = setup_intent_body(&event_id, creator_id);
+    let body = setup_intent_body(&event_id, organization_id);
 
     // First delivery — processed, ledger claimed, one audit row.
     let r1 = post_webhook!(app, &body, None);
@@ -1600,7 +1624,7 @@ async fn redelivered_event_is_deduped_handler_not_rerun() {
     let b1: Value = serde_json::from_slice(&test::read_body(r1).await).unwrap();
     assert_eq!(b1["status"], "default_pm_set");
     assert_eq!(ledger_count(&conn, &event_id).await, 1, "event claimed after success");
-    assert_eq!(setup_audit_count(&conn, creator_id, &event_id).await, 1);
+    assert_eq!(setup_audit_count(&conn, organization_id, &event_id).await, 1);
 
     // Re-delivery of the EXACT same event — deduped, handler NOT re-run.
     let r2 = post_webhook!(app, &body, None);
@@ -1609,7 +1633,7 @@ async fn redelivered_event_is_deduped_handler_not_rerun() {
     assert_eq!(b2["status"], "duplicate", "redelivery acked as duplicate");
     assert_eq!(ledger_count(&conn, &event_id).await, 1, "no second ledger row");
     assert_eq!(
-        setup_audit_count(&conn, creator_id, &event_id).await,
+        setup_audit_count(&conn, organization_id, &event_id).await,
         1,
         "handler did NOT re-run on redelivery — exactly-once effective"
     );
@@ -1630,9 +1654,10 @@ async fn forged_event_rejected_before_ledger_claim() {
     let fx = Fixture::new_with_secret(&db_url, "dedup-forged", "whsec_test_g6").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     let event_id = format!("evt_forged_{}", Uuid::new_v4().simple());
-    let body = setup_intent_body(&event_id, creator_id);
+    let body = setup_intent_body(&event_id, organization_id);
 
     // Bogus signature header — verification must reject.
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -1645,7 +1670,7 @@ async fn forged_event_rejected_before_ledger_claim() {
         "forged event NEVER claimed in the dedup ledger"
     );
     assert_eq!(
-        setup_audit_count(&conn, creator_id, &event_id).await,
+        setup_audit_count(&conn, organization_id, &event_id).await,
         0,
         "forged event NEVER processed"
     );
@@ -1657,7 +1682,7 @@ async fn forged_event_rejected_before_ledger_claim() {
 }
 
 /// A handler that FAILS (non-2xx) does NOT claim the event — so Stripe's retry
-/// re-processes it (no lost event). Here the first delivery names a creator_id
+/// re-processes it (no lost event). Here the first delivery names a organization_id
 /// with no `users` row ⇒ `set_default_pm`'s FK insert errors ⇒ 500, unclaimed.
 /// The retry (after the user exists) succeeds and is then recorded once.
 #[compio::test]
@@ -1667,10 +1692,12 @@ async fn handler_failure_is_retried_not_lost() {
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
 
-    // A creator_id that is NOT a real user → set_default_pm FK insert fails.
-    let creator_id = Uuid::new_v4();
+    // A well-formed organization id with NO organizations row behind it, so
+    // `set_default_pm` violates the foreign key. That is the retryable shape this
+    // test exists for: the event arrives before the organization is created.
+    let organization_id = zeroship_core::typed_id::generate("org");
     let event_id = format!("evt_retry_{}", Uuid::new_v4().simple());
-    let body = setup_intent_body(&event_id, creator_id);
+    let body = setup_intent_body(&event_id, &organization_id);
 
     // First delivery: handler errors (FK violation) → non-2xx, NOT claimed.
     // Status only: a retained `WebResponse` keeps the app state - and its
@@ -1687,13 +1714,18 @@ async fn handler_failure_is_retried_not_lost() {
         "failed handler did NOT claim the event — Stripe will retry"
     );
 
-    // Now the user exists (creator finished signup before the retry lands).
+    // Now the organization exists (it was created before the retry landed).
     conn.execute(
-        "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2, 'g6-retry')",
-        &[&creator_id, &format!("g6-retry-{}@test.invalid", creator_id.simple())],
+        "INSERT INTO zeroship.organizations (id, slug, name, billing_email) \
+         VALUES ($1, $2, 'g6-retry', $3)",
+        &[
+            &organization_id,
+            &format!("g6-retry-{}", Uuid::new_v4().simple()),
+            &format!("g6-retry-{organization_id}@test.invalid"),
+        ],
     )
     .await
-    .expect("insert user with fixed id");
+    .expect("insert organization with the id the event names");
 
     // Retry (same event_id) — now succeeds and IS recorded exactly once.
     let r2 = post_webhook!(app, &body, None);
@@ -1701,7 +1733,7 @@ async fn handler_failure_is_retried_not_lost() {
     let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
     assert_eq!(b2["status"], "default_pm_set");
     assert_eq!(ledger_count(&conn, &event_id).await, 1, "retry recorded once");
-    assert_eq!(setup_audit_count(&conn, creator_id, &event_id).await, 1);
+    assert_eq!(setup_audit_count(&conn, &organization_id, &event_id).await, 1);
 
     drop(conn);
     drop(app);
@@ -1727,11 +1759,11 @@ async fn owned_conn(db_url: &str) -> compio_postgres::Client {
     conn
 }
 
-/// Credit balance for a creator = SUM(credit_ledger.amount_cents).
-async fn credit_balance(conn: &compio_postgres::Client, creator_id: Uuid) -> i64 {
+/// Credit balance for a organization = SUM(credit_ledger.amount_cents).
+async fn credit_balance(conn: &compio_postgres::Client, organization_id: &str) -> i64 {
     conn.query(
-        "SELECT COALESCE(SUM(amount_cents),0)::bigint AS b FROM zeroship.credit_ledger WHERE creator_id = $1",
-        &[&creator_id],
+        "SELECT COALESCE(SUM(amount_cents),0)::bigint AS b FROM zeroship.credit_ledger WHERE organization_id = $1",
+        &[&organization_id],
     )
     .await
     .expect("credit balance")[0]
@@ -1779,7 +1811,7 @@ fn refund_updated_body(event_id: &str, re_id: &str, status: &str) -> String {
 
 /// MONEY-CRITICAL (charge.refund.updated, CASH leg): a CASH refund whose Stripe `Refund`
 /// later FAILS must be marked `failed` so the over-refund cap STOPS counting it — the
-/// creator can re-refund the same cash. A redelivery is a no-op.
+/// organization can re-refund the same cash. A redelivery is a no-op.
 ///
 /// RED pre-fix: the deferred arm left the refund `issued`, so the cash stayed
 /// permanently "refunded" and a re-refund was blocked by the over-refund cap.
@@ -1789,17 +1821,18 @@ async fn refund_updated_failed_cash_refund_frees_the_cap_idempotently() {
     let fx = Fixture::new(&db_url, "refund-updated-cash").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     conn.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        &[&creator_id],
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&organization_id],
     )
     .await
-    .expect("creator_billing");
+    .expect("organization_billing");
 
     // Finalized invoice + cash collected + the in_… charge provider_ref so the cash refund
     // resolves a money object.
-    let (inv_id, provider_invoice_id) = seed_finalized_infra_invoice(&conn, creator_id, 5000).await;
+    let (inv_id, provider_invoice_id) = seed_finalized_infra_invoice(&conn, organization_id, 5000).await;
     zeroship_control::invoice_payments::append_charge(
         &conn, &inv_id, 5000, "usd", Some(&provider_invoice_id),
     )
@@ -1892,15 +1925,16 @@ async fn refund_updated_failed_credit_claws_back_grant() {
     let fx = Fixture::new(&db_url, "refund-updated-claw").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     conn.execute(
-        "INSERT INTO zeroship.creator_billing (creator_id) VALUES ($1) ON CONFLICT DO NOTHING",
-        &[&creator_id],
+        "INSERT INTO zeroship.organization_billing (organization_id) VALUES ($1) ON CONFLICT DO NOTHING",
+        &[&organization_id],
     )
     .await
-    .expect("creator_billing");
+    .expect("organization_billing");
 
-    let (inv_id, _provider) = seed_finalized_infra_invoice(&conn, creator_id, 5000).await;
+    let (inv_id, _provider) = seed_finalized_infra_invoice(&conn, organization_id, 5000).await;
     append_charge_via_helper(&conn, &inv_id, 5000).await;
 
     let mut oc = owned_conn(&db_url).await;
@@ -1916,7 +1950,7 @@ async fn refund_updated_failed_credit_claws_back_grant() {
         zeroship_control::refund::RefundOutcome::Issued { refund_id, .. } => refund_id,
         other => panic!("expected Issued, got {other:?}"),
     };
-    let balance_before = credit_balance(&conn, creator_id).await;
+    let balance_before = credit_balance(&conn, organization_id).await;
     assert_eq!(balance_before, 2000, "credit minted");
 
     // Seed the re_… cash ref the failed-refund webhook resolves through. (Stripe does
@@ -1943,7 +1977,7 @@ async fn refund_updated_failed_credit_claws_back_grant() {
     assert_eq!(refund_status(&conn, &refund_id).await, "failed", "refund failed");
     assert_eq!(clawback_count(&conn, &refund_id).await, 1, "exactly one refund_clawback entry");
     assert_eq!(
-        credit_balance(&conn, creator_id).await,
+        credit_balance(&conn, organization_id).await,
         0,
         "balance conserved: +2000 grant − 2000 clawback = 0 (the phantom credit is gone)",
     );
@@ -1955,7 +1989,7 @@ async fn refund_updated_failed_credit_claws_back_grant() {
     let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
     assert_eq!(b2["status"], "refund_already_reversed", "no double-reversal");
     assert_eq!(clawback_count(&conn, &refund_id).await, 1, "still exactly one clawback");
-    assert_eq!(credit_balance(&conn, creator_id).await, 0, "balance still conserved");
+    assert_eq!(credit_balance(&conn, organization_id).await, 0, "balance still conserved");
 
     drop(conn);
     drop(app);
@@ -1985,11 +2019,11 @@ async fn refund_updated_succeeded_is_noop() {
     common::drain_pg().await;
 }
 
-/// Count payout_failures rows for a creator.
-async fn payout_failure_count(conn: &compio_postgres::Client, creator_id: Uuid) -> i64 {
+/// Count payout_failures rows for a organization.
+async fn payout_failure_count(conn: &compio_postgres::Client, organization_id: &str) -> i64 {
     conn.query(
-        "SELECT COUNT(*)::bigint AS n FROM zeroship.payout_failures WHERE creator_id = $1",
-        &[&creator_id],
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.payout_failures WHERE organization_id = $1",
+        &[&organization_id],
     )
     .await
     .expect("count payout failures")[0]
@@ -2020,16 +2054,17 @@ fn payout_failed_body(event_id: &str, po_id: &str, account: &str, amount: i64) -
 /// exactly ONE payout_failed notification, idempotent on the payout id.
 ///
 /// RED pre-fix: payout.failed fell into the deferred "acked but not acted on" arm — no
-/// ledger row, no creator notification.
+/// ledger row, no organization notification.
 #[compio::test]
 async fn payout_failed_records_failure_and_notifies_once() {
     let db_url = db_url();
     let fx = Fixture::new(&db_url, "payout-failed").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     let acct = format!("acct_{}", Uuid::new_v4().simple());
-    fx.state.stripe_store.link_account(creator_id, &acct).await.expect("link");
+    fx.state.stripe_store.link_account(organization_id, &acct).await.expect("link");
 
     let po_id = format!("po_{}", Uuid::new_v4().simple());
     let evt = format!("evt_payout_{}", Uuid::new_v4().simple());
@@ -2038,17 +2073,17 @@ async fn payout_failed_records_failure_and_notifies_once() {
     let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
     assert_eq!(b["status"], "payout_failure_recorded");
     assert_eq!(ledger_count(&conn, &evt).await, 1, "event claimed");
-    assert_eq!(payout_failure_count(&conn, creator_id).await, 1, "one failure row");
+    assert_eq!(payout_failure_count(&conn, organization_id).await, 1, "one failure row");
 
-    // The notify cron emits exactly one payout_failed notification for this creator. We
+    // The notify cron emits exactly one payout_failed notification for this organization. We
     // assert off the DB send-ledger PER-CREATOR (parallel-safe per the PR-6 lesson: a
-    // sibling's fleet-wide tick could deliver my creator's email into ITS recorder, but the
-    // `billing_notifications` row is per-(creator,kind,transition) and immune).
-    drive_notify_until_sent(&fx.state, &conn, creator_id, "payout_failed").await;
+    // sibling's fleet-wide tick could deliver my organization's email into ITS recorder, but the
+    // `billing_notifications` row is per-(organization,kind,transition) and immune).
+    drive_notify_until_sent(&fx.state, &conn, organization_id, "payout_failed").await;
     assert_eq!(
-        notification_sent_count(&conn, creator_id, "payout_failed").await,
+        notification_sent_count(&conn, organization_id, "payout_failed").await,
         1,
-        "exactly one payout_failed notification ledger row (sent) for this creator",
+        "exactly one payout_failed notification ledger row (sent) for this organization",
     );
 
     // Redelivery (different evt id, same po_…) is an idempotent no-op: no second row.
@@ -2057,10 +2092,10 @@ async fn payout_failed_records_failure_and_notifies_once() {
     assert_eq!(r2.status(), StatusCode::OK);
     let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
     assert_eq!(b2["status"], "duplicate", "same po_… is a no-op");
-    assert_eq!(payout_failure_count(&conn, creator_id).await, 1, "still one failure row");
+    assert_eq!(payout_failure_count(&conn, organization_id).await, 1, "still one failure row");
     let _ = zeroship_control::cron::billing_notify::tick(&fx.state).await;
     assert_eq!(
-        notification_sent_count(&conn, creator_id, "payout_failed").await,
+        notification_sent_count(&conn, organization_id, "payout_failed").await,
         1,
         "still exactly one payout_failed notification (no duplicate)",
     );
@@ -2071,29 +2106,29 @@ async fn payout_failed_records_failure_and_notifies_once() {
     common::drain_pg().await;
 }
 
-/// Count `sent` `billing_notifications` rows for a creator + kind (per-creator, immune to
+/// Count `sent` `billing_notifications` rows for a organization + kind (per-organization, immune to
 /// the fleet-wide cron's sibling-recorder race — the PR-6 parallel-safe assertion).
-async fn notification_sent_count(conn: &compio_postgres::Client, creator_id: Uuid, kind: &str) -> i64 {
+async fn notification_sent_count(conn: &compio_postgres::Client, organization_id: &str, kind: &str) -> i64 {
     conn.query(
         "SELECT COUNT(*)::bigint AS n FROM zeroship.billing_notifications \
-         WHERE creator_id = $1 AND kind = $2::text::zeroship.billing_notification_kind AND status = 'sent'",
-        &[&creator_id, &kind],
+         WHERE organization_id = $1 AND kind = $2::text::zeroship.billing_notification_kind AND status = 'sent'",
+        &[&organization_id, &kind],
     )
     .await
     .expect("count notifications")[0]
         .get::<_, i64>("n")
 }
 
-/// Drive the notify cron until MY creator's `(kind)` row is `sent` (or a bounded number of
+/// Drive the notify cron until MY organization's `(kind)` row is `sent` (or a bounded number of
 /// ticks elapse). The cron's single-flight PG advisory lock means a given tick can LOSE to a
 /// concurrent sibling test's sweep and win nothing — exactly the multi-node "loser skips"
-/// path. So we retry rather than assume one tick delivers. Per-creator + DB-ledger-anchored,
+/// path. So we retry rather than assume one tick delivers. Per-organization + DB-ledger-anchored,
 /// so a sibling's tick delivering MY row (into ITS recorder) still flips MY ledger row to
 /// `sent` and satisfies this loop (the PR-6 lesson).
 async fn drive_notify_until_sent(
     state: &std::sync::Arc<AppState>,
     conn: &compio_postgres::Client,
-    creator_id: Uuid,
+    organization_id: &str,
     kind: &str,
 ) {
     for _ in 0..40 {
@@ -2103,18 +2138,18 @@ async fn drive_notify_until_sent(
         // arbiter, so a direct sweep stays exactly-once-correct; it just guarantees the work
         // runs for THIS test's assertion.
         let _ = zeroship_control::cron::billing_notify::sweep(state).await;
-        if notification_sent_count(conn, creator_id, kind).await >= 1 {
+        if notification_sent_count(conn, organization_id, kind).await >= 1 {
             return;
         }
     }
-    panic!("notify cron did not deliver a `{kind}` notification for creator {creator_id} within 40 sweeps");
+    panic!("notify cron did not deliver a `{kind}` notification for organization {organization_id} within 40 sweeps");
 }
 
-/// Count connect_checkout_failures rows for a creator.
-async fn checkout_failure_count(conn: &compio_postgres::Client, creator_id: Uuid) -> i64 {
+/// Count connect_checkout_failures rows for a organization.
+async fn checkout_failure_count(conn: &compio_postgres::Client, organization_id: &str) -> i64 {
     conn.query(
-        "SELECT COUNT(*)::bigint AS n FROM zeroship.connect_checkout_failures WHERE creator_id = $1",
-        &[&creator_id],
+        "SELECT COUNT(*)::bigint AS n FROM zeroship.connect_checkout_failures WHERE organization_id = $1",
+        &[&organization_id],
     )
     .await
     .expect("count checkout failures")[0]
@@ -2152,9 +2187,10 @@ async fn payment_intent_failed_surfaces_record_and_notifies_once() {
     let fx = Fixture::new(&db_url, "pi-failed").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     let acct = format!("acct_{}", Uuid::new_v4().simple());
-    fx.state.stripe_store.link_account(creator_id, &acct).await.expect("link");
+    fx.state.stripe_store.link_account(organization_id, &acct).await.expect("link");
 
     let pi_id = format!("pi_{}", Uuid::new_v4().simple());
     let evt = format!("evt_pifail_{}", Uuid::new_v4().simple());
@@ -2163,13 +2199,13 @@ async fn payment_intent_failed_surfaces_record_and_notifies_once() {
     let b: Value = serde_json::from_slice(&test::read_body(r).await).unwrap();
     assert_eq!(b["status"], "checkout_failure_recorded");
     assert_eq!(ledger_count(&conn, &evt).await, 1, "event claimed");
-    assert_eq!(checkout_failure_count(&conn, creator_id).await, 1, "one checkout-failure row");
+    assert_eq!(checkout_failure_count(&conn, organization_id).await, 1, "one checkout-failure row");
 
-    drive_notify_until_sent(&fx.state, &conn, creator_id, "checkout_failed").await;
+    drive_notify_until_sent(&fx.state, &conn, organization_id, "checkout_failed").await;
     assert_eq!(
-        notification_sent_count(&conn, creator_id, "checkout_failed").await,
+        notification_sent_count(&conn, organization_id, "checkout_failed").await,
         1,
-        "exactly one checkout_failed notification ledger row (sent) for this creator",
+        "exactly one checkout_failed notification ledger row (sent) for this organization",
     );
 
     // Redelivery (same pi_…) is a no-op.
@@ -2178,7 +2214,7 @@ async fn payment_intent_failed_surfaces_record_and_notifies_once() {
     assert_eq!(r2.status(), StatusCode::OK);
     let b2: Value = serde_json::from_slice(&test::read_body(r2).await).unwrap();
     assert_eq!(b2["status"], "duplicate", "same pi_… is a no-op");
-    assert_eq!(checkout_failure_count(&conn, creator_id).await, 1, "still one row");
+    assert_eq!(checkout_failure_count(&conn, organization_id).await, 1, "still one row");
 
     drop(conn);
     drop(app);
@@ -2301,9 +2337,10 @@ async fn webhook_missing_signature_header_rejected_400() {
     let fx = Fixture::new_with_secret(&db_url, "boundary-nosig", "whsec_test_nosig").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     let event_id = format!("evt_nosig_{}", Uuid::new_v4().simple());
-    let body = setup_intent_body(&event_id, creator_id);
+    let body = setup_intent_body(&event_id, organization_id);
     // No stripe-signature header at all.
     // Status only: a retained `WebResponse` keeps the app state - and its
     // Postgres client - alive past the teardown at the end of this test.
@@ -2333,9 +2370,10 @@ async fn webhook_second_v1_matches_is_accepted() {
     let fx = Fixture::new_with_secret(&db_url, "boundary-multiv1", secret).await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     let event_id = format!("evt_multiv1_{}", Uuid::new_v4().simple());
-    let body = setup_intent_body(&event_id, creator_id);
+    let body = setup_intent_body(&event_id, organization_id);
 
     // `t` must be within tolerance of NOW (verify checks |now - t| <= 300).
     let t = std::time::SystemTime::now()
@@ -2502,9 +2540,10 @@ async fn concurrent_same_event_dispatches_once() {
     let fx = Fixture::new(&db_url, "concurrent-dispatch").await;
     let app = init_control!(fx);
     let conn = side_conn(&db_url).await;
-    let creator_id = make_user(&conn).await;
+    let organization_id = make_organization(&conn).await;
+    let organization_id = organization_id.as_str();
     let event_id = format!("evt_concur_{}", Uuid::new_v4().simple());
-    let body = setup_intent_body(&event_id, creator_id);
+    let body = setup_intent_body(&event_id, organization_id);
 
     // Two concurrent deliveries of the SAME event. Built by hand rather than
     // through `post_webhook!` because that macro awaits the call inline, and
@@ -2538,7 +2577,7 @@ async fn concurrent_same_event_dispatches_once() {
     );
     // The handler ran EXACTLY ONCE (one audit row) and the event is claimed once.
     assert_eq!(
-        setup_audit_count(&conn, creator_id, &event_id).await,
+        setup_audit_count(&conn, organization_id, &event_id).await,
         1,
         "the handler dispatched exactly once across the concurrent deliveries"
     );
@@ -2655,7 +2694,7 @@ async fn account_updated_unlinked_account_acks_not_linked() {
     let fx = Fixture::new(&db_url, "acct-unlinked").await;
     let app = init_control!(fx);
 
-    // An acct_ we NEVER linked to any creator (valid acct_ format, just no link row).
+    // An acct_ we NEVER linked to any organization (valid acct_ format, just no link row).
     let acct = format!("acct_{}", Uuid::new_v4().simple());
     let evt = format!("evt_acct_unlinked_{}", Uuid::new_v4().simple());
     let body = json!({

@@ -214,8 +214,9 @@ async fn seed_app(fx: &Fixture, workflows: &[&str]) -> Uuid {
     fx.pg
         .execute(
             "INSERT INTO zeroship.apps \
-                 (id, name, plan_id, workflows_enabled, project_id) \
-             VALUES ($1, $2, $3, true, $4)",
+                 (id, name, plan_id, workflows_enabled, project_id, organization_id) \
+             SELECT $1, $2, $3, true, p.id, p.organization_id \
+               FROM zeroship.projects p WHERE p.id = $4",
             &[
                 &app_id,
                 &app_name,

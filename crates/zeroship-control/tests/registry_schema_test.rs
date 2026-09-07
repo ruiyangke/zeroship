@@ -36,8 +36,8 @@ async fn registry_core_tables_live_in_zeroship_schema() {
         "app_vars",
         "app_secrets",
         "app_env_expose",
-        "creator_accounts",
-        "creator_account_history",
+        "organization_accounts",
+        "organization_account_history",
         "payouts",
         "app_audit",
     ] {
