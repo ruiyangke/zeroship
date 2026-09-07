@@ -52,6 +52,37 @@
 //! than a silently preferred value - an operator who edits a `kid` by hand is
 //! saying something about which key this is, and the two answers must agree.
 //!
+//! # NO KEY IS SHARED, AND BOTH HALVES OF THAT ARE CHECKED AT STARTUP
+//!
+//! The per-issuer index is the security property, so a key reachable under two
+//! issuers is the property's absence. Two independent refusals hold it, and
+//! NEITHER SUBSUMES THE OTHER - they cut the space along different axes, and a
+//! deployment can hit either one without the other:
+//!
+//! - [`load_peer_bundle`] refuses a DOCUMENT that publishes one public key
+//!   under two issuers, whoever loads it. It is a property of the file alone,
+//!   so every process that reads the file refuses, including the ones whose own
+//!   key is not involved.
+//! - [`ServiceKeyring::from_parts`] refuses a PAIR whose private key's public
+//!   half is published under any issuer but this process's own. It is a
+//!   property of the private key against the document, and no reader of the
+//!   document alone can evaluate it: a document naming that key exactly once,
+//!   under a foreign issuer, is well formed and duplicate-free.
+//!
+//! The second is what fence F4 needs and the first cannot supply. `iss` never
+//! travels on an identity envelope - only a thumbprint `kid` does, derived by
+//! signer and verifier alike from the public bytes - so a document filing the
+//! WORKER's own key under the GATEWAY's issuer makes the worker's signer stamp
+//! exactly the `kid` its own verifier resolves, with one entry and nothing
+//! duplicated. The first is what the wider blast radius needs and the second
+//! cannot supply: one key shared between two OTHER services is invisible to
+//! every process except those two, and the assertion verifier resolves its key
+//! from the issuer parsed out of the assertion it was handed, so a shared key
+//! is the ability to present as either of them.
+//!
+//! Both refuse the BOOT, for the reason the next section gives, and neither has
+//! an override. A check with a bypass flag is the shape this design replaced.
+//!
 //! # A missing or unparseable document REFUSES STARTUP
 //!
 //! Both paths are mandatory in [`ServiceKeyring::load`], and the empty string
@@ -75,6 +106,7 @@
 //! [`crate::service_identity::authorize`], so holding a peer's PUBLIC key is
 //! the ability to check that peer's signature and nothing else.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::Path;
 use std::sync::Arc;
@@ -165,12 +197,84 @@ pub enum PeerKeyError {
         /// What was wrong with it.
         reason: String,
     },
+    /// One public key is published under two different issuers.
+    ///
+    /// Refused for whoever loads the document, without reference to which
+    /// service is loading it: two issuers resolving to one key means possession
+    /// of that single private half is the ability to present as either of them,
+    /// and possession is not something a reader of the document can check.
+    #[error(
+        "service peer document {path} publishes the same public key under {first_issuer} and \
+         {second_issuer}: whoever holds that one private key can present as both. Give each \
+         issuer a key of its own."
+    )]
+    KeyUnderTwoIssuers {
+        /// The offending path.
+        path: String,
+        /// The issuer the key was first published under.
+        first_issuer: String,
+        /// The issuer that republished it.
+        second_issuer: String,
+    },
+    /// This process's own public key is published under some other issuer.
+    ///
+    /// SEPARATE from [`PeerKeyError::KeyUnderTwoIssuers`] because it is a fact
+    /// about the PAIR - the private key this process holds and the document it
+    /// was given - rather than about the document, and a document naming this
+    /// key exactly once is well formed on its own terms.
+    #[error(
+        "this process mints as {own_issuer}, but {document} publishes its own public key under \
+         {foreign_issuer}: every peer holding that document would accept this process's \
+         signature as {foreign_issuer}. Publish this key under {own_issuer} only, and give \
+         {foreign_issuer} a key of its own."
+    )]
+    OwnKeyUnderForeignIssuer {
+        /// The issuer this process mints under.
+        own_issuer: String,
+        /// The issuer the same key is also published under.
+        foreign_issuer: String,
+        /// Where the two halves came from, in the operator's terms.
+        ///
+        /// NOT named `source`: `thiserror` reads a field of that name as the
+        /// error's cause and requires it to implement `Error`, which a
+        /// provenance string is not.
+        document: String,
+    },
     /// The key material was rejected by the assertion mechanism.
     #[error("service key material: {0}")]
     Material(#[from] AssertionError),
     /// The key material was rejected by the identity-envelope mechanism.
     #[error("identity envelope key material: {0}")]
     Envelope(#[from] EnvelopeKeyError),
+}
+
+impl PeerKeyError {
+    /// Name the two files the material came from, once they are known.
+    ///
+    /// [`ServiceKeyring::from_parts`] holds material rather than paths, so the
+    /// refusal it raises can only describe the bundle generically.
+    /// [`ServiceKeyring::load`] knows both real paths and substitutes them here,
+    /// which is why the check itself does not move to `load`: putting it where
+    /// the paths are would leave `from_parts` - a public constructor - as the
+    /// way around it.
+    fn naming_document(self, key_path: &Path, peers_path: &Path) -> Self {
+        match self {
+            Self::OwnKeyUnderForeignIssuer {
+                own_issuer,
+                foreign_issuer,
+                ..
+            } => Self::OwnKeyUnderForeignIssuer {
+                own_issuer,
+                foreign_issuer,
+                document: format!(
+                    "{} (read against the private key in {})",
+                    peers_path.display(),
+                    key_path.display()
+                ),
+            },
+            other => other,
+        }
+    }
 }
 
 /// One published peer key.
@@ -244,6 +348,7 @@ impl ServiceKeyring {
             load_signing_key(key_path)?,
             load_peer_bundle(peers_path)?,
         )
+        .map_err(|error| error.naming_document(key_path, peers_path))
     }
 
     /// Build a keyring from material already in memory.
@@ -253,15 +358,49 @@ impl ServiceKeyring {
     /// holding a key it did not read from disk is a TEST or a generator; the
     /// production path is `load`, which is what applies the permission refusal.
     ///
+    /// # This service's own key may appear under its OWN issuer and no other
+    ///
+    /// The one place that holds both the private key and the bundle, so the one
+    /// place that can compare them - and until it did, nothing in this stack
+    /// ever did. Neither loader compared the two, the envelope wire format
+    /// carries a thumbprint `kid` and no issuer, and both the signer and the
+    /// verifier derive that `kid` from the public bytes. A document publishing
+    /// this process's own public half under the GATEWAY's issuer therefore made
+    /// this process's signer stamp exactly the `kid` its own verifier resolves,
+    /// and fence F4 of `docs/proposals/2026-09-05-auth-foundation-redesign.md` -
+    /// "a worker must not be able to mint an envelope it would then accept" -
+    /// became a configuration choice.
+    ///
+    /// This is NOT the same check as the document-only one in
+    /// [`load_peer_bundle`], and neither subsumes the other. A document naming
+    /// this key once, under a foreign issuer, has nothing duplicated in it and
+    /// passes there; a document sharing one key between two issuers neither of
+    /// which is this process's passes here. The pair is what closes the shape.
+    ///
     /// # Errors
     ///
-    /// Returns [`PeerKeyError::Material`] when the key cannot be encoded for
-    /// signing.
+    /// Returns [`PeerKeyError::OwnKeyUnderForeignIssuer`] when the bundle
+    /// publishes this key under any issuer other than `issuer`, and
+    /// [`PeerKeyError::Material`] when the key cannot be encoded for signing.
     pub fn from_parts(
         issuer: ServiceIssuer,
         signing_key: ServiceSigningKey,
         bundle: ServiceTrustBundle,
     ) -> Result<Self, PeerKeyError> {
+        // Derived from the PRIVATE half, which is what makes this a comparison
+        // of the two documents rather than of the bundle against itself.
+        let own_public = signing_key.verifying_key_bytes();
+        if let Some(foreign) = bundle
+            .issuers_publishing(&own_public)
+            .into_iter()
+            .find(|candidate| *candidate != issuer.as_str())
+        {
+            return Err(PeerKeyError::OwnKeyUnderForeignIssuer {
+                own_issuer: issuer.as_str().to_owned(),
+                foreign_issuer: foreign.to_owned(),
+                document: "the peer trust bundle handed to this process".to_owned(),
+            });
+        }
         let minter =
             ServiceAssertionMinter::new(issuer.clone(), signing_key.key_id(), &signing_key)?;
         // The key is MOVED in rather than borrowed, because this process signs
@@ -508,11 +647,35 @@ pub fn load_signing_key(path: &Path) -> Result<ServiceSigningKey, PeerKeyError> 
 
 /// Load the peer trust bundle from a JWKS-shaped document.
 ///
+/// # ONE KEY, ONE ISSUER
+///
+/// A document that publishes the same public key under two issuers is refused
+/// here, whoever is loading it and whichever two issuers they are. The
+/// per-issuer index in [`ServiceTrustBundle`] exists so a key resolves for one
+/// issuer and no other; two entries carrying one key put that property back in
+/// the operator's hands, and there is nothing in a document that says who holds
+/// the matching private half. `ServiceTrustBundle::trust` cannot see this - its
+/// duplicate check is scoped PER ISSUER by construction, so a second issuer is
+/// a fresh, empty entry every time.
+///
+/// The realistic producer is not a hand-edited file. `SERVICE_KEY_FILES` in
+/// `crates/zeroship-cli/src/dev.rs` states the rule in its own rustdoc - four
+/// keys, not one shared file - and a secret manager or compose override mapping
+/// one secret onto the four `*_SERVICE_KEY_FILE` mounts satisfies every check
+/// the generator makes. The document it then publishes has one key under all
+/// four issuers, which is a shared bearer secret with no shared secret visible
+/// to notice: possession of any one private half becomes the ability to present
+/// as every service, because the assertion verifier resolves its key from the
+/// issuer parsed out of the assertion it was handed.
+///
+/// The same key repeated under the SAME issuer is not this, and still loads:
+/// that is idempotent re-publication, not a second identity.
+///
 /// # Errors
 ///
 /// Returns [`PeerKeyError`] when the file cannot be read, does not parse, holds
-/// an entry that is not an ed25519 public key, or states a `kid` that
-/// disagrees with the key's own thumbprint.
+/// an entry that is not an ed25519 public key, states a `kid` that disagrees
+/// with the key's own thumbprint, or publishes one key under two issuers.
 pub fn load_peer_bundle(path: &Path) -> Result<ServiceTrustBundle, PeerKeyError> {
     let bytes = read_file(path)?;
     let document: PeerKeyDocument =
@@ -528,6 +691,10 @@ pub fn load_peer_bundle(path: &Path) -> Result<ServiceTrustBundle, PeerKeyError>
         return Err(fault("no keys".to_owned()));
     }
     let mut bundle = ServiceTrustBundle::new();
+    // Which issuer first published each key. Kept beside the bundle rather than
+    // asked of it afterwards so the refusal can name the issuer that CLAIMED
+    // the key first, which is the one an operator has to decide about.
+    let mut first_issuer_of: BTreeMap<[u8; 32], String> = BTreeMap::new();
     for entry in &document.keys {
         if let Some(kty) = entry.kty.as_deref() {
             if kty != "OKP" {
@@ -554,6 +721,19 @@ pub fn load_peer_bundle(path: &Path) -> Result<ServiceTrustBundle, PeerKeyError>
                     "{}: stated kid does not match the key's own thumbprint",
                     entry.iss
                 )));
+            }
+        }
+        match first_issuer_of.get(&public) {
+            Some(first) if first != issuer.as_str() => {
+                return Err(PeerKeyError::KeyUnderTwoIssuers {
+                    path: path.display().to_string(),
+                    first_issuer: first.clone(),
+                    second_issuer: issuer.as_str().to_owned(),
+                });
+            }
+            Some(_) => {}
+            None => {
+                first_issuer_of.insert(public, issuer.as_str().to_owned());
             }
         }
         bundle.trust(&issuer, key_id, public)?;

@@ -15,15 +15,15 @@ use ed25519_dalek::pkcs8::EncodePrivateKey as _;
 use rand::RngCore as _;
 
 use zeroship_core::service_assertion::{
-    thumbprint_key_id, InMemoryReplayStore, ServiceAssertionVerifier, ServiceSigningKey,
+    thumbprint_key_id, InMemoryReplayStore, ServiceAssertionVerifier, ServiceTrustBundle,
 };
 use zeroship_core::service_identity::{
     endpoints, verify_service_call, AuthError, ServiceName, ServicePrincipal,
     TrustDomain,
 };
 use zeroship_core::service_peers::{
-    load_peer_bundle, service_issuer, PeerKeyError, ServiceKeyring, CONTROL_SERVICE_NAME,
-    GATEWAY_SERVICE_NAME, WORKER_SERVICE_NAME,
+    load_peer_bundle, load_signing_key, service_issuer, PeerKeyError, ServiceKeyring,
+    AUTH_SERVICE_NAME, CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME, WORKER_SERVICE_NAME,
 };
 
 /// A generated ed25519 keypair written to a 0600 PKCS#8 PEM file.
@@ -324,6 +324,163 @@ fn a_peer_document_that_is_unset_missing_or_malformed_refuses_to_load() {
     // Does NOT cover whether the three `main`s CALL this loader rather than
     // building a keyring some other way. That link is
     // `tests/service_peer_boot_gate.sh`, against the real binaries.
+}
+
+/// The DOCUMENT-only half of the one-key refusal: whoever loads it, refuses.
+///
+/// This is the shape `zeroship dev init` emits when one secret is mounted onto
+/// all four `*_SERVICE_KEY_FILE` paths, and it is worse than a defeated fence:
+/// with every issuer resolving to the same key, holding ANY one private half is
+/// the ability to present as EVERY service, which is the shared secret the
+/// asymmetric design replaced.
+#[test]
+fn a_document_publishing_one_key_under_two_issuers_refuses_to_load() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let worker = write_key(dir.path(), "worker.pem");
+    let gateway = write_key(dir.path(), "gateway.pem");
+    let worker_iss = format!("spiffe://zeroship.ai/{WORKER_SERVICE_NAME}");
+    let gateway_iss = format!("spiffe://zeroship.ai/{GATEWAY_SERVICE_NAME}");
+
+    // THE ONE-VARIABLE CONTROL: two issuers, two DIFFERENT keys. Every case
+    // below changes which key the second entry carries and nothing else, so a
+    // loader that refused every multi-entry document cannot print this.
+    let distinct = write_peers(
+        dir.path(),
+        &[
+            entry(WORKER_SERVICE_NAME, &worker.public),
+            entry(GATEWAY_SERVICE_NAME, &gateway.public),
+        ],
+    );
+    assert!(
+        load_peer_bundle(&distinct).is_ok(),
+        "distinct keys under distinct issuers are the shape an operator must produce"
+    );
+
+    // A SECOND CONTROL: the same key repeated under the SAME issuer. That is
+    // idempotent re-publication, not a shared identity, and it must still load
+    // - otherwise the refusal below would be about repetition rather than about
+    // issuers.
+    let repeated = write_peers(
+        &dir.path().join("repeated"),
+        &[
+            entry(WORKER_SERVICE_NAME, &worker.public),
+            entry(WORKER_SERVICE_NAME, &worker.public),
+        ],
+    );
+    assert!(
+        load_peer_bundle(&repeated).is_ok(),
+        "one key twice under one issuer is idempotent, not a second identity"
+    );
+
+    let shared = write_peers(
+        &dir.path().join("shared"),
+        &[
+            entry(WORKER_SERVICE_NAME, &worker.public),
+            entry(GATEWAY_SERVICE_NAME, &worker.public),
+        ],
+    );
+    let message = load_peer_bundle(&shared)
+        .expect_err("one key under two issuers must refuse")
+        .to_string();
+    for token in [
+        worker_iss.as_str(),
+        gateway_iss.as_str(),
+        &shared.display().to_string(),
+    ] {
+        assert!(
+            message.contains(token),
+            "the refusal must name {token} so an operator knows what to change: {message}"
+        );
+    }
+
+    // The `zeroship dev init` shape, in full: ONE key under all four issuers.
+    let one_key_everywhere = write_peers(
+        &dir.path().join("one-key-everywhere"),
+        &[
+            entry(WORKER_SERVICE_NAME, &worker.public),
+            entry(GATEWAY_SERVICE_NAME, &worker.public),
+            entry(CONTROL_SERVICE_NAME, &worker.public),
+            entry(AUTH_SERVICE_NAME, &worker.public),
+        ],
+    );
+    assert!(load_peer_bundle(&one_key_everywhere).is_err());
+}
+
+/// The KEYRING half: this process's own public key published under somebody
+/// else's issuer.
+///
+/// Independent of the document-only refusal above rather than implied by it.
+/// The document here names ONE issuer and repeats no key, so it is well-formed
+/// on its own; what is wrong is only visible where the PRIVATE half and the
+/// document are held together. Under it, `UserEnvelopeVerifier::for_issuer`
+/// resolves the gateway issuer to this process's own key - and the envelope
+/// wire format carries no issuer, only a thumbprint `kid` - so the worker's own
+/// signer stamps exactly the `kid` its own verifier accepts, and fence F4 is
+/// defeated by configuration.
+#[test]
+fn a_keyring_whose_own_key_is_published_under_a_foreign_issuer_refuses_to_load() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let worker = write_key(dir.path(), "worker.pem");
+    let issuer = || service_issuer(WORKER_SERVICE_NAME).expect("worker issuer");
+    let worker_iss = format!("spiffe://zeroship.ai/{WORKER_SERVICE_NAME}");
+    let gateway_iss = format!("spiffe://zeroship.ai/{GATEWAY_SERVICE_NAME}");
+
+    // THE ONE-VARIABLE CONTROL: the same private file, the same key material,
+    // published under the worker's OWN issuer. Only `iss` differs below.
+    let own = write_peers(dir.path(), &[entry(WORKER_SERVICE_NAME, &worker.public)]);
+    assert!(ServiceKeyring::load(issuer(), &worker.path, &own).is_ok());
+
+    let misfiled = write_peers(
+        &dir.path().join("misfiled"),
+        &[entry(GATEWAY_SERVICE_NAME, &worker.public)],
+    );
+    assert!(
+        load_peer_bundle(&misfiled).is_ok(),
+        "the document alone is well-formed, so the document-only refusal cannot catch this"
+    );
+
+    let message = ServiceKeyring::load(issuer(), &worker.path, &misfiled)
+        .expect_err("a keyring whose own key is published as a peer must refuse")
+        .to_string();
+    for token in [
+        worker_iss.as_str(),
+        gateway_iss.as_str(),
+        &misfiled.display().to_string(),
+        &worker.path.display().to_string(),
+    ] {
+        assert!(
+            message.contains(token),
+            "the refusal must name {token} so an operator knows what to change: {message}"
+        );
+    }
+}
+
+/// `from_parts` is the one door to a keyring that skips `load`, so the refusal
+/// has to live there rather than beside the two path reads.
+#[test]
+fn from_parts_is_not_a_way_around_the_own_key_refusal() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let file = write_key(dir.path(), "worker.pem");
+    let worker = service_issuer(WORKER_SERVICE_NAME).expect("worker issuer");
+    let gateway = service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer");
+    // Two owned handles on ONE key, so the control and the case differ in the
+    // issuer the bundle files it under and in nothing else.
+    let held = || load_signing_key(&file.path).expect("load the private half");
+
+    let mut own = ServiceTrustBundle::new();
+    own.trust(&worker, thumbprint_key_id(&file.public), file.public)
+        .expect("publish the key under its own issuer");
+    assert!(ServiceKeyring::from_parts(worker.clone(), held(), own).is_ok());
+
+    let mut foreign = ServiceTrustBundle::new();
+    foreign
+        .trust(&gateway, thumbprint_key_id(&file.public), file.public)
+        .expect("publish the key under the gateway's issuer");
+    let message = ServiceKeyring::from_parts(worker.clone(), held(), foreign)
+        .expect_err("from_parts must apply the same refusal as load")
+        .to_string();
+    assert!(message.contains(worker.as_str()), "{message}");
+    assert!(message.contains(gateway.as_str()), "{message}");
 }
 
 fn worker_principal() -> ServicePrincipal {
