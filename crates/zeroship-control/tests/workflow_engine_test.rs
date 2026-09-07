@@ -457,7 +457,6 @@ async fn build_fixture_with_gateway(
             stripe_base_url: "http://127.0.0.1:9".to_string(),
             gateway_url: gateway_url.to_string(),
             worker_urls: Vec::new(),
-            worker_key: SecretString::new(String::new()),
             admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
@@ -8672,7 +8671,7 @@ fn test_control_service_auth() -> std::sync::Arc<zeroship_core::service_peers::S
 
     let issuer = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
     let key = ServiceSigningKey::generate();
-    let keyring = ServiceKeyring::from_parts(issuer, &key, ServiceTrustBundle::new())
+    let keyring = ServiceKeyring::from_parts(issuer, key, ServiceTrustBundle::new())
         .expect("control keyring");
     std::sync::Arc::new(ServiceAuth::new(
         keyring,

@@ -3119,7 +3119,7 @@ mod tests {
         held.trust_signing_key(&control_issuer, control_key.key_id(), &control_key)
             .expect("trust control");
 
-        let keyring = ServiceKeyring::from_parts(gateway_issuer.clone(), &gateway_key, held)
+        let keyring = ServiceKeyring::from_parts(gateway_issuer.clone(), gateway_key, held)
             .expect("gateway keyring");
         let verifier = ServiceAssertionVerifier::new(
             trusted,
@@ -3127,7 +3127,7 @@ mod tests {
         );
         let control = ServiceKeyring::from_parts(
             control_issuer,
-            &control_key,
+            control_key,
             ServiceTrustBundle::new(),
         )
         .expect("control keyring");
@@ -3172,13 +3172,12 @@ mod tests {
         tmp.push(format!("zsgate-idem-{}", uuid::Uuid::new_v4().simple()));
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
         Arc::new(GateState {
-            service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+            service_auth: std::sync::Arc::new(crate::test_gateway_service_auth()),
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),
                 worker_urls: worker_urls.clone(),
                 poll_interval_secs: 5,
-                worker_key: String::new(),
                 auth_ui_url: String::new(),
                 origin_scheme: zeroship_core::config::OriginScheme::Http,
                 trusted_origins: vec![],
@@ -3766,7 +3765,13 @@ mod tests {
     /// edit.
     #[ntex::test]
     async fn an_unconfigured_gateway_refuses_the_advance_edge() {
-        let state = build_test_state_with_workers(Vec::new());
+        // The shared builder now hands out a CONFIGURED identity, because every
+        // other fixture needs the gateway to sign identity envelopes. This arm
+        // is about the opposite state, so it strips the key material back out
+        // rather than relying on the builder's default.
+        let mut state = build_test_state_with_workers(Vec::new());
+        Arc::get_mut(&mut state).expect("sole owner").service_auth =
+            std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured());
         let app_id = Uuid::new_v4();
         install_workflow_route(
             &state,

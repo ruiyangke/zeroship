@@ -574,13 +574,12 @@ fn build_state_with_route(
     );
 
     Arc::new(GateState {
-        service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+        service_auth: std::sync::Arc::new(zeroship_gateway::test_gateway_service_auth()),
         config: GateConfig {
             control_url: String::new(),
             control_key: String::new(),
             worker_urls: vec![],
             poll_interval_secs: 5,
-            worker_key: "worker-key".into(),
             auth_ui_url: op_base.to_string(),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trusted_origins: vec![],

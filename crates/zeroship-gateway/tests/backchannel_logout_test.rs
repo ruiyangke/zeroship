@@ -470,13 +470,12 @@ fn build_handler_state(db: DbConfig, auth_base: &str) -> Arc<GateState> {
     tmp.push(format!("zsgate-bcl-{}", Uuid::new_v4().simple()));
     let disk = DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
     Arc::new(GateState {
-        service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
+        service_auth: std::sync::Arc::new(zeroship_gateway::test_gateway_service_auth()),
         config: GateConfig {
             control_url: String::new(),
             control_key: String::new(),
             worker_urls: vec![],
             poll_interval_secs: 5,
-            worker_key: String::new(),
             auth_ui_url: auth_base.to_string(),
             origin_scheme: zeroship_core::config::OriginScheme::Http,
             trusted_origins: vec![],
