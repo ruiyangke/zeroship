@@ -72,9 +72,12 @@ import { grant, now, raw, t, table } from "@zeroship/migrate";
 //
 // DELIBERATELY NOT HERE: the subscription move (`organizations.plan_id` and the
 // composite tie to `apps.plan_id`), the project-level `sector_identifier`, and
-// project-owned data resources with their capability bindings. Each is designed
-// in docs/proposals/2026-09-05-organization-entity-model.md and each carries its
-// own consumers to re-plumb.
+// project-owned data resources with their capability bindings. NO COMMITTED
+// DOCUMENT DESIGNS ANY OF THE THREE. This header is the design record for what
+// landed, and the three are named here so a later reader can tell a deferral
+// from an oversight -- not as a pointer to a design that exists somewhere else.
+// Each carries its own consumers to re-plumb, and each needs its design written
+// before it is built.
 //
 // EVERY CLAIM ABOVE ABOUT WHAT CANNOT BE WRITTEN IS RE-MEASURED, not asserted:
 // `tests/organization_authority_gate.sh` applies this corpus to an empty
