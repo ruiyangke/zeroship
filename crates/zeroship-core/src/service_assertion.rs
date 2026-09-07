@@ -342,6 +342,20 @@ impl ServiceSigningKey {
         thumbprint_key_id(&self.verifying_key_bytes())
     }
 
+    /// Sign `message` with this key, returning the raw 64-byte ed25519
+    /// signature.
+    ///
+    /// The one way out of this type that is not a JWT. It exists for the
+    /// `ZeroShip-User` identity envelope ([`crate::user_envelope`]), which is
+    /// not a JWT and must not become one: it is signed per request on the app
+    /// data path, and a JOSE header plus JSON claims would triple its size for
+    /// nothing it needs.
+    #[must_use]
+    pub fn sign_detached(&self, message: &[u8]) -> [u8; 64] {
+        use ed25519_dalek::Signer as _;
+        self.inner.sign(message).to_bytes()
+    }
+
     fn encoding_key(&self) -> Result<EncodingKey, AssertionError> {
         use ed25519_dalek::pkcs8::EncodePrivateKey as _;
         let der = self
@@ -617,6 +631,24 @@ impl ServiceTrustBundle {
     /// Return the keys trusted for exactly this issuer, or nothing.
     fn keys_for(&self, issuer: &str) -> Option<&[TrustedServiceKey]> {
         self.issuers.get(issuer).map(Vec::as_slice)
+    }
+
+    /// The raw public keys trusted for exactly `issuer`, each with the `kid` it
+    /// is indexed under.
+    ///
+    /// Public key material, so handing it out concedes nothing: the holder can
+    /// CHECK this issuer's signatures and cannot produce one. It exists because
+    /// the `ZeroShip-User` envelope is verified by a second mechanism
+    /// ([`crate::user_envelope`]) that reads the same operator-published
+    /// document - and reading it twice, from two parsers, is how the two ends
+    /// of one edge drift.
+    #[must_use]
+    pub fn public_keys_for(&self, issuer: &ServiceIssuer) -> Vec<(String, [u8; 32])> {
+        self.keys_for(issuer.as_str())
+            .unwrap_or_default()
+            .iter()
+            .map(|key| (key.key_id.clone(), key.public))
+            .collect()
     }
 }
 
