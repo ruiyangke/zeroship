@@ -492,6 +492,15 @@ pub async fn app_organization(pg: &compio_postgres::Client, app: &Uuid) -> Strin
 /// `role` must name a row in `zeroship.organization_roles`; the foreign key
 /// there makes an invented role unspellable rather than silently powerless.
 /// Upserts, so a test may promote or demote the same user by calling again.
+///
+/// IT READS THE AFFECTED-ROW COUNT, and that is the whole reason this is not a
+/// one-line `execute`. `INSERT ... SELECT` over a result set that matched
+/// NOTHING is a SUCCESSFUL statement affecting no rows: an app id that does not
+/// exist, or an app whose project row was never written, seats nobody and
+/// reports nothing. The test then fails much later as a 403 from whichever
+/// route wanted an owner, with no line pointing back at the fixture. The shell
+/// peer of this function (`seat_app_owner` in `tests/lib/organization_fixture.sh`)
+/// reads a token back out of the database for exactly the same reason.
 #[allow(dead_code)]
 pub async fn seat_app_organization_member(
     pg: &compio_postgres::Client,
@@ -499,15 +508,23 @@ pub async fn seat_app_organization_member(
     user: &Uuid,
     role: &str,
 ) {
-    pg.execute(
-        "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
-         SELECT p.organization_id, $2, $3 FROM zeroship.apps a \
-           JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
-         ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
-        &[app, user, &role],
-    )
-    .await
-    .expect("seat organization member for fixture app");
+    let seated = pg
+        .execute(
+            "INSERT INTO zeroship.organization_members (organization_id, user_id, role) \
+             SELECT p.organization_id, $2, $3 FROM zeroship.apps a \
+               JOIN zeroship.projects p ON p.id = a.project_id WHERE a.id = $1 \
+             ON CONFLICT (organization_id, user_id) DO UPDATE SET role = EXCLUDED.role",
+            &[app, user, &role],
+        )
+        .await
+        .expect("seat organization member for fixture app");
+    assert_eq!(
+        seated, 1,
+        "seating {user} as '{role}' on app {app} affected {seated} row(s). The \
+         INSERT ... SELECT matched no app reaching an organization through \
+         apps.project_id -> projects.organization_id, which is a SUCCESSFUL \
+         statement that seats nobody. Create the app before seating it."
+    );
 }
 
 #[allow(dead_code)]
@@ -606,94 +623,103 @@ pub fn period_date(period_start_unix: i64) -> chrono::NaiveDate {
         .expect("valid first-of-month period")
 }
 
-/// Hand this caller a far-future billing window that NO other caller can touch.
+/// Months per caller. See "THE CONTRACT FOR CALLERS" on `next_isolated_period`.
+const STRIDE_MONTHS: u32 = 4;
+/// First month handed out, as an offset from the run's own base. Starts past
+/// zero so the earliest window's back-reach stays inside the run.
+const FIRST_OFFSET_MONTHS: u32 = 4;
+/// Windows available to ONE RUN before its arithmetic leaves the region the next
+/// run's base scan will look above. This asserts rather than wrapping into a
+/// month another caller already owns.
+const MAX_WINDOWS: u32 = 600;
+
+/// Where `window` lands, in months from the band's first month, for a run whose
+/// base is `run_base`.
+///
+/// SPLIT OUT SO ONE PROPERTY CAN BE BOUND WITHOUT A SECOND RUN: that the run's
+/// base is IN the address, not merely resolved beside it. A fresh database
+/// resolves a base of zero, so a formula that dropped the term returns exactly
+/// the same months there and the defect is invisible until the second run - the
+/// whole reason it survived. `the_run_base_is_part_of_the_window_address` in
+/// `billing_safety_net_test` compares two bases through this function instead.
+#[allow(dead_code)]
+pub fn isolated_period_offset_months(run_base: u32, window: u32) -> u32 {
+    run_base + FIRST_OFFSET_MONTHS + window * STRIDE_MONTHS
+}
+
+/// Hand this caller a far-future billing window that NO other caller can touch,
+/// AND that no PREVIOUS RUN against this database has already touched.
 ///
 /// THIS LOOKS LIKE AN ORDINARY HELPER AND IS NOT. Read this before changing it,
 /// and before adding a caller.
 ///
 /// WHAT IT GUARANTEES
 /// ------------------
-/// Every call returns an instant in a month `STRIDE_MONTHS` after the previous
-/// call's, so the windows callers actually touch are DISJOINT BY CONSTRUCTION.
-/// Not "unlikely to collide" - disjoint. Two tests can never land in one period,
-/// so a period-wide aggregate can never see a neighbour's rows.
+/// Two axes, and both are needed:
 ///
-/// WHAT IT REPLACED, AND WHY BOTH WERE WRONG
-/// -----------------------------------------
-///   `isolated_closed_period_now()`  memoised ONE random month in a `OnceLock`
-///                                   and handed it to every caller, so all 78
-///                                   seeding tests in the five billing modules
-///                                   piled into a single period.
-///   `unique_closed_period_now()`    (billing_safety_net_test) drew a FRESH
-///                                   random month per call out of 2400. Its name
-///                                   claimed uniqueness it did not have: 2400
-///                                   months is a collision space, not an
-///                                   allocator.
+///   WITHIN a run   Every call returns an instant `STRIDE_MONTHS` after the
+///                  previous call's, so the windows callers touch are DISJOINT
+///                  BY CONSTRUCTION. Not "unlikely to collide" - disjoint.
+///   ACROSS runs    The whole run sits ABOVE every period any earlier run left
+///                  in this database, because the first call READS the database
+///                  and starts the run one month past the highest period any
+///                  `date` column in the `zeroship` schema holds inside the
+///                  band. A month a previous run seeded is never reissued.
 ///
-/// The bug they combined to produce: `billing_safety_net_test` asserts
-/// `subjects_checked == 1`, but `reconcile_pass` counts EVERY subject in the
-/// period, summed over every meter in it. A test owns its app; it did NOT own
-/// its period. When the random draw hit a seeded month the count came back 121
-/// instead of 1.
+/// WHY THE SECOND AXIS EXISTS. The counter is process-local and the months were
+/// FIXED calendar months, so every run handed out the same window sequence.
+/// Within one process that is isolation; against one database it is a
+/// guarantee that expires when the process does. `reconcile_pass` sweeps a
+/// period FLEET-WIDE, so run N counted every prior run's subjects and the
+/// `subjects_checked` assertions in `billing_safety_net_test` failed on the
+/// second run against the same database - by an exact multiple of the run
+/// count, which is what a re-seeded shared period looks like. The suite was
+/// green only when a database reset had happened immediately before it.
 ///
-/// MEASURED 2026-08-20 (counting periods where a draw would break that
-/// assertion) - these two numbers are measured, the rates below are modelled:
+/// WHY READING THE MAX IS SOUND, and not merely likely. Each run's own rows
+/// land at or above its base, and its base is one month past the previous
+/// maximum, so the maximum STRICTLY INCREASES across runs that seed anything.
+/// A run that seeds nothing leaves it where it was and has nothing to collide
+/// with. The scan is over the CATALOG rather than a hand-written table list, so
+/// a new table with a period column is covered the day it exists; a list would
+/// go stale silently, which is the same class of defect as the one above.
 ///
-///   before the binary merge   6 loaded periods, worst 96,  128 subjects
-///   after  the binary merge   2 loaded periods, worst 126, 128 subjects
-///   with this allocator       0 loaded periods, by construction
-///
-/// The 128 contaminating subjects were IDENTICAL across the first two: merging
-/// the test binaries did not create the hazard, it concentrated it. On a model
-/// of four draws against 2400 months that is ~1.0 percent per run before and
-/// ~0.33 percent after - real, and rarer, but never zero. This is zero.
-///
-/// WHY THIS ONLY BECAME CORRECT WHEN THE TEST BINARIES MERGED
-/// ---------------------------------------------------------
-/// The counter is process-global. Until 2026-08-20 these files were 48 separate
-/// executables, and a process-global counter would have restarted at zero in
-/// every one of them - handing the SAME months to different binaries while
-/// promising they were unique. It is only sound because `tests/live_db.rs` and
-/// `tests/main.rs` put every caller in ONE process. If these files are ever
-/// split back into separate targets, THIS FUNCTION SILENTLY BREAKS: it keeps
-/// returning values and they stop being unique. Split the targets and you must
-/// key the window by something the whole run agrees on instead.
+/// The band is finite. `ISOLATED_PERIOD_CEILING_YEAR` bounds it, the scan
+/// ignores anything at or above the ceiling (so a far-future sentinel written
+/// by some other subsystem cannot pin every run to one base), and running off
+/// the top is an assert naming the repair - drop and recreate the test
+/// database - rather than a silent wrap onto months already seeded.
 ///
 /// DO NOT REPLACE THIS WITH A LOCK
 /// -------------------------------
 /// A mutex around the sweeps cannot fix what this fixes. The rows OUTLIVE the
-/// lock, and the collision is a later test DRAWING an earlier test's month -
+/// lock, and the collision is a later test taking an earlier test's month -
 /// which serialisation does not prevent, because the two tests were never
 /// concurrent in the first place. The gate has always run `--test-threads 1`.
 /// The defect is address allocation, not concurrency.
 ///
+/// TWO RUNS AT ONCE AGAINST ONE DATABASE STILL COLLIDE, and always did: both
+/// would read the same maximum and claim the same base. Nothing here makes
+/// that safe, and nothing else in this directory does either - the modules
+/// share one Postgres and one role. Run them one at a time.
+///
 /// THE CONTRACT FOR CALLERS
 /// ------------------------
 /// ONE CALL PER TEST. Bind it to a local and reuse that local; a second call
-/// gives you a DIFFERENT window, which is the point. Two call sites in
-/// `billing_credit_test` used to rely on the memoised value being the same
-/// instant twice and were hoisted to a local when this landed.
+/// gives you a DIFFERENT window, which is the point.
 ///
 /// You may derive earlier months from the returned instant: the window reserved
 /// for you is the returned month and the `STRIDE_MONTHS - 1` months before it.
-/// Today callers reach at most two months back (`prev_period(now)` and, in one
-/// test, `prev_period(now - 40 days)`), and the self-invoicing safety net reads
-/// the returned month itself, so a stride of 4 leaves one month of slack. Reach
-/// further back than that and you are in your neighbour's window.
+/// Callers reach at most two months back (`prev_period(now)` and, in one test,
+/// `prev_period(now - 40 days)`), and the self-invoicing safety net reads the
+/// returned month itself, so the stride leaves slack. Reach further back than
+/// that and you are in your neighbour's window.
 #[allow(dead_code)]
-pub fn next_isolated_period() -> i64 {
+pub async fn next_isolated_period() -> i64 {
     use chrono::TimeZone;
     use std::sync::atomic::{AtomicU32, Ordering};
 
-    /// Months per caller. See "THE CONTRACT FOR CALLERS" above.
-    const STRIDE_MONTHS: u32 = 4;
-    /// First month handed out, as an offset from January of the base year.
-    /// Starts past zero so the earliest window's back-reach stays inside it.
-    const FIRST_OFFSET_MONTHS: u32 = 4;
-    /// Windows available before the arithmetic leaves the reserved band. The
-    /// tree uses about 64; this asserts rather than wrapping into a month
-    /// another caller already owns.
-    const MAX_WINDOWS: u32 = 600;
+    let run_base = run_band_base_months().await;
 
     static NEXT_WINDOW: AtomicU32 = AtomicU32::new(0);
     let window = NEXT_WINDOW.fetch_add(1, Ordering::Relaxed);
@@ -705,14 +731,148 @@ pub fn next_isolated_period() -> i64 {
          already seeded, which is the exact bug this replaced."
     );
 
-    let offset = FIRST_OFFSET_MONTHS + window * STRIDE_MONTHS;
+    let offset = isolated_period_offset_months(run_base, window);
     let year = ISOLATED_PERIOD_BASE_YEAR + (offset / 12) as i32;
     let month = offset % 12 + 1;
+    assert!(
+        year < ISOLATED_PERIOD_CEILING_YEAR,
+        "the isolated billing period band is exhausted on this database: the \
+         next window would land in {year}, at or past \
+         ISOLATED_PERIOD_CEILING_YEAR ({ISOLATED_PERIOD_CEILING_YEAR}), which \
+         the base scan does not look at. Every run consumes a slice of the band \
+         and never gives it back, so the repair is to drop and recreate the test \
+         database. Do NOT raise the ceiling to get past this - the months above \
+         it are invisible to the scan, so windows there would be reissued to \
+         every later run."
+    );
     chrono::Utc
         .with_ymd_and_hms(year, month, 15, 12, 0, 0)
         .single()
         .expect("valid isolated billing period")
         .timestamp()
+}
+
+/// Months from the band's first month to this RUN's first month, resolved once
+/// per process against the database the run is about to write to.
+///
+/// Memoised: the scan costs one connection per test binary, not one per test.
+/// The value is resolved BEFORE any window is handed out, so the rows it sees
+/// in the band are, by construction, previous runs' and never this one's.
+async fn run_band_base_months() -> u32 {
+    static RUN_BASE: OnceLock<u32> = OnceLock::new();
+    if let Some(base) = RUN_BASE.get() {
+        return *base;
+    }
+    let resolved = resolve_run_band_base().await;
+    // A race can only be lost to a value computed the same way from the same
+    // database, so the loser adopting the winner's base is correct rather than
+    // merely tolerable.
+    let _ = RUN_BASE.set(resolved);
+    *RUN_BASE.get().expect("run band base is resolved")
+}
+
+/// Read the highest period any `date` column in the `zeroship` schema holds
+/// inside the band, and return the month AFTER it.
+///
+/// THE COLUMN SET COMES FROM THE CATALOG, not from a list in this file. Several
+/// tables carry a `zeroship.billing_period` column today and the next one would
+/// be covered the day it is created; a hand-written list would keep printing a
+/// base while quietly stopping short of a table that had started holding
+/// periods. `typbasetype` is what makes the domain visible - `billing_period`
+/// is a domain over `date`, so a match on the column's own type name finds
+/// nothing.
+///
+/// NOT MEMOISED, deliberately: `run_band_base_months` is the memoised one, and
+/// this is also what `a_later_run_starts_above_every_period_this_run_seeded`
+/// calls to ask what a LATER run would resolve after this one has written.
+#[allow(dead_code)]
+pub async fn resolve_run_band_base() -> u32 {
+    let db_url = require_control_db();
+    let (client, connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
+        .await
+        .expect("connect to resolve the isolated billing period band base");
+    compio::runtime::spawn(async move {
+        let _ = connection.run().await;
+    })
+    .detach();
+
+    let columns = client
+        .query(
+            "SELECT c.relname AS table_name, a.attname AS column_name \
+             FROM pg_attribute a \
+             JOIN pg_class c ON c.oid = a.attrelid \
+             JOIN pg_namespace n ON n.oid = c.relnamespace \
+             JOIN pg_type t ON t.oid = a.atttypid \
+             WHERE n.nspname = 'zeroship' \
+               AND c.relkind = 'r' \
+               AND a.attnum > 0 \
+               AND NOT a.attisdropped \
+               AND COALESCE(NULLIF(t.typbasetype, 0), t.oid) = 'date'::regtype \
+             ORDER BY c.relname, a.attname",
+            &[],
+        )
+        .await
+        .expect("enumerate the schema's date columns");
+    assert!(
+        !columns.is_empty(),
+        "no date column was found in the zeroship schema, so the isolated \
+         billing period band base cannot be resolved. The billing period is a \
+         date domain and at least usage_aggregates and invoices carry one; an \
+         empty result means this database is not migrated, or the enumeration \
+         is broken. Either way, assuming a base of zero would hand this run the \
+         same months as the last one."
+    );
+
+    let mut parts = Vec::new();
+    for row in &columns {
+        let table: String = row.get("table_name");
+        let column: String = row.get("column_name");
+        // The names come from the catalog, so they are already the real
+        // identifiers; this refuses anything that would need quoting rather
+        // than splicing it into SQL and hoping.
+        for name in [&table, &column] {
+            assert!(
+                name.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "refusing to splice the catalog name {name:?} into SQL"
+            );
+        }
+        parts.push(format!(
+            "SELECT max({column})::date AS m FROM zeroship.{table} \
+             WHERE {column} >= $1::date AND {column} < $2::date"
+        ));
+    }
+
+    let band_start = chrono::NaiveDate::from_ymd_opt(ISOLATED_PERIOD_BASE_YEAR, 1, 1)
+        .expect("the band's first month is a valid date");
+    let band_end = chrono::NaiveDate::from_ymd_opt(ISOLATED_PERIOD_CEILING_YEAR, 1, 1)
+        .expect("the band's ceiling is a valid date");
+    let sql = format!("SELECT max(m) AS m FROM ({}) s", parts.join(" UNION ALL "));
+    let rows = client
+        .query(&sql, &[&band_start, &band_end])
+        .await
+        .expect("read the highest period already seeded in the band");
+    let latest: Option<chrono::NaiveDate> = rows
+        .first()
+        .expect("a bare aggregate returns one row")
+        .get("m");
+
+    let Some(latest) = latest else {
+        return 0;
+    };
+    months_since_band_start(latest) + 1
+}
+
+/// Where a period sits in the band, counted in months from its first month.
+///
+/// The ONE spelling of that arithmetic. `resolve_run_band_base` turns an
+/// observed high-water mark into a base with it, and the regression test turns
+/// a window it was handed into the same units to compare them; two copies could
+/// disagree by a month and the comparison would still look like it held.
+#[allow(dead_code)]
+pub fn months_since_band_start(period: chrono::NaiveDate) -> u32 {
+    use chrono::Datelike;
+    let months = (period.year() - ISOLATED_PERIOD_BASE_YEAR) * 12 + (period.month() as i32 - 1);
+    u32::try_from(months).expect("a period inside the band is at or after its first month")
 }
 
 /// First year of the band `next_isolated_period()` reserves. NOTHING ELSE MAY
@@ -729,17 +889,37 @@ pub fn next_isolated_period() -> i64 {
 ///     allocator's process-global counter cannot see them at all.
 ///
 /// Measured 2026-08-20 with the band at 2030: `spend_recompute`'s hardcoded
-/// 2036-08 landed inside a window this allocator had handed to a proration
-/// test, putting two modules' apps in one period. Nothing asserted on that
-/// period, so it was latent - but it is the same defect, and "we got away with
-/// it" is not isolation.
+/// far-future period landed inside a window this allocator had handed to a
+/// proration test, putting two modules' apps in one period. Nothing asserted on
+/// that period, so it was latent - but it is the same defect, and "we got away
+/// with it" is not isolation.
 ///
 /// So the band sits ABOVE every literal in the crate rather than among them,
 /// and `period_band_is_reserved_for_the_allocator` in `billing_safety_net_test`
 /// fails if a new literal moves into it. That check is what makes "disjoint by
 /// construction" a property rather than a hope; without it this constant is
 /// just a comment.
+///
+/// IT IS ALSO THE FLOOR OF THE PER-RUN BASE SCAN. `resolve_run_band_base` only
+/// looks at periods at or above this year, so a literal that moved into the
+/// band would not merely share a month with one window - it would be read as a
+/// previous run's high-water mark and push every later run's base past it.
 pub const ISOLATED_PERIOD_BASE_YEAR: i32 = 2100;
+
+/// One past the last year `next_isolated_period()` will hand out, and the top of
+/// the window the per-run base scan reads.
+///
+/// Two jobs, and they are the same job seen from both ends. The scan ignores
+/// periods at or above this year, so a far-future SENTINEL written by something
+/// that is not this allocator cannot become the high-water mark that every run
+/// then starts from - which would hand every run the same base and undo the
+/// whole point. And the allocator refuses to hand out a window at or above it,
+/// because a month the scan cannot see is a month the next run will hand out
+/// again.
+///
+/// Raising it is therefore NOT the repair for an exhausted band. Recreate the
+/// test database; the band is meant to be cheap to reclaim, not to last.
+pub const ISOLATED_PERIOD_CEILING_YEAR: i32 = 100_000;
 
 #[allow(dead_code)]
 pub fn lite_billing_stack(

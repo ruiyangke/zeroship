@@ -14,6 +14,7 @@
 pub mod advisory_lock;
 pub mod audit;
 pub mod config;
+pub mod control_client;
 pub mod cron;
 pub mod csrf;
 pub mod error;

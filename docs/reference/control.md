@@ -131,8 +131,43 @@ Two consequences a UI will meet:
   outranks rank 40, so `addMember` and `changeMemberRole` both refuse the owner
   role and `transferOwnership` MOVES the seat rather than duplicating it. An
   owner list will always show one row.
-- **There is no "leave organization".** An actor never outranks themselves, so
-  no member can remove their own seat. There is no route for it to call.
+- **Leaving is its own call, because the inequality would otherwise forbid it.**
+  An actor never outranks themselves, so `removeMember(org, myOwnId)` is
+  refused. `organizations.leave(org)` is the carve-out: it takes no user id,
+  and the route it sends to (`DELETE /api/organizations/{id}/membership`) has no
+  segment that could name one, so the seat it reaches is the caller's by
+  construction. It needs no rank — a viewer can leave — and it carries its own
+  scope, `organization:members:leave`, so a read-only consent cannot delete its
+  holder's seat. The general inequality is untouched and still stops an admin
+  removing a peer.
+
+  A **sole owner is refused** (`409 last owner`) and told to transfer ownership
+  first. An organization that keeps no owner is one no route can repair.
+
+#### Closing an organization
+
+`organizations.dissolve(org)` closes one. Owner only, and it cannot be undone.
+
+It is a **soft close**: the row survives with `dissolved_at` set, and so do its
+members, its invitations and its billing history — the organization is the
+billing subject, and a row that vanished would take the counterparty out of a
+money record that has to outlive the relationship. Every read still returns it,
+including `list()`, so a UI should label a closed organization rather than hide
+it. Every write against it answers `409 organization dissolved`, including a
+second close and including a departure.
+
+It is **refused while the organization still owns projects** (`409 organization
+has projects`, carrying the count). Delete them with `projects.delete`, which
+itself needs each project to own no apps. The ordering is the point: an
+organization that closed while apps were still running would leave them with
+nobody who answers for them.
+
+A close **releases the names the organization was holding**. Both the slug and
+the personal-organization slot are unique among *live* organizations only, so a
+creator who closes "Acme" can create another "Acme", and a creator who closes
+their personal organization gets a fresh one on their next deploy instead of an
+account that can never deploy again. Neither column is rewritten: the closed
+record still says what it was called and whose it was.
 
 #### Projects narrow; they never widen
 
@@ -151,13 +186,35 @@ per-project invoice, and `project_members` carries no billing dimension.
 every project of the organization. That filter is the point: listing them all
 would hand a below-admin member the names of projects they cannot open.
 
+`projects.changeMemberRole` moves an existing seat in **one** call. It is not
+delete-then-add, and the difference is visible to a UI: a member below admin
+with no project row reaches nothing, so removing before granting would blank
+their access in between, and a failure between the two would leave the seat gone
+rather than narrowed.
+
+`projects.update` renames or re-slugs; `projects.delete` removes the project and
+its seats, and is **refused while the project owns apps** (`409 project has
+apps`, carrying the count). Both need admin rank or above, which is the same
+threshold as creating one and for the same reason: below admin, the project row
+is what grants reach, so reshaping it would be reshaping your own authority.
+
 #### Invitations, and the one time the token exists
 
-`createInvite` is the only response that carries a `token`. The server stores a
-digest of it and nothing else, so no later read can return it — an
-`InviteRecord` has no field to hold one. **Surface or deliver it at create time
-or the invitation is lost**, and the remedy is `revokeInvite` followed by a new
-`createInvite`.
+The platform **mails the invitation**, and the response says what became of the
+attempt. `delivery` is `sent`, `suppressed` (the address is on the platform's
+bounce/complaint list, so nothing was sent) or `failed` (the transport refused).
+The invitation row is written and committed *before* the send is attempted, so a
+delivery failure costs an email rather than an invitation — a `failed` invite is
+still redeemable with the token in the same response.
+
+`createInvite` is also the only response that carries a `token`. The server
+stores a digest of it and nothing else, so no later read can return it — an
+`InviteRecord` has no field to hold one. A client does not have to deliver it
+when `delivery` is `sent`, but it **must surface it otherwise**, because in
+those cases nothing else will; the remedy for a lost one is `revokeInvite`
+followed by a new `createInvite`. Holding the token grants nothing on its own:
+redemption additionally requires the redeeming account's *verified* address to
+be the invited address.
 
 `redeemInvite` is not organization-scoped, because the redeemer holds no seat
 yet: the token is the capability and the organization comes back in the

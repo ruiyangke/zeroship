@@ -338,6 +338,7 @@ async fn build_state(db_url: &str, app_base_domain: &str) -> Arc<AppState> {
         )
         .expect("native tax provider builds"),
         notifier: Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: Arc::new(
             zeroship_control::billing_read::ProjectedChargeCache::default(),

@@ -179,24 +179,39 @@ SELECT probe('project_member_naming_a_non_member', $$
   INSERT INTO zeroship.project_members (project_id, organization_id, user_id, role)
   VALUES ('prj_0000000000000000000001','org_0000000000000000000001',
           '22222222-2222-2222-2222-222222222222','developer') $$);
--- These three name `id`, `name` and `project_id` and NOTHING else. `apps.api_key`
--- was dropped by db/migrations-ts/20260905000200_drop_app_api_key.ts, and a
--- column list still naming it does not fail in a way this gate could read: the
--- statement is refused at PARSE time with 42703, before any of the edges under
--- test are reached, and `GET STACKED DIAGNOSTICS` carries neither a constraint
--- nor a column, so every one of these would record `column:?`. That is the
--- failure this gate's header warns about - a refusal that is not evidence -
--- and `app_with_no_project` is where it bites hardest, because that case exists
+-- These name `id`, `name`, `project_id` and `organization_id` and NOTHING else.
+-- `apps.api_key` was dropped by
+-- db/migrations-ts/20260905000200_drop_app_api_key.ts, and a column list still
+-- naming it does not fail in a way this gate could read: the statement is
+-- refused at PARSE time with 42703, before any of the edges under test are
+-- reached, and `GET STACKED DIAGNOSTICS` carries neither a constraint nor a
+-- column, so every one of these would record `column:?`. That is the failure
+-- this gate's header warns about - a refusal that is not evidence - and
+-- `app_with_no_project` is where it bites hardest, because that case exists
 -- precisely to name `column:project_id` as the witness.
+--
+-- `organization_id` IS NAMED, and its absence was exactly that failure in a
+-- quieter form. It became NOT NULL in
+-- db/migrations-ts/20260906000100_apps_organization_and_billing_subject.ts, so
+-- omitting it refused `app_in_a_project` with `column:organization_id` -- and
+-- the CASCADE from there is what makes this worth spelling out: with no app in
+-- the project, `delete_a_project_that_still_owns_an_app` succeeded, so
+-- `delete_an_organization_that_still_owns_a_project` succeeded too, so the
+-- organization every later case names was GONE and each of them recorded a
+-- foreign-key refusal against a row the fixture had already deleted. One
+-- missing column produced seven failures, none of which was about the edge its
+-- case existed to measure.
 SELECT probe('app_in_a_project', $$
-  INSERT INTO zeroship.apps (id, name, project_id)
-  VALUES (gen_random_uuid(), 'gate-app', 'prj_0000000000000000000001') $$);
+  INSERT INTO zeroship.apps (id, name, project_id, organization_id)
+  VALUES (gen_random_uuid(), 'gate-app', 'prj_0000000000000000000001',
+          'org_0000000000000000000001') $$);
 SELECT probe('app_naming_an_absent_project', $$
-  INSERT INTO zeroship.apps (id, name, project_id)
-  VALUES (gen_random_uuid(), 'gate-app-2', 'prj_0000000000000000000009') $$);
+  INSERT INTO zeroship.apps (id, name, project_id, organization_id)
+  VALUES (gen_random_uuid(), 'gate-app-2', 'prj_0000000000000000000009',
+          'org_0000000000000000000001') $$);
 SELECT probe('app_with_no_project', $$
-  INSERT INTO zeroship.apps (id, name)
-  VALUES (gen_random_uuid(), 'gate-app-3') $$);
+  INSERT INTO zeroship.apps (id, name, organization_id)
+  VALUES (gen_random_uuid(), 'gate-app-3', 'org_0000000000000000000001') $$);
 SELECT probe('delete_a_project_that_still_owns_an_app', $$
   DELETE FROM zeroship.projects WHERE id = 'prj_0000000000000000000001' $$);
 SELECT probe('delete_an_organization_that_still_owns_a_project', $$
@@ -305,9 +320,9 @@ project_member_in_its_own_organization|accepted|
 project_member_naming_another_organizations_project|refused|project_members_project_ownership_fkey
 project_member_naming_a_non_member|refused|project_members_organization_member_fkey
 app_in_a_project|accepted|
-app_naming_an_absent_project|refused|apps_project_id_fkey
+app_naming_an_absent_project|refused|apps_project_ownership_fkey
 app_with_no_project|refused|column:project_id
-delete_a_project_that_still_owns_an_app|refused|apps_project_id_fkey
+delete_a_project_that_still_owns_an_app|refused|apps_project_ownership_fkey
 delete_an_organization_that_still_owns_a_project|refused|projects_organization_id_fkey
 losing_organization_membership_drops_project_membership|accepted|project_members_left:0"
 

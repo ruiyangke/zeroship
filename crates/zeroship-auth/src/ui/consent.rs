@@ -725,8 +725,7 @@ async fn classify_and_authorize(
 
     let principal_id = Uuid::parse_str(&info.subject)
         .map_err(|e| format!("consent subject is not a UUID: {e}"))?;
-    let policies = authz::load_platform_policies()
-        .map_err(|e| format!("load platform policies: {e}"))?;
+    let policies = platform_policies()?;
     let now = now_unix()?;
 
     for scope in delegated {
@@ -737,11 +736,9 @@ async fn classify_and_authorize(
             resource: Resource::Any,
             now,
             request_ip: None,
-            mfa_verified: false,
-            mfa_age_seconds: None,
             request_id: None,
         };
-        match authz::is_authorized_anywhere(db, &policies, &ctx).await {
+        match authz::is_authorized_anywhere(db, policies, &ctx).await {
             Ok(true) => {}
             Ok(false) => return Ok(ClassifiedScopes { can_grant: false, has_unknown: false }),
             Err(e) => return Err(format!("authorize {}: {e}", scope.as_str())),
@@ -749,6 +746,32 @@ async fn classify_and_authorize(
     }
 
     Ok(ClassifiedScopes { can_grant: true, has_unknown: false })
+}
+
+/// The shipped bands and their schema, loaded once per process.
+///
+/// Control and the migration service build this at BOOT and hold it in their
+/// state, so a policy set that does not validate stops the service instead of
+/// serving requests. The auth service has no such slot on its own state, and
+/// this path used to re-read and re-parse all six `.cedar` files on every
+/// consent render. That was already wasteful; it became worse the day
+/// `load_platform_policies` also started parsing the schema and running a full
+/// strict validation, which is per-process work by nature - the inputs are
+/// `include_str!` constants and cannot change while the process lives.
+///
+/// A failure is still returned rather than panicked: this is a request path,
+/// and a 500 on `/consent` is preferable to killing an auth worker that is
+/// serving logins. `build.rs` and control's boot both refuse the same defect
+/// earlier, so reaching this arm means the binary should never have shipped.
+fn platform_policies() -> Result<&'static authz::PlatformPolicies, String> {
+    static POLICIES: std::sync::OnceLock<Result<authz::PlatformPolicies, String>> =
+        std::sync::OnceLock::new();
+    POLICIES
+        .get_or_init(|| {
+            authz::load_platform_policies().map_err(|e| format!("load platform policies: {e}"))
+        })
+        .as_ref()
+        .map_err(Clone::clone)
 }
 
 fn now_unix() -> Result<i64, String> {
@@ -1047,6 +1070,46 @@ mod tests {
             ScopeDef { label: "evil".to_owned(), description: None },
         );
         assert_eq!(classify_scope("platform:admin", &defs), ScopeClass::Delegated);
+    }
+
+    /// The consent screen cannot name an authority the platform does not have,
+    /// because it holds NO copy of its own: every platform scope renders
+    /// exactly `Scope::human_label()`, which is generated from the same closed
+    /// enum the policy bands and the `.require` sites use.
+    ///
+    /// **This is the property, not the wording.** The vocabulary sweep deleted
+    /// `team:read` / `team:write` / `deployments:rollback`, each of which was
+    /// consent-visible with no enforcement site anywhere - a human asked to
+    /// approve "Roll back deployments" for a capability that did not exist, and
+    /// a standing promise the platform would have started honouring for every
+    /// already-issued token the day such a route landed. What stops that
+    /// recurring is that a deleted variant cannot be rendered at all. A second
+    /// label table here would restore exactly the defect, and this test is what
+    /// goes red if one appears.
+    #[test]
+    fn every_platform_scope_renders_its_own_human_label_and_nothing_else() {
+        let defs = HashMap::new();
+        let requested: Vec<String> = Scope::ALL
+            .iter()
+            .map(|scope| scope.as_str().to_owned())
+            .collect();
+        assert!(
+            requested.len() >= 10,
+            "ruled on {} scope(s) - the vocabulary extraction collapsed",
+            requested.len()
+        );
+
+        let views = scope_views(&requested, &defs);
+        assert_eq!(views.len(), Scope::ALL.len());
+        for (scope, view) in Scope::ALL.iter().zip(views) {
+            assert_eq!(
+                view.label,
+                scope.human_label(),
+                "{} renders copy the enum does not own",
+                scope.as_str()
+            );
+            assert!(!view.unrecognized, "{}", scope.as_str());
+        }
     }
 
     #[test]

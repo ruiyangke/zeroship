@@ -2,13 +2,13 @@ use std::collections::HashMap;
 use std::net::IpAddr;
 use std::str::FromStr;
 
-use cedar_policy::{Context, Decision, PolicySet, Request, Response, RestrictedExpression};
+use cedar_policy::{Context, Decision, PolicySet, Request, Response, RestrictedExpression, Schema};
 use compio_postgres::Client;
 use uuid::Uuid;
 
 use crate::authority::{self, Authority};
 use crate::entities::{assemble_entities, cedar_string, resource_entity_uid, uid};
-use crate::{lower, Action, AuthzError, Policy, Resource};
+use crate::{lower, Action, AuthzError, PlatformPolicies, Policy, Resource};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AuthzDecision {
@@ -22,6 +22,16 @@ pub enum AuthzDecision {
 /// [`crate::authority::resolve`] inside [`enforce`], from the requested
 /// resource, on every call. A caller-supplied rank would be a claim, and a
 /// claim is not an authority.
+///
+/// It also carries no MFA fields, and their deletion is worth a sentence. Every
+/// producer of a live `zeroship_authn::VerifiedPrincipal` set `mfa_verified:
+/// false` and `mfa_age_seconds: None` unconditionally - the platform has no
+/// second-factor signal to report - so `Condition::RequireMfa` and
+/// `Condition::MfaWithin` compared against a value that was not merely unknown
+/// but WRONG. A condition that can only ever fail is worse than an absent one:
+/// it reads to a reviewer as a fence. Both variants and both fields went in the
+/// same sweep. `now` stayed, because it is an honest unused input rather than a
+/// falsified one.
 #[derive(Debug)]
 pub struct AuthzContext<'a> {
     pub principal_id: Uuid,
@@ -30,8 +40,6 @@ pub struct AuthzContext<'a> {
     pub resource: Resource,
     pub now: i64,
     pub request_ip: Option<IpAddr>,
-    pub mfa_verified: bool,
-    pub mfa_age_seconds: Option<u32>,
     pub request_id: Option<&'a str>,
 }
 
@@ -49,25 +57,27 @@ pub struct AuthzContext<'a> {
 /// # Errors
 ///
 /// Returns [`AuthzError::Db`] when the authority resolve fails,
-/// [`AuthzError::Validation`] when the principal has no user row, and the Cedar
-/// error variants when a policy, request or entity is rejected. A resolve
-/// failure is never degraded into a Deny: an unreadable membership must not be
-/// audited as "no seat".
+/// [`AuthzError::Validation`] when the principal has no user row,
+/// [`AuthzError::CedarEval`] when Cedar records a per-policy evaluation error,
+/// and the other Cedar error variants when a policy, request or entity is
+/// rejected. A resolve failure is never degraded into a Deny: an unreadable
+/// membership must not be audited as "no seat".
 pub async fn enforce(
     pg: &Client,
-    static_policies: &PolicySet,
+    platform: &PlatformPolicies,
     ctx: &AuthzContext<'_>,
 ) -> Result<AuthzDecision, AuthzError> {
     let authority = authority::resolve(pg, ctx.principal_id, &ctx.resource).await?;
     let entities = assemble_entities(ctx.principal_id, &authority, &ctx.resource)?;
 
     if ctx.token_policy.is_some() {
-        let principal_request = build_request(ctx, &authority)?;
+        let principal_request = build_request(ctx, &authority, platform.schema())?;
         let principal_decision = cedar_policy::Authorizer::new().is_authorized(
             &principal_request,
-            static_policies,
+            platform.policies(),
             &entities,
         );
+        refuse_on_evaluation_error(&principal_decision, "principal pass")?;
         if principal_decision.decision() != Decision::Allow {
             let matched_policies = matched_policy_ids(&principal_decision);
             audit_decision(pg, ctx, AuthzDecision::Deny, &matched_policies).await;
@@ -78,11 +88,12 @@ pub async fn enforce(
     let final_policies = if let Some(token_policy) = &ctx.token_policy {
         policy_set_from_policy(token_policy)?
     } else {
-        static_policies.clone()
+        platform.policies().clone()
     };
 
-    let req = build_request(ctx, &authority)?;
+    let req = build_request(ctx, &authority, platform.schema())?;
     let decision = cedar_policy::Authorizer::new().is_authorized(&req, &final_policies, &entities);
+    refuse_on_evaluation_error(&decision, "wrapper pass")?;
     let matched_policies = matched_policy_ids(&decision);
 
     let decision = if decision.decision() == Decision::Allow {
@@ -92,6 +103,40 @@ pub async fn enforce(
     };
     audit_decision(pg, ctx, decision, &matched_policies).await;
     Ok(decision)
+}
+
+/// Refuse a response that carries per-policy evaluation errors.
+///
+/// Cedar does not fail an authorization when one policy blows up. It SKIPS that
+/// policy, records the error in `diagnostics().errors()`, and returns a
+/// perfectly ordinary response - so a permit that should have fired becomes a
+/// Deny whose `matched_policy_ids` is empty. In `zeroship.authz_decisions` that
+/// row is byte-identical to the denial of a principal who holds no seat at all,
+/// which makes the one durable record of the decision actively misleading about
+/// why it went that way.
+///
+/// A silent deny is also the WRONG answer for the failure mode: an evaluation
+/// error means the platform could not decide, and a caller told "forbidden"
+/// will not retry while a caller told "error" will.
+fn refuse_on_evaluation_error(response: &Response, pass: &str) -> Result<(), AuthzError> {
+    let errors: Vec<String> = response
+        .diagnostics()
+        .errors()
+        .map(ToString::to_string)
+        .collect();
+    if errors.is_empty() {
+        return Ok(());
+    }
+    tracing::error!(
+        pass,
+        errors = errors.join("; "),
+        "authz: Cedar recorded a policy evaluation error; refusing rather than \
+         returning the deny it would otherwise produce"
+    );
+    Err(AuthzError::CedarEval(format!(
+        "{pass}: {}",
+        errors.join("; ")
+    )))
 }
 
 /// Return true when the principal can perform `ctx.action` on SOME resource
@@ -113,12 +158,19 @@ pub async fn enforce(
 /// action. That is what stopped `organization:members:write` from reading as
 /// grantable to any creator with one app.
 ///
+/// **THIS FUNCTION IS WHY THE SCHEMA'S `appliesTo` IS WIDE.** It legitimately
+/// asks every action against every resource type, and expects "no" for most of
+/// them. A schema whose `appliesTo` was derived from the pairs the bands write
+/// would turn those honest questions into `AuthzError::CedarRequest` at
+/// `build_request` - raised before `audit_decision`, so a 500 with no record
+/// rather than a denial.
+///
 /// # Errors
 ///
 /// Propagates whatever [`enforce`] returns for any probed resource.
 pub async fn is_authorized_anywhere(
     pg: &Client,
-    static_policies: &PolicySet,
+    platform: &PlatformPolicies,
     ctx: &AuthzContext<'_>,
 ) -> Result<bool, AuthzError> {
     let mut resources = vec![Resource::Any];
@@ -133,11 +185,9 @@ pub async fn is_authorized_anywhere(
             resource,
             now: ctx.now,
             request_ip: ctx.request_ip,
-            mfa_verified: ctx.mfa_verified,
-            mfa_age_seconds: ctx.mfa_age_seconds,
             request_id: ctx.request_id,
         };
-        if enforce(pg, static_policies, &probe).await? == AuthzDecision::Allow {
+        if enforce(pg, platform, &probe).await? == AuthzDecision::Allow {
             return Ok(true);
         }
     }
@@ -149,12 +199,23 @@ fn policy_set_from_policy(policy: &Policy) -> Result<PolicySet, AuthzError> {
     PolicySet::from_str(&lower(policy)).map_err(|err| AuthzError::CedarParse(err.to_string()))
 }
 
-fn build_request(ctx: &AuthzContext<'_>, authority: &Authority) -> Result<Request, AuthzError> {
+/// Build the Cedar request, BOUND TO THE SCHEMA.
+///
+/// The `Some(schema)` is not decoration. It makes Cedar check the action id,
+/// the principal type, the resource type and the whole context SHAPE against
+/// `deploy/policies/zeroship.cedarschema` before any policy runs, so a request
+/// outside the declared vocabulary is an `AuthzError::CedarRequest` rather than
+/// a deny that looks exactly like an honest non-match.
+fn build_request(
+    ctx: &AuthzContext<'_>,
+    authority: &Authority,
+    schema: &Schema,
+) -> Result<Request, AuthzError> {
     let principal = uid("User", &ctx.principal_id.to_string())?;
     let action = uid("Action", ctx.action.cedar_id())?;
     let resource = resource_entity_uid(&ctx.resource)?;
     let context = build_context(ctx, authority)?;
-    Request::new(principal, action, resource, context, None)
+    Request::new(principal, action, resource, context, Some(schema))
         .map_err(|err| AuthzError::CedarRequest(err.to_string()))
 }
 
@@ -165,11 +226,15 @@ fn build_request(ctx: &AuthzContext<'_>, authority: &Authority) -> Result<Reques
 /// arrives with `effective_rank: 0` and each band denies at its own `>=`, with
 /// the band recorded as a non-match rather than as an evaluation error nothing
 /// writes down.
+///
+/// This map and the `RequestContext` type in
+/// `deploy/policies/zeroship.cedarschema` must agree EXACTLY, in both
+/// directions - a schema-bound request refuses a missing key and an extra one
+/// alike. `tests/cedar_schema_vocabulary_gate.sh` compares the two.
 fn build_context(ctx: &AuthzContext<'_>, authority: &Authority) -> Result<Context, AuthzError> {
     let request_ip = ctx
         .request_ip
         .map_or_else(|| "0.0.0.0".to_owned(), |ip| ip.to_string());
-    let mfa_age_seconds = ctx.mfa_age_seconds.unwrap_or(u32::MAX);
     let now_minute_utc = utc_minute_of_day(ctx.now);
 
     let pairs = HashMap::from([
@@ -181,14 +246,6 @@ fn build_context(ctx: &AuthzContext<'_>, authority: &Authority) -> Result<Contex
         (
             "request_ip".to_owned(),
             restricted(&format!("ip({})", cedar_string(&request_ip)))?,
-        ),
-        (
-            "mfa_verified".to_owned(),
-            restricted(if ctx.mfa_verified { "true" } else { "false" })?,
-        ),
-        (
-            "mfa_age_seconds".to_owned(),
-            restricted(&mfa_age_seconds.to_string())?,
         ),
         // The authority, resolved server-side from the requested resource.
         // `effective_rank` is already narrowed for a project- or app-scoped
@@ -272,8 +329,15 @@ fn audit_resource(resource: &Resource) -> (&'static str, Option<String>) {
 
 #[cfg(test)]
 mod tests {
-    use super::audit_resource;
-    use crate::Resource;
+    use std::str::FromStr as _;
+
+    use cedar_policy::Decision;
+
+    use super::{
+        audit_resource, build_request, matched_policy_ids, refuse_on_evaluation_error, AuthzContext,
+    };
+    use crate::entities::{resource_entity_uid, uid};
+    use crate::{load_platform_policies, Action, Authority, AuthzError, Resource};
 
     /// Every id-bearing variant records its own id, and each type tag is
     /// distinct. A shared tag would make two different resources
@@ -299,5 +363,144 @@ mod tests {
         assert_eq!(tag, "any");
         assert_eq!(id, None);
         assert!(tags.insert(tag));
+    }
+
+    /// EVERY action must build a schema-bound request at EVERY resource type,
+    /// and the whole context must be accepted with it.
+    ///
+    /// This is the binding for the width of `appliesTo` in
+    /// `deploy/policies/zeroship.cedarschema`, and for the exact agreement
+    /// between [`build_context`](super::build_context) and that file's
+    /// `RequestContext`. Nothing else checks either: a narrowed `appliesTo`, a
+    /// context key added on one side only, or an action dropped from the schema
+    /// all leave the policy set validating cleanly and turn live requests into
+    /// `AuthzError::CedarRequest` - raised BEFORE `audit_decision`, so a 500
+    /// with no row in `zeroship.authz_decisions` to say it happened.
+    ///
+    /// The cross product is the surface `is_authorized_anywhere` really asks
+    /// for. It probes `Resource::Any`, then each organization, then a
+    /// representative project, for whatever action the consent screen names -
+    /// so "organization:members:write at a Project" is an honest question that
+    /// must return `Deny`, never an error.
+    #[test]
+    fn every_action_builds_a_schema_bound_request_at_every_resource_type() {
+        let platform = load_platform_policies().expect("policies and schema load");
+        let authority = Authority {
+            email_verified: true,
+            account_locked: false,
+            effective_rank: 40,
+            billing_rank: 20,
+        };
+        let resources = [
+            Resource::Any,
+            Resource::App {
+                id: uuid::Uuid::nil().to_string(),
+            },
+            Resource::Project {
+                id: "prj_0123456789abcdefghijkl".to_owned(),
+            },
+            Resource::Organization {
+                id: "org_0123456789abcdefghijkl".to_owned(),
+            },
+        ];
+
+        let mut ruled_on = 0usize;
+        for action in Action::all() {
+            for resource in &resources {
+                ruled_on += 1;
+                let ctx = AuthzContext {
+                    principal_id: uuid::Uuid::nil(),
+                    token_policy: None,
+                    action: *action,
+                    resource: resource.clone(),
+                    now: 1_760_000_000,
+                    request_ip: None,
+                    request_id: None,
+                };
+                build_request(&ctx, &authority, platform.schema()).unwrap_or_else(|err| {
+                    panic!(
+                        "{} at {} is refused by the schema: {err}",
+                        action.cedar_id(),
+                        resource.cedar_type()
+                    )
+                });
+            }
+        }
+
+        assert_eq!(
+            ruled_on,
+            Action::all().len() * resources.len(),
+            "the enumeration collapsed, so the clean result above means nothing"
+        );
+        assert!(ruled_on >= 40, "ruled on only {ruled_on} pair(s)");
+    }
+
+    /// A Cedar evaluation error must be refused, and the reason it must is in
+    /// the second half of this test: the response Cedar hands back for one is
+    /// an ordinary `Deny` with an EMPTY reason set.
+    ///
+    /// Cedar does not fail an authorization when a policy blows up. It skips
+    /// that policy and records the error out of band. So a permit that should
+    /// have fired becomes a denial whose `matched_policies` column is `{}` -
+    /// byte-identical, in `zeroship.authz_decisions`, to the denial of a
+    /// principal who holds no seat at all. Returning that Deny would file a
+    /// platform malfunction as a routine refusal, and tell a caller who should
+    /// retry that they are forbidden.
+    ///
+    /// The defect is provoked the way it actually happens: a policy
+    /// dereferencing an entity attribute the store does not carry. That is
+    /// exactly why authority rides in the request CONTEXT rather than on the
+    /// `User` entity - see `crate::entities`.
+    #[test]
+    fn a_policy_evaluation_error_is_refused_and_would_otherwise_be_a_bare_deny() {
+        let policies = cedar_policy::PolicySet::from_str(
+            "permit (principal, action, resource) when { principal.rank >= 1 };",
+        )
+        .expect("the policy parses - the attribute is missing at RUNTIME, not at parse time");
+        let authority = Authority {
+            email_verified: true,
+            account_locked: false,
+            effective_rank: 40,
+            billing_rank: 20,
+        };
+        let entities = crate::assemble_entities(uuid::Uuid::nil(), &authority, &Resource::Any)
+            .expect("entities assemble");
+        let request = cedar_policy::Request::new(
+            uid("User", &uuid::Uuid::nil().to_string()).expect("principal uid"),
+            uid("Action", Action::AppsRead.cedar_id()).expect("action uid"),
+            resource_entity_uid(&Resource::Any).expect("resource uid"),
+            cedar_policy::Context::empty(),
+            None,
+        )
+        .expect("request builds");
+
+        let response =
+            cedar_policy::Authorizer::new().is_authorized(&request, &policies, &entities);
+
+        // What the caller would have been told without the refusal.
+        assert_eq!(response.decision(), Decision::Deny);
+        assert!(
+            matched_policy_ids(&response).is_empty(),
+            "the audit row for an evaluation error carries no policy id, which is \
+             what makes it indistinguishable from an honest non-match"
+        );
+
+        let refused = refuse_on_evaluation_error(&response, "test pass");
+        match refused {
+            Err(AuthzError::CedarEval(message)) => {
+                assert!(
+                    message.contains("test pass"),
+                    "the refusal must name the pass it came from: {message}"
+                );
+            }
+            other => panic!("an evaluation error must be refused, got {other:?}"),
+        }
+
+        // The control: the same helper on a response with no evaluation error
+        // must pass it through, or the arm above proves nothing about errors.
+        let clean = load_platform_policies().expect("policies load");
+        let clean_response =
+            cedar_policy::Authorizer::new().is_authorized(&request, clean.policies(), &entities);
+        assert!(refuse_on_evaluation_error(&clean_response, "test pass").is_ok());
     }
 }

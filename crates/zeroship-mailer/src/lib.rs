@@ -14,6 +14,7 @@
 pub mod bounce;
 pub mod forward;
 pub mod inbound;
+pub mod recording;
 pub mod resend;
 pub mod smtp;
 pub mod sns;
@@ -27,6 +28,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use compio_postgres::Client;
 
+pub use recording::RecordingMailer;
 pub use resend::{ResendConfig, ResendMailer};
 pub use smtp::{SmtpConfig, SmtpMailer, SmtpTls};
 pub use stdout::StdoutMailer;

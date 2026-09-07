@@ -87,6 +87,8 @@ These are also served by `crates/auth` on the auth host.
 | POST | `/me/sessions/{id}/revoke` | Revoke one of the caller's own sessions |
 | POST | `/me/unlink/{provider}` | Unlink a federated identity |
 | POST | `/me/2fa/enroll`, `/me/2fa/confirm`, `/me/2fa/disable` | TOTP self-service |
+| POST | `/me/delete` | Request account deletion (GDPR Art. 17): schedules the erasure, revokes every credential, mails the undo link |
+| GET, POST | `/me/delete/cancel` | Redeem the mailed undo token within the grace window |
 | POST | `/webhooks/postmark`, `/webhooks/ses-sns`, `/webhooks/relay-inbound` | Mailer and relay webhooks |
 | GET | `/healthz`, `/readyz`, `/static/style.css` | Health checks and static CSS |
 
@@ -99,6 +101,21 @@ account holder. Both instead mail the registered address a second-factor-removed
 notice whose call to action is a password reset, the flow that does revoke
 everything. To end other sessions deliberately, use `/me/sessions` and
 `/me/sessions/{id}/revoke`.
+
+`/me/delete` is a request, not an erasure. It is REFUSED, with nothing written,
+while the caller is the only owner of a live organization - the refusal names
+each organization and whether to transfer it, empty it, or dissolve it - and
+refused the same way if the control plane cannot answer that question at all.
+When it succeeds it schedules the erasure a grace window out, revokes every
+session and token family, and mails a confirmation carrying a single-use undo
+token.
+
+That token is the ONLY way to change your mind, and deliberately so: the request
+revokes the session in the same transaction that schedules the deletion, so
+there is no signed-in caller left to authenticate an undo. `/me/delete/cancel`
+therefore takes the token, not a cookie. Cancelling clears the schedule; it does
+not restore the revoked sessions, so you sign in fresh exactly as after a
+password reset.
 
 ### Gateway BFF endpoints
 

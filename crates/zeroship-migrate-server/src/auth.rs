@@ -43,7 +43,7 @@ pub trait Authenticator: Send + Sync {
 #[derive(Debug)]
 pub struct ControlPlaneAuthenticator {
     control_pg: Arc<Client>,
-    static_policies: authz::PolicySet,
+    static_policies: authz::PlatformPolicies,
     bearer_verifier: BearerVerifier,
 }
 
@@ -51,7 +51,7 @@ impl ControlPlaneAuthenticator {
     #[must_use]
     pub fn new(
         control_pg: Arc<Client>,
-        static_policies: authz::PolicySet,
+        static_policies: authz::PlatformPolicies,
         bearer_verifier: BearerVerifier,
     ) -> Self {
         Self {
@@ -93,8 +93,6 @@ impl ControlPlaneAuthenticator {
             resource,
             now,
             request_ip: seed.request_ip,
-            mfa_verified: seed.mfa_verified,
-            mfa_age_seconds: seed.mfa_age_seconds,
             request_id: Some(seed.request_id.as_str()),
         };
 
@@ -166,8 +164,6 @@ impl Authenticator for ControlPlaneAuthenticator {
             token_policy: verified.token_policy,
             request_id: verified.request_id,
             request_ip: verified.request_ip,
-            mfa_verified: verified.mfa_verified,
-            mfa_age_seconds: verified.mfa_age_seconds,
         };
         self.authorize(seed, app_id, required_action).await
     }
@@ -179,8 +175,6 @@ struct VerifiedSeed {
     token_policy: Option<authz::Policy>,
     request_id: String,
     request_ip: Option<IpAddr>,
-    mfa_verified: bool,
-    mfa_age_seconds: Option<u32>,
 }
 
 /// The second fence, beside Cedar: applying a migration needs OWNER authority

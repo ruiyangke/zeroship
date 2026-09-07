@@ -423,6 +423,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         billing_stream: None,
         tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
             zeroship_control::billing_read::ProjectedChargeCache::default(),
@@ -542,8 +543,8 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
     .await;
 }
 
-fn now_for_closed_period() -> i64 {
-    common::next_isolated_period()
+async fn now_for_closed_period() -> i64 {
+    common::next_isolated_period().await
 }
 
 fn prev_period(now: i64) -> i64 {
@@ -693,7 +694,7 @@ async fn two_segment_change_with_different_fx_posts_two_items_two_lines() {
     let url = db_url();
     let fx = build_fixture(&url, "twoseg").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
     let days_in_period = proration::days_in_period(period);
 
@@ -827,7 +828,7 @@ async fn each_proration_segment_item_shows_its_own_cu_and_usage() {
     let url = db_url();
     let fx = build_fixture(&url, "segcu").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     seed_weight(&fx.state).await;
@@ -970,7 +971,7 @@ async fn no_change_yields_exactly_one_segment_zero_line() {
     let url = db_url();
     let fx = build_fixture(&url, "nochange").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     seed_weight(&fx.state).await;
@@ -1019,7 +1020,7 @@ async fn reconcile_rerun_does_not_double_post_segments() {
     let url = db_url();
     let fx = build_fixture(&url, "rerun").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     seed_weight(&fx.state).await;
@@ -1161,7 +1162,7 @@ async fn past_cap_flips_plan_and_tail_prices_under_running_plan() {
     let url = db_url();
     let fx = build_fixture(&url, "cap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     seed_weight(&fx.state).await;
@@ -1269,7 +1270,7 @@ async fn end_missing_metric_does_not_credit_the_bill() {
     let url = db_url();
     let fx = build_fixture(&url, "floor").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     seed_weight(&fx.state).await;
@@ -1335,7 +1336,7 @@ async fn segment_pricing_reflects_catalog_at_reconcile_time() {
     let url = db_url();
     let fx = build_fixture(&url, "catalogtime").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     seed_weight(&fx.state).await;
@@ -1422,7 +1423,7 @@ async fn shrinking_redrive_removes_orphaned_segment_and_stripe_item() {
     let url = db_url();
     let fx = build_fixture(&url, "orphan").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     seed_weight(&fx.state).await;
@@ -1533,7 +1534,7 @@ async fn corrupt_usage_snapshot_skips_app_instead_of_overbilling() {
     let url = db_url();
     let fx = build_fixture(&url, "corrupt").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     seed_weight(&fx.state).await;

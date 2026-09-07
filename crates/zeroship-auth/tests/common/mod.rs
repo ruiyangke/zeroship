@@ -16,6 +16,7 @@
 
 #![allow(dead_code)]
 
+pub mod mock_control;
 pub mod mock_provider;
 
 use std::sync::Arc;

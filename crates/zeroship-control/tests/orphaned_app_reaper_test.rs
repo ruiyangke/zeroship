@@ -37,6 +37,19 @@ const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 // freshly inserted ownerless app before that test asserts its own report.
 static REAPER_TEST_LOCK: Mutex<()> = Mutex::new(());
 
+/// Take the serialization token, ignoring poison.
+///
+/// The guard protects NO shared data - it is `Mutex<()>`, an ordering token -
+/// so a previous test's panic leaves nothing inconsistent behind for the next
+/// one to observe. `.expect(...)` on the poison therefore converted ONE real
+/// failure into four, three of which reported `PoisonError { .. }` and said
+/// nothing about their own subject. One fleet-count assertion failing here used
+/// to take every other case in the module with it through the poisoned lock, and
+/// none of them said which verdict it would have reached.
+fn reaper_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    REAPER_TEST_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn tmpdir(label: &str) -> PathBuf {
     let mut p = std::env::temp_dir();
     p.push(format!("zs-reaper-{label}-{}", Uuid::new_v4().simple()));
@@ -120,6 +133,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         )
         .expect("native tax provider builds"),
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
             zeroship_control::billing_read::ProjectedChargeCache::default(),
@@ -187,6 +201,24 @@ async fn app_is_archived(state: &AppState, id: &Uuid) -> bool {
         .is_some_and(|row| row.get("archived"))
 }
 
+/// The instant this app was archived, or `None` while it is live.
+///
+/// Read so idempotence can be asserted about THIS APP rather than about the
+/// reaper's fleet-wide count. See
+/// `reaper_archives_ownerless_app_and_retains_its_bundle`.
+async fn app_archived_at(
+    state: &AppState,
+    id: &Uuid,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    state
+        .control_pg
+        .query("SELECT archived_at FROM zeroship.apps WHERE id = $1", &[id])
+        .await
+        .expect("query app archived_at")
+        .first()
+        .and_then(|row| row.get("archived_at"))
+}
+
 async fn cleanup_app_row(state: &AppState, id: &Uuid) {
     state
         .control_pg
@@ -224,7 +256,7 @@ async fn seed_owner_user(state: &AppState) -> Uuid {
 #[compio::test]
 async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
     let url = db_url();
-    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
+    let _guard = reaper_test_lock();
     let fx = build_state(&url, "ownerless").await;
     let state = &fx.state;
 
@@ -258,8 +290,53 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
         state.blob_store.get_manifest(&app_id, "deployone").await.is_ok(),
         "archive must retain the app's manifests"
     );
+    // IDEMPOTENCE IS ABOUT THIS APP, NOT ABOUT THE REPORT'S COUNT.
+    //
+    // `tick` sweeps the whole fleet: every non-system, unarchived, owner-less
+    // app past the five-minute grace, archived one at a time in a loop. This
+    // used to assert `retry.archived == 0`, which is a claim that NOTHING in the
+    // fleet became reapable while the first tick ran - and on a database that
+    // has been used, the first tick has dozens of apps to walk and takes long
+    // enough that apps created a few minutes earlier cross the grace boundary
+    // during it. A fleet count is not this test's subject and it is not stable:
+    // on a database that already holds same-aged orphans from an earlier run,
+    // some cross the grace boundary mid-tick, so the second run against one
+    // database saw a different count than the first and cascaded into this
+    // module's other cases through the poisoned `REAPER_TEST_LOCK`. Orphans
+    // crossing grace mid-tick is the reaper WORKING; nothing about that number
+    // says the orphan below was touched twice.
+    //
+    // So the claim is made about the app the test owns, and about SELECTION
+    // rather than about the count: the detection query must no longer return
+    // this id. That is the property `retry.archived == 0` was reaching for -
+    // `archived_at IS NULL` in `find_orphaned_apps` is what makes it true - and
+    // it is the half the count cannot express on its own.
+    //
+    // The count is not a substitute here even in principle: `archive_app`
+    // writes `archived_at = COALESCE(archived_at, NOW())`, so re-archiving an
+    // already-archived app moves NOTHING observable on the row and still
+    // returns `Ok(Some(_))`, incrementing `archived`. Selection is the only
+    // place the defect would show.
+    let archived_at = app_archived_at(state, &app_id).await;
+    assert!(archived_at.is_some(), "precondition: the orphan is archived");
+    let still_selected = orphaned_app_reaper::find_orphaned_apps(state)
+        .await
+        .expect("re-run the detection query");
+    assert!(
+        !still_selected.contains(&app_id),
+        "an archived orphan is selected again: {app_id} is still in the reap \
+         candidate set ({} candidate(s) total)",
+        still_selected.len()
+    );
     let retry = orphaned_app_reaper::tick(state).await.expect("retry reaper tick");
-    assert_eq!(retry.archived, 0, "an archived orphan is not selected again");
+    assert_eq!(
+        app_archived_at(state, &app_id).await,
+        archived_at,
+        "an archived orphan was archived AGAIN by the next tick (the retry \
+         reported found={} archived={})",
+        retry.found,
+        retry.archived
+    );
 
     cleanup_app_row(state, &app_id).await;
 
@@ -279,7 +356,7 @@ async fn reaper_archives_ownerless_app_and_retains_its_bundle() {
 #[compio::test]
 async fn reaper_leaves_owned_app_untouched() {
     let url = db_url();
-    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
+    let _guard = reaper_test_lock();
     let fx = build_state(&url, "owned").await;
     let state = &fx.state;
 
@@ -319,7 +396,7 @@ async fn reaper_leaves_owned_app_untouched() {
 #[compio::test]
 async fn reaper_never_touches_system_app() {
     let url = db_url();
-    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
+    let _guard = reaper_test_lock();
     let fx = build_state(&url, "system").await;
     let state = &fx.state;
 
@@ -352,7 +429,7 @@ async fn reaper_never_touches_system_app() {
 #[compio::test]
 async fn reaper_respects_grace_window() {
     let url = db_url();
-    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
+    let _guard = reaper_test_lock();
     let fx = build_state(&url, "grace").await;
     let state = &fx.state;
 
@@ -383,7 +460,7 @@ async fn reaper_respects_grace_window() {
 #[compio::test]
 async fn direct_archive_retains_db_row_and_vfs_blob() {
     let url = db_url();
-    let _guard = REAPER_TEST_LOCK.lock().expect("reaper test lock");
+    let _guard = reaper_test_lock();
     let fx = build_state(&url, "purge").await;
     let state = &fx.state;
 

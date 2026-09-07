@@ -136,8 +136,6 @@ fn lower_condition(condition: &Condition) -> String {
                 .join(" || ")
         }
         Condition::TimeWindow { start, end, tz } => lower_time_window(start, end, tz),
-        Condition::RequireMfa => "context.mfa_verified == true".to_owned(),
-        Condition::MfaWithin { seconds } => format!("context.mfa_age_seconds <= {seconds}"),
     }
 }
 

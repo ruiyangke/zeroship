@@ -818,9 +818,9 @@ fi
 echo ""
 echo "=== Stage 6: Stripe reconcile — closed (previous-month) period, on demand ==="
 # ===========================================================================
-# Seed a SEPARATE creator + owned app on the priced plan, give it a
-# creator_billing Customer (set up via the mock client path), and seed usage in
-# the CLOSED (previous-month) period. Then trigger the operator-gated billing
+# Seed a SEPARATE organization + owned app on the priced plan, give the
+# organization a platform Stripe Customer (set up via the mock client path), and
+# seed usage in the CLOSED (previous-month) period. Then trigger the billing
 # reconcile for that period and assert the mock recorded the invoice-item +
 # invoice calls exactly once; a second trigger is idempotent.
 
@@ -846,24 +846,24 @@ if psql_exec >/dev/null <<SQL
 INSERT INTO zeroship.users (id, email, name, email_verified_at)
 VALUES ('$CLOSED_CREATOR', 'e2e-closed-$CLOSED_CREATOR@zeroship.test'::citext, 'Closed-Period Creator', NOW());
 $(organization_fixture_sql "closed-period-$CLOSED_CREATOR" "e2e-closed-$CLOSED_CREATOR@zeroship.test")
-INSERT INTO zeroship.apps (id, name, plan_id, project_id)
-VALUES ('$CLOSED_APP', 'closed-period-app-$CLOSED_APP', '$PLAN_ID', '$ZS_FIXTURE_PROJECT_ID');
+INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id)
+VALUES ('$CLOSED_APP', 'closed-period-app-$CLOSED_APP', '$PLAN_ID', '$ZS_FIXTURE_PROJECT_ID', '$ZS_FIXTURE_ORGANIZATION_ID');
 $(seat_app_owner_sql "$CLOSED_APP" "$CLOSED_CREATOR")
--- The creator must have a saved platform Stripe Customer or the reconciler skips
--- them. The customer lives in billing_customer_refs (provider='stripe'); the
--- creator_billing identity row backs the notify-cron FK.
-INSERT INTO zeroship.creator_billing (creator_id) VALUES ('$CLOSED_CREATOR')
-ON CONFLICT (creator_id) DO NOTHING;
-INSERT INTO zeroship.billing_customer_refs (creator_id, provider, external_id)
-VALUES ('$CLOSED_CREATOR', 'stripe', 'cus_e2e_closed')
-ON CONFLICT (creator_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
+-- The ORGANIZATION must have a saved platform Stripe Customer or the reconciler
+-- skips it. The customer lives in billing_customer_refs (provider='stripe');
+-- the organization_billing identity row is the FK parent of both that and
+-- invoices, so it has to be written first.
+$(organization_billing_sql "$ZS_FIXTURE_ORGANIZATION_ID")
+INSERT INTO zeroship.billing_customer_refs (organization_id, provider, external_id)
+VALUES ('$ZS_FIXTURE_ORGANIZATION_ID', 'stripe', 'cus_e2e_closed')
+ON CONFLICT (organization_id, provider) DO UPDATE SET external_id = EXCLUDED.external_id;
 -- Seed 750 priced requests (= 750 cents) in the CLOSED period. usage_aggregates
 -- is keyed by the period DATE (the month bucket), not a timestamp.
 INSERT INTO zeroship.usage_aggregates (app_id, period, metric, total)
 VALUES ('$CLOSED_APP', to_timestamp($PERIOD_START)::date, 'requests', 750)
 ON CONFLICT (app_id, period, metric) DO UPDATE SET total = 750;
 SQL
-then pass "seeded closed-period creator+app (period=$(date -u -d @$PERIOD_START +%Y-%m-%d), 750 priced requests, Customer cus_e2e_closed)"; else fail "closed-period seed failed"; fi
+then pass "seeded closed-period organization+app (period=$(date -u -d @$PERIOD_START +%Y-%m-%d), 750 priced requests, Customer cus_e2e_closed)"; else fail "closed-period seed failed"; fi
 
 # Trigger the on-demand reconcile for this period (operator-gated internal).
 # We pass `now`=$NOW_UNIX; the endpoint bills previous_period_start_unix(now).
@@ -871,7 +871,7 @@ RECON="$(curl -s -X POST -H "Authorization: Bearer $ZEROSHIP_CONTROL_KEY" "$CONT
 echo "    reconcile result: $RECON"
 BILLED="$(echo "$RECON" | jget '.billed')"
 RPERIOD="$(echo "$RECON" | jget '.period_start')"
-[ "$BILLED" = "1" ] && pass "billing reconcile billed 1 creator for the closed period" || fail "expected billed=1, got '$BILLED' ($RECON)"
+[ "$BILLED" = "1" ] && pass "billing reconcile billed 1 organization for the closed period" || fail "expected billed=1, got '$BILLED' ($RECON)"
 [ "$RPERIOD" = "$PERIOD_START" ] && pass "reconciler resolved the expected closed period_start ($RPERIOD)" || fail "period mismatch: endpoint=$RPERIOD seeded=$PERIOD_START"
 
 # Assert the mock recorded EXACTLY ONE invoice-item create for this creator,
@@ -920,12 +920,13 @@ let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{
 });')"
 [ "$HAS_KEY" = "yes" ] && pass "recorded item carries deterministic Idempotency-Key (billitem:…) + Bearer auth (real cyper wire path)" || fail "invoice-item lacked the expected Idempotency-Key/auth (not the real wire path?)"
 
-# The billing rail records exactly one FINALIZED invoice for (creator, period),
+# The billing rail records exactly one FINALIZED invoice for (organization,
+# period),
 # priced at 750 cents (750 requests × 1 cent). (The legacy billing_runs table is
 # gone; the invoice is the system of record.)
-INV_N="$(psql_exec -tA -c "SELECT COUNT(*) FROM zeroship.invoices WHERE creator_id='$CLOSED_CREATOR' AND status='finalized'" 2>/dev/null | tr -d '[:space:]')"
-INV_TOTAL="$(psql_exec -tA -c "SELECT COALESCE(total_cents,0) FROM zeroship.invoices WHERE creator_id='$CLOSED_CREATOR' AND status='finalized' LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
-[ "$INV_N" = "1" ] && pass "invoices has exactly one finalized invoice for the creator/period" || fail "expected 1 finalized invoice, got '$INV_N'"
+INV_N="$(psql_exec -tA -c "SELECT COUNT(*) FROM zeroship.invoices WHERE organization_id='$ZS_FIXTURE_ORGANIZATION_ID' AND status='finalized'" 2>/dev/null | tr -d '[:space:]')"
+INV_TOTAL="$(psql_exec -tA -c "SELECT COALESCE(total_cents,0) FROM zeroship.invoices WHERE organization_id='$ZS_FIXTURE_ORGANIZATION_ID' AND status='finalized' LIMIT 1" 2>/dev/null | tr -d '[:space:]')"
+[ "$INV_N" = "1" ] && pass "invoices has exactly one finalized invoice for the organization/period" || fail "expected 1 finalized invoice, got '$INV_N'"
 [ "$INV_TOTAL" = "750" ] && pass "finalized invoice total = 750 cents (750 requests × 1¢)" || fail "expected invoice total 750, got '$INV_TOTAL'"
 
 # --- idempotency: a SECOND trigger creates NO new items ---------------------

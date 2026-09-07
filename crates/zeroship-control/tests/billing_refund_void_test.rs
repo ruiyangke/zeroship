@@ -300,6 +300,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         billing_stream: None,
         tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
             zeroship_control::billing_read::ProjectedChargeCache::default(),
@@ -424,8 +425,8 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
     .await;
 }
 
-fn now_for_closed_period() -> i64 {
-    common::next_isolated_period()
+async fn now_for_closed_period() -> i64 {
+    common::next_isolated_period().await
 }
 
 /// A run-unique idempotency key. `refunds.idempotency_key` is GLOBALLY unique and the
@@ -563,7 +564,7 @@ async fn over_refund_three_way_bound_blocks_credit_laundering() {
     let url = db_url();
     let fx = build_fixture(&url, "launder").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "launder").await;
@@ -735,7 +736,7 @@ async fn cash_refund_issues_re_credit_refund_appends_grant() {
     let url = db_url();
     let fx = build_fixture(&url, "cashcredit").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "cashcredit").await;
@@ -857,7 +858,7 @@ async fn refund_replay_is_idempotent_exactly_one() {
     let url = db_url();
     let fx = build_fixture(&url, "replay").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "replay").await;
@@ -941,7 +942,7 @@ async fn tax_split_refund_returns_proportional_tax() {
     // build it as a draft then finalize-in-one-UPDATE so the immutability trigger + the
     // balance CHECK accept it, then record the $110 cash collected.
     let inv = zeroship_core::typed_id::new_invoice_id();
-    let period = period_d(prev_period(now_for_closed_period()));
+    let period = period_d(prev_period(now_for_closed_period().await));
     fx.state
         .control_pg
         .execute(
@@ -1048,7 +1049,7 @@ async fn void_reversal_conserves_credit_balance() {
     let url = db_url();
     let fx = build_fixture(&url, "voidrev").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "voidrev").await;
@@ -1122,7 +1123,7 @@ async fn true_up_subtracts_already_issued_cash_refunds() {
     let url = db_url();
     let fx = build_fixture(&url, "trueup").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "trueup").await;
@@ -1372,7 +1373,7 @@ async fn one_active_invoice_per_period_void_releases_claim() {
     let url = db_url();
     let fx = build_fixture(&url, "claim").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "claim").await;
@@ -1445,7 +1446,7 @@ async fn issue_refund_takes_per_organization_advisory_lock() {
     let url = db_url();
     let fx = build_fixture(&url, "rlock").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "rlock").await;
@@ -1536,7 +1537,7 @@ async fn two_refunds_summing_over_cash_second_is_rejected() {
     let url = db_url();
     let fx = build_fixture(&url, "sumcap").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "sumcap").await;
@@ -1604,7 +1605,7 @@ async fn refund_to_credit_double_drive_appends_exactly_one_grant() {
     let url = db_url();
     let fx = build_fixture(&url, "rtcdup").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "rtcdup").await;
@@ -1689,7 +1690,7 @@ async fn void_reissue_is_redrivable_after_phase1_crash() {
     let url = db_url();
     let fx = build_fixture(&url, "redrive").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "redrive").await;
@@ -2157,7 +2158,7 @@ async fn true_up_noop_when_over_collection_not_positive() {
     set_customer(&fx.state, organization).await;
     let plan = make_plan(&fx.state).await;
     let app = make_owned_app(&fx.state, &plan, organization).await;
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
     ingest_at(&fx.state, app, 3000, period, 1).await; // $30
     let stripe = RecordingStripe::default();

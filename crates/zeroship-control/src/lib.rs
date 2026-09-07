@@ -29,6 +29,7 @@ pub mod disputes;
 pub mod device_handlers;
 pub mod env_handlers;
 pub mod env_store;
+pub mod erasure;
 pub mod fee_policy;
 pub mod http_util;
 pub mod internal;
@@ -550,10 +551,15 @@ pub struct AppState {
     /// Expected audience for OAuth access tokens accepted by the control
     /// plane's bearer-token introspection path.
     pub expected_oauth_audience: String,
-    /// Static Cedar policy bundle for control-plane authorization.
-    /// Parsed once at boot; per-token policies are loaded by the authz
-    /// evaluator only when a token-bearing request needs them.
-    pub static_policies: zeroship_authz::PolicySet,
+    /// Static Cedar policy bundle for control-plane authorization, together
+    /// with the schema it was validated against.
+    ///
+    /// Parsed, schema-validated under `ValidationMode::Strict` and REFUSED ON
+    /// FAILURE once at boot; per-token policies are loaded by the authz
+    /// evaluator only when a token-bearing request needs them. The schema
+    /// travels with the policies because every request is built against it, and
+    /// a second copy could drift from the one validation ruled on.
+    pub static_policies: zeroship_authz::PlatformPolicies,
     /// Platform auth-provider token verifier for OAuth bearer access tokens.
     /// The ONLY bearer path: control signs nothing of its own.
     pub auth_provider: Arc<zeroship_core::auth_provider::AuthProvider>,
@@ -580,6 +586,21 @@ pub struct AppState {
     /// (organization_id, kind, transition_id)` so a re-driven send is idempotent at the
     /// provider (billing-ops gap #26, PR-6, MAJOR-A). See [`notify::BillingNotifier`].
     pub notifier: Arc<dyn notify::BillingNotifier>,
+    /// The outbound mailer, for the transactional mail the control plane sends
+    /// on a REQUEST path rather than through the notify cron.
+    ///
+    /// Today that is exactly one thing: the organization invitation
+    /// ([`organizations::deliver_invite`]). It is the same `Arc` the
+    /// [`notify::BillingNotifier`] above wraps, because there is one configured
+    /// transport per process and two would be two answers to "did this send".
+    /// The notifier stays a separate seam because it owns a different
+    /// obligation - the provider-side idempotency key its re-driven sweep needs
+    /// - which an invitation, minted once and never re-sent, must not have.
+    ///
+    /// Every implementation consults `zeroship.email_suppressions` before
+    /// transport and answers `MailerError::Suppressed`; that contract is why
+    /// `send` takes a database handle, and why no caller here re-checks it.
+    pub mailer: Arc<dyn zeroship_mailer::Mailer>,
     /// Platform-wide pairwise salt (auth-sdk §6.2), derived from the SAME
     /// stash signing key the gateway uses via
     /// [`zeroship_core::auth::derive_pairwise_salt`]. Control needs it so a

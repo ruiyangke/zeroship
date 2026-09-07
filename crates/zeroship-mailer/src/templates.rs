@@ -71,6 +71,104 @@ pub struct InviteText<'a> {
     pub expires_in: &'a str,
 }
 
+// --- organization-invite ---
+//
+// Distinct from `invite` above, which invites a stranger to create a zeroship
+// ACCOUNT. This one invites an existing or future account holder into an
+// existing ORGANIZATION at a named role, and it carries the token itself rather
+// than a link: redemption today is `zeroship organization join <token>`, and a
+// link to a page nobody ships would be worse than no link.
+//
+// IT IS THE ONE TEMPLATE HERE THAT RENDERS ITSELF, and the reason is the
+// boundary rather than the template. Its caller is the control plane, which
+// takes no `askama` dependency and renders its billing bodies with `format!`.
+// Exporting two `Template` structs would make "use a mailer template" mean "add
+// a templating engine to your manifest"; exporting [`OrganizationInvite`] and
+// its [`OrganizationInvite::render`] keeps askama on this side of the wall.
+
+#[derive(Template, Debug)]
+#[template(path = "organization_invite.html")]
+struct OrganizationInviteHtml<'a> {
+    organization: &'a str,
+    inviter: &'a str,
+    role: &'a str,
+    token: &'a str,
+    expires_in: &'a str,
+}
+
+#[derive(Template, Debug)]
+#[template(path = "organization_invite.txt")]
+struct OrganizationInviteText<'a> {
+    organization: &'a str,
+    inviter: &'a str,
+    role: &'a str,
+    token: &'a str,
+    expires_in: &'a str,
+}
+
+/// The inputs to the organization-invitation mail.
+///
+/// `token` is the one-time secret. It is rendered into the body and MUST NOT be
+/// logged or stored: the platform keeps only its digest, so this message is the
+/// only copy that reaches the recipient.
+#[derive(Debug, Clone, Copy)]
+pub struct OrganizationInvite<'a> {
+    pub organization: &'a str,
+    /// The display name of whoever issued it, or a stand-in. The inviter's row
+    /// may have been erased since (`invited_by` is `ON DELETE SET NULL`), and an
+    /// invitation must stay deliverable when it has.
+    pub inviter: &'a str,
+    pub role: &'a str,
+    pub token: &'a str,
+    /// Human-readable, e.g. "7 days".
+    pub expires_in: &'a str,
+}
+
+/// Subject, plain-text body and HTML body of one rendered message.
+#[derive(Debug, Clone)]
+pub struct RenderedMail {
+    pub subject: String,
+    pub text: String,
+    pub html: String,
+}
+
+impl OrganizationInvite<'_> {
+    /// Render both bodies and the subject.
+    ///
+    /// # Errors
+    ///
+    /// Returns the askama error when either template fails to render. Both are
+    /// compiled into this crate, so a failure here is a defect in this crate
+    /// reaching a caller - which is why it is returned rather than swallowed
+    /// into a blank body.
+    pub fn render(&self) -> Result<RenderedMail, askama::Error> {
+        let text = OrganizationInviteText {
+            organization: self.organization,
+            inviter: self.inviter,
+            role: self.role,
+            token: self.token,
+            expires_in: self.expires_in,
+        }
+        .render()?;
+        let html = OrganizationInviteHtml {
+            organization: self.organization,
+            inviter: self.inviter,
+            role: self.role,
+            token: self.token,
+            expires_in: self.expires_in,
+        }
+        .render()?;
+        Ok(RenderedMail {
+            subject: format!(
+                "You have been invited to join {} on zeroship",
+                self.organization
+            ),
+            text,
+            html,
+        })
+    }
+}
+
 // --- password-reset ---
 
 #[derive(Template, Debug)]

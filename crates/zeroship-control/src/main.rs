@@ -27,7 +27,7 @@ use zeroship_bundle::{
 };
 use zeroship_control::config::{ControlSettings, ControlSettingsSources};
 use zeroship_control::{
-    api, device_handlers, env_handlers,
+    api, device_handlers, env_handlers, erasure,
     internal, oauth_grants_handlers, plan_catalog, stripe_handlers,
     workflow_instance_api,
     AppState, EnvStore, Quota, RateLimiter, Registry, StripeStore,
@@ -36,9 +36,14 @@ use zeroship_control::{
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-fn build_billing_mailer(
-    settings: &ControlSettings,
-) -> Result<Arc<dyn zeroship_mailer::Mailer>, String> {
+/// The one outbound mail transport this process gets.
+///
+/// It was `build_billing_mailer` until the invitation path needed one too. The
+/// name changed rather than gaining a second builder: two transports built from
+/// one setting would be two answers to "did this send", and the difference
+/// between billing mail and transactional mail is what the SEAM above each does
+/// with the message, not which socket it leaves by.
+fn build_mailer(settings: &ControlSettings) -> Result<Arc<dyn zeroship_mailer::Mailer>, String> {
     use zeroship_mailer::{
         ResendConfig, ResendMailer, SmtpConfig, SmtpMailer, SmtpTls, StdoutMailer,
     };
@@ -315,19 +320,17 @@ fn main() -> std::io::Result<()> {
         zeroship_control::config::DEFAULT_LOG_FILTER,
         "control",
     );
-    // Billing notifier mailer (PR-6): built from the resolved mailer setting.
-    // An unknown driver or missing creds refuses to boot.
-    let billing_mailer: Arc<dyn zeroship_mailer::Mailer> =
-        match build_billing_mailer(&settings) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "control: refusing to start - billing mailer not available"
-                );
-                std::process::exit(1);
-            }
-        };
+    // The process's mail transport, built from the resolved mailer setting. An
+    // unknown driver or missing creds refuses to boot. Shared by the billing
+    // notifier seam and by the request-path transactional mail on
+    // `AppState.mailer`.
+    let mailer: Arc<dyn zeroship_mailer::Mailer> = match build_mailer(&settings) {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::error!(error = %e, "control: refusing to start - mailer not available");
+            std::process::exit(1);
+        }
+    };
     let mailer_kind = settings.mailer.get().clone();
     let check_config = *settings.check_config.get();
     let file = &boot.overlay.config;
@@ -978,9 +981,10 @@ fn main() -> std::io::Result<()> {
 
     // Billing notifier (PR-6): a `BillingNotifier` over the relocated `zeroship-mailer`
     // `Mailer` built above. Wraps the mailer + the per-message idempotency key.
-    let notifier: Arc<dyn zeroship_control::notify::BillingNotifier> =
-        Arc::new(zeroship_control::notify::MailerNotifier::new(billing_mailer));
-    tracing::info!(mailer = %mailer_kind, "control: billing notifier selected");
+    let notifier: Arc<dyn zeroship_control::notify::BillingNotifier> = Arc::new(
+        zeroship_control::notify::MailerNotifier::new(Arc::clone(&mailer)),
+    );
+    tracing::info!(mailer = %mailer_kind, "control: mail transport selected");
 
     let state = Arc::new(AppState {
         registry,
@@ -1010,14 +1014,19 @@ fn main() -> std::io::Result<()> {
         origin_scheme,
         trusted_oauth_clients,
         expected_oauth_audience,
+        // REFUSES TO BOOT on a policy set that does not validate against
+        // deploy/policies/zeroship.cedarschema. Serving with a band Cedar
+        // cannot evaluate would deny every request that band was written to
+        // permit, and record it as an ordinary non-match.
         static_policies: zeroship_authz::load_platform_policies()
-            .expect("control: bundled authz policies parse"),
+            .expect("control: bundled authz policies parse and validate against the schema"),
         auth_provider,
         provider_registry,
         billing_stack,
         billing_stream,
         tax_provider,
         notifier,
+        mailer,
         pairwise_salt,
         projected_charge_cache: Arc::new(
             zeroship_control::billing_read::ProjectedChargeCache::default(),
@@ -1229,6 +1238,10 @@ fn main() -> std::io::Result<()> {
                 web::resource("/internal/routes")
                     .route(web::get().to(internal::get_routes)),
             )
+            // The erasure seam: the auth service asks, before it opens the
+            // grace window and again before the reaper deletes, whether this
+            // human is the last owner of anything.
+            .configure(erasure::configure)
             .configure(workflow_instance_api::configure)
             .service(
                 web::resource("/internal/billing/reconcile")

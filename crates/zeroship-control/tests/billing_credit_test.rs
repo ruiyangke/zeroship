@@ -290,6 +290,7 @@ async fn build_fixture(db_url: &str, label: &str) -> Fixture {
         billing_stream: None,
         tax_provider,
         notifier: std::sync::Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: std::sync::Arc::new(
             zeroship_control::billing_read::ProjectedChargeCache::default(),
@@ -414,8 +415,8 @@ async fn ingest_at(state: &AppState, app: Uuid, requests: u64, period_start: i64
     .await;
 }
 
-fn now_for_closed_period() -> i64 {
-    common::next_isolated_period()
+async fn now_for_closed_period() -> i64 {
+    common::next_isolated_period().await
 }
 
 fn prev_period(now: i64) -> i64 {
@@ -586,7 +587,7 @@ async fn finalize_consumes_oldest_first_and_balances() {
     let url = db_url();
     let fx = build_fixture(&url, "consume").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "consume").await;
@@ -667,7 +668,7 @@ async fn reconcile_rerun_does_not_double_consume() {
     let url = db_url();
     let fx = build_fixture(&url, "rerun").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "rerun").await;
@@ -741,7 +742,7 @@ async fn consume_helper_is_idempotent_on_draft_redrive() {
         .execute(
             "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv, &organization, &period_d(prev_period(now_for_closed_period()))],
+            &[&inv, &organization, &period_d(prev_period(now_for_closed_period().await))],
         )
         .await
         .expect("claim draft");
@@ -780,7 +781,7 @@ async fn expired_grant_is_not_consumed() {
     let url = db_url();
     let fx = build_fixture(&url, "expired").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "expired").await;
@@ -826,7 +827,7 @@ async fn non_usd_grant_is_not_drawn_against_usd_bill() {
     let url = db_url();
     let fx = build_fixture(&url, "currency").await;
     let _recon = RECONCILE_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
     let period = prev_period(now);
 
     let organization = make_organization(&fx.state, "currency").await;
@@ -1200,7 +1201,7 @@ async fn consume_takes_per_organization_advisory_lock() {
     // PRIVATE window per CALL, so the two draft invoices below must both derive
     // from this local - calling it twice would put them in unrelated windows
     // instead of the adjacent periods this test is about.
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
 
     // A draft invoice anchor for the consume.
     let inv = zeroship_core::typed_id::new_invoice_id();
@@ -1342,7 +1343,7 @@ async fn consume_with_empty_ledger_applies_zero_and_appends_nothing() {
         .execute(
             "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv, &organization, &period_d(prev_period(now_for_closed_period()))],
+            &[&inv, &organization, &period_d(prev_period(now_for_closed_period().await))],
         )
         .await
         .expect("claim draft");
@@ -1397,7 +1398,7 @@ async fn consume_with_zero_subtotal_short_circuits() {
         .execute(
             "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv, &organization, &period_d(prev_period(now_for_closed_period()))],
+            &[&inv, &organization, &period_d(prev_period(now_for_closed_period().await))],
         )
         .await
         .expect("claim draft");
@@ -1456,7 +1457,7 @@ async fn late_grant_is_not_drawn_by_an_earlier_consume() {
         .execute(
             "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv, &organization, &period_d(prev_period(now_for_closed_period()))],
+            &[&inv, &organization, &period_d(prev_period(now_for_closed_period().await))],
         )
         .await
         .expect("claim draft");
@@ -1640,7 +1641,7 @@ async fn single_large_grant_is_capped_at_subtotal_leftover_preserved() {
         .execute(
             "INSERT INTO zeroship.invoices (id, organization_id, period, status) \
              VALUES ($1, $2, $3::date, 'draft')",
-            &[&inv, &organization, &period_d(prev_period(now_for_closed_period()))],
+            &[&inv, &organization, &period_d(prev_period(now_for_closed_period().await))],
         )
         .await
         .expect("claim draft");
@@ -1707,7 +1708,7 @@ async fn consume_and_record_plan_change_serialize_on_the_organization_lock() {
     // ONE instant for the whole test: the draft invoice below and the plan
     // change further down must be recorded against the SAME window, and
     // `now_for_closed_period()` reserves a fresh private one on every call.
-    let now = now_for_closed_period();
+    let now = now_for_closed_period().await;
 
     // A draft invoice anchor for the consume.
     let inv = zeroship_core::typed_id::new_invoice_id();

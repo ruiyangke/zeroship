@@ -853,15 +853,22 @@ Gateway cookie or anchor; see Finding 2.
                              |
                              v
 +----------------------------------------------------------+
+| Auth asks Control whether this human is the last owner   |
+| of a live organization; a blocker or an unanswerable     |
+| preflight REFUSES and writes nothing                     |
++----------------------------------------------------------+
+                             |
+                             v
++----------------------------------------------------------+
 | Auth decides live session CSRF and deletion eligibility  |
-| Auth transaction disables user, schedules 30d erasure    |
-| Auth bumps version and revokes sessions and families     |
+| Auth transaction schedules the erasure, bumps version,   |
+| revokes sessions and families, mints the undo token      |
 +----------------------------------------------------------+
                              |
                              v
 +----------------------------------------------------------+
 | After commit Auth best-effort signs and sends BCL JWTs   |
-| Confirmation email is also best effort                   |
+| Confirmation email carries the undo link; best effort    |
 +----------------------------------------------------------+
                              |
                              v
@@ -871,29 +878,43 @@ Gateway cookie or anchor; see Finding 2.
                              |
                              v
 +----------------------------------------------------------+
-| After grace, hourly Auth reaper hard deletes or          |
-| anonymizes user according to financial-history policy    |
+| After grace, hourly Auth reaper re-asks the preflight    |
+| and hard deletes; a refusal leaves the user pending      |
 +----------------------------------------------------------+
 ```
 
 VERIFIED walk-through:
 
-1. `/me/delete` requires the IdP cookie and CSRF, then atomically stamps
-   `disabled_at`, deletion request and schedule, bumps `credential_version`,
-   revokes refresh families and IdP rows, and deletes gateway audit rows
-   (`crates/zeroship-auth/src/ui/account_deletion.rs:41-109`,
-   `crates/zeroship-auth/src/store/users.rs:327-437`). Auth also emits back-channel
-   logout and sends a best-effort confirmation message after the transaction
-   (`crates/zeroship-auth/src/ui/account_deletion.rs:62-107`,
-   `crates/zeroship-auth/src/oidc/backchannel_logout.rs:147-180`).
+1. `/me/delete` requires the IdP cookie and CSRF. Before it writes anything it
+   asks the control plane whether erasing this human would leave an organization
+   with no owner (`crates/zeroship-auth/src/control_client.rs::erasure_preflight`
+   against `crates/zeroship-control/src/erasure.rs::preflight`); a blocker
+   renders the refusal page with `409`, and a preflight that could not be
+   COMPUTED renders it with `503` rather than proceeding. Only then does it
+   atomically stamp the deletion request and schedule, bump
+   `credential_version`, revoke refresh families and IdP rows, delete gateway
+   audit rows, and mint the single-use undo token
+   (`crates/zeroship-auth/src/ui/account_deletion.rs::request`,
+   `crates/zeroship-auth/src/store/users.rs::request_deletion`). Auth also emits
+   back-channel logout and sends a best-effort confirmation message after the
+   transaction (`crates/zeroship-auth/src/oidc/backchannel_logout.rs`).
 2. Control's common bearer convergence rejects disabled, deletion-requested, or
-   anonymized owners (`crates/zeroship-authn/src/lib.rs:338-376`). This is current behavior
+   anonymized owners (`crates/zeroship-authn/src/lib.rs`). This is current behavior
    from the recent lifecycle merge, not a finding.
-3. After the 30-day grace period, the hourly compio reaper hard-deletes a user
-   without financial history or anonymizes PII while retaining required
-   financial rows (`crates/zeroship-auth/src/cron/account_reaper.rs:57-65`,
-   `crates/zeroship-auth/src/cron/account_reaper.rs:127-220`). The user-facing cancel path
-   cannot currently authenticate after step 1; see Finding 23.
+3. After the 30-day grace period, the hourly compio reaper re-asks the same
+   preflight and hard-deletes the `users` row
+   (`crates/zeroship-auth/src/cron/account_reaper.rs::tick`). Every reference to
+   `zeroship.users` is CASCADE or a nullable SET NULL
+   (`db/migrations-ts/20260907000000_user_erasure_edges.ts`), so PostgreSQL
+   clears the dependents under the constraint owner's privileges and there is no
+   anonymize branch and no hand-maintained FK list. A blocker that reappeared
+   during the window, or a `23503`/`23514` from the DELETE, leaves the account
+   pending and writes an `account_erasure_failed` audit row naming the user and
+   the constraint.
+4. The undo is the single-use token mailed with the confirmation, redeemed at
+   `GET,POST /me/delete/cancel` (`crates/zeroship-auth/src/identity/deletion_cancel.rs`).
+   It is a token and not a session because the request in step 1 revokes every
+   session in the same transaction; see Finding 23.
 
 ### 1.21 Connected-app grant listing
 
@@ -2677,25 +2698,33 @@ asserts that `/me` is invalid
 (`crates/zeroship-auth/tests/e2e_magic_native.rs:481-494`). The visible direct-login
 option is therefore unreachable as configured.
 
-### 23. MEDIUM: Account-deletion cancellation cannot authenticate
+### 23. FIXED: Account-deletion cancellation cannot authenticate
 
-VERIFIED: requesting deletion atomically disables the user, bumps their
-credential version, and revokes every IdP session
-(`crates/zeroship-auth/src/store/users.rs:327-437`). The only cancel route requires an
-IdP cookie and calls `sessions::validate` before it can learn which user to
-reenable (`crates/zeroship-auth/src/ui/account_deletion.rs:112-150`,
-`crates/zeroship-auth/src/ui/account_deletion.rs:220-238`). Normal login also rejects the
-disabled, deletion-requested account through the shared eligibility path
-(`crates/zeroship-auth/src/identity/credentials.rs:81-344`). The confirmation email links
-only to `/me`, not to a separate cancellation credential
-(`crates/zeroship-auth/src/ui/account_deletion.rs:155-195`).
+The finding as it stood: requesting deletion atomically bumps the credential
+version and revokes every IdP session (`crates/zeroship-auth/src/store/users.rs`),
+while the only cancel route required an IdP cookie and called
+`sessions::validate` before it could learn which user to restore. Normal login
+rejected the deletion-requested account through the shared eligibility path
+(`crates/zeroship-auth/src/identity/eligibility.rs`), and the confirmation email
+linked only to `/me`, not to a separate cancellation credential. There was no
+supported way to obtain the session the cancel required during the advertised
+30-day grace period.
 
-Search method: the complete Auth route inventory contains only the session-gated
-POST cancel route (`crates/zeroship-auth/src/server.rs:138-149`), and a full-tree search
-for `cancel_deletion` found production callers only in that handler; the other
-uses are store-level tests. INFERRED: after a successful request there is no
-supported way for the user to obtain the live IdP session required to cancel
-during the advertised 30-day grace period.
+RESOLVED, and NOT by relaxing any of those refusals - a deletion request is a
+hard revocation and should stay one. The undo credential is now a single-use
+token mailed with the confirmation and minted inside the same transaction that
+revokes everything else (`crates/zeroship-auth/src/identity/deletion_cancel.rs`,
+`crates/zeroship-auth/src/store/users.rs::request_deletion`). `GET
+/me/delete/cancel?token=...` renders the confirm form and hands out the CSRF
+pair; `POST /me/delete/cancel` spends the token and clears the schedule in ONE
+statement, so the token cannot be spent without cancelling. The session-based
+handler and the by-id `cancel_deletion` store function are DELETED rather than
+kept as a fallback that could never run.
+
+`crates/zeroship-auth/tests/account_deletion_test.rs` drives the real route
+table over HTTP with no cookie, paired with a forged-token control, and
+`tests/user_erasure_reachability_gate.sh` rules on the two route registrations,
+the email link and the absence of a by-id back door.
 
 ### 24. MEDIUM: OP discards authentication provenance before minting ID tokens
 

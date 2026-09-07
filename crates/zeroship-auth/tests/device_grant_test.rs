@@ -15,6 +15,7 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::{Issuer, ACCESS_TOKEN_TTL_SECS, ACCESS_TOKEN_TYP};
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::server;
+use zeroship_auth::identity::deletion_cancel;
 use zeroship_auth::store::{sessions as session_store, users};
 
 const DEVICE_LOGIN_IP_ALLOWED_ATTEMPTS: usize = 60;
@@ -1101,14 +1102,17 @@ async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelle
     let db_url = zeroship_core::config::test_database_url_opt()
     .expect("test database URL");
     let mut deletion = dedicated_test_db(&db_url).await;
-    users::request_deletion(&mut deletion, user.id, 30)
+    let deletion_request = users::request_deletion(&mut deletion, user.id, 30)
         .await
         .expect("request account deletion")
         .expect("device grant owner exists");
+    // The undo is the mailed single-use token, redeemed through the real
+    // primitive. There is no by-id cancel to call.
     assert!(
-        users::cancel_deletion(&pg, user.id)
+        deletion_cancel::redeem(pg.as_ref(), &deletion_request.cancel_token)
             .await
-            .expect("cancel account deletion"),
+            .expect("cancel account deletion")
+            .is_some(),
         "deletion request must be cancellable"
     );
 

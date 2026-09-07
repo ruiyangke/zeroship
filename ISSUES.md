@@ -43,9 +43,21 @@ builder.
 
 ---
 
-> **Operator decision still open (ISS-12):** confirm the billing-retention default in
-> `account_reaper::user_has_financial_history` (anonymize creators-with-Stripe vs hard-delete).
-> And confirm the dedicated `AUTH_TOTP_ENC_KEY` choice (ISS-11) vs HKDF from an existing secret.
+> **Operator decision CLOSED (ISS-12):** the billing-retention default no longer
+> exists to confirm. `account_reaper::user_has_financial_history` read
+> `zeroship.organization_members`, `zeroship.organization_accounts` and
+> `zeroship.invoices` on the AUTH connection, and `zeroship_auth` holds no
+> privilege on any of them, so under the real role the predicate raised `42501`
+> and took the whole erasure with it. Financial history belongs to the
+> ORGANIZATION now, not to a person, and no billing edge points at
+> `zeroship.users`. Both halves of the fork are deleted; erasure is a hard
+> DELETE, and what a hard delete could still strand - an organization whose last
+> owner is gone - is refused at REQUEST time by the control plane's erasure
+> preflight (`crates/zeroship-control/src/erasure.rs`) rather than inferred
+> afterwards.
+>
+> **Still open:** confirm the dedicated `AUTH_TOTP_ENC_KEY` choice (ISS-11) vs
+> HKDF from an existing secret.
 
 ---
 

@@ -42,13 +42,16 @@ fn tmpdir(label: &str) -> PathBuf {
 /// `reconcile_pass` counts every subject in the period, summed over every meter
 /// in it, so `assert_eq!(subjects_checked, 1)` is a claim about the whole
 /// period, not about this test's app. The old `unique_closed_period_now()` drew
-/// a fresh month out of 2400 per call and was unique only by luck; measured on
-/// 2026-08-20 it landed on a month another module had seeded and returned 121.
-/// `common::next_isolated_period()` reserves a private window instead. See its
-/// header for why a lock is the wrong repair and why this only works now that
-/// these files share one process.
-fn unique_closed_period_now() -> i64 {
-    common::next_isolated_period()
+/// a fresh month from a fixed range per call and was unique only by luck;
+/// measured on 2026-08-20 it landed on a month another module had seeded, and
+/// the count came back as the whole fleet's.
+///
+/// `common::next_isolated_period()` reserves a private window instead - private
+/// to this call within the run, AND to this run against the database, which is
+/// what makes these four assertions survive a second run without a reset. See
+/// its header for why a lock is the wrong repair.
+async fn unique_closed_period_now() -> i64 {
+    common::next_isolated_period().await
 }
 
 struct Fixture {
@@ -153,6 +156,7 @@ async fn build_fixture_with_provider(
         billing_stream: None,
         tax_provider,
         notifier: Arc::new(zeroship_control::notify::RecordingNotifier::new()),
+        mailer: std::sync::Arc::new(zeroship_mailer::RecordingMailer::new()),
         pairwise_salt: [0u8; 32],
         projected_charge_cache: Arc::new(
             zeroship_control::billing_read::ProjectedChargeCache::default(),
@@ -235,7 +239,7 @@ impl MeteringProvider for DbAdjustmentProvider {
 async fn reconcile_pass_writes_invoice_credit_adjustment_idempotently() {
     let url = db_url();
     let fx = build_fixture(&url, "invoice-credit").await;
-    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
+    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
     let period = BillingPeriod {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
@@ -281,7 +285,7 @@ async fn stripe_meters_self_invoicing_drift_issues_invoice_credit_not_provider_r
     let url = db_url();
     let fx = build_fixture_with_provider(&url, "stripe-meters-self-invoice", "stripe_meters", 100)
         .await;
-    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
+    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
     let period = BillingPeriod {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
@@ -323,7 +327,7 @@ async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
     let url = db_url();
     let fx = build_fixture_with_provider(&url, "stripe-meters-unpriceable", "stripe_meters", 100)
         .await;
-    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
+    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
     let period = BillingPeriod {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
@@ -361,7 +365,7 @@ async fn stripe_meters_self_invoicing_unpriceable_drift_flags_not_credits() {
 async fn reconcile_pass_corrects_multi_metric_app_per_metric() {
     let url = db_url();
     let fx = build_fixture(&url, "multi-metric").await;
-    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now());
+    let period_start = billing_reconcile::previous_period_start_unix(unique_closed_period_now().await);
     let period = BillingPeriod {
         start: period_start,
         end: billing_reconcile::period_end_unix(period_start),
@@ -688,12 +692,107 @@ async fn finding_count_for_meter(
     rows[0].get("n")
 }
 
+/// A LATER run against this database must start above every period THIS run
+/// seeded. The four assertions above depend on it and nothing else checks it.
+///
+/// WHAT WENT WRONG WITHOUT IT. `next_isolated_period()` isolated its callers
+/// from each other with a process-local counter over FIXED calendar months, so
+/// every run handed out the same window sequence. `reconcile_pass` sweeps a
+/// period FLEET-WIDE, so the second run against one database counted the first
+/// run's subjects too and `subjects_checked` came back an exact multiple of the
+/// run count. The suite was green only when a database reset had happened
+/// immediately beforehand - and nothing said so, which is why the number it
+/// produced was quoted as if it were a property of the code.
+///
+/// HOW THIS BINDS THE REPAIR. `resolve_run_band_base` is what a fresh process
+/// would call before handing out its first window. Seeding a period and asking
+/// it again must move it, and must move it PAST what was just written:
+///
+///   * a base that ignored the database (the defect) answers the same value
+///     before and after, and answers below the seeded month;
+///   * a base that answered some constant above the band would satisfy the
+///     second check and fail the first.
+///
+/// Both directions are needed, which is why this seeds BETWEEN two readings
+/// rather than taking one.
+#[compio::test]
+async fn a_later_run_starts_above_every_period_this_run_seeded() {
+    let url = db_url();
+    let fx = build_fixture(&url, "band-base").await;
+    let organization = make_organization(&fx.state).await;
+    let plan_id = make_plan(&fx.state).await;
+    let app = make_owned_app(&fx.state, &plan_id, organization.as_str()).await;
+
+    let before = common::resolve_run_band_base().await;
+
+    // A window of this test's own, used the way every other caller uses one.
+    let now = unique_closed_period_now().await;
+    common::seed_usage_total(&fx.state.control_pg, app, now, METER, 125).await;
+    let seeded = common::months_since_band_start(common::period_date(now));
+
+    let after = common::resolve_run_band_base().await;
+
+    assert!(
+        after > before,
+        "the run band base did not move after a period was written into the \
+         band ({before} -> {after}). It is not being read from the database, so \
+         the next run against it will be handed the months this one just seeded."
+    );
+    assert!(
+        after > seeded,
+        "the run band base ({after}) is not above the month this run just \
+         seeded ({seeded} months into the band). A later run would start on top \
+         of these rows, and a fleet-wide period sweep would count both runs' \
+         subjects."
+    );
+
+    // Teardown, as every case in this module does it - and this one owns MORE
+    // connections than its neighbours, because each `resolve_run_band_base`
+    // opens its own. They are dropped when that function returns; the drain is
+    // what waits for the sockets to actually close, before the runtime that
+    // owns them goes away.
+    drop(fx);
+    common::drain_pg().await;
+}
+
+/// The resolved base must reach the WINDOW ADDRESS, not just be resolved.
+///
+/// The peer of the test above, and it exists because that one cannot see this:
+/// a run that resolved a base correctly and then left it out of the arithmetic
+/// is the original defect exactly, and on a FRESH database it is invisible -
+/// the base is zero there, so both formulas return the same months. That is why
+/// the collision only ever showed up on a second run, and why a check written
+/// against a freshly migrated database would have called the broken allocator
+/// correct.
+///
+/// Two bases through the one function, differing in one variable.
+#[test]
+fn the_run_base_is_part_of_the_window_address() {
+    let at_origin = common::isolated_period_offset_months(0, 0);
+    let shifted = common::isolated_period_offset_months(7, 0);
+    assert_eq!(
+        shifted,
+        at_origin + 7,
+        "a run based 7 months up the band was handed the same window address as \
+         a run based at its start. The base is being resolved and then dropped, \
+         which is the defect this replaced: every run gets the same months, and \
+         a fleet-wide period sweep counts every earlier run's subjects."
+    );
+    assert_eq!(
+        common::isolated_period_offset_months(0, 1) - at_origin,
+        common::isolated_period_offset_months(7, 1) - shifted,
+        "the stride between windows changed with the run base, so the base is \
+         being multiplied into the window rather than added to it."
+    );
+}
+
 /// The allocator's band must belong to the allocator ALONE.
 ///
-/// `common::next_isolated_period()` makes its own callers disjoint, and that is
-/// all it can do: it is a process-global counter, and two other writers put rows
-/// into far-future periods without going through it - hardcoded literals, and
-/// the LIB test binary's `#[cfg(test)]` modules, which are a different PROCESS
+/// `common::next_isolated_period()` makes its own callers disjoint by a
+/// process-global counter, and a run disjoint from earlier runs by starting
+/// above what they left. Neither reaches the two writers that put rows into
+/// far-future periods without going through it - hardcoded literals, and the
+/// LIB test binary's `#[cfg(test)]` modules, which are a different PROCESS
 /// sharing the same database. Neither can be handed a window.
 ///
 /// So the band is reserved by ADDRESS instead. Everything else in this crate

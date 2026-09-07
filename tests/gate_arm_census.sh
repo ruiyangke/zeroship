@@ -108,12 +108,22 @@ usage() {
 # one that gets forgotten, and a forgotten pin is the stale census both scripts
 # warn about.
 #
-# IT DRIFTED AGAIN, A FIFTH TIME, AND THE ORGANIZATION WORK IS WHERE IT WAS
-# NOTICED: five gates landed across the schema, authority and client phases and
-# none of them moved this line, so the pin sat five behind a glob it is supposed
-# to pin exactly. Re-measure it, do not reason about it:
+# THE PIN IS NOW EXACT, AND THE DRIFT IS WHY. This was a `-lt` floor, and the
+# comment it replaces had grown into a tally of the times it went stale - each
+# entry added by the person who noticed, none of them by the mechanism. A
+# lower bound cannot notice that it is behind: every stale reading passed, which
+# is the failure signature of a pin nobody is forced to move.
+#
+# So the check below is EQUALITY, and a mismatch prints the number to write. A
+# gate added without touching this line now fails loudly and tells you the
+# one-line fix, instead of leaving a pin that silently means less every time the
+# directory grows. Re-measure, never reason:
 #   find tests -maxdepth 1 -name '*_gate.sh' | wc -l
-GATE_FILE_FLOOR=48
+#
+# The count itself is deliberately the ONLY magnitude here. The history of how
+# often it drifted was prose that had to be maintained by hand and rotted the
+# same way the pin did.
+GATE_FILE_COUNT=51
 
 DIR=""
 RUN=()
@@ -217,12 +227,14 @@ while IFS= read -r g; do
   [ -n "$g" ] && GATES+=("$g")
 done < <(find "$DIR" -maxdepth 1 -name '*_gate.sh' -type f | LC_ALL=C sort)
 
-echo "  gates enumerated: ${#GATES[@]} under $DIR (floor $GATE_FILE_FLOOR)"
-if [ "${#GATES[@]}" -lt "$GATE_FILE_FLOOR" ]; then
-  refuse "enumerated ${#GATES[@]} gate script(s), below the floor of $GATE_FILE_FLOOR. \
-Either the glob stopped matching or gates were deleted; a meta-gate that checks zero gates \
-is the joke version of this check, so this is a refusal and not a pass. If gates were \
-deliberately removed, lower the floor in the same commit that removes them."
+echo "  gates enumerated: ${#GATES[@]} under $DIR (pinned $GATE_FILE_COUNT)"
+if [ "${#GATES[@]}" -ne "$GATE_FILE_COUNT" ]; then
+  refuse "enumerated ${#GATES[@]} gate script(s) under $DIR, but this script pins \
+$GATE_FILE_COUNT. FEWER means the glob stopped matching or gates were deleted - a meta-gate \
+that checks zero gates is the joke version of this check, so that is a refusal and not a \
+pass. MORE means a gate landed without moving the pin, which is how this line went stale \
+repeatedly while a lower bound kept passing. Either way the fix is one line: set \
+GATE_FILE_COUNT=${#GATES[@]} in the same commit that changed the set."
 fi
 
 if [ -z "$REFUSAL" ]; then

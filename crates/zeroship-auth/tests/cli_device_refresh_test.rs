@@ -36,21 +36,32 @@ const CONTROL_AUDIENCE: &str = "control.zeroship.ai";
 const CLI_SCOPE: &str = "offline_access apps:deploy apps:read";
 /// Spelled out rather than read from the constant the code reads, so this
 /// assertion measures the registration instead of restating it.
-const EXPECTED_REGISTERED_SCOPES: [&str; 6] = [
+///
+/// `organization:create` and `organization:read` are the ZERO-CONFIG FIRST
+/// DEPLOY: an app belongs to a project and a project belongs to an
+/// organization, so a fresh account's very first `zeroship deploy` has to be
+/// able to mint its personal organization before it can create anything. They
+/// confer no authority over anything that already exists - the self-service
+/// band grants both at `Resource::Any` only.
+const EXPECTED_REGISTERED_SCOPES: [&str; 8] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "organization:create",
+    "organization:read",
     "secrets:read",
     "offline_access",
 ];
 /// The scopes the CLI's token may carry AUTHORITY for. `offline_access` is
 /// deliberately absent: it manages the grant, it does not widen it.
-const EXPECTED_ISSUABLE_SCOPES: [&str; 5] = [
+const EXPECTED_ISSUABLE_SCOPES: [&str; 7] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "organization:create",
+    "organization:read",
     "secrets:read",
 ];
 

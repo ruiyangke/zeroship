@@ -300,6 +300,73 @@ pub struct ResetPage<'a> {
     pub error: Option<&'a str>,
 }
 
+/// `/me/delete/cancel` GET + POST page.
+///
+/// The undo surface for a pending account deletion. It is token-bearing rather
+/// than session-bearing because the request that scheduled the deletion revoked
+/// every session in the same transaction; the hidden `token` field carries the
+/// mailed credential from GET to POST exactly as [`ResetPage`] does.
+///
+/// `cancelled` swaps the form for the confirmation, so one page covers both
+/// halves and there is no redirect that loses the outcome.
+#[derive(Debug, Template)]
+#[template(path = "deletion_cancel.html")]
+pub struct DeletionCancelPage<'a> {
+    pub token: &'a str,
+    pub csrf: &'a str,
+    /// Per-response CSP `script-src` nonce, independent of `csrf` (L3).
+    /// See [`TokenRedeemInterstitial::script_nonce`].
+    pub script_nonce: &'a str,
+    pub error: Option<&'a str>,
+    pub cancelled: bool,
+}
+
+/// One organization standing between a person and their account deletion, as
+/// the refusal page renders it. `instruction` is resolved from the wire
+/// `remedy` by `control_client::ErasureRemedy::instruction`.
+#[derive(Debug, Clone)]
+pub struct DeletionBlocker {
+    pub organization_name: String,
+    pub organization_slug: String,
+    pub personal: bool,
+    pub instruction: &'static str,
+}
+
+/// One organization that still owes, as the refusal page renders it.
+///
+/// `summary` is prose the handler builds from the wire counts because a
+/// template is the wrong place to divide by a hundred; `instruction` comes from
+/// `control_client::BillingRemedy::instruction`.
+#[derive(Debug, Clone)]
+pub struct DeletionDebt {
+    pub organization_name: String,
+    pub organization_slug: String,
+    pub personal: bool,
+    /// Already closed and still owing - the case a person is most likely to
+    /// think they have already dealt with, so the page says so.
+    pub dissolved: bool,
+    pub summary: String,
+    pub instruction: &'static str,
+}
+
+/// `POST /me/delete`'s refusal page.
+///
+/// Three refusals share it because they have the same consequence - nothing was
+/// changed - and differ only in what can be done next. `unavailable` is the
+/// preflight that could not be answered at all; a deletion whose precondition
+/// did not run must not be honoured, and saying so is better than a generic
+/// error the person would read as "try harder". `owing` is the money refusal,
+/// listed apart from `blockers` because its remedy is a payment rather than a
+/// succession, and because it can name an organization the person already
+/// closed.
+#[derive(Debug, Template)]
+#[template(path = "deletion_blocked.html")]
+pub struct DeletionBlockedPage {
+    pub blockers: Vec<DeletionBlocker>,
+    pub owing: Vec<DeletionDebt>,
+    pub unavailable: bool,
+}
+
 /// `/logout` GET page. Renders a CSRF-protected confirm form; the POST
 /// handler revokes the native IdP session cookie.
 #[derive(Debug, Template)]

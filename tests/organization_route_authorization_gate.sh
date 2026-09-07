@@ -98,12 +98,26 @@ is_authorized() {
 
 # The statements that CHANGE who holds what. A store function containing one of
 # these is a membership mutation and owes the lock.
+#
+# `UPDATE zeroship.project_members` and `UPDATE zeroship.organizations` were
+# ADDED once routes existed that reach them - an atomic project role change, and
+# the dissolve that closes an organization. Both were invisible to this arm
+# while the list named only the INSERT/DELETE shapes, which is the way a marker
+# list fails: it does not report the statement it cannot see, it reports one
+# fewer function and still prints a clean verdict.
+#
+# `INSERT INTO zeroship.organizations` is deliberately absent. Minting an
+# organization has nothing to serialize with - the row does not exist a
+# statement earlier - which is what `LOCK_EXCUSES` says about
+# `create_organization`, and adding the marker would only move that argument
+# into an exemption.
 writes_membership() {
   case "$1" in
     *"INSERT INTO zeroship.organization_members"*|*"UPDATE zeroship.organization_members"*|\
     *"DELETE FROM zeroship.organization_members"*|*"INSERT INTO zeroship.project_members"*|\
-    *"DELETE FROM zeroship.project_members"*|*"INSERT INTO zeroship.organization_invites"*|\
-    *"UPDATE zeroship.organization_invites"*|*"DELETE FROM zeroship.organization_invites"*)
+    *"UPDATE zeroship.project_members"*|*"DELETE FROM zeroship.project_members"*|\
+    *"INSERT INTO zeroship.organization_invites"*|*"UPDATE zeroship.organization_invites"*|\
+    *"DELETE FROM zeroship.organization_invites"*|*"UPDATE zeroship.organizations"*)
       return 0 ;;
     *) return 1 ;;
   esac
@@ -122,7 +136,7 @@ first_write_offset() {
   zs_body="$1" awk '
     BEGIN {
       body = ENVIRON["zs_body"]
-      n = split("INSERT INTO zeroship.organization_members|UPDATE zeroship.organization_members|DELETE FROM zeroship.organization_members|INSERT INTO zeroship.project_members|DELETE FROM zeroship.project_members|INSERT INTO zeroship.organization_invites|UPDATE zeroship.organization_invites|DELETE FROM zeroship.organization_invites", marker, "|")
+      n = split("INSERT INTO zeroship.organization_members|UPDATE zeroship.organization_members|DELETE FROM zeroship.organization_members|INSERT INTO zeroship.project_members|UPDATE zeroship.project_members|DELETE FROM zeroship.project_members|INSERT INTO zeroship.organization_invites|UPDATE zeroship.organization_invites|DELETE FROM zeroship.organization_invites|UPDATE zeroship.organizations", marker, "|")
       best = 0
       for (i = 1; i <= n; i++) {
         at = index(body, marker[i])
@@ -313,8 +327,10 @@ while IFS=$'\t' read -r name body; do
   fi
 done < <(functions "$MODULE")
 
-# MEASURED 2026-09-06: eleven store functions write membership, invite or
-# project-seat rows against an organization that already exists.
+# The store functions that write membership, invite, project-seat or
+# organization rows against an organization that already exists. Floor 8 sits
+# well under the set and far above the zero a moved `async fn` shape or a
+# renamed table produces.
 if ! gate_arm membership_locks "$n_mutators" 8; then
   fail "only $n_mutators membership-mutating function(s) were found. The
        function extractor or the write markers stopped matching."

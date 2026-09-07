@@ -62,16 +62,44 @@
 //! - An owner cannot remove or demote a co-owner. The remedy is
 //!   [`transfer_ownership`], which is the one operation that reshapes the owner
 //!   set.
-//! - Nobody can demote or remove THEMSELVES, because an actor never outranks
-//!   their own rank. "Leave this organization" is therefore not a route here.
+//! - Nobody can demote or remove THEMSELVES through [`remove_member`], because
+//!   an actor never outranks their own rank. Giving up your own seat is
+//!   [`leave_organization`], which is a different statement reached by a
+//!   different route.
 //! - An admin cannot seat another admin, which is what makes
 //!   `organization:members:write` safe to grant to admins at all.
 //!
-//! [`transfer_ownership`] is the single place the strict inequality is relaxed,
-//! and it is relaxed for a reason that survives inspection: the actor gives up
-//! rank 40 in the SAME transaction that grants it, so no authority exists after
-//! the transfer that did not exist before it. It is gated on
-//! `organization:admin`, which no band but the owner band permits.
+//! # The TWO places the strict inequality does not apply, and why each is safe
+//!
+//! [`transfer_ownership`] relaxes it: the actor gives up rank 40 in the SAME
+//! transaction that grants it, so no authority exists after the transfer that
+//! did not exist before it. It is gated on `organization:admin`, which no band
+//! but the owner band permits.
+//!
+//! [`leave_organization`] does not relax it - it has no comparison to relax,
+//! because it has no target. The route above it
+//! (`DELETE /api/organizations/{id}/membership`) carries no user id in its
+//! path, its body or its query, so the row it can reach is the authenticated
+//! principal's and there is no argument by which it could be another. It
+//! carries its own action, `organization:members:leave`, banded at viewer rank
+//! rather than at admin, because a viewer holds no `members:write` at any rank
+//! and a viewer is the member most likely to want out. The last-owner rule
+//! still applies to it, unchanged.
+//!
+//! # Closing an organization
+//!
+//! [`dissolve_organization`] sets `dissolved_at` and nothing else is destroyed:
+//! the organization is the billing subject, and a row that vanished would take
+//! the counterparty out of a money record that has to outlive the relationship.
+//! It refuses while any project remains, and names the remedy.
+//!
+//! The close is enforced in ONE place. [`lock_organization`] refuses a
+//! dissolved organization, and every mutation here opens with that call, so a
+//! closed organization refuses membership writes, invites, projects, renames,
+//! redemption and a second close without any of them carrying its own clause.
+//! A `dissolved_at IS NULL` predicate per effect statement would be the same
+//! rule written a dozen times, and the thirteenth mutation is the one that
+//! forgets it.
 
 use std::sync::Arc;
 
@@ -89,12 +117,15 @@ use serde_json::json;
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroship_authz::{Action as AuthzAction, Resource};
+use zeroship_mailer::templates::OrganizationInvite;
+use zeroship_mailer::{Address, Email};
 use zeroship_core::invite_id::InviteId;
 use zeroship_core::organization_id::OrganizationId;
 use zeroship_core::project_id::ProjectId;
 
 use crate::audit::{self, Action as AuditAction, AuditEntry};
 use crate::authz_guard::AuthzGuard;
+use crate::billing_read::{self, BillingRemedy, LocalInvoicing, OutstandingBilling};
 use crate::env_handlers::admin_rate_limit;
 use crate::http_util;
 use crate::registry::{Registry, RegistryError};
@@ -343,6 +374,14 @@ pub struct CreateProjectBody {
 }
 
 #[derive(Debug, Deserialize)]
+pub struct UpdateProjectBody {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub slug: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct AddProjectMemberBody {
     pub user_id: Uuid,
     pub role: String,
@@ -361,6 +400,14 @@ pub struct OrganizationRecord {
     pub personal_owner_id: Option<Uuid>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// When the organization was CLOSED, and `None` while it is live.
+    ///
+    /// A dissolved organization is a historical record: its members, invites
+    /// and billing history stay exactly where they are, and every read still
+    /// returns it. What it no longer accepts is CHANGE - [`lock_organization`]
+    /// refuses, so every mutation in this module refuses, including a second
+    /// dissolve and including a departure.
+    pub dissolved_at: Option<DateTime<Utc>>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -404,14 +451,78 @@ pub struct InviteRecord {
     pub consumed_at: Option<DateTime<Utc>>,
 }
 
+/// What became of the invitation email.
+///
+/// It is recorded in `organization_invites.delivery`, which the schema leaves
+/// NULL until an attempt resolves - the row is written and COMMITTED before the
+/// mail is attempted, so that a redemption can never arrive before the digest it
+/// is matched against exists. A send that fails therefore leaves a usable
+/// invitation and a row that says the recipient never got it, rather than
+/// losing the invitation to a transport error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum InviteDelivery {
+    /// The mailer accepted it.
+    Sent,
+    /// The address is in `zeroship.email_suppressions`. Not an error: the
+    /// platform declines to mail a known bouncer or complainant, and the
+    /// inviter is told so they can deliver the token another way.
+    Suppressed,
+    /// The transport refused or failed. The invitation stands; the token in
+    /// this response is the only copy that exists.
+    Failed,
+}
+
+impl InviteDelivery {
+    /// The `organization_invites_delivery_check` vocabulary. The column is
+    /// constrained to exactly these three words, so this is the one spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sent => "sent",
+            Self::Suppressed => "suppressed",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Whether the recipient's mailbox now holds the token.
+    #[must_use]
+    pub const fn reached_the_recipient(self) -> bool {
+        matches!(self, Self::Sent)
+    }
+}
+
+/// What [`create_invite`] produces: a committed invitation and the one-time
+/// token for it, BEFORE anything has tried to deliver it.
+///
+/// It is a separate type from [`CreatedInvite`] because it is a separate fact.
+/// This one says an invitation exists and can be redeemed; the wire type adds
+/// what became of the email, which is not known yet and cannot be, since the
+/// row has to be committed before the send is attempted.
+#[derive(Debug)]
+pub struct IssuedInvite {
+    pub invite: InviteRecord,
+    pub token: String,
+}
+
 /// The create-invite response. The token appears HERE and nowhere else, ever:
 /// only its digest is stored, so this response is the single moment the secret
 /// exists outside the recipient's mailbox. Re-reading the invite returns an
 /// [`InviteRecord`] with no token field.
+///
+/// # Why the token is still returned now that the platform mails it
+///
+/// Because delivery can fail, and because the inviter may legitimately want to
+/// hand the invitation over by another channel. `delivery` says which case this
+/// is, so a client can show the token only when the mail did not carry it. The
+/// token confers nothing on its holder that the inviter did not already have:
+/// redemption additionally requires the redeeming account's VERIFIED address to
+/// be the invited address, so possessing it is not a way to seat yourself.
 #[derive(Debug, Serialize)]
 pub struct CreatedInvite {
     pub invite: InviteRecord,
     pub token: String,
+    pub delivery: InviteDelivery,
 }
 
 // ---------------------------------------------------------------------------
@@ -437,6 +548,29 @@ pub enum OrganizationError {
     /// the DELETE plus the `FOR UPDATE` lock that makes the count true at
     /// commit. Carries the remedy.
     LastOwner,
+    /// The organization was closed. Carries WHEN, because the answer to "why
+    /// was this refused" is a date the caller can go and look at.
+    ///
+    /// Raised by [`lock_organization`], so it precedes every effect statement
+    /// in this module rather than being re-derived per mutation.
+    Dissolved(DateTime<Utc>),
+    /// Dissolve was asked for while the organization still owns projects.
+    ///
+    /// `projects.organization_id` is `ON DELETE RESTRICT`, so this is not a
+    /// policy layered over a permissive schema - it is the same rule stated
+    /// where the caller can read it, with the remedy named.
+    OrganizationHasProjects(i64),
+    /// Delete was asked for while the project still owns apps. `apps.project_id`
+    /// is `ON DELETE RESTRICT`; same shape as [`Self::OrganizationHasProjects`].
+    ProjectHasApps(i64),
+    /// Dissolve was asked for while the organization still owes - an unpaid
+    /// finalized invoice, or usage in a closed period that was never invoiced.
+    ///
+    /// It carries the whole typed answer rather than a count, because unlike
+    /// the two above there is no single number that describes it: money already
+    /// claimed and usage not yet claimed are different debts with different
+    /// remedies, and a caller told only "you owe" cannot act.
+    OrganizationOwesBilling(OutstandingBilling),
     /// The invite exists but cannot be redeemed: expired, already consumed, the
     /// address does not match, or the inviter's authority has lapsed since
     /// issue. Deliberately ONE variant - distinguishing them for the redeemer
@@ -478,9 +612,52 @@ impl OrganizationError {
                 .json(&json!({"error": "insufficient authority", "detail": detail})),
             Self::LastOwner => web::HttpResponse::Conflict().json(&json!({
                 "error": "last owner",
-                "detail": "an organization must keep at least one owner; seat another owner \
-                           first, or transfer ownership, and then remove this one",
+                "detail": "an organization must keep at least one owner; transfer ownership \
+                           first, and then remove this seat",
             })),
+            Self::Dissolved(at) => web::HttpResponse::Conflict().json(&json!({
+                "error": "organization dissolved",
+                "detail": "this organization was closed and accepts no further changes; \
+                           its members, invitations and billing history are readable as they \
+                           were left",
+                "dissolved_at": at,
+            })),
+            Self::OrganizationHasProjects(remaining) => {
+                web::HttpResponse::Conflict().json(&json!({
+                    "error": "organization has projects",
+                    "detail": "an organization is closed only once it owns no projects; delete \
+                               them first with DELETE /api/projects/{project_id}, which itself \
+                               needs each project to own no apps",
+                    "projects": remaining,
+                }))
+            }
+            Self::ProjectHasApps(remaining) => web::HttpResponse::Conflict().json(&json!({
+                "error": "project has apps",
+                "detail": "a project is deleted only once it owns no apps; archive and delete \
+                           them first, or move them to another project",
+                "apps": remaining,
+            })),
+            Self::OrganizationOwesBilling(outstanding) => {
+                // The remedy is derived from the same rows the refusal reports,
+                // so the two can never name different next steps. It is
+                // `Some` on every path that builds this variant - the variant
+                // is only constructed from an unsettled reading - and the
+                // fallback exists so a future settled reading cannot render a
+                // refusal with no instruction in it.
+                let detail = outstanding.remedy().map_or(
+                    "this organization has unsettled billing",
+                    BillingRemedy::instruction,
+                );
+                web::HttpResponse::Conflict().json(&json!({
+                    "error": "organization owes",
+                    "detail": detail,
+                    "owed_cents": outstanding.owed_cents(),
+                    "currency": outstanding.currency(),
+                    "remedy": outstanding.remedy(),
+                    "unpaid_invoices": outstanding.unpaid_invoices,
+                    "unbilled_periods": outstanding.unbilled_periods,
+                }))
+            }
             Self::InviteNotRedeemable => web::HttpResponse::Forbidden().json(&json!({
                 "error": "invite not redeemable",
                 "detail": "the invitation has expired, has already been used, was issued to a \
@@ -617,7 +794,7 @@ fn token_digest(token: &str) -> Vec<u8> {
 
 const ORGANIZATION_COLUMNS: &str =
     "o.id, o.slug::text AS slug, o.name, o.billing_email::text AS billing_email, \
-     o.personal_owner_id, o.created_at, o.updated_at";
+     o.personal_owner_id, o.created_at, o.updated_at, o.dissolved_at";
 
 fn row_to_organization(row: &compio_postgres::Row) -> OrganizationRecord {
     OrganizationRecord {
@@ -628,6 +805,7 @@ fn row_to_organization(row: &compio_postgres::Row) -> OrganizationRecord {
         personal_owner_id: row.get("personal_owner_id"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        dissolved_at: row.get("dissolved_at"),
     }
 }
 
@@ -871,26 +1049,47 @@ async fn admin_rank<C: GenericClient + Sync>(conn: &C) -> Result<Option<i32>, Or
 // Mutations
 // ---------------------------------------------------------------------------
 
-/// Lock one organization row for the rest of the transaction.
+/// Lock one organization row for the rest of the transaction, and refuse a
+/// dissolved one.
 ///
 /// Returns `OrganizationNotFound` when the row does not exist, so a membership
 /// mutation against a deleted organization is a 404 rather than a statement
 /// that silently affects nothing.
+///
+/// # The dissolved fence lives HERE and in exactly one place
+///
+/// Every mutation in this module opens with this call, so making it the fence
+/// closes the whole surface at once - membership, invites, projects, renames,
+/// redemption and a second dissolve. The alternative, a `dissolved_at IS NULL`
+/// clause in each effect statement, is the same rule written a dozen times, and
+/// the thirteenth mutation is the one that forgets it.
+///
+/// It is a REFUSAL and not a filter, and the difference matters for
+/// [`dissolve_organization`]: re-dissolving reports the close it already had,
+/// with its date, rather than pretending to do it again.
+///
+/// Cedar is not asked about this. A dissolved organization's members keep their
+/// ranks, so `zeroship_authz::authority::resolve` still answers 40 for its
+/// owner and the band still permits - which is right, because what ended is the
+/// organization, not the seat. The refusal belongs where the effect is.
 async fn lock_organization<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
 ) -> Result<(), OrganizationError> {
     let rows = tx
         .query(
-            "SELECT id FROM zeroship.organizations WHERE id = $1 FOR UPDATE",
+            "SELECT dissolved_at FROM zeroship.organizations WHERE id = $1 FOR UPDATE",
             &[&organization_id],
         )
         .await
         .map_err(|err| db_error(&err, "lock organization"))?;
-    if rows.is_empty() {
+    let Some(row) = rows.first() else {
         return Err(OrganizationError::OrganizationNotFound);
+    };
+    match row.get::<_, Option<DateTime<Utc>>>("dissolved_at") {
+        Some(at) => Err(OrganizationError::Dissolved(at)),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Mint an organization and seat the caller as its first owner.
@@ -1335,6 +1534,200 @@ pub async fn remove_member(
     Ok(())
 }
 
+/// Give up your OWN seat.
+///
+/// # The one carve-out in the rank model, and exactly how narrow it is
+///
+/// Every other membership write compares `actor.rank > target.rank`. An actor
+/// never outranks their own rank, so that inequality - which is what stops an
+/// admin demoting a peer - also made departure impossible for everyone. The
+/// carve-out is this function and nothing else: it takes NO target, because the
+/// route above it carries no user id in its path, its body or its query. The
+/// statement matches `user_id = $2` where `$2` is the authenticated principal,
+/// so "someone else's seat" is not a request this code can be asked to make.
+///
+/// [`remove_member`] is untouched, still strict, and still the only way to
+/// remove anyone else.
+///
+/// # What still refuses
+///
+/// The last-owner rule, unchanged and in the same shape: the predicate rides in
+/// the DELETE and is sound because the caller holds the organization row lock.
+/// A sole owner is refused and told to transfer ownership first - an
+/// organization that keeps no owner is one no route can repair, and letting the
+/// last one walk out would create exactly that.
+pub async fn leave_organization(
+    registry: &Registry,
+    principal: Uuid,
+    organization_id: &str,
+    source_ip: Option<&str>,
+) -> Result<(), OrganizationError> {
+    let mut conn = registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|err| db_error(&err, "begin leave organization"))?;
+    lock_organization(&tx, organization_id).await?;
+
+    let rows = tx
+        .query(
+            "DELETE FROM zeroship.organization_members m \
+              WHERE m.organization_id = $1 AND m.user_id = $2 \
+                AND (m.role <> $3 \
+                     OR (SELECT COUNT(*) FROM zeroship.organization_members owners \
+                          WHERE owners.organization_id = $1 AND owners.role = $3) > 1) \
+             RETURNING m.role",
+            &[&organization_id, &principal, &ROLE_OWNER],
+        )
+        .await
+        .map_err(|err| db_error(&err, "leave organization"))?;
+
+    let Some(row) = rows.first() else {
+        return Err(classify_departure_refusal(&tx, organization_id, principal).await);
+    };
+    let role: String = row.get("role");
+
+    audit_authority_change(
+        &tx,
+        principal,
+        AuditAction::OrganizationMemberLeft,
+        organization_id,
+        source_ip,
+        &json!({
+            "organization_id": organization_id,
+            "user_id": principal,
+            "role": role,
+        }),
+    )
+    .await;
+
+    tx.commit()
+        .await
+        .map_err(|err| db_error(&err, "commit leave organization"))?;
+    Ok(())
+}
+
+/// Close an organization.
+///
+/// # Soft, and why that is the design rather than a limitation
+///
+/// `projects.organization_id` is `ON DELETE RESTRICT`, so a hard delete cannot
+/// even run while a project remains. That is not the deciding argument, though.
+/// The organization is the BILLING SUBJECT: invoices, disputes and status
+/// transitions all name it, and a row that vanished would take the counterparty
+/// out of a money record that has to outlive the relationship. So the close is a
+/// timestamp, everything it owned stays readable, and what ends is the ability
+/// to change any of it ([`lock_organization`] is the fence).
+///
+/// # It refuses while projects remain, and names the remedy
+///
+/// The refusal is not deferred to the foreign key. `NOT EXISTS (... projects
+/// ...)` rides in the UPDATE, under the organization row lock, so a project
+/// created concurrently either serializes behind this statement or blocks it -
+/// and the caller is told how many remain and which route removes them, rather
+/// than receiving a constraint name.
+///
+/// # A close RELEASES the names the organization was holding
+///
+/// The slug and the personal-organization slot are both unique among LIVE
+/// organizations only - the schema carries `dissolved_at IS NULL` in both
+/// indexes - so this statement frees them without touching either column. That
+/// matters most for a PERSONAL organization: it is where `zeroship deploy`
+/// lands on a fresh account, resolved through `personal_owner_id`, and its slug
+/// is derived from the owner's uuid so it can never be re-derived differently.
+/// Held globally, closing one would answer the creator's next deploy with a
+/// refusal no route could clear.
+///
+/// The pointer is KEPT rather than cleared. Clearing it is the personal-to-
+/// shared conversion [`transfer_ownership`] performs, and a closed organization
+/// was not converted to anything - it ended. [`personal_organization_of`]
+/// carries the filter instead, which is one place rather than one per writer.
+///
+/// # It refuses while the organization still owes
+///
+/// The second refusal, and the one the requirement is about: an unpaid
+/// finalized invoice or usage in a closed period that was never invoiced. It is
+/// asked FIRST, ahead of the projects rider, because money can appear at any
+/// moment while projects only appear when somebody makes one - so an
+/// organization that is both empty and indebted must be told about the debt
+/// rather than about a rung it has already cleared.
+///
+/// Unlike the projects test this is a CHECK inside the transaction rather than
+/// a rider on the UPDATE, and the difference is deliberate. The organization
+/// row lock does not serialize against a concurrent finalize, which locks the
+/// organization by advisory key instead, so a rider would not close the race
+/// either. What makes the check sufficient is that a dissolve DESTROYS NOTHING:
+/// it writes a timestamp, every invoice and every usage row stays exactly where
+/// it was, and the erasure of the last human who names them re-asks this same
+/// predicate at its own moment ([`crate::erasure::preflight`], which covers
+/// dissolved organizations for precisely this reason). The destructive act has
+/// the fence; this one has the door.
+pub async fn dissolve_organization(
+    registry: &Registry,
+    principal: Uuid,
+    organization_id: &str,
+    invoicing: LocalInvoicing,
+    source_ip: Option<&str>,
+) -> Result<OrganizationRecord, OrganizationError> {
+    let mut conn = registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|err| db_error(&err, "begin dissolve organization"))?;
+    // A second dissolve is refused HERE, with the date of the first, rather
+    // than matching no rows and needing a classifier to guess why.
+    lock_organization(&tx, organization_id).await?;
+
+    // THE predicate, shared with the erasure seam. A read that fails is a
+    // refusal, never a pass: closing an organization on the strength of a debt
+    // check that did not run is the outcome this exists to prevent.
+    let outstanding = billing_read::outstanding_billing(&tx, organization_id, invoicing).await?;
+    if !outstanding.is_settled() {
+        return Err(OrganizationError::OrganizationOwesBilling(outstanding));
+    }
+
+    let sql = format!(
+        "UPDATE zeroship.organizations o \
+            SET dissolved_at = NOW(), updated_at = NOW() \
+          WHERE o.id = $1 \
+            AND o.dissolved_at IS NULL \
+            AND EXISTS (SELECT 1 FROM {seat} WHERE actor_role.rank >= {owner}) \
+            AND NOT EXISTS (SELECT 1 FROM zeroship.projects p \
+                             WHERE p.organization_id = o.id) \
+        RETURNING {ORGANIZATION_COLUMNS}",
+        seat = actor_seat("o.id", "$2"),
+        owner = ladder_rank("$3"),
+    );
+    let rows = tx
+        .query(&sql, &[&organization_id, &principal, &ROLE_OWNER])
+        .await
+        .map_err(|err| db_error(&err, "dissolve organization"))?;
+
+    let Some(row) = rows.first() else {
+        return Err(classify_dissolve_refusal(&tx, organization_id, principal).await);
+    };
+    let record = row_to_organization(row);
+
+    audit_authority_change(
+        &tx,
+        principal,
+        AuditAction::OrganizationDissolved,
+        organization_id,
+        source_ip,
+        &json!({
+            "organization_id": organization_id,
+            "slug": record.slug,
+            "dissolved_at": record.dissolved_at,
+        }),
+    )
+    .await;
+
+    tx.commit()
+        .await
+        .map_err(|err| db_error(&err, "commit dissolve organization"))?;
+    Ok(record)
+}
+
 /// Hand ownership to another member and step down to admin.
 ///
 /// One transaction, so the organization is never ownerless and never has an
@@ -1445,7 +1838,7 @@ pub async fn create_invite(
     organization_id: &str,
     body: &CreateInviteBody,
     source_ip: Option<&str>,
-) -> Result<CreatedInvite, OrganizationError> {
+) -> Result<IssuedInvite, OrganizationError> {
     validate_email(&body.email)?;
     let invite_id = InviteId::mint();
     let token = mint_invite_token();
@@ -1519,7 +1912,219 @@ pub async fn create_invite(
     tx.commit()
         .await
         .map_err(|err| db_error(&err, "commit create invite"))?;
-    Ok(CreatedInvite { invite, token })
+    Ok(IssuedInvite { invite, token })
+}
+
+/// Issue an invitation and then try to mail it.
+///
+/// The two steps are composed HERE rather than in the handler so that the
+/// ordering is a property of a function instead of a convention every caller
+/// has to remember: [`create_invite`] commits, and only then does
+/// [`deliver_invite`] attempt a send whose outcome it records. A handler that
+/// got that backwards would be a token in flight before its digest was durable.
+///
+/// A delivery failure is NOT an error. The invitation exists, the token is in
+/// the response, and `delivery` says the recipient did not get it - which is
+/// the state of the world, and is actionable in a way a 500 is not.
+pub async fn create_and_deliver_invite(
+    registry: &Registry,
+    pg: &compio_postgres::Client,
+    mailer: &dyn zeroship_mailer::Mailer,
+    principal: Uuid,
+    organization_id: &str,
+    body: &CreateInviteBody,
+    source_ip: Option<&str>,
+) -> Result<CreatedInvite, OrganizationError> {
+    let issued = create_invite(registry, principal, organization_id, body, source_ip).await?;
+    let delivery = deliver_invite(pg, mailer, &issued.invite, &issued.token).await;
+    Ok(CreatedInvite {
+        invite: issued.invite,
+        token: issued.token,
+        delivery,
+    })
+}
+
+/// Who the invitation appears to come from.
+///
+/// A const, like [`crate::notify`]'s billing sender, because the control plane
+/// has no operator-facing mail-from setting to read - the auth service is the
+/// one that carries `auth.mail_from_email`. If a deployment ever needs to move
+/// this, it moves both.
+const INVITE_FROM_EMAIL: &str = "invites@zeroship.ai";
+const INVITE_FROM_NAME: &str = "zeroship";
+
+/// Mail the invitation, and record what became of the attempt.
+///
+/// # The ordering is the whole design
+///
+/// [`create_invite`] has already COMMITTED the row by the time this runs. That
+/// is deliberate and it is why `organization_invites.delivery` is nullable:
+/// were the mail sent inside the creating transaction, a recipient quick enough
+/// to redeem could present a token whose digest had not been committed yet, and
+/// a transport that hung would hold the row lock while it did. So the invitation
+/// exists first, the attempt happens second, and the OUTCOME is recorded third.
+///
+/// A failed send therefore leaves a usable invitation plus a row that says the
+/// recipient never received it - which is the difference between a delivery
+/// problem and a lost invitation.
+///
+/// # Suppression is honoured by the trait, not by a check here
+///
+/// Every `Mailer` implementation calls `zeroship_mailer::check_suppression`
+/// before transport and returns `MailerError::Suppressed`; that is the trait's
+/// documented contract and re-checking it here would be a second answer to a
+/// question the transport already answers. What this function adds is that the
+/// suppression is RECORDED rather than swallowed, so the inviter learns the
+/// address is unreachable instead of waiting for a reply that cannot come.
+///
+/// # It never returns an error
+///
+/// There is no failure of this function that should fail the request: the
+/// invitation is already created and the token is already in the response. A
+/// database error while RECORDING the outcome leaves `delivery` NULL, which is
+/// exactly what it means - nobody knows - and is logged.
+pub async fn deliver_invite(
+    pg: &compio_postgres::Client,
+    mailer: &dyn zeroship_mailer::Mailer,
+    invite: &InviteRecord,
+    token: &str,
+) -> InviteDelivery {
+    let (organization, inviter) = invite_mail_context(pg, invite).await;
+    let expires_in = format!("{INVITE_TTL_DAYS} days");
+    let rendered = match (OrganizationInvite {
+        organization: &organization,
+        inviter: &inviter,
+        role: &invite.role,
+        token,
+        expires_in: &expires_in,
+    })
+    .render()
+    {
+        Ok(rendered) => rendered,
+        Err(err) => {
+            // A template that will not render is a build-time defect reaching
+            // production. Record the failure rather than sending a blank body.
+            tracing::error!(error = %err, invite_id = invite.id, "control: invite template failed");
+            record_invite_delivery(pg, &invite.id, InviteDelivery::Failed).await;
+            return InviteDelivery::Failed;
+        }
+    };
+
+    let message = Email {
+        to: Address {
+            email: invite.email.clone(),
+            name: None,
+        },
+        header_to: None,
+        from: Address {
+            email: INVITE_FROM_EMAIL.to_owned(),
+            name: Some(INVITE_FROM_NAME.to_owned()),
+        },
+        reply_to: None,
+        envelope_from: None,
+        subject: rendered.subject,
+        text: rendered.text,
+        html: Some(rendered.html),
+        headers: Vec::new(),
+        tags: vec!["organization_invite".to_owned()],
+        // No provider-side dedup key. Nothing re-drives this send: a token is
+        // minted once, and a lost invitation is revoked and re-issued, which is
+        // a DIFFERENT invitation and must not be deduplicated against the first.
+        idempotency_key: None,
+    };
+
+    let outcome = match mailer.send(pg, message).await {
+        Ok(_) => InviteDelivery::Sent,
+        Err(zeroship_mailer::MailerError::Suppressed(_)) => {
+            tracing::info!(
+                invite_id = invite.id,
+                "control: invitation not mailed; the address is suppressed"
+            );
+            InviteDelivery::Suppressed
+        }
+        Err(err) => {
+            // The invite id, not the address: this line is written on a path a
+            // caller can trigger at will, and the id is enough to find the row.
+            // What the TRANSPORT puts in its own error text is the transport's
+            // business and may well include the recipient - this is a choice
+            // about the fields, not a guarantee about the whole line.
+            tracing::warn!(error = %err, invite_id = invite.id, "control: invitation send failed");
+            InviteDelivery::Failed
+        }
+    };
+    record_invite_delivery(pg, &invite.id, outcome).await;
+    outcome
+}
+
+/// The organization's display name and the inviter's, for the mail body.
+///
+/// Both fall back rather than failing: an invitation whose inviter row has been
+/// erased (`invited_by` is `ON DELETE SET NULL`) still has to be deliverable,
+/// and the organization name is decoration around a token that is the actual
+/// payload.
+async fn invite_mail_context(
+    pg: &compio_postgres::Client,
+    invite: &InviteRecord,
+) -> (String, String) {
+    // One statement rather than two round trips. The invite is the driving
+    // row, so both joins hang off it: the organization is guaranteed by the
+    // invite's foreign key, and the inviter is not (`invited_by` is `ON DELETE
+    // SET NULL`), which is why only that one is a LEFT JOIN.
+    let rows = pg
+        .query(
+            "SELECT o.name AS organization, u.name AS inviter \
+               FROM zeroship.organization_invites i \
+               JOIN zeroship.organizations o ON o.id = i.organization_id \
+               LEFT JOIN zeroship.users u ON u.id = i.invited_by \
+              WHERE i.id = $1",
+            &[&invite.id],
+        )
+        .await;
+    match rows {
+        Ok(rows) => rows.first().map_or_else(
+            || (invite.organization_id.clone(), "Someone".to_string()),
+            |row| {
+                (
+                    row.get::<_, String>("organization"),
+                    row.get::<_, Option<String>>("inviter")
+                        .filter(|name| !name.trim().is_empty())
+                        .unwrap_or_else(|| "Someone".to_string()),
+                )
+            },
+        ),
+        Err(err) => {
+            tracing::warn!(error = %err, "control: could not read invite mail context");
+            (invite.organization_id.clone(), "Someone".to_string())
+        }
+    }
+}
+
+/// Write the outcome into `organization_invites.delivery`.
+///
+/// One autocommit statement, no transaction and no organization lock. It writes
+/// a column nothing derives authority from, on a row whose identity is already
+/// fixed - so there is nothing for a lock to serialize with, and taking one
+/// would put a mail transport's latency inside a lock every membership mutation
+/// waits on.
+async fn record_invite_delivery(
+    pg: &compio_postgres::Client,
+    invite_id: &str,
+    outcome: InviteDelivery,
+) {
+    if let Err(err) = pg
+        .execute(
+            "UPDATE zeroship.organization_invites SET delivery = $2 WHERE id = $1",
+            &[&invite_id, &outcome.as_str()],
+        )
+        .await
+    {
+        tracing::warn!(
+            error = %err,
+            invite_id,
+            delivery = outcome.as_str(),
+            "control: could not record invitation delivery"
+        );
+    }
 }
 
 fn invite_conflict(err: &compio_postgres::Error, context: &str) -> OrganizationError {
@@ -1816,6 +2421,163 @@ pub async fn create_project(
     Ok(record)
 }
 
+/// Rename or re-slug a project. Admin and above, said in the UPDATE.
+///
+/// The threshold matches [`create_project`] and the `project:write` band, and
+/// it is the same argument: below admin a member reaches only the projects they
+/// hold a row on, so letting them re-slug one would let them reshape the thing
+/// that grants them reach.
+pub async fn update_project(
+    registry: &Registry,
+    principal: Uuid,
+    project_id: &str,
+    body: &UpdateProjectBody,
+    source_ip: Option<&str>,
+) -> Result<ProjectRecord, OrganizationError> {
+    if let Some(name) = body.name.as_deref() {
+        validate_name(name)?;
+    }
+    if let Some(slug) = body.slug.as_deref() {
+        validate_slug(slug)?;
+    }
+    if body.name.is_none() && body.slug.is_none() {
+        return Err(OrganizationError::Invalid(
+            "supply at least one of name or slug".to_string(),
+        ));
+    }
+
+    let mut conn = registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|err| db_error(&err, "begin update project"))?;
+    let organization_id = lock_project_organization(&tx, project_id).await?;
+
+    let sql = format!(
+        "UPDATE zeroship.projects p \
+            SET name = COALESCE($3, p.name), \
+                slug = COALESCE($4, p.slug), \
+                updated_at = NOW() \
+          WHERE p.id = $1 \
+            AND EXISTS (SELECT 1 FROM {seat} WHERE actor_role.rank >= {admin}) \
+        RETURNING p.id, p.organization_id, p.slug::text AS slug, p.name, p.created_at",
+        seat = actor_seat("$2", "$5"),
+        admin = ladder_rank("$6"),
+    );
+    let name = body.name.as_deref().map(str::trim);
+    let slug = body.slug.as_deref().map(str::trim);
+    let rows = tx
+        .query(
+            &sql,
+            &[
+                &project_id,
+                &organization_id,
+                &name,
+                &slug,
+                &principal,
+                &ROLE_ADMIN,
+            ],
+        )
+        .await
+        .map_err(|err| slug_conflict(&err, slug.unwrap_or(""), "update project"))?;
+    let Some(row) = rows.first() else {
+        // The project exists (`lock_project_organization` proved it) and is not
+        // dissolved, so the only clause left is the rank predicate.
+        return Err(OrganizationError::Insufficient(
+            "renaming a project needs admin authority in the organization".to_string(),
+        ));
+    };
+    let record = row_to_project(row);
+
+    audit_authority_change(
+        &tx,
+        principal,
+        AuditAction::ProjectUpdated,
+        &organization_id,
+        source_ip,
+        &json!({
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "name": name,
+            "slug": slug,
+        }),
+    )
+    .await;
+
+    tx.commit()
+        .await
+        .map_err(|err| db_error(&err, "commit update project"))?;
+    Ok(record)
+}
+
+/// Delete a project.
+///
+/// Hard, unlike [`dissolve_organization`], and the asymmetry is the point: a
+/// project is not a billing subject and names no money record, so there is
+/// nothing that has to outlive it. Its `project_members` rows go with it by
+/// cascade, which is right - a seat on a project that does not exist is not a
+/// record worth keeping.
+///
+/// # Apps refuse it, and the predicate says so rather than the constraint
+///
+/// `apps.project_id` is `ON DELETE RESTRICT`. Leaning on that would surface a
+/// constraint name; the `NOT EXISTS` clause here is the same rule under the
+/// organization row lock, and the classifier turns zero rows into a count and a
+/// remedy.
+pub async fn delete_project(
+    registry: &Registry,
+    principal: Uuid,
+    project_id: &str,
+    source_ip: Option<&str>,
+) -> Result<(), OrganizationError> {
+    let mut conn = registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|err| db_error(&err, "begin delete project"))?;
+    let organization_id = lock_project_organization(&tx, project_id).await?;
+
+    let sql = format!(
+        "DELETE FROM zeroship.projects p \
+          WHERE p.id = $1 \
+            AND EXISTS (SELECT 1 FROM {seat} WHERE actor_role.rank >= {admin}) \
+            AND NOT EXISTS (SELECT 1 FROM zeroship.apps a WHERE a.project_id = p.id) \
+         RETURNING p.slug::text AS slug",
+        seat = actor_seat("$2", "$3"),
+        admin = ladder_rank("$4"),
+    );
+    let rows = tx
+        .query(
+            &sql,
+            &[&project_id, &organization_id, &principal, &ROLE_ADMIN],
+        )
+        .await
+        .map_err(|err| db_error(&err, "delete project"))?;
+    let Some(row) = rows.first() else {
+        return Err(classify_project_deletion_refusal(&tx, &organization_id, principal, project_id).await);
+    };
+    let slug: String = row.get("slug");
+
+    audit_authority_change(
+        &tx,
+        principal,
+        AuditAction::ProjectDeleted,
+        &organization_id,
+        source_ip,
+        &json!({
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "slug": slug,
+        }),
+    )
+    .await;
+
+    tx.commit()
+        .await
+        .map_err(|err| db_error(&err, "commit delete project"))?;
+    Ok(())
+}
+
 /// Seat an organization member on one project.
 ///
 /// The two composite foreign keys on `project_members` make a row naming
@@ -1926,6 +2688,120 @@ fn project_member_conflict(err: &compio_postgres::Error, context: &str) -> Organ
     }
 }
 
+/// Move a project seat to another role, in one statement.
+///
+/// # Why this is not delete-then-add
+///
+/// Two calls have a window between them in which the member holds NO project
+/// row, and a member below admin with no project row reaches nothing - so
+/// narrowing someone from project owner to project viewer used to blank their
+/// access first and restore part of it after. Worse in the other direction: a
+/// crash between the two leaves the seat gone rather than narrowed, and the
+/// caller who asked for an adjustment has performed a removal.
+///
+/// # It compares BOTH roles, exactly as [`change_member_role`] does
+///
+/// The actor must outrank the role being granted AND the role being taken away.
+/// Checking only the new role would let an admin narrow an owner's project seat;
+/// checking only the old one would let them widen a viewer's.
+pub async fn change_project_member_role(
+    registry: &Registry,
+    principal: Uuid,
+    project_id: &str,
+    user_id: Uuid,
+    body: &ChangeRoleBody,
+    source_ip: Option<&str>,
+) -> Result<ProjectMemberRecord, OrganizationError> {
+    let mut conn = registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|err| db_error(&err, "begin change project role"))?;
+    let organization_id = lock_project_organization(&tx, project_id).await?;
+
+    // `held_role`, not `current_role`: `CURRENT_ROLE` is a reserved SQL keyword
+    // and PostgreSQL refuses it as a bare alias. Same trap `change_member_role`
+    // documents, and it fails at execute time rather than at compile time.
+    let sql = format!(
+        "UPDATE zeroship.project_members pm \
+            SET role = target_role.role, changed_at = NOW(), changed_by = $4 \
+           FROM zeroship.organization_roles target_role, \
+                zeroship.organization_roles held_role, \
+                {seat} \
+          WHERE pm.project_id = $1 AND pm.user_id = $2 \
+            AND target_role.role = $3 \
+            AND held_role.role = pm.role \
+            AND actor_role.rank >= {admin} \
+            AND actor_role.rank > target_role.rank \
+            AND actor_role.billing_rank >= target_role.billing_rank \
+            AND actor_role.rank > held_role.rank \
+            AND actor_role.billing_rank >= held_role.billing_rank \
+         RETURNING pm.role, pm.added_at, held_role.role AS previous_role",
+        seat = actor_seat("$5", "$4"),
+        admin = ladder_rank("$6"),
+    );
+    let rows = tx
+        .query(
+            &sql,
+            &[
+                &project_id,
+                &user_id,
+                &body.role,
+                &principal,
+                &organization_id,
+                &ROLE_ADMIN,
+            ],
+        )
+        .await
+        .map_err(|err| db_error(&err, "change project member role"))?;
+    let Some(row) = rows.first() else {
+        let seated = tx
+            .query(
+                "SELECT 1 FROM zeroship.project_members WHERE project_id = $1 AND user_id = $2",
+                &[&project_id, &user_id],
+            )
+            .await
+            .map_err(|err| db_error(&err, "classify project role change"))?;
+        return Err(if seated.is_empty() {
+            OrganizationError::MemberNotFound
+        } else {
+            classify_seat_refusal(&tx, &organization_id, principal, &body.role).await
+        });
+    };
+    let added_at: DateTime<Utc> = row.get("added_at");
+    let previous_role: String = row.get("previous_role");
+    let role: String = row.get("role");
+
+    audit_authority_change(
+        &tx,
+        principal,
+        AuditAction::ProjectMemberRoleChanged,
+        &organization_id,
+        source_ip,
+        &json!({
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "user_id": user_id,
+            "from": previous_role,
+            "to": role,
+        }),
+    )
+    .await;
+
+    let record = ProjectMemberRecord {
+        project_id: project_id.to_string(),
+        user_id,
+        email: member_email(&tx, user_id).await?,
+        role,
+        added_at,
+    };
+
+    tx.commit()
+        .await
+        .map_err(|err| db_error(&err, "commit change project role"))?;
+    Ok(record)
+}
+
 pub async fn remove_project_member(
     registry: &Registry,
     principal: Uuid,
@@ -2010,22 +2886,31 @@ pub async fn remove_project_member(
 /// on the project, because that is the row every other membership path already
 /// locks: two locks over one authority model would deadlock the first time a
 /// caller re-roled someone at both heights.
+/// It carries the same dissolved refusal [`lock_organization`] does, for the
+/// same reason: a project of a closed organization is part of a closed record.
+/// In practice a dissolved organization owns no projects at all - dissolve
+/// refuses while any remains - so this arm is the one that stays true if that
+/// ever stops being so.
 async fn lock_project_organization<C: GenericClient + Sync>(
     tx: &C,
     project_id: &str,
 ) -> Result<String, OrganizationError> {
     let rows = tx
         .query(
-            "SELECT o.id FROM zeroship.organizations o \
+            "SELECT o.id, o.dissolved_at FROM zeroship.organizations o \
                JOIN zeroship.projects p ON p.organization_id = o.id \
               WHERE p.id = $1 FOR UPDATE OF o",
             &[&project_id],
         )
         .await
         .map_err(|err| db_error(&err, "lock project organization"))?;
-    rows.first()
-        .map(|row| row.get::<_, String>("id"))
-        .ok_or(OrganizationError::ProjectNotFound)
+    let Some(row) = rows.first() else {
+        return Err(OrganizationError::ProjectNotFound);
+    };
+    match row.get::<_, Option<DateTime<Utc>>>("dissolved_at") {
+        Some(at) => Err(OrganizationError::Dissolved(at)),
+        None => Ok(row.get::<_, String>("id")),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2114,11 +2999,18 @@ async fn ensure_personal_organization<C: GenericClient + Sync>(
     let organization_id = OrganizationId::mint();
     let rows = tx
         .query(
+            // The inference clause names BOTH conjuncts of
+            // `organizations_live_personal_owner_key`. PostgreSQL matches a
+            // partial unique index only when the statement's own predicate
+            // implies the index's, and a mismatch is not a silent widening - it
+            // is "there is no unique or exclusion constraint matching the ON
+            // CONFLICT specification", on the first deploy of a fresh account.
             "INSERT INTO zeroship.organizations \
                  (id, slug, name, billing_email, personal_owner_id, created_by) \
              SELECT $1, $2, u.name, u.email, u.id, u.id \
                FROM zeroship.users u WHERE u.id = $3 \
-             ON CONFLICT (personal_owner_id) WHERE personal_owner_id IS NOT NULL DO NOTHING \
+             ON CONFLICT (personal_owner_id) \
+                 WHERE personal_owner_id IS NOT NULL AND dissolved_at IS NULL DO NOTHING \
              RETURNING id",
             &[
                 &organization_id.as_str(),
@@ -2138,13 +3030,21 @@ async fn ensure_personal_organization<C: GenericClient + Sync>(
         .ok_or(OrganizationError::UserNotFound)
 }
 
+/// The creator's LIVE personal organization, if they have one.
+///
+/// `dissolved_at IS NULL` is the whole of what makes closing one recoverable: a
+/// creator who closed their personal workspace gets a fresh one on their next
+/// deploy rather than resolving back into a row that refuses everything. The
+/// filter matches the predicate on `organizations_live_personal_owner_key`, so
+/// the read and the uniqueness rule say the same thing.
 async fn personal_organization_of<C: GenericClient + Sync>(
     tx: &C,
     principal: Uuid,
 ) -> Result<Option<String>, OrganizationError> {
     let rows = tx
         .query(
-            "SELECT id FROM zeroship.organizations WHERE personal_owner_id = $1",
+            "SELECT id FROM zeroship.organizations \
+              WHERE personal_owner_id = $1 AND dissolved_at IS NULL",
             &[&principal],
         )
         .await
@@ -2291,8 +3191,123 @@ async fn classify_member_refusal<C: GenericClient + Sync>(
     }
     OrganizationError::Insufficient(format!(
         "removing a member holding {current_role:?} needs a strictly higher rank and at least \
-         equal billing authority"
+         equal billing authority. To give up your OWN seat, call \
+         DELETE /api/organizations/{{organization_id}}/membership, which needs no rank at all"
     ))
+}
+
+/// Why the departure DELETE matched nothing.
+///
+/// It is NOT [`classify_member_refusal`], and the difference is the point:
+/// that function's fallback sentence explains a RANK comparison, and the
+/// departure statement has no rank comparison to fail. Only two clauses can
+/// match nothing here - no seat, or the last owner's seat - so those are the
+/// only two answers this can give. Reusing the other classifier would have
+/// meant a departure occasionally reporting an authority failure that did not
+/// happen.
+async fn classify_departure_refusal<C: GenericClient + Sync>(
+    tx: &C,
+    organization_id: &str,
+    principal: Uuid,
+) -> OrganizationError {
+    let rows = tx
+        .query(
+            "SELECT m.role FROM zeroship.organization_members m \
+              WHERE m.organization_id = $1 AND m.user_id = $2",
+            &[&organization_id, &principal],
+        )
+        .await;
+    match rows {
+        Ok(rows) if rows.is_empty() => OrganizationError::MemberNotFound,
+        // A seat exists and the DELETE still matched nothing, so the only
+        // surviving clause is the last-owner count.
+        Ok(_) => OrganizationError::LastOwner,
+        Err(err) => db_error(&err, "classify departure refusal"),
+    }
+}
+
+/// Why the dissolve UPDATE matched nothing.
+///
+/// The dissolved case cannot reach here - [`lock_organization`] refuses it
+/// before the statement runs - so the two live answers are "you are not an
+/// owner" and "projects remain". Projects are reported FIRST and with a count,
+/// because that is the refusal a legitimate owner meets and it is the one with
+/// a next step.
+async fn classify_dissolve_refusal<C: GenericClient + Sync>(
+    tx: &C,
+    organization_id: &str,
+    principal: Uuid,
+) -> OrganizationError {
+    let sql = format!(
+        "SELECT (SELECT COUNT(*) FROM zeroship.projects p \
+                  WHERE p.organization_id = $1)::bigint AS projects, \
+                (SELECT COUNT(*) FROM {seat} \
+                  WHERE actor_role.role = $3)::bigint AS actor_owns",
+        seat = actor_seat("$1", "$2"),
+    );
+    let rows = match tx
+        .query(&sql, &[&organization_id, &principal, &ROLE_OWNER])
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => return db_error(&err, "classify dissolve refusal"),
+    };
+    let Some(row) = rows.first() else {
+        return OrganizationError::Db;
+    };
+    let projects: i64 = row.get("projects");
+    let actor_owns: i64 = row.get("actor_owns");
+    if projects > 0 {
+        return OrganizationError::OrganizationHasProjects(projects);
+    }
+    if actor_owns == 0 {
+        return OrganizationError::Insufficient(
+            "closing an organization is reserved to its owners".to_string(),
+        );
+    }
+    OrganizationError::Db
+}
+
+/// Why the project DELETE matched nothing: apps remain, or the actor is below
+/// admin. Apps first, for the same reason projects come first above.
+async fn classify_project_deletion_refusal<C: GenericClient + Sync>(
+    tx: &C,
+    organization_id: &str,
+    principal: Uuid,
+    project_id: &str,
+) -> OrganizationError {
+    let sql = format!(
+        "SELECT (SELECT COUNT(*) FROM zeroship.apps a \
+                  WHERE a.project_id = $3)::bigint AS apps, \
+                (SELECT COUNT(*) FROM {seat} \
+                  WHERE actor_role.rank >= {admin})::bigint AS actor_admin",
+        seat = actor_seat("$1", "$2"),
+        admin = ladder_rank("$4"),
+    );
+    let rows = match tx
+        .query(
+            &sql,
+            &[&organization_id, &principal, &project_id, &ROLE_ADMIN],
+        )
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => return db_error(&err, "classify project deletion refusal"),
+    };
+    let Some(row) = rows.first() else {
+        return OrganizationError::Db;
+    };
+    let apps: i64 = row.get("apps");
+    let actor_admin: i64 = row.get("actor_admin");
+    if apps > 0 {
+        return OrganizationError::ProjectHasApps(apps);
+    }
+    if actor_admin == 0 {
+        return OrganizationError::Insufficient(
+            "deleting a project needs admin authority in the organization".to_string(),
+        );
+    }
+    OrganizationError::Db
 }
 
 async fn classify_transfer_refusal<C: GenericClient + Sync>(
@@ -2765,6 +3780,95 @@ pub async fn remove_member_handler(
     }
 }
 
+/// Give up your own seat.
+///
+/// The route carries NO user id - not in the path, not in the body - so the
+/// only seat it can reach is the bearer's. That is what makes the rank
+/// carve-out safe: it is not a check that could be got round, it is an argument
+/// that does not exist.
+///
+/// Gated on `organization:members:leave`, which is banded at viewer rank and
+/// above. `organization:members:write` would have been the wrong gate (a viewer
+/// never holds it, and a viewer is the member most likely to want out) and
+/// `organization:read` would have been worse (a read-only consent could then
+/// delete its holder's seat).
+pub async fn leave_handler(
+    req: web::HttpRequest,
+    path: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = admin_rate_limit(&req, &state).await {
+        return r;
+    }
+    let id = match parse_organization_id(&path) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = authz
+        .require(
+            AuthzAction::OrganizationMembersLeave,
+            Resource::Organization { id: id.clone() },
+            &state,
+        )
+        .await
+    {
+        return resp;
+    }
+    let ip = http_util::source_ip(&req, state.trust_proxy);
+    match leave_organization(&state.registry, authz.principal_id, &id, ip.as_deref()).await {
+        Ok(()) => web::HttpResponse::NoContent().finish(),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Close an organization.
+///
+/// Gated on `organization:admin`, the action no band but the owner's permits -
+/// the same gate as [`transfer_handler`], because reshaping who owns an
+/// organization and ending it are the two things only an owner may do.
+///
+/// It answers `200` with the closed record rather than `204`, because
+/// `dissolved_at` is the whole result and a caller that had to re-read for it
+/// would be reading a row that now refuses everything else.
+pub async fn dissolve_handler(
+    req: web::HttpRequest,
+    path: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = admin_rate_limit(&req, &state).await {
+        return r;
+    }
+    let id = match parse_organization_id(&path) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = authz
+        .require(
+            AuthzAction::OrganizationAdmin,
+            Resource::Organization { id: id.clone() },
+            &state,
+        )
+        .await
+    {
+        return resp;
+    }
+    let ip = http_util::source_ip(&req, state.trust_proxy);
+    match dissolve_organization(
+        &state.registry,
+        authz.principal_id,
+        &id,
+        LocalInvoicing::of(&state.billing_stack),
+        ip.as_deref(),
+    )
+    .await
+    {
+        Ok(record) => web::HttpResponse::Ok().json(&record),
+        Err(e) => e.into_response(),
+    }
+}
+
 pub async fn transfer_handler(
     req: web::HttpRequest,
     path: Path<String>,
@@ -2851,8 +3955,10 @@ pub async fn create_invite_handler(
         return resp;
     }
     let ip = http_util::source_ip(&req, state.trust_proxy);
-    match create_invite(
+    match create_and_deliver_invite(
         &state.registry,
+        state.control_pg.as_ref(),
+        state.mailer.as_ref(),
         authz.principal_id,
         &id,
         &body,
@@ -3043,6 +4149,81 @@ pub async fn show_project(
     }
 }
 
+pub async fn update_project_handler(
+    req: web::HttpRequest,
+    path: Path<String>,
+    authz: AuthzGuard,
+    body: Json<UpdateProjectBody>,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = admin_rate_limit(&req, &state).await {
+        return r;
+    }
+    let id = match parse_project_path(&path) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = authz
+        .require(
+            AuthzAction::ProjectWrite,
+            Resource::Project { id: id.clone() },
+            &state,
+        )
+        .await
+    {
+        return resp;
+    }
+    let ip = http_util::source_ip(&req, state.trust_proxy);
+    match update_project(
+        &state.registry,
+        authz.principal_id,
+        &id,
+        &body,
+        ip.as_deref(),
+    )
+    .await
+    {
+        Ok(record) => web::HttpResponse::Ok().json(&record),
+        Err(e) => e.into_response(),
+    }
+}
+
+/// Delete a project.
+///
+/// The same `project:write` gate as the rename, and deliberately so: the
+/// consent copy for that scope is "Rename and delete projects", so a separate
+/// action would either need its own consent line or would be authority a human
+/// approved under a different sentence.
+pub async fn delete_project_handler(
+    req: web::HttpRequest,
+    path: Path<String>,
+    authz: AuthzGuard,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = admin_rate_limit(&req, &state).await {
+        return r;
+    }
+    let id = match parse_project_path(&path) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    if let Err(resp) = authz
+        .require(
+            AuthzAction::ProjectWrite,
+            Resource::Project { id: id.clone() },
+            &state,
+        )
+        .await
+    {
+        return resp;
+    }
+    let ip = http_util::source_ip(&req, state.trust_proxy);
+    match delete_project(&state.registry, authz.principal_id, &id, ip.as_deref()).await {
+        Ok(()) => web::HttpResponse::NoContent().finish(),
+        Err(e) => e.into_response(),
+    }
+}
+
 pub async fn project_members(
     req: web::HttpRequest,
     path: Path<String>,
@@ -3111,6 +4292,57 @@ pub async fn add_project_member_handler(
     }
 }
 
+pub async fn change_project_role_handler(
+    req: web::HttpRequest,
+    path: Path<(String, String)>,
+    authz: AuthzGuard,
+    body: Json<ChangeRoleBody>,
+    state: State<Arc<AppState>>,
+) -> web::HttpResponse {
+    if let Some(r) = admin_rate_limit(&req, &state).await {
+        return r;
+    }
+    let (raw_project, raw_user) = path.into_inner();
+    let id = match parse_project_path(&raw_project) {
+        Ok(id) => id,
+        Err(resp) => return resp,
+    };
+    let Ok(user_id) = raw_user.parse::<Uuid>() else {
+        return bad_id("user_id");
+    };
+    // No `require_seat_authority` here, and the asymmetry with the
+    // ORGANIZATION role change is deliberate. That one reserves seating an
+    // owner or an admin to `organization:admin`, because those roles carry
+    // authority over the organization. A project role carries none: the
+    // effective rank is min(organization rank, project rank), so seating a
+    // developer as project owner leaves them at 20. There is nothing here for
+    // the consent fence to protect.
+    if let Err(resp) = authz
+        .require(
+            AuthzAction::ProjectMembersWrite,
+            Resource::Project { id: id.clone() },
+            &state,
+        )
+        .await
+    {
+        return resp;
+    }
+    let ip = http_util::source_ip(&req, state.trust_proxy);
+    match change_project_member_role(
+        &state.registry,
+        authz.principal_id,
+        &id,
+        user_id,
+        &body,
+        ip.as_deref(),
+    )
+    .await
+    {
+        Ok(record) => web::HttpResponse::Ok().json(&record),
+        Err(e) => e.into_response(),
+    }
+}
+
 pub async fn remove_project_member_handler(
     req: web::HttpRequest,
     path: Path<(String, String)>,
@@ -3165,13 +4397,21 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
         web::resource("/api/organizations/{organization_id}")
             .state(payload())
             .route(web::get().to(show))
-            .route(web::patch().to(update)),
+            .route(web::patch().to(update))
+            .route(web::delete().to(dissolve_handler)),
     )
     .service(
         web::resource("/api/organizations/{organization_id}/members")
             .state(payload())
             .route(web::get().to(members))
             .route(web::post().to(add_member_handler)),
+    )
+    // Registered BEFORE `/members/{user_id}` so the literal wins the match.
+    // `membership` is not a uuid, so the parameterised route would answer it
+    // with `bad user_id` rather than 404 - a refusal naming the wrong thing.
+    .service(
+        web::resource("/api/organizations/{organization_id}/membership")
+            .route(web::delete().to(leave_handler)),
     )
     .service(
         web::resource("/api/organizations/{organization_id}/members/{user_id}")
@@ -3205,7 +4445,13 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .route(web::get().to(projects))
             .route(web::post().to(create_project_handler)),
     )
-    .service(web::resource("/api/projects/{project_id}").route(web::get().to(show_project)))
+    .service(
+        web::resource("/api/projects/{project_id}")
+            .state(payload())
+            .route(web::get().to(show_project))
+            .route(web::patch().to(update_project_handler))
+            .route(web::delete().to(delete_project_handler)),
+    )
     .service(
         web::resource("/api/projects/{project_id}/members")
             .state(payload())
@@ -3214,6 +4460,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     )
     .service(
         web::resource("/api/projects/{project_id}/members/{user_id}")
+            .state(payload())
+            .route(web::patch().to(change_project_role_handler))
             .route(web::delete().to(remove_project_member_handler)),
     );
 }

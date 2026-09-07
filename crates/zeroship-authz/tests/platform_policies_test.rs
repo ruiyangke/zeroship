@@ -17,11 +17,10 @@
 use std::str::FromStr;
 
 use cedar_policy::{
-    Authorizer, Context, Decision, Entities, EntityId, EntityTypeName, EntityUid, PolicySet,
-    Request,
+    Authorizer, Context, Decision, Entities, EntityId, EntityTypeName, EntityUid, Request,
 };
 use serde_json::json;
-use zeroship_authz::load_platform_policies;
+use zeroship_authz::{load_platform_policies, PlatformPolicies};
 
 const APP: &str = "app_blog";
 const PROJECT: &str = "prj_0000000000000000000001";
@@ -508,7 +507,7 @@ fn the_self_service_baseline_grants_only_self_scoped_actions() {
 // ---------------------------------------------------------------------------
 
 fn assert_allow(
-    policies: &PolicySet,
+    policies: &PlatformPolicies,
     action: &str,
     resource_type: &str,
     resource_id: &str,
@@ -523,7 +522,7 @@ fn assert_allow(
 }
 
 fn assert_deny(
-    policies: &PolicySet,
+    policies: &PlatformPolicies,
     action: &str,
     resource_type: &str,
     resource_id: &str,
@@ -538,7 +537,7 @@ fn assert_deny(
 }
 
 fn decide(
-    policies: &PolicySet,
+    policies: &PlatformPolicies,
     action: &str,
     resource_type: &str,
     resource_id: &str,
@@ -562,7 +561,11 @@ fn decide(
     .expect("request should be valid");
 
     Authorizer::new()
-        .is_authorized(&request, policies, &entities(resource_type, resource_id))
+        .is_authorized(
+            &request,
+            policies.policies(),
+            &entities(resource_type, resource_id),
+        )
         .decision()
 }
 

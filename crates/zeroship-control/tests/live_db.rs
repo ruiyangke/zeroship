@@ -81,6 +81,7 @@ mod egress_rules_test;
 mod env_store;
 mod oauth_clients_test;
 mod oauth_grants_handlers_test;
+mod erasure_preflight_test;
 mod organizations_test;
 mod orphaned_app_reaper_test;
 mod plan_catalog;

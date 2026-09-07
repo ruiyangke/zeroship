@@ -15,8 +15,6 @@ use crate::{http_util, AppState};
 pub struct AuthzGuard {
     pub principal_id: Uuid,
     pub token_policy: Option<authz::Policy>,
-    pub mfa_verified: bool,
-    pub mfa_age_seconds: Option<u32>,
     pub request_ip: Option<IpAddr>,
     pub request_id: String,
 }
@@ -75,8 +73,6 @@ impl AuthzGuard {
             resource,
             now,
             request_ip: self.request_ip,
-            mfa_verified: self.mfa_verified,
-            mfa_age_seconds: self.mfa_age_seconds,
             request_id: Some(self.request_id.as_str()),
         };
 
@@ -120,8 +116,6 @@ impl AuthzGuard {
             resource: Resource::Any,
             now,
             request_ip: self.request_ip,
-            mfa_verified: self.mfa_verified,
-            mfa_age_seconds: self.mfa_age_seconds,
             request_id: Some(self.request_id.as_str()),
         };
         authz::is_authorized_anywhere(&state.control_pg, &state.static_policies, &ctx)
@@ -228,8 +222,6 @@ impl From<VerifiedPrincipal> for AuthzGuard {
         Self {
             principal_id: principal.principal_id,
             token_policy: principal.token_policy,
-            mfa_verified: principal.mfa_verified,
-            mfa_age_seconds: principal.mfa_age_seconds,
             request_ip: principal.request_ip,
             request_id: principal.request_id,
         }

@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block title %}Account deletion not possible yet · zeroship{% endblock %}
+{% block body %}
+<h2>Your account cannot be deleted yet</h2>
+{% if unavailable %}
+<div class="error" role="alert" id="form-error">
+  We could not check whether deleting your account would leave an organization
+  without an owner or an unpaid bill behind, so nothing was changed. Please try
+  again shortly.
+</div>
+<p class="subtle">Your account is unchanged and still fully usable.</p>
+{% else %}
+{% if blockers.len() > 0 %}
+<p>
+  You are the only owner of the organizations below. Deleting your account would
+  leave each of them with nobody able to administer it, so the request was
+  refused and nothing was changed.
+</p>
+<ul class="blockers">
+  {% for blocker in blockers %}
+  <li>
+    <strong>{{ blocker.organization_name }}</strong>
+    <span class="subtle">({{ blocker.organization_slug }}{% if blocker.personal %}, your personal workspace{% endif %})</span>
+    <div>{{ blocker.instruction }}</div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+{% if owing.len() > 0 %}
+<p>
+  The organizations below still have outstanding billing, and yours is the last
+  owner account naming them. Deleting it would leave the balance with nobody to
+  settle it, so the request was refused and nothing was changed.
+</p>
+<ul class="blockers">
+  {% for debt in owing %}
+  <li>
+    <strong>{{ debt.organization_name }}</strong>
+    <span class="subtle">({{ debt.organization_slug }}{% if debt.personal %}, your personal workspace{% endif %}{% if debt.dissolved %}, already closed{% endif %})</span>
+    <div>{{ debt.summary }}</div>
+    <div>{{ debt.instruction }}</div>
+  </li>
+  {% endfor %}
+</ul>
+{% endif %}
+<p class="subtle">
+  Once every organization above has another owner or has been dissolved, and
+  every balance is settled, request deletion again.
+</p>
+{% endif %}
+<p><a href="/me">Back to your account</a></p>
+{% endblock %}

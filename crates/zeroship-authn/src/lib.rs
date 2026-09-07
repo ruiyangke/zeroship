@@ -22,12 +22,20 @@ pub use rejection::AuthnRejection;
 /// module for what ntex's own helpers get wrong about `status_code()`.
 pub type HttpRejection = ntex::web::Error;
 
+/// What a verified bearer proves.
+///
+/// **IT CARRIES NO MFA FIELDS, AND THE DELETION IS THE POINT.** `mfa_verified`
+/// and `mfa_age_seconds` used to be here, and every construction below set them
+/// to `false` / `None` unconditionally - the platform has no second-factor
+/// signal to report. They fed `Condition::RequireMfa` and `Condition::MfaWithin`
+/// in `zeroship-authz`, so those conditions compared against a value that was
+/// not unknown but wrong, and could only ever deny. The fields and both
+/// conditions were deleted together rather than left as a fence that reads as
+/// enforced and never fires.
 #[derive(Debug)]
 pub struct VerifiedPrincipal {
     pub principal_id: Uuid,
     pub token_policy: Option<authz::Policy>,
-    pub mfa_verified: bool,
-    pub mfa_age_seconds: Option<u32>,
     pub request_ip: Option<IpAddr>,
     pub request_id: String,
     /// This bearer is a platform CLI token for a principal with no
@@ -257,8 +265,6 @@ impl BearerVerifier {
         Ok(VerifiedPrincipal {
             principal_id,
             token_policy: Some(token_policy),
-            mfa_verified: false,
-            mfa_age_seconds: None,
             request_ip,
             request_id,
             seed_platform_cli_grants,

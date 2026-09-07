@@ -15,7 +15,11 @@ fn policy_roundtrips_through_wrapper_json_shape() {
                 Condition::IpRange {
                     cidrs: vec!["10.0.0.0/8".to_owned()],
                 },
-                Condition::RequireMfa,
+                Condition::TimeWindow {
+                    start: "09:00".to_owned(),
+                    end: "17:00".to_owned(),
+                    tz: "UTC".to_owned(),
+                },
             ],
         }],
     };
@@ -32,7 +36,7 @@ fn policy_roundtrips_through_wrapper_json_shape() {
                 "resources": [{"type": "app", "id": "blog"}],
                 "conditions": [
                     {"kind": "ip_range", "cidrs": ["10.0.0.0/8"]},
-                    {"kind": "require_mfa"}
+                    {"kind": "time_window", "start": "09:00", "end": "17:00", "tz": "UTC"}
                 ]
             }]
         })
@@ -65,6 +69,10 @@ fn action_cedar_ids_are_canonical() {
         (
             Action::OrganizationMembersWrite,
             "organization:members:write",
+        ),
+        (
+            Action::OrganizationMembersLeave,
+            "organization:members:leave",
         ),
         (Action::ProjectCreate, "project:create"),
         (Action::ProjectRead, "project:read"),
