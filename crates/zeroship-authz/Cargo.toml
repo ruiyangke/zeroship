@@ -22,6 +22,10 @@ zeroship-core = { workspace = true }
 [dev-dependencies]
 zeroship-test-support = { workspace = true }
 compio = { workspace = true }
+# The live-database preflight this crate's two database targets run before
+# their first assertion. Without it they read a stale schema as a code
+# regression; see `zeroship_testkit::live_db`.
+zeroship-testkit = { workspace = true }
 
 [build-dependencies]
 cedar-policy = { version = "4.11.0", default-features = false, features = ["ipaddr"] }

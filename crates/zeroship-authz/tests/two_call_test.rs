@@ -674,6 +674,12 @@ where
         zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };
+    // The preflight, before the first fixture INSERT. See the twin in
+    // `crates/zeroship-authz/tests/app_resolution_test.rs` for the run that
+    // made a stale schema read as a code regression, and
+    // `zeroship_testkit::live_db` for what the refusal says. Memoised per
+    // process; it is called from the one gate every test here goes through.
+    zeroship_testkit::live_db::require_once(&dsn, zeroship_testkit::live_db::PLATFORM_SCHEMAS);
     compio::runtime::Runtime::new()
         .expect("create compio runtime")
         .block_on(async move {

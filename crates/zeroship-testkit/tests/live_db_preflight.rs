@@ -10,6 +10,7 @@
 //!
 //!   same database, different schema asked for   -> Ready / Refused
 //!   same schema asked for, different database   -> Ready / Refused
+//!   same database and schemas, journal short    -> Refused / Ready
 //!
 //! Without both directions the file is worthless in the specific way the thing
 //! it guards was worthless: a check that always says the same thing reads as a
@@ -64,14 +65,58 @@ use std::path::{Path, PathBuf};
 use compio_postgres::NoTls;
 use zeroship_testkit::{admin, live_db, overlay};
 
-/// The schemas the control live-DB target requires, and what this file uses as
-/// its `Ready` input. Kept identical to `crates/zeroship-control/tests/common/mod.rs`
-/// deliberately: if that list grows, this file should be asking for the same
-/// thing.
-const PLATFORM_SCHEMAS: [&str; 2] = ["zeroship", "zeroship_migrations"];
+/// The schemas a platform live-DB target requires, and what this file uses as
+/// its `Ready` input.
+///
+/// IT IS THE PRODUCTION CONSTANT, NOT A COPY OF IT. This file used to spell the
+/// pair out beside a comment asking that it be "kept identical" to
+/// `crates/zeroship-control/tests/common/mod.rs`, which is a convention rather
+/// than a mechanism: the day that list grew, this file would have gone on
+/// testing the old one and reporting green.
+const PLATFORM_SCHEMAS: &[&str] = live_db::PLATFORM_SCHEMAS;
 
 /// A schema name nothing in this tree ever creates. The `Refused` input.
 const NEVER_CREATED: &str = "zs_schema_that_is_never_created";
+
+/// The journal table the ledger stage counts, in the shape that stage reads.
+///
+/// TWO COLUMNS, NOT TWELVE. The real table (see
+/// `db/migrations-ts/`) carries an event sequence, immutability triggers and a
+/// shape CHECK, none of which the preflight looks at. Reproducing them here
+/// would pin this file to a schema it does not test and would go stale the
+/// first time the journal grows a column.
+const JOURNAL_TABLE: &str = "zeroship_migrations.__zeroship_schema_migrations";
+
+/// How many migration files this checkout carries, which is what a current
+/// journal must have consumed.
+///
+/// Re-derived from the tree on every run through the SAME enumeration the
+/// preflight uses, so the two cannot drift apart and neither is written down.
+fn migrations_carried() -> usize {
+    zeroship_testkit::fingerprint::files_in(&repo_root())
+        .expect("this checkout carries a migration set")
+        .len()
+}
+
+/// Give `dsn` a journal that has consumed `consumed` distinct migrations.
+///
+/// The preflight counts DISTINCT `checksum` values on `applied` rows, so the
+/// rows carry distinct checksums and nothing else that matters. Two rows per
+/// migration, because one migration journals many step events in the real
+/// corpus and a check that counted ROWS rather than distinct checksums would
+/// pass here for the wrong reason.
+fn seed_journal(dsn: &str, consumed: usize) {
+    let mut sql = format!(
+        "CREATE TABLE IF NOT EXISTS {JOURNAL_TABLE} (event_kind text NOT NULL, checksum text NOT NULL);"
+    );
+    for index in 0..consumed {
+        sql.push_str(&format!(
+            "INSERT INTO {JOURNAL_TABLE} (event_kind, checksum) \
+             VALUES ('applied', 'checksum-{index}'), ('applied', 'checksum-{index}');"
+        ));
+    }
+    run(dsn, &sql).unwrap_or_else(|e| panic!("seed a journal of {consumed} migrations: {e}"));
+}
 
 fn repo_root() -> PathBuf {
     // Substituted at COMPILE time by `env!`, so this is a constant in the
@@ -226,12 +271,19 @@ fn drop_scratch(server: &admin::Server, scratch: &Scratch) {
 /// `zeroship` database was reachable and answered every connection, and the
 /// only thing wrong with it was that the platform schema had been dropped out
 /// of it.
+///
+/// THE `Ready` SIDE ALSO SEEDS A JOURNAL, because asking for the journal SCHEMA
+/// now also asks whether that journal is current. A bare `CREATE SCHEMA
+/// zeroship_migrations` is a schema with no journal in it, which is behind the
+/// tree by every migration there is -- correctly refused, and not what this arm
+/// is about.
 #[test]
 fn one_database_answers_ready_for_a_schema_it_has_and_refuses_for_one_it_does_not() {
     let Some(server) = server() else { return };
-    let db = scratch(&server, "schema_axis", &PLATFORM_SCHEMAS);
+    let db = scratch(&server, "schema_axis", PLATFORM_SCHEMAS);
+    seed_journal(&db.dsn, migrations_carried());
 
-    let present = live_db::inspect(&db.dsn, &PLATFORM_SCHEMAS);
+    let present = live_db::inspect(&db.dsn, PLATFORM_SCHEMAS);
     let absent = live_db::inspect(&db.dsn, &[NEVER_CREATED]);
 
     drop_scratch(&server, &db);
@@ -275,11 +327,12 @@ fn one_database_answers_ready_for_a_schema_it_has_and_refuses_for_one_it_does_no
 #[test]
 fn the_same_question_answers_ready_on_a_seeded_database_and_refuses_on_a_fresh_one() {
     let Some(server) = server() else { return };
-    let seeded = scratch(&server, "db_axis_seeded", &PLATFORM_SCHEMAS);
+    let seeded = scratch(&server, "db_axis_seeded", PLATFORM_SCHEMAS);
+    seed_journal(&seeded.dsn, migrations_carried());
     let fresh = scratch(&server, "db_axis_fresh", &[]);
 
-    let on_seeded = live_db::inspect(&seeded.dsn, &PLATFORM_SCHEMAS);
-    let on_fresh = live_db::inspect(&fresh.dsn, &PLATFORM_SCHEMAS);
+    let on_seeded = live_db::inspect(&seeded.dsn, PLATFORM_SCHEMAS);
+    let on_fresh = live_db::inspect(&fresh.dsn, PLATFORM_SCHEMAS);
 
     drop_scratch(&server, &seeded);
     drop_scratch(&server, &fresh);
@@ -310,7 +363,7 @@ fn an_unreachable_server_refuses_differently_from_an_unmigrated_database() {
     // Port 1 is reserved (tcpmux) and nothing in this tree binds it, so the
     // connect fails without a timeout worth waiting on.
     let dead = "postgres://postgres:zeroship@127.0.0.1:1/zeroship";
-    let text = live_db::inspect(dead, &PLATFORM_SCHEMAS)
+    let text = live_db::inspect(dead, PLATFORM_SCHEMAS)
         .refusal()
         .expect("nothing listens on port 1")
         .to_string();
@@ -321,5 +374,82 @@ fn an_unreachable_server_refuses_differently_from_an_unmigrated_database() {
     assert!(
         !text.contains("db-migrate.sh"),
         "an unreachable server must not be blamed on a missing migration; got {text}"
+    );
+}
+
+/// ARM 4 -- the LEDGER axis. ONE database, one question, two journals differing
+/// by one migration.
+///
+/// This is the arm that would have caught the 2026-09-07 run. That database
+/// held both platform schemas and a populated journal; the only thing wrong
+/// with it was that the journal had never seen
+/// `db/migrations-ts/20260906000100_apps_organization_and_billing_subject.ts`,
+/// so `zeroship.apps` had no `organization_id` and seven targets across two
+/// crates reported a missing column as a test failure.
+///
+/// SAME DATABASE FOR BOTH SIDES, and the short journal is measured FIRST. A
+/// second database would differ in its name and its creation time as well as
+/// its journal; topping the journal up in place leaves exactly one variable.
+#[test]
+fn one_database_refuses_on_a_short_journal_and_is_ready_once_it_is_topped_up() {
+    let Some(server) = server() else { return };
+    let carried = migrations_carried();
+    let db = scratch(&server, "ledger_axis", PLATFORM_SCHEMAS);
+
+    seed_journal(&db.dsn, carried - 1);
+    let behind = live_db::inspect(&db.dsn, PLATFORM_SCHEMAS);
+    seed_journal(&db.dsn, carried);
+    let current = live_db::inspect(&db.dsn, PLATFORM_SCHEMAS);
+
+    drop_scratch(&server, &db);
+
+    let text = behind
+        .refusal()
+        .unwrap_or_else(|| panic!("{} was one migration short of the tree", db.name));
+    assert!(
+        text.contains("BEHIND the tree"),
+        "the refusal must say which side is short; got {text}"
+    );
+    assert!(
+        text.contains(&format!("/{}", db.name)),
+        "the refusal must name the database it dialled; got {text}"
+    );
+    assert!(
+        text.contains("db-migrate.sh"),
+        "the refusal must name the applier to run; got {text}"
+    );
+    assert!(
+        current.is_ready(),
+        "the same database with a complete journal must be ready; got {}",
+        current.refusal().unwrap_or("")
+    );
+}
+
+/// ARM 5 -- the ledger stage is KEYED to the journal schema, live.
+///
+/// A caller that does not name `zeroship_migrations` is not claiming to need
+/// the platform corpus. The same database that ARM 4 refuses for the platform
+/// question must answer `Ready` to a question that never mentioned the journal,
+/// or every non-platform live-DB target in the workspace inherits a refusal
+/// about a corpus it does not use.
+#[test]
+fn a_caller_that_never_asked_for_the_journal_is_not_judged_on_it() {
+    let Some(server) = server() else { return };
+    let db = scratch(&server, "ledger_switch", PLATFORM_SCHEMAS);
+    seed_journal(&db.dsn, 0);
+
+    let with_journal = live_db::inspect(&db.dsn, PLATFORM_SCHEMAS);
+    let without_journal = live_db::inspect(&db.dsn, &["zeroship"]);
+
+    drop_scratch(&server, &db);
+
+    assert!(
+        with_journal.refusal().is_some(),
+        "an empty journal is behind every checkout that carries migrations"
+    );
+    assert!(
+        without_journal.is_ready(),
+        "asking only for \"zeroship\" must not drag in the ledger stage; got {}",
+        without_journal.refusal().unwrap_or("")
     );
 }

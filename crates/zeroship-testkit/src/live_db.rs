@@ -8,7 +8,9 @@
 //! places, so every control and auth live-DB test connected fine, ran its
 //! fixture, and failed inside an assertion with
 //!
-//!     db error: ERROR: relation "zeroship.plans" does not exist
+//! ```text
+//! db error: ERROR: relation "zeroship.plans" does not exist
+//! ```
 //!
 //! That is a VOID RUN -- the code under test never executed -- but `cargo test`
 //! prints it as `test billing_credit_test::... FAILED` with a database error in
@@ -36,17 +38,76 @@
 //! descriptor 2 and is not captured, so the block reaches the terminal on the
 //! plain `cargo test` invocation the person is actually running.
 //!
-//! WHAT IT DOES NOT CATCH. The check is "these schemas exist", not "this
-//! database matches this tree". A database migrated by an OLDER checkout has
-//! every schema this asks for and will still fail inside an assertion on a
-//! table that checkout never created. Catching that needs the migration
-//! fingerprint ([`crate::fingerprint`]) compared against the journal, and the
-//! journal does not record one today. The narrower check is what discriminates
-//! the case that actually happened; it is not the general one.
+//! THE SECOND STAGE: IS IT AS FAR ALONG AS THIS CHECKOUT? Schemas existing is
+//! not the same as schemas being current. On 2026-09-07 the same `zeroship`
+//! database on :5440 held every schema this module asks for and had never seen
+//! `db/migrations-ts/20260906000100_apps_organization_and_billing_subject.ts`,
+//! so `zeroship.apps` had no `organization_id`. Seven targets --
+//! `crates/zeroship-authz/tests/{app_resolution_test,two_call_test}.rs` and
+//! `crates/zeroship-gateway/tests/{sessions_test,auth_token_anchors_test,
+//! backchannel_logout_test,browser_auth_test,oidc_rp_e2e}.rs` -- died on the
+//! missing column and presented, again, as named tests FAILING. That is the
+//! same void run as 2026-08-21 wearing different clothes, and the header above
+//! declared it out of scope ("the journal does not record one today").
+//!
+//! HOW IT IS DECIDED, since the journal records no fingerprint. Every event the
+//! platform runner writes to `zeroship_migrations.__zeroship_schema_migrations`
+//! carries a `checksum`, and that checksum is one per migration FILE: it is
+//! `Checksum::of_ir` over the file's canonical op list plus its flags, owner and
+//! dependency edges (`crates/zeroship-migrate-ir/src/migration.rs`,
+//! `of_ir_version_strings`). So the count of DISTINCT applied checksums is the
+//! count of files the database has consumed, and it is compared against the
+//! files this checkout carries ([`crate::fingerprint::files_in`]). Both sides
+//! are re-derived on every run; neither is written down anywhere.
+//!
+//! IT IS NOT THE FILE'S SHA256, and `crate::fingerprint`'s header says
+//! otherwise. Measured 2026-09-07 against the live journal:
+//! `20260907000000_user_erasure_edges.ts` hashes to `e80e7b88...` as bytes and
+//! is journaled under `0b02c6ad...`. A check built on the source hash would
+//! refuse every database forever.
+//!
+//! WHAT THIS SECOND STAGE STILL DOES NOT CATCH, and both directions matter:
+//!
+//!   - A migration EDITED IN PLACE after it was applied. The database keeps the
+//!     old checksum, the file count does not move, and the two agree. The
+//!     branch-keyed suite database ([`crate::fingerprint`]) is what covers that
+//!     case; this is not.
+//!   - Two files that record the SAME canonical ops. The checksum omits the
+//!     migration's name and version by construction (they are its identity, not
+//!     its content), so such a pair journals one distinct checksum for two
+//!     files and this check refuses a database that is in fact current. That is
+//!     a loud, explained false refusal rather than a silent pass, and it has
+//!     never occurred: measured 2026-09-07 on the :5440 corpus, distinct
+//!     applied checksums equalled the file count exactly.
+//!
+//! IT ONLY RUNS WHEN THE CALLER ASKED FOR THE JOURNAL SCHEMA. A caller that
+//! does not name `zeroship_migrations` in `required_schemas` is not claiming to
+//! need the platform corpus, and counting a corpus it never wanted would refuse
+//! databases that are correct for it.
 
 use std::io::Write as _;
 
 use compio_postgres::{Config, NoTls};
+
+/// The schema the platform runner journals into.
+///
+/// Naming it in `required_schemas` is what turns the ledger stage on; see the
+/// module header for why that is the switch.
+pub const JOURNAL_SCHEMA: &str = "zeroship_migrations";
+
+/// What a target reading the PLATFORM schema must ask for.
+///
+/// Asking for BOTH is what separates "never migrated" from "migrated and then
+/// partly dismantled" - the second is what happened on 2026-08-21, and a check
+/// for the journal alone would have called that database ready. Naming
+/// [`JOURNAL_SCHEMA`] also turns the ledger stage on, which is what separates
+/// both of those from "migrated by an older checkout".
+///
+/// IT IS ONE CONSTANT BECAUSE IT WAS THREE COPIES. `zeroship-control`'s two
+/// preflights and this crate's own live test each spelled the pair out, so a
+/// target that grew a third requirement would have left the others asking for
+/// less and reporting Ready on a database that could not serve them.
+pub const PLATFORM_SCHEMAS: &[&str] = &["zeroship", JOURNAL_SCHEMA];
 
 /// The exit status a refusal leaves behind.
 ///
@@ -94,6 +155,35 @@ pub fn require(dsn: &str, required_schemas: &[&str]) {
     if let Verdict::Refused(text) = inspect(dsn, required_schemas) {
         refuse(&text);
     }
+}
+
+/// [`require`], at most once per `(dsn, required_schemas)` per test binary.
+///
+/// WHY THE MEMOISATION IS HERE AND NOT AT THE CALL SITE. A preflight is a fact
+/// about the process, so it wants to run once; but it also has to run before
+/// the FIRST database touch, and any test can be the first when a filter
+/// selects it (`cargo test --exact <one>`). That means every gate in a file
+/// calls it -- `crates/zeroship-gateway/tests/backchannel_logout_test.rs` alone
+/// has eleven -- and a `OnceLock` per call site is a `OnceLock` per file, which
+/// is the seven copies this helper exists to avoid.
+///
+/// The lock is held across the probe on purpose: two threads arriving together
+/// must not both dial, and libtest gives every test its own thread.
+pub fn require_once(dsn: &str, required_schemas: &[&str]) {
+    use std::collections::HashSet;
+    use std::sync::{Mutex, OnceLock};
+
+    static CHECKED: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
+    let key = format!("{dsn}\u{0}{}", required_schemas.join("\u{0}"));
+    let mut checked = CHECKED
+        .get_or_init(|| Mutex::new(HashSet::new()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if checked.contains(&key) {
+        return;
+    }
+    require(dsn, required_schemas);
+    checked.insert(key);
 }
 
 /// [`require`], for a caller whose DSN may not have been configured at all.
@@ -172,7 +262,7 @@ fn inspect_here(dsn: &str, required_schemas: &[String]) -> Verdict {
     };
 
     let probe = match compio::runtime::Runtime::new() {
-        Ok(runtime) => runtime.block_on(schemas_present(&config)),
+        Ok(runtime) => runtime.block_on(probe(&config, ledger_stage_wanted(required_schemas))),
         Err(error) => {
             return Verdict::Refused(refusal(
                 &where_,
@@ -182,43 +272,120 @@ fn inspect_here(dsn: &str, required_schemas: &[String]) -> Verdict {
         }
     };
 
-    match probe {
-        Err(error) => Verdict::Refused(refusal(
-            &where_,
-            &format!("the server did not answer: {error}"),
-            UNREACHABLE_REMEDY,
-        )),
-        Ok(found) => {
-            let missing: Vec<&String> = required_schemas
-                .iter()
-                .filter(|want| !found.iter().any(|have| have == *want))
-                .collect();
-            if missing.is_empty() {
-                return Verdict::Ready;
-            }
-            let names: Vec<String> = missing.iter().map(|s| format!("\"{s}\"")).collect();
-            Verdict::Refused(refusal(
+    let found = match probe {
+        Err(error) => {
+            return Verdict::Refused(refusal(
                 &where_,
-                &format!(
-                    "it holds no schema {} (it has {} other schema(s))",
-                    names.join(", "),
-                    found.len()
-                ),
-                UNMIGRATED_REMEDY,
+                &format!("the server did not answer: {error}"),
+                UNREACHABLE_REMEDY,
             ))
         }
+        Ok(found) => found,
+    };
+
+    let missing: Vec<&String> = required_schemas
+        .iter()
+        .filter(|want| !found.schemas.iter().any(|have| have == *want))
+        .collect();
+    if !missing.is_empty() {
+        let names: Vec<String> = missing.iter().map(|s| format!("\"{s}\"")).collect();
+        return Verdict::Refused(refusal(
+            &where_,
+            &format!(
+                "it holds no schema {} (it has {} other schema(s))",
+                names.join(", "),
+                found.schemas.len()
+            ),
+            UNMIGRATED_REMEDY,
+        ));
+    }
+
+    match found.applied_migrations {
+        None => Verdict::Ready,
+        Some(applied) => ledger_verdict(&where_, applied),
     }
 }
 
-/// Every non-system schema the database holds, so the refusal can say what IS
-/// there. "84 other schemas" is the line that told a reader the database had
-/// been used by something else entirely; "no schema zeroship" alone does not.
-async fn schemas_present(config: &Config) -> Result<Vec<String>, String> {
+/// The switch for stage two: did the caller declare it needs the journal?
+///
+/// A caller that does not name [`JOURNAL_SCHEMA`] is not claiming to need the
+/// platform corpus, and counting a corpus it never wanted would refuse
+/// databases that are correct for it.
+fn ledger_stage_wanted(required_schemas: &[String]) -> bool {
+    required_schemas.iter().any(|s| s == JOURNAL_SCHEMA)
+}
+
+/// Stage two: the journal is present, so ask whether it has consumed every
+/// migration this checkout carries.
+///
+/// A checkout with no readable `db/migrations-ts/` refuses rather than passing.
+/// The alternative -- "cannot tell, carry on" -- is the void run this module
+/// exists to remove, one indirection further out.
+fn ledger_verdict(where_: &Coordinates, applied: usize) -> Verdict {
+    let carried = match crate::fingerprint::files_in(repo_root()) {
+        Ok(files) => files.len(),
+        Err(text) => {
+            return Verdict::Refused(refusal(
+                where_,
+                &format!("this checkout's migration set could not be read: {}", text.trim()),
+                UNMIGRATED_REMEDY,
+            ))
+        }
+    };
+    if applied >= carried {
+        return Verdict::Ready;
+    }
+    Verdict::Refused(refusal(
+        where_,
+        &format!(
+            "its migration journal has consumed {applied} of the {carried} migrations \
+             this checkout carries, so the schema is BEHIND the tree"
+        ),
+        UNMIGRATED_REMEDY,
+    ))
+}
+
+/// The checkout this binary was compiled from.
+///
+/// Baked at compile time rather than taken from the working directory: a cargo
+/// test binary's cwd is its package root, and the harness also runs these
+/// targets from `tests/*.sh` with a cwd of the repository. One of those two
+/// answers would always be wrong.
+fn repo_root() -> &'static std::path::Path {
+    // <repo>/crates/zeroship-testkit -> <repo>
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the testkit manifest lives two directories below the repository root")
+}
+
+/// What the one preflight connection found.
+struct Probe {
+    /// Every non-system schema the database holds.
+    schemas: Vec<String>,
+    /// Distinct applied migration checksums, or `None` when the caller did not
+    /// ask for the journal schema and the ledger stage is therefore off.
+    applied_migrations: Option<usize>,
+}
+
+/// One connection, both questions.
+///
+/// The schema list is what lets the refusal say what IS there. "84 other
+/// schemas" is the line that told a reader the database had been used by
+/// something else entirely; "no schema zeroship" alone does not.
+///
+/// The ledger count is asked for in the SAME round trip rather than a second
+/// dial, and it is asked with `to_regclass` in front of it: a database that
+/// holds the journal SCHEMA but not the journal TABLE is a real state (a
+/// half-dismantled database is exactly the 2026-08-21 case), and a bare
+/// `SELECT` there would come back as "the server did not answer", which names
+/// the wrong problem and prints the wrong remedy.
+async fn probe(config: &Config, want_ledger: bool) -> Result<Probe, String> {
     let (client, connection) = config.connect(NoTls).await.map_err(|e| e.to_string())?;
     let driver = compio::runtime::spawn(async move {
         let _ = connection.run().await;
     });
-    let result = client
+    let schemas = client
         .query(
             "SELECT nspname FROM pg_namespace \
              WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' \
@@ -226,6 +393,21 @@ async fn schemas_present(config: &Config) -> Result<Vec<String>, String> {
             &[],
         )
         .await;
+    let ledger = if want_ledger {
+        Some(
+            client
+                .query_one(
+                    "SELECT CASE WHEN to_regclass($1) IS NULL THEN 0 ELSE ( \
+                       SELECT count(DISTINCT checksum) \
+                       FROM zeroship_migrations.__zeroship_schema_migrations \
+                       WHERE event_kind = 'applied') END",
+                    &[&"zeroship_migrations.__zeroship_schema_migrations"],
+                )
+                .await,
+        )
+    } else {
+        None
+    };
     // Drop the client first so the driver is asked to shut down, then WAIT for
     // it rather than detaching: a detached driver parked on a read holds an
     // io_uring submission, and the submission holds the runtime's inner state
@@ -233,8 +415,18 @@ async fn schemas_present(config: &Config) -> Result<Vec<String>, String> {
     // socket. `crates/zeroship-testkit/src/admin.rs` carries the long form.
     drop(client);
     let _ = driver.await;
-    let rows = result.map_err(|e| e.to_string())?;
-    Ok(rows.iter().map(|row| row.get::<_, String>(0)).collect())
+    let rows = schemas.map_err(|e| e.to_string())?;
+    let applied_migrations = match ledger {
+        None => None,
+        Some(row) => {
+            let count: i64 = row.map_err(|e| e.to_string())?.get(0);
+            Some(usize::try_from(count).unwrap_or(0))
+        }
+    };
+    Ok(Probe {
+        schemas: rows.iter().map(|row| row.get::<_, String>(0)).collect(),
+        applied_migrations,
+    })
 }
 
 /// Host, port and database name, with the password removed.
@@ -311,8 +503,9 @@ fn refusal(where_: &Coordinates, what: &str, remedy: &str) -> String {
          \n\
          \x20   NO TEST RAN. This is not a failure; it is the absence of a verdict.\n\
          \x20   Had the run continued, every assertion touching {database} would have\n\
-         \x20   reported `42P01 relation ... does not exist` from inside a named test,\n\
-         \x20   which reads exactly like a regression and is not one.\n\
+         \x20   reported `42P01 relation ... does not exist` or `42703 column ... does\n\
+         \x20   not exist` from inside a named test, which reads exactly like a\n\
+         \x20   regression and is not one.\n\
          \n\
          \x20   {remedy}\n",
         redacted = where_.redacted,
@@ -328,14 +521,75 @@ mod tests {
     /// database, WHAT was missing, and WHAT TO DO. Asserting on all three is
     /// the point -- a refusal that says only "not migrated" sends the reader
     /// back to guessing which of the eleven databases on :5440 it meant.
+    ///
+    /// THE APPLIER ASSERTION USED TO NAME A DELETED BINARY. It asked for
+    /// `zeroship-platform-migrate`, which `ccda4bb42` removed on 2026-08-28 in
+    /// the same change that rewrote `UNMIGRATED_REMEDY` to name
+    /// `deploy/ops/db-migrate.sh`. The constant's own doc comment recorded the
+    /// swap; the test did not, and stayed red from that day. It now asks for
+    /// the wrapper the remedy actually prints, which is the string a reader
+    /// would paste.
     #[test]
     fn a_refusal_names_the_database_the_gap_and_the_remedy() {
         let where_ = Coordinates::of("postgres://postgres:hunter2@127.0.0.1:5440/zeroship");
         let text = refusal(&where_, "it holds no schema \"zeroship\"", UNMIGRATED_REMEDY);
         assert!(text.contains("127.0.0.1:5440/zeroship"), "{text}");
         assert!(text.contains("no schema \"zeroship\""), "{text}");
-        assert!(text.contains("zeroship-platform-migrate"), "{text}");
+        assert!(text.contains("deploy/ops/db-migrate.sh"), "{text}");
         assert!(text.contains("NO TEST RAN"), "{text}");
+    }
+
+    /// A database whose journal is BEHIND the checkout refuses, and the refusal
+    /// says which side is short and what to run.
+    ///
+    /// `ledger_verdict` is the whole second stage: everything above it is the
+    /// one query that produces `applied`, and everything below it is printing.
+    #[test]
+    fn a_journal_behind_the_checkout_refuses_and_names_the_applier() {
+        let where_ = Coordinates::of("postgres://postgres:hunter2@127.0.0.1:5440/zeroship");
+        let carried = crate::fingerprint::files_in(repo_root())
+            .expect("this checkout carries a migration set")
+            .len();
+        let verdict = ledger_verdict(&where_, carried - 1);
+        let text = verdict
+            .refusal()
+            .expect("one migration short of the tree is behind the tree");
+        assert!(text.contains("BEHIND the tree"), "{text}");
+        assert!(text.contains(&format!("of the {carried} migrations")), "{text}");
+        assert!(text.contains("deploy/ops/db-migrate.sh"), "{text}");
+        assert!(text.contains("NO TEST RAN"), "{text}");
+    }
+
+    /// The control: a journal that has consumed the whole set is ready, and one
+    /// that has consumed MORE is ready too.
+    ///
+    /// The second half is not padding. A database migrated by a checkout AHEAD
+    /// of this one -- another agent's worktree, a branch merged since -- has
+    /// more distinct checksums than this tree has files, and refusing it would
+    /// turn every shared database into a permanent refusal for whoever is one
+    /// commit behind. This stage answers "is the database BEHIND me", and that
+    /// is a one-sided question on purpose.
+    #[test]
+    fn a_journal_level_with_or_ahead_of_the_checkout_is_ready() {
+        let where_ = Coordinates::of("postgres://postgres:hunter2@127.0.0.1:5440/zeroship");
+        let carried = crate::fingerprint::files_in(repo_root())
+            .expect("this checkout carries a migration set")
+            .len();
+        assert_eq!(ledger_verdict(&where_, carried), Verdict::Ready);
+        assert_eq!(ledger_verdict(&where_, carried + 1), Verdict::Ready);
+    }
+
+    /// The ledger stage is off unless the caller said it needs the journal.
+    ///
+    /// A caller asking only for its own schema is not claiming to need the
+    /// platform corpus, and counting a corpus it never wanted would refuse
+    /// databases that are correct for it.
+    #[test]
+    fn the_ledger_stage_is_keyed_to_the_journal_schema() {
+        let named = ["zeroship".to_string(), JOURNAL_SCHEMA.to_string()];
+        let unnamed = ["zeroship".to_string()];
+        assert!(ledger_stage_wanted(&named));
+        assert!(!ledger_stage_wanted(&unnamed));
     }
 
     /// A refusal is pasted into issues and chat. The password must not travel
