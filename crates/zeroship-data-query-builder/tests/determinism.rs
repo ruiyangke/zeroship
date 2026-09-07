@@ -46,11 +46,13 @@ fn field(name: &str) -> ProjectedField {
 ///
 /// It is written out in full rather than compared permutation-to-permutation,
 /// because two wrong renderings agree with each other perfectly.
+/// It carried seven more columns until 2026-09-07, when the projection stopped
+/// unioning a platform-field list of its own. Canonical ORDER is what this
+/// fixture exists to pin, and that is unchanged: the two permutations still
+/// sort to one statement. What changed is only which columns a caller has to
+/// name for themselves.
 const CANONICAL_SQL: &str = concat!(
-    r#"SELECT "created_at" AS "created_at", "created_by" AS "created_by", "#,
-    r#""deleted_at" AS "deleted_at", "email" AS "email", "id" AS "id", "#,
-    r#""name" AS "name", "updated_at" AS "updated_at", "#,
-    r#""updated_by" AS "updated_by", "version" AS "version" "#,
+    r#"SELECT "email" AS "email", "name" AS "name" "#,
     r#"FROM "app_1"."users" "#,
     r#"WHERE ("age" = $1 AND "score" = $2) "#,
     r#"ORDER BY "name" ASC NULLS LAST "#,
@@ -197,14 +199,9 @@ fn permuted_membership_sets_render_identically() {
 // do so.
 // ---------------------------------------------------------------------------
 
-/// The `RETURNING` list both write fixtures below produce: one declared column
-/// unioned with the seven platform fields, in canonical alias order.
-const RETURNING_LIST: &str = concat!(
-    r#" RETURNING "created_at" AS "created_at", "created_by" AS "created_by", "#,
-    r#""deleted_at" AS "deleted_at", "email" AS "email", "id" AS "id", "#,
-    r#""name" AS "name", "updated_at" AS "updated_at", "#,
-    r#""updated_by" AS "updated_by", "version" AS "version""#
-);
+/// The `RETURNING` list both write fixtures below produce: the two declared
+/// columns, in canonical alias order.
+const RETURNING_LIST: &str = r#" RETURNING "email" AS "email", "name" AS "name""#;
 
 fn write_returning(order: [&str; 2]) -> Returning {
     Returning::rows(

@@ -104,7 +104,7 @@ pub use predicate::{
 };
 pub use projection::{
     Exposure, ProjectedField, Projection, ProjectionError, ProjectionKind, ProjectionSource,
-    SearchScalarKind, PLATFORM_FIELD_NAMES,
+    SearchScalarKind,
 };
 pub use search::{
     GeoPoint, RadiusMetres, Search, SearchBuilder, SearchCriterion, SearchError, VectorMetric,
