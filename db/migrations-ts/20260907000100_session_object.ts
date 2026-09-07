@@ -137,6 +137,20 @@ export default {
         onDelete: "cascade",
         onUpdate: "restrict",
       });
+    // Keyed to the client registry, cascading, exactly as
+    // `app_user_identities_app_client_id_fkey`, `oauth_grants_client_id_fkey`
+    // and `oauth_refresh_tokens_client_id_fkey` are. A grant naming a client
+    // that does not exist is a subject nobody can present. The key goes when
+    // the audience moves to the project; until then the referent is the same
+    // one every other audience-scoped table uses.
+    table("grants", { schema: "zeroship" })
+      .foreignKey("grants_client_id_fkey")
+      .add({
+        columns: ["client_id"],
+        references: { table: "oauth_clients", columns: ["client_id"], schema: "zeroship" },
+        onDelete: "cascade",
+        onUpdate: "restrict",
+      });
 
     // ---- sessions ----------------------------------------------------------
     table("sessions", { schema: "zeroship" }).create({
