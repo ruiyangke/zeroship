@@ -57,11 +57,6 @@ pub struct GateConfig {
     pub control_key: String,
     pub worker_urls: Vec<String>,
     pub poll_interval_secs: u64,
-    /// Shared secret between gateway and workers. Used to bearer-auth the
-    /// `/dispatch` endpoints and HMAC-sign the `ZeroShip-User` header so
-    /// workers can verify forwarded identity was not forged by an attacker
-    /// with direct network access. Startup rejects an empty value.
-    pub worker_key: String,
     /// Upstream URL for `crates/auth` — the self-contained OP
     /// (`/oauth2/*`, `/oauth2/.well-known/*`),
     /// login/signup UI, OAuth2 consent handlers, and webhook surfaces.
@@ -103,6 +98,28 @@ impl OriginMatch {
             Self::App => value == "same-origin",
             Self::Trusted => matches!(value, "same-origin" | "same-site" | "cross-site"),
         }
+    }
+}
+
+impl GateState {
+    /// Mint the `Authorization` header value this gateway presents to a worker.
+    ///
+    /// The TRANSPORT-ONLY profile, and the choice is by RATE: this hop carries
+    /// every end-user request, so a single-use `jti` here would put a write
+    /// against a table shared by every worker replica on the app data path.
+    /// What bounds replay on this hop instead is the identity envelope's own
+    /// binding to the dispatch request id and its issuance window.
+    ///
+    /// `None` when no service key material is configured. The worker then sees
+    /// no credential and refuses, which is the whole difference from the shared
+    /// secret this replaces: absence used to mean "skip the check".
+    #[must_use]
+    pub fn worker_authorization(&self) -> Option<String> {
+        let worker = zeroship_core::service_peers::service_issuer(
+            zeroship_core::service_peers::WORKER_SERVICE_NAME,
+        )
+        .ok()?;
+        self.service_auth.authorization_for(&worker)
     }
 }
 
@@ -249,5 +266,56 @@ pub struct GateState {
     /// on the response path (an `RwLock` read + a per-app `Mutex` for the
     /// custom metric — uncontended, not literally lock-free); the flush is a
     /// detached background task, so the proxy hot path is not slowed.
+    /// This process's service identity: its own ed25519 key for the calls it
+    /// MAKES, and the peer bundle plus replay store for the calls it RECEIVES.
+    ///
+    /// DISTINCT from `signing_key`, which signs an END-USER session cookie. One
+    /// key doing both jobs is the shape this change removes.
+    ///
+    /// Two edges use it, at two profiles. The inbound workflow-advance handler
+    /// verifies control under the FULL profile, because that edge fires per
+    /// advance. The outbound dispatch hop MINTS under the transport-only
+    /// profile, because that hop is the app data path and a single-use claim
+    /// there would be a shared-store write per end-user request.
+    ///
+    /// It also holds the gateway's signer for the `ZeroShip-User` identity
+    /// envelope, which is the same ed25519 key under a second use: what the
+    /// gateway asserts about a SERVICE (itself) and what it asserts about an
+    /// END USER both carry its signature, and the worker checks both under the
+    /// one published public half.
+    ///
+    /// `ServiceAuth::unconfigured()` when no key material was configured; that
+    /// state refuses the inbound edge, mints nothing outbound, and signs no
+    /// identity - so an unconfigured gateway forwards no user rather than
+    /// forwarding one nothing can check.
+    pub service_auth: Arc<zeroship_core::service_peers::ServiceAuth>,
     pub meter: Arc<zeroship_metering::Meter>,
+}
+
+/// A gateway service identity backed by a freshly generated key, for tests that
+/// need the gateway to SIGN.
+///
+/// Not `#[cfg(test)]`: the gateway's integration tests build `GateState`
+/// directly and would otherwise each grow their own copy of this, which is how
+/// two fixtures end up signing under keys that verify differently. The peer
+/// bundle is empty because the gateway verifies its own envelope from its own
+/// signer, and nothing here receives an inbound service call.
+#[must_use]
+pub fn test_gateway_service_auth() -> zeroship_core::service_peers::ServiceAuth {
+    use zeroship_core::service_assertion::{
+        ServiceSigningKey, ServiceTrustBundle, TransportAssertionVerifier,
+    };
+    use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring, GATEWAY_SERVICE_NAME};
+
+    let issuer = service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer");
+    let keyring = ServiceKeyring::from_parts(
+        issuer,
+        ServiceSigningKey::generate(),
+        ServiceTrustBundle::new(),
+    )
+    .expect("gateway keyring");
+    ServiceAuth::new(
+        keyring,
+        Arc::new(TransportAssertionVerifier::new(ServiceTrustBundle::new())),
+    )
 }

@@ -177,7 +177,7 @@ cat > "$LUA_RPC" << EOF
 wrk.method = "POST"
 wrk.body = '{"jsonrpc":"2.0","method":"ping","params":[],"id":1}'
 wrk.headers["Content-Type"] = "application/json"
-wrk.headers["Authorization"] = "Bearer $ZEROSHIP_WORKER_KEY"
+wrk.headers["Authorization"] = "Bearer $E2E_STALE_WORKER_BEARER"
 EOF
 
 LUA_GATE=$(mktemp)

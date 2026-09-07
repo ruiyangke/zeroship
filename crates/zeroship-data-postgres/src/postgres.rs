@@ -906,16 +906,12 @@ impl DialectBuilder for PostgresBackend {
 //   * key sourcing -- PG is in-process only, the same
 //     `LocalKeySource` the SQLite arm uses. The database-backed variant
 //     was deleted on 2026-08-27 with the admin schema it read.
-//   * `Backup` -- the PITR placeholder writes to
-//     `__zeroship_admin.pitr_targets`, a table with no installer since
-//     that same deletion, so `pitr_replay` always errors. Snapshot /
-//     restore do not touch it. The impl is `cfg(feature =
-//     "test-helpers")` and nothing outside this crate reaches it, so
-//     nothing observes the failure. Whether PITR gets a real home or is
-//     deleted is an open operator decision -- it was NOT covered by the
-//     2026-08-27 decisions that removed per-column keys and the durable
-//     mask-policy store, so it is the one admin-schema reference this
-//     crate still issues.
+//   * `Backup` -- snapshot and restore only. The PITR placeholder that
+//     sat beside them was deleted on 2026-09-07 along with the trait
+//     method it implemented; `zeroship_data_core::storage::Backup`'s
+//     rustdoc records why PITR is an operator capability with a
+//     database-server contract rather than a data-store method. This
+//     crate now issues no statement naming a platform system schema.
 
 impl PostgresBackend {
     /// Borrow this isolate's column-encryption key store.
@@ -938,17 +934,9 @@ impl PostgresBackend {
 // `snapshot` → `pg_dump --schema=<app_id> --format=custom --no-owner
 // --no-privileges`, stream the dump to a file URI, hash the bytes
 // on the fly. `restore` → drop-and-recreate schema then `pg_restore`.
-// `pitr_replay` → records the target row in `__zeroship_admin.pitr_targets`;
-// the operator runs the actual recovery via `recovery.conf`.
 //
 // Notes:
-//   1. The PITR placeholder writes to the `__zeroship_admin` schema,
-//      which NO LONGER EXISTS - the auth/bootstrap subtree that
-//      provisioned it was deleted on 2026-08-27. The INSERT below
-//      therefore fails on every database. It is left in place because
-//      picking a new home for PITR targets is a design decision, not a
-//      deletion.
-//   2. `Backup` is admin-tier surface — app code never reaches it. Nor does
+//   1. `Backup` is admin-tier surface — app code never reaches it. Nor does
 //      anything else: there is no accessor and no consumer, so today the impl
 //      is exercised only by this crate's tests through the trait. Whether the
 //      capability ships or goes is an open operator decision, not a claim this
@@ -981,14 +969,6 @@ impl zeroship_data_core::storage::Backup for PostgresBackend {
     ) -> Result<(), DbError> {
         backup_pg::restore_impl(self, app_id, snapshot).await
     }
-
-    async fn pitr_replay(
-        &self,
-        app_id: &str,
-        target: zeroship_data_core::capability::PitrTarget,
-    ) -> Result<(), DbError> {
-        backup_pg::pitr_replay_impl(self, app_id, target).await
-    }
 }
 
 /// Inner module so the helpers stay grouped and the surrounding file
@@ -1006,7 +986,7 @@ mod backup_pg {
     use crate::PgLockManager;
     use crate::lock_guard::LockGuard;
     use zeroship_data_core::capability::{
-        BusyPolicy, LockScope, PitrTarget, SnapshotHandle, SnapshotOpts,
+        BusyPolicy, LockScope, SnapshotHandle, SnapshotOpts,
     };
     use zeroship_data_core::error::DbError;
 
@@ -1420,35 +1400,6 @@ mod backup_pg {
         Ok(())
     }
 
-    pub(super) async fn pitr_replay_impl(
-        backend: &PostgresBackend,
-        app_id: &str,
-        target: PitrTarget,
-    ) -> Result<(), DbError> {
-        // This ships the API surface only. PITR replay requires
-        // PG-server-level configuration (recovery.conf,
-        // archive_command); the platform can't initiate WAL replay
-        // from a client connection. We record the target so the
-        // operator dashboard / maintenance cron can surface
-        // "PITR recovery pending for <app_id>"; the operator runs
-        // the actual recovery out-of-band.
-        let target_str = match &target {
-            PitrTarget::Lsn(s) => format!("LSN:{s}"),
-            PitrTarget::TimeMillis(ms) => format!("TIME_MS:{ms}"),
-        };
-        let sql = "INSERT INTO __zeroship_admin.pitr_targets \
-                   (app_id, target, recorded_at) \
-                   VALUES ($1, $2, NOW()) \
-                   ON CONFLICT (app_id) DO UPDATE \
-                     SET target = EXCLUDED.target, \
-                         recorded_at = EXCLUDED.recorded_at";
-        backend
-            .pool()
-            .query_text_params(sql, &[app_id, target_str.as_str()])
-            .await
-            .map_err(|e| crate::pg_error::classify(&e))?;
-        Ok(())
-    }
 }
 
 /// Render SC-1's [`BeginIntent`] as PostgreSQL's `BEGIN` statement.

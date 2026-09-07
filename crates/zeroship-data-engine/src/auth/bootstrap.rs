@@ -12,10 +12,11 @@
 //! function": anything the worker can invoke is, by construction, not
 //! privileged, so a capability it invokes cannot be a boundary.
 //!
-//! The `__zeroship_admin` schema, its six tables and its 32
-//! definer-rights routines were deleted on 2026-08-27 under that
-//! invariant. Nothing replaced them; the runtime descriptor is the
-//! schema authority and per-app roles are the privilege boundary.
+//! That schema, its six tables and its 32 definer-rights routines were
+//! deleted on 2026-08-27 under that invariant. Nothing replaced them; the
+//! runtime descriptor is the schema authority and per-app roles are the
+//! privilege boundary. See `crate::auth`'s module header for what it held
+//! and why the name it used is reserved rather than retired.
 //!
 //! Every `CREATE ROLE` here is wrapped in an existence probe, so
 //! re-running `ensure_per_app_role` on a provisioned cluster is a

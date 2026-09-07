@@ -1,13 +1,17 @@
 //! Auth utilities: constant-time secret comparison, API key hashing, bearer
-//! extraction, and HMAC signing for cross-service identity propagation.
+//! extraction, broker-secret derivation and the pairwise-subject derivation.
+//!
+//! It no longer carries cross-service IDENTITY propagation. The `ZeroShip-User`
+//! envelope the gateway forwards to the worker used to be an HMAC signed here
+//! under `worker_key` - the same shared secret that bearer-authenticated the
+//! hop, so verifying it and forging it were one capability. It is ed25519 now
+//! and lives in [`crate::user_envelope`], keyed by the gateway alone.
 
 pub mod trusted_clients;
 
 pub use trusted_clients::{
     default_trusted_oauth_clients, is_trusted_client_id, resolve_trusted_oauth_clients,
 };
-
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use hkdf::Hkdf;
@@ -17,8 +21,6 @@ use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
 
-pub const ZEROSHIP_USER_MAX_AGE_SECS: u64 = 60;
-pub const ZEROSHIP_USER_FUTURE_SKEW_SECS: u64 = 5;
 pub const DEV_BROKER_MASTER_SECRET: &[u8] = b"dev-broker-master-secret-never-use-prod";
 
 const BROKER_SECRET_HKDF_SALT: &[u8] = b"zeroship:broker-secret:v1";
@@ -137,7 +139,7 @@ pub fn extract_bearer(header: &str) -> Option<&str> {
 }
 
 // ---------------------------------------------------------------------------
-// HMAC-SHA256 signing — used to sign forwarded identity across trust boundaries
+// HMAC-SHA256 signing — stash cookies, pending-link tokens, pairwise subjects
 // ---------------------------------------------------------------------------
 
 /// Compute an HMAC-SHA256 over `payload` with `key`, returned as the
@@ -325,138 +327,9 @@ pub fn derive_pairwise(salt: &[u8], global_user_id: &str, sector: &str) -> Strin
     format!("pws_{body}")
 }
 
-/// Sign a `ZeroShip-User` JSON payload as:
-/// `<base64(json)>.<request_id>.<issued_at_unix_secs>.<hex-hmac>`.
-///
-/// The HMAC covers the first three segments, binding the identity to one
-/// gateway dispatch request and a short issuance window.
-#[must_use]
-pub fn sign_zeroship_user_header_at(
-    key: &[u8],
-    user_json: &[u8],
-    request_id: Uuid,
-    issued_at_secs: u64,
-) -> String {
-    let payload_b64 = base64::engine::general_purpose::STANDARD.encode(user_json);
-    let signed = format!("{payload_b64}.{request_id}.{issued_at_secs}");
-    let mac = hmac_sha256_hex(key, signed.as_bytes());
-    format!("{signed}.{mac}")
-}
-
-#[must_use]
-pub fn sign_zeroship_user_header(key: &[u8], user_json: &[u8], request_id: Uuid) -> String {
-    let issued_at_secs = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .expect("system clock is before Unix epoch")
-        .as_secs();
-    sign_zeroship_user_header_at(key, user_json, request_id, issued_at_secs)
-}
-
-/// Verify and decode a request-bound `ZeroShip-User` header.
-#[must_use]
-pub fn verify_zeroship_user_header(key: &[u8], header: &str) -> Option<String> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    verify_zeroship_user_header_at(key, header, now)
-}
-
-/// Verify and decode a request-bound `ZeroShip-User` header at a fixed clock.
-#[must_use]
-pub fn verify_zeroship_user_header_at(key: &[u8], header: &str, now_secs: u64) -> Option<String> {
-    verify_zeroship_user_header_parts_at(key, header, now_secs).map(|verified| verified.user_json)
-}
-
-/// Verify and decode a `ZeroShip-User` header for one expected dispatch request.
-#[must_use]
-pub fn verify_zeroship_user_header_for_request(
-    key: &[u8],
-    header: &str,
-    expected_request_id: Uuid,
-) -> Option<String> {
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_secs();
-    verify_zeroship_user_header_for_request_at(key, header, expected_request_id, now)
-}
-
-/// Verify and decode a `ZeroShip-User` header for one expected dispatch request
-/// at a fixed clock.
-#[must_use]
-pub fn verify_zeroship_user_header_for_request_at(
-    key: &[u8],
-    header: &str,
-    expected_request_id: Uuid,
-    now_secs: u64,
-) -> Option<String> {
-    let verified = verify_zeroship_user_header_parts_at(key, header, now_secs)?;
-    if verified.request_id != expected_request_id {
-        return None;
-    }
-    Some(verified.user_json)
-}
-
-struct VerifiedZeroShipUserHeader {
-    user_json: String,
-    request_id: Uuid,
-}
-
-fn verify_zeroship_user_header_parts_at(
-    key: &[u8],
-    header: &str,
-    now_secs: u64,
-) -> Option<VerifiedZeroShipUserHeader> {
-    let mut parts = header.split('.');
-    let payload_b64 = parts.next()?;
-    let request_id = parts.next()?;
-    let issued_at = parts.next()?;
-    let mac = parts.next()?;
-    if parts.next().is_some()
-        || payload_b64.is_empty()
-        || request_id.is_empty()
-        || issued_at.is_empty()
-        || mac.is_empty()
-    {
-        return None;
-    }
-    let issued_at_secs = issued_at.parse::<u64>().ok()?;
-    let request_id = Uuid::parse_str(request_id).ok()?;
-    if now_secs.saturating_sub(issued_at_secs) > ZEROSHIP_USER_MAX_AGE_SECS {
-        return None;
-    }
-    if issued_at_secs.saturating_sub(now_secs) > ZEROSHIP_USER_FUTURE_SKEW_SECS {
-        return None;
-    }
-
-    let signed = format!("{payload_b64}.{request_id}.{issued_at}");
-    if !verify_hmac_sha256_hex(key, signed.as_bytes(), mac) {
-        return None;
-    }
-
-    let json = base64::engine::general_purpose::STANDARD
-        .decode(payload_b64)
-        .ok()?;
-    Some(VerifiedZeroShipUserHeader {
-        user_json: String::from_utf8(json).ok()?,
-        request_id,
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    const USER_JSON: &[u8] =
-        br#"{"id":"usr_123","email":"a@example.com","name":"A","email_verified":true}"#;
-
-    fn legacy_payload_only_user_header(key: &[u8], user_json: &[u8]) -> String {
-        let payload_b64 = base64::engine::general_purpose::STANDARD.encode(user_json);
-        let mac = hmac_sha256_hex(key, payload_b64.as_bytes());
-        format!("{payload_b64}.{mac}")
-    }
-
-    fn legacy_payload_only_user_header_verifies(key: &[u8], header: &str) -> bool {
-        let Some((payload_b64, mac)) = header.split_once('.') else {
-            return false;
-        };
-        verify_hmac_sha256_hex(key, payload_b64.as_bytes(), mac)
-    }
 
     #[test]
     fn equal_secrets_match() {
@@ -829,88 +702,6 @@ mod tests {
         assert_eq!(
             hex_form,
             "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7"
-        );
-    }
-
-    #[test]
-    fn zeroship_user_header_accepts_fresh_request_bound_header() {
-        let key = b"worker-secret";
-        let request_id = Uuid::parse_str("018f6df3-43f7-7f68-84e0-4f1f9f5f0021").unwrap();
-        let now = 1_900_000_000;
-        let header = sign_zeroship_user_header_at(key, USER_JSON, request_id, now);
-
-        assert_eq!(
-            verify_zeroship_user_header_at(key, &header, now),
-            Some(String::from_utf8(USER_JSON.to_vec()).unwrap())
-        );
-    }
-
-    #[test]
-    fn zeroship_user_header_rejects_old_issued_at() {
-        let key = b"worker-secret";
-        let request_id = Uuid::parse_str("018f6df3-43f7-7f68-84e0-4f1f9f5f0021").unwrap();
-        let now = 1_900_000_000;
-        let stale = now - 120;
-        let header = sign_zeroship_user_header_at(key, USER_JSON, request_id, stale);
-
-        assert_eq!(verify_zeroship_user_header_at(key, &header, now), None);
-
-        let legacy_header = legacy_payload_only_user_header(key, USER_JSON);
-        assert!(
-            legacy_payload_only_user_header_verifies(key, &legacy_header),
-            "payload-only validation had no timestamp to reject a replay"
-        );
-        assert_eq!(verify_zeroship_user_header_at(key, &legacy_header, now), None);
-    }
-
-    #[test]
-    fn zeroship_user_header_rejects_future_issued_at() {
-        let key = b"worker-secret";
-        let request_id = Uuid::parse_str("018f6df3-43f7-7f68-84e0-4f1f9f5f0021").unwrap();
-        let now = 1_900_000_000;
-        let future = now + 60;
-        let header = sign_zeroship_user_header_at(key, USER_JSON, request_id, future);
-
-        assert_eq!(verify_zeroship_user_header_at(key, &header, now), None);
-    }
-
-    #[test]
-    fn zeroship_user_header_rejects_rebound_request_id() {
-        let key = b"worker-secret";
-        let request_id = Uuid::parse_str("018f6df3-43f7-7f68-84e0-4f1f9f5f0021").unwrap();
-        let other_request_id = Uuid::parse_str("018f6df3-43f7-7f68-84e0-4f1f9f5f0022").unwrap();
-        let now = 1_900_000_000;
-        let header = sign_zeroship_user_header_at(key, USER_JSON, request_id, now);
-        let mut parts: Vec<&str> = header.split('.').collect();
-        parts[1] = "018f6df3-43f7-7f68-84e0-4f1f9f5f0022";
-        let rebound = parts.join(".");
-
-        assert_eq!(verify_zeroship_user_header_at(key, &rebound, now), None);
-        assert_eq!(
-            verify_zeroship_user_header_at(
-                key,
-                &sign_zeroship_user_header_at(key, USER_JSON, other_request_id, now),
-                now,
-            ),
-            Some(String::from_utf8(USER_JSON.to_vec()).unwrap())
-        );
-    }
-
-    #[test]
-    fn zeroship_user_header_rejects_replay_on_different_request() {
-        let key = b"worker-secret";
-        let request_id = Uuid::parse_str("018f6df3-43f7-7f68-84e0-4f1f9f5f0021").unwrap();
-        let other_request_id = Uuid::parse_str("018f6df3-43f7-7f68-84e0-4f1f9f5f0022").unwrap();
-        let now = 1_900_000_000;
-        let header = sign_zeroship_user_header_at(key, USER_JSON, request_id, now);
-
-        assert_eq!(
-            verify_zeroship_user_header_for_request_at(key, &header, request_id, now),
-            Some(String::from_utf8(USER_JSON.to_vec()).unwrap())
-        );
-        assert_eq!(
-            verify_zeroship_user_header_for_request_at(key, &header, other_request_id, now),
-            None
         );
     }
 }

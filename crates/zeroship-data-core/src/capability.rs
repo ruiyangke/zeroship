@@ -22,9 +22,10 @@
 //!
 //! # NO `cfg(feature)` IN THIS FILE
 //!
-//! Four types here - `SnapshotOpts`, `BusyPolicy`, `SnapshotHandle`,
-//! `PitrTarget` - carried `#[cfg(feature = "test-helpers")]` until 2026-09-04,
-//! because their only consumer, [`crate::storage::Backup`], carried it too.
+//! Four types here - `SnapshotOpts`, `BusyPolicy`, `SnapshotHandle` and a
+//! `PitrTarget` since deleted - carried `#[cfg(feature = "test-helpers")]`
+//! until 2026-09-04, because their only consumer,
+//! [`crate::storage::Backup`], carried it too.
 //! Both gates are gone. Every one of the four appears in a `Backup` method
 //! SIGNATURE, so they are not vocabulary the contract happens to use, they are
 //! part of it: a build that cannot name `SnapshotOpts` cannot state the
@@ -40,9 +41,9 @@
 //! hashes with live.
 //!
 //! Ungating cost three DEAD DOC LINKS their invisibility, and that is the
-//! second-order effect to expect from any ungating here. The three
-//! `[`Backup::snapshot`]` / `[`Backup::pitr_replay`]` links below were bare and
-//! resolved to nothing - `Backup` lives in [`crate::storage`] and is not
+//! second-order effect to expect from any ungating here. The three bare
+//! `Backup::*` links below resolved to nothing - `Backup` lives in
+//! [`crate::storage`] and is not
 //! imported into this module - but a DEFAULT `cargo doc` never rendered items
 //! that were `cfg`-gated out of it, so `tests/run_doc_gate.sh` never saw them.
 //! They are qualified paths now. The same thing happened to `SchemaIntrospect`'s
@@ -191,20 +192,6 @@ pub struct SnapshotHandle {
     /// Wall-clock time of snapshot start, milliseconds since UNIX
     /// epoch.
     pub created_at_ms: u64,
-}
-
-/// Target for [`Backup::pitr_replay`](crate::storage::Backup::pitr_replay).
-///
-/// PG accepts both forms; SQLite refuses both with `pitr_pg_only`
-/// (the SQLite arm has no WAL-archive PITR story — the placeholder
-/// exists so the trait surface is uniform).
-#[derive(Debug, Clone)]
-pub enum PitrTarget {
-    /// PG log-sequence-number, e.g. `"0/16B6300"`.
-    Lsn(String),
-    /// Wall-clock time, milliseconds since UNIX epoch. PG translates
-    /// to `recovery_target_time`.
-    TimeMillis(u64),
 }
 
 /// The result of selecting a single cell: `SELECT <col> FROM <t> WHERE id = ?`.

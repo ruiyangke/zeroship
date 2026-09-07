@@ -280,7 +280,7 @@ else
     '{"json":{"query":"build"}}' \
     '[["content-type","application/json"],["accept","text/event-stream"]]'
   curl -s -N -D "$WORK/stream.hdr" -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$CSR_APP_ID" \
-    -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+    -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
     -H 'content-type: application/octet-stream' \
     --data-binary @"$WORK/stream-frame.bin" > "$WORK/stream.body" 2>/dev/null
   S_CODE="$(awk 'NR==1{print $2}' "$WORK/stream.hdr")"
@@ -402,7 +402,7 @@ else
       zs_write_frame "$WORK/oai-frame.bin" POST \
         "http://openai-demo-e2e.localhost/__zeroship/v1/ping" '{"json":null}'
       OAI_RESP="$(curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$OAI_ID" \
-                   -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+                   -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
                    -H 'content-type: application/octet-stream' \
                    --data-binary @"$WORK/oai-frame.bin" 2>/dev/null)"
       OAI_CODE="$(echo "$OAI_RESP" | tail -1)"; OAI_BODY="$(echo "$OAI_RESP" | head -1)"

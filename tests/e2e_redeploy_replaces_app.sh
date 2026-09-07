@@ -65,7 +65,7 @@ REDIS_PORT="${REDIS_PORT:-6397}"
 # name is then the only thing left that one run can take from another --
 # `docker rm -f` in cleanup would kill the other run's Redis.
 REDIS_CONTAINER="${REDIS_CONTAINER:-zs-redeploy-redis}"
-export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-redeploy-worker-key-0123456789abcdef}"
+export E2E_STALE_WORKER_BEARER="${E2E_STALE_WORKER_BEARER:-redeploy-worker-key-0123456789abcdef}"
 APP_NAME="redep"
 ZSHIP_A="${ZSHIP_A:-$ROOT/examples/kv-dashboard/dist/app.zship}"
 ZSHIP_B="${ZSHIP_B:-$ROOT/examples/starter/dist/app.zship}"

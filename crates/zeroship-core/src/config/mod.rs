@@ -71,7 +71,7 @@ pub use zeroship_config_macros::zeroship_config;
 pub use secrets::{
     decoded_master_key_len, is_loopback_url, parse_secret_ref, platform_secret, read_secret_file,
     require_nonempty, resolve_secret, validate_master_key_material, validate_pairwise_salt,
-    validate_secret_material, validate_secret_ref, validate_stash_key, validate_worker_key,
+    validate_secret_material, validate_secret_ref, validate_stash_key,
     PlatformSecret, SecretError, SecretRef, SecretStrength, MIN_DECODED_KEY_BYTES,
     MIN_SECRET_BYTES, PLATFORM_SECRETS,
 };

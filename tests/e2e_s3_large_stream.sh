@@ -265,7 +265,7 @@ dispatch_to() {
   local out="$1" proc="$2" body="$3"
   curl -s -o "$out" -w '%{http_code} %{time_total}' --max-time 1800 \
     -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$ST_APP" \
-    -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+    -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
     -H 'content-type: application/json' -d "$(envelope "$proc" "$body")"
 }
 jget_json() { node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>{try{const o=JSON.parse(s);console.log((o.json&&o.json'"$1"')??"")}catch(e){console.log("")}})'; }

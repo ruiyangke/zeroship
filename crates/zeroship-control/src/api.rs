@@ -1694,7 +1694,7 @@ pub async fn get_app_logs(
     let mut lines = Vec::new();
     let mut errors = Vec::new();
     for worker_url in &state.worker_urls {
-        match fetch_worker_logs(worker_url, state.worker_key.expose_secret(), &uid).await {
+        match fetch_worker_logs(worker_url, worker_authorization(&state).as_deref(), &uid).await {
             Ok(mut worker_lines) => lines.append(&mut worker_lines),
             Err(e) => {
                 tracing::warn!(
@@ -1735,9 +1735,25 @@ fn worker_logs_url(worker_url: &str, app_id: &Uuid) -> String {
     )
 }
 
+/// The `Authorization` header control presents to a worker for the log read.
+///
+/// A service assertion under control's OWN ed25519 key, minted fresh per fan-out
+/// leg. It used to be the shared `worker_key` bearer - the same secret that keyed
+/// the gateway's identity envelope - so a worker that could read this header
+/// could forge an end-user identity. That secret is gone; the worker's allowlist
+/// grants the log read to `svc/control` and to nothing else, which is a
+/// separation a shared bearer could not express at all.
+fn worker_authorization(state: &AppState) -> Option<String> {
+    let worker = zeroship_core::service_peers::service_issuer(
+        zeroship_core::service_peers::WORKER_SERVICE_NAME,
+    )
+    .ok()?;
+    state.service_auth.authorization_for(&worker)
+}
+
 async fn fetch_worker_logs(
     worker_url: &str,
-    worker_key: &str,
+    authorization: Option<&str>,
     app_id: &Uuid,
 ) -> Result<Vec<String>, String> {
     let url = worker_logs_url(worker_url, app_id);
@@ -1745,9 +1761,9 @@ async fn fetch_worker_logs(
     let mut builder = client
         .get(&url)
         .map_err(|e| format!("invalid worker URL: {e}"))?;
-    if !worker_key.is_empty() {
+    if let Some(authorization) = authorization {
         builder = builder
-            .header("authorization", &format!("Bearer {worker_key}"))
+            .header("authorization", authorization)
             .map_err(|e| format!("invalid auth header: {e}"))?;
     }
 

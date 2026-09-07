@@ -3502,7 +3502,7 @@ fn setup_globals_with_descriptor(
     // creator can resolve the conflict by deleting one or the other).
     //
     // An earlier revision used `std::env::vars()` which leaked every
-    // host-level secret (DATABASE_URL, WORKER_KEY, AWS credentials) to
+    // host-level secret (DATABASE_URL, CONTROL_KEY, AWS credentials) to
     // every app. Multi-tenant apps must only see their own env vars.
     {
         let process = v8::Object::new(scope);

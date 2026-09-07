@@ -6,16 +6,70 @@ use ntex::web;
 use ntex::web::types::{Path, State};
 use uuid::Uuid;
 use zeroship_core::readiness::ReadinessGate;
+use zeroship_core::service_identity::{endpoints, AuthError, ServiceEndpoint};
+use zeroship_core::service_peers::ServiceAuth;
 
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
-// Auth helper
+// Auth helpers
 // ---------------------------------------------------------------------------
 
-/// The one control-key check every `/internal/*` handler runs, including the
-/// ones in sibling modules (`crate::erasure`). Shared rather than re-spelled:
-/// a second copy is a second place for the empty-key arm to go missing.
+/// Refuse a caller that has not proved WHICH SERVICE it is, or that holds no
+/// grant on this endpoint.
+///
+/// The FULL assertion profile: signed, and single-use through the replay store.
+/// Correct here and only here because these endpoints fire at app-load rate -
+/// the worker calls them once per app it loads and again on a version change -
+/// so the store write is proportional to app loads rather than to end-user
+/// traffic. Do not reach for this on a per-request path.
+///
+/// It replaces [`check_auth`] on the privileged reads, and the difference is
+/// the whole point of the change: the shared bearer proves only that the caller
+/// read the same file the control plane did, so every holder of it is every
+/// other holder. An assertion names one service, under a key only that service
+/// holds, and the endpoint allowlist then decides what that service may reach.
+async fn check_service_auth(
+    req: &web::HttpRequest,
+    service_auth: &ServiceAuth,
+    endpoint: ServiceEndpoint,
+) -> Option<web::HttpResponse> {
+    let header = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    match service_auth.verify(header, endpoint).await {
+        Ok(_identity) => None,
+        Err(error) => {
+            tracing::warn!(
+                method = %req.method(),
+                path = %req.path(),
+                %error,
+                "control-internal: service auth rejected"
+            );
+            // A store outage refuses every caller at once and is an operator's
+            // problem, so it answers 503 rather than 401 - a caller told
+            // "unauthorized" would rotate a credential that is fine.
+            Some(if matches!(error, AuthError::StoreUnavailable) {
+                web::HttpResponse::ServiceUnavailable()
+                    .json(&serde_json::json!({"error":"service unavailable"}))
+            } else {
+                web::HttpResponse::Unauthorized()
+                    .json(&serde_json::json!({"error":"unauthorized"}))
+            })
+        }
+    }
+}
+
+/// The shared-control-key check the `/internal/*` endpoints that are NOT
+/// privileged still run, including the one in `crate::erasure`.
+///
+/// `pub(crate)` rather than private so that sibling module can call THIS
+/// spelling instead of growing a second copy - and a second copy is where the
+/// empty-key arm goes missing. It is deliberately not the check on the
+/// privileged reads: those took [`check_service_auth`] above, which names one
+/// service under a key only that service holds, where this one proves only that
+/// the caller read the same file the control plane did.
 pub(crate) fn check_auth(
     req: &web::HttpRequest,
     state: &AppState,
@@ -108,9 +162,13 @@ pub async fn get_app_env(
     state: State<Arc<AppState>>,
     app_id: Path<String>,
 ) -> web::HttpResponse {
-    // Internal endpoint, no user authz: workers authenticate with the
-    // control-key shared secret and there is no user principal.
-    if let Some(resp) = check_auth(&req, &state) {
+    // Internal endpoint, no user authz: the caller is a SERVICE and there is no
+    // user principal. It presents its own ed25519 assertion under the full
+    // profile; a shared bearer no longer opens this door, which matters most
+    // here because the response body is the app's DECRYPTED environment.
+    if let Some(resp) =
+        check_service_auth(&req, &state.service_auth, endpoints::CONTROL_APP_ENV).await
+    {
         return resp;
     }
     let Ok(id) = Uuid::parse_str(&app_id) else {
@@ -151,9 +209,9 @@ pub async fn get_app_version(
     state: State<Arc<AppState>>,
     app_id: Path<String>,
 ) -> web::HttpResponse {
-    // Internal endpoint, no user authz: workers authenticate with the
-    // control-key shared secret and there is no user principal.
-    if let Some(resp) = check_auth(&req, &state) {
+    // Same rate as the env read - once per app load, plus a refetch on a
+    // version change - so the same full profile.
+    if let Some(resp) = check_service_auth(&req, &state.service_auth, endpoints::CONTROL_APP).await {
         return resp;
     }
     let uid = match app_id.parse::<Uuid>() {

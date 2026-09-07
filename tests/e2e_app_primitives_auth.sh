@@ -9,7 +9,7 @@
 #   env.auth identity normally arrives via the gateway's HMAC-signed
 #   `ZeroShip-User` header. For a DIRECT worker /dispatch test (bypassing the
 #   gateway), the worker still requires its generated bearer and verifies the
-#   user-header HMAC with the same generated ZEROSHIP_WORKER_KEY. The harness therefore
+#   user-header HMAC with the same generated E2E_STALE_WORKER_BEARER. The harness therefore
 #   mints a fully formed, request-bound header with that real key:
 #
 #     <base64(userJson)>.<request_id>.<issued_at>.<hmac_sha256_hex(key, signed)>
@@ -120,7 +120,7 @@ sign_user_header() {
     const signed = `${b64}.${rid}.${iat}`;
     const mac = c.createHmac("sha256", workerKey).update(signed).digest("hex");
     process.stdout.write(`${signed}.${mac}`);
-  ' "$user_json" "$request_id" "$ZEROSHIP_WORKER_KEY"
+  ' "$user_json" "$request_id" "$E2E_STALE_WORKER_BEARER"
 }
 
 # POST an envelope to the worker /dispatch for $APP_ID; echo "<body>\n<code>".
@@ -136,14 +136,14 @@ dispatch() {
   if [ -n "$user_json" ]; then
     local hdr; hdr="$(sign_user_header "$user_json" "$rid")"
     curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$app" \
-      -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+      -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
       -H 'content-type: application/octet-stream' \
       -H "x-request-id: $rid" \
       -H "zeroship-user: $hdr" \
       --data-binary @"$frame"
   else
     curl -s -w '\n%{http_code}' -X POST "http://localhost:$ZEROSHIP_WORKER_PORT/dispatch/$app" \
-      -H "Authorization: Bearer $ZEROSHIP_WORKER_KEY" \
+      -H "Authorization: Bearer $E2E_STALE_WORKER_BEARER" \
       -H 'content-type: application/octet-stream' \
       --data-binary @"$frame"
   fi

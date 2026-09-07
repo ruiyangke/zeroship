@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::os::unix::fs::PermissionsExt as _;
 use std::process::{Command, Output};
 
 use base64::Engine as _;
@@ -7,7 +8,7 @@ use ed25519_dalek::pkcs8::DecodePrivateKey as _;
 use ed25519_dalek::SigningKey;
 use zeroship_core::config::{
     validate_master_key_material, validate_pairwise_salt,
-    validate_stash_key, validate_worker_key,
+    validate_stash_key,
 };
 
 // `migrate-dsn` is the one entry that is NOT generated key material: it is the
@@ -29,7 +30,7 @@ use zeroship_core::config::{
 //
 // It carries the postgres SUPERUSER password, so of everything here it is the
 // entry that most needs the 0600 the loop below pins.
-const SECRET_FILES: [&str; 7] = [
+const SECRET_FILES: [&str; 11] = [
     "auth-signing.pem",
     "broker-secret",
     "gateway-signing.pem",
@@ -37,7 +38,22 @@ const SECRET_FILES: [&str; 7] = [
     "pairwise-salt",
     "refresh-hash-key",
     "refresh-idem-key",
+    // One per-service assertion key, never one shared file: a peer must be able
+    // to VERIFY a service without being able to IMPERSONATE it, and a key held
+    // by four processes is a shared secret wearing a signature.
+    "svc-auth.pem",
+    "svc-control.pem",
+    "svc-gateway.pem",
+    "svc-worker.pem",
 ];
+
+/// The one generated file that is NOT private, and must not become private.
+///
+/// It holds PUBLIC keys. Pinning it to 0600 alongside the private material
+/// would read as "another secret", and the first operator who had to serve it
+/// to a peer would loosen the whole directory instead of this one file. It is
+/// named separately here so the distinction is asserted rather than assumed.
+const PUBLIC_FILES: [&str; 1] = ["service-peers.json"];
 
 // ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET is NOT here: only Stripe can issue a value that
 // verifies, so `dev init` no longer manufactures one. See
@@ -45,7 +61,7 @@ const SECRET_FILES: [&str; 7] = [
 // Sorted, and every one is a canonical `ZEROSHIP_` name that some binary
 // declares. `GATEWAY_OIDC_SECRET` was dropped rather than renamed: nothing in
 // the tree reads it, so generating it only made an unread slot look configured.
-const ENV_KEYS: [&str; 8] = [
+const ENV_KEYS: [&str; 7] = [
     "ZEROSHIP_AUTH_STASH_SIGNING_KEY",
     "ZEROSHIP_AUTH_TOTP_ENC_KEY",
     "ZEROSHIP_CONTROL_KEY",
@@ -53,7 +69,6 @@ const ENV_KEYS: [&str; 8] = [
     "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY",
     "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY",
     "ZEROSHIP_PAIRWISE_SALT",
-    "ZEROSHIP_WORKER_KEY",
 ];
 
 const WEAK_LITERALS: [&str; 6] = [
@@ -74,10 +89,25 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
     let output = run_dev_init(&secrets_dir, &env_file);
     assert_success(&output, "first zeroship dev init");
 
-    assert_eq!(directory_entries(&secrets_dir), SECRET_FILES);
+    let mut expected: Vec<String> = SECRET_FILES
+        .into_iter()
+        .chain(PUBLIC_FILES)
+        .map(str::to_owned)
+        .collect();
+    expected.sort();
+    assert_eq!(directory_entries(&secrets_dir).to_vec(), expected);
     assert_private_mode(&secrets_dir, 0o700);
     for name in SECRET_FILES {
         assert_private_mode(&secrets_dir.join(name), 0o600);
+    }
+    // The peer document is deliberately NOT in that loop; see PUBLIC_FILES.
+    for name in PUBLIC_FILES {
+        let mode = std::fs::metadata(secrets_dir.join(name))
+            .unwrap_or_else(|error| panic!("stat {name}: {error}"))
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_ne!(mode, 0o600, "{name} holds public keys and must not be private");
     }
     assert_private_mode(&env_file, 0o600);
 
@@ -164,8 +194,6 @@ fn dev_init_generates_the_complete_private_deployment_secret_set() {
 
     validate_master_key_material("ZEROSHIP_CONTROL_MASTER_KEY", &overlay["ZEROSHIP_CONTROL_MASTER_KEY"])
         .expect("generated master key must pass the production boot guard");
-    validate_worker_key("ZEROSHIP_WORKER_KEY", &overlay["ZEROSHIP_WORKER_KEY"])
-        .expect("generated worker key must pass the production boot guard");
     validate_stash_key(
         "ZEROSHIP_GATEWAY_STASH_SIGNING_KEY",
         &overlay["ZEROSHIP_GATEWAY_STASH_SIGNING_KEY"],

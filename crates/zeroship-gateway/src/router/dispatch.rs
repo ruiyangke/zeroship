@@ -28,6 +28,7 @@ use uuid::Uuid;
 
 use zeroship_bundle::RequiredPrincipal;
 use zeroship_core::app_id::AppId;
+use zeroship_core::service_identity::{endpoints, AuthError as ServiceAuthError};
 
 use crate::{enforce, idempotency, oidc_rp, proxy, GateState};
 
@@ -115,6 +116,40 @@ pub async fn workflow_advance_internal(
         return HttpResponse::NotFound().finish();
     }
 
+    // WHO IS CALLING. This edge is reached by the control plane's workflow
+    // engine and by nobody else, and until this check landed it took no caller
+    // credential at all - the Host-header rule above was the whole gate, and it
+    // refuses only hosts that PARSE as a subdomain, so a dotless Host reached
+    // the forwarder and made the gateway advance an arbitrary app's workflow
+    // under the gateway's own authority.
+    //
+    // The FULL profile, because the rate is per advance: the single-use `jti`
+    // claim's write against the shared store is proportional to advances, not
+    // to end-user traffic. The handler's OUTBOUND leg below is the ordinary
+    // dispatch hop and takes the transport-only profile instead; applying one
+    // sentence to the handler rather than to its two edges would re-import the
+    // store write onto the forwarding path.
+    let authorization = req
+        .headers()
+        .get("authorization")
+        .and_then(|value| value.to_str().ok());
+    if let Err(error) = state
+        .service_auth
+        .verify(authorization, endpoints::GATEWAY_WORKFLOW_ADVANCE)
+        .await
+    {
+        tracing::warn!(%error, "gateway: workflow-advance caller rejected");
+        // A store outage refuses every caller at once and is the operator's
+        // problem; the control plane treats 5xx as backpressure and retries,
+        // where a 401 would look like a credential to rotate.
+        return if matches!(error, ServiceAuthError::StoreUnavailable) {
+            HttpResponse::ServiceUnavailable()
+                .json(&serde_json::json!({"error": "service unavailable"}))
+        } else {
+            HttpResponse::Unauthorized().json(&serde_json::json!({"error": "unauthorized"}))
+        };
+    }
+
     let request: WorkflowStepRequest = match serde_json::from_slice(body.as_ref()) {
         Ok(request) => request,
         Err(e) => {
@@ -153,17 +188,16 @@ pub async fn workflow_advance_internal(
         }
     };
 
-    // TODO(DW-signed-transport): verify a control-plane signature/nonce before
-    // accepting this internal StepRequest, then sign the gateway->worker hop.
-    // For DW-05b the worker's unsigned test-flag route is the intentional seam.
     let request_id = Uuid::new_v4();
+    // The OUTBOUND leg: a fresh transport-only assertion for the worker.
+    let worker_authorization = state.worker_authorization();
     let worker_response = match proxy::forward_workflow_advance(
         &state.hash_ring,
         &app_id,
         &compiled_route.entry.plan_id,
         &request_id,
         &worker_body,
-        &state.config.worker_key,
+        worker_authorization.as_deref(),
     )
     .await
     {
@@ -2436,6 +2470,12 @@ async fn handle_dispatch(
     // HMAC `ZeroShip-User` channel (`user_header_value`), never here.
     let headers = collect_forwarded_headers(req.headers());
 
+    // The gateway's own peer credential for this hop, minted per request under
+    // the transport-only profile. It says WHICH SERVICE is calling and nothing
+    // about the end user; the identity envelope above is a separate credential
+    // for a separate job, which is the point of splitting them.
+    let worker_authorization = state.worker_authorization();
+
     // Proxy to worker via CHWBL hash ring.
     let mut response = match proxy::forward_dispatch(
         &state.hash_ring,
@@ -2447,7 +2487,7 @@ async fn handle_dispatch(
         &headers,
         body.as_ref(),
         user_header_value.as_deref(),
-        &state.config.worker_key,
+        worker_authorization.as_deref(),
     )
     .await
     {
@@ -3047,6 +3087,60 @@ mod tests {
         }
     }
 
+    /// A gateway identity that trusts a freshly generated control plane, plus
+    /// the `Authorization` header that control would present.
+    ///
+    /// The FULL profile with an in-memory replay store: single use holds within
+    /// this process, which is what these tests exercise. A replicated callee
+    /// needs the Postgres store, and `crates/zeroship-control/tests/internal_service_auth_test.rs`
+    /// is where that is measured against the real table.
+    fn control_credentialled_service_auth()
+    -> (Arc<zeroship_core::service_peers::ServiceAuth>, String) {
+        use zeroship_core::service_assertion::{
+            InMemoryReplayStore, ServiceAssertionVerifier, ServiceSigningKey, ServiceTrustBundle,
+        };
+        use zeroship_core::service_peers::{
+            service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME,
+            GATEWAY_SERVICE_NAME,
+        };
+
+        let gateway_issuer = service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer");
+        let control_issuer = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+        let gateway_key = ServiceSigningKey::generate();
+        let control_key = ServiceSigningKey::generate();
+
+        // Two bundles because a verifier CONSUMES one; both carry the same
+        // trust, so the header below verifies under the state built here.
+        let mut trusted = ServiceTrustBundle::new();
+        trusted
+            .trust_signing_key(&control_issuer, control_key.key_id(), &control_key)
+            .expect("trust control");
+        let mut held = ServiceTrustBundle::new();
+        held.trust_signing_key(&control_issuer, control_key.key_id(), &control_key)
+            .expect("trust control");
+
+        let keyring = ServiceKeyring::from_parts(gateway_issuer.clone(), gateway_key, held)
+            .expect("gateway keyring");
+        let verifier = ServiceAssertionVerifier::new(
+            trusted,
+            std::sync::Arc::new(InMemoryReplayStore::new()),
+        );
+        let control = ServiceKeyring::from_parts(
+            control_issuer,
+            control_key,
+            ServiceTrustBundle::new(),
+        )
+        .expect("control keyring");
+        let header = format!(
+            "Bearer {}",
+            control.mint_for(&gateway_issuer).expect("mint for the gateway")
+        );
+        (
+            Arc::new(ServiceAuth::new(keyring, std::sync::Arc::new(verifier))),
+            header,
+        )
+    }
+
     fn build_test_state_with_workers(worker_urls: Vec<String>) -> Arc<GateState> {
         // `burst: 1` gives a 1000-token bucket, and ANY request costs the whole
         // thing, so this fixture cannot tell a Degraded request from a normal
@@ -3078,12 +3172,12 @@ mod tests {
         tmp.push(format!("zsgate-idem-{}", uuid::Uuid::new_v4().simple()));
         let disk = crate::blob_cache::DiskBlobCache::new(tmp, 1024 * 1024).expect("disk cache");
         Arc::new(GateState {
+            service_auth: std::sync::Arc::new(crate::test_gateway_service_auth()),
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),
                 worker_urls: worker_urls.clone(),
                 poll_interval_secs: 5,
-                worker_key: String::new(),
                 auth_ui_url: String::new(),
                 origin_scheme: zeroship_core::config::OriginScheme::Http,
                 trusted_origins: vec![],
@@ -3181,7 +3275,9 @@ mod tests {
         })
         .await;
 
-        let state = build_test_state_with_workers(vec![worker.url("/")]);
+        let mut state = build_test_state_with_workers(vec![worker.url("/")]);
+        let (service_auth, control_header) = control_credentialled_service_auth();
+        Arc::get_mut(&mut state).expect("sole owner").service_auth = service_auth;
         let app_id = Uuid::new_v4();
         install_workflow_route(
             &state,
@@ -3199,6 +3295,7 @@ mod tests {
 
         let req = ntex::web::test::TestRequest::post()
             .uri("/__zeroship/internal/workflow-advance")
+            .header("authorization", control_header.as_str())
             .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
             .to_request();
         let resp = ntex::web::test::call_service(&app, req).await;
@@ -3569,7 +3666,9 @@ mod tests {
 
     #[ntex::test]
     async fn internal_workflow_advance_spend_blocked_app_returns_402() {
-        let state = build_test_state_with_workers(Vec::new());
+        let mut state = build_test_state_with_workers(Vec::new());
+        let (service_auth, control_header) = control_credentialled_service_auth();
+        Arc::get_mut(&mut state).expect("sole owner").service_auth = service_auth;
         let app_id = Uuid::new_v4();
         install_workflow_route(
             &state,
@@ -3587,6 +3686,7 @@ mod tests {
 
         let req = ntex::web::test::TestRequest::post()
             .uri("/__zeroship/internal/workflow-advance")
+            .header("authorization", control_header.as_str())
             .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
             .to_request();
         let resp = ntex::web::test::call_service(&app, req).await;
@@ -3594,6 +3694,109 @@ mod tests {
         let body = ntex::web::test::read_body(resp).await;
         let json: Value = serde_json::from_slice(&body).expect("402 JSON");
         assert_eq!(json["code"], "SPEND_LIMIT");
+    }
+
+    /// The exploit `tests/e2e_gateway_workflow_advance_authz.sh` drives, at the
+    /// handler.
+    ///
+    /// A caller with a reachable Host, a real `runId` and a real `appId`, and NO
+    /// credential. Until the caller check landed this reached the forwarder and
+    /// advanced the app's workflow under the GATEWAY's own authority - the Host
+    /// rule above was the whole gate, and it refuses only hosts that parse as a
+    /// subdomain, so `Host: localhost` sailed through.
+    ///
+    /// Paired with the ack test above, which differs in exactly one variable:
+    /// the `Authorization` header.
+    #[ntex::test]
+    async fn internal_workflow_advance_without_a_credential_is_refused() {
+        let mut state = build_test_state_with_workers(Vec::new());
+        let (service_auth, control_header) = control_credentialled_service_auth();
+        Arc::get_mut(&mut state).expect("sole owner").service_auth = service_auth;
+        let app_id = Uuid::new_v4();
+        install_workflow_route(
+            &state,
+            app_id,
+            zeroship_core::types::SpendState::Allow,
+            zeroship_core::types::AccountState::Active,
+        );
+        let app = ntex::web::test::init_service(
+            web::App::new().state(state).service(
+                web::resource("/__zeroship/internal/workflow-advance")
+                    .route(web::post().to(workflow_advance_internal)),
+            ),
+        )
+        .await;
+
+        for header in [None, Some("Bearer not-an-assertion".to_string())] {
+            let mut req = ntex::web::test::TestRequest::post()
+                .uri("/__zeroship/internal/workflow-advance")
+                .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap());
+            if let Some(value) = header.clone() {
+                req = req.header("authorization", value);
+            }
+            let resp = ntex::web::test::call_service(&app, req.to_request()).await;
+            assert_eq!(
+                resp.status(),
+                ntex::http::StatusCode::UNAUTHORIZED,
+                "header {header:?} must not reach the forwarder"
+            );
+        }
+
+        // The control, one variable apart: with control's assertion the request
+        // gets PAST the guard and fails on the empty worker ring instead, so the
+        // 401s above are the credential check and not the route being broken.
+        let resp = ntex::web::test::call_service(
+            &app,
+            ntex::web::test::TestRequest::post()
+                .uri("/__zeroship/internal/workflow-advance")
+                .header("authorization", control_header.as_str())
+                .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::BAD_GATEWAY);
+    }
+
+    /// A gateway with no service key material refuses the advance edge.
+    ///
+    /// The predecessor's shape was the opposite: an empty shared secret turned
+    /// the check OFF. This asserts the inversion directly, because it is the
+    /// property most likely to be undone by a later "make it work locally"
+    /// edit.
+    #[ntex::test]
+    async fn an_unconfigured_gateway_refuses_the_advance_edge() {
+        // The shared builder now hands out a CONFIGURED identity, because every
+        // other fixture needs the gateway to sign identity envelopes. This arm
+        // is about the opposite state, so it strips the key material back out
+        // rather than relying on the builder's default.
+        let mut state = build_test_state_with_workers(Vec::new());
+        Arc::get_mut(&mut state).expect("sole owner").service_auth =
+            std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured());
+        let app_id = Uuid::new_v4();
+        install_workflow_route(
+            &state,
+            app_id,
+            zeroship_core::types::SpendState::Allow,
+            zeroship_core::types::AccountState::Active,
+        );
+        assert!(!state.service_auth.is_configured());
+        let app = ntex::web::test::init_service(
+            web::App::new().state(state).service(
+                web::resource("/__zeroship/internal/workflow-advance")
+                    .route(web::post().to(workflow_advance_internal)),
+            ),
+        )
+        .await;
+
+        let resp = ntex::web::test::call_service(
+            &app,
+            ntex::web::test::TestRequest::post()
+                .uri("/__zeroship/internal/workflow-advance")
+                .set_payload(serde_json::to_vec(&workflow_step_request(app_id)).unwrap())
+                .to_request(),
+        )
+        .await;
+        assert_eq!(resp.status(), ntex::http::StatusCode::UNAUTHORIZED);
     }
 
     #[ntex::test]

@@ -118,7 +118,7 @@ PG_PORT="${PG_PORT:-5487}"
 PGC="zs-devdeploy-db-pg"
 DBURL="postgres://postgres:zeroship@localhost:$PG_PORT/zeroship"
 ZEROSHIP_CONTROL_KEY="dd-ck"; ZEROSHIP_CONTROL_MASTER_KEY="dd-mk"
-export ZEROSHIP_WORKER_KEY="${ZEROSHIP_WORKER_KEY:-devdeploy-worker-key-0123456789abcd}"
+export E2E_STALE_WORKER_BEARER="${E2E_STALE_WORKER_BEARER:-devdeploy-worker-key-0123456789abcd}"
 APP_NAME="dbtodos"
 
 # One identity per RUN, used VERBATIM on both tiers. `users.email` and

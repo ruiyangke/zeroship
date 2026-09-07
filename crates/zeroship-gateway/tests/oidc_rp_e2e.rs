@@ -70,7 +70,19 @@ const APP_NAME: &str = "gateway-e2e";
 const PASSWORD: &str = "gateway-test-password-with-enough-bytes-1234";
 const BROKER_MASTER: &[u8] = b"gateway-oidc-rp-e2e-broker-master-32-bytes";
 const GATEWAY_ISS: &str = "https://api.zeroship.ai";
-const WORKER_KEY: &str = "gateway-e2e-worker-key";
+
+/// ONE gateway identity for this whole test binary.
+///
+/// The fake worker below must verify the identity envelope under the PUBLIC
+/// half of the key the gateway signs with, which is the production
+/// relationship. A per-call `test_gateway_service_auth()` would give the state
+/// and the worker different keys and the worker would refuse every request -
+/// so the fixture holds one and hands out both halves.
+fn gateway_identity() -> &'static std::sync::Arc<zeroship_core::service_peers::ServiceAuth> {
+    static IDENTITY: std::sync::OnceLock<std::sync::Arc<zeroship_core::service_peers::ServiceAuth>> =
+        std::sync::OnceLock::new();
+    IDENTITY.get_or_init(|| std::sync::Arc::new(zeroship_gateway::test_gateway_service_auth()))
+}
 
 fn db_url() -> Option<String> {
     zeroship_core::config::test_database_url_opt()
@@ -328,13 +340,18 @@ fn protected_worker_manifest() -> Manifest {
 }
 
 async fn echo_verified_user(req: web::HttpRequest) -> web::HttpResponse {
-    let authorized = req
+    // The transport credential is an ed25519 service assertion now, not a shared
+    // string. This stand-in worker checks only that one was PRESENTED - the real
+    // worker's verification of it is bound in `zeroship-worker`'s own suite -
+    // because what this test is for is the IDENTITY envelope below, which is a
+    // separate credential under a separate key.
+    let presented = req
         .headers()
         .get(http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.strip_prefix("Bearer "))
-        == Some(WORKER_KEY);
-    if !authorized {
+        .is_some_and(|assertion| !assertion.is_empty());
+    if !presented {
         return web::HttpResponse::Unauthorized().finish();
     }
     let Some(user_header) = req
@@ -352,11 +369,14 @@ async fn echo_verified_user(req: web::HttpRequest) -> web::HttpResponse {
     else {
         return web::HttpResponse::Unauthorized().finish();
     };
-    let Some(user_json) = zeroship_core::auth::verify_zeroship_user_header_for_request(
-        WORKER_KEY.as_bytes(),
-        user_header,
-        request_id,
-    ) else {
+    // Verified under the GATEWAY's public half, which is the whole point: this
+    // worker cannot produce this envelope, only check it.
+    let Some(user_json) = gateway_identity()
+        .user_envelope_signer()
+        .expect("the test gateway signs")
+        .own_verifier()
+        .verify_for_request(user_header, request_id)
+    else {
         return web::HttpResponse::Unauthorized().finish();
     };
     web::HttpResponse::Ok()
@@ -396,12 +416,12 @@ fn build_gateway_state(
     .with_issuer(ISSUER);
 
     let state = Arc::new(GateState {
+        service_auth: std::sync::Arc::clone(gateway_identity()),
         config: GateConfig {
             control_url: String::new(),
             control_key: String::new(),
             worker_urls: worker_urls.clone(),
             poll_interval_secs: 5,
-            worker_key: WORKER_KEY.to_string(),
             auth_ui_url: auth_base.to_string(),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trusted_origins: vec![],

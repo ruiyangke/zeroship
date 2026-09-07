@@ -1777,11 +1777,10 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
-// `Backup` capability (VACUUM INTO snapshot + atomic
-// file-swap restore + `pitr_pg_only` refusal).
+// `Backup` capability (VACUUM INTO snapshot + atomic file-swap restore).
 // ---------------------------------------------------------------------------
 //
-// Three methods on `impl Backup for SqliteBackend`:
+// Two methods on `impl Backup for SqliteBackend`:
 //
 //   * `snapshot(app_id, dest_uri, opts)`:
 //       1. Hold the per-app snapshot/restore advisory lock through the
@@ -1813,16 +1812,20 @@ fn recover_preceding_quoted_ident(text: &str) -> Option<String> {
 //          sequentially.
 //       6. Release the lock.
 //
-//   * `pitr_replay(app_id, target)`:
-//       SQLite has no WAL-archive PITR. Returns
-//       `Configuration { code: "pitr_pg_only" }` unconditionally.
+// There was a third, `pitr_replay`, which refused unconditionally with
+// `Configuration { code: "pitr_pg_only" }`. It went on 2026-09-07 with the
+// trait method it implemented, because the PG arm it deferred to could not
+// replay either - see `zeroship_data_core::storage::Backup`'s rustdoc for why
+// PITR is an operator capability with a database-server contract rather than a
+// data-store method.
 //
-// The gate below is `test-helpers` ALONE, and must stay that way. The
-// `Backup` trait itself carries `#[cfg(feature = "test-helpers")]`
-// (`backend/mod.rs`), so under a plain `cargo test --lib` the trait does
-// not exist and there is nothing here to implement. Widening this to
-// `any(test, feature = "test-helpers")` does not make the impl available
-// to in-crate unit tests - it fails the build with E0405/E0432, measured.
+// The gate below is `test-helpers` ALONE. It is the IMPL that is gated, not the
+// trait: `zeroship_data_core::storage::Backup` ungated itself on 2026-09-04, on
+// the grounds that a contract whose shape depends on a feature is not a
+// contract. What stays out of a release build is the body - a `pg_dump` /
+// `pg_restore` shell-out on one arm and a destructive file swap on the other.
+// This comment claimed the trait was gated until 2026-09-07 and cited
+// `backend/mod.rs`, a path that no longer holds it.
 
 #[cfg(feature = "test-helpers")]
 impl zeroship_data_core::storage::Backup for SqliteBackend {
@@ -1841,25 +1844,6 @@ impl zeroship_data_core::storage::Backup for SqliteBackend {
         snapshot: &zeroship_data_core::capability::SnapshotHandle,
     ) -> Result<(), DbError> {
         backup_sqlite::restore_impl(self, app_id, snapshot).await
-    }
-
-    async fn pitr_replay(
-        &self,
-        _app_id: &str,
-        _target: zeroship_data_core::capability::PitrTarget,
-    ) -> Result<(), DbError> {
-        Err(DbError::Configuration {
-            code: "pitr_pg_only",
-            message: "SQLite has no WAL-archive PITR; use snapshot/restore against a \
-                 per-app file copy instead. PITR replay is supported only on the \
-                 PG backend (recovery_target_lsn / recovery_target_time)."
-                .into(),
-            hint: Some(
-                "Configure WAL archiving on a PG backend to enable PITR; for the \
-                 SQLite arm use Backup::snapshot followed by Backup::restore."
-                    .into(),
-            ),
-        })
     }
 }
 
@@ -2248,16 +2232,18 @@ mod backup_sqlite {
         Ok(())
     }
 
-    // `pitr_replay` does not need a helper — the impl method body returns the
-    // typed `Configuration { code: "pitr_pg_only" }` directly. PG retains its
-    // own replay path; SQLite cannot participate without a WAL-archive
-    // substrate.
+    // There is no `pitr_replay` helper because there is no longer a
+    // `pitr_replay`. It was deleted on 2026-09-07 together with the trait
+    // method; neither backend could replay, and the reason is recorded once, in
+    // `zeroship_data_core::storage::Backup`'s rustdoc, rather than in a comment
+    // per arm.
     //
-    // That statement was carried by an empty `fn _pitr_marker(PitrTarget) {}`
-    // under `#[allow(dead_code)]`, deleted 2026-09-04. A no-op function is a
-    // bad home for a sentence about why code is ABSENT: it compiles, so it
-    // reads as a mechanism, and the `allow` stopped the one tool that would
-    // have said otherwise.
+    // Two earlier homes for that sentence are worth not repeating: an empty
+    // `fn _pitr_marker(PitrTarget) {}` under `#[allow(dead_code)]` (deleted
+    // 2026-09-04), and the refusal arm itself. A no-op function is a bad home
+    // for a sentence about why code is ABSENT, because it compiles and so reads
+    // as a mechanism; a refusal arm is a worse one, because it reads as a
+    // deliberate per-vendor divergence when the capability was absent on both.
 }
 
 #[cfg(test)]

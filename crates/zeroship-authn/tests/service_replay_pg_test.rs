@@ -312,7 +312,7 @@ struct TwoReplicas {
 
 async fn two_replicas(
     url: &str,
-    store: impl Fn(Client) -> Arc<dyn ReplayStore>,
+    store: impl Fn(Client) -> Arc<dyn ReplayStore + Send + Sync>,
 ) -> TwoReplicas {
     let signing = ServiceSigningKey::generate();
     let public = signing.verifying_key_bytes();
@@ -371,7 +371,7 @@ async fn two_replicas_racing_one_assertion_admit_exactly_one() {
         return;
     };
     let replicas = two_replicas(&url, |client| {
-        Arc::new(PostgresReplayStore::new(client)) as Arc<dyn ReplayStore>
+        Arc::new(PostgresReplayStore::new(client)) as Arc<dyn ReplayStore + Send + Sync>
     })
     .await;
 
@@ -393,7 +393,7 @@ async fn a_read_then_write_store_loses_the_same_race() {
     // this admitted one, the harness would not be racing and the test above
     // would prove nothing.
     let replicas = two_replicas(&url, |client| {
-        Arc::new(ReadThenWriteStore { client }) as Arc<dyn ReplayStore>
+        Arc::new(ReadThenWriteStore { client }) as Arc<dyn ReplayStore + Send + Sync>
     })
     .await;
 
@@ -495,7 +495,7 @@ async fn a_verified_assertion_cannot_be_replayed_at_another_replica() {
     // assertion and has no process-local memory of it. Only the shared store
     // can refuse it.
     let replicas = two_replicas(&url, |client| {
-        Arc::new(PostgresReplayStore::new(client)) as Arc<dyn ReplayStore>
+        Arc::new(PostgresReplayStore::new(client)) as Arc<dyn ReplayStore + Send + Sync>
     })
     .await;
 

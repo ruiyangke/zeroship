@@ -1089,12 +1089,12 @@ mod tests {
         disk: crate::blob_cache::DiskBlobCache,
     ) -> GateState {
         GateState {
+            service_auth: std::sync::Arc::new(crate::test_gateway_service_auth()),
             config: crate::GateConfig {
                 control_url: String::new(),
                 control_key: String::new(),
                 worker_urls: vec![],
                 poll_interval_secs: 5,
-                worker_key: String::new(),
                 auth_ui_url: String::new(),
                 origin_scheme: zeroship_core::config::OriginScheme::Http,
                 trusted_origins: vec![],

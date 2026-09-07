@@ -511,7 +511,7 @@ are internally accessed; end-users hit it indirectly via HTTP.
 | ProcedureKind method gate | 🟢 | internal | `crates/zeroship-gateway/src/router/dispatch.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-bundle/src/compiled.rs` | 405/426; Action None-kind path. |
 | CHWBL hash-ring worker routing | 🟢 | internal | `crates/zeroship-gateway/src/proxy.rs` | `docs/architecture/gateway-routing.md` | — | 150 vnodes; Unix socket support. |
 | Worker dispatch proxy + connection pooling | 🟢 | internal | `crates/zeroship-gateway/src/proxy.rs` | `docs/architecture/distributed.md` | — | Reserved headers scrubbed. |
-| ZeroShip-User HMAC signing | 🟢 | internal | `crates/zeroship-gateway/src/proxy.rs`, `oidc_rp.rs` | `docs/architecture/distributed.md` | — | Empty worker_key disables (dev). |
+| ZeroShip-User ed25519 signing | 🟢 | internal | `crates/zeroship-gateway/src/oidc_rp.rs`, `crates/zeroship-core/src/user_envelope.rs` | `docs/architecture/distributed.md` | — | Gateway signs; worker verifies under the published public half. |
 | App response header sanitization (SEC-9) | 🟢 | internal | `crates/zeroship-gateway/src/proxy.rs` | — | `crates/zeroship-gateway/src/proxy.rs` | Strips cookie Domain; caps count/size. |
 | Route cache with 5s polling | 🟢 | internal | `crates/zeroship-gateway/src/sync.rs` | `docs/architecture/gateway-routing.md` | `crates/zeroship-gateway/src/sync.rs` | Push-pull; configurable interval. |
 | Static asset serving (tiered cache) | 🟢 | internal | `crates/zeroship-gateway/src/router/static_serve.rs`, `blob_cache.rs`, `router/variants.rs`, `conditional.rs` | `docs/architecture/gateway-routing.md` | — | mem→disk→BlobStore; br/gzip; 304/206. |
@@ -856,7 +856,7 @@ snapshots are shared across threads via a process-wide RwLock.
 
 | Feature | Status | Surface | Code | Docs | Example | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| HTTP dispatch endpoint | 🟢 | POST /dispatch/{app_id} | `crates/zeroship-worker/src/handler.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | 4 MiB body cap; Bearer worker_key. |
+| HTTP dispatch endpoint | 🟢 | POST /dispatch/{app_id} | `crates/zeroship-worker/src/handler.rs` | `docs/architecture/distributed.md` | `tests/e2e_platform.sh` | 4 MiB body cap; ed25519 service assertion. |
 | Streaming (SSE/ReadableStream) forwarding | 🟢 | internal | `crates/zeroship-worker/src/handler.rs` | — | — | Waker-based mpsc; no busy-poll. |
 | WebSocket upgrade via dispatch endpoint | ⚫ | HTTP endpoint (unreachable) | `crates/zeroship-worker/src/handler.rs` | — | — | Returns 500; gateway uses separate WS path. |
 | Per-thread V8 isolate LRU cache | 🟢 | internal | `crates/zeroship-worker/src/cache.rs` | `AGENTS.md` | `tests/e2e_platform.sh` | Thread-local; default 200; abort fan-out on evict. |
@@ -875,7 +875,7 @@ snapshots are shared across threads via a process-wide RwLock.
 | Prometheus metrics endpoint | 🟢 | GET /metrics | `crates/zeroship-worker/src/metrics.rs` | — | — | 13 counters; no auth. |
 | Health + readiness endpoints | 🟢 | GET /healthz, GET /readyz | `crates/zeroship-worker/src/health.rs` | — | `tests/e2e_platform.sh` | /healthz is a constant 200 (liveness); /readyz needs a current control poll AND a reachable blob store. |
 | Config validation dry-run | 🟢 | --check-config [--format] | `crates/zeroship-worker/src/main.rs` | — | `tests/config_check_e2e.sh` | Non-secret summary. |
-| Secret reference resolution | 🟢 | ZEROSHIP_CONTROL_KEY / ZEROSHIP_WORKER_KEY / ... | `crates/zeroship-core/src/config/secrets.rs` | — | `tests/config_check_e2e.sh` | Literal or urn:zeroship:file only; secrets sit at their canonical overlay path. |
+| Secret reference resolution | 🟢 | ZEROSHIP_CONTROL_KEY / ZEROSHIP_PAIRWISE_SALT / ... | `crates/zeroship-core/src/config/secrets.rs` | — | `tests/config_check_e2e.sh` | Literal or urn:zeroship:file only; secrets sit at their canonical overlay path. |
 | Unix domain socket listener | 🟢 | --socket / ZEROSHIP_WORKER_SOCKET | `crates/zeroship-worker/src/main.rs` | — | — | Stale socket removed at startup. |
 | Graceful shutdown with drain timeout | 🟢 | --shutdown-timeout | `crates/zeroship-worker/src/main.rs` | — | — | 0 skips the drain and drops in-flight work at once; use a large value to wait. |
 | mimalloc global allocator | 🟢 | internal | `crates/zeroship-worker/src/main.rs` | — | — | #[global_allocator]. |

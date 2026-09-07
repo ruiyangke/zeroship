@@ -84,6 +84,7 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
     let control_pg = Arc::new(control_pg_client);
 
     let state = Arc::new(AppState {
+        service_auth: std::sync::Arc::new(zeroship_core::service_peers::ServiceAuth::unconfigured()),
         registry,
         env_store,
         stripe_store,
@@ -96,7 +97,6 @@ async fn build_state(db_url: &str, label: &str) -> Fixture {
         stripe_base_url: "https://api.stripe.com".to_string(),
         gateway_url: "http://127.0.0.1:9".to_string(),
         worker_urls: Vec::new(),
-        worker_key: SecretString::new(String::new()),
         admin_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
         origin_scheme: zeroship_core::config::OriginScheme::Https,

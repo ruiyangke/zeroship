@@ -1671,7 +1671,6 @@ mod session_csrf_tests {
             control_key: String::new(),
             worker_urls: vec![],
             poll_interval_secs: 5,
-            worker_key: String::new(),
             auth_ui_url: String::new(),
             origin_scheme,
             trusted_origins: trusted_origins

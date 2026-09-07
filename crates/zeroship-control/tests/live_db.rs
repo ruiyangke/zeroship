@@ -79,6 +79,7 @@ mod deploy_test;
 mod device_handlers_test;
 mod egress_rules_test;
 mod env_store;
+mod internal_service_auth_test;
 mod oauth_clients_test;
 mod oauth_grants_handlers_test;
 mod erasure_preflight_test;

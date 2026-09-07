@@ -29,6 +29,7 @@
 //! [`PostgresReplayStore::purge_expired`] is a housekeeping sweep, not a
 //! correctness requirement: rows past `expires_at` are already reclaimable.
 
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use compio_postgres::GenericClient;
@@ -114,30 +115,71 @@ impl<C: GenericClient + Sync> PostgresReplayStore<C> {
     }
 }
 
+/// Settle one single-use claim on `client`.
+///
+/// The statement and its verdict, over any client that can reach the table.
+/// EVERY caller in the tree goes through here - the two [`ReplayStore`] impls
+/// below and the gateway's pool-checkout one - so [`CLAIM_SQL`] has exactly one
+/// consumer and a second copy cannot drift out of step with the grants.
+///
+/// # Errors
+///
+/// Returns [`ReplayStoreError`] when the statement could not be executed. The
+/// verifier must reject the credential; it never treats this as a pass.
+pub async fn claim_replay_key<C: GenericClient + Sync>(
+    client: &C,
+    key: &str,
+    expires_at: SystemTime,
+) -> Result<ReplayClaim, ReplayStoreError> {
+    // The absolute instant travels as epoch seconds and is turned into a
+    // timestamptz by the SERVER, so the stored value does not depend on how
+    // this client's driver renders a local timestamp.
+    let epoch_seconds = expires_at
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| ReplayStoreError("retention instant precedes the epoch".to_owned()))?
+        .as_secs_f64();
+    let affected = client
+        .execute(CLAIM_SQL, &[&key, &epoch_seconds])
+        .await
+        .map_err(|error| ReplayStoreError(describe(&error)))?;
+    // One row means this caller inserted the key, or reclaimed a row whose
+    // window had already closed. Zero means a live claim is already held, by
+    // someone else or by an earlier presentation of the same assertion.
+    Ok(if affected == 1 {
+        ReplayClaim::Accepted
+    } else {
+        ReplayClaim::AlreadyUsed
+    })
+}
+
 impl<C: GenericClient + Sync> ReplayStore for PostgresReplayStore<C> {
     fn claim<'a>(&'a self, key: &'a str, expires_at: SystemTime) -> ClaimFuture<'a> {
-        Box::pin(async move {
-            // The absolute instant travels as epoch seconds and is turned into
-            // a timestamptz by the SERVER, so the stored value does not depend
-            // on how this client's driver renders a local timestamp.
-            let epoch_seconds = expires_at
-                .duration_since(UNIX_EPOCH)
-                .map_err(|_| ReplayStoreError("retention instant precedes the epoch".to_owned()))?
-                .as_secs_f64();
-            let affected = self
-                .client
-                .execute(CLAIM_SQL, &[&key, &epoch_seconds])
-                .await
-                .map_err(|error| ReplayStoreError(describe(&error)))?;
-            // One row means this caller inserted the key, or reclaimed a row
-            // whose window had already closed. Zero means a live claim is
-            // already held, by someone else or by an earlier presentation of
-            // the same assertion.
-            Ok(if affected == 1 {
-                ReplayClaim::Accepted
-            } else {
-                ReplayClaim::AlreadyUsed
-            })
-        })
+        Box::pin(claim_replay_key(&self.client, key, expires_at))
+    }
+}
+
+/// A [`ReplayStore`] over a shared long-lived client.
+///
+/// The shape a service holds when it already keeps one client for the process
+/// rather than a per-thread pool - the control plane's `control_pg`. Present as
+/// its own type because `Arc<Client>` does not implement
+/// [`GenericClient`](compio_postgres::GenericClient), so
+/// [`PostgresReplayStore`] cannot be instantiated over it directly.
+#[derive(Debug)]
+pub struct SharedClientReplayStore {
+    client: Arc<compio_postgres::Client>,
+}
+
+impl SharedClientReplayStore {
+    /// Wrap a client shared by the whole process.
+    #[must_use]
+    pub const fn new(client: Arc<compio_postgres::Client>) -> Self {
+        Self { client }
+    }
+}
+
+impl ReplayStore for SharedClientReplayStore {
+    fn claim<'a>(&'a self, key: &'a str, expires_at: SystemTime) -> ClaimFuture<'a> {
+        Box::pin(claim_replay_key(self.client.as_ref(), key, expires_at))
     }
 }

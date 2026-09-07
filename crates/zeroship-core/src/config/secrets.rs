@@ -16,14 +16,13 @@ const KNOWN_WEAK_STASH_KEYS: &[&str] = &[
     "dev-only-stash-signing-key-not-for-production-use!!",
 ];
 const KNOWN_WEAK_PAIRWISE_SALTS: &[&str] = &["dev-pairwise-salt-never-rotate-in-prod"];
-const KNOWN_WEAK_WORKER_KEYS: &[&str] = &["dev-worker-key-not-for-production-use"];
 const KNOWN_WEAK_MASTER_KEYS: &[&str] =
     &["00000000000000000000000000000000000000000000000000000000000000ff"];
 
 /// The raw-UTF-8 byte floor every string-secret validator below enforces.
 ///
-/// THE CONSTANT IS THE RULE. [`validate_stash_key`], [`validate_pairwise_salt`]
-/// and [`validate_worker_key`] each compare against it AND interpolate it into
+/// THE CONSTANT IS THE RULE. [`validate_stash_key`] and
+/// [`validate_pairwise_salt`] each compare against it AND interpolate it into
 /// their refusal, so the threshold a message promises and the threshold the
 /// code applies cannot drift apart, and [`PLATFORM_SECRETS`] states the same
 /// number rather than a second copy of it.
@@ -95,11 +94,6 @@ pub const PLATFORM_SECRETS: &[PlatformSecret] = &[
         env: "ZEROSHIP_CONTROL_MASTER_KEY",
         strength: SecretStrength::DecodedBytes(MIN_DECODED_KEY_BYTES),
         validate: validate_master_key_material,
-    },
-    PlatformSecret {
-        env: "ZEROSHIP_WORKER_KEY",
-        strength: SecretStrength::RawBytes(MIN_SECRET_BYTES),
-        validate: validate_worker_key,
     },
     PlatformSecret {
         env: "ZEROSHIP_MIGRATE_SERVER_POLICY_SEAL_KEY",
@@ -233,39 +227,6 @@ pub fn validate_stash_key(label: &str, value: &str) -> Result<(), String> {
 /// value, empty, or shorter than 32 bytes.
 pub fn validate_pairwise_salt(label: &str, value: &str) -> Result<(), String> {
     reject_known_weak(label, value, KNOWN_WEAK_PAIRWISE_SALTS)?;
-    if is_unset_credential(value) {
-        return Err(unset_credential_message(label));
-    }
-
-    if value.len() < MIN_SECRET_BYTES {
-        return Err(format!(
-            "{label} is too short ({} bytes); minimum {MIN_SECRET_BYTES} bytes",
-            value.len()
-        ));
-    }
-
-    Ok(())
-}
-
-/// Validate the requirement for the worker dispatch key.
-///
-/// The `worker_key` authenticates the gateway→worker dispatch bearer AND keys
-/// the per-request `ZeroShip-User` HMAC (the only authoritative identity channel
-/// into app code). An empty or weak key therefore disables auth or makes the
-/// HMAC forgeable, so it carries the same strength posture as the stash key and
-/// pairwise salt: non-empty, raw UTF-8 length of at least 32 bytes.
-///
-/// `label` is the caller's operator-facing spelling, for the same reason as
-/// [`validate_stash_key`]. The bare `WORKER_KEY` it used to interpolate is not
-/// settable: the identity is declared in `crates/zeroship-config-macros/src/shared.rs`
-/// and projects to `ZEROSHIP_WORKER_KEY`.
-///
-/// # Errors
-///
-/// Returns an explanatory error when `value` is a known public development
-/// value, empty, or shorter than 32 bytes.
-pub fn validate_worker_key(label: &str, value: &str) -> Result<(), String> {
-    reject_known_weak(label, value, KNOWN_WEAK_WORKER_KEYS)?;
     if is_unset_credential(value) {
         return Err(unset_credential_message(label));
     }
@@ -627,15 +588,15 @@ mod tests {
         decoded_master_key_len, enforce_owner_only, is_loopback_url, parse_secret_ref,
         read_secret_file, require_nonempty, validate_secret_material,
         resolve_secret, validate_master_key_material, validate_pairwise_salt, validate_secret_ref,
-        validate_stash_key, validate_worker_key, SecretError, SecretRef, SecretStrength,
+        validate_stash_key, SecretError, SecretRef, SecretStrength,
         KNOWN_WEAK_MASTER_KEYS, KNOWN_WEAK_PAIRWISE_SALTS, KNOWN_WEAK_STASH_KEYS,
-        KNOWN_WEAK_WORKER_KEYS, MIN_SECRET_BYTES, PLATFORM_SECRETS,
+        MIN_SECRET_BYTES, PLATFORM_SECRETS,
     };
 
     /// THE DEFECT THIS TABLE EXISTS FOR. The compose secret-strength gate
     /// (deleted 2026-08-21) derived its rule set by regexing the message text out of
-    /// this file. 2c56e92a3 replaced the baked-in `WORKER_KEY` in those messages
-    /// with a `{label}` format parameter - a correct change - and the regex
+    /// this file. 2c56e92a3 replaced the baked-in credential names in those
+    /// messages with a `{label}` format parameter - a correct change - and the regex
     /// silently matched nothing from that day on. The gate's anti-vacuity guard
     /// caught it, so it went RED rather than falsely green, but the invariant
     /// went unenforced for seven days.
@@ -702,7 +663,7 @@ mod tests {
     /// the old text-scraping gate would have reported as a rule set of its own.
     #[test]
     fn the_length_refusal_quotes_the_constant_it_compares_against() {
-        for validate in [validate_stash_key, validate_pairwise_salt, validate_worker_key] {
+        for validate in [validate_stash_key, validate_pairwise_salt] {
             let under = "a".repeat(MIN_SECRET_BYTES - 1);
             assert_eq!(
                 validate(SENTINEL, &under).expect_err("under the floor"),
@@ -778,13 +739,15 @@ mod tests {
     }
 
     /// THE DEFECT. Three validators interpolated a bare `STASH_SIGNING_KEY`,
-    /// `PAIRWISE_SALT` and `WORKER_KEY` into their refusals. None of those is a
+    /// `PAIRWISE_SALT` and a third name into their refusals. None of those is a
     /// variable any binary reads: the shared identities in
-    /// `crates/zeroship-config-macros/src/shared.rs` project to `ZEROSHIP_WORKER_KEY`
-    /// and `ZEROSHIP_PAIRWISE_SALT`, and the stash key is not shared at all -
+    /// `crates/zeroship-config-macros/src/shared.rs` project to
+    /// `ZEROSHIP_PAIRWISE_SALT`, and the stash key is not shared at all -
     /// it is `gateway.stash_signing_key` and `auth.stash_signing_key`, two
     /// different variables behind one validator. An operator who followed any
-    /// of these refusals set a variable the binary does not read.
+    /// of these refusals set a variable the binary does not read. (The third
+    /// validator was the worker key's, deleted with the shared secret itself
+    /// once the identity envelope became asymmetric.)
     ///
     /// The fix is that this module names NOTHING. Every refusal carries only
     /// the caller's label, so the operator-facing spelling lives next to the
@@ -800,9 +763,6 @@ mod tests {
             validate_pairwise_salt(SENTINEL, KNOWN_WEAK_PAIRWISE_SALTS[0]),
             validate_pairwise_salt(SENTINEL, ""),
             validate_pairwise_salt(SENTINEL, "short"),
-            validate_worker_key(SENTINEL, KNOWN_WEAK_WORKER_KEYS[0]),
-            validate_worker_key(SENTINEL, ""),
-            validate_worker_key(SENTINEL, "short"),
             validate_master_key_material(SENTINEL, KNOWN_WEAK_MASTER_KEYS[0]),
             validate_master_key_material(SENTINEL, "YWJj"),
             validate_master_key_material(SENTINEL, "not!base64!"),
@@ -830,7 +790,7 @@ mod tests {
         let other = "ZEROSHIP_OTHER_LABEL";
         assert_eq!(
             crate::config::env_like_tokens(
-                &validate_worker_key(other, "short").expect_err("short key")
+                &validate_pairwise_salt(other, "short").expect_err("short salt")
             ),
             vec![other.to_owned()]
         );
@@ -861,36 +821,6 @@ mod tests {
             .expect_err("short")
             .contains("too short"));
         validate_pairwise_salt(SENTINEL, "0123456789abcdef0123456789abcdef").expect("strong salt");
-    }
-
-    // L6: the worker_key gates BOTH the dispatch bearer check and the
-    // ZeroShip-User HMAC. Presence-only validation let a weak short key bind
-    // any interface and be brute-forced for header forgery. It now carries the
-    // SAME ≥32-byte strength floor as the stash key / pairwise salt: empty
-    // rejected, short rejected, and values of at least 32 bytes accepted.
-    #[test]
-    fn validate_worker_key_enforces_min_len() {
-        for weak in KNOWN_WEAK_WORKER_KEYS {
-            assert!(
-                validate_worker_key(SENTINEL, weak)
-                    .expect_err("known public worker key")
-                    .contains("known public")
-            );
-        }
-
-        // empty rejected (an empty key would HMAC-verify against a zero-length
-        // key any party can compute)
-        assert!(validate_worker_key(SENTINEL, "")
-            .expect_err("empty key")
-            .contains("required"));
-
-        // short (<32) rejected
-        assert!(validate_worker_key(SENTINEL, "short")
-            .expect_err("short key")
-            .contains("too short"));
-
-        // exactly 32 ok
-        validate_worker_key(SENTINEL, "0123456789abcdef0123456789abcdef").expect("strong key");
     }
 
     #[test]

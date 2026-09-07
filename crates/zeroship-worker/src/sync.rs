@@ -230,10 +230,23 @@ async fn version_poll_loop(
     }
 }
 
+/// The credential for the version poll.
+///
+/// Still the shared control key, and deliberately so: `/internal/versions` is
+/// on the POLLED tier, which the app-metadata distribution work replaces. It
+/// is out of scope for the tiering rather than exempt from it - whatever
+/// survives that work inherits the POLLED reasoning, where the rate is per
+/// poll per process.
+fn version_poll_authorization(config: &WorkerConfig) -> Option<String> {
+    (!config.control_key.is_empty()).then(|| format!("Bearer {}", config.control_key))
+}
+
 async fn poll_versions(config: &WorkerConfig) -> Result<VersionMap, String> {
     let url = format!("{}/internal/versions", config.control_url);
     let response =
-        http_get(&url, &config.control_key).await.map_err(|e| format!("fetch versions: {e}"))?;
+        http_get(&url, version_poll_authorization(config).as_deref())
+            .await
+            .map_err(|e| format!("fetch versions: {e}"))?;
     serde_json::from_str(&response).map_err(|e| format!("parse versions: {e}"))
 }
 
@@ -341,7 +354,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
         let Some(info) = versions.get(app_id) else { continue };
         let cached_version = cached_env_version(envs, app_id);
         if cached_version == Some(info.env_version) { continue; }
-        match fetch_app_env(&config.control_url, &config.control_key, app_id).await {
+        match fetch_app_env(&config.control_url, &config.service_auth, app_id).await {
             Ok(env_json) => {
                 if let Err(e) = put_env_from_json(envs, *app_id, &env_json, info.env_version) {
                     tracing::warn!(app_id = %app_id, error = %e, "worker-sync: env parse failed");
@@ -399,7 +412,7 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
                             let shared_env_stale =
                                 cached_env_version(envs, local_id) != Some(info.env_version);
                             let env_for_load: Option<String> = if shared_env_stale {
-                                match fetch_app_env(&config.control_url, &config.control_key, local_id).await {
+                                match fetch_app_env(&config.control_url, &config.service_auth, local_id).await {
                                     Ok(json) => Some(json),
                                     Err(e) => {
                                         crate::metrics::inc(&crate::metrics::ENV_FETCH_FAILURES);
@@ -502,9 +515,13 @@ async fn reconcile_once(config: &WorkerConfig, versions: &VersionMap, envs: &Sha
 
 /// Fetch just one app's version info. Used by `load_on_demand` in `handler.rs`
 /// when a request arrives for an app that's not yet in the thread-local cache.
-pub async fn fetch_app_version(url_base: &str, auth_key: &str, app_id: &Uuid) -> Result<AppVersionInfo, String> {
+pub async fn fetch_app_version(
+    url_base: &str,
+    service_auth: &zeroship_core::service_peers::ServiceAuth,
+    app_id: &Uuid,
+) -> Result<AppVersionInfo, String> {
     let url = format!("{url_base}/internal/apps/{app_id}");
-    let body = http_get(&url, auth_key).await?;
+    let body = http_get(&url, control_authorization(service_auth)?.as_deref()).await?;
     serde_json::from_str(&body).map_err(|e| e.to_string())
 }
 
@@ -517,9 +534,38 @@ pub async fn fetch_app_version(url_base: &str, auth_key: &str, app_id: &Uuid) ->
 /// Control returns 404 / 500 for non-existent apps or decrypt failures;
 /// in both cases we propagate the error string so the caller can log it
 /// and decide whether to evict the bundle or fail the request.
-pub async fn fetch_app_env(url_base: &str, auth_key: &str, app_id: &Uuid) -> Result<String, String> {
+pub async fn fetch_app_env(
+    url_base: &str,
+    service_auth: &zeroship_core::service_peers::ServiceAuth,
+    app_id: &Uuid,
+) -> Result<String, String> {
     let url = format!("{url_base}/internal/apps/{app_id}/env");
-    http_get(&url, auth_key).await
+    http_get(&url, control_authorization(service_auth)?.as_deref()).await
+}
+
+/// Mint this worker's credential for one control-plane call.
+///
+/// The FULL assertion profile: these two reads fire once per app load and
+/// again on a version change, so the single-use claim control writes is
+/// proportional to app loads rather than to end-user traffic.
+///
+/// A fresh assertion per call, deliberately. Caching one would defeat the
+/// single-use property it is minted to satisfy - the second presentation is
+/// exactly what the callee's replay store refuses.
+fn control_authorization(
+    service_auth: &zeroship_core::service_peers::ServiceAuth,
+) -> Result<Option<String>, String> {
+    let control = zeroship_core::service_peers::service_issuer(
+        zeroship_core::service_peers::CONTROL_SERVICE_NAME,
+    )
+    .map_err(|e| format!("control service issuer is malformed: {e}"))?;
+    match service_auth.authorization_for(&control) {
+        Some(header) => Ok(Some(header)),
+        None => Err(
+            "no service key material configured; cannot assert this worker's identity to control"
+                .to_owned(),
+        ),
+    }
 }
 
 /// Parse + insert an env JSON into the shared cache, tagged with the
@@ -572,8 +618,8 @@ pub fn remove_env(envs: &SharedEnvs, app_id: &Uuid) {
 }
 
 /// Simple HTTP GET returning response body as string.
-async fn http_get(url: &str, auth_key: &str) -> Result<String, String> {
-    let bytes = http_get_bytes(url, auth_key).await?;
+async fn http_get(url: &str, authorization: Option<&str>) -> Result<String, String> {
+    let bytes = http_get_bytes(url, authorization).await?;
     String::from_utf8(bytes).map_err(|e| e.to_string())
 }
 
@@ -608,8 +654,8 @@ fn this_thread_control_client() -> cyper::Client {
 /// Used by the env / version polls (still HTTP). Worker-bundle bytes
 /// come from `BlobStore` directly — see `reconcile_once` and
 /// `handler::load_on_demand`.
-async fn http_get_bytes(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
-    compio::time::timeout(CONTROL_REQUEST_TIMEOUT, http_get_bytes_inner(url, auth_key))
+async fn http_get_bytes(url: &str, authorization: Option<&str>) -> Result<Vec<u8>, String> {
+    compio::time::timeout(CONTROL_REQUEST_TIMEOUT, http_get_bytes_inner(url, authorization))
         .await
         .map_err(|_| control_timeout_error())?
 }
@@ -621,14 +667,21 @@ fn control_timeout_error() -> String {
     )
 }
 
-async fn http_get_bytes_inner(url: &str, auth_key: &str) -> Result<Vec<u8>, String> {
+async fn http_get_bytes_inner(
+    url: &str,
+    authorization: Option<&str>,
+) -> Result<Vec<u8>, String> {
     let client = this_thread_control_client();
     let mut builder = client
         .get(url)
         .map_err(|e| format!("invalid control URL: {e}"))?;
-    if !auth_key.is_empty() {
+    // The COMPLETE header value, built by the caller. Two different credentials
+    // ride this one function - a service assertion on the privileged per-app
+    // reads, the shared control key on the version poll - so the scheme is the
+    // caller's to choose and this function never invents one.
+    if let Some(value) = authorization {
         builder = builder
-            .header("authorization", &format!("Bearer {auth_key}"))
+            .header("authorization", value)
             .map_err(|e| format!("invalid auth header: {e}"))?;
     }
 
@@ -887,6 +940,10 @@ mod tests {
                 "/dispatch/{}",
                 zeroship_core::app_id::canonical_app_id_for(app_id).as_str()
             ))
+            .header(
+                "authorization",
+                crate::handler::tests::gateway_authorization(),
+            )
             .set_payload(frame)
             .to_request()
     }
@@ -989,6 +1046,7 @@ mod tests {
 
             let logs = crate::logs::new_store();
             let config = Arc::new(crate::WorkerConfig {
+                service_auth: crate::handler::tests::test_service_auth(),
                 // Dead port: this scenario must not need the control plane
                 // (SharedEnvs is already current when PHASE 2 swaps).
                 control_url: "http://127.0.0.1:1".to_string(),
@@ -999,7 +1057,6 @@ mod tests {
                 max_isolates: 10,
                 max_pinned_isolates_per_app: 4,
                 poll_interval_secs: 60,
-                worker_key: String::new(),
                 shutdown_timeout_secs: 0,
                 blob_store,
                 workflow_blob_store,
