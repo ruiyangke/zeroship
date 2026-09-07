@@ -1589,6 +1589,20 @@ mod access_identity_tests {
     // panic naming the provisioning command.
     async fn mint_fixture() -> (String, Client, Client, Client, Uuid, OAuthClient, Issuer) {
         let dsn = zeroship_core::config::test_database_url();
+        // A DATABASE BEHIND THE MIGRATION LEDGER IS REFUSED, NOT REPORTED AS A
+        // CODE REGRESSION. `refresh::establish_session` maps every error the
+        // session store raises onto one `server_error("session issuance
+        // unavailable")`, so a `zeroship` schema that has never seen
+        // `db/migrations-ts/20260907000100_session_object.ts` arrives here as
+        // an opaque 500 inside `proof_for`'s `expect`, and the tests below
+        // present as named failures naming nothing that is wrong with them.
+        // That is the void run `zeroship_testkit::live_db` exists to remove: it
+        // names the database, says how far short its journal is, and prints
+        // `deploy/ops/db-migrate.sh`. Asking for the journal schema is what
+        // turns that ledger comparison on; the schema list alone would call a
+        // behind database ready. Memoised per process, because any of these
+        // tests can be the first to reach a database under a filter.
+        zeroship_testkit::live_db::require_once(&dsn, zeroship_testkit::live_db::PLATFORM_SCHEMAS);
         let setup = pg_connect(&dsn).await;
         let mint = pg_connect(&dsn).await;
         let deletion = pg_connect(&dsn).await;

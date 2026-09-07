@@ -95,6 +95,12 @@ async-trait = { workspace = true }
 futures = { workspace = true }
 # Capture structured retirement fields in the live retention test.
 tracing-subscriber = { workspace = true }
+# The live-database preflight. The lib tests in `src/oidc/authorization_code.rs`
+# talk to the shared platform database directly, so they need the same refusal
+# `zeroship-gateway`, `zeroship-authz` and `zeroship-control` already run: a
+# database behind the migration ledger is refused by name rather than surfacing
+# as a failing assertion.
+zeroship-testkit = { workspace = true }
 
 [lints]
 workspace = true
