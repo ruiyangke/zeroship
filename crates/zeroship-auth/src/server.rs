@@ -359,6 +359,7 @@ pub async fn run(
     relay_forward_mailer: RelayForwardMailer,
     op_issuer: Arc<oidc::Issuer>,
     refresh_pool: oidc::refresh::RefreshSessionPool,
+    service_keyring: Arc<zeroship_core::service_peers::ServiceKeyring>,
 ) -> std::io::Result<()> {
     let addr = cfg.settings.addr.get().clone();
     let google_enabled = google_jwks.is_some();
@@ -379,6 +380,9 @@ pub async fn run(
             .state(mailer.clone())
             .state(op_issuer.clone())
             .state(refresh_pool.clone())
+            // This service's own assertion key. `/me/delete` mints one call's
+            // credential from it for the control-plane erasure preflight.
+            .state(service_keyring.clone())
             // The dedicated relay-forward mailer (§5.2a). A distinct newtype
             // so `State<RelayForwardMailer>` doesn't collide with the
             // transactional `State<Arc<dyn Mailer>>`.

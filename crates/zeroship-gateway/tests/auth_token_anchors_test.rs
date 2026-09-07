@@ -1187,7 +1187,7 @@ async fn op_refresh(oidc: &OidcRp, op: &MockOP) -> Result<(), String> {
 /// no-ops in CI. Locally (no `CI`), `None` ⇒ the test prints a skip line and
 /// returns, the established env-skip convention for a dev box without PG.
 fn db_url() -> Option<String> {
-    match zeroship_core::config::test_database_url_opt() {
+    match common::platform_db_or_skip() {
         Some(dsn) if !dsn.is_empty() => Some(dsn),
         _ => {
             if zeroship_core::declared_env!(external, "CI", zeroship_core::config::TestHarness).is_some() {

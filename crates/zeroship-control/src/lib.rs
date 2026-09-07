@@ -80,7 +80,7 @@ pub(crate) mod test_live_db {
             .get_or_init(|| {
                 zeroship_testkit::live_db::require_configured(
                     zeroship_core::config::test_database_url_opt(),
-                    &["zeroship", "zeroship_migrations"],
+                    zeroship_testkit::live_db::PLATFORM_SCHEMAS,
                 )
             })
             .clone()

@@ -54,7 +54,7 @@ async fn live_session(
 
 #[compio::test]
 async fn create_validate_revoke_roundtrip() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+    let Some(dsn) = common::platform_db_or_skip() else {
         zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };

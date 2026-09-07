@@ -206,7 +206,7 @@ OUTSIDE these two markers is hand-maintained and is never rewritten
 by the generator.
 -->
 
-**155 canonical settings**: 116 operational, 32 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
+**162 canonical settings**: 124 operational, 31 secret, 5 bootstrap controls, 2 command controls. Every environment name below is `ZEROSHIP_<CANONICAL>` and every overlay path is the canonical name itself, because both are computed from the one declaration rather than spelled twice.
 
 ### shared (no scope prefix: read by more than one binary)
 
@@ -216,7 +216,7 @@ by the generator.
 | `check_config` | command control | - | - | zeroship-auth `--check-config`<br>zeroship-control `--check-config`<br>zeroship-data-cdc-server `--check-config`<br>zeroship-gate `--check-config`<br>zeroship-migrate-server `--check-config`<br>zeroship-worker `--check-config`<br>zeroship-workflow-scheduler `--check-config` | - |
 | `check_config_format` | command control | - | - | zeroship-auth `--check-config-format`<br>zeroship-control `--check-config-format`<br>zeroship-data-cdc-server `--check-config-format`<br>zeroship-gate `--check-config-format`<br>zeroship-migrate-server `--check-config-format`<br>zeroship-worker `--check-config-format`<br>zeroship-workflow-scheduler `--check-config-format` | `CheckFormat::Text` |
 | `config` | bootstrap control | `ZEROSHIP_CONFIG` | - | zeroship-auth `--config`<br>zeroship-control `--config`<br>zeroship-data-cdc-server `--config`<br>zeroship-gate `--config`<br>zeroship-migrate-server `--config`<br>zeroship-workflow-scheduler `--config` | - |
-| `control_key` | secret | `ZEROSHIP_CONTROL_KEY` | `control_key` | zeroship-auth `--control-key-file`<br>zeroship-control `--control-key-file`<br>zeroship-gate `--control-key-file`<br>zeroship-migrate-server `--control-key-file`<br>zeroship-worker `--control-key-file` | - |
+| `control_key` | secret | `ZEROSHIP_CONTROL_KEY` | `control_key` | zeroship-control `--control-key-file`<br>zeroship-gate `--control-key-file`<br>zeroship-migrate-server `--control-key-file`<br>zeroship-worker `--control-key-file` | - |
 | `control_url` | operational | `ZEROSHIP_CONTROL_URL` | `control_url` | zeroship-auth `--control-url`<br>zeroship-gate `--control-url`<br>zeroship-worker `--control-url` | `http://localhost:9090` |
 | `no_config` | bootstrap control | `ZEROSHIP_NO_CONFIG` | - | zeroship-auth `--no-config`<br>zeroship-control `--no-config`<br>zeroship-data-cdc-server `--no-config`<br>zeroship-gate `--no-config`<br>zeroship-migrate-server `--no-config`<br>zeroship-workflow-scheduler `--no-config` | - |
 | `oauth_audience` | operational | `ZEROSHIP_OAUTH_AUDIENCE` | `oauth_audience` | zeroship-auth `--oauth-audience`<br>zeroship-control `--oauth-audience`<br>zeroship-migrate-server `--oauth-audience` | `control.zeroship.ai` |
@@ -276,6 +276,8 @@ by the generator.
 | `auth.relay_smtp_tls` | operational | `ZEROSHIP_AUTH_RELAY_SMTP_TLS` | `auth.relay_smtp_tls` | zeroship-auth `--relay-smtp-tls` | `SmtpTls::Starttls` |
 | `auth.relay_smtp_username` | operational | `ZEROSHIP_AUTH_RELAY_SMTP_USERNAME` | `auth.relay_smtp_username` | zeroship-auth `--relay-smtp-username` | empty |
 | `auth.resend_api_key` | secret | `ZEROSHIP_AUTH_RESEND_API_KEY` | `auth.resend_api_key` | zeroship-auth `--resend-api-key-file` | - |
+| `auth.service_key_file` | operational | `ZEROSHIP_AUTH_SERVICE_KEY_FILE` | `auth.service_key_file` | zeroship-auth `--service-key-file` | empty |
+| `auth.service_peers_file` | operational | `ZEROSHIP_AUTH_SERVICE_PEERS_FILE` | `auth.service_peers_file` | zeroship-auth `--service-peers-file` | empty |
 | `auth.signing_key_file` | operational | `ZEROSHIP_AUTH_SIGNING_KEY_FILE` | `auth.signing_key_file` | zeroship-auth `--signing-key-file` | empty |
 | `auth.smtp_host` | operational | `ZEROSHIP_AUTH_SMTP_HOST` | `auth.smtp_host` | zeroship-auth `--smtp-host` | empty |
 | `auth.smtp_password` | secret | `ZEROSHIP_AUTH_SMTP_PASSWORD` | `auth.smtp_password` | zeroship-auth `--smtp-password-file` | - |

@@ -41,6 +41,8 @@
   "oidc_session_clients": "zeroship_platform",
   "principal_grants": "zeroship_platform",
   "rate_limits": "zeroship_platform",
+  "grants": "zeroship_platform",
+  "sessions": "zeroship_platform",
   "signing_keys": "zeroship_platform",
   "token_revocations": "zeroship_platform",
   "totp_backup_codes": "zeroship_platform",

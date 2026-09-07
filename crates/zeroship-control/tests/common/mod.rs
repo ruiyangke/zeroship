@@ -90,14 +90,13 @@ pub fn require_control_db() -> String {
     static CHECKED: OnceLock<String> = OnceLock::new();
     CHECKED
         .get_or_init(|| {
-            // `zeroship` is the platform schema; `zeroship_migrations` is the
-            // journal beside it. Asking for BOTH is what separates "never
-            // migrated" from "migrated and then partly dismantled" - the second
-            // is what actually happened, and a check for the journal alone
-            // would have called that database ready.
+            // The pair is `zeroship_testkit::live_db::PLATFORM_SCHEMAS`, whose
+            // doc comment carries what each half separates and why naming the
+            // journal also asks whether the journal is CURRENT. It was spelled
+            // out here, and in two other places, until it became one constant.
             zeroship_testkit::live_db::require_configured(
                 zeroship_core::config::test_database_url_opt(),
-                &["zeroship", "zeroship_migrations"],
+                zeroship_testkit::live_db::PLATFORM_SCHEMAS,
             )
         })
         .clone()

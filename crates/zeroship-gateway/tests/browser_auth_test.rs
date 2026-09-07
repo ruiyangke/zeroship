@@ -552,7 +552,7 @@ async fn signout_with_no_anchor_is_204_and_clears_cookies() {
 /// cleared, (d) OP `/revoke` was hit exactly once.
 #[ntex::test]
 async fn signout_local_revokes_family_marker_deletes_anchor_and_hits_op_revoke() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
+    let Some(dsn) = common::platform_db_or_skip() else {
         zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
         return;
     };

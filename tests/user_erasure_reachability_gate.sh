@@ -277,9 +277,18 @@ order_claim "the preflight runs BEFORE request_deletion" \
   "[ -n '$PREFLIGHT_LINE' ] && [ -n '$REQUEST_LINE' ] && [ '$PREFLIGHT_LINE' -lt '$REQUEST_LINE' ]"
 order_claim "the reaper re-checks it before the delete" \
   "grep -q 'still_erasable' '$ROOT/crates/zeroship-auth/src/cron/account_reaper.rs'"
-order_claim "a missing control key refuses rather than proceeding" \
+order_claim "a credential this process cannot produce refuses rather than proceeding" \
   "grep -q 'PreflightError::NoCredential' '$ROOT/crates/zeroship-auth/src/control_client.rs'"
-gate_arm precondition_ordering "$N_ORDER" 5
+# The preflight is the auth service's ONE call into the control plane, and the
+# credential it carries decides who else could make it. On the shared control
+# key the answer is "any of the four processes that read that file"; on a service
+# assertion it is "svc/auth". Both halves are checked, because keeping
+# `check_service_auth` while ALSO leaving a `check_auth` arm would re-open the
+# shared-key door beside the narrow one.
+order_claim "the control side authenticates the caller as one named service" \
+  "grep -q 'check_service_auth' '$ROOT/crates/zeroship-control/src/erasure.rs' \
+     && ! grep -q 'check_auth(' '$ROOT/crates/zeroship-control/src/erasure.rs'"
+gate_arm precondition_ordering "$N_ORDER" 6
 
 echo ""
 echo "============================================"
