@@ -44,13 +44,13 @@ struct DeviceTokenResponse {
 }
 
 #[allow(clippy::future_not_send)]
-async fn boot_native() -> Option<(
+async fn boot_native() -> (
     ntex::web::test::TestServer,
     String,
     Arc<compio_postgres::Client>,
     Arc<Issuer>,
-)> {
-    let db_url = zeroship_core::config::test_database_url_opt()?;
+) {
+    let db_url = crate::common::test_database_url();
     let (pg_client, pg_connection) =
         compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
@@ -92,7 +92,7 @@ async fn boot_native() -> Option<(
     .await;
     let auth_base = srv.url("").trim_end_matches('/').to_string();
 
-    Some((srv, auth_base, pg, issuer))
+    (srv, auth_base, pg, issuer)
 }
 
 fn test_issuer() -> Issuer {
@@ -302,10 +302,7 @@ async fn get_device_with_user_code_from_ip(
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_route_renders_and_rejects_bad_input() {
-    let Some((srv, auth_base, _pg, _issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, _pg, _issuer) = boot_native().await;
     let http = cyper::Client::new();
 
     let resp = http
@@ -390,10 +387,7 @@ async fn device_route_renders_and_rejects_bad_input() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_authorization_user_code_uses_high_entropy_format() {
-    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant_entropy] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, pg, _issuer) = boot_native().await;
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-entropy-{}", Uuid::new_v4().simple());
     insert_native_device_client(&pg, &client_id, "native device entropy test", &["openid"]).await;
@@ -422,10 +416,7 @@ async fn device_authorization_user_code_uses_high_entropy_format() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_code() {
-    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant_ratelimit] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, pg, _issuer) = boot_native().await;
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-ratelimit-{}", Uuid::new_v4().simple());
     insert_native_device_client(
@@ -563,10 +554,7 @@ async fn device_post_rate_limits_failed_user_code_guesses_but_allows_correct_cod
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_get_rate_limits_failed_complete_uri_guesses_by_ip() {
-    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant_get_ratelimit] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, pg, _issuer) = boot_native().await;
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-get-ratelimit-{}", Uuid::new_v4().simple());
     let client_name = "native device GET rate-limit test";
@@ -640,10 +628,7 @@ async fn device_get_rate_limits_failed_complete_uri_guesses_by_ip() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_post_anonymous_failed_user_code_guesses_drain_ip_backstop() {
-    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant_ip_backstop] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, pg, _issuer) = boot_native().await;
     let http = cyper::Client::new();
 
     let xff_ip = unique_test_client_ip();
@@ -715,10 +700,7 @@ async fn device_post_anonymous_failed_user_code_guesses_drain_ip_backstop() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_authorization_omitted_scope_defaults_to_openid_only() {
-    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant_scope] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, pg, _issuer) = boot_native().await;
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-scope-{}", Uuid::new_v4().simple());
     insert_native_device_client(
@@ -760,10 +742,7 @@ async fn device_authorization_omitted_scope_defaults_to_openid_only() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
-    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant_confirm] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, pg, _issuer) = boot_native().await;
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-confirm-{}", Uuid::new_v4().simple());
     let client_name = "zeroship CLI confirm test";
@@ -877,10 +856,7 @@ async fn native_device_confirmation_shows_client_scopes_and_requires_confirm() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
-    let Some((srv, auth_base, pg, issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant_native] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, pg, issuer) = boot_native().await;
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-native-{}", Uuid::new_v4().simple());
     insert_native_device_client(&pg, &client_id, "native device test", &["apps:read"]).await;
@@ -1066,10 +1042,7 @@ async fn native_device_grant_approves_via_auth_session_and_polls_op_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelled() {
-    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant_native] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, pg, _issuer) = boot_native().await;
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-lifecycle-{}", Uuid::new_v4().simple());
     insert_native_device_client(&pg, &client_id, "native device lifecycle test", &["apps:read"])
@@ -1099,8 +1072,7 @@ async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelle
     .await
     .expect("approve native device grant");
 
-    let db_url = zeroship_core::config::test_database_url_opt()
-    .expect("test database URL");
+    let db_url = crate::common::test_database_url();
     let mut deletion = dedicated_test_db(&db_url).await;
     let deletion_request = users::request_deletion(&mut deletion, user.id, 30)
         .await
@@ -1166,10 +1138,7 @@ async fn credential_bump_rejects_approved_device_code_after_deletion_is_cancelle
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_user_code_redirects_anonymous_browser_to_login() {
-    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, pg, _issuer) = boot_native().await;
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-test-{}", Uuid::new_v4().simple());
 
@@ -1303,10 +1272,7 @@ async fn device_user_code_redirects_anonymous_browser_to_login() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn device_post_requires_csrf_token() {
-    let Some((srv, auth_base, pg, _issuer)) = boot_native().await else {
-        zeroship_test_support::skip("[device_grant] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (srv, auth_base, pg, _issuer) = boot_native().await;
     let http = cyper::Client::new();
     let client_id = format!("zeroship-cli-csrf-{}", Uuid::new_v4().simple());
 

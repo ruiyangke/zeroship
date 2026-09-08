@@ -1,4 +1,5 @@
-//! Token-sweep cron — live PG. Skip when no test database is configured.
+//! Token-sweep cron - live PG. A run that cannot reach one is REFUSED, not
+//! skipped.
 //!
 //! Drives [`token_sweep::tick`] directly so the sweep is observable inside
 //! a single test run (the real cron sleeps 1 h between ticks).
@@ -26,8 +27,8 @@ use zeroship_auth::store::{users};
 use crate::common;
 
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<(compio_postgres::Client, String)> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> (compio_postgres::Client, String) {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -35,17 +36,14 @@ async fn pg() -> Option<(compio_postgres::Client, String)> {
         }
     })
     .detach();
-    Some((client, dsn))
+    (client, dsn)
 }
 
 // The lease is taken BEFORE the seed and held past the assertions: the window
 // that has to be exclusive starts at the first backdated row, not at the tick.
 #[compio::test]
 async fn token_sweep_deletes_expired_rows_after_grace_and_keeps_fresh_rows() {
-    let Some((client, db_url)) = pg().await else {
-        zeroship_test_support::skip("skipping token_sweep_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (client, db_url) = pg().await;
     let _lease = common::lease_sweep(common::sweep_lock::TOKEN_SWEEP).await;
 
     let tag = Uuid::new_v4().simple().to_string();
@@ -244,17 +242,14 @@ async fn cleanup(
 /// SEC-3: the token sweep also reaps idle `zeroship.rate_limits` rows (and the
 /// relay dedup sentinels that share the table) so a forged-IP flood cannot
 /// leave permanent rows. A bucket idle past the 24h grace window is deleted; a
-/// freshly-touched one survives. Live PG — skip when no test database is configured.
+/// freshly-touched one survives. Live PG; a run without one is refused.
 ///
 /// This one asserts nothing about the whole database - both counts name a
 /// bucket key this run minted - so it takes the lease only because it drives
 /// the same tick as its sibling and would otherwise sweep out from under it.
 #[compio::test]
 async fn token_sweep_reaps_idle_rate_limit_buckets_and_keeps_fresh() {
-    let Some((client, db_url)) = pg().await else {
-        zeroship_test_support::skip("skipping token_sweep rate_limits test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (client, db_url) = pg().await;
     let _lease = common::lease_sweep(common::sweep_lock::TOKEN_SWEEP).await;
 
     let tag = Uuid::new_v4().simple().to_string();

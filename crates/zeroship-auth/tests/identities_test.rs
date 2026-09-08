@@ -1,7 +1,10 @@
 //! Live-PG roundtrip for `auth::store::identities`.
 //!
-//! Skipped unless a test database is available (`PG_TEST_URL` or the TOML overlay). Seeds an OAuth-only user (no password
-//! hash), exercises link/find/list/unlink, then cleans up via FK cascade.
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped.
+//!
+//! Seeds an OAuth-only user (no password hash), exercises link/find/list/unlink,
+//! then cleans up via FK cascade.
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
@@ -11,10 +14,7 @@ use zeroship_auth::store::{identities};
 
 #[compio::test]
 async fn identities_link_find_list_unlink_roundtrip() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skipping identities_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
 
     let client = pg_connect(&dsn).await;
 
@@ -105,10 +105,7 @@ async fn identities_link_find_list_unlink_roundtrip() {
 
 #[compio::test]
 async fn guarded_unlink_allows_only_one_concurrent_oauth_only_unlink() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skipping identities_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
 
     let client = pg_connect(&dsn).await;
 

@@ -11,10 +11,7 @@ use zeroship_auth::cron::audit_retention;
 
 #[compio::test]
 async fn retention_deletes_old_security_events() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
     let (client, conn) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         let _ = conn.run().await;
@@ -70,10 +67,7 @@ async fn retention_deletes_old_security_events() {
 
 #[compio::test]
 async fn retention_keeps_refresh_reuse_detected_forever() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
     let (client, conn) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         let _ = conn.run().await;
@@ -138,10 +132,7 @@ async fn retention_keeps_refresh_reuse_detected_forever() {
 ///      trigger — i.e. the trigger is ARMED for everything but the sweep.
 #[compio::test]
 async fn sweep_guc_does_not_leak_past_its_transaction() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skip: no test database (set PG_TEST_URL or run tests/provision_test_backends.sh)");
-        return;
-    };
+    let dsn = crate::common::test_database_url();
     let (mut client, conn) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         let _ = conn.run().await;

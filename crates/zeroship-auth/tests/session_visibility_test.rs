@@ -1,8 +1,9 @@
 //! Live-PG roundtrip for ISS-10 — active-session visibility + single-session
 //! revoke (`store::sessions::list_by_user` + `revoke_one_for_user`).
 //!
-//! Skipped unless a test database is available (`PG_TEST_URL` or the TOML overlay). The repo convention is to run the
-//! auth DB suite with `--test-threads=1` (one shared DB). Each test scopes
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped. The repo convention is to run
+//! the auth DB suite with `--test-threads=1` (one shared DB). Each test scopes
 //! itself with random emails so a serial run leaves no residue; an explicit
 //! cleanup removes every row each test inserted.
 //!
@@ -20,8 +21,8 @@ use crate::common;
 use zeroship_auth::store::sessions::{self, SessionKind};
 use zeroship_auth::store::users;
 
-async fn pg() -> Option<Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> Client {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -29,7 +30,7 @@ async fn pg() -> Option<Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 /// Seed a real `zeroship.apps` row (gateway_sessions.app_id FKs into it) and
@@ -121,10 +122,7 @@ async fn cleanup_app(client: &Client, app_id: Uuid) {
 /// newest-first, and tags each with the right kind + (gateway) app_id.
 #[compio::test]
 async fn list_returns_idp_and_gateway_sessions() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping session_visibility_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
     let email = format!("iss10-list-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&client, &email, "Test", None)
         .await
@@ -175,10 +173,7 @@ async fn list_returns_idp_and_gateway_sessions() {
 /// list_by_user excludes revoked and expired sessions of BOTH kinds.
 #[compio::test]
 async fn list_excludes_revoked_and_expired() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping session_visibility_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
     let email = format!("iss10-excl-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&client, &email, "Test", None)
         .await
@@ -266,10 +261,7 @@ async fn list_excludes_revoked_and_expired() {
 /// list_by_user never returns ANOTHER user's sessions.
 #[compio::test]
 async fn list_excludes_other_users_sessions() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping session_visibility_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
     let email_a = format!("iss10-a-{}@zeroship.test", Uuid::new_v4().simple());
     let email_b = format!("iss10-b-{}@zeroship.test", Uuid::new_v4().simple());
     let user_a = users::create(&client, &email_a, "A", None)
@@ -317,10 +309,7 @@ async fn list_excludes_other_users_sessions() {
 /// session then disappears from the list.
 #[compio::test]
 async fn revoke_one_idp_session_succeeds() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping session_visibility_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
     let email = format!("iss10-revidp-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&client, &email, "Test", None)
         .await
@@ -373,10 +362,7 @@ async fn revoke_one_idp_session_succeeds() {
 /// file can rule on is that the caller is handed what it needs to get there.
 #[compio::test]
 async fn revoke_one_gateway_session_succeeds() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping session_visibility_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
     let email = format!("iss10-revgw-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&client, &email, "Test", None)
         .await
@@ -411,10 +397,7 @@ async fn revoke_one_gateway_session_succeeds() {
 /// false AND leave user_b's session active.
 #[compio::test]
 async fn revoke_other_users_session_is_noop_idor_guard() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping session_visibility_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
     let email_a = format!("iss10-idor-a-{}@zeroship.test", Uuid::new_v4().simple());
     let email_b = format!("iss10-idor-b-{}@zeroship.test", Uuid::new_v4().simple());
     let user_a = users::create(&client, &email_a, "A", None)
@@ -480,10 +463,7 @@ async fn revoke_other_users_session_is_noop_idor_guard() {
 /// Revoking an already-revoked or nonexistent id is a no-op (returns false).
 #[compio::test]
 async fn revoke_already_revoked_or_missing_is_noop() {
-    let Some(client) = pg().await else {
-        zeroship_test_support::skip("skipping session_visibility_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
     let email = format!("iss10-noop-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&client, &email, "Test", None)
         .await

@@ -6,10 +6,10 @@ use zeroship_authn::rate_limit::{consume, Quota, RateLimitDecision};
 // compio-postgres's `Client` is `!Send` (it owns an io_uring submission
 // handle). All async helpers that touch it inherit that.
 #[allow(clippy::future_not_send)]
-async fn pg_or_skip() -> Option<compio_postgres::Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> compio_postgres::Client {
+    let dsn = crate::common::test_database_url();
     let client = pg_connect(&dsn).await;
-    Some(client)
+    client
 }
 
 #[allow(clippy::future_not_send)]
@@ -26,10 +26,7 @@ async fn pg_connect(dsn: &str) -> compio_postgres::Client {
 
 #[compio::test]
 async fn consumes_until_throttled() {
-    let Some(client) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let client = pg().await;
 
     let key = format!("test:{}", uuid::Uuid::new_v4().simple());
     let bucket = Quota {
@@ -58,12 +55,8 @@ async fn consumes_until_throttled() {
 
 #[compio::test]
 async fn concurrent_consumes_are_atomic() {
-    let Some(seed_client) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let dsn = zeroship_core::config::test_database_url_opt()
-        .expect("test database URL present after pg_or_skip");
+    let seed_client = pg().await;
+    let dsn = crate::common::test_database_url();
 
     let key = format!("test:atomic:{}", uuid::Uuid::new_v4().simple());
     seed_client

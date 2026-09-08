@@ -63,11 +63,8 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot(kind: ClientKind, previous: Option<&[u8]>) -> Option<Self> {
-        let Some(db_url) = db_url() else {
-            zeroship_test_support::skip("[oidc_brokered_login_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return None;
-        };
+    async fn boot(kind: ClientKind, previous: Option<&[u8]>) -> Self {
+        let db_url = db_url();
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(err) = pg_connection.run().await {
@@ -146,7 +143,7 @@ impl Fixture {
         })
         .await;
 
-        Some(Self {
+        Self {
             auth_base: srv.url("").trim_end_matches('/').to_string(),
             srv,
             db,
@@ -155,7 +152,7 @@ impl Fixture {
             app_id,
             user_id,
             session_cookie,
-        })
+        }
     }
 
     async fn cleanup(self) {
@@ -167,9 +164,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_code_exchange_without_broker_secret_is_invalid_client() {
-    let Some(fx) = Fixture::boot(ClientKind::Brokered, None).await else {
-        return;
-    };
+    let fx = Fixture::boot(ClientKind::Brokered, None).await;
 
     let verifier = pkce_verifier();
     let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
@@ -191,9 +186,7 @@ async fn brokered_code_exchange_without_broker_secret_is_invalid_client() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_code_exchange_with_derived_secret_yields_global_sub_id_token_and_pairwise_access() {
-    let Some(fx) = Fixture::boot(ClientKind::Brokered, None).await else {
-        return;
-    };
+    let fx = Fixture::boot(ClientKind::Brokered, None).await;
     let verifier = pkce_verifier();
     let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
     let secret = zeroship_core::auth::derive_broker_secret(BROKER_CURRENT, &fx.client_id);
@@ -232,9 +225,7 @@ async fn brokered_code_exchange_with_derived_secret_yields_global_sub_id_token_a
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_rotation_previous_master_secret_still_accepted() {
-    let Some(fx) = Fixture::boot(ClientKind::Brokered, Some(BROKER_PREVIOUS)).await else {
-        return;
-    };
+    let fx = Fixture::boot(ClientKind::Brokered, Some(BROKER_PREVIOUS)).await;
     let verifier = pkce_verifier();
     let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
     let previous_secret =
@@ -252,9 +243,7 @@ async fn brokered_rotation_previous_master_secret_still_accepted() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn non_brokered_client_unchanged_pairwise_and_no_secret_required() {
-    let Some(fx) = Fixture::boot(ClientKind::NonBrokered, None).await else {
-        return;
-    };
+    let fx = Fixture::boot(ClientKind::NonBrokered, None).await;
     let verifier = pkce_verifier();
     let code = authorize_code(&fx, REDIRECT_URI, &verifier).await;
 
@@ -281,9 +270,7 @@ async fn non_brokered_client_unchanged_pairwise_and_no_secret_required() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_client_still_enforces_exact_redirect_match() {
-    let Some(fx) = Fixture::boot(ClientKind::Brokered, None).await else {
-        return;
-    };
+    let fx = Fixture::boot(ClientKind::Brokered, None).await;
     let verifier = pkce_verifier();
 
     let resp = send_authorize(&fx, UNREGISTERED_REDIRECT_URI, &verifier)
@@ -303,9 +290,7 @@ async fn brokered_client_still_enforces_exact_redirect_match() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn brokered_refresh_grant_requires_broker_secret() {
-    let Some(fx) = Fixture::boot(ClientKind::Brokered, None).await else {
-        return;
-    };
+    let fx = Fixture::boot(ClientKind::Brokered, None).await;
     let verifier = pkce_verifier();
     let secret = zeroship_core::auth::derive_broker_secret(BROKER_CURRENT, &fx.client_id);
 
@@ -379,8 +364,8 @@ async fn refresh_request(
     req.body(body).send().await
 }
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+fn db_url() -> String {
+    crate::common::test_database_url()
 }
 
 fn test_issuer() -> Issuer {

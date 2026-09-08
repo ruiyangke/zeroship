@@ -12,7 +12,8 @@
 //! If these diverge in status, body length, or wall time, the dummy-hash
 //! arm has regressed and an attacker can probe for valid emails.
 //!
-//! Skips when no test database is configured.
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -117,11 +118,8 @@ const N_PAIRS: usize = 4;
 
 #[ntex::test]
 async fn login_failure_responses_are_indistinguishable() {
-    // 0. Env-skip check.
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("[enum_defense] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    // 0. Resolve the database, or refuse the run.
+    let db_url = crate::common::test_database_url();
 
     // 1. Connect PG.
     let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)

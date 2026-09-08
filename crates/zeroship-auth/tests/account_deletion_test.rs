@@ -1,6 +1,7 @@
 //! Account-deletion / GDPR-erase lifecycle - live PG (ISS-12).
 //!
-//! Skipped unless a test database (`PG_TEST_URL` or the TOML overlay) is available. These drive the
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped. These drive the
 //! REAL store transactions, the REAL undo token, the REAL HTTP routes and the
 //! REAL reaper tick - no shims - so a green run exercises the same code path
 //! `/me/delete`, `/me/delete/cancel` and the `account_reaper` cron take in
@@ -33,13 +34,13 @@ use crate::common;
 use crate::common::mock_control::{Answer, MockControl};
 
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> Client {
+    let dsn = crate::common::test_database_url();
     open(&dsn).await
 }
 
 #[allow(clippy::future_not_send)]
-async fn open(dsn: &str) -> Option<Client> {
+async fn open(dsn: &str) -> Client {
     let (client, connection) = connect(dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -47,7 +48,7 @@ async fn open(dsn: &str) -> Option<Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 /// The test DSN rewritten to connect as the REAL `zeroship_auth` role instead
@@ -126,10 +127,7 @@ async fn audit_detail(db: &Client, user_id: Uuid, event_type: &str) -> Vec<serde
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn request_marks_deletion_schedules_and_mints_one_undo_token() {
-    let Some(mut db) = pg().await else {
-        zeroship_test_support::skip("skipping account_deletion_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let mut db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let email = format!("acctdel-req-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Req User", Some("phc")).await.unwrap();
@@ -192,9 +190,7 @@ async fn request_marks_deletion_schedules_and_mints_one_undo_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn the_emailed_token_cancels_within_grace_and_only_once() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let email = format!("acctdel-cancel-{tag}@zeroship.test");
     let user = users::create(&db, &email, "Cancel User", Some("phc")).await.unwrap();
@@ -253,9 +249,7 @@ async fn the_emailed_token_cancels_within_grace_and_only_once() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reissuing_a_request_supersedes_the_previous_undo_token() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(
         &db,
@@ -298,9 +292,7 @@ async fn reissuing_a_request_supersedes_the_previous_undo_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_token_past_the_grace_window_is_refused() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(
         &db,
@@ -345,9 +337,7 @@ async fn a_token_past_the_grace_window_is_refused() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn cancellation_preserves_an_independent_administrative_disable() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(
         &db,
@@ -392,9 +382,7 @@ async fn cancellation_preserves_an_independent_administrative_disable() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn cancellation_does_not_restore_pre_deletion_app_credentials() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(
         &db,
@@ -556,9 +544,7 @@ async fn the_cancel_route_is_reachable_over_http_and_restores_the_account() {
     let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
         return;
     };
-    let Some(mut db) = open(&dsn).await else {
-        return;
-    };
+    let mut db = open(&dsn).await;
     let fixture = boot_cancel_server(&dsn).await;
 
     let tag = Uuid::new_v4().simple().to_string();
@@ -637,9 +623,7 @@ async fn the_cancel_route_refuses_a_token_it_never_issued() {
     let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
         return;
     };
-    let Some(mut db) = open(&dsn).await else {
-        return;
-    };
+    let mut db = open(&dsn).await;
     let fixture = boot_cancel_server(&dsn).await;
 
     let tag = Uuid::new_v4().simple().to_string();
@@ -709,9 +693,7 @@ async fn boot_cancel_server(dsn: &str) -> CancelServer {
     use std::sync::Arc;
 
     let cfg = Arc::new(common::test_auth_config(dsn));
-    let Some(client) = open(dsn).await else {
-        unreachable!("caller checked the DSN")
-    };
+    let client = open(dsn).await;
     let db = Arc::new(client);
     let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(dsn.to_owned(), 2);
     let mailer: Arc<dyn zeroship_mailer::Mailer> = Arc::new(common::CapturingMailer::default());
@@ -741,9 +723,7 @@ async fn boot_cancel_server(dsn: &str) -> CancelServer {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_erases_a_due_user_and_cascades() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let (_mock, control) = clear_control().await;
     let tag = Uuid::new_v4().simple().to_string();
@@ -812,9 +792,7 @@ async fn reaper_erases_a_due_user_and_cascades() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let (_mock, control) = clear_control().await;
     let tag = Uuid::new_v4().simple().to_string();
@@ -939,9 +917,7 @@ async fn erasing_a_sole_owner_retains_the_organizations_invoice() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_erases_a_user_holding_every_previously_blocking_reference() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let (_mock, control) = clear_control().await;
     let tag = Uuid::new_v4().simple().to_string();
@@ -1094,12 +1070,10 @@ async fn reaper_erases_as_the_real_auth_role() {
     let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
         return;
     };
-    let Some(db) = open(&dsn).await else { return };
+    let db = open(&dsn).await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let (_mock, control) = clear_control().await;
-    let Some(mut as_auth) = open(&as_auth_role(&dsn)).await else {
-        return;
-    };
+    let mut as_auth = open(&as_auth_role(&dsn)).await;
 
     let tag = Uuid::new_v4().simple().to_string();
     let user = users::create(
@@ -1156,9 +1130,7 @@ async fn reaper_erases_as_the_real_auth_role() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let mock = MockControl::start(Answer::Clear).await;
     let control = ControlAccess {
@@ -1233,9 +1205,7 @@ async fn reaper_refuses_and_records_when_the_preflight_names_a_blocker() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let mock = MockControl::start(Answer::Clear).await;
     let control = ControlAccess {
@@ -1328,9 +1298,7 @@ async fn reaper_refuses_and_records_billing_when_the_organization_still_owes() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let mock = MockControl::start(Answer::Unavailable).await;
     let control = ControlAccess {
@@ -1380,9 +1348,7 @@ async fn reaper_refuses_when_the_preflight_cannot_be_answered() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_refuses_when_the_control_plane_rejects_its_credential() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let mock = MockControl::start(Answer::Clear).await;
     let control = ControlAccess {
@@ -1428,9 +1394,7 @@ async fn reaper_refuses_when_the_control_plane_rejects_its_credential() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_new_blocking_reference_is_recorded_with_its_constraint() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let (_mock, control) = clear_control().await;
     let tag = Uuid::new_v4().simple().to_string();
@@ -1495,9 +1459,7 @@ async fn a_new_blocking_reference_is_recorded_with_its_constraint() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_skips_cancelled_request() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let (_mock, control) = clear_control().await;
     let tag = Uuid::new_v4().simple().to_string();
@@ -1531,9 +1493,7 @@ async fn reaper_skips_cancelled_request() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn reaper_ignores_a_schedule_without_a_deletion_request() {
-    let Some(mut db) = pg().await else {
-        return;
-    };
+    let mut db = pg().await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
     let (_mock, control) = clear_control().await;
     let tag = Uuid::new_v4().simple().to_string();
@@ -1625,23 +1585,12 @@ async fn wait_until_blocked_on_the_organization_lock(observer: &Client) -> bool 
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skipping account_deletion_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let Some(mut db) = open(&dsn).await else {
-        return;
-    };
+    let dsn = crate::common::test_database_url();
+    let mut db = open(&dsn).await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
-    let Some(as_auth) = open(&as_auth_role(&dsn)).await else {
-        return;
-    };
-    let Some(mut departing) = open(&dsn).await else {
-        return;
-    };
-    let Some(observer) = open(&dsn).await else {
-        return;
-    };
+    let as_auth = open(&as_auth_role(&dsn)).await;
+    let mut departing = open(&dsn).await;
+    let observer = open(&dsn).await;
     let (mock, control) = clear_control().await;
 
     let tag = Uuid::new_v4().simple().to_string();
@@ -1817,23 +1766,12 @@ async fn a_departure_after_the_preflight_cannot_leave_the_organization_ownerless
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn a_promotion_after_the_preflight_cannot_leave_the_organization_ownerless() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skipping account_deletion_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
-    let Some(mut db) = open(&dsn).await else {
-        return;
-    };
+    let dsn = crate::common::test_database_url();
+    let mut db = open(&dsn).await;
     let _reaper = common::lease_sweep(common::sweep_lock::ACCOUNT_REAPER).await;
-    let Some(as_auth) = open(&as_auth_role(&dsn)).await else {
-        return;
-    };
-    let Some(mut transferring) = open(&dsn).await else {
-        return;
-    };
-    let Some(observer) = open(&dsn).await else {
-        return;
-    };
+    let as_auth = open(&as_auth_role(&dsn)).await;
+    let mut transferring = open(&dsn).await;
+    let observer = open(&dsn).await;
     let (mock, control) = clear_control().await;
 
     let tag = Uuid::new_v4().simple().to_string();

@@ -8,8 +8,8 @@
 //! paired with a control differing in exactly one variable, so a refusal that
 //! is really a broken fixture cannot read as a fence.
 //!
-//! Skips when no test database is configured; `tests/run_auth_suite.sh` treats
-//! a skip here as a failure and provisions one first.
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped.
 
 use std::io::Write as _;
 
@@ -25,8 +25,8 @@ const ABSOLUTE_DAYS: i64 = 30;
 const IDEM_WINDOW_SECS: i64 = 30;
 
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> Client {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(err) = connection.run().await {
@@ -34,7 +34,7 @@ async fn pg() -> Option<Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 /// A keyring in a private directory, owner-only, as the loader demands.
@@ -138,12 +138,7 @@ fn tag() -> String {
 /// being read as a broken fixture.
 #[compio::test]
 async fn a_revoked_session_cannot_mint() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let keys = keys(&tag);
     let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
@@ -182,12 +177,7 @@ async fn a_revoked_session_cannot_mint() {
 /// the revocation fence working.
 #[compio::test]
 async fn a_live_session_mints_where_a_revoked_one_does_not() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let keys = keys(&tag);
     let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
@@ -234,12 +224,7 @@ async fn a_live_session_mints_where_a_revoked_one_does_not() {
 /// before its ceiling is moved.
 #[compio::test]
 async fn an_expired_session_cannot_mint_and_the_same_row_could_before() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let keys = keys(&tag);
     let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
@@ -296,12 +281,7 @@ async fn an_expired_session_cannot_mint_and_the_same_row_could_before() {
 /// grant, so there is no second enforcement path to keep in agreement.
 #[compio::test]
 async fn a_suspended_grant_cannot_create_a_session() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let keys = keys(&tag);
     let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
@@ -348,12 +328,7 @@ async fn a_suspended_grant_cannot_create_a_session() {
 /// refuses. The control pins the epoch the person actually carries.
 #[compio::test]
 async fn a_stale_credential_epoch_cannot_create_a_session() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let keys = keys(&tag);
     let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
@@ -386,12 +361,7 @@ async fn a_stale_credential_epoch_cannot_create_a_session() {
 /// rather than an enumeration something has to remember to run.
 #[compio::test]
 async fn advancing_the_credential_epoch_stops_the_next_mint() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let keys = keys(&tag);
     let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
@@ -438,12 +408,7 @@ async fn advancing_the_credential_epoch_stops_the_next_mint() {
 /// the same superseded secret is refused.
 #[compio::test]
 async fn a_superseded_secret_replays_once_and_then_is_refused() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let keys = keys(&tag);
     let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
@@ -514,12 +479,7 @@ async fn a_superseded_secret_replays_once_and_then_is_refused() {
 /// cached response instead of advancing the row.
 #[compio::test]
 async fn the_live_secret_is_not_replayable() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let keys = keys(&tag);
     let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
@@ -571,12 +531,7 @@ async fn the_live_secret_is_not_replayable() {
 /// than an exception to it.
 #[compio::test]
 async fn a_session_with_no_secret_can_never_be_presented() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let keys = keys(&tag);
     let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
@@ -610,12 +565,7 @@ async fn a_session_with_no_secret_can_never_be_presented() {
 /// leaves an already-revoked one alone.
 #[compio::test]
 async fn revoking_a_person_ends_every_live_session() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let keys = keys(&tag);
     let (person_id, _client_id, grant_id) = seed(&db, &tag).await;
@@ -667,12 +617,7 @@ async fn revoking_a_person_ends_every_live_session() {
 /// what stops a re-derivation silently re-identifying a returning person.
 #[compio::test]
 async fn a_second_consent_advances_scopes_and_never_rewrites_the_subject() {
-    let Some(db) = pg().await else {
-        zeroship_test_support::skip(
-            "skipping session_object_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))",
-        );
-        return;
-    };
+    let db = pg().await;
     let tag = tag();
     let (person_id, client_id, grant_id) = seed(&db, &tag).await;
     let audience = Audience::App {

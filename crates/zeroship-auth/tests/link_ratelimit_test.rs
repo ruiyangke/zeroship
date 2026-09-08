@@ -45,13 +45,7 @@ fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn link_wrong_password_is_limited_by_fifth_attempt() {
-    let db_url = match zeroship_core::config::test_database_url_opt() {
-        Some(db_url) => db_url,
-        None => {
-            zeroship_test_support::skip("skipping link_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return;
-        }
-    };
+    let db_url = crate::common::test_database_url();
     let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = pg_connection.run().await {

@@ -14,8 +14,8 @@
 //! test that composes the URL instead is testing its own author's idea of a
 //! valid continuation, which is exactly how this shipped.
 //!
-//! Skips when no test database is configured (`tests/run_auth_suite.sh` provisions it
-//! and fails the run on a skip).
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped.
 
 use std::net::{IpAddr, Ipv4Addr};
 use std::sync::Arc;
@@ -60,9 +60,9 @@ fn test_cfg(db_url: &str) -> AuthConfig {
 }
 
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<(String, compio_postgres::Client)> {
+async fn pg() -> (String, compio_postgres::Client) {
     let dsn =
-        zeroship_core::config::test_database_url_opt()?;
+        crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -70,7 +70,7 @@ async fn pg() -> Option<(String, compio_postgres::Client)> {
         }
     })
     .detach();
-    Some((dsn, client))
+    (dsn, client)
 }
 
 fn read_set_cookie(headers: &ntex::http::HeaderMap, name: &str) -> Option<String> {
@@ -191,10 +191,7 @@ macro_rules! signup_app {
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn the_login_pages_own_signup_link_creates_an_account() {
-    let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_continuation_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (dsn, client) = pg().await;
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
     let mailer: Arc<dyn Mailer> = Arc::new(NoopMailer);
@@ -270,10 +267,7 @@ async fn the_login_pages_own_signup_link_creates_an_account() {
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn a_bare_signup_url_renders_the_form() {
-    let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_continuation_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (dsn, client) = pg().await;
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
     let mailer: Arc<dyn Mailer> = Arc::new(NoopMailer);
@@ -305,10 +299,7 @@ async fn a_bare_signup_url_renders_the_form() {
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn a_duplicate_signup_is_indistinguishable_from_a_fresh_one() {
-    let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_continuation_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (dsn, client) = pg().await;
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
     let mailer: Arc<dyn Mailer> = Arc::new(NoopMailer);
@@ -388,10 +379,7 @@ async fn a_duplicate_signup_is_indistinguishable_from_a_fresh_one() {
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn a_duplicate_insert_reports_its_sqlstate() {
-    let Some((_dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_continuation_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (_dsn, client) = pg().await;
     let email = format!("signup-code-{}@zeroship.test", Uuid::new_v4().simple());
 
     zeroship_auth::store::users::create(&client, &email, "Continuation Test", None)
@@ -416,10 +404,7 @@ async fn a_duplicate_insert_reports_its_sqlstate() {
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn an_off_origin_continuation_is_replaced_not_echoed() {
-    let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_continuation_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (dsn, client) = pg().await;
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
     let mailer: Arc<dyn Mailer> = Arc::new(NoopMailer);

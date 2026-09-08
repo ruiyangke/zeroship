@@ -1,7 +1,8 @@
 //! End-to-end Google federation flow against the in-process `crates/auth`
 //! server + an in-process mock Google provider.
 //!
-//! Skips if no test database is configured. The mock provider (see
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped. The mock provider (see
 //! `tests/common/mock_provider.rs`) is in-process so no real Google credentials
 //! are required in CI.
 //!
@@ -39,11 +40,8 @@ use common::{
 
 #[ntex::test]
 async fn google_federation_creates_new_user() {
-    // 0. Env-skip check.
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("[e2e_google] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    // 0. Resolve the database, or refuse the run.
+    let db_url = crate::common::test_database_url();
 
     // 1. Boot the mock Google provider on a random port. The mock will
     //    return this canned identity through both `/token` (as ID-token
@@ -295,10 +293,7 @@ async fn google_federation_creates_new_user() {
 
 #[ntex::test]
 async fn google_federation_rejects_untrusted_domain_without_hd() {
-    let Some(db_url) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("[e2e_google untrusted] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let db_url = crate::common::test_database_url();
 
     let test_email = format!(
         "e2e-google-untrusted-{}@example.test",

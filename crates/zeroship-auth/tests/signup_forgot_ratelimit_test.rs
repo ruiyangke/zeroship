@@ -138,10 +138,7 @@ fn unique_loopback() -> IpAddr {
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn signup_native_return_to_redirects_to_login_return_to() {
-    let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (dsn, client) = pg().await;
 
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
@@ -212,10 +209,7 @@ async fn signup_native_return_to_redirects_to_login_return_to() {
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn signup_replaces_open_redirect_return_to_at_intake() {
-    let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (dsn, client) = pg().await;
 
     let pg = Arc::new(client);
     let cfg = Arc::new(test_cfg(&dsn));
@@ -266,8 +260,8 @@ async fn signup_replaces_open_redirect_return_to_at_intake() {
 }
 
 #[allow(clippy::future_not_send)]
-async fn pg() -> Option<(String, compio_postgres::Client)> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> (String, compio_postgres::Client) {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -275,16 +269,13 @@ async fn pg() -> Option<(String, compio_postgres::Client)> {
         }
     })
     .detach();
-    Some((dsn, client))
+    (dsn, client)
 }
 
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn signup_post_throttles_after_ip_bucket_capacity() {
-    let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (dsn, client) = pg().await;
 
     let prefix = format!("signup-rl-{}", Uuid::new_v4().simple());
     let pg = Arc::new(client);
@@ -387,10 +378,7 @@ async fn signup_post_throttles_after_ip_bucket_capacity() {
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn signup_non_duplicate_create_error_renders_error_page() {
-    let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (dsn, client) = pg().await;
 
     // `zeroship.users` is shared with every concurrent run, so this constraint
     // is scoped twice and both halves are load-bearing.
@@ -539,10 +527,7 @@ async fn signup_non_duplicate_create_error_renders_error_page() {
 #[compio::test]
 #[allow(clippy::future_not_send)]
 async fn forgot_post_throttles_after_email_bucket_capacity() {
-    let Some((dsn, client)) = pg().await else {
-        zeroship_test_support::skip("skipping signup_forgot_ratelimit_test (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let (dsn, client) = pg().await;
 
     let email = format!("forgot-rl-{}@zeroship.test", Uuid::new_v4().simple());
     let user = users::create(&client, &email, "Forgot Test", None)

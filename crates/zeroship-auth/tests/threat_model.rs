@@ -9,7 +9,8 @@
 //! 5. `login_rate_limit_kicks_in` — `LOGIN_EIP` bucket throttles the 6th attempt
 //! 6. `session_id_rotates_post_login_success` — session cookie value differs across two logins
 //!
-//! Every test skips when no test database is configured.
+//! Requires a live PostgreSQL (`PG_TEST_URL` or the TOML overlay). A run
+//! that cannot reach one is REFUSED, not skipped.
 
 use uuid::Uuid;
 
@@ -42,10 +43,7 @@ fn login_url(fx: &Fixture, return_to: &str) -> String {
 /// re-rendered login form at status 400.
 #[ntex::test]
 async fn login_csrf_missing_field_rejected() {
-    let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::csrf_missing] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = Fixture::boot("threat").await;
 
     let return_to = fx.fresh_challenge().await;
     let login_url = login_url(&fx, &return_to);
@@ -94,10 +92,7 @@ async fn login_csrf_missing_field_rejected() {
 /// §13 "Login CSRF": form `csrf` field ≠ cookie token → reject.
 #[ntex::test]
 async fn login_csrf_mismatched_token_rejected() {
-    let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::csrf_mismatch] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = Fixture::boot("threat").await;
 
     let return_to = fx.fresh_challenge().await;
     let login_url = login_url(&fx, &return_to);
@@ -158,10 +153,7 @@ async fn login_csrf_mismatched_token_rejected() {
 /// XFO DENY on /login) FAILS now, and vice-versa.
 #[ntex::test]
 async fn login_clickjacking_headers_present() {
-    let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::clickjacking] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = Fixture::boot("threat").await;
 
     // (a) The FRAMED route `/login` GET: relaxed frame-ancestors, NO XFO.
     let return_to = fx.fresh_challenge().await;
@@ -247,10 +239,7 @@ async fn login_clickjacking_headers_present() {
 /// `crates/auth` UI pages.
 #[ntex::test]
 async fn login_referrer_policy_set() {
-    let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::referrer] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = Fixture::boot("threat").await;
 
     let return_to = fx.fresh_challenge().await;
     let login_url = login_url(&fx, &return_to);
@@ -281,10 +270,7 @@ async fn login_referrer_policy_set() {
 /// `(email, ip)` tuple.
 #[ntex::test]
 async fn login_rate_limit_kicks_in() {
-    let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::rate_limit] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = Fixture::boot("threat").await;
 
     // Unique email and client IP so we don't collide with concurrent /
     // leftover rate-limit state from other tests.
@@ -415,10 +401,7 @@ async fn one_login(fx: &Fixture, email: &str, password: &str, xff_ip: &str) -> S
 /// values differ.
 #[ntex::test]
 async fn session_id_rotates_post_login_success() {
-    let Some(fx) = Fixture::boot("threat").await else {
-        zeroship_test_support::skip("[threat_model::rotate] skip (need a test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let fx = Fixture::boot("threat").await;
 
     // Seed a user.
     let email = format!("rotate-{}@zeroship.test", Uuid::new_v4().simple());

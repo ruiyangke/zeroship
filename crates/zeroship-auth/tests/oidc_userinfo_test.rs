@@ -57,11 +57,8 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
-        let Some(db_url) = db_url() else {
-            zeroship_test_support::skip("[oidc_userinfo_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return None;
-        };
+    async fn boot() -> Self {
+        let db_url = db_url();
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(err) = pg_connection.run().await {
@@ -125,7 +122,7 @@ impl Fixture {
         })
         .await;
 
-        Some(Self {
+        Self {
             auth_base: srv.url("").trim_end_matches('/').to_string(),
             srv,
             db,
@@ -137,7 +134,7 @@ impl Fixture {
             user_name: user_profile.name,
             user_avatar_url: user_profile.avatar_url,
             session_cookie,
-        })
+        }
     }
 
     async fn cleanup(self) {
@@ -149,9 +146,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_returns_scope_gated_claims_for_valid_token() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let token = issue_token(&fx, "openid email profile").await;
     let jwks = jwks_document(&fx.db).await.expect("jwks");
     let id = verify_with_jwks::<IdTokenClaims>(
@@ -200,9 +195,7 @@ async fn userinfo_returns_scope_gated_claims_for_valid_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_omits_identity_claims_without_scopes() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let token = issue_token(&fx, "openid").await;
     let jwks = jwks_document(&fx.db).await.expect("jwks");
     let id = verify_with_jwks::<IdTokenClaims>(
@@ -228,9 +221,7 @@ async fn userinfo_omits_identity_claims_without_scopes() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_missing_and_bad_tokens() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
 
     let missing = userinfo_get(&fx, None).await.expect("missing bearer");
     assert_missing_token(&missing);
@@ -270,9 +261,7 @@ async fn userinfo_rejects_missing_and_bad_tokens() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_id_token_used_as_access_token() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let token = issue_token(&fx, "openid email profile").await;
 
     let resp = userinfo_get(&fx, Some(&token.id_token))
@@ -286,9 +275,7 @@ async fn userinfo_rejects_id_token_used_as_access_token() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_token_without_openid_scope() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     // A validly-signed OP access token minted for the app resource audience but
     // WITHOUT `openid` must not be usable as an identity oracle (OIDC Core §5.3).
     let access_token = access_token_with_scopes(&fx, &fx.issuer, &["email", "profile"], Some(600));
@@ -304,9 +291,7 @@ async fn userinfo_rejects_token_without_openid_scope() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn userinfo_rejects_disabled_user() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let token = issue_token(&fx, "openid email profile").await;
 
     // Disable the account AFTER the token was minted: a still-live access token
@@ -327,8 +312,8 @@ async fn userinfo_rejects_disabled_user() {
     fx.cleanup().await;
 }
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+fn db_url() -> String {
+    crate::common::test_database_url()
 }
 
 fn test_issuer(issuer: &str) -> Issuer {

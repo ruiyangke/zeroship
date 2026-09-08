@@ -62,16 +62,13 @@ struct Fixture {
 
 impl Fixture {
     #[allow(clippy::future_not_send)]
-    async fn boot() -> Option<Self> {
+    async fn boot() -> Self {
         Self::boot_with_email_verified(true).await
     }
 
     #[allow(clippy::future_not_send)]
-    async fn boot_with_email_verified(email_verified: bool) -> Option<Self> {
-        let Some(db_url) = db_url() else {
-            zeroship_test_support::skip("[op_authorization_code_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-            return None;
-        };
+    async fn boot_with_email_verified(email_verified: bool) -> Self {
+        let db_url = db_url();
         let (pg_client, pg_connection) = connect(&db_url, NoTls).await.expect("connect pg");
         compio::runtime::spawn(async move {
             if let Err(err) = pg_connection.run().await {
@@ -135,7 +132,7 @@ impl Fixture {
         })
         .await;
 
-        Some(Self {
+        Self {
             auth_base: srv.url("").trim_end_matches('/').to_string(),
             srv,
             db,
@@ -148,7 +145,7 @@ impl Fixture {
             user_avatar_url: user_profile.avatar_url,
             session_id: session.id,
             session_cookie,
-        })
+        }
     }
 
     async fn cleanup(self) {
@@ -160,9 +157,7 @@ impl Fixture {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_token() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
@@ -229,9 +224,7 @@ async fn authorize_token_happy_path_mints_pairwise_access_and_nonce_at_hash_id_t
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn id_token_includes_email_and_profile_claims_when_scopes_granted() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
@@ -280,9 +273,7 @@ async fn id_token_includes_email_and_profile_claims_when_scopes_granted() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn id_token_omits_identity_claims_without_email_and_profile_scopes() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
@@ -313,9 +304,7 @@ async fn id_token_omits_identity_claims_without_email_and_profile_scopes() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn id_token_email_verified_false_for_unverified_user() {
-    let Some(fx) = Fixture::boot_with_email_verified(false).await else {
-        return;
-    };
+    let fx = Fixture::boot_with_email_verified(false).await;
     let verifier = pkce_verifier();
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
@@ -349,9 +338,7 @@ async fn id_token_email_verified_false_for_unverified_user() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn pkce_negatives_missing_plain_and_wrong_verifier_are_rejected() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
@@ -382,9 +369,7 @@ async fn pkce_negatives_missing_plain_and_wrong_verifier_are_rejected() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn interactive_authorize_errors_after_redirect_validation_redirect_to_rp_with_iss() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
@@ -405,9 +390,7 @@ async fn interactive_authorize_errors_after_redirect_validation_redirect_to_rp_w
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn redirect_uri_must_exact_match_registered_value() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
 
@@ -433,9 +416,7 @@ async fn redirect_uri_must_exact_match_registered_value() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn expired_authorization_code_is_rejected() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
     let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
@@ -456,9 +437,7 @@ async fn expired_authorization_code_is_rejected() {
 #[ntex::test]
 #[allow(clippy::future_not_send)]
 async fn credential_bump_rejects_code_after_deletion_is_cancelled() {
-    let Some(fx) = Fixture::boot().await else {
-        return;
-    };
+    let fx = Fixture::boot().await;
     let verifier = pkce_verifier();
     let nonce = format!("nc-{}", Uuid::new_v4().simple());
     let authorize = send_authorize(&fx, REDIRECT_URI, &verifier, Some(&nonce), None)
@@ -466,7 +445,7 @@ async fn credential_bump_rejects_code_after_deletion_is_cancelled() {
         .expect("authorize response");
     let code = query_param(&location(&authorize), "code").expect("code");
 
-    let mut deletion = dedicated_test_db(&db_url().expect("test database URL")).await;
+    let mut deletion = dedicated_test_db(&db_url()).await;
     let deletion_request = users::request_deletion(&mut deletion, fx.user_id, 30)
         .await
         .expect("request account deletion")
@@ -496,8 +475,8 @@ async fn credential_bump_rejects_code_after_deletion_is_cancelled() {
     assert_eq!(body["error"], "invalid_grant");
 }
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+fn db_url() -> String {
+    crate::common::test_database_url()
 }
 
 fn test_issuer() -> Issuer {

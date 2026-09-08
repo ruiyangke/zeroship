@@ -23,8 +23,8 @@ use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_auth::store::relay;
 
-async fn pg_or_skip() -> Option<Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn pg() -> Client {
+    let dsn = crate::common::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -32,7 +32,7 @@ async fn pg_or_skip() -> Option<Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 /// Seed a user, an oauth client + grant, and an active relay-alias identity row
@@ -134,10 +134,7 @@ async fn cleanup(db: &Client, user_id: Uuid, client_id: &str) {
 /// never a fake "revoked success").
 #[compio::test]
 async fn auto_revoke_locally_disables_forwarding_and_leaves_grant_untouched() {
-    let Some(db) = pg_or_skip().await else {
-        zeroship_test_support::skip("skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return;
-    };
+    let db = pg().await;
     let (user_id, client_id, relay_email) = seed_active_alias(&db).await;
 
     // Pre-condition: the alias forwards (active map + live grant present).

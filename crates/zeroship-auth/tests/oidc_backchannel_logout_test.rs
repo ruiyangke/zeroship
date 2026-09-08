@@ -17,15 +17,12 @@ use zeroship_auth::store::sessions as session_store;
 
 const ISSUER: &str = "https://auth.zeroship.test/oauth2";
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+fn db_url() -> String {
+    crate::common::test_database_url()
 }
 
-async fn open_conn() -> Option<Client> {
-    let Some(dsn) = db_url() else {
-        zeroship_test_support::skip("[oidc_backchannel_logout_test] skip (no test database (set PG_TEST_URL or run tests/provision_test_backends.sh))");
-        return None;
-    };
+async fn open_conn() -> Client {
+    let dsn = db_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect test DB");
     compio::runtime::spawn(async move {
         if let Err(err) = connection.run().await {
@@ -33,7 +30,7 @@ async fn open_conn() -> Option<Client> {
         }
     })
     .detach();
-    Some(client)
+    client
 }
 
 fn test_issuer() -> Issuer {
@@ -43,9 +40,7 @@ fn test_issuer() -> Issuer {
 
 #[ntex::test]
 async fn logout_emission_posts_signed_logout_token_with_sid() {
-    let Some(db) = open_conn().await else {
-        return;
-    };
+    let db = open_conn().await;
     let issuer = test_issuer();
     common::publish_op_key_once(&issuer, &db)
         .await

@@ -48,8 +48,7 @@ struct EnrollFixture {
 impl EnrollFixture {
     #[allow(clippy::future_not_send)]
     async fn boot(label: &str) -> Self {
-        let db_url = zeroship_core::config::test_database_url_opt()
-            .expect("a test database is required for totp_enroll_reauth_test (set PG_TEST_URL or run tests/provision_test_backends.sh)");
+        let db_url = crate::common::test_database_url();
         let (pg_client, pg_connection) = compio_postgres::connect(&db_url, compio_postgres::NoTls)
             .await
             .expect("connect pg");
