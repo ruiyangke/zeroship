@@ -798,7 +798,13 @@ impl BillingRemedy {
 /// A bool cannot carry a refusal message: the person on the other end has to be
 /// told WHAT is owed and WHICH action clears it, and both are derived from the
 /// rows below rather than stored anywhere.
-#[derive(Debug, Clone, Serialize)]
+///
+/// [`Serialize`] is hand-written rather than derived, for one reason: the two
+/// TOTALS a refusal quotes are derived from the vectors and a derive cannot
+/// emit them, so every renderer had to sum a list itself or quote neither. An
+/// unbilled-only organization was told "you owe" beside an owed figure of zero,
+/// with the priced amount reachable only by adding up `unbilled_periods`.
+#[derive(Debug, Clone)]
 pub struct OutstandingBilling {
     pub organization_id: String,
     pub unpaid_invoices: Vec<UnpaidInvoice>,
@@ -809,6 +815,32 @@ pub struct OutstandingBilling {
     /// attachment is the missing piece; with one, the period simply was never
     /// invoiced and only a reconcile of THAT period raises it.
     pub billing_identity_on_file: bool,
+}
+
+impl Serialize for OutstandingBilling {
+    /// The stored rows PLUS the two totals derived from them, so a refusal
+    /// rendered straight from this value states both figures and a reader never
+    /// has to sum a list to learn what an unbilled period came to.
+    ///
+    /// The destructure is the drift fence: a field added to the struct fails to
+    /// compile HERE rather than quietly disappearing from every refusal.
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let Self {
+            organization_id,
+            unpaid_invoices,
+            unbilled_periods,
+            billing_identity_on_file,
+        } = self;
+        let mut out = serializer.serialize_struct("OutstandingBilling", 6)?;
+        out.serialize_field("organization_id", organization_id)?;
+        out.serialize_field("unpaid_invoices", unpaid_invoices)?;
+        out.serialize_field("unbilled_periods", unbilled_periods)?;
+        out.serialize_field("billing_identity_on_file", billing_identity_on_file)?;
+        out.serialize_field("owed_cents", &self.owed_cents())?;
+        out.serialize_field("unbilled_cents", &self.unbilled_cents())?;
+        out.end()
+    }
 }
 
 impl OutstandingBilling {
@@ -899,7 +931,8 @@ impl OutstandingBilling {
 /// different balances.
 ///
 /// **Unbilled closed-period usage.** A period strictly BEFORE the current month
-/// that carries usage, has NO invoice row of any status, and RE-PRICES TO MONEY.
+/// that carries usage, has no invoice row that SETTLED it, and RE-PRICES TO
+/// MONEY.
 /// The current month is excluded because it always has accrued usage and never
 /// has an invoice — including it would mean no account could ever be closed.
 /// Archived apps are NOT filtered, matching the reconciler, which bills them on
@@ -922,6 +955,20 @@ impl OutstandingBilling {
 /// Voiding RELEASES the claim, which is the whole point of the one transition
 /// `invoices_immutable()` permits; it is a deliberate statement that the period
 /// is done, not evidence that it was never billed.
+///
+/// **A DRAFT INVOICE SETTLES NOTHING, AND TREATING IT AS PROOF OF BILLING LET A
+/// REAL DEBT THROUGH BOTH ARMS AT ONCE.** The candidate predicate used to read
+/// the mere PRESENCE of an invoice row as "this period was billed", and a draft
+/// is a row. It is not a claim: `invoice_total_balances` holds every amount on
+/// it at zero, so the unpaid arm — keyed on `total > collected` over
+/// `finalized` — cannot see it either. An organization whose reconcile crashed
+/// between claiming the row and finalizing it therefore produced NO blocker of
+/// any kind over a period that owed real money, and could be dissolved and its
+/// sole owner erased. The reconciler writes that row BEFORE any provider call
+/// precisely so a crash is recoverable, which makes a draft the signal "billing
+/// started and did not finish" — exactly what the unbilled arm exists to catch.
+/// So the candidate predicate asks for an invoice that ACCOUNTS for the period
+/// (`finalized` or `void`), and a draft leaves the period to be re-priced.
 ///
 /// Pricing FAILS CLOSED. An unresolved FX or a compute-unit overflow propagates
 /// as an error, never as a silent zero — a zero here would clear a debt, which
@@ -1004,13 +1051,21 @@ pub async fn outstanding_billing<C: GenericClient + Sync>(
 /// invoiced.
 ///
 /// Two steps, and the split is deliberate. The SQL narrows to CANDIDATES — a
-/// period is a candidate when it is closed, carries a usage row, and has no
-/// invoice row at all — because that is the whole of what a row-level predicate
-/// can decide. Whether a candidate owed anything is a question only the pricing
-/// kernel can answer, so the second step re-prices each candidate through
-/// [`crate::cron::billing_reconcile::price_period_lines`], the function the
-/// reconciler itself runs. A candidate that prices to nothing is dropped: it is
-/// the free tier's ordinary month and it owes nobody anything.
+/// period is a candidate when it is closed, carries a usage row, and carries no
+/// invoice that ACCOUNTS for it — because that is the whole of what a row-level
+/// predicate can decide. Whether a candidate owed anything is a question only
+/// the pricing kernel can answer, so the second step re-prices each candidate
+/// through [`crate::cron::billing_reconcile::price_period_lines`], the function
+/// the reconciler itself runs. A candidate that prices to nothing is dropped: it
+/// is the free tier's ordinary month and it owes nobody anything.
+///
+/// **Accounting for a period is a STATUS, not a row.** `finalized` raised the
+/// claim and `void` released it; both are decisions about the period, and the
+/// invoice arm above handles whether a finalized one was ever paid. `draft` is
+/// neither — it is the reconciler's pre-provider claim on the key, carrying
+/// zero amounts by CHECK — so it is not in the set and does not stop the period
+/// being re-priced. Reading a draft as "billed" silenced BOTH arms over a
+/// period that owed money; see [`outstanding_billing`] for that failure.
 ///
 /// **The app set is the organization's WHOLE roster, not the apps that accrued.**
 /// That is what the reconciler prices - its per-organization path resolves apps
@@ -1018,7 +1073,12 @@ pub async fn outstanding_billing<C: GenericClient + Sync>(
 /// ORGANIZATIONS a sweep visits. The difference is money: a plan with a
 /// `base_fee_cents` is charged whether or not the app served a request, so an
 /// app-set narrowed to accruers here would price a period lower than the
-/// invoice would.
+/// invoice would. That is a claim about behaviour, so it is bound by
+/// behaviour: `deletion_owes_test`'s
+/// `a_non_accruing_app_on_a_base_fee_plan_is_priced_into_the_period` builds an
+/// organization whose period turns entirely on the base fee of an app that
+/// never served a request, and narrowing this read to accruers drops that app,
+/// prices the period to nothing and fails the test.
 async fn unbilled_priced_periods<C: GenericClient + Sync>(
     conn: &C,
     organization_id: &str,
@@ -1026,6 +1086,11 @@ async fn unbilled_priced_periods<C: GenericClient + Sync>(
     // Candidate periods. No `total > 0` filter: whether the period is worth
     // anything is the pricing pass's answer, not this predicate's, and a base
     // fee makes a zero-usage period cost money.
+    //
+    // The status list is the SETTLED set, never "a row exists". A draft is a
+    // reconcile that did not finish, and it carries zero amounts, so counting
+    // it here would suppress this arm while leaving the invoice arm nothing to
+    // see.
     let candidate_rows = conn
         .query(
             "SELECT DISTINCT u.period::date AS period \
@@ -1036,7 +1101,8 @@ async fn unbilled_priced_periods<C: GenericClient + Sync>(
                 AND NOT EXISTS ( \
                       SELECT 1 FROM zeroship.invoices i \
                        WHERE i.organization_id = a.organization_id \
-                         AND i.period = u.period) \
+                         AND i.period = u.period \
+                         AND i.status IN ('finalized', 'void')) \
               ORDER BY 1",
             &[&organization_id],
         )
@@ -1232,6 +1298,28 @@ mod tests {
         let both = outstanding(vec![invoice(1000), invoice(250)], vec![usage()]);
         assert_eq!(both.owed_cents(), 1250);
         assert_eq!(both.unbilled_cents(), 4_200);
+    }
+
+    /// The rendered refusal states BOTH totals. An unbilled-only organization
+    /// is told it owes, and the only figure it used to be given was the zero
+    /// `owed_cents` of the claimed-cash half - a refusal that says you owe and
+    /// then says you owe nothing. The priced amount now travels with it.
+    #[test]
+    fn the_serialized_refusal_states_the_unbilled_price_beside_the_owed_cash() {
+        let rendered =
+            serde_json::to_value(outstanding(vec![], vec![usage()])).expect("serialize");
+        assert_eq!(
+            rendered.get("owed_cents").and_then(serde_json::Value::as_i64),
+            Some(0),
+            "no invoice: no claimed cash"
+        );
+        assert_eq!(
+            rendered
+                .get("unbilled_cents")
+                .and_then(serde_json::Value::as_i64),
+            Some(4_200),
+            "the priced period has to be a number the refusal states: {rendered}"
+        );
     }
 
     /// The remedy is derived, ordered, and total. Cash already claimed wins:
