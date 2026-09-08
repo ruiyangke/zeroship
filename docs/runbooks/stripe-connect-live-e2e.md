@@ -10,15 +10,16 @@ webhooks). It drives zeroship's **Stripe Connect payment** path against
 handlers, and the signature-verified `/internal/webhooks/stripe`
 ingest of `account.updated` / `invoice.paid` (Connect payment) / `payout.failed`.
 
-## Connect is currently DISABLED on the test account — the harness SKIPs cleanly
+## Connect must be ENABLED on the test account — the harness refuses otherwise
 
 `POST /v1/accounts` returns HTTP 400 `invalid_request_error`: "You can only
-create new accounts if you've signed up for Connect…". The harness probes this
-**first** and, when Connect is off, prints
-`SKIP: Connect not enabled on this account — enable at dashboard.stripe.com/connect`
-and exits 0 — exactly like the other `*_live` tests self-skip without creds. It
-is safe to commit and run anytime; it runs the full payment flow the moment
-Connect is enabled.
+create new accounts if you've signed up for Connect…" on an account that has not
+signed up. The harness probes this **first** and, when Connect is off, refuses
+with exit 2 naming `dashboard.stripe.com/connect`. It runs the full payment flow
+the moment Connect is enabled there.
+
+It used to exit 0 on that probe, which made a run against a Connect-disabled
+account print the same result as one that had moved money end to end.
 
 ## What still needs the user to do (one-time, to fully validate)
 
@@ -46,7 +47,8 @@ and the charge path runs.
   (`packages/zero-migrate-cli/dist/cli-bin.js`, which the harness reaches
   through `zs_platform_migrate` in `tests/lib/runtime_secrets.sh`), `node`,
   `openssl`, `curl`, and `psql` (taken from $PATH, else the nix store;
-  override with `PSQL`. Absent psql is a refusal, not a skip).
+  override with `PSQL`). Every one of these is a refusal when absent, not a
+  skip.
 - The operator's Stripe **TEST** secret key, sourced from the env file.
 
 ## Run
@@ -54,15 +56,20 @@ and the charge path runs.
 ```bash
 cargo build --release -p zeroship-control
 pnpm install && pnpm build
-source /home/ruiyang/.config/zeroship-stripe-test.env   # REQUIRED — skips cleanly if unset
+source /home/ruiyang/.config/zeroship-stripe-test.env   # REQUIRED — refuses if unset
 ./tests/e2e_stripe_connect_live.sh
 STRICT=1 ./tests/e2e_stripe_connect_live.sh             # documented divergences = hard fail
 ```
 
-Skips cleanly (exit 0) when prereqs are absent (no keys / PG :5440 / docker /
-tools) **or when Connect is not enabled**. Refuses to run if
-`STRIPE_TEST_SECRET_KEY` is not an `sk_test_` key. Self-managed up/down: tears
-down control and deletes the test-mode connected accounts it minted on exit.
+Refuses (exit 2) when a prerequisite is absent (no keys / PG :5440 / docker /
+tools / jose) **or when Connect is not enabled**, naming the thing and its
+remedy. It also refuses if `STRIPE_TEST_SECRET_KEY` is not an `sk_test_` key.
+Self-managed up/down: tears down control and deletes the test-mode connected
+accounts it minted on exit.
+
+Nothing in `.github/workflows/` runs this script and neither does
+`tests/run_billing_suite.sh`, so a refusal reaches the person who ran it by hand
+and cannot leave a CI job permanently red.
 
 ## Secrets handling
 
