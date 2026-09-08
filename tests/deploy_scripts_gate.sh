@@ -578,6 +578,62 @@ else
   fail "the adapted control host must declare exactly one /v1/* handler for migrate-server; found $MIGRATE_V1_EDGE_HANDLERS"
 fi
 
+# THE INTERNAL-ROUTE BOUNDARY AT THE EDGE.
+#
+# Control's /internal/* routes are service-to-service. The catch-all used to
+# forward them from the public edge, and `/internal/workers/enrol` in particular
+# then observed CADDY as the peer - so control derived the proxy's address for
+# every enrolment, while the `ProxyFronted` arm stayed silent because its input
+# is control's own `trust_proxy` declaration rather than an observation.
+#
+# This is EDGE CONFIGURATION, so nothing in Rust notices it being deleted. That
+# is the whole reason for this arm.
+#
+# It rules on the ADAPTED artifact, not the Caddyfile text, for the reason
+# reserved_names.rs records: host and path claims are not statically decidable
+# from the source grammar, and the adapted JSON is what Caddy actually does.
+#
+# THREE FACTS, and the third is the one a reader would omit. Stripe delivers to
+# `/internal/webhooks/stripe` FROM THE INTERNET, so that one path must stay
+# reachable - and because `handle` blocks match in order, a reorder putting the
+# refusal first would swallow it and break webhook delivery while both other
+# facts still held.
+INTERNAL_EDGE_CHECKS=0
+INTERNAL_EDGE_REFUSED="$(
+  jq '[.config.apps.http.servers[].routes[]
+       | select(any(.match[]?.host[]?; . == "control.zsdomain.invalid"))
+       | .handle[]?.routes[]?
+       | select(any(.match[]?.path[]?; . == "/internal/*"))
+       | select([.. | objects | .upstreams?] | flatten | map(select(. != null)) | length == 0)
+       | select(any(.. | objects | .handler?; . == "static_response"))] | length' "$EDGE_ART" 2>/dev/null \
+    || printf '0\n'
+)"
+INTERNAL_EDGE_WEBHOOK="$(
+  jq '[.config.apps.http.servers[].routes[]
+       | select(any(.match[]?.host[]?; . == "control.zsdomain.invalid"))
+       | .handle[]?.routes[]?
+       | select(any(.match[]?.path[]?; . == "/internal/webhooks/*"))
+       | select(any(.. | objects | .upstreams?[]?.dial?; . == "control:9090"))] | length' "$EDGE_ART" 2>/dev/null \
+    || printf '0\n'
+)"
+INTERNAL_EDGE_ORDER="$(
+  jq -r '[.config.apps.http.servers[].routes[]
+          | select(any(.match[]?.host[]?; . == "control.zsdomain.invalid"))
+          | .handle[]?.routes[]? | .match[]?.path[]?]
+         | if (index("/internal/webhooks/*") // -1) < (index("/internal/*") // -1)
+           then "ok" else "bad" end' "$EDGE_ART" 2>/dev/null \
+    || printf 'bad\n'
+)"
+[ "${INTERNAL_EDGE_REFUSED:-0}" -eq 1 ] && INTERNAL_EDGE_CHECKS=$((INTERNAL_EDGE_CHECKS + 1))
+[ "${INTERNAL_EDGE_WEBHOOK:-0}" -eq 1 ] && INTERNAL_EDGE_CHECKS=$((INTERNAL_EDGE_CHECKS + 1))
+[ "$INTERNAL_EDGE_ORDER" = "ok" ] && INTERNAL_EDGE_CHECKS=$((INTERNAL_EDGE_CHECKS + 1))
+if gate_arm internal_edge_boundary "$INTERNAL_EDGE_CHECKS" 3 \
+  && [ "$INTERNAL_EDGE_CHECKS" -eq 3 ]; then
+  pass "the edge refuses control's /internal/* and still delivers the Stripe webhook, in that order"
+else
+  fail "the control host must refuse /internal/* with no upstream, keep /internal/webhooks/* proxied to control, and order the webhook FIRST; refused=$INTERNAL_EDGE_REFUSED webhook=$INTERNAL_EDGE_WEBHOOK order=$INTERNAL_EDGE_ORDER"
+fi
+
 N_CONTROL_RESOURCES="$(
   rg -U --pcre2 -o 'web::resource\s*\(' "$CONTROL_SRC" 2>/dev/null | wc -l
 )"
