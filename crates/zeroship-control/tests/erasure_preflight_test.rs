@@ -6,8 +6,10 @@
 //! every blocker it returns has to carry enough for the person to act on it.
 //!
 //! Its second rule, whether an organization still OWES, has its own file
-//! (`deletion_owes_test.rs`) because it shares one predicate with the dissolve
-//! path and the two are worth ruling on together.
+//! (`crates/zeroship-control/tests/deletion_owes_test.rs`) because it shares one
+//! predicate with the dissolve path and the two are worth ruling on together.
+//! The reaper's half of that rule is in
+//! `crates/zeroship-auth/tests/account_deletion_test.rs`, where the reaper is.
 //!
 //! The auth suite exercises the WIRE (`mock_control`); this exercises the SQL,
 //! because that is where the tables are and `zeroship_auth` cannot read them.
