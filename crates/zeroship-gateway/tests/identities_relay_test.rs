@@ -13,21 +13,25 @@
 //! `None` here is exactly the fail-closed-no-real-email-leak behaviour. This is
 //! the real function the arms call, not a stub.
 //!
-//! Skipped without a test database (1b-anchor convention; set `PG_TEST_URL`).
+//! REFUSES without a test database, naming `tests/provision_test_backends.sh`
+//! - the same convention as every other live-PG target in this crate, and no
+//! environment variable turns it back into a skip.
+
+mod common;
 
 use compio_postgres::{connect, Client, NoTls};
 use uuid::Uuid;
 use zeroship_gateway::identities;
 
 #[allow(clippy::future_not_send)]
-async fn pg_or_skip() -> Option<Client> {
-    let dsn = zeroship_core::config::test_database_url_opt()?;
+async fn require_pg() -> Client {
+    let dsn = common::require_platform_db();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         let _ = connection.run().await;
     })
     .detach();
-    Some(client)
+    client
 }
 
 async fn seed_user(client: &Client, label: &str) -> Uuid {
@@ -102,10 +106,7 @@ async fn cleanup(client: &Client, client_id: &str, user_id: Uuid) {
 
 #[compio::test]
 async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
-    let Some(mut client) = pg_or_skip().await else {
-        zeroship_test_support::skip("[identities_relay_test] skip (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let mut client = require_pg().await;
     let client_id = format!("oac_relayswap_{}", Uuid::new_v4().simple());
     seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "relayswap").await;
@@ -168,10 +169,7 @@ async fn lookup_relay_email_returns_active_alias_and_fails_closed_on_revoke() {
 /// second bind fails, and the first subject is still what a read returns.
 #[compio::test]
 async fn upsert_refuses_to_rebind_a_stored_pairwise_subject() {
-    let Some(mut client) = pg_or_skip().await else {
-        zeroship_test_support::skip("[identities_relay_test] skip (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let mut client = require_pg().await;
     let client_id = format!("oac_rebind_{}", Uuid::new_v4().simple());
     seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "rebind").await;
@@ -231,10 +229,7 @@ async fn upsert_refuses_to_rebind_a_stored_pairwise_subject() {
 
 #[compio::test]
 async fn lookup_relay_email_is_none_when_no_alias_minted() {
-    let Some(mut client) = pg_or_skip().await else {
-        zeroship_test_support::skip("[identities_relay_test] skip (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let mut client = require_pg().await;
     let client_id = format!("oac_noalias_{}", Uuid::new_v4().simple());
     seed_oauth_client(&client, &client_id).await;
     let user_id = seed_user(&client, "noalias").await;

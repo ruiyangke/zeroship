@@ -1,8 +1,8 @@
 //! Live-PG smoke test for `gateway::sessions`.
 //!
-//! Skipped silently when there is no test database (set `PG_TEST_URL` or run
-//! `tests/provision_test_backends.sh`; the same convention every live-PG
-//! test under `crates/auth/tests/` uses).
+//! REFUSES when there is no test database, and prints what to run
+//! (`tests/provision_test_backends.sh`) rather than skipping into a green.
+//! There is no environment variable that turns that back into a skip.
 //!
 //! Runs the full CRUD round-trip: create → validate (positive) →
 //! validate w/ wrong `app_id` (negative) → revoke (per-app) → validate
@@ -54,10 +54,7 @@ async fn live_session(
 
 #[compio::test]
 async fn create_validate_revoke_roundtrip() {
-    let Some(dsn) = common::platform_db_or_skip() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = common::require_platform_db();
 
     let (mut client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
