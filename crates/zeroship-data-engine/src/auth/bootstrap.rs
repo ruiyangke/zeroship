@@ -778,10 +778,15 @@ mod live_reserved_sweep_tests {
         app: &str,
         sql: &str,
     ) -> Result<(), compio_postgres::Error> {
+        // `tx_session_setup_sql` takes the typed schema name, so the scratch app
+        // id is parsed rather than passed as text. Mirrors
+        // `zeroship-migrate-server`'s `scratch_schema_name`, which took the same
+        // signature change.
+        let schema = zeroship_schema::SchemaName::new(app).expect("a scratch app id is a schema");
         admin.batch_execute("BEGIN").await?;
         let scoped = async {
             admin
-                .batch_execute(&tx_session_setup_sql(app).expect("scratch app role name"))
+                .batch_execute(&tx_session_setup_sql(&schema).expect("scratch app role name"))
                 .await?;
             admin.batch_execute(sql).await
         }
