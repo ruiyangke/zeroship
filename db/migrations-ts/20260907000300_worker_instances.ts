@@ -27,8 +27,11 @@ import { createFunction, grant, now, raw, t, table } from "@zeroship/migrate";
 // ONLY ITS LISTENING PORT. Control takes the host from the observed peer
 // address, validates the pair against an operator-declared envelope of permitted
 // CIDRs and ports held in CONTROL'S OWN config, and refuses anything outside it,
-// including a peer that is loopback or a configured proxy (without that arm the
-// derivation collapses to "everything is the proxy").
+// including a peer reached through a configured proxy (without that arm the
+// derivation collapses to "everything is the proxy"). Loopback is ruled on by
+// the declared networks like any other address, so an operator can state a
+// single-host deployment; it is not fenced above them, which would make that
+// deployment inexpressible.
 //
 // WHY, because it is not obvious: `collect_forwarded_headers` in
 // crates/zeroship-gateway/src/router/dispatch.rs strips a named header set and
