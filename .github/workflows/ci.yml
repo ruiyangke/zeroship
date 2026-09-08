@@ -180,6 +180,22 @@ jobs:
       # definition the compose file already carries.
       - name: Provision the required test backends (postgres, redis, smtp sink)
         run: bash tests/provision_test_backends.sh
+      # The provisioner stands the servers up and writes the overlay; it does
+      # not apply the platform corpus, and says so in its own "what it does not
+      # provision" header. That was survivable while a target without a migrated
+      # database announced a skip. It is not survivable now: those targets
+      # REFUSE, so an unmigrated server takes this job red rather than green
+      # over tests that never ran. The corpus is a prerequisite of the suite,
+      # so it is provisioned like one.
+      #
+      # The DSN is the provisioner's own default (`PG_DSN` there, from PG_HOST /
+      # PG_PORT / PG_USER / PG_PASS / PG_DB). If those defaults move, this moves
+      # with them - which is why the applier is named rather than open-coded.
+      - name: Apply the platform corpus to the provisioned database
+        run: |
+          set -o pipefail
+          ZEROSHIP_MIGRATE_DSN='postgres://postgres:zeroship@127.0.0.1:5440/zeroship' \
+            bash deploy/ops/db-migrate.sh
       # `--no-fail-fast` because cargo otherwise stops at the FIRST failing
       # target and never builds or runs the ones after it. Those targets do not
       # report as failed, they report as nothing at all, so one known-failing
