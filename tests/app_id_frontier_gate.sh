@@ -46,16 +46,24 @@ gate_arms_init app_id_frontier
 
 FAIL=0
 
-# The ratchet. Composition at the time of writing, measured by this script:
-#   6 production call sites  - plugin-workflow claim.rs and store/pg.rs,
-#     migrate-server apply.rs, control registry.rs (x2) and workflow_rollout.rs,
-#     plugin-db replication.rs
+# The ratchet. Composition, measured by this script:
+#   3 production call sites  - plugin-workflow store/pg.rs, migrate-server
+#     apply.rs, plugin-db replication.rs
 #   1 in-file test mention   - gateway sync.rs, inside its `#[cfg(test)] mod`
-# Seven production + one test is eight. When the sweep finishes, the production
-# half is zero and `AppId::from_uuid` is deleted outright, taking the last one
-# with it - so the end state is CEILING=0 and this gate is deleted with the
-# bridge it was written to police.
-CEILING=8
+# When the sweep finishes, the production half is zero and `AppId::from_uuid` is
+# deleted outright, taking the last one with it - so the end state is CEILING=0
+# and this gate is deleted with the bridge it was written to police.
+#
+# IT WAS 8, AND PART OF THE DROP IS NOT PROGRESS OF THE KIND THE NUMBER SUGGESTS.
+# Five of the removed sites were the app-lifecycle lock's holders, and they did
+# not stop converting - they now share ONE conversion inside
+# `app_derivation::lifecycle_lock_seed_for_stored_uuid`, in a file this gate
+# EXCLUDES as a defining module. So one degradation moved out of the count
+# rather than out of the tree. That is the intended shape (the derivation seam
+# is where a transitional conversion belongs, and one conversion cannot half-move
+# the way five could) but a reader comparing 8 to 4 should know that four of the
+# four are real removals and one is a relocation.
+CEILING=4
 
 # ONE definition, used by the real scan and by the anti-vacuity control alike.
 # It was two copies for the length of one edit, and they had already drifted on

@@ -6,7 +6,6 @@ use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
 use zeroship_core::app_derivation;
-use zeroship_core::app_id::AppId;
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
     GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry, RouteEntry,
@@ -442,7 +441,7 @@ impl Registry {
         // the marker; work admitted before it may still finish.
         tx.query_one(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&app_derivation::lifecycle_lock_seed(&AppId::from_uuid(id))],
+            &[&app_derivation::lifecycle_lock_seed_for_stored_uuid(id)],
         )
         .await?;
         let rows = tx
@@ -477,7 +476,7 @@ impl Registry {
         let tx = conn.transaction().await?;
         tx.query_one(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&app_derivation::lifecycle_lock_seed(&AppId::from_uuid(id))],
+            &[&app_derivation::lifecycle_lock_seed_for_stored_uuid(id)],
         )
         .await?;
         let state = tx
@@ -1208,6 +1207,11 @@ fn name_reads_as_an_app_id(name: &str) -> bool {
 #[cfg(test)]
 mod name_validation_tests {
     use super::*;
+    // Scoped to the tests because production here no longer names the type: the
+    // lifecycle lock's seed conversion moved into `app_derivation`. It was a
+    // file-level import, and `cargo check -p zeroship-control` does not compile
+    // this module, so dropping it looked clean and broke the test target only.
+    use zeroship_core::app_id::AppId;
 
     /// The string that is a legal app NAME and a legal app ID at once.
     ///

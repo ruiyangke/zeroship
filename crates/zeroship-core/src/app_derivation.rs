@@ -227,6 +227,34 @@ pub fn lifecycle_lock_seed(app: &AppId) -> String {
     format!("{LIFECYCLE_LOCK_SEED_PREFIX}{}", app.as_str())
 }
 
+/// The same seed, for a caller that still holds the `zeroship.apps.id` column's
+/// `Uuid`.
+///
+/// TRANSITIONAL, and the exact pair of [`AppId::from_uuid`]: it is deleted in
+/// the slice that flips the column, and every caller then holds an [`AppId`] and
+/// calls [`lifecycle_lock_seed`] directly.
+///
+/// # Why this exists rather than five conversions
+///
+/// Every holder of the app-lifecycle lock spelled
+/// `lifecycle_lock_seed(&AppId::from_uuid(id))` itself - `archive_app` and
+/// `unarchive_app` in the control registry, the workflow rollout, the worker's
+/// final workflow claim, and the account-closure app delete. Five independent
+/// conversions of one value.
+///
+/// **Holders that disagree about the seed do not contend.** They take DIFFERENT
+/// advisory locks, both succeed, and the mutual exclusion the lock exists for is
+/// gone - with no error, no log, and no failing test, because each side is
+/// individually correct. Re-keying four of five is a plausible tidy-up, which is
+/// what makes it dangerous: the app delete could cross the archive marker a
+/// worker claim is holding.
+///
+/// One conversion cannot half-move. That is the whole property.
+#[must_use]
+pub fn lifecycle_lock_seed_for_stored_uuid(id: &uuid::Uuid) -> String {
+    lifecycle_lock_seed(&AppId::from_uuid(id))
+}
+
 /// The path segment this app's bundle and assets hang off in the blob store.
 ///
 /// `LocalFs` composes `<base>/<segment>/bundle.appbundle` and

@@ -2719,9 +2719,7 @@ pub async fn delete_app(
     // have crossed the marker.
     tx.query_one(
         "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-        &[&zeroship_core::app_derivation::lifecycle_lock_seed(
-            &zeroship_core::app_id::AppId::from_uuid(&app_id),
-        )],
+        &[&zeroship_core::app_derivation::lifecycle_lock_seed_for_stored_uuid(&app_id)],
     )
     .await
     .map_err(|err| db_error(&err, "lock app lifecycle"))?;
