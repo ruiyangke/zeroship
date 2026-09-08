@@ -254,8 +254,9 @@ WORKER_NEXT="refusing unsafe database authority"
 GATEWAY_NEXT="without a readable"
 
 # EVERY REFUSAL ARM CALLS THIS, and it exists because of a measurement rather
-# than for symmetry. Mutating `build_service_auth` to log its message and then
-# CARRY ON - rather than exit - left this gate fully green: the message
+# than for symmetry. Mutating the key-material loader - `load_role_material` in
+# the worker, `build_service_auth` in the gateway - to log its message and then
+# CARRY ON rather than exit left this gate fully green: the message
 # assertion still matched the line the mutation had not touched, and the
 # non-zero exit was supplied by the later refusal. Two assertions, and both were
 # satisfied by a build that had removed the fence. What discriminates is that a

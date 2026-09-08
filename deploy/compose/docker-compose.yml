@@ -770,8 +770,16 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
+      # HEALTHY, not merely STARTED, and the difference became load-bearing when
+      # the worker started enrolling at boot: it asks control for an instance
+      # identity before it serves, and refuses to start when it cannot get one.
+      # `service_started` only says the container was created, so every replica
+      # would race control's first bind and depend on the worker's unreachable
+      # retry budget to survive it. That budget still exists - Kubernetes offers
+      # no ordering at all - but a declaration that states the dependency is
+      # better than one that leans on a timeout.
       control:
-        condition: service_started
+        condition: service_healthy
       redis:
         condition: service_started
 

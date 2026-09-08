@@ -239,9 +239,10 @@ done
 # WORKER_PORTS. Without this, control would admit that one port and refuse every
 # worker in this file as `port_outside_envelope`.
 #
-# It is latent until enrolment is mandatory - nothing calls the enrolment
-# endpoint yet - which is exactly why it is stated here rather than discovered
-# later: the refusal would arrive with every health probe still green.
+# It was stated here while enrolment was still latent, and it is LOAD-BEARING
+# now: every worker below enrols at boot and REFUSES TO START when control
+# refuses it. A range that does not cover WORKER_PORTS therefore stops this
+# harness at bring-up, loudly, instead of at a later assertion.
 #
 # Derived from the array, never written out, and the range assumes WORKER_PORTS
 # is contiguous and ascending, which the declaration above keeps true.
