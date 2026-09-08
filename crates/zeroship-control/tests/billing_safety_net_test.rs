@@ -846,13 +846,36 @@ fn period_band_is_reserved_for_the_allocator() {
             let is_year = b[i..i + 4].iter().all(u8::is_ascii_digit);
             let looks_like_date =
                 is_year && b[i + 4] == b'-' && b[i + 5].is_ascii_digit() && b[i + 6].is_ascii_digit();
-            if looks_like_date && (i == 0 || !b[i - 1].is_ascii_digit()) {
-                let year = (0..4).fold(0i32, |acc, k| acc * 10 + i32::from(b[i + k] - b'0'));
-                found.push(year);
+            if !looks_like_date || (i > 0 && b[i - 1].is_ascii_digit()) {
+                continue;
             }
+            // THE MONTH MUST BE A MONTH, and without this the shape `dddd-dd`
+            // matches any hyphenated pair of numbers in the crate. A port range
+            // in `src/worker_enrolment.rs` tripped it on 2026-09-07 and was
+            // reported as pinning a billing period in the reserved band. The
+            // narrowing loses nothing the guard was built for: a quoted period
+            // literal always carries a real month, and a chrono constructor is
+            // caught by the marker scan above whatever its arguments are.
+            let month = i32::from(b[i + 5] - b'0') * 10 + i32::from(b[i + 6] - b'0');
+            if !(1..=12).contains(&month) {
+                continue;
+            }
+            let year = (0..4).fold(0i32, |acc, k| acc * 10 + i32::from(b[i + k] - b'0'));
+            found.push(year);
         }
         found
     }
+
+    // THE SCANNER'S OWN CONTROL, because a narrowed detector that matches
+    // nothing prints exactly what a clean crate prints. The first row is the
+    // shape this guard exists to catch; the rest are shapes it must not.
+    assert_eq!(period_years("let p = \"2136-08\";"), vec![2136]);
+    assert_eq!(
+        period_years("Utc.with_ymd_and_hms(2136, 8, 1, 0, 0, 0)"),
+        vec![2136]
+    );
+    assert!(period_years("const PORTS: &str = \"8080-8090\";").is_empty());
+    assert!(period_years("let range = \"9090-8080\";").is_empty());
 
     let crate_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
     // The allocator names its own band; this file quotes the year that proved
