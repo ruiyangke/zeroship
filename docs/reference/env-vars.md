@@ -758,7 +758,19 @@ CI also sets `PG_CONTAINER` `PG_HOST` `PG_PORT` `PG_USER` `PG_PASS`
 `POSTGRES_USER` `POSTGRES_PASSWORD` `REDPANDA_BROKERS` `ZS_FRESHNESS_STRICT`.
 `PG_HOST`/`PG_PORT`/`PG_USER`/`PG_PASS` are INPUTS to
 `tests/provision_test_backends.sh`, which writes what they resolve to into the
-overlay; no harness carries its own copy of the defaults any more.
+overlay; no harness carries its own copy of the defaults any more. That script
+takes `REDIS_HOST`/`REDIS_PORT` and `SMTP_HOST`/`SMTP_PORT`/`SMTP_UI_PORT`/
+`SMTP_CONTAINER`/`SMTP_IMAGE` the same way. The SMTP ones are the sink's
+coordinates rather than a variable any test reads: the sink is named to test
+code only by `AUTH_TEST_SMTP_SINK`, and by the compiled default it falls back
+to.
+
+`AUTH_TEST_SMTP_SINK` (`host:port`) is the same shape one tier down: it
+redirects `zeroship-mailer`'s plaintext-transport test at a sink of your own.
+Unset, the test dials the address `tests/provision_test_backends.sh` runs mailpit
+on, and FAILS naming that script if nothing answers. It was the one standing
+allowlist entry in the deleted skip census, on the ground that no script could
+stand a sink up; provisioning one is what retired the exemption.
 
 `PG_TEST_URL` and `REDIS_TEST_URL` REDIRECT the suites; they do not enable
 them. Unset, everything resolves from the overlay - and `libs/compio-postgres`,
