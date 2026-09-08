@@ -54,10 +54,11 @@
 use compio_postgres::Client;
 use rand::RngCore as _;
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::auth::hash_client_secret;
 use zeroship_authz::Scope;
 use zeroship_bundle::ScopeDef;
-use zeroship_core::typed_id::app_oauth_client_id;
+use zeroship_core::typed_id::APP_OAUTH_CLIENT_PREFIX;
 
 /// Per-app custom-domain cap (default 50). With 2 redirect_uris per host
 /// (popup-callback + callback) the redirect_uri array is bounded at
@@ -129,11 +130,22 @@ fn error_with_source_chain(err: &dyn std::error::Error) -> String {
 // ---------------------------------------------------------------------------
 
 /// Deterministic, stable-for-app-life OAuth `client_id`: `oac_<base62-app-id>`.
-/// Delegates to the shared `zeroship_core::typed_id` minter so the auth-side
-/// decoder (`app_id_from_oauth_client_id`) is the exact inverse.
+///
+/// The base62 body is carried over VERBATIM from the app id's own printed
+/// form rather than re-derived from its bits: `AppId` keeps no route to them
+/// (see `zeroship_core::entity_id`), and the body is already exactly the
+/// bytes `zeroship_core::typed_id::app_oauth_client_id` would have encoded,
+/// since the two ids share one body under different prefixes. The auth-side
+/// decoder (`app_id_from_oauth_client_id`) stays the exact inverse either way
+/// - it reads the body, not the prefix that produced it.
 #[must_use]
-pub fn client_id_for_app(app_id: &Uuid) -> String {
-    app_oauth_client_id(app_id)
+pub fn client_id_for_app(app_id: &AppId) -> String {
+    let body = app_id
+        .as_str()
+        .strip_prefix(AppId::PREFIX)
+        .and_then(|s| s.strip_prefix('_'))
+        .expect("AppId::as_str always renders as <PREFIX>_<body>");
+    format!("{APP_OAUTH_CLIENT_PREFIX}_{body}")
 }
 
 /// The app's apex origin, used as the `sector_identifier` (pairwise/relay
@@ -397,7 +409,7 @@ fn generate_client_secret_hash() -> String {
 /// that would exceed [`MAX_REDIRECT_URIS`], or an invalid declared scope.
 pub async fn ensure_app_client(
     pg: &mut Client,
-    app_id: &Uuid,
+    app_id: &AppId,
     app_name: &str,
     scheme: &str,
     hosts: &[String],
@@ -457,7 +469,7 @@ pub async fn ensure_app_client(
 /// [`AppOauthClientError`] on DB failure or an invalid host list.
 pub async fn sync_app_redirect_uris(
     pg: &mut Client,
-    app_id: &Uuid,
+    app_id: &AppId,
     app_name: &str,
     scheme: &str,
     hosts: &[String],
@@ -512,7 +524,7 @@ pub async fn sync_app_redirect_uris(
 /// threshold; every field is still required and read exactly once.
 #[derive(Debug)]
 struct ClientRowInput<'a> {
-    app_id: &'a Uuid,
+    app_id: &'a AppId,
     client_id: &'a str,
     client_name: &'a str,
     sector: &'a str,
@@ -595,7 +607,7 @@ async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()
          ON CONFLICT (app_id) DO UPDATE SET \
             sector_identifier = EXCLUDED.sector_identifier, \
             updated_at = NOW()",
-        &[app_id, &client_id, &sector],
+        &[&app_id.as_str(), &client_id, &sector],
     )
     .await
     .map_err(db_error)?;
@@ -606,7 +618,7 @@ async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()
     // manifest. Same transaction ⇒ atomic with the allowlist mirror above.
     tx.execute(
         "DELETE FROM zeroship.app_scope_defs WHERE app_id = $1",
-        &[app_id],
+        &[&app_id.as_str()],
     )
     .await
     .map_err(db_error)?;
@@ -614,7 +626,7 @@ async fn upsert_db_rows(pg: &mut Client, input: ClientRowInput<'_>) -> Result<()
         tx.execute(
             "INSERT INTO zeroship.app_scope_defs (app_id, scope_id, label, description) \
              VALUES ($1, $2, $3, $4)",
-            &[app_id, &scope.id, &scope.label, &scope.description],
+            &[&app_id.as_str(), &scope.id, &scope.label, &scope.description],
         )
         .await
         .map_err(db_error)?;
@@ -652,7 +664,7 @@ mod tests {
 
     #[test]
     fn client_id_is_deterministic_and_oac_prefixed() {
-        let app = Uuid::parse_str("018f3a4b-5c6d-7e8f-9a0b-1c2d3e4f5a6b").unwrap();
+        let app = AppId::mint();
         let a = client_id_for_app(&app);
         let b = client_id_for_app(&app);
         assert_eq!(a, b, "stable for app life");
@@ -665,8 +677,8 @@ mod tests {
 
     #[test]
     fn distinct_apps_get_distinct_client_ids() {
-        let a = client_id_for_app(&Uuid::new_v4());
-        let b = client_id_for_app(&Uuid::new_v4());
+        let a = client_id_for_app(&AppId::mint());
+        let b = client_id_for_app(&AppId::mint());
         assert_ne!(a, b);
     }
 

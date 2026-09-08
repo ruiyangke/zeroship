@@ -20,7 +20,7 @@
 //! (registry JOINs `app_spend_state`), NOT a pushed `ControlEvent`. The cron
 //! constructs `ControlEvent::SpendState` only for the audit log / future SSE.
 
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::types::SpendState;
 
 use crate::metering::{current_period_start_unix, period_date};
@@ -178,9 +178,9 @@ pub struct SpendEngine {
 /// derive so the reconcile cron's `SpendStateChange` audit row records the
 /// money context (#8) — matching the `{from,to,spend_cents,limit_cents}` shape
 /// documented on `audit::Action::SpendStateChange`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpendTransition {
-    pub app_id: Uuid,
+    pub app_id: AppId,
     pub old: SpendState,
     pub new: SpendState,
     /// Priced period spend at the transition, in cents.
@@ -206,7 +206,7 @@ impl SpendEngine {
     /// when there is no row yet in the respective table.
     async fn app_state_row(
         conn: &compio_postgres::Client,
-        app_id: &Uuid,
+        app_id: &AppId,
     ) -> Result<(String, SpendState, Option<i64>, i64), RegistryError> {
         let rows = conn
             .query(
@@ -215,12 +215,12 @@ impl SpendEngine {
                  LEFT JOIN zeroship.app_spend_limit l ON l.app_id = a.id \
                  LEFT JOIN zeroship.app_spend_state s ON s.app_id = a.id \
                  WHERE a.id = $1",
-                &[app_id],
+                &[&app_id.as_str()],
             )
             .await?;
         let row = rows
             .first()
-            .ok_or_else(|| RegistryError::NotFound(format!("app {app_id}")))?;
+            .ok_or_else(|| RegistryError::NotFound(format!("app {}", app_id.as_str())))?;
         let plan_id: String = row.get("plan_id");
         let prev = row
             .get::<_, Option<String>>("state")
@@ -277,7 +277,7 @@ impl SpendEngine {
                 &[&period_date(period_start)],
             )
             .await?;
-        let mut usage_by_app: std::collections::HashMap<Uuid, std::collections::HashMap<String, i64>> =
+        let mut usage_by_app: std::collections::HashMap<AppId, std::collections::HashMap<String, i64>> =
             std::collections::HashMap::new();
         // ACTIVE UNWEIGHTED-METRIC ALERT (Key flow B): a metric that has accrued
         // usage this period but has NO `metric_weights` row prices to $0 CU —
@@ -287,7 +287,12 @@ impl SpendEngine {
         let mut warned_unweighted: std::collections::HashSet<String> =
             std::collections::HashSet::new();
         for row in &usage_rows {
-            let aid: Uuid = row.get("app_id");
+            let aid_raw: String = row.get("app_id");
+            let aid = AppId::parse(&aid_raw).map_err(|e| {
+                RegistryError::Database(format!(
+                    "usage_aggregates.app_id {aid_raw} is not a canonical app id: {e}"
+                ))
+            })?;
             let metric: String = row.get("metric");
             if !weights.contains_key(&metric) && warned_unweighted.insert(metric.clone()) {
                 tracing::warn!(
@@ -305,14 +310,19 @@ impl SpendEngine {
         let mut transitions = Vec::new();
 
         for row in &app_rows {
-            let app_id: Uuid = row.get("id");
+            let app_id_raw: String = row.get("id");
+            let app_id = AppId::parse(&app_id_raw).map_err(|e| {
+                RegistryError::Database(format!(
+                    "apps.id {app_id_raw} is not a canonical app id: {e}"
+                ))
+            })?;
             let (plan_id, prev, override_limit, prev_eval_limit) =
                 Self::app_state_row(&conn, &app_id).await?;
 
             // Plan → price model + default spend limit. A missing plan row
             // (should not happen — plan_id is an FK) is skipped, not crashed.
             let Some(plan) = plans.get(&plan_id) else {
-                tracing::warn!(app_id = %app_id, plan_id = %plan_id, "spend: app plan not in catalog — skipping");
+                tracing::warn!(app_id = %app_id.as_str(), plan_id = %plan_id, "spend: app plan not in catalog — skipping");
                 continue;
             };
 
@@ -329,7 +339,7 @@ impl SpendEngine {
                 Ok(b) => b,
                 Err(crate::pricing::PricingError::UnresolvedFx) => {
                     tracing::error!(
-                        app_id = %app_id,
+                        app_id = %app_id.as_str(),
                         plan_id = %plan_id,
                         "spend: global default FX missing — cannot price; ABORTING sweep (no app derived)"
                     );
@@ -341,7 +351,7 @@ impl SpendEngine {
                 }
                 Err(e @ crate::pricing::PricingError::ComputeUnitOverflow { .. }) => {
                     tracing::warn!(
-                        app_id = %app_id,
+                        app_id = %app_id.as_str(),
                         plan_id = %plan_id,
                         error = %e,
                         "spend: compute-unit overflow pricing app — skipping (not clamping spend)"
@@ -366,7 +376,7 @@ impl SpendEngine {
             // a warn! (the loop continues for everyone else), matching reconcile.
             let Ok(spend_i64) = i64::try_from(spend_cents) else {
                 tracing::warn!(
-                    app_id = %app_id,
+                    app_id = %app_id.as_str(),
                     plan_id = %plan_id,
                     spend_cents,
                     "spend: priced spend exceeds i64::MAX — skipping app (refusing to clamp), \
@@ -376,7 +386,7 @@ impl SpendEngine {
             };
             let Ok(limit_i64) = i64::try_from(limit_cents) else {
                 tracing::warn!(
-                    app_id = %app_id,
+                    app_id = %app_id.as_str(),
                     plan_id = %plan_id,
                     limit_cents,
                     "spend: effective limit exceeds i64::MAX — skipping app (refusing to clamp)"
@@ -434,7 +444,7 @@ impl SpendEngine {
     /// `Transaction` Drop / explicit early return — rolls both back atomically.
     async fn persist_transition(
         conn: &mut compio_postgres::Client,
-        app_id: &Uuid,
+        app_id: &AppId,
         from: SpendState,
         to: SpendState,
         spend_cents: i64,
@@ -452,7 +462,7 @@ impl SpendEngine {
                eval_limit_cents = EXCLUDED.eval_limit_cents, \
                period = EXCLUDED.period, evaluated_at = NOW()",
             &[
-                app_id,
+                &app_id.as_str(),
                 &spend_state_str(to),
                 &spend_cents,
                 &eval_limit_cents,
@@ -474,7 +484,7 @@ impl SpendEngine {
              VALUES ($1, $2, $3::date, $4::text, $5::text, $6, $7)",
             &[
                 &history_id,
-                app_id,
+                &app_id.as_str(),
                 &period,
                 &spend_state_str(from),
                 &spend_state_str(to),
@@ -493,7 +503,7 @@ impl SpendEngine {
     /// override column to clobber — ending the prior three-writer clobber dance.
     async fn touch_state(
         conn: &compio_postgres::Client,
-        app_id: &Uuid,
+        app_id: &AppId,
         state: SpendState,
         spend_cents: i64,
         eval_limit_cents: i64,
@@ -508,7 +518,7 @@ impl SpendEngine {
                eval_limit_cents = EXCLUDED.eval_limit_cents, \
                period = EXCLUDED.period, evaluated_at = NOW()",
             &[
-                app_id,
+                &app_id.as_str(),
                 &spend_state_str(state),
                 &spend_cents,
                 &eval_limit_cents,
@@ -527,7 +537,7 @@ impl SpendEngine {
     /// via the `limit_changed` deadband bypass).
     pub async fn set_limit(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         cents: Option<u64>,
     ) -> Result<(), RegistryError> {
         let conn = self.registry.conn().await?;
@@ -547,7 +557,7 @@ impl SpendEngine {
              VALUES ($1, $2, NOW()) \
              ON CONFLICT (app_id) DO UPDATE SET \
                spend_limit_cents = EXCLUDED.spend_limit_cents, updated_at = NOW()",
-            &[app_id, &limit],
+            &[&app_id.as_str(), &limit],
         )
         .await?;
         Ok(())

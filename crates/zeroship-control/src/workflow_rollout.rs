@@ -4,8 +4,8 @@
 //! control-plane replica observes the same rollout state.
 
 use compio_postgres::GenericClient;
-use uuid::Uuid;
 use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 
 use crate::registry::RegistryError;
 
@@ -13,7 +13,7 @@ pub const ROLLOUT_CONFIG_ID: &str = "global";
 
 pub async fn workflows_enabled_for_app<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<bool, RegistryError>
 where
     C: GenericClient + Sync,
@@ -23,7 +23,7 @@ where
     // before archive returns or observe the archived marker afterwards.
     conn.query_one(
         "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
-        &[&app_derivation::lifecycle_lock_seed_for_stored_uuid(app_id)],
+        &[&app_derivation::lifecycle_lock_seed(app_id)],
     )
     .await
     .map_err(RegistryError::from)?;
@@ -36,7 +36,7 @@ where
                FROM zeroship.apps a \
                LEFT JOIN zeroship.plans p ON p.id = a.plan_id \
               WHERE a.id = $1",
-            &[app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(RegistryError::from)?;

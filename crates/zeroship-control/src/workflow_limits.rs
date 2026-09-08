@@ -1,4 +1,4 @@
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_plugin_workflow::engine::{
     workflow_journal_limits_from_plan, WorkflowJournalLimits,
 };
@@ -20,19 +20,19 @@ pub(crate) mod operator_pending_g3_workflow_capacity {
 
 pub(crate) async fn lock_app_journal_accounting<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<(), RegistryError>
 where
     C: compio_postgres::GenericClient + Sync,
 {
-    let key = format!("workflow-journal:{app_id}");
+    let key = format!("workflow-journal:{}", app_id.as_str());
     conn.query("SELECT pg_advisory_xact_lock(hashtext($1)::bigint)", &[&key])
         .await
         .map_err(RegistryError::from)?;
     Ok(())
 }
 
-pub(crate) async fn app_journal_bytes<C>(conn: &C, app_id: &Uuid) -> Result<i64, RegistryError>
+pub(crate) async fn app_journal_bytes<C>(conn: &C, app_id: &AppId) -> Result<i64, RegistryError>
 where
     C: compio_postgres::GenericClient + Sync,
 {
@@ -51,7 +51,7 @@ where
 
 pub(crate) async fn workflow_journal_limits_for_app<C>(
     conn: &C,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<WorkflowJournalLimits, RegistryError>
 where
     C: compio_postgres::GenericClient + Sync,
@@ -62,13 +62,14 @@ where
                FROM zeroship.apps a \
                LEFT JOIN zeroship.plans p ON p.id = a.plan_id \
               WHERE a.id = $1",
-            &[app_id],
+            &[&app_id.as_str()],
         )
         .await
         .map_err(RegistryError::from)?;
     let Some(row) = rows.first() else {
         return Err(RegistryError::InvalidInput(format!(
-            "app {app_id} not found for workflow journal limits"
+            "app {} not found for workflow journal limits",
+            app_id.as_str()
         )));
     };
     let plan_id: String = row.get("plan_id");

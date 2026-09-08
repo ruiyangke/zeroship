@@ -13,6 +13,7 @@ use compio::net::{TcpListener, TcpStream};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
+use zeroship_core::app_id::AppId;
 use zeroship_control::metering::provider::{
     assert_capability_consistency, AggregateQuery, BillingPeriod, Capabilities, DedupKey,
     DedupTtl, CorrectionCapability, IngestAck, InvoiceRef, LiteStore, MeteringProvider,
@@ -746,7 +747,7 @@ fn events_for_meter(
         .iter()
         .enumerate()
         .map(|(idx, value)| {
-            let app = stable_uuid(&format!("provider-conformance-{label}-app"));
+            let app = stable_app_id(&format!("provider-conformance-{label}-app"));
             let mut dims = BTreeMap::new();
             dims.insert("period_start".to_string(), PERIOD.start.to_string());
             dims.insert("period_end".to_string(), PERIOD.end.to_string());
@@ -771,6 +772,14 @@ fn stable_uuid(label: &str) -> Uuid {
     let mut bytes = [0u8; 16];
     bytes.copy_from_slice(&digest[..16]);
     Uuid::from_bytes(bytes)
+}
+
+/// A deterministic APP id for one conformance label, on the same construction
+/// [`subject_ref`] uses for organizations: base62 over a label digest, because
+/// an app id is text with a fixed prefix, not a uuid.
+fn stable_app_id(label: &str) -> AppId {
+    let encoded = zeroship_core::typed_id::uuid_to_base62(&stable_uuid(label));
+    AppId::parse(&format!("app_{encoded}")).expect("stable app id is canonical")
 }
 
 #[derive(Default)]

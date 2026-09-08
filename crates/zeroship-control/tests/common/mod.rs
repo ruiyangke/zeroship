@@ -16,6 +16,7 @@ use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use ntex::web::{self, HttpResponse};
 use serde_json::json;
 use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 use zeroship_core::auth_provider::{AuthProvider, PlatformConfig, PlatformProvider};
 use zeroship_control::Registry;
 
@@ -276,7 +277,7 @@ fn platform_jwks_body() -> String {
 ///
 /// Call it AFTER inserting the app row and BEFORE `PgStore::provision`.
 #[allow(dead_code)]
-pub async fn provision_app_workflow_schema(pg: &compio_postgres::Client, app_id: &Uuid) {
+pub async fn provision_app_workflow_schema(pg: &compio_postgres::Client, app_id: &AppId) {
     zeroship_migrate_server::provisioning::provision_workflow_journal_schema(pg, app_id)
         .await
         .expect("provision app workflow journal schema");

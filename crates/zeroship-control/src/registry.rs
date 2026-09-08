@@ -6,6 +6,8 @@ use compio_postgres::error::SqlState;
 use compio_postgres::{Client, NoTls};
 use uuid::Uuid;
 use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
+use zeroship_core::user_id::UserId;
 use zeroship_core::types::{
     AppNetPolicy, AppNetPolicyLimits, AppRecord, AppRuntimeLimits, AppVersionInfo,
     GatewayFamilyRevocation, GatewayPrincipalLifecycle, GatewaySnapshot, NetEgressEntry, RouteEntry,
@@ -299,6 +301,11 @@ impl Registry {
         // typed error and an archived-plan check the FK can't).
         Self::validate_plan(&tx, plan_id).await?;
 
+        // `zeroship.apps.id` carries no database default: a SQL-side generator
+        // would be a second minter beside `AppId::mint`, and one producer per
+        // identifier is what makes a derived name (schema, role, publication,
+        // …) answerable. This is that one producer.
+        let app_id = AppId::mint();
         let rows = tx
             .query(
                 &format!(
@@ -307,18 +314,18 @@ impl Registry {
                     // `(project_id, organization_id) -> projects(id,
                     // organization_id)` checks is true by construction rather
                     // than by a second lookup that could disagree.
-                    "INSERT INTO zeroship.apps (name, plan_id, project_id, organization_id) \
-                     SELECT $1, $2, p.id, p.organization_id \
+                    "INSERT INTO zeroship.apps (id, name, plan_id, project_id, organization_id) \
+                     SELECT $1, $2, $3, p.id, p.organization_id \
                        FROM zeroship.projects p \
                        LEFT JOIN zeroship.organization_members m \
-                              ON m.organization_id = p.organization_id AND m.user_id = $4 \
+                              ON m.organization_id = p.organization_id AND m.user_id = $5 \
                        LEFT JOIN zeroship.organization_roles organization_role \
                               ON organization_role.role = m.role \
                        LEFT JOIN zeroship.project_members pm \
-                              ON pm.project_id = p.id AND pm.user_id = $4 \
+                              ON pm.project_id = p.id AND pm.user_id = $5 \
                        LEFT JOIN zeroship.organization_roles project_role \
                               ON project_role.role = pm.role \
-                      WHERE p.id = $3 AND {effective} >= {developer} \
+                      WHERE p.id = $4 AND {effective} >= {developer} \
                      RETURNING id, name, plan_id, deploy_hash, \
                                archived_at::text, created_at::text, updated_at::text",
                     effective = crate::organizations::effective_project_rank_sql(
@@ -328,37 +335,38 @@ impl Registry {
                     ),
                     developer = crate::organizations::ladder_rank_of(crate::organizations::ROLE_DEVELOPER),
                 ),
-                &[&name, &plan_id, &project_id, owner_id],
+                &[&app_id.as_str(), &name, &plan_id, &project_id, owner_id],
             )
             .await?;
-        let record = rows.first().map(row_to_record).ok_or_else(|| {
+        let Some(row) = rows.first() else {
             // Zero rows means the project does not exist or the caller's
             // narrowed rank does not reach `developer` there. Both are the
             // caller's problem, so neither may be reported as a database
             // failure - `RegistryError::Database` would surface as a 500 and
             // send them looking at the platform instead of at their seat.
-            RegistryError::Conflict(format!(
+            return Err(RegistryError::Conflict(format!(
                 "cannot create an app in project {project_id}: it does not exist, or you do not \
                  hold developer authority there"
-            ))
-        })?;
+            )));
+        };
+        let record = row_to_record(row)?;
 
         tx.commit().await?;
         Ok(record)
     }
 
     /// Get an app by primary key.
-    pub async fn get_app(&self, id: &Uuid) -> Result<Option<AppRecord>, RegistryError> {
+    pub async fn get_app(&self, id: &AppId) -> Result<Option<AppRecord>, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
             .query(
                 "SELECT id, name, plan_id, deploy_hash, archived_at::text, \
                         created_at::text, updated_at::text \
                  FROM zeroship.apps WHERE id = $1",
-                &[id],
+                &[&id.as_str()],
             )
             .await?;
-        Ok(rows.first().map(row_to_record))
+        rows.first().map(row_to_record).transpose()
     }
 
     /// Get an app by unique name.
@@ -372,7 +380,7 @@ impl Registry {
                 &[&name],
             )
             .await?;
-        Ok(rows.first().map(row_to_record))
+        rows.first().map(row_to_record).transpose()
     }
 
     /// List the apps `owner_id` can reach, ordered by name.
@@ -421,7 +429,7 @@ impl Registry {
                 &[owner_id],
             )
             .await?;
-        Ok(rows.iter().map(row_to_record).collect())
+        rows.iter().map(row_to_record).collect()
     }
 
     /// Archive an app without deleting any app-attributed state.
@@ -433,7 +441,7 @@ impl Registry {
     /// schedulable. Database schema and role lifecycle is intentionally absent
     /// here: control has no provisioning DSN and privileged teardown belongs to
     /// migrate-server.
-    pub async fn archive_app(&self, id: &Uuid) -> Result<Option<AppRecord>, RegistryError> {
+    pub async fn archive_app(&self, id: &AppId) -> Result<Option<AppRecord>, RegistryError> {
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
         // Workflow admissions and the worker's final claim take the shared
@@ -441,7 +449,7 @@ impl Registry {
         // the marker; work admitted before it may still finish.
         tx.query_one(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&app_derivation::lifecycle_lock_seed_for_stored_uuid(id)],
+            &[&app_derivation::lifecycle_lock_seed(id)],
         )
         .await?;
         let rows = tx
@@ -452,11 +460,11 @@ impl Registry {
                   WHERE id = $1 AND deleted_at IS NULL \
                   RETURNING id, name, plan_id, deploy_hash, \
                             archived_at::text, created_at::text, updated_at::text",
-                &[id],
+                &[&id.as_str()],
             )
             .await?;
         tx.commit().await?;
-        Ok(rows.first().map(row_to_record))
+        rows.first().map(row_to_record).transpose()
     }
 
     /// Restore an archived app. Retained name, manifests, billing evidence, and
@@ -471,12 +479,12 @@ impl Registry {
     /// already denies every app-scoped action on a deleted app, because it
     /// resolves an app's organization through the project the delete detaches -
     /// so this guard is the one that holds if that ever stops being true.
-    pub async fn unarchive_app(&self, id: &Uuid) -> Result<Option<AppRecord>, RegistryError> {
+    pub async fn unarchive_app(&self, id: &AppId) -> Result<Option<AppRecord>, RegistryError> {
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
         tx.query_one(
             "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-            &[&app_derivation::lifecycle_lock_seed_for_stored_uuid(id)],
+            &[&app_derivation::lifecycle_lock_seed(id)],
         )
         .await?;
         let state = tx
@@ -485,7 +493,7 @@ impl Registry {
                    FROM zeroship.apps \
                   WHERE id = $1 AND deleted_at IS NULL \
                   FOR UPDATE",
-                &[id],
+                &[&id.as_str()],
             )
             .await?;
         let Some(state) = state.first() else {
@@ -500,13 +508,14 @@ impl Registry {
                          SELECT 1 FROM zeroship.app_schema_applies \
                           WHERE app_id = $1 AND status = 'submitted' \
                      ) AS applying",
-                    &[id],
+                    &[&id.as_str()],
                 )
                 .await?
                 .get("applying");
             if apply_in_progress {
                 return Err(RegistryError::Conflict(format!(
-                    "app {id} has a schema apply in progress; retry restore after it finishes"
+                    "app {} has a schema apply in progress; retry restore after it finishes",
+                    id.as_str()
                 )));
             }
             let manifest_json: Option<String> = state.get("manifest_json");
@@ -515,12 +524,14 @@ impl Registry {
                     let manifest = serde_json::from_str::<zeroship_bundle::Manifest>(&json)
                         .map_err(|error| {
                             RegistryError::Conflict(format!(
-                                "archived app {id} has an invalid retained manifest: {error}"
+                                "archived app {} has an invalid retained manifest: {error}",
+                                id.as_str()
                             ))
                         })?;
                     manifest.validate().map_err(|error| {
                         RegistryError::Conflict(format!(
-                            "archived app {id} has an invalid retained manifest: {error}"
+                            "archived app {} has an invalid retained manifest: {error}",
+                            id.as_str()
                         ))
                     })?;
                     manifest.runtime_descriptor.map(|entry| entry.hash)
@@ -535,7 +546,7 @@ impl Registry {
                       ORDER BY m.applied_at DESC NULLS LAST, m.submitted_at DESC, \
                                m.migration_id DESC \
                       LIMIT 1",
-                    &[id],
+                    &[&id.as_str()],
                 )
                 .await?
                 .first()
@@ -556,11 +567,11 @@ impl Registry {
                   WHERE id = $1 AND deleted_at IS NULL \
                   RETURNING id, name, plan_id, deploy_hash, \
                             archived_at::text, created_at::text, updated_at::text",
-                &[id],
+                &[&id.as_str()],
             )
             .await?;
         tx.commit().await?;
-        Ok(rows.first().map(row_to_record))
+        rows.first().map(row_to_record).transpose()
     }
 
     /// Atomic deploy commit. Sets `deploy_hash` and `manifest_json` in
@@ -608,7 +619,7 @@ impl Registry {
     /// rollback across a migration boundary — is not made safe by an override.
     pub async fn set_deploy_with_manifest(
         &self,
-        id: &Uuid,
+        id: &AppId,
         deploy_hash: &str,
         manifest_json: &str,
         descriptor_sha256: Option<&str>,
@@ -630,7 +641,7 @@ impl Registry {
                                                        m.migration_id DESC \
                                               LIMIT 1) \
                        END",
-                &[&deploy_hash, &manifest_json, id, &descriptor_sha256],
+                &[&deploy_hash, &manifest_json, &id.as_str(), &descriptor_sha256],
             )
             .await?;
         if n == 0 {
@@ -647,7 +658,7 @@ impl Registry {
             let app_rows = tx
                 .query(
                     "SELECT 1 FROM zeroship.apps WHERE id = $1 AND deleted_at IS NULL",
-                    &[id],
+                    &[&id.as_str()],
                 )
                 .await?;
             if app_rows.is_empty() {
@@ -661,7 +672,7 @@ impl Registry {
                       ORDER BY m.applied_at DESC NULLS LAST, m.submitted_at DESC, \
                                m.migration_id DESC \
                       LIMIT 1",
-                    &[id],
+                    &[&id.as_str()],
                 )
                 .await?
                 .first()
@@ -682,7 +693,7 @@ impl Registry {
                     manifest_json = EXCLUDED.manifest_json, \
                     activated_at = now() \
                  RETURNING id",
-                &[&deploy_id, id, &deploy_hash, &manifest_json],
+                &[&deploy_id, &id.as_str(), &deploy_hash, &manifest_json],
             )
             .await?;
         let deploy_id: String = row.get("id");
@@ -702,10 +713,10 @@ impl Registry {
     /// the legacy `internal::get_asset` shim while the gateway still
     /// asks the control plane for asset bytes.
     /// Remove this once the gateway switches to BlobStore directly.
-    pub async fn get_manifest_json(&self, id: &Uuid) -> Result<Option<String>, RegistryError> {
+    pub async fn get_manifest_json(&self, id: &AppId) -> Result<Option<String>, RegistryError> {
         let conn = self.conn().await?;
         let rows = conn
-            .query("SELECT manifest_json FROM zeroship.apps WHERE id = $1", &[id])
+            .query("SELECT manifest_json FROM zeroship.apps WHERE id = $1", &[&id.as_str()])
             .await?;
         Ok(rows.first().and_then(|r| r.get::<_, Option<String>>("manifest_json")))
     }
@@ -722,7 +733,7 @@ impl Registry {
     /// is ambiguous (no such app OR the plan is unknown/archived), so we
     /// disambiguate with a follow-up read to return a clean typed error rather
     /// than a raw FK violation or a silent no-op.
-    pub async fn set_plan(&self, id: &Uuid, plan_id: &str) -> Result<bool, RegistryError> {
+    pub async fn set_plan(&self, id: &AppId, plan_id: &str) -> Result<bool, RegistryError> {
         let conn = self.conn().await?;
         let n = conn
             .execute(
@@ -730,7 +741,7 @@ impl Registry {
                  WHERE id = $2 AND deleted_at IS NULL \
                    AND EXISTS (SELECT 1 FROM zeroship.plans \
                                WHERE id = $1 AND NOT archived)",
-                &[&plan_id, id],
+                &[&plan_id, &id.as_str()],
             )
             .await?;
         if n > 0 {
@@ -747,7 +758,7 @@ impl Registry {
         let app_exists = conn
             .query(
                 "SELECT 1 FROM zeroship.apps WHERE id = $1 AND deleted_at IS NULL",
-                &[id],
+                &[&id.as_str()],
             )
             .await?;
         if app_exists.is_empty() {
@@ -806,15 +817,22 @@ impl Registry {
                 &[],
             )
             .await?;
-        let mut rules: HashMap<Uuid, Vec<NetEgressEntry>> = HashMap::new();
+        let mut rules: HashMap<AppId, Vec<NetEgressEntry>> = HashMap::new();
         for row in &rule_rows {
-            let app_id: Uuid = row.get("app_id");
+            let app_id_raw: String = row.get("app_id");
+            let Ok(app_id) = AppId::parse(&app_id_raw) else {
+                tracing::error!(
+                    app_id = %app_id_raw,
+                    "registry: app_egress_rules row has a malformed app id; skipping"
+                );
+                continue;
+            };
             let destination: String = row.get("destination");
             let verdict_text: String = row.get("verdict");
             let port_i32: i32 = row.get("port");
             let Ok(port) = u16::try_from(port_i32) else {
                 tracing::error!(
-                    app_id = %app_id,
+                    app_id = %app_id.as_str(),
                     destination = %destination,
                     port = port_i32,
                     "registry: app_egress_rules row has out-of-range port; skipping"
@@ -838,7 +856,14 @@ impl Registry {
         }
         let mut map = HashMap::new();
         for row in &rows {
-            let id: Uuid = row.get("id");
+            let id_raw: String = row.get("id");
+            let Ok(id) = AppId::parse(&id_raw) else {
+                tracing::error!(
+                    app_id = %id_raw,
+                    "registry: apps row has a malformed id; skipping"
+                );
+                continue;
+            };
             let hash: Option<String> = row.get("deploy_hash");
             let plan_id: String = row.get("plan_id");
             let env_version: i64 = row.get("env_version");
@@ -868,7 +893,7 @@ impl Registry {
                     Ok(m) => Some(m),
                     Err(e) => {
                         tracing::warn!(
-                            app_id = %id,
+                            app_id = %id.as_str(),
                             error = %e,
                             "registry: versions: manifest parse failure — emitting None"
                         );
@@ -876,9 +901,10 @@ impl Registry {
                     }
                 }
             });
+            let runtime = runtime_limits_from_catalog(runtime_limits_json.as_ref(), &id);
             map.insert(id, AppVersionInfo {
                 deploy_hash: hash,
-                runtime: runtime_limits_from_catalog(runtime_limits_json.as_ref(), &id),
+                runtime,
                 plan_id,
                 env_version,
                 manifest,
@@ -946,7 +972,14 @@ impl Registry {
             .await?;
         let mut map = HashMap::new();
         for row in &rows {
-            let id: Uuid = row.get("id");
+            let id_raw: String = row.get("id");
+            let Ok(id) = AppId::parse(&id_raw) else {
+                tracing::error!(
+                    app_id = %id_raw,
+                    "registry: apps row has a malformed id; skipping"
+                );
+                continue;
+            };
             let manifest_json: Option<String> = row.get("manifest_json");
             let manifest = manifest_json
                 .as_deref()
@@ -961,7 +994,7 @@ impl Registry {
                             // callers. That is a security downgrade, not a
                             // degraded-service notice.
                             tracing::error!(
-                                app_id = %id,
+                                app_id = %id.as_str(),
                                 error = %e,
                                 "registry: invalid manifest — falling back to passthrough, \
                                  which serves EVERY route as anonymous-public"
@@ -971,7 +1004,7 @@ impl Registry {
                     },
                     Err(e) => {
                         tracing::error!(
-                            app_id = %id,
+                            app_id = %id.as_str(),
                             error = %e,
                             "registry: manifest parse failure — falling back to passthrough, \
                              which serves EVERY route as anonymous-public"
@@ -1045,10 +1078,17 @@ impl Registry {
                 &[],
             )
             .await?;
-        let mut by_user = HashMap::<Uuid, GatewayPrincipalLifecycle>::new();
+        let mut by_user = HashMap::<UserId, GatewayPrincipalLifecycle>::new();
         for row in &rows {
-            let user_id: Uuid = row.get("id");
-            let lifecycle = by_user.entry(user_id).or_insert_with(|| {
+            let user_id_raw: String = row.get("id");
+            let Ok(user_id) = UserId::parse(&user_id_raw) else {
+                tracing::error!(
+                    user_id = %user_id_raw,
+                    "registry: gateway snapshot: users row has a malformed id; skipping"
+                );
+                continue;
+            };
+            let lifecycle = by_user.entry(user_id.clone()).or_insert_with(|| {
                 GatewayPrincipalLifecycle {
                     user_id,
                     disabled: row.get("disabled"),
@@ -1063,7 +1103,7 @@ impl Registry {
             }
         }
         let mut principal_lifecycle: Vec<_> = by_user.into_values().collect();
-        principal_lifecycle.sort_by_key(|lifecycle| lifecycle.user_id);
+        principal_lifecycle.sort_by_key(|lifecycle| lifecycle.user_id.clone());
         let family_revocations = conn
             .query(
                 "SELECT client_id, sub, \
@@ -1103,14 +1143,14 @@ impl Registry {
 /// hardcoded plan-name table.
 fn runtime_limits_from_catalog(
     json: Option<&serde_json::Value>,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> AppRuntimeLimits {
     match json {
         Some(j) => match serde_json::from_value::<AppRuntimeLimits>(j.clone()) {
             Ok(limits) => limits,
             Err(e) => {
                 tracing::warn!(
-                    app_id = %app_id,
+                    app_id = %app_id.as_str(),
                     error = %e,
                     "registry: plan runtime_limits_json parse failure — using free-tier fallback"
                 );
@@ -1126,14 +1166,14 @@ fn runtime_limits_from_catalog(
 /// ceiling. Missing/corrupt catalog values fall back to the free-tier caps.
 fn net_policy_limits_from_catalog(
     json: Option<&serde_json::Value>,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> AppNetPolicyLimits {
     match json {
         Some(j) => match serde_json::from_value::<AppNetPolicyLimits>(j.clone()) {
             Ok(limits) => limits,
             Err(e) => {
                 tracing::warn!(
-                    app_id = %app_id,
+                    app_id = %app_id.as_str(),
                     error = %e,
                     "registry: plan net_policy_limits_json parse failure — using free-tier fallback"
                 );
@@ -1225,11 +1265,6 @@ fn name_reads_as_an_app_id(name: &str) -> bool {
 #[cfg(test)]
 mod name_validation_tests {
     use super::*;
-    // Scoped to the tests because production here no longer names the type: the
-    // lifecycle lock's seed conversion moved into `app_derivation`. It was a
-    // file-level import, and `cargo check -p zeroship-control` does not compile
-    // this module, so dropping it looked clean and broke the test target only.
-    use zeroship_core::app_id::AppId;
 
     /// The string that is a legal app NAME and a legal app ID at once.
     ///
@@ -1318,16 +1353,28 @@ mod name_validation_tests {
 
 /// Convert a query row into an `AppRecord`.
 ///
-/// Columns: id (UUID), name (TEXT), plan_id (UUID), deploy_hash (TEXT | NULL),
-///          archived_at (TEXT | NULL), created_at (TEXT), updated_at (TEXT).
-fn row_to_record(row: &compio_postgres::Row) -> AppRecord {
-    AppRecord {
-        id: row.get("id"),
+/// Columns: id (TEXT, the canonical `app_<base62>` rendering), name (TEXT),
+///          plan_id (TEXT), deploy_hash (TEXT | NULL), archived_at
+///          (TEXT | NULL), created_at (TEXT), updated_at (TEXT).
+///
+/// # Errors
+///
+/// [`RegistryError::Database`] if the `id` column does not hold a canonical
+/// app id. `AppId` has no `FromSql` impl - decoding through a fallible
+/// `String` read and parse is the only route in, and it is what keeps a
+/// malformed row from being mistaken for a real app.
+fn row_to_record(row: &compio_postgres::Row) -> Result<AppRecord, RegistryError> {
+    let id_raw: String = row.get("id");
+    let id = AppId::parse(&id_raw).map_err(|e| {
+        RegistryError::Database(format!("apps.id {id_raw} is not a canonical app id: {e}"))
+    })?;
+    Ok(AppRecord {
+        id,
         name: row.get("name"),
         plan_id: row.get("plan_id"),
         deploy_hash: row.get("deploy_hash"),
         archived_at: row.get("archived_at"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
-    }
+    })
 }

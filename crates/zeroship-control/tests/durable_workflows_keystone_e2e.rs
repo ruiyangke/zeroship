@@ -24,6 +24,7 @@ use futures::channel::oneshot;
 use futures::lock::Mutex as AsyncMutex;
 use uuid::Uuid;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_core::app_id::AppId;
 use zeroship_control::cron::workflow_blob_gc;
 use zeroship_control::cron::workflow_engine::{
     self, DispatchOutcome, GatewayStepDispatcher, StepDispatcher, WorkflowEngineConfig,
@@ -94,7 +95,7 @@ struct Fixture {
     blob_root: PathBuf,
     cleanup_blob_root: bool,
     deploy_tmp_dir: PathBuf,
-    app_id: Uuid,
+    app_id: AppId,
     deploy_id: String,
     scheduler_store: WorkflowSchedulerStore,
 }
@@ -102,11 +103,11 @@ struct Fixture {
 #[derive(Clone)]
 struct TestPg {
     inner: Arc<compio_postgres::Client>,
-    app_id: Uuid,
+    app_id: AppId,
 }
 
 impl TestPg {
-    fn new(inner: Arc<compio_postgres::Client>, app_id: Uuid) -> Self {
+    fn new(inner: Arc<compio_postgres::Client>, app_id: AppId) -> Self {
         Self { inner, app_id }
     }
 
@@ -118,7 +119,7 @@ impl TestPg {
         // schema `env.db` can address - see `prepare_side_effect_table`. Mapping
         // them here rather than at ~30 call sites keeps every accessor's SQL
         // reading as the plain table name.
-        let app_data_schema = quote_ident(&self.app_id.to_string());
+        let app_data_schema = quote_ident(self.app_id.as_str());
         sql.replace("zeroship.workflow_runs", &tables.runs)
             .replace("zeroship.workflow_steps", &tables.steps)
             .replace("zeroship.workflow_signals", &tables.signals)
@@ -197,7 +198,7 @@ async fn provision_scheduler_store_once(db_url: &str, store: &WorkflowSchedulerS
     *provisioned = Some(db_url.to_string());
 }
 
-async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id: String) -> Fixture {
+async fn build_fixture(db_url: &str, gateway_url: &str, app_id: AppId, deploy_id: String) -> Fixture {
     let (blob_root, cleanup_blob_root) = match zeroship_core::test_env!("ZEROSHIP_DW_E2E_BLOB_ROOT")
     {
         Some(root) if !root.trim().is_empty() => (PathBuf::from(root), false),
@@ -221,7 +222,7 @@ async fn build_fixture(db_url: &str, gateway_url: &str, app_id: Uuid, deploy_id:
     PgStore::provision(control_pg.as_ref(), &app_id)
         .await
         .expect("provision workflow journal");
-    let test_pg = TestPg::new(Arc::clone(&control_pg), app_id);
+    let test_pg = TestPg::new(Arc::clone(&control_pg), app_id.clone());
 
     Fixture {
         state: Arc::new(AppState {
@@ -543,8 +544,8 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
 /// The explicit column grants are re-issued on every call because this function
 /// drops and recreates the tables.
 async fn prepare_side_effect_table(pg: &TestPg) {
-    let app_schema = quote_ident(&pg.app_id.to_string());
-    let app_role_name = zeroship_core::database_role::per_app_role_name(&pg.app_id.to_string())
+    let app_schema = quote_ident(pg.app_id.as_str());
+    let app_role_name = zeroship_core::database_role::per_app_role_name(pg.app_id.as_str())
         .expect("workflow fixture app id must produce a valid PostgreSQL role name");
     let app_role = quote_ident(&app_role_name);
     // The seven platform system columns, verbatim from the DDL the platform
@@ -625,9 +626,10 @@ async fn prepare_side_effect_table(pg: &TestPg) {
     .expect("prepare side-effect table");
 }
 
-/// Double-quote a Postgres identifier. The two values this is used on are a
-/// `Uuid` rendering and a name derived from it, so neither can carry a quote;
-/// the escape is here so a future caller does not have to notice that.
+/// Double-quote a Postgres identifier. The values this is used on are the
+/// canonical `app_<base62>` rendering of an app id and names derived from it,
+/// so none can carry a quote; the escape is here so a future caller does not
+/// have to notice that.
 fn quote_ident(ident: &str) -> String {
     format!("\"{}\"", ident.replace('"', "\"\""))
 }
@@ -681,7 +683,7 @@ async fn set_app_plan_runtime_limit(
                FROM zeroship.apps a \
                JOIN zeroship.plans p ON p.id = a.plan_id \
               WHERE a.id = $1",
-            &[&fx.app_id],
+            &[&fx.app_id.as_str()],
         )
         .await
         .expect("load app plan runtime limits");
@@ -739,7 +741,7 @@ async fn seed_workflow_run(
             &[
                 &run_id,
                 &workflow_name,
-                &fx.app_id,
+                &fx.app_id.as_str(),
                 &fx.deploy_id,
                 &input,
                 &wake_at,
@@ -748,7 +750,7 @@ async fn seed_workflow_run(
         .await
         .expect("seed workflow run");
     fx.scheduler_store
-        .register_timer(&run_id, fx.app_id, wake_at)
+        .register_timer(&run_id, &fx.app_id, wake_at)
         .await
         .expect("register seeded workflow timer");
     run_id
@@ -780,16 +782,18 @@ async fn register_existing_run_timer(fx: &Fixture, run_id: &str) {
         state.as_str(),
         "queued" | "running" | "sleeping" | "waiting" | "compensating"
     ) {
-        let app_id: Uuid = row.get("app_id");
+        // `fx.pg` rewrites `zeroship.workflow_runs` to the fixture's own
+        // per-app table, so the row's `app_id` column is redundant with
+        // `fx.app_id` rather than a second source.
         if row.get::<_, bool>("cancel_requested") {
             fx.scheduler_store
-                .ack_register_next(run_id, app_id, Utc::now())
+                .ack_register_next(run_id, &fx.app_id, Utc::now())
                 .await
                 .expect("register cancelled workflow timer");
         } else {
             let wake_at = wake_at.expect("active workflow run should have wake_at for test register");
             fx.scheduler_store
-                .register_timer(run_id, app_id, wake_at)
+                .register_timer(run_id, &fx.app_id, wake_at)
                 .await
                 .expect("register existing workflow timer");
         }
@@ -877,9 +881,8 @@ fn dw23_workflow_engine_load_bench() {
 
         let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
         let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-        let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
-            .parse()
-            .expect("ZEROSHIP_DW_E2E_APP_ID uuid");
+        let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
+            .expect("ZEROSHIP_DW_E2E_APP_ID app id");
         let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
         let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
         set_dispatch_paused(&fx, false).await;
@@ -1289,7 +1292,7 @@ async fn force_run_due(fx: &Fixture, run_id: &str) -> DateTime<Utc> {
         .expect("force workflow run due");
     assert_eq!(updated, 1, "expected one workflow run for {run_id}");
     fx.scheduler_store
-        .register_timer(run_id, fx.app_id, wake_at)
+        .register_timer(run_id, &fx.app_id, wake_at)
         .await
         .expect("register due workflow timer");
     wake_at
@@ -1471,7 +1474,7 @@ async fn rollout_switch_drill(
         &signal_run,
     )
     .await;
-    let token = create_run_signal_token(control_url, fx.app_id, &signal_run, "PT30S").await;
+    let token = create_run_signal_token(control_url, &fx.app_id, &signal_run, "PT30S").await;
     set_ingress_disabled(fx, true).await;
     let (public_status, public_body) = post_public_signal(
         gateway_url,
@@ -1481,7 +1484,7 @@ async fn rollout_switch_drill(
     .await;
     let point_signal = post_signal(
         control_url,
-        fx.app_id,
+        &fx.app_id,
         &signal_run,
         serde_json::json!({"ok": true, "source": "dw24-point-to-point"}),
     )
@@ -2024,7 +2027,7 @@ async fn activate_redeploy_with_current_manifest(fx: &Fixture) -> (String, Strin
         .pg
         .query_one(
             "SELECT manifest_json FROM zeroship.apps WHERE id = $1",
-            &[&fx.app_id],
+            &[&fx.app_id.as_str()],
         )
         .await
         .expect("load current app manifest")
@@ -2053,7 +2056,7 @@ async fn activate_redeploy_with_current_manifest(fx: &Fixture) -> (String, Strin
             "SELECT id \
                FROM zeroship.app_deploys \
               WHERE app_id = $1 AND deploy_hash = $2",
-            &[&fx.app_id, &redeploy_hash],
+            &[&fx.app_id.as_str(), &redeploy_hash],
         )
         .await
         .expect("load redeploy id")
@@ -2067,7 +2070,7 @@ async fn wait_for_active_deploy(fx: &Fixture, expected_hash: &str, expected_depl
             .pg
             .query_one(
                 "SELECT deploy_hash FROM zeroship.apps WHERE id = $1",
-                &[&fx.app_id],
+                &[&fx.app_id.as_str()],
             )
             .await
             .expect("load active app deploy hash")
@@ -2080,7 +2083,7 @@ async fn wait_for_active_deploy(fx: &Fixture, expected_hash: &str, expected_depl
                   WHERE app_id = $1 AND activated_at IS NOT NULL \
                   ORDER BY activated_at DESC, created_at DESC, id DESC \
                   LIMIT 1",
-                &[&fx.app_id],
+                &[&fx.app_id.as_str()],
             )
             .await
             .expect("load resolved active deploy");
@@ -2100,7 +2103,7 @@ async fn wait_for_active_deploy(fx: &Fixture, expected_hash: &str, expected_depl
         .pg
         .query_one(
             "SELECT deploy_hash FROM zeroship.apps WHERE id = $1",
-            &[&fx.app_id],
+            &[&fx.app_id.as_str()],
         )
         .await
         .expect("load final active app deploy hash")
@@ -2113,7 +2116,7 @@ async fn wait_for_active_deploy(fx: &Fixture, expected_hash: &str, expected_depl
               WHERE app_id = $1 AND activated_at IS NOT NULL \
               ORDER BY activated_at DESC, created_at DESC, id DESC \
               LIMIT 1",
-            &[&fx.app_id],
+            &[&fx.app_id.as_str()],
         )
         .await
         .expect("load final resolved active deploy");
@@ -2367,7 +2370,7 @@ async fn scheduled_run_for(
                 AND workflow_name = $2 \
                 AND dedup_key = $3 \
               ORDER BY created_at, id",
-            &[&fx.app_id, &SCHEDULED_WORKFLOW_NAME, &key],
+            &[&fx.app_id.as_str(), &SCHEDULED_WORKFLOW_NAME, &key],
         )
         .await
         .expect("load scheduled run");
@@ -2383,7 +2386,7 @@ async fn scheduled_run_for(
 
 async fn post_signal(
     control_url: &str,
-    app_id: Uuid,
+    app_id: &AppId,
     run_id: &str,
     payload: serde_json::Value,
 ) -> serde_json::Value {
@@ -2402,7 +2405,7 @@ async fn post_signal(
     let builder = builder
         .header("content-type", "application/json")
         .expect("content-type header")
-        .header("x-zeroship-app-id", app_id.to_string())
+        .header("x-zeroship-app-id", app_id.as_str())
         .expect("app id header");
     let response = builder.body(body).send().await.expect("post signal");
     let status = response.status().as_u16();
@@ -2418,7 +2421,7 @@ async fn post_signal(
 
 async fn create_run_signal_token(
     control_url: &str,
-    app_id: Uuid,
+    app_id: &AppId,
     run_id: &str,
     ttl: &str,
 ) -> String {
@@ -2432,7 +2435,7 @@ async fn create_run_signal_token(
 
 async fn create_topic_signal_token(
     control_url: &str,
-    app_id: Uuid,
+    app_id: &AppId,
     topic: &str,
     ttl: &str,
 ) -> String {
@@ -2444,7 +2447,7 @@ async fn create_topic_signal_token(
     create_signal_token_at(&url, app_id, ttl).await
 }
 
-async fn create_signal_token_at(url: &str, app_id: Uuid, ttl: &str) -> String {
+async fn create_signal_token_at(url: &str, app_id: &AppId, ttl: &str) -> String {
     let body = serde_json::to_vec(&serde_json::json!({
         "types": ["go"],
         "ttl": ttl,
@@ -2456,7 +2459,7 @@ async fn create_signal_token_at(url: &str, app_id: Uuid, ttl: &str) -> String {
         .expect("token request URL")
         .header("content-type", "application/json")
         .expect("content-type header")
-        .header("x-zeroship-app-id", app_id.to_string())
+        .header("x-zeroship-app-id", app_id.as_str())
         .expect("app id header")
         .body(body)
         .send()
@@ -2507,7 +2510,7 @@ async fn post_public_signal(
 
 async fn post_control(
     control_url: &str,
-    app_id: Uuid,
+    app_id: &AppId,
     run_id: &str,
     op: &str,
     body: serde_json::Value,
@@ -2524,7 +2527,7 @@ async fn post_control(
     let builder = builder
         .header("content-type", "application/json")
         .expect("content-type header")
-        .header("x-zeroship-app-id", app_id.to_string())
+        .header("x-zeroship-app-id", app_id.as_str())
         .expect("app id header");
     let response = builder.body(bytes).send().await.expect("post control");
     let status = response.status().as_u16();
@@ -2540,7 +2543,7 @@ async fn post_control(
 
 async fn post_control_raw(
     control_url: &str,
-    app_id: Uuid,
+    app_id: &AppId,
     run_id: &str,
     op: &str,
     body: serde_json::Value,
@@ -2558,7 +2561,7 @@ async fn post_control_raw(
         .expect("control request URL")
         .header("content-type", "application/json")
         .expect("content-type header")
-        .header("x-zeroship-app-id", app_id.to_string())
+        .header("x-zeroship-app-id", app_id.as_str())
         .expect("app id header")
         .body(bytes)
         .send()
@@ -2574,7 +2577,7 @@ async fn post_control_raw(
 
 async fn get_output_bytes(
     control_url: &str,
-    app_id: Uuid,
+    app_id: &AppId,
     run_id: &str,
     step_name: Option<&str>,
     range: Option<&str>,
@@ -2596,7 +2599,7 @@ async fn get_output_bytes(
     let mut builder = client
         .get(&url)
         .expect("output request URL")
-        .header("x-zeroship-app-id", app_id.to_string())
+        .header("x-zeroship-app-id", app_id.as_str())
         .expect("app id header");
     if let Some(range) = range {
         builder = builder.header("range", range).expect("range header");
@@ -2780,8 +2783,7 @@ async fn keystone_real_spine() {
     let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_CONTROL_URL"));
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
-        .parse()
+    let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
         .expect("app id uuid");
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
 
@@ -2803,7 +2805,7 @@ async fn keystone_real_spine() {
             "SELECT id, deploy_hash, workflow_name, kind, cron_expr, tz, next_fire_at \
                FROM zeroship.workflow_schedules \
               WHERE app_id = $1 AND name = 'dw14-scheduled'",
-            &[&fx.app_id],
+            &[&fx.app_id.as_str()],
         )
         .await
         .expect("load reconciled schedule row");
@@ -3101,7 +3103,7 @@ async fn keystone_real_spine() {
             "SELECT COUNT(*)::bigint AS n \
                FROM zeroship.workflow_runs \
               WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3",
-            &[&fx.app_id, &SCHEDULED_WORKFLOW_NAME, &key],
+            &[&fx.app_id.as_str(), &SCHEDULED_WORKFLOW_NAME, &key],
         )
         .await
         .expect("count concurrent scheduled runs")
@@ -3118,7 +3120,7 @@ async fn keystone_real_spine() {
                     "SELECT COUNT(*)::bigint AS n \
                        FROM zeroship.workflow_runs \
                       WHERE app_id = $1 AND workflow_name = $2 AND dedup_key = $3",
-                    &[&fx.app_id, &SCHEDULED_WORKFLOW_NAME, &key],
+                    &[&fx.app_id.as_str(), &SCHEDULED_WORKFLOW_NAME, &key],
                 )
                 .await
                 .expect("count concurrent scheduled runs after background tick")
@@ -3197,7 +3199,7 @@ async fn keystone_real_spine() {
 
     let restart = post_control(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &happy_run,
         "restart",
         serde_json::json!({"from": {"name": "b"}}),
@@ -3483,7 +3485,7 @@ async fn keystone_real_spine() {
     let cw6_child = cw6_children.remove(0);
     let cancel = post_control(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &cw6_parent,
         "cancel",
         serde_json::json!({}),
@@ -3643,7 +3645,7 @@ async fn keystone_real_spine() {
     );
     let pause_body = post_control(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &pause_run,
         "pause",
         serde_json::json!({}),
@@ -3692,7 +3694,7 @@ async fn keystone_real_spine() {
     );
     let resume_body = post_control(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &pause_run,
         "resume",
         serde_json::json!({}),
@@ -3732,7 +3734,7 @@ async fn keystone_real_spine() {
     assert_ack_run(&cancel_ack, &cancel_run, "cancel first dispatch");
     let cancel_body = post_control(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &cancel_run,
         "cancel",
         serde_json::json!({}),
@@ -3960,7 +3962,7 @@ async fn keystone_real_spine() {
         Some("application/json")
     );
     let (step_status, step_bytes) =
-        get_output_bytes(&control_url, fx.app_id, &blob_run, Some("big"), None).await;
+        get_output_bytes(&control_url, &fx.app_id, &blob_run, Some("big"), None).await;
     assert_eq!(step_status, 200);
     assert_eq!(
         blob_step.get::<_, Option<i64>>("output_size"),
@@ -3976,14 +3978,14 @@ async fn keystone_real_spine() {
     assert_eq!(step_json["digest"], blob_output["digest"]);
     assert_eq!(blob_output["len"].as_u64(), Some(blob_size as u64));
     let (run_status, run_bytes) =
-        get_output_bytes(&control_url, fx.app_id, &blob_run, None, None).await;
+        get_output_bytes(&control_url, &fx.app_id, &blob_run, None, None).await;
     assert_eq!(run_status, 200);
     let run_read_json: serde_json::Value =
         serde_json::from_slice(&run_bytes).expect("run output json");
     assert_eq!(run_read_json, blob_output);
     let (range_status, range_bytes) = get_output_bytes(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &blob_run,
         Some("big"),
         Some("bytes=0-31"),
@@ -4114,7 +4116,7 @@ async fn keystone_real_spine() {
         .expect("reclaim blob hash");
     let restart = post_control(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &reclaim_run,
         "restart",
         serde_json::json!({"from": {"name": "big"}}),
@@ -4186,7 +4188,7 @@ async fn keystone_real_spine() {
 
     let signal_body = post_signal(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &signal_run,
         serde_json::json!({"ok": true, "source": "e2e"}),
     )
@@ -4274,7 +4276,7 @@ async fn keystone_real_spine() {
     )
     .await;
     let external_token =
-        create_run_signal_token(&control_url, fx.app_id, &external_run, "PT30S").await;
+        create_run_signal_token(&control_url, &fx.app_id, &external_run, "PT30S").await;
     let (status, external_body) = post_public_signal(
         &gateway_url,
         &external_token,
@@ -4339,7 +4341,7 @@ async fn keystone_real_spine() {
         &forged_run,
     )
     .await;
-    let forged_token = create_run_signal_token(&control_url, fx.app_id, &forged_run, "PT30S").await;
+    let forged_token = create_run_signal_token(&control_url, &fx.app_id, &forged_run, "PT30S").await;
     let mut forged_bytes = forged_token.into_bytes();
     let last = forged_bytes.last_mut().expect("token bytes");
     *last = if *last == b'a' { b'b' } else { b'a' };
@@ -4365,7 +4367,7 @@ async fn keystone_real_spine() {
         &expired_run,
     )
     .await;
-    let expired_token = create_run_signal_token(&control_url, fx.app_id, &expired_run, "PT1S").await;
+    let expired_token = create_run_signal_token(&control_url, &fx.app_id, &expired_run, "PT1S").await;
     // Wait past TTL(1s) + timestamp-tolerance(1s) with margin for integer-second
     // rounding: exp = mint_second+1, so the token is only strictly expired once
     // now_second >= mint_second+3. 2.25s lands on the mint_second+2 boundary and
@@ -4393,10 +4395,10 @@ async fn keystone_real_spine() {
     )
     .await;
     let terminal_token =
-        create_run_signal_token(&control_url, fx.app_id, &terminal_run, "PT30S").await;
+        create_run_signal_token(&control_url, &fx.app_id, &terminal_run, "PT30S").await;
     let _ = post_signal(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &terminal_run,
         serde_json::json!({"ok": true, "source": "internal"}),
     )
@@ -4443,14 +4445,14 @@ async fn keystone_real_spine() {
             "SELECT COUNT(*)::bigint AS n \
                FROM zeroship.workflow_subscriptions \
               WHERE app_id = $1 AND topic = $2",
-            &[&fx.app_id, &topic],
+            &[&fx.app_id.as_str(), &topic],
         )
         .await
         .expect("count topic subscriptions")
         .get("n");
     assert_eq!(sub_count, 3, "three runs should subscribe to the topic");
 
-    let topic_token = create_topic_signal_token(&control_url, fx.app_id, &topic, "PT30S").await;
+    let topic_token = create_topic_signal_token(&control_url, &fx.app_id, &topic, "PT30S").await;
     let (topic_status, topic_body) = post_public_signal(
         &gateway_url,
         &topic_token,
@@ -4597,7 +4599,7 @@ async fn keystone_real_spine() {
             "SELECT COUNT(*)::bigint AS n \
                FROM zeroship.workflow_subscriptions \
               WHERE app_id = $1 AND topic = $2",
-            &[&fx.app_id, &topic],
+            &[&fx.app_id.as_str(), &topic],
         )
         .await
         .expect("count remaining topic subscriptions")
@@ -4769,7 +4771,7 @@ async fn keystone_real_spine() {
         .pg
         .query_one(
             "SELECT manifest_json FROM zeroship.apps WHERE id = $1",
-            &[&fx.app_id],
+            &[&fx.app_id.as_str()],
         )
         .await
         .expect("load app manifest before cascade redeploy")
@@ -4784,7 +4786,7 @@ async fn keystone_real_spine() {
     );
     let cancel = post_control(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &cascade_redeploy_parent,
         "cancel",
         serde_json::json!({}),
@@ -4803,7 +4805,7 @@ async fn keystone_real_spine() {
         .pg
         .query_one(
             "SELECT deploy_hash FROM zeroship.apps WHERE id = $1",
-            &[&fx.app_id],
+            &[&fx.app_id.as_str()],
         )
         .await
         .expect("load active deploy hash after cascade redeploy")
@@ -4836,7 +4838,7 @@ async fn keystone_real_spine() {
         .pg
         .query_one(
             "SELECT manifest_json FROM zeroship.apps WHERE id = $1",
-            &[&fx.app_id],
+            &[&fx.app_id.as_str()],
         )
         .await
         .expect("load app manifest")
@@ -4864,7 +4866,7 @@ async fn keystone_real_spine() {
             "SELECT COUNT(*)::bigint AS n \
                FROM zeroship.workflow_schedules \
               WHERE app_id = $1 AND name = 'dw14-scheduled'",
-            &[&fx.app_id],
+            &[&fx.app_id.as_str()],
         )
         .await
         .expect("count schedules after redeploy")
@@ -4893,8 +4895,7 @@ async fn bare_await_body_io_is_rejected() {
 
     let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
-        .parse()
+    let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
         .expect("app id uuid");
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
     let fx = build_fixture(&db_url, &gateway_url, app_id, deploy_id).await;
@@ -4944,8 +4945,7 @@ async fn scheduler_misfire_lost_register_recovers() {
 
     let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
-        .parse()
+    let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
         .expect("app id uuid");
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
 
@@ -5050,8 +5050,7 @@ async fn scheduler_overfire_duplicate_dispatch_noops() {
 
     let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
-        .parse()
+    let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
         .expect("app id uuid");
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
 
@@ -5159,8 +5158,7 @@ async fn compensation_saga_rollback_real_spine() {
     let db_url = required_env("a test database", zeroship_core::config::test_database_url_opt());
     let control_url = required_env("ZEROSHIP_DW_E2E_CONTROL_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_CONTROL_URL"));
     let gateway_url = required_env("ZEROSHIP_DW_E2E_GATEWAY_URL", zeroship_core::test_env!("ZEROSHIP_DW_E2E_GATEWAY_URL"));
-    let app_id: Uuid = required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID"))
-        .parse()
+    let app_id: AppId = AppId::parse(&required_env("ZEROSHIP_DW_E2E_APP_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_APP_ID")))
         .expect("app id uuid");
     let deploy_id = required_env("ZEROSHIP_DW_E2E_DEPLOY_ID", zeroship_core::test_env!("ZEROSHIP_DW_E2E_DEPLOY_ID"));
 
@@ -5206,7 +5204,7 @@ async fn compensation_saga_rollback_real_spine() {
 
     let (restart_status, restart_body) = post_control_raw(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &failed_run,
         "restart",
         serde_json::json!({"from": {"name": "b"}}),
@@ -5340,7 +5338,7 @@ async fn compensation_saga_rollback_real_spine() {
     .await;
     let cancel = post_control(
         &control_url,
-        fx.app_id,
+        &fx.app_id,
         &cancel_run,
         "cancel",
         serde_json::json!({"mode": "compensate"}),
