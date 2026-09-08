@@ -41,8 +41,16 @@
 # DO NO HARM: a PER-RUN dedicated DB on :5440 (never the real `zeroship` DB,
 # never zeroship_billing_test, never a peer harness's database) and a PER-RUN
 # control port. Self-managed up/down; tears down `stripe listen` + control on
-# exit. Skips CLEANLY (exit 0) when prereqs are absent (no nix/stripe-cli, no
-# PG :5440, no docker, no keys).
+# exit. REFUSES (exit 2, naming the missing thing and its remedy) when a
+# prerequisite is absent: no stripe CLI, no PG :5440, no docker, no built control
+# binary, no keys, or a `stripe listen` that never authenticates or becomes
+# Ready.
+#
+# NOT WIRED INTO CI: nothing in .github/workflows/ names this script, and
+# tests/run_billing_suite.sh does not invoke it either. It needs an operator's
+# live Stripe TEST keys and an authenticated stripe CLI, neither of which CI can
+# hold, so refusing cannot turn a CI job permanently red. It refuses to the
+# person who ran it by hand, which is the only reader it has.
 #
 # BOTH HALVES OF THAT USED TO BE FIXED CONSTANTS, and both were shared. The
 # database was `zeroship_stripe_e2e`, the same literal as
@@ -87,12 +95,28 @@ echo "============================================"
 echo "  zeroship E2E — Stripe-DELIVERED webhooks (stripe listen + trigger, REAL delivery)"
 echo "============================================"
 
-# --- prereq gates: skip on absent Stripe credentials, REFUSE on absent psql -
+# --- prereq gates: EVERY missing prerequisite REFUSES ----------------------
 # psql: $PATH first, then any postgresql in the nix store, then refuse. This
 # replaced ZEROSHIP_PSQL, whose default was one pinned /nix/store hash that
 # resolved on exactly one machine; everywhere else it was absent and the
 # absence was `exit 0`, so this suite measured nothing and reported success.
 # Same chain as tests/e2e_auth_ui.sh, same variable name.
+#
+# THAT SENTENCE WAS THE ONLY ONE ACTED ON at the time: psql got a refusal and
+# every other prerequisite kept its `exit 0`, so the diagnosis sat beside the
+# arms it applied to verbatim. They refuse now too, including the two that decide
+# mid-run whether Stripe is actually delivering (the signing secret and the
+# `listen` forwarder's Ready line) - the arms without which this suite has no
+# subject at all.
+zs_prereq() {
+  echo "" >&2
+  echo "  x MISSING PREREQUISITE: $1" >&2
+  echo "    remedy: $2" >&2
+  echo "" >&2
+  echo "    This harness does not skip. A run that cannot reach what it tests" >&2
+  echo "    must not print the exit code of a run that tested it." >&2
+  exit 2
+}
 PSQL="${PSQL:-}"
 if [ -z "$PSQL" ]; then
   if command -v psql >/dev/null 2>&1; then
@@ -114,9 +138,8 @@ DB="$TEST_DB"
 source "$ROOT/tests/lib/e2e_ports.sh"
 
 if [ -z "${STRIPE_TEST_SECRET_KEY:-}" ]; then
-  echo "  ⚠ SKIP: STRIPE_TEST_SECRET_KEY not set."
-  echo "         source /home/ruiyang/.config/zeroship-stripe-test.env first."
-  exit 0
+  zs_prereq "STRIPE_TEST_SECRET_KEY is not set, so there is no Stripe TEST account to deliver from." \
+            "source the operator's zeroship-stripe-test.env, or export the sk_test_ key first."
 fi
 case "$STRIPE_TEST_SECRET_KEY" in
   sk_test_*) ;;
@@ -143,9 +166,8 @@ else
   STRIPE="$CAND"
 fi
 if [ -z "$STRIPE" ] || [ ! -x "$STRIPE" ]; then
-  echo "  ⚠ SKIP: stripe CLI not found. Obtain it via: nix-shell -p stripe-cli"
-  echo "         (or set ZEROSHIP_STRIPE_BIN=/path/to/stripe)."
-  exit 0
+  zs_prereq "the stripe CLI was not found on PATH, in ZEROSHIP_STRIPE_BIN, or in the nix store; it is what makes Stripe DELIVER to us." \
+            "nix-shell -p stripe-cli, or set ZEROSHIP_STRIPE_BIN=/path/to/stripe"
 fi
 echo "  stripe CLI: $("$STRIPE" version 2>/dev/null | head -1) ($STRIPE)"
 
@@ -153,19 +175,21 @@ echo "  stripe CLI: $("$STRIPE" version 2>/dev/null | head -1) ($STRIPE)"
   echo "  x ABORT: no psql on \$PATH or in the nix store; set PSQL to the Postgres client binary." >&2
   exit 2
 }
-command -v node    >/dev/null 2>&1 || { echo "  ⚠ SKIP: node required."; exit 0; }
-command -v openssl >/dev/null 2>&1 || { echo "  ⚠ SKIP: openssl required."; exit 0; }
-command -v curl    >/dev/null 2>&1 || { echo "  ⚠ SKIP: curl required."; exit 0; }
-[ -x "$BIN/zeroship-control" ] || { echo "  ⚠ SKIP: missing $BIN/zeroship-control — run: cargo build --release -p zeroship-control"; exit 0; }
+command -v node    >/dev/null 2>&1 || zs_prereq "node is not on PATH; the harness mints its bearer with it." "install Node, or enter the dev shell: nix develop"
+command -v openssl >/dev/null 2>&1 || zs_prereq "openssl is not on PATH; the gateway signing key is generated with it." "install openssl, or enter the dev shell: nix develop"
+command -v curl    >/dev/null 2>&1 || zs_prereq "curl is not on PATH; every Stripe and control-plane call goes through it." "install curl, or enter the dev shell: nix develop"
+[ -x "$BIN/zeroship-control" ] || zs_prereq "no control binary at $BIN/zeroship-control; this harness drives the real one." "cargo build --release -p zeroship-control"
 
 export PGPASSWORD="$PGPW"
 psql_db() { "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB" "$@"; }
 psql1()   { psql_db -tA -c "$1" 2>/dev/null | tr -d '[:space:]'; }
 if ! "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -tAc "SELECT 1" >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: Postgres :$PGPORT unreachable."; exit 0
+  zs_prereq "PostgreSQL at $PGHOST:$PGPORT did not answer 'SELECT 1' as $PGUSER; the per-run database lives there." \
+            "start it (tests/provision_test_backends.sh), or point PGPORT at a server that answers."
 fi
 if [ -f "$ROOT/deploy/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: docker required step."; exit 0
+  zs_prereq "docker is not on PATH and deploy/ops/db-migrate.sh needs it to apply the platform migration set." \
+            "install docker and start its daemon."
 fi
 
 SAPI="https://api.stripe.com/v1"
@@ -268,7 +292,8 @@ fi
 WEBHOOK_SECRET="$(scli listen --print-secret 2>/dev/null | tr -d '[:space:]')"
 case "$WEBHOOK_SECRET" in
   whsec_*) pass "captured the STABLE stripe-listen webhook signing secret (whsec_… — not printed)";;
-  *) echo "  ⚠ SKIP: could not obtain a stripe-listen webhook secret (CLI auth? network?)."; exit 0;;
+  *) zs_prereq "\`stripe listen --print-secret\` returned no whsec_ value, so control cannot be configured with the secret Stripe will sign with." \
+               "authenticate the CLI (\`stripe login\`) and check network reachability to Stripe, then re-run.";;
 esac
 
 DBURL="postgres://$PGUSER:$PGPW@$PGHOST:$PGPORT/$DB"
@@ -302,7 +327,10 @@ if grep -q "Ready!" "$LISTEN_LOG" 2>/dev/null; then
   pass "stripe listen forwarder READY — Stripe now DELIVERS real signed events to control"
   echo "    $(grep -m1 'API Version' "$LISTEN_LOG" | sed 's/Your webhook signing secret is whsec_[a-f0-9]*/Your webhook signing secret is whsec_…(redacted)/')"
 else
-  echo "  ⚠ SKIP: stripe listen never became Ready (network/auth?). Tail:"; tail -8 "$LISTEN_LOG"; exit 0
+  echo "    tail of $LISTEN_LOG:" >&2
+  tail -8 "$LISTEN_LOG" >&2
+  zs_prereq "\`stripe listen\` never printed Ready, so Stripe is not delivering to control and this suite's whole subject is absent." \
+            "authenticate the CLI (\`stripe login\`) and check network reachability to Stripe, then re-run."
 fi
 
 # Record the listen log size so per-stage we can attribute which events Stripe

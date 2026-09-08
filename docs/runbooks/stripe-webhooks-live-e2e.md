@@ -38,7 +38,8 @@ stripe listen --print-secret              → capture the STABLE whsec_…
   (`packages/zero-migrate-cli/dist/cli-bin.js`, which the harness reaches
   through `zs_platform_migrate` in `tests/lib/runtime_secrets.sh`), `node`,
   `openssl`, `curl`, and `psql` (taken from $PATH, else the nix store;
-  override with `PSQL`. Absent psql is a refusal, not a skip).
+  override with `PSQL`). Every one of these is a refusal when absent, not a
+  skip.
 - The operator's Stripe **TEST** secret key, sourced from the env file.
 
 ## Run
@@ -46,14 +47,20 @@ stripe listen --print-secret              → capture the STABLE whsec_…
 ```bash
 cargo build --release -p zeroship-control
 pnpm install && pnpm build
-source /home/ruiyang/.config/zeroship-stripe-test.env   # REQUIRED — skips cleanly if unset
+source /home/ruiyang/.config/zeroship-stripe-test.env   # REQUIRED — refuses if unset
 ./tests/e2e_stripe_webhooks_live.sh
 STRICT=1 ./tests/e2e_stripe_webhooks_live.sh            # documented divergences = hard fail
 ```
 
-Skips cleanly (exit 0) when prereqs are absent (no stripe CLI / keys / PG :5440 /
-docker / tools). Refuses to run if `STRIPE_TEST_SECRET_KEY` is not an `sk_test_`
-key. Self-managed up/down: tears down `stripe listen` + control on exit.
+Refuses (exit 2) when a prerequisite is absent - no stripe CLI, keys, PG :5440,
+docker, tools, or a `stripe listen` that never authenticates or becomes Ready -
+naming the thing and its remedy. It also refuses if `STRIPE_TEST_SECRET_KEY` is
+not an `sk_test_` key. Self-managed up/down: tears down `stripe listen` + control
+on exit.
+
+Nothing in `.github/workflows/` runs this script and neither does
+`tests/run_billing_suite.sh`, so a refusal reaches the person who ran it by hand
+and cannot leave a CI job permanently red.
 
 ## Secrets handling
 
@@ -125,7 +132,7 @@ On the test account's default API version (`2025-09-30.clover`, Basil line):
   fail-safe); the gate-FLIP write path needs a real linked `acct_`. The full
   Connect money flow has its own dedicated harness —
   `tests/e2e_stripe_connect_live.sh` (see `stripe-connect-live-e2e.md`) — which
-  probes for Connect and SKIPs cleanly until it is enabled at
+  probes for Connect and REFUSES until it is enabled at
   `dashboard.stripe.com/connect`.
 - **Dispute resolution rides a NON-RECOVERABLE real-delivery timing race.** Stripe
   creates and DELIVERS `charge.dispute.created` within ~1s of the

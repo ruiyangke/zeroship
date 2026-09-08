@@ -54,12 +54,12 @@
 # ZEROSHIP_CONTROL_STRIPE_WEBHOOK_SECRET — the REAL signature-verification + handler path. Only
 # the delivery is self-driven. Object SHAPES + the signature verify are real.
 #
-# ── CONNECT IS CURRENTLY DISABLED ON THIS TEST ACCOUNT ──────────────────────
+# ── CONNECT MUST BE ENABLED ON THE TEST ACCOUNT ─────────────────────────────
 # POST /v1/accounts returns HTTP 400 invalid_request_error: "You can only create
-# new accounts if you've signed up for Connect…". This harness DETECTS that and
-# SKIPS CLEANLY (exit 0, a clear SKIP message) — exactly like the *_live tests
-# self-skip without creds. It is SAFE to commit + run anytime; it runs for real
-# the moment Connect is enabled at dashboard.stripe.com/connect.
+# new accounts if you've signed up for Connect…" on an account that has not
+# signed up. This harness DETECTS that and REFUSES (exit 2, naming the dashboard
+# page that enables it). It used to exit 0 there, which made "the Connect money
+# flow is covered" and "no Connect account exists" the same result.
 #
 # DO NO HARM: a PER-RUN dedicated DB on the :5440 server and a PER-RUN control
 # port. Never the real `zeroship` DB, never the concurrent agent's
@@ -73,8 +73,16 @@
 # meant one destroying the other's run mid-flight. See tests/lib/scratch_db.sh
 # and tests/lib/e2e_ports.sh.
 #
-# Skips CLEANLY (exit 0) when prereqs are absent (no PG :5440, no docker for the
-# migrate, the Stripe TEST env not sourced) OR when Connect is not enabled.
+# REFUSES (exit 2, naming the missing thing and its remedy) when a prerequisite
+# is absent - no PG :5440, no docker for the migrate, no built control binary, no
+# jose for the bearer, the Stripe TEST env not sourced - or when Connect is not
+# enabled on the account.
+#
+# NOT WIRED INTO CI: nothing in .github/workflows/ names this script, and
+# tests/run_billing_suite.sh does not invoke it either. It needs an operator's
+# live Stripe TEST keys and a Connect-enabled account, neither of which CI can
+# hold, so refusing cannot turn a CI job permanently red. It refuses to the
+# person who ran it by hand, which is the only reader it has.
 #
 # Usage:
 #   source /home/ruiyang/.config/zeroship-stripe-test.env   # sets the TEST keys
@@ -109,12 +117,26 @@ echo "============================================"
 echo "  zeroship E2E — Stripe CONNECT money flow (REAL Stripe TEST mode, not the mock)"
 echo "============================================"
 
-# --- prereq gates: skip on absent Stripe credentials, REFUSE on absent psql -
+# --- prereq gates: EVERY missing prerequisite REFUSES ----------------------
 # psql: $PATH first, then any postgresql in the nix store, then refuse. This
 # replaced ZEROSHIP_PSQL, whose default was one pinned /nix/store hash that
 # resolved on exactly one machine; everywhere else it was absent and the
 # absence was `exit 0`, so this suite measured nothing and reported success.
 # Same chain as tests/e2e_auth_ui.sh, same variable name.
+#
+# THAT SENTENCE WAS THE ONLY ONE ACTED ON at the time: psql got a refusal and
+# every other prerequisite kept its `exit 0`, so the diagnosis sat beside the
+# arms it applied to verbatim. They refuse now too, including the two mid-run
+# ones (Connect not enabled, bearer not mintable).
+zs_prereq() {
+  echo "" >&2
+  echo "  x MISSING PREREQUISITE: $1" >&2
+  echo "    remedy: $2" >&2
+  echo "" >&2
+  echo "    This harness does not skip. A run that cannot reach what it tests" >&2
+  echo "    must not print the exit code of a run that tested it." >&2
+  exit 2
+}
 PSQL="${PSQL:-}"
 if [ -z "$PSQL" ]; then
   if command -v psql >/dev/null 2>&1; then
@@ -136,9 +158,8 @@ DB="$TEST_DB"
 source "$ROOT/tests/lib/e2e_ports.sh"
 
 if [ -z "${STRIPE_TEST_SECRET_KEY:-}" ]; then
-  echo "  ⚠ SKIP: STRIPE_TEST_SECRET_KEY not set."
-  echo "         source /home/ruiyang/.config/zeroship-stripe-test.env first."
-  exit 0
+  zs_prereq "STRIPE_TEST_SECRET_KEY is not set, so there is no Stripe TEST account to drive." \
+            "source the operator's zeroship-stripe-test.env, or export the sk_test_ key first."
 fi
 case "$STRIPE_TEST_SECRET_KEY" in
   sk_test_*) ;;
@@ -150,19 +171,21 @@ SK="$STRIPE_TEST_SECRET_KEY"
   echo "  x ABORT: no psql on \$PATH or in the nix store; set PSQL to the Postgres client binary." >&2
   exit 2
 }
-command -v node    >/dev/null 2>&1 || { echo "  ⚠ SKIP: node required."; exit 0; }
-command -v openssl >/dev/null 2>&1 || { echo "  ⚠ SKIP: openssl required."; exit 0; }
-command -v curl    >/dev/null 2>&1 || { echo "  ⚠ SKIP: curl required."; exit 0; }
-[ -x "$BIN/zeroship-control" ] || { echo "  ⚠ SKIP: missing $BIN/zeroship-control — run: cargo build --release -p zeroship-control"; exit 0; }
+command -v node    >/dev/null 2>&1 || zs_prereq "node is not on PATH; the harness mints its bearer and signs webhook payloads with it." "install Node, or enter the dev shell: nix develop"
+command -v openssl >/dev/null 2>&1 || zs_prereq "openssl is not on PATH; the gateway signing key is generated with it." "install openssl, or enter the dev shell: nix develop"
+command -v curl    >/dev/null 2>&1 || zs_prereq "curl is not on PATH; every Stripe and control-plane call goes through it." "install curl, or enter the dev shell: nix develop"
+[ -x "$BIN/zeroship-control" ] || zs_prereq "no control binary at $BIN/zeroship-control; this harness drives the real one." "cargo build --release -p zeroship-control"
 
 export PGPASSWORD="$PGPW"
 psql_db() { "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$DB" "$@"; }
 psql1()   { psql_db -tA -c "$1" 2>/dev/null | tr -d '[:space:]'; }
 if ! "$PSQL" -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d postgres -tAc "SELECT 1" >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: Postgres :$PGPORT unreachable."; exit 0
+  zs_prereq "PostgreSQL at $PGHOST:$PGPORT did not answer 'SELECT 1' as $PGUSER; the per-run database lives there." \
+            "start it (tests/provision_test_backends.sh), or point PGPORT at a server that answers."
 fi
 if [ -f "$ROOT/deploy/ops/db-migrate.sh" ] && ! command -v docker >/dev/null 2>&1; then
-  echo "  ⚠ SKIP: docker required step."; exit 0
+  zs_prereq "docker is not on PATH and deploy/ops/db-migrate.sh needs it to apply the platform migration set." \
+            "install docker and start its daemon."
 fi
 
 SAPI="https://api.stripe.com/v1"
@@ -229,7 +252,7 @@ provision_custom_account() {
 # CONNECT-ENABLED PROBE — the load-bearing gate. Try to create a REAL Express
 # connected account requesting transfers+card_payments. On a Connect-disabled
 # account Stripe returns HTTP 400 invalid_request_error "You can only create new
-# accounts if you've signed up for Connect…". We SKIP CLEANLY in that case.
+# accounts if you've signed up for Connect…". We REFUSE in that case.
 # ===========================================================================
 echo ""
 echo "=== Connect-enabled probe (POST /v1/accounts type=express + capabilities) ==="
@@ -247,14 +270,9 @@ case "$PROBE_ACCT" in
     curl -s -X DELETE "$SAPI/accounts/$PROBE_ACCT" -u "$SK:" -o /dev/null
     ;;
   *)
-    echo ""
-    echo "  ⚠ SKIP: Connect not enabled on this account — enable at dashboard.stripe.com/connect"
-    echo "         POST /v1/accounts → ${PROBE_ERR:-<no error message — check CLI auth/network>}"
-    echo ""
-    echo "  This harness is committed + syntactically sound and runs the full Connect money"
-    echo "  flow the moment Connect is enabled. Nothing else (DB/keys/webhook-sig) was touched"
-    echo "  by this run. See docs/runbooks/stripe-connect-live-e2e.md."
-    exit 0
+    echo "    POST /v1/accounts -> ${PROBE_ERR:-<no error message; check key auth and network>}" >&2
+    zs_prereq "Connect is not enabled on this Stripe TEST account, so the money flow this harness exists to prove cannot run." \
+              "enable it at dashboard.stripe.com/connect, then re-run. See docs/runbooks/stripe-connect-live-e2e.md."
     ;;
 esac
 
@@ -406,8 +424,8 @@ fi
 if [ "$(echo -n "$ADMIN_TOKEN" | awk -F. '{print NF}')" = "3" ]; then
   pass "minted operator bearer for the onboard/checkout/fee-policy endpoints"
 else
-  echo "  ⚠ SKIP: could not mint bearer (jose missing at $JOSE_JS?) — the authenticated Connect legs need it."
-  exit 0
+  zs_prereq "could not mint the operator bearer (jose not found at $JOSE_JS); every authenticated Connect leg needs it." \
+            'pnpm install at the repo root, then re-run.'
 fi
 AUTH=(-H "Authorization: Bearer $ADMIN_TOKEN")
 
