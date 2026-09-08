@@ -68,6 +68,18 @@ export default {
       sql: "REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA zeroship FROM zeroship_worker",
       reason: "the worker must not advance platform-owned sequences",
     });
+    // THESE TWO STATEMENTS STORE NOTHING, AND TWO OTHER MIGRATIONS CREDITED
+    // THEM WITH DENYING THE WORKER UNTIL 2026-09-07. `ALTER DEFAULT PRIVILEGES
+    // ... REVOKE` subtracts from the default privilege set; `zeroship_worker`
+    // was never IN that set, so each is a no-op and `pg_default_acl` stays
+    // empty. What actually denies the worker on a new platform table is
+    // PostgreSQL's owner-only default: a fresh table has a null `relacl` and
+    // nobody but the owner holds anything.
+    //
+    // They are kept because they make the INTENT explicit and would become
+    // load-bearing the moment anything grants `zeroship_worker` a schema-wide
+    // default. They are not a fence today. Do not cite them as one, and do not
+    // read their presence as evidence that a later grant would be contradicted.
     raw({
       sql: "ALTER DEFAULT PRIVILEGES IN SCHEMA zeroship REVOKE ALL PRIVILEGES ON TABLES FROM zeroship_worker",
       reason: "future platform tables must inherit the same deny-by-default boundary",

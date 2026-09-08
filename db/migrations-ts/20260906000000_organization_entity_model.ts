@@ -551,10 +551,21 @@ export default {
     // ---- grants ------------------------------------------------------------
     // The control plane is the only service that reaches any of these. The
     // gateway and the auth service never resolve creator authority, and the
-    // worker is denied by default in the platform schema
-    // (db/migrations-ts/20260818000200_worker_database_authority.ts revokes
-    // future tables through ALTER DEFAULT PRIVILEGES), so neither needs a
-    // revoke here.
+    // worker holds nothing here, so neither needs a revoke.
+    //
+    // WHAT DENIES THE WORKER, NAMED CORRECTLY - this comment credited the wrong
+    // mechanism until 2026-09-07. It is PostgreSQL's OWNER-ONLY DEFAULT: a newly
+    // created table has a null `relacl` and nobody but the owner holds anything.
+    // It is NOT the `ALTER DEFAULT PRIVILEGES ... REVOKE` in
+    // db/migrations-ts/20260818000200_worker_database_authority.ts, whose lines
+    // store nothing - revoking a privilege that was never in the default set is
+    // a no-op, measured as an empty `pg_default_acl`.
+    //
+    // The distinction is load-bearing rather than pedantic. An ambient default
+    // is not a fence: a later migration granting the worker anything on these
+    // tables succeeds silently, and there is no REVOKE here to contradict it.
+    // If that becomes a real risk, add an explicit revoke so the claim supports
+    // itself instead of resting on what nobody has done yet.
     grant({
       privileges: ["select", "insert", "update", "delete"],
       on: {
