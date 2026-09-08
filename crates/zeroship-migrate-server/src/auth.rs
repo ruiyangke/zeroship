@@ -8,6 +8,7 @@ use ntex::http::StatusCode;
 use uuid::Uuid;
 use zeroship_authn::BearerVerifier;
 use zeroship_authz::{self as authz, Action, AuthzContext, AuthzDecision, Resource, Scope};
+use zeroship_core::app_id::AppId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedCaller {
@@ -33,7 +34,7 @@ pub trait Authenticator: Send + Sync {
     async fn verify_action(
         &self,
         token: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         required_action: Action,
         request_ip: Option<IpAddr>,
         request_id: &str,
@@ -64,7 +65,7 @@ impl ControlPlaneAuthenticator {
     pub async fn verify_bearer(
         &self,
         token: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         required_scope: Scope,
         request_id: &str,
     ) -> Result<VerifiedCaller, AuthError> {
@@ -75,11 +76,11 @@ impl ControlPlaneAuthenticator {
     async fn authorize(
         &self,
         seed: VerifiedSeed,
-        app_id: Uuid,
+        app_id: &AppId,
         required_action: Action,
     ) -> Result<VerifiedCaller, AuthError> {
         let resource = Resource::App {
-            id: app_id.to_string(),
+            id: app_id.clone(),
         };
         resource
             .validate_ids()
@@ -124,7 +125,7 @@ impl Authenticator for ControlPlaneAuthenticator {
     async fn verify_action(
         &self,
         token: &str,
-        app_id: Uuid,
+        app_id: &AppId,
         required_action: Action,
         request_ip: Option<IpAddr>,
         request_id: &str,
@@ -195,10 +196,20 @@ struct VerifiedSeed {
 /// requiring the ORGANIZATION rank means only somebody who answers for the whole
 /// organization can. Read this as the ceiling being organization-level on
 /// purpose, not as an oversight about `project_members`.
+///
+/// # The app id is bound as `text`, and that is a requirement on the column
+///
+/// [`AppId`] exposes no route to any embedded bits, so text against text is the
+/// only comparison this join can make. A database whose `zeroship.apps.id` is
+/// still `uuid` fails this query outright with a type error rather than matching
+/// no row - which matters, because no row here is indistinguishable from a
+/// caller who holds no organization seat, and this function's `false` denies the
+/// apply. `zeroship_authz::authority` binds the same column the same way and
+/// spells out the same requirement.
 async fn caller_holds_organization_ownership(
     pg: &Client,
     principal_id: Uuid,
-    app_id: Uuid,
+    app_id: &AppId,
 ) -> Result<bool, AuthError> {
     let rows = pg
         .query(
@@ -208,9 +219,9 @@ async fn caller_holds_organization_ownership(
                JOIN zeroship.organization_members m \
                     ON m.organization_id = p.organization_id AND m.user_id = $2 \
                JOIN zeroship.organization_roles r ON r.role = m.role \
-              WHERE a.id = $1 \
+              WHERE a.id = $1::text \
                 AND r.rank >= (SELECT rank FROM zeroship.organization_roles WHERE role = 'owner')",
-            &[&app_id, &principal_id],
+            &[&app_id.as_str(), &principal_id],
         )
         .await
         .map_err(|err| {
