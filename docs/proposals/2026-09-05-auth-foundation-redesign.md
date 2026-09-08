@@ -2746,12 +2746,28 @@ from the foreign key every other session carries. See the `grant_id` paragraph i
 ## 11. Corrections
 
 Claims made during this investigation that turned out wrong, and what is true.
-Each was established by reading the working tree. Nothing was executed.
-Two entries are a different kind and are marked as such. C8 records an error in
-what this document PRESCRIBED, not in what it observed. C9 records an
-observation that was CORRECT WHEN TAKEN and was then repeated until it was not,
-which is a failure of process rather than of reading, and is the only entry here
-whose lesson outlives its subject.
+
+**How each was established differs, and the difference matters.** C1 through C9
+were reached by READING the working tree; nothing was executed for them. C10
+through C12 were reached by EXECUTION - running a suite, applying a mutation and
+confirming it changed the right thing, querying a live database - during the work
+that implemented step 4. A read can only find a claim that contradicts the source;
+only execution finds a claim the source appears to support.
+
+Several kinds appear here. C8 records an error in what this document PRESCRIBED,
+not in what it observed. C9 records an observation that was CORRECT WHEN TAKEN and
+then repeated until it was not - a failure of process rather than of reading.
+C10 through C12 are errors made while BUILDING what this document specifies, two
+of them written into durable artifacts and corrected there rather than quietly
+deleted.
+
+The entries whose lessons outlive their subjects are C9, C10, C11 and C12. They
+describe, in four different disguises, one failure: **a mechanism or a claim that
+appears to rule on something and does not.** A fence above the check that would
+have admitted a legitimate case; a citation naming a file that holds a type
+rather than a call; a benefit listed beside true ones with nothing implementing
+it; an observation reused past the moment it was true. Read those four together
+before adding a fence, a citation, or a benefit to this document.
 
 **C1. The service-assertion replay table IS provisioned. Earlier write-ups said it
 exists only as a DDL string inside a test, and that claim was published carrying a
@@ -2901,6 +2917,47 @@ does - which is the same blindness in a different instrument.
 *What C9 does not license.* It re-decides nothing. The landed model contradicts
 the CONDITION D-B was recorded under, not its content; section 10.2 item 10
 states that as a question for the operator and leaves it open.
+
+**C10. A FENCE I WROTE MADE A LEGITIMATE DEPLOYMENT INEXPRESSIBLE, AND I CALLED IT
+POLICY.** `EnrolmentEnvelope::derive_address` refused a loopback peer in an arm
+ABOVE the declared-network comparison. The operator could therefore declare
+`127.0.0.0/8` and still be refused, so no single-host deployment could enrol -
+which is every developer machine and every harness that launches a worker. The
+arm read as caution and behaved as a defect: a fence whose declared input cannot
+express a case the operator states outright is not a policy. Fixed at
+`2f697c01e` by letting the networks rule on loopback, keeping `ProxyFronted` and
+the unspecified-address arm unconditional.
+
+*The lesson is in how it was caught.* A suite of REFUSALS cannot detect a fence
+that refuses too much - every refusal arm passes against a fence that refuses
+everything. The regression pair that binds it now differs in the declared
+networks and nothing else, and under a mutation restoring the old ordering the
+refusal arm stays GREEN while only the admit arm reddens.
+
+**C11. THIS DOCUMENT NAMED THE WRONG CONSUMER OF A CAPABILITY, BECAUSE A TYPE
+NAME WAS READ AS A CALL.** It recorded `crates/zeroship-gateway/src/oidc_rp.rs`
+as the only non-definition consumer of `UserEnvelopeSigner`. That file names the
+TYPE in a parameter position and never calls the accessor; every live call is in
+`crates/zeroship-gateway/src/router/auth.rs`. Corrected at `e9d7f21a0`.
+
+The error came from grepping the type name and treating a type-position match as
+a consumer. **When the question is who EXERCISES a capability, search for the
+CALL.** The same blindness has a sibling worth stating with it: a test that binds
+a fence usually names the BEHAVIOUR, not the callee, so searching test files for
+an internal function name can report "no coverage" over a suite that covers it.
+Both were hit in one session.
+
+**C12. AN UNEARNED CLAIM WAS WRITTEN BESIDE A TRUE ONE, WHICH IS WHERE THEY
+SURVIVE.** `db/migrations-ts/20260907000300_worker_instances.ts` listed what
+per-instance identity buys as "attribution, per-instance revocation, a countable
+and RATE-LIMITABLE event". Nothing rate-limits enrolment: no budget, no quota, no
+duplicate check on the endpoint. Corrected at `516531c68`.
+
+The word sat one line below that file's careful refusal to call the mechanism a
+boundary - which is exactly why it survived review. In a list of benefits, beside
+claims that are true, an unearned one reads as delivered rather than as possible.
+**Say "could" in a design and "does" only where something does.** Enrolment IS a
+discrete event that COULD be bounded; that it is not remains open.
 
 **Still UNVERIFIED, with the experiment for each.**
 
