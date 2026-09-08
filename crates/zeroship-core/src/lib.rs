@@ -44,6 +44,7 @@ pub mod typed_id;
 pub mod types;
 pub mod usage_event;
 pub mod user_envelope;
+pub mod user_id;
 
 pub use superjson::Envelope;
 pub use types::*;
