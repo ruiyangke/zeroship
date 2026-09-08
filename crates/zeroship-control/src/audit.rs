@@ -152,6 +152,15 @@ pub enum Action {
     /// A project was deleted. Hard, unlike an organization: a project names no
     /// money record, so nothing has to outlive it.
     ProjectDeleted,
+    /// An app was deleted - the terminal end of the app lifecycle and the last
+    /// step of the account-closure funnel.
+    ///
+    /// Written by `crate::organizations::delete_app` through [`log_in_tx`], so
+    /// it shares the fate of the marker it describes, and it carries the app's
+    /// typed id in `app_id` with the project it LEFT in `resource`. That pairing
+    /// is the point: deletion detaches the app from its project, so afterwards
+    /// this row is the only place that says which project it belonged to.
+    AppDeleted,
     /// A member was seated on one project (the per-project narrowing grant).
     ProjectMemberAdded,
     /// A project seat moved to another role, in one statement rather than as a
@@ -205,6 +214,7 @@ impl Action {
             Self::ProjectCreated => "project_created",
             Self::ProjectUpdated => "project_updated",
             Self::ProjectDeleted => "project_deleted",
+            Self::AppDeleted => "app_deleted",
             Self::ProjectMemberAdded => "project_member_added",
             Self::ProjectMemberRoleChanged => "project_member_role_changed",
             Self::ProjectMemberRemoved => "project_member_removed",

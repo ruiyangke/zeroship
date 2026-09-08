@@ -1157,7 +1157,11 @@ fn main() -> std::io::Result<()> {
             )
             .service(
                 web::resource("/api/apps/{id}")
-                    .route(web::get().to(api::get_app)),
+                    .route(web::get().to(api::get_app))
+                    // The terminal lifecycle verb, and the last step of the
+                    // account-closure funnel. `DELETE` on the ARCHIVE resource
+                    // below is the reversible restore, not this.
+                    .route(web::delete().to(api::delete_app)),
             )
             .service(
                 web::resource("/api/apps/{id}/archive")

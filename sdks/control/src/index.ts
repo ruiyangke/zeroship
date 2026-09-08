@@ -526,6 +526,18 @@ export class ControlClient {
       this.request(`/api/apps/${pathPart(id)}/archive`, { method: "PUT" }),
     unarchive: (id: string): Promise<AppRecord> =>
       this.request(`/api/apps/${pathPart(id)}/archive`, { method: "DELETE" }),
+    /**
+     * End the app. Terminal, unlike `archive`, and the last step of the
+     * account-closure funnel: only after it can the app's project be deleted,
+     * then its organization dissolved, then its sole owner erased.
+     *
+     * `DELETE` on the APP is this; `DELETE` on the app's `archive` resource is
+     * the reversible restore above. The app must already be archived, and it
+     * returns nothing because there is no record left to hand back that the
+     * caller may act on.
+     */
+    delete: (id: string): Promise<void> =>
+      this.request(`/api/apps/${pathPart(id)}`, { method: "DELETE" }),
     deploy: (
       id: string,
       artifact: DeployBody,

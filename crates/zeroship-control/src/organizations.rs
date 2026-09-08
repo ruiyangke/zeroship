@@ -560,9 +560,22 @@ pub enum OrganizationError {
     /// policy layered over a permissive schema - it is the same rule stated
     /// where the caller can read it, with the remedy named.
     OrganizationHasProjects(i64),
-    /// Delete was asked for while the project still owns apps. `apps.project_id`
-    /// is `ON DELETE RESTRICT`; same shape as [`Self::OrganizationHasProjects`].
+    /// Delete was asked for while the project still owns apps.
+    /// `apps_project_ownership_fkey` is `ON DELETE RESTRICT`; same shape as
+    /// [`Self::OrganizationHasProjects`].
+    ///
+    /// The count is of LIVE apps. A deleted app has left its project, so it is
+    /// neither counted here nor held by the constraint.
     ProjectHasApps(i64),
+    /// The app named by [`delete_app`] does not exist, or has already been
+    /// deleted. ONE variant for both, because a deleted app has left its
+    /// project and there is no longer anything that could tell them apart
+    /// without re-deriving reach from a row that no longer has any.
+    AppNotFound,
+    /// Delete was asked for on an app that is still live. Archive is the
+    /// reversible step and delete is the terminal one; refusing here is what
+    /// keeps the ordering an act rather than an accident.
+    AppNotArchived,
     /// Dissolve was asked for while the organization still owes - an unpaid
     /// finalized invoice, or usage in a closed period that was never invoiced.
     ///
@@ -633,9 +646,19 @@ impl OrganizationError {
             }
             Self::ProjectHasApps(remaining) => web::HttpResponse::Conflict().json(&json!({
                 "error": "project has apps",
-                "detail": "a project is deleted only once it owns no apps; archive and delete \
-                           them first, or move them to another project",
+                "detail": "a project is deleted only once it owns no apps; archive each one \
+                           with PUT /api/apps/{app_id}/archive and then delete it with \
+                           DELETE /api/apps/{app_id}",
                 "apps": remaining,
+            })),
+            Self::AppNotFound => {
+                web::HttpResponse::NotFound().json(&json!({"error": "app not found"}))
+            }
+            Self::AppNotArchived => web::HttpResponse::Conflict().json(&json!({
+                "error": "app not archived",
+                "detail": "an app is deleted only once it is archived; archive it first with \
+                           PUT /api/apps/{app_id}/archive, which is reversible, and then \
+                           delete it, which is not",
             })),
             Self::OrganizationOwesBilling(outstanding) => {
                 // The remedy is derived from the same rows the refusal reports,
@@ -2614,6 +2637,201 @@ pub async fn delete_project(
     Ok(())
 }
 
+/// Delete an app: the terminal end of the app lifecycle, and the step the
+/// account-closure funnel used to name without providing.
+///
+/// # Why it lives here and not beside `archive_app`
+///
+/// This is the bottom of the same funnel [`delete_project`] and
+/// [`dissolve_organization`] sit in, and it borrows both of their rules: the
+/// organization row is locked first, a dissolved organization refuses, and the
+/// `admin` floor rides in the effect statement rather than in a Rust `if`. The
+/// authority to end an app is the authority to end the project it lives in;
+/// splitting the two across modules is how they would drift apart.
+///
+/// # It is a MARKER, and the two children of `zeroship.apps` say why
+///
+/// `invoice_lines.app_id` is `ON DELETE RESTRICT`, so a row delete is refused
+/// outright once a finalized line prices the app. `usage_aggregates.app_id` is
+/// `ON DELETE CASCADE`, so a row delete instead destroys the input the
+/// unbilled-usage predicate reads - the same predicate `dissolve` and the
+/// erasure preflight refuse on. A hard delete is therefore impossible or
+/// destructive depending only on whether the reconciler has run, and
+/// `db/migrations-ts/20260831000000_archive_apps.ts` revoked the DELETE
+/// privilege for that reason. The row is retained and marked; nothing cascades.
+///
+/// # What ends, and what is kept
+///
+/// **Ends.** The project edge (`project_id` is set NULL, which is what lets the
+/// project be deleted afterwards - the ownership key is `ON DELETE RESTRICT`
+/// and a retained edge would pin the project forever). The current artifact
+/// pointer, so no route or worker can serve the app again. The whole creator
+/// environment - vars, secrets, and the `process.env` expose list - because
+/// that is the app's live capability rather than a record of anything.
+///
+/// **Kept.** Every billing record: `usage_aggregates`, `app_usage_history`,
+/// `invoice_lines`, `plan_change_events`, `spend_state_history`. The reconciler
+/// and [`crate::billing_read::outstanding_billing`] both reach an app through
+/// `apps.organization_id`, never through its project, so a detached app is
+/// still billed and still owes. The audit trail, which is append-only and keyed
+/// to no parent. And the app's NAME, which is its routable hostname: it is
+/// retired rather than released, because old links, cookies and OAuth redirect
+/// URIs still point at it and recycling it would hand the next registrant an
+/// audience it never earned.
+///
+/// **Not this service's to end.** The deploy blobs are content-addressed and
+/// shared by hash across apps and deploys, so reclaiming them is a sweep over
+/// the whole store rather than a statement here. The app's database schema and
+/// role are privileged teardown and belong to migrate-server, for the reason
+/// [`Registry::archive_app`] already gives: control holds no provisioning DSN.
+///
+/// # A deleted app is UNREACHABLE afterwards, by construction
+///
+/// `zeroship_authz` resolves an app's organization only through its project, so
+/// once the edge is cut every app-scoped Cedar check on it resolves to rank 0
+/// and denies. A repeated delete is answered `403`, not `404`, which is the
+/// same answer a stranger's app id gets. Nothing here relies on that: the
+/// statement below carries its own `deleted_at IS NULL` guard, so a second
+/// delete could not move the marker even if it were reached.
+pub async fn delete_app(
+    registry: &Registry,
+    principal: Uuid,
+    app_id: Uuid,
+    source_ip: Option<&str>,
+) -> Result<(), OrganizationError> {
+    let mut conn = registry.conn().await?;
+    let tx = conn
+        .transaction()
+        .await
+        .map_err(|err| db_error(&err, "begin delete app"))?;
+    let AppOwnership {
+        organization_id,
+        project_id,
+    } = lock_app_organization(&tx, app_id).await?;
+    // The same advisory lock `archive_app`, `unarchive_app` and the worker's
+    // final workflow claim take. Once this returns, no claim and no restore can
+    // have crossed the marker.
+    tx.query_one(
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&zeroship_core::app_derivation::lifecycle_lock_seed(
+            &zeroship_core::app_id::AppId::from_uuid(&app_id),
+        )],
+    )
+    .await
+    .map_err(|err| db_error(&err, "lock app lifecycle"))?;
+
+    let sql = format!(
+        "UPDATE zeroship.apps a \
+            SET deleted_at = NOW(), \
+                project_id = NULL, \
+                deploy_hash = NULL, \
+                manifest_json = NULL, \
+                env_version = a.env_version + 1, \
+                updated_at = NOW() \
+          WHERE a.id = $1 \
+            AND a.deleted_at IS NULL \
+            AND a.archived_at IS NOT NULL \
+            AND EXISTS (SELECT 1 FROM {seat} WHERE actor_role.rank >= {admin}) \
+         RETURNING a.name, a.project_id AS still_attached",
+        seat = actor_seat("$2", "$3"),
+        admin = ladder_rank("$4"),
+    );
+    let rows = tx
+        .query(&sql, &[&app_id, &organization_id, &principal, &ROLE_ADMIN])
+        .await
+        .map_err(|err| db_error(&err, "delete app"))?;
+    let Some(row) = rows.first() else {
+        return Err(classify_app_deletion_refusal(&tx, &organization_id, principal, app_id).await);
+    };
+    let name: String = row.get("name");
+    debug_assert!(
+        row.get::<_, Option<String>>("still_attached").is_none(),
+        "a deleted app must have left its project"
+    );
+
+    // The environment goes with the app. These three tables are the creator's
+    // live capability - what the running app could read - and none of them is
+    // evidence of anything. Retaining a deleted app's secret material because
+    // nothing can reach it any more is an argument that stops being true the
+    // day something can.
+    for table in ["app_vars", "app_secrets", "app_env_expose"] {
+        tx.execute(
+            &format!("DELETE FROM zeroship.{table} WHERE app_id = $1"),
+            &[&app_id],
+        )
+        .await
+        .map_err(|err| db_error(&err, "purge deleted app environment"))?;
+    }
+
+    audit::log_in_tx(
+        &tx,
+        AuditEntry {
+            app_id: Some(app_id),
+            organization_id: Some(&organization_id),
+            actor_user_id: Some(principal),
+            action: AuditAction::AppDeleted,
+            resource: Some(&project_id),
+            source_ip,
+        },
+        &json!({
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "app_id": app_id,
+            "name": name,
+        }),
+    )
+    .await;
+
+    tx.commit()
+        .await
+        .map_err(|err| db_error(&err, "commit delete app"))?;
+    Ok(())
+}
+
+/// Who owns one app, read under the organization row lock.
+struct AppOwnership {
+    organization_id: String,
+    /// The project the app belongs to WHILE it is live. Read before the delete
+    /// cuts the edge, because afterwards nothing can reconstruct it and the
+    /// audit row is the only place it survives.
+    project_id: String,
+}
+
+/// Lock the ORGANIZATION that owns `app_id`, and return the ownership pair.
+///
+/// The peer of [`lock_project_organization`], reached one edge further out: an
+/// app names a project and a project names an organization. An app whose
+/// project edge is already cut - which is what deletion does - is reported
+/// [`OrganizationError::AppNotFound`] by this join rather than by a separate
+/// state read, because after the cut there is no longer any organization the
+/// caller can be shown to have authority over.
+async fn lock_app_organization<C: GenericClient + Sync>(
+    tx: &C,
+    app_id: Uuid,
+) -> Result<AppOwnership, OrganizationError> {
+    let rows = tx
+        .query(
+            "SELECT o.id, o.dissolved_at, p.id AS project_id \
+               FROM zeroship.organizations o \
+               JOIN zeroship.projects p ON p.organization_id = o.id \
+               JOIN zeroship.apps a ON a.project_id = p.id \
+              WHERE a.id = $1 FOR UPDATE OF o",
+            &[&app_id],
+        )
+        .await
+        .map_err(|err| db_error(&err, "lock app organization"))?;
+    let Some(row) = rows.first() else {
+        return Err(OrganizationError::AppNotFound);
+    };
+    match row.get::<_, Option<DateTime<Utc>>>("dissolved_at") {
+        Some(at) => Err(OrganizationError::Dissolved(at)),
+        None => Ok(AppOwnership {
+            organization_id: row.get("id"),
+            project_id: row.get("project_id"),
+        }),
+    }
+}
+
 /// Seat an organization member on one project.
 ///
 /// The two composite foreign keys on `project_members` make a row naming
@@ -3372,6 +3590,52 @@ async fn classify_project_deletion_refusal<C: GenericClient + Sync>(
     if actor_admin == 0 {
         return OrganizationError::Insufficient(
             "deleting a project needs admin authority in the organization".to_string(),
+        );
+    }
+    OrganizationError::Db
+}
+
+/// Why the app UPDATE matched nothing: the app was already deleted, it is
+/// still live, or the actor is below admin.
+///
+/// State before authority, for the reason the two classifiers above give: the
+/// caller is told the step that comes next, and "archive it" is a step they can
+/// take while "you are not an admin" is not.
+async fn classify_app_deletion_refusal<C: GenericClient + Sync>(
+    tx: &C,
+    organization_id: &str,
+    principal: Uuid,
+    app_id: Uuid,
+) -> OrganizationError {
+    let sql = format!(
+        "SELECT (SELECT COUNT(*) FROM zeroship.apps a \
+                  WHERE a.id = $3 AND a.archived_at IS NULL)::bigint AS live, \
+                (SELECT COUNT(*) FROM zeroship.apps a \
+                  WHERE a.id = $3 AND a.deleted_at IS NOT NULL)::bigint AS already_deleted, \
+                (SELECT COUNT(*) FROM {seat} \
+                  WHERE actor_role.rank >= {admin})::bigint AS actor_admin",
+        seat = actor_seat("$1", "$2"),
+        admin = ladder_rank("$4"),
+    );
+    let rows = match tx
+        .query(&sql, &[&organization_id, &principal, &app_id, &ROLE_ADMIN])
+        .await
+    {
+        Ok(rows) => rows,
+        Err(err) => return db_error(&err, "classify app deletion refusal"),
+    };
+    let Some(row) = rows.first() else {
+        return OrganizationError::Db;
+    };
+    if row.get::<_, i64>("already_deleted") > 0 {
+        return OrganizationError::AppNotFound;
+    }
+    if row.get::<_, i64>("live") > 0 {
+        return OrganizationError::AppNotArchived;
+    }
+    if row.get::<_, i64>("actor_admin") == 0 {
+        return OrganizationError::Insufficient(
+            "deleting an app needs admin authority in the organization".to_string(),
         );
     }
     OrganizationError::Db

@@ -450,7 +450,7 @@ impl Registry {
                 "UPDATE zeroship.apps \
                     SET archived_at = COALESCE(archived_at, NOW()), \
                         updated_at = CASE WHEN archived_at IS NULL THEN NOW() ELSE updated_at END \
-                  WHERE id = $1 \
+                  WHERE id = $1 AND deleted_at IS NULL \
                   RETURNING id, name, plan_id, deploy_hash, \
                             archived_at::text, created_at::text, updated_at::text",
                 &[id],
@@ -464,6 +464,14 @@ impl Registry {
     /// workflow records become active through their normal polling paths. The
     /// retained deploy is checked against the latest applied schema descriptor
     /// while the app row is locked; restore must not bypass the deploy gate.
+    ///
+    /// A DELETED app is reported absent rather than restored. Deletion is the
+    /// terminal transition (`crate::organizations::delete_app`) and archive is
+    /// the reversible one; a restore that could undo the terminal step would
+    /// make the two the same transition with different names. `zeroship_authz`
+    /// already denies every app-scoped action on a deleted app, because it
+    /// resolves an app's organization through the project the delete detaches -
+    /// so this guard is the one that holds if that ever stops being true.
     pub async fn unarchive_app(&self, id: &Uuid) -> Result<Option<AppRecord>, RegistryError> {
         let mut conn = self.conn().await?;
         let tx = conn.transaction().await?;
@@ -476,7 +484,7 @@ impl Registry {
             .query(
                 "SELECT archived_at IS NOT NULL AS archived, manifest_json \
                    FROM zeroship.apps \
-                  WHERE id = $1 \
+                  WHERE id = $1 AND deleted_at IS NULL \
                   FOR UPDATE",
                 &[id],
             )
