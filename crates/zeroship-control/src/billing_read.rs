@@ -776,15 +776,18 @@ impl BillingRemedy {
             Self::AttachPaymentMethod => {
                 "this organization has closed-period usage that priced to money and no \
                  payment identity to bill it to; attach a default payment method with \
-                 POST /api/organizations/{organization_id}/billing/setup, which is what \
-                 the reconciler is waiting for"
+                 POST /api/organizations/{organization_id}/billing/setup. That is \
+                 necessary but not always sufficient: the sweep bills only the \
+                 immediately previous month, so a period older than that needs an \
+                 operator reconcile as well"
             }
             Self::ReconcileClosedPeriod => {
                 "this organization has closed-period usage that priced to money and was \
                  never invoiced; the automatic sweep bills only the immediately previous \
                  month, so an operator must run \
-                 POST /internal/billing/reconcile?period=<unix-seconds> for the period \
-                 named in unbilled_periods"
+                 POST /internal/billing/reconcile?period=<unix-seconds>, passing an \
+                 instant in the month AFTER the one named in unbilled_periods - the \
+                 route takes the tick instant and bills the month before it"
             }
         }
     }
@@ -1292,6 +1295,41 @@ mod tests {
                 "{remedy:?} sends the creator to a sweep that only covers last month: {text}"
             );
         }
+    }
+
+    /// The reconcile remedy tells an operator to pass an instant in the month
+    /// AFTER the one to bill. That direction is a claim about another module,
+    /// and a substring check on the sentence cannot tell whether it is true -
+    /// which is how it was inverted and stayed green.
+    ///
+    /// So ask the function the sentence describes. `force_reconcile` hands its
+    /// `period` straight to `tick_with` as `now`, and the period actually
+    /// billed is `previous_period_start_unix(now)`; if that ever starts
+    /// returning the month it was given, this sentence has to change with it.
+    #[test]
+    fn the_reconcile_remedy_states_the_direction_the_route_actually_takes() {
+        // Two instants a month apart, chosen so the assertion is about the
+        // relationship rather than about either value.
+        let march = chrono::DateTime::parse_from_rfc3339("2026-03-14T00:00:00Z")
+            .unwrap()
+            .timestamp();
+        let february_start = crate::cron::billing_reconcile::previous_period_start_unix(march);
+        let billed = chrono::DateTime::from_timestamp(february_start, 0).unwrap();
+
+        assert_eq!(
+            billed.format("%Y-%m-%d").to_string(),
+            "2026-02-01",
+            "the route bills the month BEFORE the instant it is given, so the \
+             remedy must say to pass an instant in the month after the unbilled \
+             one; it currently says: {}",
+            BillingRemedy::ReconcileClosedPeriod.instruction()
+        );
+        assert!(
+            BillingRemedy::ReconcileClosedPeriod
+                .instruction()
+                .contains("month AFTER"),
+            "the remedy stopped naming the direction its route takes"
+        );
     }
 
     /// The currency comes from the invoice that owes it, and falls back to the
