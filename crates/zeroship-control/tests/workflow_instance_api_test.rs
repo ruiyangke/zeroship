@@ -1,10 +1,9 @@
 //! HTTP-level tests for the durable-workflows instance API.
 //!
-//! Requires a configured test database
-//! (`zeroship_core::config::test_database_url_opt`) pointing at a migrated
-//! disposable Postgres database. This matches the rest of the control
-//! integration suite: no DB means the tests skip without failing local
-//! `cargo test`.
+//! Requires a configured, migrated test database. This matches the rest of the
+//! control integration suite: no database is a REFUSAL naming
+//! `tests/provision_test_backends.sh`, never a skip that passes without
+//! running anything (`common::require_control_db`).
 
 #![allow(clippy::await_holding_lock, clippy::future_not_send)]
 
@@ -30,8 +29,8 @@ use zeroship_workflow_scheduler::WorkflowSchedulerStore;
 const TEST_CONTROL_KEY: &str = "test-control-key";
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+fn db_url() -> String {
+    common::require_control_db()
 }
 
 fn tmpdir(label: &str) -> PathBuf {
@@ -294,10 +293,7 @@ fn run_id(value: &Value) -> String {
 
 #[compio::test]
 async fn workflow_routes_reject_missing_auth() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_fixture(&db_url, "auth-required").await;
     let app = test::init_service(
         web::App::new()
@@ -345,10 +341,7 @@ async fn workflow_routes_reject_missing_auth() {
 
 #[compio::test]
 async fn archived_app_rejects_new_runs_until_restore() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_fixture(&db_url, "archived-admission").await;
     let (app_id, _) = seed_app(&fx, "archived-admission", &["Checkout"]).await;
     fx.state
@@ -418,10 +411,7 @@ async fn archived_app_rejects_new_runs_until_restore() {
 
 #[compio::test]
 async fn create_conflicts_status_and_cross_app_isolation() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_fixture(&db_url, "create").await;
     let (app_a, _) = seed_app(&fx, "a", &["Checkout", "OtherWorkflow"]).await;
     let (app_b, _) = seed_app(&fx, "b", &["Checkout"]).await;
@@ -681,10 +671,7 @@ async fn create_conflicts_status_and_cross_app_isolation() {
 
 #[compio::test]
 async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_fixture(&db_url, "signal").await;
     let (app_id, _) = seed_app(&fx, "signal", &["Checkout"]).await;
     let app = test::init_service(
@@ -890,10 +877,7 @@ async fn signal_writes_row_and_pulls_matching_wait_wake_at() {
 
 #[compio::test]
 async fn pause_resume_cancel_transitions_preserve_wake_and_discard_claim() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_fixture(&db_url, "control").await;
     let (app_id, _) = seed_app(&fx, "control", &["Checkout"]).await;
     let app = test::init_service(
@@ -1151,10 +1135,7 @@ async fn count_runs(fx: &Fixture, app_id: Uuid, workflow_name: &str) -> i64 {
 /// protected by the unique index on `(app_id, workflow_name, dedup_key)`.
 #[compio::test]
 async fn failed_timer_registration_leaves_no_run_so_a_retry_starts_exactly_one() {
-    let Some(db_url) = db_url() else {
-        zeroship_test_support::skip("skipping workflow_instance_api_test (no test database)");
-        return;
-    };
+    let db_url = db_url();
     let fx = build_fixture(&db_url, "timerfail").await;
     let (app_id, _) = seed_app(&fx, "timerfail", &["Charge"]).await;
     install_timer_registration_failpoint(&fx).await;
