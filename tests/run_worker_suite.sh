@@ -66,8 +66,12 @@
 #                    LOAD-BEARING ARMS: a total-passes floor cannot tell a
 #                    gated-out live set from a shrunken one, because a feature
 #                    typo and a deleted test both just print a smaller number.
-#   no skips         nothing in the run announced that it did nothing.
 #   floor            the total pass count did not fall.
+#
+# There is no "no skips" arm here any more, and the row that named one was the
+# last thing in this file describing an apparatus that is gone. A test which
+# cannot reach its backend FAILS, so a run that did nothing cannot report a
+# tally at all - see the note above the floor below.
 #
 # USAGE
 #   tests/run_worker_suite.sh                    # the shared, schema-keyed DB
@@ -321,7 +325,10 @@ fi
 
 echo "=================================================================="
 if [ "$status" -eq 0 ]; then
-  echo "WORKER SUITE: ${passed} tests passed (floor ${WORKER_MIN_PASSED}), ${live_ran} live workflow-advance (floor ${WORKER_LIVE_MIN}), ${posture_live_ran} live boot-posture (floor ${POSTURE_LIVE_MIN}), 0 unexpected skips"
+  # No skip count on this line. The census that produced one was deleted from
+  # this file; a constant "0 unexpected skips" printed beside three measured
+  # numbers reads as a fourth measurement and is a claim about an empty set.
+  echo "WORKER SUITE: ${passed} tests passed (floor ${WORKER_MIN_PASSED}), ${live_ran} live workflow-advance (floor ${WORKER_LIVE_MIN}), ${posture_live_ran} live boot-posture (floor ${POSTURE_LIVE_MIN})"
   echo "              against ${TEST_DB} at ${WHERE}"
 else
   echo "WORKER SUITE: FAILED"

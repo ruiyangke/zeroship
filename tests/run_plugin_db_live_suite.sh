@@ -57,10 +57,19 @@
 #      Available is NOT enough: a fresh database with the extension merely
 #      available fails with `type "vector" does not exist`.
 #
-#   3. postgis is NOT provisioned, so exactly one test announces a skip
-#      (`spatial_near_runs_under_per_app_role_via_rls`). It is allowlisted
-#      BY NAME below rather than by raising a tolerance, so the day postgis
-#      arrives the allowlist stops matching nothing and someone has to look.
+#   3. postgis, and it is a REQUIREMENT of this suite rather than a tolerated
+#      absence. `spatial_near_runs_under_per_app_role_via_rls` used to announce
+#      a skip on a server without the extension and be excused by name in a
+#      census here; both the announcement and the census are gone, so it now
+#      FAILS, naming the extension and how to get it. Nothing in this file
+#      excuses it and there is no variable that turns it back into a pass:
+#      point this suite at a server carrying postgis, or the run is red.
+#      Its `#[ignore]`d twin `near_returns_within_radius` is not in that count -
+#      cargo never builds it into a default run - so the extension being
+#      missing costs exactly one failure, not two.
+#      ci.yml's `plugin-db-live-gate` installs the postgis package into the
+#      pgvector container for exactly this reason; the two images are disjoint
+#      and no published one carries both.
 #
 # A TRAP FOR WHOEVER DEBUGS A FAILURE HERE: several tests cannot be run in
 # isolation on a fresh database. `p4_round_trip_encrypted_masked_vector_via_
@@ -105,8 +114,14 @@ SUITE_LOG="${SUITE_LOG:-${TMPDIR:-/tmp}/plugin-db-live.log}"
 # `#[ignore]` in this file before that removal, counted by grep, so the target
 # lost one between the two dates and nothing recorded it. Treat the passed/failed
 # columns of the old reading the same way: re-measure rather than adjust.
-# The 6 that remain are the pgvector (3), PostGIS (1) and pg_dump (2)
-# prerequisites named above.
+# WHAT IS IGNORED TODAY IS NOT WHAT THIS PASSAGE SAID, and the correction is the
+# point rather than the number: it named a pgvector group among the ignored, and
+# no pgvector test in that file carries the attribute. Count them where they are
+# declared instead of reading a tally here -
+#   grep -c '^#\[ignore' crates/zeroship-plugin-db/tests/integration.rs
+# - and read the reasons on the attributes for which prerequisite each wants. A
+# test whose prerequisite is NOT statically ignored fails when the server lacks
+# it; that is the postgis case in requirement 3 above.
 # The floor is the SUM, 111, and it is the measured number rather than a round
 # one below it: these binaries have a fixed test count, so any shortfall means a
 # target stopped running rather than a test getting faster. Raise it
