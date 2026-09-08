@@ -1,7 +1,7 @@
 [
   { "file": "20260702000100_schema_roles_extensions.ts", "name": "schema_roles_extensions", "opCount": 26 },
   { "file": "20260702000200_control_tables.ts", "name": "control_tables", "opCount": 32 },
-  { "file": "20260702000300_auth_oauth_tables.ts", "name": "auth_oauth_tables", "opCount": 39 },
+  { "file": "20260702000300_auth_oauth_tables.ts", "name": "auth_oauth_tables", "opCount": 40 },
   { "file": "20260702000400_billing_metering_invoice_tables.ts", "name": "billing_metering_invoice_tables", "opCount": 85 },
   { "file": "20260702000500_sandbox_tables.ts", "name": "sandbox_tables", "opCount": 43 },
   { "file": "20260702000600_constraints_indexes_fks.ts", "name": "constraints_indexes_fks", "opCount": 189 },
@@ -35,7 +35,7 @@
   { "file": "20260820000000_control_workflow_journal_access.ts", "name": "control_workflow_journal_access", "opCount": 1 },
   { "file": "20260820000100_app_egress_rules.ts", "name": "app_egress_rules", "opCount": 8 },
   { "file": "20260831000000_archive_apps.ts", "name": "archive_apps", "opCount": 3 },
-  { "file": "20260831000001_sortable_entity_id_collations.ts", "name": "sortable_entity_id_collations", "opCount": 55 },
+  { "file": "20260831000001_sortable_entity_id_collations.ts", "name": "sortable_entity_id_collations", "opCount": 77 },
   { "file": "20260905000000_drop_jwk_key_state.ts", "name": "drop_jwk_key_state", "opCount": 1 },
   { "file": "20260905000100_drop_app_api_key_hash.ts", "name": "drop_app_api_key_hash", "opCount": 1 },
   { "file": "20260905000200_drop_app_api_key.ts", "name": "drop_app_api_key", "opCount": 1 },

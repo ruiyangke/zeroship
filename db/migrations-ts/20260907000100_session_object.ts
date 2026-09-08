@@ -58,7 +58,7 @@ export default {
     table("grants", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
-        person_id: t.uuid().notNull(),
+        person_id: t.text().notNull(),
         audience_kind: t.text().notNull(),
         client_id: t.text(),
         // The subject this person presents to this audience. Derived, never
@@ -156,7 +156,7 @@ export default {
     table("sessions", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
-        person_id: t.uuid().notNull(),
+        person_id: t.text().notNull(),
         audience_kind: t.text().notNull(),
         client_id: t.text(),
         grant_id: t.text().notNull(),
@@ -324,8 +324,8 @@ export default {
     // the same reason - it is a pairwise derivation or a UUID rendering, not an
     // identity domain this corpus mints.
     const typedIdColumnsByTable: Readonly<Record<string, readonly string[]>> = {
-      grants: ["id"],
-      sessions: ["id", "grant_id", "parent_session_id"],
+      grants: ["id", "person_id"],
+      sessions: ["id", "grant_id", "parent_session_id", "person_id"],
     };
     for (const [tableName, columns] of Object.entries(typedIdColumnsByTable)) {
       const alterations = columns
