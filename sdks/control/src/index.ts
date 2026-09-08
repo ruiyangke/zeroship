@@ -821,8 +821,9 @@ export class ControlClient {
      * nothing has to outlive it, and its `project_members` rows go with it.
      *
      * REFUSED while the project still owns apps (`409 project has apps`,
-     * carrying the count). Archive and delete them, or move them to another
-     * project, first.
+     * carrying the count). Archive each one with `apps.archive` and then
+     * `apps.delete` it. There is no route that moves an app between projects,
+     * so that is the whole remedy.
      */
     delete: (projectId: string): Promise<void> =>
       this.request(`/api/projects/${pathPart(projectId)}`, {
