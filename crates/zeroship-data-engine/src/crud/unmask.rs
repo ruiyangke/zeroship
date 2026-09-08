@@ -221,7 +221,7 @@ fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
 /// The two fetch helpers below are the only readers of that column in the tree.
 /// They formatted the name themselves until this existed, which was coherent
 /// only while the write side did too: `crud::mask_pass` now places the value
-/// under the name `zeroship_schema::query::declared_raw_column` resolves, so a
+/// under the name `zeroship_data_query_builder::compile::declared_raw_column` resolves, so a
 /// SELECT that kept its own `format!` would miss every row a renamed column
 /// stored - and on SQLite it would MISS QUIETLY, because a double-quoted
 /// identifier that matches no column is taken as a string literal and the
@@ -239,10 +239,10 @@ fn lookup_mask_meta(schema: &Value, column: &str) -> Option<ColumnMaskMeta> {
 /// mask, which is unreachable: every caller has already been through
 /// [`lookup_mask_meta`], and that is the same test.
 fn resolve_raw_column(schema: &Value, canonical_column: &str) -> Result<String, DbError> {
-    let def = schema
-        .get(canonical_column)
-        .ok_or_else(|| DbError::internal(format!("unmask: column '{canonical_column}' vanished")))?;
-    crate::query::declared_raw_column(canonical_column, def)?.ok_or_else(|| {
+    let def = schema.get(canonical_column).ok_or_else(|| {
+        DbError::internal(format!("unmask: column '{canonical_column}' vanished"))
+    })?;
+    crate::compile::declared_raw_column(canonical_column, def)?.ok_or_else(|| {
         DbError::internal(format!(
             "unmask: column '{canonical_column}' has no raw column but passed the mask lookup"
         ))
@@ -436,10 +436,7 @@ pub fn check_unmask_authorization(
 /// [`crate::crud::mask_policy::cache_put`]. A
 /// corrupt sidecar propagates as `DbError` so operators see the real
 /// fault instead of a silent default-deny.
-async fn ensure_mask_policy_cached(
-    backend: &BackendHandle,
-    app_id: &str,
-) -> Result<(), DbError> {
+async fn ensure_mask_policy_cached(backend: &BackendHandle, app_id: &str) -> Result<(), DbError> {
     if super::mask_policy::cache_has(app_id) {
         return Ok(());
     }
@@ -551,7 +548,15 @@ pub async fn dispatch_unmask(
         // Audit-then-refuse. The audit row carries `outcome = "denied"`
         // so operators see every attempted access — including the
         // `canUnmask()` probe path the SDK uses.
-        write_audit_unmask_row(backend, db_schema, app_id, &args, &mask_meta.classification, "denied").await?;
+        write_audit_unmask_row(
+            backend,
+            db_schema,
+            app_id,
+            &args,
+            &mask_meta.classification,
+            "denied",
+        )
+        .await?;
         // The REFUSED unmask still wrote an audit row, and that row cost a
         // statement. Metering counts work performed, not permission granted.
         meter_audit_write(app_id);
@@ -584,7 +589,15 @@ pub async fn dispatch_unmask(
     // is in hand so a SELECT failure / decrypt failure doesn't leave a
     // ghost "granted" row in the audit log (the failure surfaces a
     // typed error; the audit table reflects only completed unmasks).
-    write_audit_unmask_row(backend, db_schema, app_id, &args, &mask_meta.classification, "granted").await?;
+    write_audit_unmask_row(
+        backend,
+        db_schema,
+        app_id,
+        &args,
+        &mask_meta.classification,
+        "granted",
+    )
+    .await?;
     meter_audit_write(app_id);
 
     Ok(UnmaskFieldResult { plaintext })
@@ -888,7 +901,7 @@ async fn write_audit_unmask_row(
     backend: &BackendHandle,
     // SCHEMA: where the audit table lives on PostgreSQL, and what the runtime
     // role the INSERT runs under is derived from.
-    db_schema: &zeroship_schema::SchemaName,
+    db_schema: &zeroship_data_query_builder::SchemaName,
     // TENANT: the SQLite ATTACH alias the same table is reached through on the
     // dev tier, and the metering subject.
     app_id: &str,
@@ -1213,7 +1226,7 @@ pub async fn dispatch_bulk_unmask(
 /// exactly which pairs caused the refusal.
 async fn write_audit_bulk_row(
     backend: &BackendHandle,
-    db_schema: &zeroship_schema::SchemaName,
+    db_schema: &zeroship_data_query_builder::SchemaName,
     app_id: &str,
     args: &BulkUnmaskArgs,
     classifications: &std::collections::HashMap<String, String>,
@@ -1266,7 +1279,15 @@ async fn write_audit_bulk_row(
         reason: Some(reason_text),
         rejected_claim: args.rejected_claim.clone(),
     };
-    write_audit_unmask_row(backend, db_schema, app_id, &synthetic, &classification_joined, outcome).await
+    write_audit_unmask_row(
+        backend,
+        db_schema,
+        app_id,
+        &synthetic,
+        &classification_joined,
+        outcome,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1561,7 +1582,7 @@ pub async fn dispatch_unmask_for_query(
 #[allow(clippy::too_many_arguments)]
 async fn write_audit_query_hint_row(
     backend: &BackendHandle,
-    db_schema: &zeroship_schema::SchemaName,
+    db_schema: &zeroship_data_query_builder::SchemaName,
     app_id: &str,
     collection: &str,
     unmask_columns: &[String],
@@ -1598,7 +1619,15 @@ async fn write_audit_query_hint_row(
         reason: Some(reason_text),
         rejected_claim: rejected_claim.cloned(),
     };
-    write_audit_unmask_row(backend, db_schema, app_id, &synthetic, &class_joined, outcome).await
+    write_audit_unmask_row(
+        backend,
+        db_schema,
+        app_id,
+        &synthetic,
+        &class_joined,
+        outcome,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------

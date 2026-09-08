@@ -182,7 +182,7 @@ async fn classify_missing_role(app_id: &str) -> DbError {
 
     let classified = pg_error::classify_pg_per_app_session_setup_for_tests(
         &err,
-        &zeroship_schema::SchemaName::new(app_id).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name"),
     );
     drop(client);
     drain_pg().await;

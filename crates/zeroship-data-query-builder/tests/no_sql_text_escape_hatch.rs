@@ -68,8 +68,8 @@ fn sources() -> Vec<(String, String)> {
 }
 
 fn collect(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
-    let entries = std::fs::read_dir(dir)
-        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+    let entries =
+        std::fs::read_dir(dir).unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -204,7 +204,7 @@ fn no_plan_type_derives_serialize() {
 }
 
 /// The structural half, which is what makes the arm above hard to defeat: the
-/// manifest declares no dependencies at all, so `serde` is not in scope and the
+/// manifest does not declare `serde`, so it is not in scope and the
 /// derive would not compile even if someone wrote it.
 #[test]
 fn serialize_derive_is_structurally_impossible() {
@@ -229,9 +229,8 @@ fn serialize_derive_is_structurally_impossible() {
         }
     }
     assert!(
-        declared.is_empty(),
-        "this crate must declare NO dependencies - that is what keeps it a leaf and \
-         what makes a serde derive impossible - but it declares: {declared:?}"
+        !declared.contains("serde") && !declared.contains("serde_derive"),
+        "plan types must not acquire a serde derive dependency: {declared:?}"
     );
     // Anti-vacuity: the parser must be able to see a dependency at all,
     // otherwise "declared nothing" is a statement about the parser.
@@ -248,8 +247,11 @@ fn serialize_derive_is_structurally_impossible() {
             saw = true;
         }
     }
-    assert!(saw, "the manifest parser cannot see a dependency it is shown");
-    println!("ruled on 1 manifest, 0 dependencies declared");
+    assert!(
+        saw,
+        "the manifest parser cannot see a dependency it is shown"
+    );
+    println!("ruled on {} dependency declarations", declared.len());
 }
 
 /// The positive controls. Both predicates above are negative checks whose only
@@ -257,8 +259,12 @@ fn serialize_derive_is_structurally_impossible() {
 /// be empty, so they would go blind exactly when the crate became correct.
 #[test]
 fn the_gate_predicates_can_actually_fail() {
-    assert!(declares_an_escape_hatch("pub fn raw_sql(s: String) -> Fragment {"));
-    assert!(declares_an_escape_hatch("    pub fn into_string(self) -> String {"));
+    assert!(declares_an_escape_hatch(
+        "pub fn raw_sql(s: String) -> Fragment {"
+    ));
+    assert!(declares_an_escape_hatch(
+        "    pub fn into_string(self) -> String {"
+    ));
     assert!(!declares_an_escape_hatch("pub fn as_str(&self) -> &str {"));
     assert!(
         !declares_an_escape_hatch("/// there is no raw_sql on this type"),

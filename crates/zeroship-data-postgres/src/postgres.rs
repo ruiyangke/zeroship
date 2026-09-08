@@ -21,22 +21,22 @@ use std::cell::RefCell;
 use std::rc::Rc;
 
 // Feeds only the `SchemaIntrospect` impl, which is ungated since 2026-09-04.
-use zeroship_schema::diff::LiveSchema;
 use zeroship_data_core::error::{BeginIntent, CleanupAck, DbError, SettleIntent, TerminalResult};
+use zeroship_data_query_builder::catalog::LiveSchema;
 
 // `Backend` is NOT imported here. It is `zeroship-plugin-db`'s own
 // `pub(crate)` composition marker, so by the orphan rule
 // `impl Backend for PostgresBackend` can only be written in that crate - and
 // its compile-time conformance assertion lives beside it.
 use super::pg_introspect;
-use zeroship_data_core::storage::{
-    DialectBuilder, LockManager, SpatialIndex, SqlExecutor, VectorIndex,
-};
-use zeroship_schema::descriptors::{GeoPoint, VectorMetric};
+use super::{pg_autocommit, pg_error};
 #[cfg(any(test, feature = "test-helpers"))]
 use super::{PgLockManager, PgSqlExecutor};
 use zeroship_data_core::storage::SchemaIntrospect;
-use super::{pg_autocommit, pg_error};
+use zeroship_data_core::storage::{
+    DialectBuilder, LockManager, SpatialIndex, SqlExecutor, VectorIndex,
+};
+use zeroship_data_query_builder::descriptors::{GeoPoint, VectorMetric};
 
 /// Single concrete impl of `Backend` backed by `compio_postgres`.
 ///
@@ -203,7 +203,7 @@ impl PostgresBackend {
     /// Propagates pool checkout, session setup, statement and COMMIT failures.
     pub async fn query_roled_json(
         &self,
-        schema: &zeroship_schema::SchemaName,
+        schema: &zeroship_data_query_builder::SchemaName,
         sql: &str,
         params: &[&str],
     ) -> Result<Vec<serde_json::Value>, DbError> {
@@ -218,7 +218,7 @@ impl PostgresBackend {
     /// byte-typed.
     pub async fn read_roled_scalar_bytes(
         &self,
-        schema: &zeroship_schema::SchemaName,
+        schema: &zeroship_data_query_builder::SchemaName,
         sql: &str,
         params: &[&str],
     ) -> Result<pg_autocommit::ScalarRead<Vec<u8>>, DbError> {
@@ -234,7 +234,7 @@ impl PostgresBackend {
     /// [`Self::read_roled_scalar_bytes`].
     pub async fn read_roled_scalar_text(
         &self,
-        schema: &zeroship_schema::SchemaName,
+        schema: &zeroship_data_query_builder::SchemaName,
         sql: &str,
         params: &[&str],
     ) -> Result<pg_autocommit::ScalarRead<String>, DbError> {
@@ -248,7 +248,7 @@ impl PostgresBackend {
     /// As [`Self::query_roled_json`].
     pub async fn execute_roled(
         &self,
-        schema: &zeroship_schema::SchemaName,
+        schema: &zeroship_data_query_builder::SchemaName,
         sql: &str,
         params: &[&str],
     ) -> Result<(), DbError> {
@@ -274,7 +274,7 @@ impl PostgresBackend {
     /// As [`Self::query_roled_json`].
     pub async fn query_roled_rows_as_json(
         &self,
-        schema: &zeroship_schema::SchemaName,
+        schema: &zeroship_data_query_builder::SchemaName,
         sql: &str,
         params: &[&str],
     ) -> Result<Vec<serde_json::Value>, DbError> {
@@ -612,7 +612,7 @@ impl PostgresBackend {
         metric: VectorMetric,
         filter: &serde_json::Value,
         schema: &serde_json::Value,
-    ) -> Result<zeroship_schema::query::BuiltQuery, DbError> {
+    ) -> Result<zeroship_data_query_builder::compile::BuiltQuery, DbError> {
         // Probe so a missing extension surfaces with the same typed
         // error shape the capability probe produces — the SDK branches
         // on `e.code === "vector_extension_missing"` regardless of
@@ -622,7 +622,7 @@ impl PostgresBackend {
         // The projection allowlist and the `column` identifier check both come
         // off the descriptor. A collection this deploy does not declare is
         // refused here rather than searched with an unbounded projection.
-        zeroship_schema::query::build_vector_search(
+        zeroship_data_query_builder::compile::build_vector_search(
             binding.schema(),
             collection,
             column,
@@ -649,7 +649,9 @@ impl VectorIndex for PostgresBackend {
         schema: &serde_json::Value,
     ) -> Result<Vec<serde_json::Value>, DbError> {
         let bq = self
-            .plan_vector_search(binding, collection, column, query, k, metric, filter, schema)
+            .plan_vector_search(
+                binding, collection, column, query, k, metric, filter, schema,
+            )
             .await?;
         let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
         self.query_roled_json(binding.schema(), &bq.sql, &param_refs)
@@ -736,10 +738,10 @@ impl PostgresBackend {
         filter: &serde_json::Value,
         limit: Option<usize>,
         schema: &serde_json::Value,
-    ) -> Result<zeroship_schema::query::BuiltQuery, DbError> {
+    ) -> Result<zeroship_data_query_builder::compile::BuiltQuery, DbError> {
         self.ensure_postgis_available().await?;
 
-        zeroship_schema::query::build_spatial_near(
+        zeroship_data_query_builder::compile::build_spatial_near(
             binding.schema(),
             collection,
             column,
@@ -818,12 +820,12 @@ impl DialectBuilder for PgDialect {
     // `error[E0046]: not all trait items implemented, missing: sql_dialect`
     // under `--features zeroship-data-core/test-helpers`, which is one
     // manifest line away in any dependent.
-    fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
-        zeroship_schema::query::SqlDialect::Postgres
+    fn sql_dialect(&self) -> zeroship_data_query_builder::compile::SqlDialect {
+        zeroship_data_query_builder::compile::SqlDialect::Postgres
     }
 
     /// Double-quote with embedded-quote escape. Matches the existing
-    /// `zeroship_schema::query::quote_ident` helper byte-for-byte.
+    /// `zeroship_data_query_builder::compile::quote_ident` helper byte-for-byte.
     fn quote_ident(&self, name: &str) -> String {
         format!("\"{}\"", name.replace('"', "\"\""))
     }
@@ -871,7 +873,7 @@ impl DialectBuilder for PgDialect {
 /// separate field. The bodies delegate to the `PgDialect` ZST; rustc
 /// inlines the value away because every method is `&self`.
 impl DialectBuilder for PostgresBackend {
-    fn sql_dialect(&self) -> zeroship_schema::query::SqlDialect {
+    fn sql_dialect(&self) -> zeroship_data_query_builder::compile::SqlDialect {
         PgDialect.sql_dialect()
     }
 
@@ -982,12 +984,10 @@ mod backup_pg {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     use super::PostgresBackend;
-    use zeroship_data_core::capability::SNAPSHOT_RESTORE_LOCK_TAG;
-    use crate::PgLockManager;
     use crate::lock_guard::LockGuard;
-    use zeroship_data_core::capability::{
-        BusyPolicy, LockScope, SnapshotHandle, SnapshotOpts,
-    };
+    use crate::PgLockManager;
+    use zeroship_data_core::capability::SNAPSHOT_RESTORE_LOCK_TAG;
+    use zeroship_data_core::capability::{BusyPolicy, LockScope, SnapshotHandle, SnapshotOpts};
     use zeroship_data_core::error::DbError;
 
     /// Parse a `file:///abs/path` URI into the underlying filesystem
@@ -1399,7 +1399,6 @@ mod backup_pg {
         let _ = guard.release().await;
         Ok(())
     }
-
 }
 
 /// Render SC-1's [`BeginIntent`] as PostgreSQL's `BEGIN` statement.
@@ -1436,7 +1435,7 @@ pub fn render_begin(intent: BeginIntent) -> String {
 /// `compio_postgres`.
 pub async fn apply_per_app_role(
     client: &compio_postgres::Client,
-    schema: &zeroship_schema::SchemaName,
+    schema: &zeroship_data_query_builder::SchemaName,
 ) -> Result<(), zeroship_data_core::error::SessionSetupError> {
     // SET LOCAL ROLE + the DB-1 timeout guards (statement / idle-in-tx / lock)
     // in one simple-query batch - all SET LOCAL, so they revert at the tx end.
@@ -1450,8 +1449,7 @@ pub async fn apply_per_app_role(
         // characters. The classifier derives the role it expects to see named in
         // the failure; handing it a different identity than the setup batch used
         // is what degrades SCHEMA_NOT_PROVISIONED into a generic failure.
-        let mut classified =
-            crate::pg_error::classify_pg_per_app_session_setup(&e, schema);
+        let mut classified = crate::pg_error::classify_pg_per_app_session_setup(&e, schema);
         zeroship_data_core::error::prefix_message(
             classified.error_mut(),
             "db: tx session setup (per-app section 17.5 + DB-1 guards): ",
@@ -1570,7 +1568,7 @@ mod tests {
     //!    tightening a lifetime, swapping an associated type) fails
     //!    compilation here, not at a distant call site.
     //! 2. Associated-type identities — pin `Client = compio_postgres::OwnedPooledClient`
-    //!    and `LiveSchema = zeroship_schema::diff::LiveSchema` so a refactor that
+    //!    and `LiveSchema = zeroship_data_query_builder::catalog::LiveSchema` so a refactor that
     //!    accidentally swaps either is caught here.
     //! 3. The `Backend: 'static` bound on the trait — re-asserted at
     //!    the impl site.
@@ -1601,7 +1599,10 @@ mod tests {
     fn assert_postgres_backend_impls_sub_traits() {
         fn impls_sql_executor<T: SqlExecutor<Client = compio_postgres::OwnedPooledClient>>() {}
         fn impls_lock_manager<T: LockManager<Client = compio_postgres::OwnedPooledClient>>() {}
-        fn impls_schema_introspect<T: SchemaIntrospect<LiveSchema = zeroship_schema::diff::LiveSchema>>() {}
+        fn impls_schema_introspect<
+            T: SchemaIntrospect<LiveSchema = zeroship_data_query_builder::catalog::LiveSchema>,
+        >() {
+        }
         fn impls_pg_sql_executor<T: PgSqlExecutor>() {}
         fn impls_pg_lock_manager<T: PgLockManager>() {}
         impls_sql_executor::<PostgresBackend>();

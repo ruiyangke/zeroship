@@ -45,7 +45,7 @@ pub struct ProbeOutcome {
 /// The backend error behind a `BEGIN` that did not open.
 pub async fn begin(
     app_id: &str,
-    schema: zeroship_schema::SchemaName,
+    schema: zeroship_data_query_builder::SchemaName,
     isolation_level: Option<zeroship_data_core::error::IsolationLevel>,
     backend: BackendHandle,
 ) -> Result<(), DbError> {

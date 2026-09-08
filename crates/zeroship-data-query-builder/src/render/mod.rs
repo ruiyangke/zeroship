@@ -43,33 +43,10 @@
 //!
 //! # Parameters are TYPED, so a binary value is not a tagged string
 //!
-//! The shape this replaces is `BuiltQuery { sql: String, params: Vec<String> }`
-//! (`zeroship_schema::query`), where every parameter is a `String` and binary
-//! values are smuggled through by two different mechanisms for one concept
-//! (`query.rs:106-122`): `PostgreSQL` wraps the placeholder in SQL as
-//! `decode($N, 'base64')::bytea`, `SQLite` emits a bare `$N` and prefixes the
-//! PARAM VALUE with `SQLITE_BINARY_BIND_PREFIX` (`query.rs:593`) for the session
-//! actor to detect and rebind as a BLOB, and `MySQL` wraps with `FROM_BASE64(?)`.
-//!
-//! Three things go wrong there, and they are worth separating:
-//!
-//! 1. the value's TYPE is invisible to the type system;
-//! 2. one dialect difference leaks into two unrelated layers - SQL text on one
-//!    arm, param value on the other - so there is no single place to read what
-//!    a dialect does with bytes;
-//! 3. a sentinel PREFIX on a string parameter is forgeable in principle by any
-//!    value that happens to start with those bytes. Whether that is reachable
-//!    today is not established here and is not claimed; the point is that a
-//!    typed parameter removes the question instead of answering it.
-//!
-//! [`Literal::Bytes`] is a variant, so (1) and (3) do not arise: a `Vec<u8>` is
-//! not a `String` and carries no prefix to forge. [`ValueFormat`] fixes (2) by
-//! putting every dialect's spelling of every parameter type in one trait, and
-//! the trait deliberately has **no default methods** - the same enforcement
-//! `SchemaRenderer` uses (`query.rs:124-130`), so a second dialect cannot
-//! compile until it has spelled all of them, and a new [`Literal`] variant
-//! breaks [`placeholder_for`]'s exhaustive match rather than silently
-//! inheriting someone else's spelling.
+//! [`Literal::Bytes`] preserves binary parameters for a host with typed binds.
+//! [`ValueFormat`] defines the placeholder spelling for each parameter type;
+//! its methods are required for every dialect. The runtime compiler uses
+//! explicit decoding expressions when executing through its text-bind channel.
 
 pub mod postgres;
 
@@ -188,7 +165,7 @@ pub trait ValueFormat {
     ///
     /// * `PostgreSQL` builds a text literal `[1,2,3]`, binds it as a `String`,
     ///   and casts it in the SQL
-    ///   (`crates/zeroship-schema/src/query.rs:4983-5013`);
+    ///   (`crates/zeroship-data-query-builder/src/compile.rs:4983-5013`);
     /// * `SQLite` encodes the same values as a little-endian `f32` buffer and
     ///   **interpolates it into the statement as an `x'..'` literal**, binding
     ///   nothing at all, because the session actor's parameter surface is
@@ -217,11 +194,7 @@ pub trait ValueFormat {
 ///
 /// One match, in one place. A new [`Literal`] variant fails to compile here,
 /// which is what stops it inheriting `text_placeholder` by accident.
-pub(crate) fn placeholder_for(
-    format: &dyn ValueFormat,
-    slot: usize,
-    value: &Literal,
-) -> String {
+pub(crate) fn placeholder_for(format: &dyn ValueFormat, slot: usize, value: &Literal) -> String {
     match value {
         Literal::Bool(_) => format.bool_placeholder(slot),
         Literal::Int(_) => format.int_placeholder(slot),

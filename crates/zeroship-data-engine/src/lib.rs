@@ -1,46 +1,11 @@
-//! The data plane's ENGINE tier.
+//! Runtime ORM, protection pipelines, and database execution.
 //!
-//! # What lives here
-//!
-//! Everything between the per-isolate composition root and the two drivers:
-//!
-//! - [`crud`] - the read and write pipelines and their passes (system fields,
-//!   bytes, encryption, masking, unmask).
-//! - [`transaction`] - the SC-1 protocol: reducer, driver, frames, deadlines.
-//! - [`exec`] - the routed executor every statement funnels through, and the
-//!   single point that emits the raw usage metrics in [`metrics`].
-//! - [`tx_lanes`] - the per-isolate transaction lane owner (claims, parked
-//!   sessions, pending emits, reducers).
-//! - [`tx_route`] - the tx-vs-pool routing decision, frozen at the V8 dispatch
-//!   frame and carried into the spawned future.
-//! - [`backend_handle`] / [`backend`] - the dispatch enum over both vendors and
-//!   the prelude that names their traits.
-//! - [`auth`] - per-app PostgreSQL role provisioning.
-//!
-//! # What is deliberately absent
-//!
-//! **Any name from `zeroship-plugin-db`.** The adapter owns the V8 classes, the
-//! per-isolate `context`, the CDC modules and the service lifecycle; this crate
-//! is below it, so it cannot name it. That is enforced by the manifest, not by
-//! review - `zeroship-plugin-db` appears in neither dependency table, so
-//! `zeroship_plugin_db::…` here is E0433.
-//!
-//! Where a helper here genuinely needed adapter state, the state is a
-//! PARAMETER: `exec::ambient_route_for_tests` takes the backend,
-//! `backend_selection::new_sqlite_backend` takes the key source, and
-//! `transaction::probe::begin` takes the handle (all three are behind
-//! `test-helpers`, so a default build has none of them). The caller that owns the
-//! context does the lookup, which is the same correction
-//! `PostgresBackend::new` and `open_sqlite_backend` already took one tier down.
-//!
-//! # How `crate::` paths still resolve
-//!
-//! This crate re-exports the same neutral modules `zeroship-plugin-db`'s
-//! `lib.rs` does - `query`, `diff`, `broker`, `read_set`, `encryption`,
-//! `budgets`, `lock_policy` - so every `crate::query::…` / `crate::broker::…`
-//! reference in a moved file resolves to exactly the item it resolved to
-//! before, and the adapter re-exports THIS crate's modules for the same reason.
-//! Two crates, one vocabulary, zero call-site churn.
+//! The public API is [`orm`]: deployment-bound database and collection handles,
+//! Rust model mapping, and the prepared operations used by the V8 adapter.
+//! [`crud`] applies system fields, masking, encryption and result decoding.
+//! [`transaction`] and [`exec`] own transaction state and routed statements.
+//! [`backend_handle`] dispatches over the storage vendors; this crate has no
+//! dependency on V8 or the worker adapter.
 
 // The engine's async chains nest deeply - a CRUD pass awaiting the routed
 // executor awaiting a pooled `compio-postgres` request - and rustc walks the
@@ -63,13 +28,8 @@ zeroship_core::declare_env_consumer!(
 // The shared vocabulary, re-exported so `crate::…` means the same thing here as
 // it does in the adapter.
 // ---------------------------------------------------------------------------
-// The DDL/DML builders + `QueryError` + `SqlDialect`, in the leaf crate
-// `zeroship-schema`.
-pub use zeroship_schema::query;
-// The diff classifier and the vendor-neutral schema metadata (`MaskMeta`,
-// `EncryptionMeta`, `MaskKind`, `Classification`, `LiveSchema`, `ColumnInfo`)
-// the mask and encryption passes read off a descriptor.
-pub use zeroship_schema::diff;
+// Runtime compilation and catalog contracts.
+pub use zeroship_data_query_builder::{catalog, compile};
 // The process-wide change broker. Two tiers publish into it - this one on local
 // mutation (`exec::emit_local`) and CDC from the WAL - which is why it sits in
 // `zeroship-data-core`, below both.
@@ -96,7 +56,7 @@ pub mod auth;
 // `backend/mod.rs`, untiered and contested (#170), and the contest was over the
 // CDC names in its rustdoc and one `#[cfg(test)]` conformance assertion. The
 // assertion moved to `change_stream_pg.rs`, where the fact it pins lives; what
-// is left re-exports data-core, both vendors and `zeroship-schema`, plus this
+// is left re-exports data-core, both vendors and `zeroship-data-query-builder`, plus this
 // crate's own `BackendHandle`. Every one of those is at or below this tier.
 pub mod backend;
 // The per-isolate dispatch enum, separated from `backend/mod.rs` so this cut
@@ -196,3 +156,7 @@ pub fn reset_engine_for_tests() {
     system_shape_charter::reset_for_tests();
     zeroship_data_core::schema_cache::reset_for_tests();
 }
+
+/// The ORM used by Rust callers and the native worker adapter.
+pub mod orm;
+pub use orm::{Collection, Database};

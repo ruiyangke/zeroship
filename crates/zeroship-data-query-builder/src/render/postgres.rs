@@ -33,9 +33,7 @@ use crate::predicate::{
 use crate::projection::{ProjectedField, ProjectionSource, SearchScalarKind};
 use crate::render::{RenderedSql, ValueFormat};
 use crate::search::{Search, SearchCriterion, VectorMetric};
-use crate::write::{
-    Assignment, ColumnAssignment, Delete, Insert, Returning, Update, WriteValue,
-};
+use crate::write::{Assignment, ColumnAssignment, Delete, Insert, Returning, Update, WriteValue};
 use core::fmt;
 
 /// Why this backend refused a node.
@@ -301,7 +299,7 @@ pub fn render_delete(plan: &Delete) -> Result<RenderedSql, RenderError> {
 ///
 /// `PostgreSQL` would accept `ORDER BY "_distance"` - it resolves an output
 /// column name in an `ORDER BY` - and the shipped geo builder writes exactly
-/// that (`crates/zeroship-schema/src/query.rs:5082`) while the shipped vector
+/// that (`crates/zeroship-data-query-builder/src/compile.rs:5082`) while the shipped vector
 /// builder re-emits the expression (`:5013`). One of the two spellings has to
 /// win here, and it is the expression, for a reason that is specific to this
 /// family: an `hnsw` or `ivfflat` index answers a `k`-nearest query only when
@@ -565,7 +563,7 @@ impl Writer {
     /// second copy of the query vector on the wire - for a 1536-dimension
     /// embedding, roughly 12 KB of duplicated text per search. Today's builder
     /// re-uses `$1` for exactly this reason
-    /// (`crates/zeroship-schema/src/query.rs:5006-5013`).
+    /// (`crates/zeroship-data-query-builder/src/compile.rs:5006-5013`).
     fn bind(&mut self, value: Literal) -> usize {
         self.params.push(value);
         self.params.len()
@@ -635,7 +633,7 @@ impl ValueFormat for PostgresValueFormat {
     /// per-database and is not a constant the driver can know at compile time.
     /// Binding the value as text and casting is what sidesteps the binary
     /// protocol's type-discovery handshake - the reason
-    /// `crates/zeroship-schema/src/query.rs:4936-4940` gives for the same
+    /// `crates/zeroship-data-query-builder/src/compile.rs:4936-4940` gives for the same
     /// choice. Unlike the `bytes` wrapper this crate deleted, this one does
     /// real work and stays.
     fn vector_placeholder(&self, slot: usize) -> String {
@@ -746,7 +744,8 @@ fn write_assignments(out: &mut Writer, assignments: &[ColumnAssignment]) {
                 out.write_param(arithmetic.operand().clone());
             }
             Assignment::CurrentTimestamp => {
-                out.sql.push_str(PostgresValueFormat.current_timestamp_expr());
+                out.sql
+                    .push_str(PostgresValueFormat.current_timestamp_expr());
             }
         }
     }
@@ -1096,7 +1095,10 @@ mod tests {
         let mut backwards = vec![column("email"), column("name")];
         forwards.sort();
         backwards.sort();
-        assert_eq!(render_columns_raw(&forwards), render_columns_raw(&backwards));
+        assert_eq!(
+            render_columns_raw(&forwards),
+            render_columns_raw(&backwards)
+        );
     }
 
     /// THE MUTATION ARM FOR AN UPDATE'S SET LIST, same shape.

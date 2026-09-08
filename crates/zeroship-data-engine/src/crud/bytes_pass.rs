@@ -35,8 +35,8 @@
 //! - Postgres: leave the (canonically re-encoded) base64 in the param list and
 //!   deposit a `__zsbin__<col>` marker so the SQL builders emit
 //!   `decode($N, 'base64')::bytea` at that placeholder.
-//! - SQLite: rewrite the value to a `SQLITE_BINARY_BIND_PREFIX`-tagged param so
-//!   the session actor binds a raw `Vec<u8>` as a BLOB.
+//! - SQLite: mark the column for the compiler to encode a hex parameter and
+//!   emit `unhex($N)`. The expression produces a BLOB without inspecting text.
 //!
 //! ENCRYPTED `bytes` COLUMNS ARE NOT OURS. `t.encrypted({ wraps: t.bytes() })`
 //! is already handled end to end by `encryption_pass`, which base64-DECODES the
@@ -59,8 +59,8 @@
 use base64::Engine as _;
 use serde_json::Value;
 
+use crate::compile::SqlDialect;
 use zeroship_data_core::error::DbError;
-use crate::query::SqlDialect;
 
 /// Cheap walk: does any field def on `schema` declare a plain, non-encrypted
 /// `bytes` column? Drives the per-write decision to run this pass at all.
@@ -72,8 +72,7 @@ pub fn schema_has_plain_bytes_columns(schema: &Value) -> bool {
 }
 
 fn is_plain_bytes(def: &Value) -> bool {
-    def.get("encrypted").is_none()
-        && def.get("type").and_then(Value::as_str) == Some("bytes")
+    def.get("encrypted").is_none() && def.get("type").and_then(Value::as_str) == Some("bytes")
 }
 
 /// Field names on `schema` this pass owns, in schema order.
@@ -165,13 +164,6 @@ fn encode_bytes_scalar(
     if value.is_null() {
         return Ok(());
     }
-    // Idempotence guard: the value is already a lowered SQLite binary bind.
-    // Reachable when an upsert re-runs the pass over a doc it has already
-    // rewritten.
-    if matches!(value, Value::String(s) if s.starts_with(crate::query::SQLITE_BINARY_BIND_PREFIX)) {
-        return Ok(());
-    }
-
     let Some(b64) = value.as_str() else {
         return Err(DbError::validation(
             "invalid_bytes_arg",
@@ -190,20 +182,9 @@ fn encode_bytes_scalar(
             )
         })?;
 
-    match dialect {
-        SqlDialect::Sqlite => {
-            *value = Value::String(super::sqlite_blob_param(&raw));
-        }
-        SqlDialect::Postgres | SqlDialect::Mysql => {
-            // Re-encode from the bytes we just validated rather than forwarding
-            // the caller's spelling. `decode(x, 'base64')` and Rust's STANDARD
-            // engine do not accept the same inputs (PG skips newlines, we
-            // reject them), so canonicalising here means the parameter the
-            // database decodes is provably the value this pass approved.
-            *value = Value::String(base64::engine::general_purpose::STANDARD.encode(&raw));
-            marks.push(field.to_string());
-        }
-    }
+    let _ = dialect;
+    *value = Value::String(base64::engine::general_purpose::STANDARD.encode(&raw));
+    marks.push(field.to_string());
     Ok(())
 }
 
@@ -254,17 +235,14 @@ mod tests {
         let mut doc = json!({ "payload": b64() });
         encode_bytes_on_write(&schema(), SqlDialect::Sqlite, &mut doc).expect("encode");
         let param = doc["payload"].as_str().expect("param string");
-        let tagged = param
-            .strip_prefix(crate::query::SQLITE_BINARY_BIND_PREFIX)
-            .expect("blob sentinel");
+        let tagged = param;
         assert_eq!(
             base64::engine::general_purpose::STANDARD
                 .decode(tagged)
                 .expect("sentinel payload decodes"),
             RAW.to_vec()
         );
-        // The SQLite arm needs no marker: the sentinel IS the side-channel.
-        assert!(doc.get("__zsbin__payload").is_none());
+        assert_eq!(doc["__zsbin__payload"], json!(true));
     }
 
     #[test]

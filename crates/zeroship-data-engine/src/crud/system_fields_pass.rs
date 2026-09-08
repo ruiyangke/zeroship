@@ -14,7 +14,7 @@
 //! the next person to add one will trust this comment.
 //!
 //! The READ projection still holds a second, hand-maintained list:
-//! `zeroship_schema::query::SYSTEM_FIELD_NAMES` (`crates/zeroship-schema/src/query.rs:756`),
+//! `zeroship_data_query_builder::compile::SYSTEM_FIELD_NAMES` (`crates/zeroship-data-query-builder/src/compile.rs:756`),
 //! walked by `implicit_read_projection_parts` (`:3644`) - which builds the
 //! SELECT list for every read builder AND the `RETURNING` list for every write
 //! (`build_returning_expr`, `:3685`) - and by `read_surface_columns` (`:3746`),
@@ -92,8 +92,8 @@ use std::rc::Rc;
 use serde_json::{Map, Value};
 use zeroship_migrate_policy::{AssignmentEvent, AssignmentGenerator};
 
-use zeroship_data_core::error::DbError;
 use crate::system_shape_charter::AssignmentPlan;
+use zeroship_data_core::error::DbError;
 
 /// Does `event` fire while a row is being created?
 ///
@@ -159,7 +159,7 @@ pub fn derive_prefix_from_collection_name(collection: &str) -> String {
 ///    the descriptor the caller resolved.
 /// 2. Fall back to [`derive_prefix_from_collection_name`] when the descriptor
 ///    declares no explicit prefix.
-/// 3. Validate either source through [`crate::query::validate_id_prefix`].
+/// 3. Validate either source through [`crate::compile::validate_id_prefix`].
 ///
 /// `column` is a parameter rather than the literal `"id"` because the charter
 /// is what decides which column a typed id is minted for. It happens to be
@@ -190,7 +190,7 @@ pub fn prefix_for_collection(
         .and_then(|p| p.as_str())
         .map(str::to_string)
         .unwrap_or_else(|| derive_prefix_from_collection_name(collection));
-    crate::query::validate_id_prefix(&prefix)?;
+    crate::compile::validate_id_prefix(&prefix)?;
     Ok(prefix)
 }
 
@@ -398,10 +398,7 @@ fn apply_system_fields_on_update_impl(
     _collection: &str,
 ) -> Result<(), DbError> {
     let plan = assignment_plan()?;
-    let immutable: Vec<String> = plan
-        .immutable_after_insert()
-        .map(str::to_string)
-        .collect();
+    let immutable: Vec<String> = plan.immutable_after_insert().map(str::to_string).collect();
     let reassigned: Vec<String> = plan.reassigned_on_write().map(str::to_string).collect();
 
     let Some(obj) = patch.as_object_mut() else {
@@ -435,7 +432,7 @@ fn refuse_and_strip(
     for name in immutable {
         if obj.contains_key(name) {
             let where_ = under.map_or_else(String::new, |op| format!(" under `{op}`"));
-            return Err(crate::query::QueryError::ImmutableSystemField(format!(
+            return Err(crate::compile::QueryError::ImmutableSystemField(format!(
                 "UPDATE patch attempted to overwrite immutable system field `{name}`{where_} \
                  (assigned by the platform when the row was created)"
             ))
@@ -465,10 +462,7 @@ fn refuse_and_strip(
 /// Used by both `dispatch_update_one` and `dispatch_update_many` to
 /// decide whether to surface a `version_mismatch` typed error when the
 /// affected-rows count comes back zero.
-pub fn extract_cas_version(
-    filter: &Value,
-    collection: &str,
-) -> Result<Option<i64>, DbError> {
+pub fn extract_cas_version(filter: &Value, collection: &str) -> Result<Option<i64>, DbError> {
     if filter_has_nested_version_predicate(filter) {
         return Err(DbError::version_filter_must_be_top_level(collection));
     }
@@ -518,8 +512,7 @@ fn filter_has_nested_version_predicate(filter: &Value) -> bool {
             return true;
         }
         obj.iter().any(|(key, nested)| {
-            matches!(key.as_str(), "$and" | "$or")
-                && combinator_contains_field(nested, field)
+            matches!(key.as_str(), "$and" | "$or") && combinator_contains_field(nested, field)
         })
     }
 
@@ -551,9 +544,7 @@ fn filter_has_nested_version_predicate(filter: &Value) -> bool {
 ///
 /// When `include_deleted: true` is set, the caller explicitly opts out
 /// of the platform's default soft-delete filter.
-pub fn should_filter_soft_deleted(
-    include_deleted: bool,
-) -> bool {
+pub fn should_filter_soft_deleted(include_deleted: bool) -> bool {
     !include_deleted
 }
 
@@ -564,8 +555,8 @@ mod tests {
     use zeroship_migrate_policy::{PolicyRegistry, RootCharter};
 
     /// The fixture schema the INSERT builders take now that they refuse a `&str`.
-    fn fixture_schema() -> zeroship_schema::SchemaName {
-        zeroship_schema::SchemaName::new("app1").expect("fixture schema name")
+    fn fixture_schema() -> zeroship_data_query_builder::SchemaName {
+        zeroship_data_query_builder::SchemaName::new("app1").expect("fixture schema name")
     }
 
     // ---- the charter drives the pass -------------------------------
@@ -583,9 +574,9 @@ mod tests {
         );
         let charter = RootCharter::parse_toml(&toml, &PolicyRegistry::empty())
             .expect("the test charter must parse");
-        let plan = std::rc::Rc::new(
-            crate::system_shape_charter::AssignmentPlan::from_charter(&charter),
-        );
+        let plan = std::rc::Rc::new(crate::system_shape_charter::AssignmentPlan::from_charter(
+            &charter,
+        ));
         crate::system_shape_charter::stamp(plan);
     }
 
@@ -653,7 +644,10 @@ mod tests {
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
         let obj = doc.as_object().expect("object");
-        assert!(!obj.contains_key("version"), "supplied version survived: {doc}");
+        assert!(
+            !obj.contains_key("version"),
+            "supplied version survived: {doc}"
+        );
         assert!(
             !obj.contains_key("created_at"),
             "supplied created_at survived: {doc}",
@@ -748,9 +742,13 @@ mod tests {
             Some("usr_x"),
         )
         .expect("derived prefix must be accepted");
-        let built =
-            crate::query::build_insert_many(&fixture_schema(), "posts", &schema_without_id_prefix(), &docs)
-                .expect("build_insert_many");
+        let built = crate::compile::build_insert_many(
+            &fixture_schema(),
+            "posts",
+            &schema_without_id_prefix(),
+            &docs,
+        )
+        .expect("build_insert_many");
         let columns = built
             .sql
             .split_once(" VALUES ")
@@ -786,7 +784,10 @@ mod tests {
     #[test]
     fn derive_prefix_truncates_to_four() {
         assert_eq!(derive_prefix_from_collection_name("invoices"), "invo");
-        assert_eq!(derive_prefix_from_collection_name("authentications"), "auth");
+        assert_eq!(
+            derive_prefix_from_collection_name("authentications"),
+            "auth"
+        );
     }
 
     #[test]
@@ -809,12 +810,8 @@ mod tests {
         // The same validator that fences creator-declared prefixes also
         // fences a collection name whose derived prefix is reserved.
         let mut doc = json!({ "title": "hi" });
-        let result = apply_system_fields_on_insert(
-            &mut doc,
-            &schema_without_id_prefix(),
-            "usrs",
-            None,
-        );
+        let result =
+            apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "usrs", None);
 
         match result {
             Err(DbError::ValidationFailed { code, .. }) => {
@@ -822,7 +819,10 @@ mod tests {
             }
             other => panic!("expected reserved-prefix refusal, got {other:?}"),
         }
-        assert!(doc.get("id").is_none(), "refusal must happen before minting");
+        assert!(
+            doc.get("id").is_none(),
+            "refusal must happen before minting"
+        );
     }
 
     /// The other half of the id fence. The prefix validator closed the
@@ -980,12 +980,22 @@ mod tests {
         let mut doc = json!({});
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "users", None)
             .expect("derived prefix must be accepted");
-        assert!(doc.get("id").unwrap().as_str().unwrap().starts_with("user_"));
+        assert!(doc
+            .get("id")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with("user_"));
 
         let mut doc2 = json!({});
         apply_system_fields_on_insert(&mut doc2, &schema_without_id_prefix(), "tasks", None)
             .expect("derived prefix must be accepted");
-        assert!(doc2.get("id").unwrap().as_str().unwrap().starts_with("task_"));
+        assert!(doc2
+            .get("id")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .starts_with("task_"));
     }
 
     #[test]
@@ -1129,13 +1139,8 @@ mod tests {
             { "id": "post_keepme", "title": "a" },
             { "title": "b" },
         ]);
-        apply_system_fields_on_insert_many(
-            &mut docs,
-            &schema_without_id_prefix(),
-            "posts",
-            None,
-        )
-        .expect("derived prefix must be accepted");
+        apply_system_fields_on_insert_many(&mut docs, &schema_without_id_prefix(), "posts", None)
+            .expect("derived prefix must be accepted");
         let arr = docs.as_array().unwrap();
         assert_eq!(
             arr[0].get("id").and_then(|v| v.as_str()),
@@ -1166,7 +1171,12 @@ mod tests {
         let obj = doc.as_object().unwrap();
         // The 4 columns reaching INSERT: user-declared title + the 3
         // auto-injected system fields (id + created_by + updated_by).
-        assert_eq!(obj.len(), 4, "doc keys: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(
+            obj.len(),
+            4,
+            "doc keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
         for required in &["id", "title", "created_by", "updated_by"] {
             assert!(
                 obj.contains_key(*required),
@@ -1188,14 +1198,24 @@ mod tests {
         apply_system_fields_on_insert(&mut doc, &schema_without_id_prefix(), "posts", None)
             .expect("derived prefix must be accepted");
         let obj = doc.as_object().unwrap();
-        assert_eq!(obj.len(), 4, "doc keys: {:?}", obj.keys().collect::<Vec<_>>());
+        assert_eq!(
+            obj.len(),
+            4,
+            "doc keys: {:?}",
+            obj.keys().collect::<Vec<_>>()
+        );
         assert!(obj.contains_key("id"));
         assert!(obj.contains_key("title"));
         assert_eq!(obj.get("created_by"), Some(&Value::Null));
         assert_eq!(obj.get("updated_by"), Some(&Value::Null));
 
-        let built = crate::query::build_insert(&fixture_schema(), "posts", &schema_without_id_prefix(), &doc)
-            .expect("build_insert");
+        let built = crate::compile::build_insert(
+            &fixture_schema(),
+            "posts",
+            &schema_without_id_prefix(),
+            &doc,
+        )
+        .expect("build_insert");
         assert!(
             built.sql.contains("\"created_by\""),
             "the NULL actor column must still be named: {}",
@@ -1213,7 +1233,7 @@ mod tests {
     /// says that where `*` only implied it.
     #[test]
     fn insert_pass_followed_by_build_insert_returns_every_system_field() {
-        use crate::query::{build_insert, SYSTEM_FIELD_NAMES};
+        use crate::compile::{build_insert, SYSTEM_FIELD_NAMES};
         let mut doc = json!({ "title": "hi" });
         apply_system_fields_on_insert(
             &mut doc,
@@ -1222,8 +1242,13 @@ mod tests {
             Some("usr_x"),
         )
         .expect("derived prefix must be accepted");
-        let built = build_insert(&fixture_schema(), "posts", &schema_without_id_prefix(), &doc)
-            .expect("build_insert");
+        let built = build_insert(
+            &fixture_schema(),
+            "posts",
+            &schema_without_id_prefix(),
+            &doc,
+        )
+        .expect("build_insert");
         let returning = built
             .sql
             .split_once(" RETURNING ")
@@ -1298,7 +1323,10 @@ mod tests {
         crate::reset_engine_for_tests();
         let plan = crate::system_shape_charter::plan().expect("the compiled charter must project");
         let fixed: Vec<String> = plan.immutable_after_insert().map(str::to_string).collect();
-        assert!(!fixed.is_empty(), "the charter must fix at least one column at insert");
+        assert!(
+            !fixed.is_empty(),
+            "the charter must fix at least one column at insert"
+        );
         for name in fixed {
             expect_immutable_refusal(json!({ name.clone(): "x" }), "posts_charter_immutable");
         }
@@ -1464,7 +1492,9 @@ mod tests {
     #[test]
     fn filter_has_id_predicate_detects_operator() {
         // `id: { $in: [...] }` still narrows to id-keyed lookups.
-        assert!(filter_has_id_predicate(&json!({ "id": { "$in": ["a", "b"] } })));
+        assert!(filter_has_id_predicate(
+            &json!({ "id": { "$in": ["a", "b"] } })
+        ));
     }
 
     #[test]

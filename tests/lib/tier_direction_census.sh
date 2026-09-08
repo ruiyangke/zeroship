@@ -142,7 +142,7 @@
 #      by `crate::query` at 22 - the module decision 4 routes ALL SQL through,
 #      never placed in the lattice". `crate::query` IS NOT A MODULE OF THIS
 #      CRATE. There is no query.rs and no query/ directory; lib.rs:94 says
-#      `pub use zeroship_schema::query;`, and lib.rs:150 does the same for
+#      `pub use zeroship_data_query_builder::compile;`, and lib.rs:150 does the same for
 #      `diff`. Both resolve to a DEPENDENCY crate, which is below every tier
 #      here by construction - cargo already forbids that cycle.
 #      The error was reading "the census has no arm for it" as "nobody has
@@ -276,7 +276,7 @@ tier_of_file() {
     # true of ONE `#[cfg(test)]` assertion, which moved to `change_stream_pg.rs`
     # on 2026-09-03 - the fact it pins is about `PgChangeStream`, so it belongs
     # beside it. What is left is a prelude of re-exports from data-core, both
-    # vendor crates and zeroship-schema, plus this tier's own `BackendHandle`
+    # vendor crates and zeroship-data-query-builder, plus this tier's own `BackendHandle`
     # and a test-only conformance marker: all at or below ENGINE. Issue #170
     # closes here.
     ./backend/mod.rs)                                    echo ENGINE ;;
@@ -380,7 +380,7 @@ tier_of_target() {
       fi ;;
     *)
       # Not a known module. Before calling it unplaced, ask whether it is a
-      # RE-EXPORT of a dependency crate: `pub use zeroship_schema::query;` makes
+      # RE-EXPORT of a dependency crate: `pub use zeroship_data_query_builder::compile;` makes
       # `crate::query::quote_ident` resolve OUTSIDE this crate entirely, so it
       # is a dependency edge, not an intra-crate placement question at all.
       # Missing this is how 24 of 66 dropped references read as "modules nobody

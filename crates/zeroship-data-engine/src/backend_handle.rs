@@ -35,7 +35,7 @@ use serde_json::Value;
 
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
-use zeroship_schema::descriptors::{GeoPoint, VectorMetric};
+use zeroship_data_query_builder::descriptors::{GeoPoint, VectorMetric};
 
 // `VectorIndex` and `SpatialIndex` are NOT imported here any more: the two
 // `impl ... for BackendHandle` blocks that named them became the routed free
@@ -43,8 +43,8 @@ use zeroship_schema::descriptors::{GeoPoint, VectorMetric};
 // still exist and both vendor backends still implement them - that impl is what
 // an autocommit caller reaches - but this file no longer names either.
 use crate::backend::{
-    ChangeStream, DialectBuilder, LockManager, PostgresBackend, ScalarRead, SqlExecutor,
-    SqliteBackend, UnmaskAuditRow, postgres, sqlite,
+    postgres, sqlite, ChangeStream, DialectBuilder, LockManager, PostgresBackend, ScalarRead,
+    SqlExecutor, SqliteBackend, UnmaskAuditRow,
 };
 use crate::tx_lanes::TxConnection;
 use zeroship_data_core::error::{BeginIntent, OpenSessionError};
@@ -85,7 +85,7 @@ pub const AUDIT_UNMASK_TABLE: &str = "__zeroship_audit_unmask";
 ///   would require `Box<dyn Future>` per call — a per-CRUD-op
 ///   allocation on a hot path that runs ~200K times/sec under load.
 /// - The associated types (`Client = compio_postgres::OwnedPooledClient`,
-///   `LiveSchema = crate::diff::LiveSchema`) cannot be erased behind a
+///   `LiveSchema = crate::catalog::LiveSchema`) cannot be erased behind a
 ///   `dyn` without losing the concrete client type that
 ///   [`LockManager::acquire_advisory_lock`] and the audit-row helpers
 ///   take by `&Self::Client` reference.
@@ -168,15 +168,20 @@ pub async fn routed_vector_search(
         // to the arm that needs it, and nothing else has to know.
         BackendHandle::Sqlite(sq) => {
             sq.attach_app_file(binding.app_id()).await?;
-            let (_lane_claim, lane) = sqlite_lane(route, sq)?;
-            sq.vector_search_on(
-                &lane, binding, collection, column, query, k, metric, filter, schema,
-            )
+            read_on_route(route, async {
+                let (_lane_claim, lane) = sqlite_lane(route, sq)?;
+                sq.vector_search_on(
+                    &lane, binding, collection, column, query, k, metric, filter, schema,
+                )
+                .await
+            })
             .await
         }
         BackendHandle::Postgres(pg) => {
             let bq = pg
-                .plan_vector_search(binding, collection, column, query, k, metric, filter, schema)
+                .plan_vector_search(
+                    binding, collection, column, query, k, metric, filter, schema,
+                )
                 .await?;
             run_planned_postgres_read(route, pg, &bq).await
         }
@@ -206,10 +211,13 @@ pub async fn routed_spatial_near(
     match route.backend() {
         BackendHandle::Sqlite(sq) => {
             sq.attach_app_file(binding.app_id()).await?;
-            let (_lane_claim, lane) = sqlite_lane(route, sq)?;
-            sq.spatial_near_on(
-                &lane, binding, collection, column, point, radius_m, filter, limit, schema,
-            )
+            read_on_route(route, async {
+                let (_lane_claim, lane) = sqlite_lane(route, sq)?;
+                sq.spatial_near_on(
+                    &lane, binding, collection, column, point, radius_m, filter, limit, schema,
+                )
+                .await
+            })
             .await
         }
         BackendHandle::Postgres(pg) => {
@@ -220,6 +228,17 @@ pub async fn routed_spatial_near(
                 .await?;
             run_planned_postgres_read(route, pg, &bq).await
         }
+    }
+}
+
+async fn read_on_route<T>(
+    route: &crate::tx_route::TxRoute,
+    read: impl std::future::Future<Output = Result<T, DbError>>,
+) -> Result<T, DbError> {
+    if route.in_tx() {
+        crate::transaction::driver::execute_operation(route.app_id(), read).await
+    } else {
+        read.await
     }
 }
 
@@ -234,25 +253,28 @@ pub async fn routed_spatial_near(
 async fn run_planned_postgres_read(
     route: &crate::tx_route::TxRoute,
     pg: &PostgresBackend,
-    bq: &crate::query::BuiltQuery,
+    bq: &crate::compile::BuiltQuery,
 ) -> Result<Vec<serde_json::Value>, DbError> {
-    let params: Vec<&str> = bq.params.iter().map(String::as_str).collect();
-    if route.in_tx() {
-        let lane = crate::exec::take_tx_lane(route)?;
-        let TxConnection::Postgres(client) = lane.client() else {
-            return Err(lane_vendor_mismatch());
-        };
-        let rows = client
-            .query_text_params(&bq.sql, &params)
-            .await
-            .map_err(|e| crate::backend::pg_error::classify(&e))?;
-        return Ok(zeroship_data_postgres::pg_row_json::rows_to_json_value(
-            &rows,
-        ));
-    }
-    // SCHEMA: the roled autocommit lane qualifies the table and derives the
-    // per-app role, both from the physical schema.
-    pg.query_roled_json(route.schema(), &bq.sql, &params).await
+    read_on_route(route, async {
+        let params: Vec<&str> = bq.params.iter().map(String::as_str).collect();
+        if route.in_tx() {
+            let lane = crate::exec::take_tx_lane(route)?;
+            let TxConnection::Postgres(client) = lane.client() else {
+                return Err(lane_vendor_mismatch());
+            };
+            let rows = client
+                .query_text_params(&bq.sql, &params)
+                .await
+                .map_err(|e| crate::backend::pg_error::classify(&e))?;
+            return Ok(zeroship_data_postgres::pg_row_json::rows_to_json_value(
+                &rows,
+            ));
+        }
+        // SCHEMA: the roled autocommit lane qualifies the table and derives the
+        // per-app role, both from the physical schema.
+        pg.query_roled_json(route.schema(), &bq.sql, &params).await
+    })
+    .await
 }
 
 /// The unmask fetch's lane vendor disagreed with the bound backend's.
@@ -308,48 +330,53 @@ pub async fn read_raw_column_bytes(
     raw_column: &str,
     row_pk: &str,
 ) -> Result<ScalarRead<Vec<u8>>, DbError> {
-    // TWO IDENTITIES, and the arms want different ones. Postgres qualifies the
-    // table with the SCHEMA and narrows the session to the role derived from
-    // it; SQLite qualifies with the ATTACH ALIAS, which is TENANT-keyed -
-    // `attach_app_file(app_id)` is what created it.
-    let schema = route.schema().as_str();
-    let attach_alias = route.app_id();
-    match route.backend() {
-        BackendHandle::Postgres(pg) => {
-            let sql =
-                format!("SELECT \"{raw_column}\" FROM \"{schema}\".\"{collection}\" WHERE id = $1");
-            if route.in_tx() {
-                let lane = crate::exec::take_tx_lane(route)?;
-                let TxConnection::Postgres(client) = lane.client() else {
-                    return Err(lane_vendor_mismatch());
-                };
-                let rows = client
-                    .query_text_params(&sql, &[row_pk])
+    read_on_route(route, async {
+        // TWO IDENTITIES, and the arms want different ones. Postgres qualifies the
+        // table with the SCHEMA and narrows the session to the role derived from
+        // it; SQLite qualifies with the ATTACH ALIAS, which is TENANT-keyed -
+        // `attach_app_file(app_id)` is what created it.
+        let schema = route.schema().as_str();
+        let attach_alias = route.app_id();
+        match route.backend() {
+            BackendHandle::Postgres(pg) => {
+                let sql = format!(
+                    "SELECT \"{raw_column}\" FROM \"{schema}\".\"{collection}\" WHERE id = $1"
+                );
+                if route.in_tx() {
+                    let lane = crate::exec::take_tx_lane(route)?;
+                    let TxConnection::Postgres(client) = lane.client() else {
+                        return Err(lane_vendor_mismatch());
+                    };
+                    let rows = client
+                        .query_text_params(&sql, &[row_pk])
+                        .await
+                        .map_err(|e| crate::backend::pg_error::classify(&e))?;
+                    return zeroship_data_postgres::pg_autocommit::scalar_bytes(&rows);
+                }
+                pg.read_roled_scalar_bytes(route.schema(), &sql, &[row_pk])
                     .await
-                    .map_err(|e| crate::backend::pg_error::classify(&e))?;
-                return zeroship_data_postgres::pg_autocommit::scalar_bytes(&rows);
             }
-            pg.read_roled_scalar_bytes(route.schema(), &sql, &[row_pk]).await
-        }
-        BackendHandle::Sqlite(sq) => {
-            let q_app = sq.quote_ident(attach_alias);
-            let q_coll = sq.quote_ident(collection);
-            let q_col = sq.quote_ident(raw_column);
-            let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-            let (_lane_claim, lane) = sqlite_lane(route, sq)?;
-            let typed = lane.query_typed_internal(&sql, &[row_pk]).await?;
-            if typed.rows.is_empty() {
-                return Ok(ScalarRead::NoRow);
-            }
-            match &typed.rows[0][0] {
-                sqlite::session::TypedCell::Blob(b) => Ok(ScalarRead::Value(b.clone())),
-                sqlite::session::TypedCell::Null => Ok(ScalarRead::Null),
-                other => Err(DbError::internal(format!(
-                    "unmask: expected BLOB for encrypted column, got {other:?}"
-                ))),
+            BackendHandle::Sqlite(sq) => {
+                let q_app = sq.quote_ident(attach_alias);
+                let q_coll = sq.quote_ident(collection);
+                let q_col = sq.quote_ident(raw_column);
+                let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
+                let (_lane_claim, lane) = sqlite_lane(route, sq)?;
+                let typed = lane.query_typed_internal(&sql, &[row_pk]).await?;
+                if typed.rows.is_empty() {
+                    return Ok(ScalarRead::NoRow);
+                }
+                match &typed.rows[0][0] {
+                    sqlite::session::TypedCell::Blob(b) => Ok(ScalarRead::Value(b.clone())),
+                    sqlite::session::TypedCell::Null => Ok(ScalarRead::Null),
+                    other => Err(DbError::internal(format!(
+                        "unmask: expected BLOB for encrypted column, got {other:?}"
+                    ))),
+                }
             }
         }
-    }
+    })
+    .await
 }
 
 /// Read the RAW sibling of a masked column as TEXT, on this dispatch's lane.
@@ -369,44 +396,49 @@ pub async fn read_raw_column_text(
     raw_column: &str,
     row_pk: &str,
 ) -> Result<ScalarRead<String>, DbError> {
-    // The same two identities as [`read_raw_column_bytes`], split for the same
-    // reason: PG qualifies with the schema, SQLite with the tenant-keyed ATTACH
-    // alias.
-    let schema = route.schema().as_str();
-    let attach_alias = route.app_id();
-    match route.backend() {
-        BackendHandle::Postgres(pg) => {
-            let sql =
-                format!("SELECT \"{raw_column}\" FROM \"{schema}\".\"{collection}\" WHERE id = $1");
-            if route.in_tx() {
-                let lane = crate::exec::take_tx_lane(route)?;
-                let TxConnection::Postgres(client) = lane.client() else {
-                    return Err(lane_vendor_mismatch());
-                };
-                let rows = client
-                    .query_text_params(&sql, &[row_pk])
+    read_on_route(route, async {
+        // The same two identities as [`read_raw_column_bytes`], split for the same
+        // reason: PG qualifies with the schema, SQLite with the tenant-keyed ATTACH
+        // alias.
+        let schema = route.schema().as_str();
+        let attach_alias = route.app_id();
+        match route.backend() {
+            BackendHandle::Postgres(pg) => {
+                let sql = format!(
+                    "SELECT \"{raw_column}\" FROM \"{schema}\".\"{collection}\" WHERE id = $1"
+                );
+                if route.in_tx() {
+                    let lane = crate::exec::take_tx_lane(route)?;
+                    let TxConnection::Postgres(client) = lane.client() else {
+                        return Err(lane_vendor_mismatch());
+                    };
+                    let rows = client
+                        .query_text_params(&sql, &[row_pk])
+                        .await
+                        .map_err(|e| crate::backend::pg_error::classify(&e))?;
+                    return zeroship_data_postgres::pg_autocommit::scalar_text(&rows);
+                }
+                pg.read_roled_scalar_text(route.schema(), &sql, &[row_pk])
                     .await
-                    .map_err(|e| crate::backend::pg_error::classify(&e))?;
-                return zeroship_data_postgres::pg_autocommit::scalar_text(&rows);
             }
-            pg.read_roled_scalar_text(route.schema(), &sql, &[row_pk]).await
-        }
-        BackendHandle::Sqlite(sq) => {
-            let q_app = sq.quote_ident(attach_alias);
-            let q_coll = sq.quote_ident(collection);
-            let q_col = sq.quote_ident(raw_column);
-            let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
-            let (_lane_claim, lane) = sqlite_lane(route, sq)?;
-            let rows = lane.query_internal(&sql, &[row_pk]).await?;
-            if rows.is_empty() {
-                return Ok(ScalarRead::NoRow);
-            }
-            match rows[0].first().and_then(|c| c.clone()) {
-                Some(value) => Ok(ScalarRead::Value(value)),
-                None => Ok(ScalarRead::Null),
+            BackendHandle::Sqlite(sq) => {
+                let q_app = sq.quote_ident(attach_alias);
+                let q_coll = sq.quote_ident(collection);
+                let q_col = sq.quote_ident(raw_column);
+                let sql = format!("SELECT {q_col} FROM {q_app}.{q_coll} WHERE id = ?1");
+                let (_lane_claim, lane) = sqlite_lane(route, sq)?;
+                let rows = lane.query_internal(&sql, &[row_pk]).await?;
+                if rows.is_empty() {
+                    return Ok(ScalarRead::NoRow);
+                }
+                match rows[0].first().and_then(|c| c.clone()) {
+                    Some(value) => Ok(ScalarRead::Value(value)),
+                    None => Ok(ScalarRead::Null),
+                }
             }
         }
-    }
+    })
+    .await
 }
 
 /// The SQLite session handle this dispatch's raw-column read must use, with the
@@ -441,6 +473,13 @@ fn sqlite_lane(
 }
 
 impl BackendHandle {
+    /// SQL dialect implemented by this connection provider.
+    pub fn dialect(&self) -> crate::compile::SqlDialect {
+        match self {
+            Self::Postgres(_) => crate::compile::SqlDialect::Postgres,
+            Self::Sqlite(_) => crate::compile::SqlDialect::Sqlite,
+        }
+    }
     /// Append one row to the app's `__zeroship_audit_unmask` table.
     ///
     /// **Through the role fence on both vendors.** The PostgreSQL arm goes via
@@ -461,7 +500,7 @@ impl BackendHandle {
     /// while the two values were the same string.
     pub async fn append_unmask_audit(
         &self,
-        schema: &zeroship_schema::SchemaName,
+        schema: &zeroship_data_query_builder::SchemaName,
         attach_alias: &str,
         row: &UnmaskAuditRow<'_>,
     ) -> Result<(), DbError> {
@@ -550,7 +589,7 @@ impl BackendHandle {
     pub async fn open_tx_session(
         &self,
         app_id: &str,
-        schema: &zeroship_schema::SchemaName,
+        schema: &zeroship_data_query_builder::SchemaName,
         begin: BeginIntent,
     ) -> Result<crate::tx_lanes::TxConnection, OpenSessionError> {
         match self {
@@ -676,7 +715,7 @@ impl BackendHandle {
     pub async fn introspect_schema(
         &self,
         app_id: &str,
-    ) -> Result<zeroship_schema::diff::LiveSchema, DbError> {
+    ) -> Result<zeroship_data_query_builder::catalog::LiveSchema, DbError> {
         use crate::backend::SchemaIntrospect;
         match self {
             Self::Postgres(pg) => pg.introspect_schema(app_id).await,
@@ -738,7 +777,6 @@ impl BackendHandle {
             Self::Sqlite(_) => None,
         }
     }
-
 
     /// Borrow the inner [`SqliteBackend`] as a `&SqliteBackend`
     /// reference — async-friendly companion to `BackendHandle::with_sqlite`.
@@ -872,35 +910,17 @@ mod routed_read_tests {
 
             let handle = BackendHandle::Sqlite(Rc::clone(&backend));
 
-            // Park a real transaction connection, the way `exec_begin` does.
-            let client = backend
-                .acquire_dedicated_client(app)
-                .await
-                .expect("acquire tx client");
-            backend
-                .client_exec(&client, "BEGIN", &[])
-                .await
-                .expect("BEGIN");
-            // Write the row ON that connection, so it exists only there.
-            backend
-                .client_exec(
-                    &client,
-                    &format!(
-                        r#"INSERT INTO "{app}"."people" (id, ssn, "__zs_raw__ssn")
-                           VALUES ('p1', '***', '123-45-6789')"#
-                    ),
-                    &[],
-                )
-                .await
-                .expect("INSERT on the transaction connection");
-            crate::tx_lanes::with_mut(|l| {
-                let previous = l.install_tx_client(app, TxConnection::Sqlite(client));
-                assert!(previous.is_none(), "the tx slot must start empty");
-            });
+            let admission = crate::transaction::TxAdmission::acquire(app.to_owned()).await;
+            crate::transaction::exec_begin_or_savepoint(false, None, app,
+                zeroship_data_query_builder::SchemaName::new(app).unwrap(), handle.clone()).await.unwrap();
+            admission.handed_to_reducer();
+            crate::transaction::driver::run_operation(app,
+                &format!(r#"INSERT INTO "{app}"."people" (id, ssn, "__zs_raw__ssn") VALUES ('p1', '***', '123-45-6789')"#), &[])
+                .await.expect("INSERT on the transaction connection");
 
             // CONTROL: a pool-lane read cannot see the uncommitted row.
             let outside = read_raw_column_text(
-                &CapturedRoute::pool_for_tests(app, crate::query::SqlDialect::Sqlite)
+                &CapturedRoute::pool_for_tests(app, crate::compile::SqlDialect::Sqlite)
                     .bind(handle.clone()),
                 "people",
                 "__zs_raw__ssn",
@@ -916,7 +936,7 @@ mod routed_read_tests {
 
             // SUBJECT: the same read, routed onto the transaction.
             let inside = read_raw_column_text(
-                &CapturedRoute::tx_for_tests(app, crate::query::SqlDialect::Sqlite)
+                &CapturedRoute::tx_for_tests(app, crate::compile::SqlDialect::Sqlite)
                     .bind(handle.clone()),
                 "people",
                 "__zs_raw__ssn",
@@ -931,19 +951,8 @@ mod routed_read_tests {
 
             // The guard must have handed the session back, or the next op in
             // this transaction would find an empty slot.
-            let parked = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app));
-            match parked {
-                Some(TxConnection::Sqlite(client)) => {
-                    let _ = client.exec("ROLLBACK", &[]).await;
-                }
-                Some(TxConnection::Postgres(_)) => {
-                    panic!("the slot must hold the SQLite session this test parked")
-                }
-                None => panic!(
-                    "the routed read must hand the tx session back; an empty slot here \
-                     means the next op in the same transaction would refuse"
-                ),
-            }
+            assert!(matches!(crate::transaction::exec_settle(app, false, None).await, crate::transaction::SettleOutcome::Ok));
+
         });
     }
 }

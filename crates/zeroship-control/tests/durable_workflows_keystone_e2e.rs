@@ -518,7 +518,7 @@ fn assert_ack_run(response: &WorkflowAdvanceResponse, run_id: &str, label: &str)
 /// WHY THE APP SCHEMA AND NOT `zeroship`. `env.db.collection("foo")` addresses
 /// exactly one place: `"<app_id>"."foo"`
 /// (`build_find_with_schema_and_unmask_and_soft_delete_with_dialect_and_limit_ceiling`
-/// in crates/zeroship-schema/src/query.rs). There is no
+/// in crates/zeroship-migrate-core/src/schema/query.rs). There is no
 /// cross-schema qualifier - an op-level `schema:` naming another schema is
 /// refused - so the tables the step bodies write have to live there. Every
 /// accessor below still spells them `zeroship.workflow_e2e_*`;
@@ -549,7 +549,7 @@ async fn prepare_side_effect_table(pg: &TestPg) {
     let app_role = quote_ident(&app_role_name);
     // The seven platform system columns, verbatim from the DDL the platform
     // itself emits for a creator table
-    // (crates/zeroship-schema/src/query.rs:208-219). `id` is TEXT because
+    // (crates/zeroship-migrate-core/src/schema/query.rs). `id` is TEXT because
     // plugin-db mints a typed_id string into it when the document omits one
     // (crates/zeroship-data-engine/src/crud/system_fields_pass.rs:244-249); a uuid
     // column would reject that. `deleted_at` is not optional either - `find` and

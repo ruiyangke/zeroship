@@ -192,7 +192,7 @@ mod tests {
     use super::*;
 
     fn binding(app: &str, deploy: &str) -> DbBinding {
-        let schema = zeroship_schema::SchemaName::new(app).expect("fixture schema name");
+        let schema = zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name");
         DbBinding::new(app, deploy, schema)
     }
 

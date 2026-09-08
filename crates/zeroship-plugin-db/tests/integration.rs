@@ -71,8 +71,15 @@
 //!    slot reaper's fleet-leader lock and all-apps enumeration are exclusive by
 //!    design. No naming scheme partitions those; see [`cdc_budget`].
 
+#[path = "support/schema.rs"]
+mod schema_fixture;
+#[allow(unused_imports)]
+use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+#[allow(unused_imports)]
+use zeroship_migrate::schema::query::FkEmission;
+
 use compio_postgres::{NoTls, Pool};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use uuid::Uuid;
 use zeroship_data_core::binding::DbBinding;
 use zeroship_plugin_db::backend::ChangeStream;
@@ -355,7 +362,7 @@ async fn setup(pool: &Pool, schema: &str) {
             // THE NULLABILITY MATTERS AS MUCH AS THE COLUMN LIST, and this
             // fixture got it wrong until 2026-09-01: `created_at` and
             // `updated_at` were declared nullable while the production emitter
-            // writes them NOT NULL (`zeroship-schema/src/query.rs:212-213`).
+            // writes them NOT NULL (`zeroship-data-query-builder/src/compile.rs:212-213`).
             // Measured against pg18 with the statement `build_insert_many`
             // emits for a mixed batch - it unions the column set across
             // documents (`query.rs:4390`) and binds `unwrap_or(&Value::Null)`
@@ -390,14 +397,14 @@ async fn setup(pool: &Pool, schema: &str) {
 }
 
 /// Helper: build + execute a query, return parsed JSON array.
-async fn exec_query(pool: &Pool, bq: zeroship_plugin_db::query::BuiltQuery) -> Vec<Value> {
+async fn exec_query(pool: &Pool, bq: zeroship_plugin_db::compile::BuiltQuery) -> Vec<Value> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     rows.iter().map(row_to_json).collect()
 }
 
 /// Helper: build + execute a mutation, return parsed JSON array.
-async fn exec_mutation(pool: &Pool, bq: zeroship_plugin_db::query::BuiltQuery) -> Vec<Value> {
+async fn exec_mutation(pool: &Pool, bq: zeroship_plugin_db::compile::BuiltQuery) -> Vec<Value> {
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     rows.iter().map(row_to_json).collect()
@@ -566,7 +573,7 @@ fn connections_do_not_outlive_the_runtime_that_opened_them() {
     );
 }
 
-use zeroship_plugin_db::query::*;
+use zeroship_plugin_db::compile::*;
 
 /// The descriptor entry for the `notes` fixture table, in the same
 /// `{ <column>: FieldDef }` shape the runtime descriptor hook plants and
@@ -759,7 +766,7 @@ async fn insert_and_find() {
 
     // Insert
     let bq = build_insert(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Hello", "body": "World", "category": "tech"}),
@@ -773,7 +780,7 @@ async fn insert_and_find() {
 
     // Find
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({}),
         None,
@@ -806,12 +813,24 @@ async fn insert_many_round_trip() {
         {"title": "B", "body": "two", "category": "food"},
         {"title": "C", "body": "three", "category": "tech"}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     let inserted = exec_mutation(&pool, bq).await;
     assert_eq!(inserted.len(), 3);
 
     // Verify all in DB
-    let bq = build_count(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &json!({})).unwrap();
+    let bq = build_count(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &json!({}),
+    )
+    .unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     let count: i64 = rows[0].get("count");
@@ -833,7 +852,7 @@ async fn update_one_inc() {
 
     // Insert
     let bq = build_insert(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Counter", "category": "tech", "views": 0}),
@@ -843,7 +862,7 @@ async fn update_one_inc() {
 
     // $inc views by 5
     let bq = build_update_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Counter"}),
@@ -856,7 +875,7 @@ async fn update_one_inc() {
 
     // $inc again
     let bq = build_update_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Counter"}),
@@ -881,7 +900,7 @@ async fn update_one_dec_mul() {
     setup(&pool, schema).await;
 
     let bq = build_insert(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Math", "category": "tech", "views": 10}),
@@ -891,7 +910,7 @@ async fn update_one_dec_mul() {
 
     // $dec
     let bq = build_update_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Math"}),
@@ -903,7 +922,7 @@ async fn update_one_dec_mul() {
 
     // $mul
     let bq = build_update_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Math"}),
@@ -928,7 +947,7 @@ async fn update_one_jsonb_array_ops() {
     setup(&pool, schema).await;
 
     let bq = build_insert(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Tags", "category": "tech"}),
@@ -938,7 +957,7 @@ async fn update_one_jsonb_array_ops() {
 
     // $push "rust"
     let bq = build_update_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Tags"}),
@@ -951,7 +970,7 @@ async fn update_one_jsonb_array_ops() {
 
     // $push "go"
     let bq = build_update_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Tags"}),
@@ -966,7 +985,7 @@ async fn update_one_jsonb_array_ops() {
 
     // $addToSet "rust" (duplicate — should NOT add)
     let bq = build_update_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Tags"}),
@@ -979,7 +998,7 @@ async fn update_one_jsonb_array_ops() {
 
     // $addToSet "python" (new — should add)
     let bq = build_update_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Tags"}),
@@ -992,7 +1011,7 @@ async fn update_one_jsonb_array_ops() {
 
     // $pull "go"
     let bq = build_update_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Tags"}),
@@ -1025,12 +1044,18 @@ async fn update_many_round_trip() {
         {"title": "C", "category": "tech", "views": 0},
         {"title": "D", "category": "food", "views": 0}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     // Update all tech views +1
     let bq = build_update_many(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"category": "tech"}),
@@ -1042,7 +1067,7 @@ async fn update_many_round_trip() {
 
     // Verify food unchanged
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"category": "food"}),
         None,
@@ -1057,7 +1082,7 @@ async fn update_many_round_trip() {
 
     // Verify tech updated
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"category": "tech"}),
         None,
@@ -1093,12 +1118,18 @@ async fn delete_operations() {
         {"title": "Del2", "category": "food"},
         {"title": "Del3", "category": "food"}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     // Delete one food
     let bq = build_delete_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"category": "food"}),
@@ -1108,14 +1139,20 @@ async fn delete_operations() {
     assert_eq!(deleted.len(), 1);
 
     // 4 remaining
-    let bq = build_count(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &json!({})).unwrap();
+    let bq = build_count(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &json!({}),
+    )
+    .unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 4);
 
     // Delete many remaining food
     let bq = build_delete_many(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"category": "food"}),
@@ -1126,7 +1163,13 @@ async fn delete_operations() {
     assert_eq!(deleted.len(), 2);
 
     // 2 tech remaining
-    let bq = build_count(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &json!({})).unwrap();
+    let bq = build_count(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &json!({}),
+    )
+    .unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 2);
@@ -1151,12 +1194,18 @@ async fn filter_comparison_operators() {
         {"title": "C", "category": "food", "views": 30},
         {"title": "D", "category": "food", "views": 40}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     // $gt 25
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"views": {"$gt": 25}}),
         None,
@@ -1171,7 +1220,7 @@ async fn filter_comparison_operators() {
 
     // $lte 20
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"views": {"$lte": 20}}),
         None,
@@ -1186,7 +1235,7 @@ async fn filter_comparison_operators() {
 
     // $in
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"category": {"$in": ["tech", "food"]}}),
         None,
@@ -1201,7 +1250,7 @@ async fn filter_comparison_operators() {
 
     // $nin
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"category": {"$nin": ["food"]}}),
         None,
@@ -1216,7 +1265,7 @@ async fn filter_comparison_operators() {
 
     // $ne
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"category": {"$ne": "food"}}),
         None,
@@ -1248,12 +1297,18 @@ async fn filter_logical_operators() {
         {"title": "B", "category": "tech", "views": 50},
         {"title": "C", "category": "food", "views": 10}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     // $and: tech AND views > 20
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"$and": [{"category": "tech"}, {"views": {"$gt": 20}}]}),
         None,
@@ -1269,7 +1324,7 @@ async fn filter_logical_operators() {
 
     // $or: tech OR views > 20
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"$or": [{"category": "tech"}, {"views": {"$gt": 20}}]}),
         None,
@@ -1284,7 +1339,7 @@ async fn filter_logical_operators() {
 
     // $not: NOT food
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"$not": {"category": "food"}}),
         None,
@@ -1316,12 +1371,18 @@ async fn filter_pattern_operators() {
         {"title": "hello rust", "category": "tech"},
         {"title": "Goodbye", "category": "food"}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     // $like (case sensitive)
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"title": {"$like": "Hello%"}}),
         None,
@@ -1336,7 +1397,7 @@ async fn filter_pattern_operators() {
 
     // $ilike (case insensitive)
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"title": {"$ilike": "%hello%"}}),
         None,
@@ -1368,12 +1429,18 @@ async fn find_with_options() {
         {"title": "A", "category": "tech", "views": 10},
         {"title": "B", "category": "tech", "views": 20}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     // Order by views ASC, limit 2
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({}),
         Some(2),
@@ -1390,7 +1457,7 @@ async fn find_with_options() {
 
     // Order by views DESC, limit 1, offset 1
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({}),
         Some(1),
@@ -1419,7 +1486,7 @@ async fn find_with_projection() {
     setup(&pool, schema).await;
 
     let bq = build_insert(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Proj", "body": "secret", "category": "tech"}),
@@ -1428,7 +1495,7 @@ async fn find_with_projection() {
     exec_mutation(&pool, bq).await;
 
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({}),
         None,
@@ -1466,10 +1533,23 @@ async fn distinct_values() {
         {"title": "C", "category": "food"},
         {"title": "D", "category": "science"}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
-    let bq = build_distinct(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", "category", &json!({}), &notes_schema()).unwrap();
+    let bq = build_distinct(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        "category",
+        &json!({}),
+        &notes_schema(),
+    )
+    .unwrap();
     let rows = exec_query(&pool, bq).await;
     let values: Vec<&str> = rows
         .iter()
@@ -1482,7 +1562,7 @@ async fn distinct_values() {
 
     // Distinct with filter
     let bq = build_distinct(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         "category",
         &json!({"category": {"$ne": "science"}}),
@@ -1511,18 +1591,30 @@ async fn count_with_filter() {
         {"title": "B", "category": "tech"},
         {"title": "C", "category": "food"}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     // Count all
-    let bq = build_count(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &json!({})).unwrap();
+    let bq = build_count(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &json!({}),
+    )
+    .unwrap();
     let param_refs: Vec<&str> = bq.params.iter().map(String::as_str).collect();
     let rows = pool.query_text_params(&bq.sql, &param_refs).await.unwrap();
     assert_eq!(rows[0].get::<_, i64>("count"), 3);
 
     // Count with filter
     let bq = build_count(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"category": "tech"}),
@@ -1552,7 +1644,13 @@ async fn aggregate_full() {
         {"title": "C", "category": "tech", "views": 30},
         {"title": "D", "category": "food", "views": 100}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     let pipeline = json!([
@@ -1567,7 +1665,13 @@ async fn aggregate_full() {
         }},
         {"$sort": {"cnt": -1}}
     ]);
-    let bq = build_aggregate(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &pipeline, &notes_schema()).unwrap();
+    let bq = build_aggregate(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &pipeline,
+        &notes_schema(),
+    )
+    .unwrap();
     let rows = exec_query(&pool, bq).await;
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0]["category"], "tech");
@@ -1596,7 +1700,13 @@ async fn aggregate_multi_group() {
         {"title": "C", "category": "tech", "body": "go", "views": 5},
         {"title": "D", "category": "food", "body": "pasta", "views": 50}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     let pipeline = json!([
@@ -1606,7 +1716,13 @@ async fn aggregate_multi_group() {
         }},
         {"$sort": {"cnt": -1}}
     ]);
-    let bq = build_aggregate(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &pipeline, &notes_schema()).unwrap();
+    let bq = build_aggregate(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &pipeline,
+        &notes_schema(),
+    )
+    .unwrap();
     let rows = exec_query(&pool, bq).await;
     // tech/rust=2, tech/go=1, food/pasta=1
     assert_eq!(rows.len(), 3);
@@ -1632,7 +1748,13 @@ async fn aggregate_having() {
         {"title": "C", "category": "tech", "views": 30},
         {"title": "D", "category": "food", "views": 5}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &notes_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &notes_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     // HAVING with alias → resolved to aggregate expression
@@ -1644,7 +1766,13 @@ async fn aggregate_having() {
         {"$having": {"cnt": {"$gt": 1}}},
         {"$sort": {"cnt": -1}}
     ]);
-    let bq = build_aggregate(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "notes", &pipeline, &notes_schema()).unwrap();
+    let bq = build_aggregate(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "notes",
+        &pipeline,
+        &notes_schema(),
+    )
+    .unwrap();
     let rows = exec_query(&pool, bq).await;
     // Only tech has count > 1
     assert_eq!(rows.len(), 1);
@@ -1667,7 +1795,7 @@ async fn null_handling() {
 
     // Insert with body
     let bq = build_insert(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "WithBody", "body": "has content", "category": "tech"}),
@@ -1676,7 +1804,7 @@ async fn null_handling() {
     exec_mutation(&pool, bq).await;
     // Insert without body (column defaults to NULL)
     let bq = build_insert(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "NoBody", "category": "tech"}),
@@ -1686,7 +1814,7 @@ async fn null_handling() {
 
     // Find where body IS NULL
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"body": null}),
         None,
@@ -1702,7 +1830,7 @@ async fn null_handling() {
 
     // Find where body IS NOT NULL
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"body": {"$ne": null}}),
         None,
@@ -1718,7 +1846,7 @@ async fn null_handling() {
 
     // $exists: true
     let bq = build_find_with_schema(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &json!({"body": {"$exists": true}}),
         None,
@@ -1747,7 +1875,7 @@ async fn mixed_update() {
     setup(&pool, schema).await;
 
     let bq = build_insert(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Mix", "category": "tech", "views": 10}),
@@ -1757,7 +1885,7 @@ async fn mixed_update() {
 
     // Update: set category + inc views + push tag
     let bq = build_update_one(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Mix"}),
@@ -1785,7 +1913,7 @@ async fn timestamps_as_numbers() {
     setup(&pool, schema).await;
 
     let bq = build_insert(
-        &zeroship_schema::SchemaName::new(schema).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
         "notes",
         &notes_schema(),
         &json!({"title": "Time", "category": "tech"}),
@@ -1856,7 +1984,13 @@ async fn aggregate_having_postgres_docs_example() {
         {"city": "Hayward", "temp_lo": 38, "temp_hi": 52},
         {"city": "Hayward", "temp_lo": 41, "temp_hi": 55}
     ]);
-    let bq = build_insert_many(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "weather", &weather_schema(), &docs).unwrap();
+    let bq = build_insert_many(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "weather",
+        &weather_schema(),
+        &docs,
+    )
+    .unwrap();
     exec_mutation(&pool, bq).await;
 
     // Equivalent of: SELECT city, count(*), max(temp_lo)
@@ -1869,7 +2003,13 @@ async fn aggregate_having_postgres_docs_example() {
         }},
         {"$having": {"max_temp": {"$lt": 42}}}
     ]);
-    let bq = build_aggregate(&zeroship_schema::SchemaName::new(schema).expect("fixture schema name"), "weather", &pipeline, &weather_schema()).unwrap();
+    let bq = build_aggregate(
+        &zeroship_data_query_builder::SchemaName::new(schema).expect("fixture schema name"),
+        "weather",
+        &pipeline,
+        &weather_schema(),
+    )
+    .unwrap();
 
     // Verify SQL has the resolved expression, not the alias
     assert!(
@@ -1910,17 +2050,27 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
-    pool.execute(&zeroship_plugin_db::query::build_create_schema(&zeroship_schema::SchemaName::new(app).expect("fixture schema name")), &[])
-        .await
-        .unwrap();
+    pool.execute(
+        &schema_fixture::fixture_schema_sql(
+            &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        ),
+        &[],
+    )
+    .await
+    .unwrap();
 
     let schema = json!({
         "email": {"type": "string", "required": true, "unique": true},
         "handle": {"type": "string", "index": true},
     });
 
-    let create_table =
-        build_create_table_with_fks(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), collection, &schema, &FkEmission::Inline).unwrap();
+    let create_table = fixture_table_sql(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        collection,
+        &schema,
+        &FkEmission::Inline,
+    )
+    .unwrap();
     // `build_create_table_with_fks` emits MULTI-statement DDL (the CREATE TABLE
     // plus the system-field index `CREATE INDEX`s, and on PG the
     // `COMMENT ON COLUMN … 'zero-migrate:mask:…'` / `'zero-migrate:enc:…'` sentinels). The
@@ -1930,8 +2080,12 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
     pool.batch_execute(&create_table).await.unwrap();
 
     // Generate and execute the new index DDL.
-    let indexes =
-        zeroship_plugin_db::query::build_create_indexes(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), collection, &schema).unwrap();
+    let indexes = schema_fixture::fixture_indexes(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        collection,
+        &schema,
+    )
+    .unwrap();
     assert_eq!(indexes.len(), 2, "expected 2 indexes, got: {indexes:?}");
 
     for spec in &indexes {
@@ -1985,7 +2139,7 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
     // assert the second one fails with SQLSTATE 23505.
     // -----------------------------------------------------------------------
     let ins1 = build_insert(
-        &zeroship_schema::SchemaName::new(app).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
         collection,
         &schema,
         &with_seed_id(json!({"email": "a@x.com"})),
@@ -1997,7 +2151,7 @@ async fn a1_unique_index_actually_enforces_uniqueness() {
     // Distinct `id` so the second insert is rejected for the DUPLICATE EMAIL
     // (the unique index under test), not an incidental duplicate PK.
     let ins2 = build_insert(
-        &zeroship_schema::SchemaName::new(app).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
         collection,
         &schema,
         &with_seed_id(json!({"email": "a@x.com"})),
@@ -2152,7 +2306,7 @@ SELECT con.conname AS name,
     // deferred. That is the contract settled in docs/reference/db.md:362-364
     // ("the database's own defaults apply: NO ACTION for both actions, and
     // immediate (non-deferred) checking") and implemented at
-    // crates/zeroship-schema/src/query.rs:1607, which OMITS the ON DELETE
+    // crates/zeroship-data-query-builder/src/compile.rs:1607, which OMITS the ON DELETE
     // clause when the action is NO ACTION.
     //
     // These three assertions read `r`/`r`/`true` until 2026-08-12 -- the
@@ -3422,13 +3576,15 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
     zeroship_plugin_db::broker::drop_app(None);
     let sub = zeroship_plugin_db::broker::subscribe(app, "users");
 
-    // Install a real Client into TX_CONN with BEGIN issued; matches
-    // production exec_begin's effect on the queue/drain machinery.
-    zeroship_plugin_db::install_tx_marker_for_tests(app, &url).await;
+    // Open the production transaction protocol.
+    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
+
+    let role = zeroship_core::database_role::per_app_role_name(app).unwrap();
+    pool.batch_execute(&format!(r#"GRANT SELECT, INSERT ON "{app}"."users" TO "{role}"; GRANT USAGE ON ALL SEQUENCES IN SCHEMA "{app}" TO "{role}""#)).await.unwrap();
 
     // Insert via the production helper.
-    let bq = zeroship_plugin_db::query::build_insert(
-        &zeroship_schema::SchemaName::new(app).expect("fixture schema name"),
+    let bq = zeroship_plugin_db::compile::build_insert(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
         "users",
         // The descriptor entry for the fixture table above: one declared field.
         &serde_json::json!({ "name": { "type": "string", "required": true } }),
@@ -3450,9 +3606,11 @@ async fn gap_b_end_to_end_insert_inside_tx_defers_emit_until_commit() {
         "pre-commit broker must be empty (Gap B)"
     );
 
-    // Simulate commit: drain pending emits.
-    zeroship_plugin_db::drain_pending_emits_for_tests(app);
-    zeroship_plugin_db::uninstall_tx_marker_for_tests(app).await;
+    // Settlement commits the row before publishing its buffered event.
+    assert!(matches!(
+        zeroship_plugin_db::transaction::exec_settle(app, true, None).await,
+        zeroship_plugin_db::transaction::SettleOutcome::Ok
+    ));
 
     let got = sub.pop();
     match got {
@@ -3835,7 +3993,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
 fn p8a2_per_app_emit_suppression_integration() {
     use zeroship_core::change_event::ChangeOp;
     use zeroship_plugin_db::broker::{
-        SubscriptionMessage, emit_local, is_app_suppressed, suppress_app, unsuppress_app,
+        emit_local, is_app_suppressed, suppress_app, unsuppress_app, SubscriptionMessage,
     };
 
     zeroship_plugin_db::broker::drop_app(None);
@@ -3924,7 +4082,7 @@ fn err_chain(e: &dyn std::error::Error) -> String {
 #[test]
 fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
     use zeroship_plugin_db::service::{
-        DbService, DbServiceConfig, close_operator_pools, operator_pool_open_count, url_parse_count,
+        close_operator_pools, operator_pool_open_count, url_parse_count, DbService, DbServiceConfig,
     };
 
     const DELETED_APPS: [&str; 3] = [
@@ -6463,7 +6621,7 @@ async fn exec_autocommit_query_runs_under_per_app_role() {
 
     let rows = zeroship_plugin_db::exec_query_for_tests(
         app,
-        zeroship_plugin_db::query::BuiltQuery {
+        zeroship_plugin_db::compile::BuiltQuery {
             sql: "SELECT current_user AS u".to_string(),
             params: vec![],
         },
@@ -6736,8 +6894,13 @@ async fn unmask_fetch_runs_under_per_app_role_via_rls() {
     // Built with the platform's own emitter, not hand-spelled, so the fixture
     // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
     // column and `__zs_raw__ssn` gets the declared type for the real value.
-    let create_table = build_create_table_with_fks(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), coll, &schema, &FkEmission::Inline)
-        .expect("emitter must build the users DDL");
+    let create_table = fixture_table_sql(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        coll,
+        &schema,
+        &FkEmission::Inline,
+    )
+    .expect("emitter must build the users DDL");
     admin_pool.batch_execute(&create_table).await.unwrap();
     admin_pool
         .execute(
@@ -6863,8 +7026,13 @@ async fn unmask_encrypted_column_on_pg_reads_bytea_raw_sibling() {
     // The emitter decides the raw sibling's type. For an encrypted column that
     // is BYTEA, which is the whole point of this test - so build the DDL rather
     // than hand-spelling it, or the fixture proves nothing about the runtime.
-    let create_table = build_create_table_with_fks(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), coll, &schema, &FkEmission::Inline)
-        .expect("emitter must build the users DDL");
+    let create_table = fixture_table_sql(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        coll,
+        &schema,
+        &FkEmission::Inline,
+    )
+    .expect("emitter must build the users DDL");
     admin_pool.batch_execute(&create_table).await.unwrap();
 
     // Real ciphertext from the platform's own encryptor, under the AAD the read
@@ -6991,8 +7159,13 @@ async fn unmask_audit_insert_runs_under_the_per_app_role_not_the_login_role() {
     // Built with the platform's own emitter, not hand-spelled, so the fixture
     // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
     // column and `__zs_raw__ssn` gets the declared type for the real value.
-    let create_table = build_create_table_with_fks(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), coll, &schema, &FkEmission::Inline)
-        .expect("emitter must build the patients DDL");
+    let create_table = fixture_table_sql(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        coll,
+        &schema,
+        &FkEmission::Inline,
+    )
+    .expect("emitter must build the patients DDL");
     admin_pool.batch_execute(&create_table).await.unwrap();
     admin_pool
         .execute(
@@ -7151,8 +7324,13 @@ async fn pg_declared_mask_policy_authorizes_unmask_without_durable_store() {
     // Built with the platform's own emitter, not hand-spelled, so the fixture
     // cannot drift from the runtime's DDL shape: `ssn` gets the bare-TEXT mask
     // column and `__zs_raw__ssn` gets the declared type for the real value.
-    let create_table = build_create_table_with_fks(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), coll, &schema, &FkEmission::Inline)
-        .expect("emitter must build the patients DDL");
+    let create_table = fixture_table_sql(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        coll,
+        &schema,
+        &FkEmission::Inline,
+    )
+    .expect("emitter must build the patients DDL");
     pool.batch_execute(&create_table).await.unwrap();
     pool.execute(
         &format!(
@@ -7300,7 +7478,7 @@ async fn wal_connection_stays_platform_role() {
 // ---------------------------------------------------------------------------
 
 use zeroship_plugin_db::backend::BackendHandle;
-use zeroship_plugin_db::drop_namespace::{DropNamespaceOpts, DropNamespaceOutcome, drop_namespace};
+use zeroship_plugin_db::drop_namespace::{drop_namespace, DropNamespaceOpts, DropNamespaceOutcome};
 
 /// Build a `BackendHandle::Postgres` over a fresh `PostgresBackend` for
 /// the drop-namespace tests. (`PostgresBackend` is already imported at

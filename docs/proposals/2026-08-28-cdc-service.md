@@ -282,7 +282,7 @@ wire_columns(collection) =
 
 `storage.valueColumn` is the descriptor's field-to-physical-column mapping, the
 same block `value_column_for_field` reads on the query side
-(`crates/zeroship-schema/src/query.rs:3603`). After the shipped storage flip the
+(`crates/zeroship-schema/src/query.rs:3603`). After the shipped storage flip the (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 logical field column holds the creator-visible value including the mask, and
 `storage.rawColumn` names the `__zs_raw__<field>` column holding plaintext or
 ciphertext (`crates/zeroship-migrate-core/src/render/gen_types.rs`,
@@ -1501,7 +1501,7 @@ boundary on live PostgreSQL 18.4:
    exercising `ResolvedIrDocument -> WireProjection -> bracket`. The creator does
    not declare `id`: the confined ceiling forbids author primary keys and injects
    `id` plus six other system fields
-   (`policies/confined-system-shape.inject.toml:96-102`).
+   (`policies/confined-system-shape.inject.toml`).
 2. Insert through the real plugin-db write pipeline with a distinctive plaintext
    sentinel and a distinct mask. Direct SQL is not the write-side acceptance
    path.

@@ -1,55 +1,12 @@
-//! What a read returns.
+//! Explicit projections for typed query plans.
 //!
-//! # There is no `Star`
+//! There is no wildcard node. Callers enumerate the fields their read needs,
+//! including identity fields used for row mapping or relation loading. The
+//! runtime ORM compiler separately preserves the system fields its protection
+//! and change-event pipelines require.
 //!
-//! "Never `SELECT *`" is a property of the type here, not a rule a renderer
-//! remembers. [`ProjectionSource`] has no wildcard variant, so the shortest
-//! path to a working query is still an explicit column list.
-//!
-//! # The platform-field union is in the constructor
-//!
-//! SC-3 states the narrowing rule as: *a narrowed projection is always unioned
-//! with the required platform fields; narrowing can request fewer declared
-//! fields, it can never drop a column the system needs to function* - and is
-//! explicit that this must be enforced in the constructor rather than
-//! remembered. [`Projection::rows`] does the union unconditionally, so a caller
-//! cannot express a row projection without them.
-//!
-//! The reason the rule matters is that `id` is load-bearing in four independent
-//! ways, and no one of them would be found by testing the others: the relation
-//! stitch matches children to parents by it; the unmask handle plucks `row_pk`
-//! from it; encrypted columns bind it into the AEAD tag, so without it the
-//! ciphertext is undecryptable; and change events correlate on it
-//! (`emit_for_rows` reads `row["id"]`, `crates/zeroship-data-engine/src/exec.rs`).
-//! A narrowing implementation could plausibly be written, reviewed and shipped
-//! against any one of those with the other three never exercised.
-//!
-//! # `Stored` is a node, and that is only half a guarantee
-//!
-//! A protected column is not selected alongside the column that holds its
-//! stored form; it is *substituted*, emitting `"<physical>" AS "<logical>"`, and
-//! the mask pass depends on exactly that aliasing. So the obvious implementation
-//! of narrowing - filter the final column list down to what the caller asked for
-//! - emits a bare logical name and returns **plaintext**: not fewer columns than
-//! intended but the wrong value, silently, on precisely the columns marked as
-//! needing protection.
-//!
-//! [`ProjectionSource::Stored`] makes that substitution a node rather than a
-//! late string rewrite, and [`crate::render`] has no way to emit a bare logical
-//! name for one. **What it cannot do is force the choice.** Deciding that a
-//! column is protected requires the declared schema, which lives outside this
-//! leaf crate, so a caller who builds `ProjectionSource::Column` for a protected
-//! column still gets plaintext. The node makes the correct form expressible and
-//! nameable; the schema-aware layer above is what must choose it. That gap is
-//! real and is listed under what the types cannot enforce.
-//!
-//! This variant DERIVED its physical name until 2026-09-07, as `<col>_masked`,
-//! at one site. The storage flip moved the platform's stored form to a
-//! `__zs_raw__` prefix and stopped creating `<col>_masked` at all, so the
-//! derivation outlived the layout it described and rendered against a column no
-//! migration produces. Both names are now supplied by the caller, because where
-//! a value is physically stored is the storage owner's fact, not a rule a
-//! grammar can hold.
+//! Protected storage can use a physical column under a logical alias through
+//! ProjectionSource::Stored. Narrowing must preserve that mapping.
 
 use crate::ident::{Ident, IdentRole};
 use crate::path::FieldPath;
@@ -108,7 +65,7 @@ impl SearchScalarKind {
     /// The output name this scalar is projected under.
     ///
     /// These are the names the shipped builders emit - `_distance`
-    /// (`crates/zeroship-schema/src/query.rs:5007`) and `_distance_m`
+    /// (`crates/zeroship-data-query-builder/src/compile.rs:5007`) and `_distance_m`
     /// (`:5075`) - and they are spelled at **exactly one site**, here, for the
     /// same reason the reservation tables split by role: a leading `_` is
     /// refused for a column ([`crate::IdentRole::Column`]) and permitted for an
@@ -151,7 +108,9 @@ pub enum ProjectionSource {
     /// has no way to emit a bare `alias` for one, and [`Projection::aggregate`]
     /// refuses it as a grouping key. Collapsing it into `Column` would keep the
     /// rendering correct and silently drop the refusal.
-    Stored { physical: Ident },
+    Stored {
+        physical: Ident,
+    },
     Aggregate(AggregateRef),
     /// The scalar a search ranks by. Only reachable inside a
     /// [`crate::Search`]; see [`SearchScalarKind`].
@@ -353,7 +312,7 @@ impl Projection {
     /// The deeper problem is that the list was platform policy living in a
     /// grammar. Which fields a platform manages is not a property of SQL, this
     /// crate had no way to be told the answer, and its own copy was a duplicate
-    /// of `zeroship-schema`'s `SYSTEM_FIELD_NAMES` that nothing kept in step -
+    /// of `zeroship-data-query-builder`'s `SYSTEM_FIELD_NAMES` that nothing kept in step -
     /// the constant's doc comment said one of the two had to go.
     ///
     /// So the caller supplies the whole list now, and marks the platform's own
@@ -522,15 +481,25 @@ impl Projection {
 /// Why a projection was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProjectionError {
-    Alias { source: crate::ident::IdentError },
+    Alias {
+        source: crate::ident::IdentError,
+    },
     /// A row projection was given no fields at all.
     Empty,
-    DuplicateAlias { alias: String },
-    AggregateInRowProjection { alias: String },
-    StoredInAggregate { alias: String },
+    DuplicateAlias {
+        alias: String,
+    },
+    AggregateInRowProjection {
+        alias: String,
+    },
+    StoredInAggregate {
+        alias: String,
+    },
     NoAggregate,
     /// A ranking scalar was offered to a projection that is not a search's.
-    SearchScalarOutsideSearch { alias: String },
+    SearchScalarOutsideSearch {
+        alias: String,
+    },
 }
 
 impl fmt::Display for ProjectionError {

@@ -40,8 +40,10 @@ fn collection() -> Ident {
 }
 
 fn rows() -> Projection {
-    Projection::rows(vec![ProjectedField::column(column("name")).expect("projectable")])
-        .expect("row projection")
+    Projection::rows(vec![
+        ProjectedField::column(column("name")).expect("projectable")
+    ])
+    .expect("row projection")
 }
 
 fn leaf() -> Predicate {
@@ -127,14 +129,14 @@ fn a_tree_one_past_the_limit_is_refused_by_the_smart_constructors() {
         expected
     );
     ruled_on += 1;
-    assert_eq!(
-        Predicate::negate(over).expect_err("must refuse"),
-        expected
-    );
+    assert_eq!(Predicate::negate(over).expect_err("must refuse"), expected);
     ruled_on += 1;
 
     assert_eq!(ruled_on, 3, "every composing constructor must be ruled on");
-    println!("ruled on {ruled_on} constructors at depth {}", MAX_PREDICATE_DEPTH + 1);
+    println!(
+        "ruled on {ruled_on} constructors at depth {}",
+        MAX_PREDICATE_DEPTH + 1
+    );
 }
 
 /// THE CONTROL. Exactly at the limit must succeed, or the refusal above is a
@@ -288,7 +290,8 @@ fn a_plan_at_the_limit_renders_with_its_full_depth() {
         .filter(at)
         .build()
         .expect("at the limit");
-    let rendered = zeroship_data_query_builder::render::postgres::render_select(&plan).expect("renders");
+    let rendered =
+        zeroship_data_query_builder::render::postgres::render_select(&plan).expect("renders");
     let sql = rendered.sql();
     // Every level has exactly two children, so it contributes exactly one
     // joiner; a leaf contributes none.
@@ -308,7 +311,7 @@ fn a_plan_at_the_limit_renders_with_its_full_depth() {
 fn the_ir_bound_matches_the_translator_it_replaces() {
     assert_eq!(
         MAX_PREDICATE_DEPTH, 16,
-        "MAX_FILTER_NESTING_DEPTH is 16 at crates/zeroship-schema/src/query.rs:604; a \
+        "MAX_FILTER_NESTING_DEPTH is 16 at crates/zeroship-data-query-builder/src/compile.rs:604; a \
          replacement that refuses filters the current translator accepts is a \
          regression, whatever the new number's merits"
     );

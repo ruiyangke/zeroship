@@ -7,7 +7,7 @@ use uuid::Uuid;
 use zeroship_core::app_derivation;
 use zeroship_core::app_id::AppId;
 use zeroship_core::database_role::{per_app_role_name, PerAppRoleNameError};
-use zeroship_schema::SchemaName;
+use zeroship_data_query_builder::SchemaName;
 use zeroship_migrate::apply::journal::DeployRecoveryScope;
 use zeroship_migrate::{
     resolve_create_table_policy, Approval, ApprovalScope, DeclarativeApplyError, EngineError,
@@ -206,7 +206,7 @@ pub enum ApplyRequestError {
     #[error("inspect migration database schema: {0}")]
     InspectSchema(compio_postgres::Error),
     /// `reason` is a rendered string rather than a `#[source]` because
-    /// `zeroship_schema::query::QueryError` implements `Display` but not
+    /// `zeroship_data_query_builder::compile::QueryError` implements `Display` but not
     /// `std::error::Error`, so it cannot be a source in this chain.
     #[error("app schema name {schema:?} is not a legal identifier: {reason}")]
     SchemaName { schema: String, reason: String },

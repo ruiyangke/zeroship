@@ -2,27 +2,17 @@
 name = "zeroship-data-query-builder"
 version = "0.1.0"
 edition = "2021"
-description = "The DbPlan runtime query plan: an identifier-validated, backend-neutral operation tree in which a fragment of SQL text is not a representable value. Values are always parameters, identifiers are always role-validated, and nullness is a node rather than a literal. A true LEAF: no v8, no runtime, no plugin-db, no schema crate, and NO dependencies at all."
+description = "Runtime query plans, SQL compilation, and catalog contracts. No database drivers or runtime dependencies."
 
-# ---------------------------------------------------------------------------
-# ZERO dependencies, and that is load-bearing rather than tidy.
-# ---------------------------------------------------------------------------
-#
-# `zeroship-schema` was the obvious candidate (it already owns the identifier
-# validators this crate re-states) and is REFUSED, because it is not a leaf: its
-# manifest declares `compio-postgres`, `zeroship-core` and `tracing`
-# (crates/zeroship-schema/Cargo.toml). Depending on it would drag a live
-# PostgreSQL driver into a crate whose whole claim is that it can be built and
-# tested without a database, a runtime or an isolate. The identifier fences are
-# therefore re-stated here (`src/ident.rs`) as the destination SC-3 names
-# (`shared/identifier.rs`), NOT wrapped.
-#
-# Declaring no third-party dependency at all is what makes SC-3's decision 3 -
-# "`DbPlan` ... MUST NOT derive `Serialize`" - a structural fact rather than a
-# review item: `serde` is not in scope in this crate, so the derive does not
-# compile. `serialize_derive_is_structurally_impossible` in
-# `tests/no_sql_text_escape_hatch.rs` asserts this manifest keeps it that way.
 [dependencies]
+serde_json = { workspace = true }
+base64 = { workspace = true }
+
+[dev-dependencies]
+zeroship-core = { workspace = true }
+zeroship-migrate = { workspace = true }
+zeroship-migrate-core = { workspace = true }
+zeroship-migrate-backend = { workspace = true }
 
 [lints]
 workspace = true

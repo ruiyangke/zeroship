@@ -43,9 +43,7 @@ use deadline::{
     DeadlineGeneration, DeadlineGenerations, DeadlineKind, DeadlineSlot, ScheduleTimer,
 };
 use frames::{Effect, FrameClose, FrameError, FrameId, FrameStack};
-use identity::{
-    classify, DenyReason, ExpectedAuthority, MaskCeiling, ObservedAuthority, Verdict,
-};
+use identity::{classify, DenyReason, ExpectedAuthority, MaskCeiling, ObservedAuthority, Verdict};
 
 /// The nine states.
 ///
@@ -392,10 +390,7 @@ pub enum TxEvent {
     /// A creator data statement is starting. Takes the session.
     OperationRequested,
     /// A creator data statement answered.
-    OperationCompleted {
-        token: CommandToken,
-        errored: bool,
-    },
+    OperationCompleted { token: CommandToken, errored: bool },
     /// Open a child frame. Takes no caller-supplied id: the registry mints a
     /// never-reused frame id and savepoint name from its own sequence.
     OpenFrame,
@@ -449,20 +444,11 @@ pub enum Action {
     /// Send a creator data statement.
     IssueDataSql { token: CommandToken },
     /// Send `SAVEPOINT <name>`.
-    IssueSavepoint {
-        token: CommandToken,
-        name: Box<str>,
-    },
+    IssueSavepoint { token: CommandToken, name: Box<str> },
     /// Send `ROLLBACK TO SAVEPOINT <name>`.
-    IssueRollbackTo {
-        token: CommandToken,
-        name: Box<str>,
-    },
+    IssueRollbackTo { token: CommandToken, name: Box<str> },
     /// Send `RELEASE SAVEPOINT <name>`.
-    IssueRelease {
-        token: CommandToken,
-        name: Box<str>,
-    },
+    IssueRelease { token: CommandToken, name: Box<str> },
     /// Send terminal SQL.
     IssueTerminal {
         token: CommandToken,
@@ -785,9 +771,7 @@ impl TxReducer {
             if authority.identity != self.expected.identity
                 || authority.domain != self.expected.domain
             {
-                return vec![Action::Reply(Err(
-                    TxProtocolError::AppIncarnationMismatch,
-                ))];
+                return vec![Action::Reply(Err(TxProtocolError::AppIncarnationMismatch))];
             }
         }
 
@@ -930,10 +914,11 @@ impl TxReducer {
             Verdict::Current { ceiling } => {
                 // Not forcing: it never claims the gate. The ceiling folds by
                 // meet, so it can only tighten (invariant 8).
-                self.effective_ceiling = Some(match (&self.begin_ceiling, &self.effective_ceiling) {
-                    (Some(begin), Some(effective)) => begin.meet(effective).meet(&ceiling),
-                    _ => ceiling.clone(),
-                });
+                self.effective_ceiling =
+                    Some(match (&self.begin_ceiling, &self.effective_ceiling) {
+                        (Some(begin), Some(effective)) => begin.meet(effective).meet(&ceiling),
+                        _ => ceiling.clone(),
+                    });
                 match self.state {
                     TxState::Preparing => {
                         // Capture the BEGIN ceiling from this read and proceed.
@@ -982,9 +967,7 @@ impl TxReducer {
                 self.state = TxState::Idle;
                 vec![Action::Reply(Ok(TxReply::Began))]
             }
-            BeginOutcome::SetupFailed => {
-                self.force(CleanupCause::SessionSetupFailed, now).1
-            }
+            BeginOutcome::SetupFailed => self.force(CleanupCause::SessionSetupFailed, now).1,
             BeginOutcome::ReResolve => self.on_verdict(Verdict::ReResolve, now),
             BeginOutcome::Denied(reason) => self.on_verdict(Verdict::Deny(reason), now),
             BeginOutcome::Failed => {
@@ -1229,10 +1212,7 @@ impl TxReducer {
             return reply;
         }
         match self.state {
-            // From `Idle` and `Poisoned` it goes straight to `Settling`. A
-            // COMMIT from `Poisoned` is reachable and must be handled, not
-            // forbidden: PostgreSQL accepts it and answers with the tag
-            // `ROLLBACK`, which is a failure the machine records as such.
+            // A poisoned transaction settles by rollback on every backend.
             TxState::Idle | TxState::Poisoned => self.begin_terminal(intent, now),
             // From `InFlight` it goes to `Quiescing` first and waits there for
             // the operation to return the client, rather than treating the
@@ -1261,6 +1241,11 @@ impl TxReducer {
     /// Issue terminal SQL exactly once and enter `Settling`.
     fn begin_terminal(&mut self, intent: SettleIntent, now: Instant) -> Vec<Action> {
         debug_assert!(self.active.is_none(), "invariant 5: one active token");
+        let command = if self.state == TxState::Poisoned {
+            SettleIntent::Rollback
+        } else {
+            intent
+        };
         self.settle_intent = Some(intent);
         self.state = TxState::Settling;
         let token = self.mint_token();
@@ -1276,7 +1261,10 @@ impl TxReducer {
         ) {
             actions.push(Action::ScheduleTimer(scheduled));
         }
-        actions.push(Action::IssueTerminal { token, intent });
+        actions.push(Action::IssueTerminal {
+            token,
+            intent: command,
+        });
         actions
     }
 
@@ -1354,9 +1342,7 @@ impl TxReducer {
             return vec![];
         }
         match kind {
-            DeadlineKind::Execution => {
-                self.force(CleanupCause::DeadlineExpired(kind), now).1
-            }
+            DeadlineKind::Execution => self.force(CleanupCause::DeadlineExpired(kind), now).1,
             // The second-stage deadline. The backend did not answer within its
             // grace. There is no third timer and no escalation: the session is
             // WITHDRAWN - the physical connection destroyed rather than

@@ -130,7 +130,7 @@ vendor_hit_lines() {
 ROOTS="
 crates/zeroship-plugin-db/src
 crates/zeroship-data-engine/src
-crates/zeroship-schema/src
+crates/zeroship-data-query-builder/src
 crates/zeroship-data-core/src
 "
 

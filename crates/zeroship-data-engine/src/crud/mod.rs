@@ -37,15 +37,15 @@
 
 use serde_json::Value;
 
+use crate::compile;
+use crate::exec::{exec_mutation_with_emit, exec_query};
+use crate::tx_route::TxRoute;
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
-use crate::exec::{exec_mutation_with_emit, exec_query};
-use crate::query;
-use crate::tx_route::TxRoute;
 
 // Transparent column-encryption pass. The helpers in
 // this module (`encrypt_row_on_write` / `decrypt_row_on_read`) sit
-// around `query::build_*` and `exec_query` respectively.
+// around `compile::build_*` and `exec_query` respectively.
 //
 // Visibility: crate-private in release builds; `pub` under
 // `test-helpers` so `crates/zeroship-plugin-db/tests/sqlite_integration.rs` can drive the
@@ -94,7 +94,6 @@ pub mod unmask;
 // confirmed by applying it and reading the error.
 pub mod mask_policy;
 
-
 // `mask_backfill` WAS DECLARED HERE and is deleted (2026-09-02), under the
 // split's Phase 0.5 dead-code decision. Its header called it "mask backfill /
 // rewrite / removal jobs driven by the migration service", and #30 wired that
@@ -103,12 +102,12 @@ pub mod mask_policy;
 //
 // Measured before deleting: all six entry points were either one-line
 // delegations to a live function elsewhere (`parse_mask_sentinel` ->
-// `zeroship_schema::mask_codec`, which `pg_introspect.rs` and `sqlite/mod.rs`
+// `zeroship_data_query_builder::mask_codec`, which `pg_introspect.rs` and `sqlite/mod.rs`
 // already call directly; `compute_masked_for_plaintext` -> `apply_mask_kind`
 // in `mask_pass.rs`) or helpers with zero callers anywhere
 // (`apply_mask_to_one_row`, `backfill_audit_name`, `rewrite_audit_name`,
 // `compute_masked_pairs_for_row`). Its sentinel tests duplicated
-// `zeroship-schema/src/mask_codec.rs`'s under the same names; the rest
+// `zeroship-data-query-builder/src/mask_codec.rs`'s under the same names; the rest
 // exercised the zero-caller helpers.
 //
 // The module itself had already named the hazard, about its own column-name
@@ -201,7 +200,7 @@ mod write_pipeline;
 #[cfg(any(test, feature = "test-helpers"))]
 #[allow(unused_imports)]
 pub use write_pipeline::{
-    WritePathCounters, reset_write_path_counters_for_tests, write_path_counters_for_tests,
+    reset_write_path_counters_for_tests, write_path_counters_for_tests, WritePathCounters,
 };
 
 // ---------------------------------------------------------------------------
@@ -227,7 +226,7 @@ pub async fn exec_mutation_then_read(
     binding: DbBinding,
     coll: String,
     route: crate::tx_route::TxRoute,
-    bq: query::BuiltQuery,
+    bq: compile::BuiltQuery,
     op: zeroship_core::change_event::ChangeOp,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_mutation_with_emit(bq, &route, &coll, op).await?;
@@ -252,7 +251,7 @@ pub async fn exec_aggregate_read(
     binding: DbBinding,
     coll: String,
     route: crate::tx_route::TxRoute,
-    bq: query::BuiltQuery,
+    bq: compile::BuiltQuery,
     group_fields: Vec<String>,
     result_columns: Option<Vec<String>>,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
@@ -291,7 +290,7 @@ pub async fn exec_distinct_read(
     binding: DbBinding,
     coll: String,
     route: crate::tx_route::TxRoute,
-    bq: query::BuiltQuery,
+    bq: compile::BuiltQuery,
     reads_masked_sibling: bool,
 ) -> Result<read_pipeline::ApplyResult, DbError> {
     let rows = exec_query(&route, bq).await?;
@@ -351,15 +350,15 @@ fn record_read_set(binding: &DbBinding, collection: &str, filter: &Value) {
 // alongside it for the same reason: resolved once by the caller, not re-asked
 // four times per write.
 
-fn maybe_lower_sqlite_boolean_doc(dialect: query::SqlDialect, schema: &Value, doc: &mut Value) {
-    if dialect != query::SqlDialect::Sqlite {
+fn maybe_lower_sqlite_boolean_doc(dialect: compile::SqlDialect, schema: &Value, doc: &mut Value) {
+    if dialect != compile::SqlDialect::Sqlite {
         return;
     }
     lower_boolean_doc_with_schema(schema, doc);
 }
 
-fn maybe_lower_sqlite_boolean_docs(dialect: query::SqlDialect, schema: &Value, docs: &mut Value) {
-    if dialect != query::SqlDialect::Sqlite {
+fn maybe_lower_sqlite_boolean_docs(dialect: compile::SqlDialect, schema: &Value, docs: &mut Value) {
+    if dialect != compile::SqlDialect::Sqlite {
         return;
     }
     let Some(arr) = docs.as_array_mut() else {
@@ -371,33 +370,32 @@ fn maybe_lower_sqlite_boolean_docs(dialect: query::SqlDialect, schema: &Value, d
 }
 
 fn maybe_lower_sqlite_boolean_update(
-    dialect: query::SqlDialect,
+    dialect: compile::SqlDialect,
     schema: &Value,
     patch: &mut Value,
 ) {
-    if dialect != query::SqlDialect::Sqlite {
+    if dialect != compile::SqlDialect::Sqlite {
         return;
     }
     lower_boolean_update_with_schema(schema, patch);
 }
 
 fn maybe_lower_sqlite_boolean_filter(
-    dialect: query::SqlDialect,
+    dialect: compile::SqlDialect,
     schema: &Value,
     filter: &mut Value,
 ) {
-    if dialect != query::SqlDialect::Sqlite {
+    if dialect != compile::SqlDialect::Sqlite {
         return;
     }
     lower_boolean_filter_with_schema(schema, filter);
 }
 
-
 fn lower_boolean_doc_with_schema(schema: &Value, doc: &mut Value) {
     let Some(obj) = doc.as_object_mut() else {
         return;
     };
-    for (field, value) in obj {
+    for (field, value) in obj.iter_mut() {
         if field.starts_with("__zsbin__") {
             continue;
         }
@@ -496,14 +494,9 @@ fn schema_field<'a>(schema: &'a Value, field: &str) -> Option<&'a Value> {
     schema.as_object()?.get(field)
 }
 
-fn sqlite_blob_param(bytes: &[u8]) -> String {
+fn sqlite_binary_base64(bytes: &[u8]) -> String {
     use base64::Engine as _;
-
-    format!(
-        "{}{}",
-        crate::query::SQLITE_BINARY_BIND_PREFIX,
-        base64::engine::general_purpose::STANDARD.encode(bytes),
-    )
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 fn encode_sqlite_binary_scalar(
@@ -512,9 +505,6 @@ fn encode_sqlite_binary_scalar(
     value: &mut Value,
 ) -> Result<(), DbError> {
     if value.is_null() {
-        return Ok(());
-    }
-    if matches!(value, Value::String(s) if s.starts_with(crate::query::SQLITE_BINARY_BIND_PREFIX)) {
         return Ok(());
     }
 
@@ -553,7 +543,7 @@ fn encode_sqlite_binary_scalar(
                 })?;
                 vector.push(n as f32);
             }
-            *value = Value::String(sqlite_blob_param(
+            *value = Value::String(sqlite_binary_base64(
                 &crate::backend::sqlite::vector::vec_to_le_bytes(&vector),
             ));
             Ok(())
@@ -577,7 +567,7 @@ fn encode_sqlite_binary_scalar(
                     format!("db: geoPoint column '{field}' is missing numeric lng"),
                 )
             })?;
-            *value = Value::String(sqlite_blob_param(
+            *value = Value::String(sqlite_binary_base64(
                 &crate::backend::sqlite::spatial::point_to_blob(crate::backend::GeoPoint {
                     lat,
                     lng,
@@ -596,11 +586,25 @@ fn encode_sqlite_binary_doc_with_schema(schema: &Value, doc: &mut Value) -> Resu
     let Some(schema_obj) = schema.as_object() else {
         return Ok(());
     };
+    let mut marks = Vec::new();
     for (field, field_def) in schema_obj {
+        if obj.contains_key(&format!("__zsbin__{field}")) {
+            continue;
+        }
         let Some(value) = obj.get_mut(field) else {
             continue;
         };
         encode_sqlite_binary_scalar(field, field_def, value)?;
+        if matches!(
+            field_def.get("type").and_then(Value::as_str),
+            Some("vector" | "geoPoint")
+        ) && !value.is_null()
+        {
+            marks.push(field.clone());
+        }
+    }
+    for field in marks {
+        obj.insert(format!("__zsbin__{field}"), Value::Bool(true));
     }
     Ok(())
 }
@@ -615,13 +619,20 @@ fn encode_sqlite_binary_update_with_schema(
     if let Some(set_doc) = obj.get_mut("$set") {
         encode_sqlite_binary_doc_with_schema(schema, set_doc)?;
     }
-    for (field, value) in obj {
+    let mut marks = Vec::new();
+    for (field, value) in obj.iter_mut() {
         if field.starts_with('$') || field.starts_with("__zsbin__") {
             continue;
         }
         let Some(field_def) = schema_field(schema, field) else {
             continue;
         };
+        if matches!(
+            field_def.get("type").and_then(Value::as_str),
+            Some("vector" | "geoPoint")
+        ) {
+            marks.push(field.clone());
+        }
         match value {
             Value::Array(_) | Value::String(_) | Value::Object(_) | Value::Null => {
                 if let Some(set_val) = value.as_object_mut().and_then(|ops| ops.get_mut("$set")) {
@@ -632,6 +643,9 @@ fn encode_sqlite_binary_update_with_schema(
             }
             _ => {}
         }
+    }
+    for field in marks {
+        obj.insert(format!("__zsbin__{field}"), Value::Bool(true));
     }
     Ok(())
 }
@@ -744,12 +758,7 @@ pub struct FindPlan {
 /// the broker needs to narrow events - or belongs to a DIFFERENT query. That is
 /// the same hazard the `dispatch_insert` actor_id read is documented against.
 /// Verified by reading `read_set.rs`, not by a test.
-pub fn plan_find(
-    binding: &DbBinding,
-    collection: &str,
-    filter: &Value,
-    opts: &Value,
-) -> FindPlan {
+pub fn plan_find(binding: &DbBinding, collection: &str, filter: &Value, opts: &Value) -> FindPlan {
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
     record_read_set(binding, collection, filter);
@@ -757,7 +766,7 @@ pub fn plan_find(
     // DB-2: public `find` normalises an omitted limit here before calling the
     // builder. This does not protect internal builder callers; they must pass
     // their own explicit bound. Callers paginate past this page via `offset`.
-    let limit = Some(query::effective_query_limit(
+    let limit = Some(compile::effective_query_limit(
         opts.get("limit").and_then(Value::as_i64),
     ));
     // DB-3: strip an app-supplied reserved `auto` system actor — a find with
@@ -848,7 +857,7 @@ pub async fn run_find(
     let filter_soft_deleted = system_fields_pass::should_filter_soft_deleted(plan.include_deleted);
     let mut sql_filter = filter;
     maybe_lower_sqlite_boolean_filter(route.dialect(), &schema_hint, &mut sql_filter);
-    let bq = query::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
+    let bq = compile::build_find_with_schema_and_unmask_and_soft_delete_with_dialect(
         binding.schema(),
         &coll,
         &sql_filter,
@@ -892,7 +901,6 @@ pub async fn run_find(
     }
     Ok(result)
 }
-
 
 // ---------------------------------------------------------------------------
 // insert / insertMany — write paths returning the row(s)
@@ -940,7 +948,7 @@ pub async fn run_insert(
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     maybe_lower_sqlite_boolean_doc(route.dialect(), &schema, &mut doc);
     let bq =
-        query::build_insert_with_dialect(binding.schema(), &coll, &schema, &doc, route.dialect())
+        compile::build_insert_with_dialect(binding.schema(), &coll, &schema, &doc, route.dialect())
             .map_err(DbError::from)?;
     let rows = exec_mutation_with_emit(
         bq,
@@ -958,7 +966,6 @@ pub async fn run_insert(
     )
     .await
 }
-
 
 /// Shared dispatch for `insertMany`. See `v8_classes::dispatch::dispatch_insert` for the
 /// capability-gate contract.
@@ -986,7 +993,7 @@ pub async fn run_insert_many(
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     maybe_lower_sqlite_boolean_docs(route.dialect(), &schema, &mut docs);
 
-    let bq = query::build_insert_many_with_dialect(
+    let bq = compile::build_insert_many_with_dialect(
         binding.schema(),
         &coll,
         &schema,
@@ -1010,7 +1017,6 @@ pub async fn run_insert_many(
     )
     .await
 }
-
 
 // ---------------------------------------------------------------------------
 // updateOne / updateMany — write paths
@@ -1117,12 +1123,12 @@ pub async fn run_update_one(
     // No `skip_*` knob is set: the pass stripped every column the
     // charter re-assigns on write, so the patch cannot carry a
     // competing assignment for the builder to defer to.
-    let autobump = query::SystemFieldAutoBump {
+    let autobump = compile::SystemFieldAutoBump {
         dispatch_write: true,
         actor_id: actor_id.as_deref(),
         ..Default::default()
     };
-    let built = query::build_update_one_with_system_fields(
+    let built = compile::build_update_one_with_system_fields(
         binding.schema(),
         &coll,
         &schema,
@@ -1175,7 +1181,6 @@ pub async fn run_update_one(
     Ok((result.rows, result.has_masked))
 }
 
-
 /// The ENGINE half of `updateMany`. Resolves to a COUNT, so unlike
 /// [`run_update_one`] it returns a plain `usize` and the adapter lowers once.
 ///
@@ -1211,7 +1216,7 @@ pub async fn run_update_many(
     // No `skip_*` knob is set: the pass stripped every column the
     // charter re-assigns on write, so the patch cannot carry a
     // competing assignment for the builder to defer to.
-    let autobump = query::SystemFieldAutoBump {
+    let autobump = compile::SystemFieldAutoBump {
         dispatch_write: true,
         actor_id: actor_id.as_deref(),
         ..Default::default()
@@ -1224,23 +1229,23 @@ pub async fn run_update_many(
                 dialect,
                 &coll,
                 &filter,
-                query::MAX_QUERY_LIMIT + 1,
+                compile::MAX_QUERY_LIMIT + 1,
                 &schema,
             )
             .await?;
-            let target_limit = usize::try_from(query::MAX_QUERY_LIMIT)
+            let target_limit = usize::try_from(compile::MAX_QUERY_LIMIT)
                 .expect("MAX_QUERY_LIMIT must be a positive usize");
             if target_rows.len() > target_limit {
                 return Err(DbError::validation_hinted(
                     "update_many_target_limit_exceeded",
                     format!(
                         "updateMany matched more than {} rows; the maximum is {}",
-                        query::MAX_QUERY_LIMIT,
-                        query::MAX_QUERY_LIMIT
+                        compile::MAX_QUERY_LIMIT,
+                        compile::MAX_QUERY_LIMIT
                     ),
                     format!(
                         "Narrow the updateMany filter so one call targets at most {} rows.",
-                        query::MAX_QUERY_LIMIT
+                        compile::MAX_QUERY_LIMIT
                     ),
                 ));
             }
@@ -1285,7 +1290,7 @@ pub async fn run_update_many(
                 // ordinary column-grant surface while the primary key still
                 // bounds the statement to this exact row.
                 row_queries.push(
-                    query::build_update_many_with_system_fields(
+                    compile::build_update_many_with_system_fields(
                         binding.schema(),
                         &coll,
                         &schema,
@@ -1345,7 +1350,7 @@ pub async fn run_update_many(
     maybe_lower_sqlite_boolean_update(dialect, &schema, &mut update);
     let mut sql_filter = filter.clone();
     maybe_lower_sqlite_boolean_filter(dialect, &schema, &mut sql_filter);
-    let bq = query::build_update_many_with_system_fields(
+    let bq = compile::build_update_many_with_system_fields(
         binding.schema(),
         &coll,
         &schema,
@@ -1382,7 +1387,6 @@ pub async fn run_update_many(
     Ok(rows.len())
 }
 
-
 // ---------------------------------------------------------------------------
 // deleteOne / deleteMany / purge / restore — write paths
 //
@@ -1406,8 +1410,8 @@ pub fn plan_delete_one(
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
-) -> Result<query::BuiltQuery, DbError> {
-    let autobump = query::SystemFieldAutoBump {
+) -> Result<compile::BuiltQuery, DbError> {
+    let autobump = compile::SystemFieldAutoBump {
         actor_id,
         ..Default::default()
     };
@@ -1417,7 +1421,7 @@ pub fn plan_delete_one(
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
-        query::build_soft_delete_one_with_system_fields(
+        compile::build_soft_delete_one_with_system_fields(
             binding.schema(),
             collection,
             &schema,
@@ -1428,7 +1432,6 @@ pub fn plan_delete_one(
         .map_err(DbError::from)
     })
 }
-
 
 /// Shared dispatch for `deleteMany`. Resolves with the count of
 /// affected rows as a JS `number`.
@@ -1440,15 +1443,15 @@ pub fn plan_delete_many(
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
-) -> Result<query::BuiltQuery, DbError> {
-    let autobump = query::SystemFieldAutoBump {
+) -> Result<compile::BuiltQuery, DbError> {
+    let autobump = compile::SystemFieldAutoBump {
         actor_id,
         ..Default::default()
     };
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
-        query::build_soft_delete_many_with_system_fields(
+        compile::build_soft_delete_many_with_system_fields(
             binding.schema(),
             collection,
             &schema,
@@ -1459,7 +1462,6 @@ pub fn plan_delete_many(
         .map_err(DbError::from)
     })
 }
-
 
 /// Explicit hard-delete entry point. Always emits
 /// `DELETE FROM ...` regardless of marker state. Used by the SDK's
@@ -1479,11 +1481,11 @@ pub fn plan_purge_one(
     route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
-) -> Result<query::BuiltQuery, DbError> {
+) -> Result<compile::BuiltQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
-        query::build_delete_one_with_dialect(
+        compile::build_delete_one_with_dialect(
             binding.schema(),
             collection,
             &schema,
@@ -1494,7 +1496,6 @@ pub fn plan_purge_one(
     })
 }
 
-
 /// Bulk-purge entry point.
 /// The ENGINE half of `purge_many`. Peer of [`plan_purge_one`]: a hard delete,
 /// so no `actor_id`.
@@ -1503,15 +1504,20 @@ pub fn plan_purge_many(
     route: &crate::tx_route::CapturedRoute,
     collection: &str,
     filter: Value,
-) -> Result<query::BuiltQuery, DbError> {
+) -> Result<compile::BuiltQuery, DbError> {
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
-        query::build_delete_many(binding.schema(), collection, &schema, &filter, route.dialect())
-            .map_err(DbError::from)
+        compile::build_delete_many(
+            binding.schema(),
+            collection,
+            &schema,
+            &filter,
+            route.dialect(),
+        )
+        .map_err(DbError::from)
     })
 }
-
 
 /// Restore a soft-deleted row.
 /// The ENGINE half of `restore_one`.
@@ -1525,8 +1531,8 @@ pub fn plan_restore_one(
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
-) -> Result<query::BuiltQuery, DbError> {
-    let autobump = query::SystemFieldAutoBump {
+) -> Result<compile::BuiltQuery, DbError> {
+    let autobump = compile::SystemFieldAutoBump {
         dispatch_write: true,
         actor_id,
         ..Default::default()
@@ -1534,7 +1540,7 @@ pub fn plan_restore_one(
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
-        query::build_restore_one_with_system_fields(
+        compile::build_restore_one_with_system_fields(
             binding.schema(),
             collection,
             &schema,
@@ -1545,7 +1551,6 @@ pub fn plan_restore_one(
         .map_err(DbError::from)
     })
 }
-
 
 /// Bulk-restore entry point.
 /// The ENGINE half of `restore_many`. Like [`plan_restore_one`], the autobump
@@ -1556,8 +1561,8 @@ pub fn plan_restore_many(
     collection: &str,
     filter: Value,
     actor_id: Option<&str>,
-) -> Result<query::BuiltQuery, DbError> {
-    let autobump = query::SystemFieldAutoBump {
+) -> Result<compile::BuiltQuery, DbError> {
+    let autobump = compile::SystemFieldAutoBump {
         dispatch_write: true,
         actor_id,
         ..Default::default()
@@ -1565,7 +1570,7 @@ pub fn plan_restore_many(
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
-        query::build_restore_many_with_system_fields(
+        compile::build_restore_many_with_system_fields(
             binding.schema(),
             collection,
             &schema,
@@ -1576,7 +1581,6 @@ pub fn plan_restore_many(
         .map_err(DbError::from)
     })
 }
-
 
 // ---------------------------------------------------------------------------
 // aggregate / distinct / count — read paths
@@ -1604,7 +1608,7 @@ pub fn plan_aggregate(
     collection: &str,
     pipeline: &Value,
     opts: &Value,
-) -> Result<(query::BuiltQuery, Option<Vec<String>>), DbError> {
+) -> Result<(compile::BuiltQuery, Option<Vec<String>>), DbError> {
     // Record into the active query's read-set so the broker can
     // narrow events. If the first stage is `$match`, capture its filter;
     // otherwise record a coarse-grained entry (empty filter) — the
@@ -1629,7 +1633,7 @@ pub fn plan_aggregate(
     // `$group.by` / `$sum` / `$sort` on a masked column read the field's own
     // column, which holds the mask - there is no sibling to lower to any more.
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
-        query::build_aggregate_with_result_columns(
+        compile::build_aggregate_with_result_columns(
             binding.schema(),
             collection,
             pipeline,
@@ -1640,7 +1644,6 @@ pub fn plan_aggregate(
         .map_err(DbError::from)
     })
 }
-
 
 /// The ENGINE half of `distinct`: no `scope`, no `v8::`, no `ResolveValue`.
 ///
@@ -1666,8 +1669,7 @@ pub fn plan_distinct(
     field: &str,
     filter: Value,
     opts: &Value,
-) -> Result<(query::BuiltQuery, bool), DbError> {
-
+) -> Result<(compile::BuiltQuery, bool), DbError> {
     let include_deleted = opts
         .get("include_deleted")
         .and_then(|v| v.as_bool())
@@ -1681,12 +1683,12 @@ pub fn plan_distinct(
     // descriptor entry the builder uses; an undeclared collection rejects
     // before either.
     let schema_hint = crate::descriptor::collection_schema(binding, collection)?;
-    let distinct_reads_masked_sibling = query::column_is_masked(field, &schema_hint);
+    let distinct_reads_masked_sibling = compile::column_is_masked(field, &schema_hint);
 
     let mut filter = filter;
     maybe_lower_sqlite_boolean_filter(route.dialect(), &schema_hint, &mut filter);
 
-    let built = query::build_distinct_with_soft_delete_with_dialect(
+    let built = compile::build_distinct_with_soft_delete_with_dialect(
         binding.schema(),
         collection,
         field,
@@ -1699,7 +1701,6 @@ pub fn plan_distinct(
 
     Ok((built, distinct_reads_masked_sibling))
 }
-
 
 /// Shared dispatch for `count`. Resolves with a real JS `number`
 /// (not a JSON-stringified integer).
@@ -1730,7 +1731,7 @@ pub fn plan_count(
     collection: &str,
     filter: Value,
     opts: &Value,
-) -> Result<query::BuiltQuery, DbError> {
+) -> Result<compile::BuiltQuery, DbError> {
     // Record into the active query's read-set so the broker can
     // narrow events to this filter. No-op outside `query()` handlers.
     record_read_set(binding, collection, &filter);
@@ -1744,7 +1745,7 @@ pub fn plan_count(
     crate::descriptor::collection_schema(binding, collection).and_then(|schema| {
         let mut filter = filter;
         maybe_lower_sqlite_boolean_filter(route.dialect(), &schema, &mut filter);
-        query::build_count_with_soft_delete(
+        compile::build_count_with_soft_delete(
             binding.schema(),
             collection,
             &schema,
@@ -1755,7 +1756,6 @@ pub fn plan_count(
         .map_err(DbError::from)
     })
 }
-
 
 // ---------------------------------------------------------------------------
 // upsert — INSERT … ON CONFLICT path
@@ -1783,7 +1783,7 @@ pub async fn run_upsert(
     .await?;
     let schema = crate::descriptor::collection_schema(&binding, &coll)?;
     maybe_lower_sqlite_boolean_doc(route.dialect(), &schema, &mut doc);
-    let bq = query::build_upsert_with_dialect(
+    let bq = compile::build_upsert_with_dialect(
         binding.schema(),
         &coll,
         &schema,
@@ -1813,7 +1813,6 @@ pub async fn run_upsert(
     )
     .await
 }
-
 
 // ---------------------------------------------------------------------------
 // search - vector entry point
@@ -1857,7 +1856,7 @@ pub struct SearchPlan {
 /// question [`plan_find`] documents, and this half is where the original put it.
 pub fn plan_search(
     binding: &DbBinding,
-    dialect: query::SqlDialect,
+    dialect: compile::SqlDialect,
     collection: &str,
     args: &Value,
 ) -> Result<SearchPlan, DbError> {
@@ -2006,7 +2005,6 @@ pub async fn run_search(
     .await
 }
 
-
 /// Shared dispatch for the `Collection.near()` v8_method.
 ///
 /// `args` shape (validated SDK-side):
@@ -2041,7 +2039,7 @@ pub struct NearPlan {
 /// tidied - the SDK branches on the code.
 pub fn plan_near(
     binding: &DbBinding,
-    dialect: query::SqlDialect,
+    dialect: compile::SqlDialect,
     collection: &str,
     args: &Value,
 ) -> Result<NearPlan, DbError> {
@@ -2163,10 +2161,9 @@ pub async fn run_near(
     .await
 }
 
-
 // `dispatch_find_or_create` was removed along with the
 // `Collection.findOrCreate` v8_method (absorbed by `upsert`). The
-// `query::build_find_or_create` SQL builder stays for now —
+// `compile::build_find_or_create` SQL builder stays for now —
 // `upsert({where, create})` shape lands in a follow-up.
 
 // ===========================================================================
@@ -2185,7 +2182,7 @@ pub async fn run_near(
 /// but does not stop cargo refusing once the engine is its own crate.
 pub async fn prepare_insert_many_docs_for_binding(
     keys: &crate::encryption::KeyStore,
-    dialect: query::SqlDialect,
+    dialect: compile::SqlDialect,
     route: &TxRoute,
     docs: &mut Value,
     binding: &DbBinding,
@@ -2277,9 +2274,7 @@ async fn prepare_upsert_doc_for_write(
 ///   raw bytes.
 /// - **SQLite arm** (chosen at runtime, not compiled in): the keys are
 ///   env-var-sourced. The SQL builder (when called with `SqlDialect::Sqlite`)
-///   emits `$N` and tags the encrypted-column param with
-///   `SQLITE_BINARY_BIND_PREFIX`; the session actor binds the raw bytes
-///   as a BLOB.
+///   emits `unhex($N)` over a hex parameter to produce the BLOB.
 ///
 /// Encrypted columns work end-to-end on both backends through the
 /// SDK's CRUD path.
@@ -2465,20 +2460,14 @@ mod tests {
             .as_str()
             .expect("loc should be sentinel-wrapped base64");
 
-        assert!(
-            embedding.starts_with(crate::query::SQLITE_BINARY_BIND_PREFIX),
-            "vector payload must use the sqlite blob sentinel: {embedding}"
-        );
-        assert!(
-            loc.starts_with(crate::query::SQLITE_BINARY_BIND_PREFIX),
-            "geo payload must use the sqlite blob sentinel: {loc}"
-        );
+        assert_eq!(doc["__zsbin__embedding"], serde_json::json!(true));
+        assert_eq!(doc["__zsbin__loc"], serde_json::json!(true));
 
         let embedding_bytes = base64::engine::general_purpose::STANDARD
-            .decode(embedding.trim_start_matches(crate::query::SQLITE_BINARY_BIND_PREFIX))
+            .decode(embedding)
             .expect("decode vector blob");
         let loc_bytes = base64::engine::general_purpose::STANDARD
-            .decode(loc.trim_start_matches(crate::query::SQLITE_BINARY_BIND_PREFIX))
+            .decode(loc)
             .expect("decode geo blob");
 
         assert_eq!(
