@@ -18,6 +18,10 @@ hex = { workspace = true }
 # PKCE verifier generation (shared with gateway OIDC RP + auth tests).
 rand = "0.8"
 base64 = { workspace = true }
+# The consistent-hash ring positions in `worker_ring`. The gateway declares the
+# same crate and feature; both must agree or the two rings order one fleet
+# differently, which is the failure that module exists to prevent.
+xxhash-rust = { version = "0.8", features = ["xxh3"] }
 thiserror = { workspace = true }
 linkme = { workspace = true }
 zeroship-config-macros = { workspace = true }
