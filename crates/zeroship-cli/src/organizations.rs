@@ -923,6 +923,7 @@ fn usage() -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::device_grant::PLATFORM_CLI_ISSUABLE_SCOPES;
 
     fn argv(rest: &[&str]) -> Vec<String> {
         std::iter::once("zeroship".to_string())
@@ -1412,6 +1413,120 @@ mod tests {
                 "dissolve",
                 "projects"
             ]
+        );
+    }
+
+    /// The control-plane authority each shipped subcommand asks for, named
+    /// beside the verb that asks for it. The action is the one its handler
+    /// passes to `AuthzGuard::require` in
+    /// `crates/zeroship-control/src/organizations.rs`.
+    ///
+    /// `use` is the only entry with no scope: it writes this CLI's own
+    /// selection file and reaches no server, which `run` enforces by returning
+    /// before a token is even resolved.
+    ///
+    /// `invite` and `role` name two actions because `require_seat_authority`
+    /// asks for `organization:admin` ON TOP of `organization:members:write`
+    /// when the role being seated is itself admin or owner. A ceiling holding
+    /// only the first would leave both verbs working for ordinary seats and
+    /// refusing privileged ones - reachable in the letter and broken in the
+    /// half a creator hits when they promote someone.
+    const SUBCOMMAND_SCOPES: &[(&str, &[&str])] = &[
+        ("create", &["organization:create"]),
+        ("list", &["organization:read"]),
+        ("show", &["organization:read"]),
+        ("use", &[]),
+        ("members", &["organization:members:read"]),
+        (
+            "invite",
+            &["organization:members:write", "organization:admin"],
+        ),
+        ("revoke", &["organization:members:write"]),
+        // Redeeming an invitation is banded on the token, not on a seat the
+        // caller does not yet have.
+        ("join", &["organization:read"]),
+        (
+            "role",
+            &["organization:members:write", "organization:admin"],
+        ),
+        ("remove", &["organization:members:write"]),
+        ("leave", &["organization:members:leave"]),
+        ("transfer", &["organization:admin"]),
+        ("dissolve", &["organization:admin"]),
+        // Bare `projects` lists them, which is an organization read.
+        ("projects", &["organization:read"]),
+    ];
+
+    /// The same table for the `projects` verbs.
+    const PROJECT_VERB_SCOPES: &[(&str, &[&str])] = &[
+        ("create", &["project:create"]),
+        ("rename", &["project:write"]),
+        ("delete", &["project:write"]),
+        ("members", &["project:members:read"]),
+        ("add", &["project:members:write"]),
+        ("role", &["project:members:write"]),
+        ("remove", &["project:members:write"]),
+    ];
+
+    /// Every verb this CLI advertises must be reachable by a token this CLI can
+    /// be issued.
+    ///
+    /// The defect this pins: `PLATFORM_CLI_ISSUABLE_SCOPES` is a closed
+    /// ceiling and `crates/zeroship-authz/src/eval.rs` `enforce` evaluates the
+    /// token policy ALONE as its final pass, so a scope outside the ceiling is
+    /// an action NO rank can widen back in. Most of this verb table - `leave`
+    /// included, the one verb that exists so a member can depart - therefore
+    /// answered 403 for every credential `zeroship login` could produce.
+    ///
+    /// It is derived from the verb lists rather than from a transcript of them,
+    /// so a verb added without a scope fails on the coverage assertion and a
+    /// verb whose scope is outside the ceiling fails on the membership one.
+    /// What it does NOT check: that the scope named here is the scope the
+    /// handler actually requires. That mapping is prose in the table above;
+    /// only the reachability of what it names is mechanical.
+    #[test]
+    fn every_shipped_verb_names_a_scope_the_cli_can_be_issued() {
+        let mut ruled_on = 0_usize;
+        for (verbs, table, label) in [
+            (SUBCOMMANDS, SUBCOMMAND_SCOPES, "zeroship organization"),
+            (
+                PROJECT_VERBS,
+                PROJECT_VERB_SCOPES,
+                "zeroship organization projects",
+            ),
+        ] {
+            for verb in verbs {
+                let scopes = table
+                    .iter()
+                    .find(|(name, _)| name == verb)
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "`{label} {verb}` ships with no declared scope; name the action \
+                             its handler requires"
+                        )
+                    })
+                    .1;
+                for scope in scopes {
+                    assert!(
+                        PLATFORM_CLI_ISSUABLE_SCOPES.contains(scope),
+                        "`{label} {verb}` needs {scope}, which no token \
+                         `zeroship login` can mint may carry: it is outside \
+                         PLATFORM_CLI_ISSUABLE_SCOPES, so the token policy denies the action \
+                         at any rank"
+                    );
+                    ruled_on += 1;
+                }
+            }
+            for (verb, _) in table {
+                assert!(
+                    verbs.contains(verb),
+                    "`{label} {verb}` has a declared scope but is not advertised"
+                );
+            }
+        }
+        assert!(
+            ruled_on >= 20,
+            "ruled on {ruled_on} verb/scope pair(s), which is fewer than this table declares"
         );
     }
 
