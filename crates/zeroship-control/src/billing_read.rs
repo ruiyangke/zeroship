@@ -1091,6 +1091,16 @@ async fn unbilled_priced_periods<C: GenericClient + Sync>(
     // reconcile that did not finish, and it carries zero amounts, so counting
     // it here would suppress this arm while leaving the invoice arm nothing to
     // see.
+    //
+    // A DRAFT WINS OVER A SETTLEMENT, which is why this is a disjunction rather
+    // than one NOT EXISTS. `void_reissue::void_and_reissue` commits the void
+    // before it writes the replacement, so a period can legitimately hold a
+    // void row AND a draft at once. Asking only "is there a finalized or void
+    // row" lets the void answer for the period and hides the draft's money
+    // exactly as the bare row-existence test used to. The two cannot both be
+    // stale in the other direction: `invoices_organization_active_period_claim`
+    // is unique on (organization_id, period) where status is not void, so a
+    // draft and a finalized invoice cannot coexist for one period.
     let candidate_rows = conn
         .query(
             "SELECT DISTINCT u.period::date AS period \
@@ -1098,11 +1108,16 @@ async fn unbilled_priced_periods<C: GenericClient + Sync>(
                JOIN zeroship.apps a ON a.id = u.app_id \
               WHERE a.organization_id = $1 \
                 AND u.period < date_trunc('month', NOW())::date \
-                AND NOT EXISTS ( \
-                      SELECT 1 FROM zeroship.invoices i \
-                       WHERE i.organization_id = a.organization_id \
-                         AND i.period = u.period \
-                         AND i.status IN ('finalized', 'void')) \
+                AND ( EXISTS ( \
+                        SELECT 1 FROM zeroship.invoices i \
+                         WHERE i.organization_id = a.organization_id \
+                           AND i.period = u.period \
+                           AND i.status = 'draft') \
+                      OR NOT EXISTS ( \
+                        SELECT 1 FROM zeroship.invoices i \
+                         WHERE i.organization_id = a.organization_id \
+                           AND i.period = u.period \
+                           AND i.status IN ('finalized', 'void')) ) \
               ORDER BY 1",
             &[&organization_id],
         )
