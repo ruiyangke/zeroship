@@ -161,51 +161,15 @@ pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
     // The fixture was simply less configured than any real deployment, so the
     // fix is here rather than in the three tests that already set these by
     // hand for their own reasons.
-    let (hash_file, idem_file) = session_key_files();
+    //
+    // The pair comes from `zeroship-test-support` rather than from a local
+    // helper, because the control plane's `PlatformOp` fixture builds its own
+    // `AuthConfig` the same way and MISSED this when it was added here. One
+    // function is what stops the two drifting again.
+    let (hash_file, idem_file) = zeroship_test_support::session_key_files();
     cfg.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_file);
     cfg.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_file);
     cfg
-}
-
-/// Owner-only key files for the session-secret keyring, one pair per process.
-///
-/// Memoised: `SessionSecretKeys::from_files` reads them on every exchange, and
-/// a per-CALL temp dir would leave one directory per token request behind.
-#[allow(dead_code)]
-fn session_key_files() -> (std::path::PathBuf, std::path::PathBuf) {
-    use std::io::Write as _;
-    static FILES: std::sync::OnceLock<(std::path::PathBuf, std::path::PathBuf)> =
-        std::sync::OnceLock::new();
-    FILES
-        .get_or_init(|| {
-            let dir = std::env::temp_dir().join(format!(
-                "zs-auth-fixture-keys-{}",
-                uuid::Uuid::new_v4().simple()
-            ));
-            std::fs::create_dir_all(&dir).expect("fixture key dir");
-            let hash_path = dir.join("refresh-hmac.keys");
-            let idem_path = dir.join("refresh-idem.key");
-            for (path, body) in [
-                (
-                    &hash_path,
-                    "1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\n"
-                        .as_bytes(),
-                ),
-                (&idem_path, "fixture-idempotency-master-secret".as_bytes()),
-            ] {
-                let mut file = std::fs::File::create(path).expect("create fixture key file");
-                file.write_all(body).expect("write fixture key file");
-                drop(file);
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt as _;
-                    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-                        .expect("chmod fixture key file");
-                }
-            }
-            (hash_path, idem_path)
-        })
-        .clone()
 }
 
 /// A secret in the shape an in-memory literal resolves to. See

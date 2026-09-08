@@ -575,6 +575,18 @@ impl PlatformOp {
                                 .to_string(),
                         ),
                     );
+                    // The session-secret keyring. Every token exchange
+                    // establishes a session whose secret is hashed under it, so
+                    // without it the device-grant exchange below answers 500
+                    // with "refresh hash key is not configured" instead of a
+                    // token. Shared with the auth crate's fixture through
+                    // `zeroship-test-support`, which is where the two stopped
+                    // being able to drift apart.
+                    let (hash_file, idem_file) = zeroship_test_support::session_key_files();
+                    cfg.settings.refresh_hash_key_file =
+                        zeroship_core::config::Operational::new(hash_file);
+                    cfg.settings.refresh_idem_key_file =
+                        zeroship_core::config::Operational::new(idem_file);
                     let cfg = Arc::new(cfg);
                     let issuer_url = cfg.op_issuer_url();
                     assert_eq!(issuer_url, PLATFORM_OP_ISSUER);
