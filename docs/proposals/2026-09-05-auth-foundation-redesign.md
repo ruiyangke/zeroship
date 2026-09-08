@@ -2046,6 +2046,31 @@ and the narrowing holds exactly until the fleet is busy, which is when an attack
 would want it to fail and when nobody is reading logs. A fence with a
 load-dependent bypass is worse than none, because it tests green.
 
+*The health monitor, and the trap waiting in it.* An eligible set computed over
+`status = 'active'` is a set of instances that were once active, not ones that are
+alive: enrolment is per boot, nothing transitions a row, and a crash-looping worker
+leaves a fresh `active` row per attempt. Something must observe liveness.
+
+**That something must NOT write its observation into `status`.** The column is a
+closed set over what a WRITER DECLARED, and
+`db/migrations-ts/20260907000300_worker_instances.ts` already says why readiness is
+excluded: readiness is a probe result, it is derived, it expires, and it belongs to
+whatever performed the probe. Admitting it would make one column carry two kinds of
+fact and leave readers disagreeing about which they hold.
+
+The trap, if that rule is broken: `gone` is TERMINAL, there is no path back, and a
+worker only re-enrols by restarting. A monitor that writes `gone` on a failed probe
+therefore turns a transient network blip into the permanent eviction of a healthy
+worker, recoverable only by killing it. The blast radius grows with fleet size and
+peaks during exactly the partial-partition conditions that produced the blip.
+
+So: the monitor holds observed liveness in its own short-lived state, and the
+eligible-set computation intersects declared `active` with recently-observed-healthy.
+The table keeps what control declared; the monitor keeps what it saw; neither is
+written into the other. What may promote a long-unhealthy instance to `gone` is a
+retention decision with an operator in it, not a probe timeout - and it is not
+settled here.
+
 *Prerequisite, and it is unavoidable under any variant of this step.* Per-instance
 worker identity must land first. `ServiceKeyring::load` in
 `crates/zeroship-core/src/service_peers.rs` reads one signing key per BINARY ROLE
