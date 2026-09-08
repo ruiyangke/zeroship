@@ -2,7 +2,6 @@
 
 use crate::common;
 
-use std::path::PathBuf;
 use std::sync::Arc;
 
 use base64::{engine::general_purpose::STANDARD, Engine as _};
@@ -15,7 +14,6 @@ use zeroship_auth::headers::SecurityHeaders;
 use zeroship_auth::oidc::{AccessTokenMint, Issuer};
 use zeroship_auth::oidc::refresh::RefreshSessionPool;
 use zeroship_auth::server;
-use zeroship_core::config::Operational;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 use zeroship_auth::identity::deletion_cancel;
@@ -53,7 +51,6 @@ struct Fixture {
     app_id: Uuid,
     user_id: Uuid,
     session_cookie: String,
-    key_dir: PathBuf,
 }
 
 impl Fixture {
@@ -102,19 +99,15 @@ impl Fixture {
             .expect("cookie pair")
             .to_string();
 
-        let key_dir = make_key_dir();
-        let hash_key_file = key_dir.join("refresh-hmac.keys");
-        let idem_key_file = key_dir.join("refresh-idem.key");
-        write_secret_file(
-            &hash_key_file,
-            b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        );
-        write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
-
-        let mut cfg = test_auth_config(&db_url);
-        cfg.settings.refresh_hash_key_file = Operational::new(hash_key_file);
-        cfg.settings.refresh_idem_key_file = Operational::new(idem_key_file);
-        let cfg = Arc::new(cfg);
+        // The session-secret keyring this file's whole MED-2 refresh path
+        // needs comes from `test_auth_config`, which takes it from
+        // `zeroship_test_support::session_key_files`. This fixture used to
+        // write its own pair into its own temp directory and overwrite the
+        // shared one with material of the same shape. That second copy is the
+        // duplication which let the control plane's fixture ship with NO
+        // keyring and answer the exchange `refresh hash key is not
+        // configured`, so the operation now has one definition.
+        let cfg = Arc::new(test_auth_config(&db_url));
         let cfg_state = cfg.clone();
         let db_state = db.clone();
         let issuer_state = issuer.clone();
@@ -146,13 +139,14 @@ impl Fixture {
             app_id,
             user_id,
             session_cookie,
-            key_dir,
         })
     }
 
     async fn cleanup(self) {
         cleanup_seeded_rows(&self.db, self.user_id, self.app_id, &self.client_id).await;
-        let _ = std::fs::remove_dir_all(&self.key_dir);
+        // No key directory to remove: the keyring is the process-wide one
+        // `session_key_files` memoises, and every other fixture in this binary
+        // is pointed at the same files.
         drop(self.srv);
     }
 }
@@ -1180,22 +1174,6 @@ fn db_url() -> Option<String> {
 fn test_issuer() -> Issuer {
     let signing = common::op_signing_key();
     Issuer::from_signing_key(&signing, [11u8; 32], ISSUER.to_string()).expect("issuer")
-}
-
-fn make_key_dir() -> PathBuf {
-    let path = std::env::temp_dir().join(format!("zs-refresh-keys-{}", Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&path).expect("create key dir");
-    path
-}
-
-fn write_secret_file(path: &std::path::Path, bytes: &[u8]) {
-    std::fs::write(path, bytes).expect("write secret file");
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .expect("secret file permissions");
-    }
 }
 
 async fn seed_user_client(
