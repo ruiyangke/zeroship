@@ -122,7 +122,15 @@ impl Drop for Fixture {
     }
 }
 
-async fn fixture_with_platform(label: &str, user_id: Uuid) -> Option<Fixture> {
+/// A fixture, or no run at all.
+///
+/// IT RETURNED `Option<Fixture>` UNTIL 2026-09-08, and no arm of it could ever
+/// produce `None`: `db_url` ends the process when there is no migrated
+/// database, and everything after it `expect`s. What the `Option` did produce
+/// was a file full of `let Some(fx) = ... else { return }` - the shape that
+/// used to mean "pass silently" - left standing as a template. Returning the
+/// value makes it unwritable rather than merely unreachable.
+async fn fixture_with_platform(label: &str, user_id: Uuid) -> Fixture {
     let jwks = PlatformJwksMock::start();
     let auth_provider = platform_auth_provider(jwks.jwks_url());
     fixture_with_auth_provider(label, user_id, auth_provider, Some(jwks)).await
@@ -133,7 +141,7 @@ async fn fixture_with_auth_provider(
     user_id: Uuid,
     auth_provider: Arc<AuthProvider>,
     jwks: Option<PlatformJwksMock>,
-) -> Option<Fixture> {
+) -> Fixture {
     let db_url = db_url();
 
     let (control_pg_client, control_pg_conn) = connect(&db_url, NoTls).await.expect("control-pg connect");
@@ -200,7 +208,7 @@ async fn fixture_with_auth_provider(
     });
 
     insert_user(&state, user_id, label).await;
-    Some(Fixture {
+    Fixture {
         state,
         user_id,
         app_id: None,
@@ -208,7 +216,7 @@ async fn fixture_with_auth_provider(
         deploy_tmp_dir,
         _jwks: jwks,
         _op: None,
-    })
+    }
 }
 
 async fn insert_user(state: &AppState, user_id: Uuid, label: &str) {
@@ -723,16 +731,7 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
     let database_url = db_url();
     let op = PlatformOp::start(auth_role_db_url(&database_url));
     let auth_provider = platform_auth_provider_for(&op.issuer, op.jwks_url());
-    let Some(mut fx) = fixture_with_auth_provider(
-        "op-cli-control",
-        user_id,
-        auth_provider,
-        None,
-    )
-    .await
-    else {
-        return;
-    };
+    let mut fx = fixture_with_auth_provider("op-cli-control", user_id, auth_provider, None).await;
     fx._op = Some(op);
     assert_platform_cli_registration(&fx.state.control_pg).await;
     let app_id = create_app(&mut fx, "op-cli-control").await;
@@ -948,9 +947,7 @@ async fn op_cli_device_token_authorizes_control_endpoint() {
 #[compio::test]
 async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
     let user_id = Uuid::new_v4();
-    let Some(mut fx) = fixture_with_platform("platform-issuer", user_id).await else {
-        return;
-    };
+    let mut fx = fixture_with_platform("platform-issuer", user_id).await;
     let app_id = create_app(&mut fx, "platform-issuer").await;
     let app = init_control!(fx);
 
@@ -989,9 +986,7 @@ async fn platform_issuer_accepts_valid_token_and_rejects_unknown_issuer() {
 #[compio::test]
 async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
     let user_id = Uuid::new_v4();
-    let Some(mut fx) = fixture_with_platform("platform-revoked", user_id).await else {
-        return;
-    };
+    let mut fx = fixture_with_platform("platform-revoked", user_id).await;
     let app_id = create_app(&mut fx, "platform-revoked").await;
     let app = init_control!(fx);
 
@@ -1033,9 +1028,7 @@ async fn platform_access_token_revocation_marker_rejects_within_cache_ttl() {
 #[compio::test]
 async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_token() {
     let user_id = Uuid::new_v4();
-    let Some(fx) = fixture_with_platform("bearer-verifier", user_id).await else {
-        return;
-    };
+    let fx = fixture_with_platform("bearer-verifier", user_id).await;
 
     let oauth_token = platform_token(user_id, "apps:read apps:deploy", PLATFORM_ISSUER);
     let oauth = fx
@@ -1105,9 +1098,7 @@ async fn bearer_verifier_directly_accepts_oauth_and_rejects_revoked_platform_tok
 #[compio::test]
 async fn oauth_token_with_apps_read_can_list_apps() {
     let user_id = Uuid::new_v4();
-    let Some(fx) = fixture_with_platform("apps-read", user_id).await else {
-        return;
-    };
+    let fx = fixture_with_platform("apps-read", user_id).await;
     let app = init_control!(fx);
     let request_id = format!("req_h4_{}", Uuid::new_v4().simple());
 
@@ -1148,9 +1139,7 @@ async fn oauth_token_with_apps_read_can_list_apps() {
 #[compio::test]
 async fn oauth_token_owned_by_anonymized_user_returns_401() {
     let user_id = Uuid::new_v4();
-    let Some(fx) = fixture_with_platform("anonymized-owner", user_id).await else {
-        return;
-    };
+    let fx = fixture_with_platform("anonymized-owner", user_id).await;
     let app = init_control!(fx);
 
     fx.state
@@ -1181,9 +1170,7 @@ async fn oauth_token_owned_by_anonymized_user_returns_401() {
 #[compio::test]
 async fn oauth_token_ignores_standard_oidc_scopes() {
     let user_id = Uuid::new_v4();
-    let Some(fx) = fixture_with_platform("oidc-scopes", user_id).await else {
-        return;
-    };
+    let fx = fixture_with_platform("oidc-scopes", user_id).await;
     let app = init_control!(fx);
 
     // Native platform token carrying standard OIDC scopes alongside the one
@@ -1227,9 +1214,7 @@ async fn oauth_token_ignores_standard_oidc_scopes() {
 #[compio::test]
 async fn creator_self_service_creates_and_lists_only_own_apps() {
     let user_id = Uuid::new_v4();
-    let Some(mut fx) = fixture_with_platform("self-service", user_id).await else {
-        return;
-    };
+    let mut fx = fixture_with_platform("self-service", user_id).await;
 
     // Seed ANOTHER creator's app (different owner) directly. It must never show
     // up in this principal's scoped list.
@@ -1329,9 +1314,7 @@ async fn creator_self_service_creates_and_lists_only_own_apps() {
 #[compio::test]
 async fn oauth_token_without_required_scope_returns_403() {
     let user_id = Uuid::new_v4();
-    let Some(mut fx) = fixture_with_platform("missing-deploy", user_id).await else {
-        return;
-    };
+    let mut fx = fixture_with_platform("missing-deploy", user_id).await;
     let app_id = create_app(&mut fx, "missing-deploy").await;
     let app = init_control!(fx);
 
@@ -1352,9 +1335,7 @@ async fn oauth_token_without_required_scope_returns_403() {
 #[compio::test]
 async fn invalid_oauth_token_returns_401() {
     let user_id = Uuid::new_v4();
-    let Some(fx) = fixture_with_platform("invalid-token", user_id).await else {
-        return;
-    };
+    let fx = fixture_with_platform("invalid-token", user_id).await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
@@ -1379,9 +1360,7 @@ async fn invalid_oauth_token_returns_401() {
 #[compio::test]
 async fn oauth_token_wrong_audience_returns_401() {
     let user_id = Uuid::new_v4();
-    let Some(fx) = fixture_with_platform("wrong-audience", user_id).await else {
-        return;
-    };
+    let fx = fixture_with_platform("wrong-audience", user_id).await;
     let app = init_control!(fx);
 
     let token = platform_token_subject(
@@ -1408,9 +1387,7 @@ async fn oauth_token_wrong_audience_returns_401() {
 #[compio::test]
 async fn invalid_oauth_sub_returns_401() {
     let user_id = Uuid::new_v4();
-    let Some(fx) = fixture_with_platform("invalid-sub", user_id).await else {
-        return;
-    };
+    let fx = fixture_with_platform("invalid-sub", user_id).await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
@@ -1430,9 +1407,7 @@ async fn invalid_oauth_sub_returns_401() {
 #[compio::test]
 async fn unknown_scope_returns_401_not_silently_dropped() {
     let user_id = Uuid::new_v4();
-    let Some(fx) = fixture_with_platform("unknown-scope", user_id).await else {
-        return;
-    };
+    let fx = fixture_with_platform("unknown-scope", user_id).await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
@@ -1452,9 +1427,7 @@ async fn unknown_scope_returns_401_not_silently_dropped() {
 #[compio::test]
 async fn invalid_app_resource_id_returns_400_before_cedar() {
     let user_id = Uuid::new_v4();
-    let Some(fx) = fixture_with_platform("invalid-resource-id", user_id).await else {
-        return;
-    };
+    let fx = fixture_with_platform("invalid-resource-id", user_id).await;
     let app = init_control!(fx);
 
     let req = test::TestRequest::get()
@@ -1474,9 +1447,7 @@ async fn invalid_app_resource_id_returns_400_before_cedar() {
 #[compio::test]
 async fn oauth_token_subset_of_user_two_call_enforcement() {
     let user_id = Uuid::new_v4();
-    let Some(mut fx) = fixture_with_platform("token-subset", user_id).await else {
-        return;
-    };
+    let mut fx = fixture_with_platform("token-subset", user_id).await;
     let app_id = create_app(&mut fx, "token-subset").await;
     let app = init_control!(fx);
 
@@ -1601,9 +1572,7 @@ async fn seeding_marker_count(state: &AppState, principal_id: Uuid) -> i64 {
 #[compio::test]
 async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants() {
     let user_id = Uuid::new_v4();
-    let Some(mut fx) = fixture_with_platform("first-cli", user_id).await else {
-        return;
-    };
+    let mut fx = fixture_with_platform("first-cli", user_id).await;
     let app_id = create_app(&mut fx, "first-cli").await;
     let app = init_control!(fx);
 
@@ -1672,9 +1641,7 @@ async fn a_first_cli_request_is_authorized_and_materializes_the_default_grants()
 #[compio::test]
 async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
     let user_id = Uuid::new_v4();
-    let Some(mut fx) = fixture_with_platform("narrowed-cli", user_id).await else {
-        return;
-    };
+    let mut fx = fixture_with_platform("narrowed-cli", user_id).await;
     let app_id = create_app(&mut fx, "narrowed-cli").await;
     seed_grants(&fx.state, user_id, &["apps:read"]).await;
     let app = init_control!(fx);
@@ -1721,9 +1688,7 @@ async fn an_operator_deleting_a_grant_row_narrows_the_next_cli_request() {
 #[compio::test]
 async fn viewer_role_cannot_use_granted_apps_archive_scope() {
     let user_id = Uuid::new_v4();
-    let Some(mut fx) = fixture_with_platform("user-subset", user_id).await else {
-        return;
-    };
+    let mut fx = fixture_with_platform("user-subset", user_id).await;
     // The app is owned by a DIFFERENT principal; `user_id` is only a viewer.
     // (create_app now binds the creator as owner, so the principal-under-test
     // must NOT be the creator for this "viewer-only" scenario.)

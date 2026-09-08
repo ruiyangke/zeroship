@@ -50,12 +50,18 @@ struct Fx {
 }
 
 impl Fx {
-    /// `None` when no migrated database is configured. Returning rather than
-    /// skipping silently is the crate idiom; `common::require_control_db`
-    /// already ENDS the run when the variable is set but the schema is absent,
-    /// so reaching `None` here means the suite was asked to run without a
-    /// database at all.
-    async fn new() -> Option<Self> {
+    /// A fixture, or no run at all.
+    ///
+    /// IT RETURNED `Option<Self>` UNTIL 2026-09-08, under a comment saying
+    /// `None` meant "no migrated database is configured". That was never
+    /// reachable: `common::require_control_db` ENDS the process when the DSN is
+    /// absent and again when the schema is not there, so the only value this
+    /// could produce was `Some`. What the `Option` did produce was thirty-odd
+    /// `let Some(fx) = Fx::new().await else { return }` call sites - the exact
+    /// shape that used to mean "pass silently", left standing as a template for
+    /// the next test to copy. Returning the value makes it unwritable rather
+    /// than merely unreachable.
+    async fn new() -> Self {
         let url = common::require_control_db();
         let (pg, conn) = connect(&url, NoTls).await.expect("control-pg connect");
         compio::runtime::spawn(async move {
@@ -63,7 +69,7 @@ impl Fx {
         })
         .detach();
         let registry = Registry::new(&url).await.expect("registry");
-        Some(Self { registry, pg })
+        Self { registry, pg }
     }
 }
 
@@ -220,9 +226,7 @@ async fn email_of(pg: &Client, user: Uuid) -> String {
 /// granted.
 #[compio::test]
 async fn organization_project_rank_matches_the_authz_narrowing() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let pg = &fx.pg;
 
     // (organization_rank, project_rank, admin_rank)
@@ -293,9 +297,7 @@ async fn organization_project_rank_matches_the_authz_narrowing() {
 /// is attributable to the rank comparison and not to the actor's seat.
 #[compio::test]
 async fn an_admin_seats_below_itself_and_never_at_its_own_rank() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "rankorg").await;
     let admin = org.seat(&fx, "admin", "admin").await;
     let target = seed_user(&fx.pg, "target").await;
@@ -362,9 +364,7 @@ async fn an_admin_seats_below_itself_and_never_at_its_own_rank() {
 /// attributable to the floor and not to the role being granted.
 #[compio::test]
 async fn a_developer_seats_nobody_where_an_admin_seats_a_viewer() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "floororg").await;
     let developer = org.seat(&fx, "developer", "developer").await;
     let admin = org.seat(&fx, "admin", "admin").await;
@@ -418,9 +418,7 @@ async fn a_developer_seats_nobody_where_an_admin_seats_a_viewer() {
 /// authorized it.
 #[compio::test]
 async fn a_developer_invites_nobody_where_an_admin_invites_a_viewer() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "invfloor").await;
     let developer = org.seat(&fx, "developer", "developer").await;
     let admin = org.seat(&fx, "admin", "admin").await;
@@ -498,9 +496,7 @@ async fn pending_invites(fx: &Fx, organization_id: &str, email: &str) -> i64 {
 /// one did.
 #[compio::test]
 async fn a_developer_removes_nobody_where_an_admin_removes_a_viewer() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "rmfloor").await;
     let developer = org.seat(&fx, "developer", "developer").await;
     let admin = org.seat(&fx, "admin", "admin").await;
@@ -539,9 +535,7 @@ async fn a_developer_removes_nobody_where_an_admin_removes_a_viewer() {
 /// a developer may not write to a seat row at all.
 #[compio::test]
 async fn a_developer_reroles_nobody_where_an_admin_reroles_a_viewer() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "rolefloor").await;
     let developer = org.seat(&fx, "developer", "developer").await;
     let admin = org.seat(&fx, "admin", "admin").await;
@@ -598,9 +592,7 @@ async fn a_developer_reroles_nobody_where_an_admin_reroles_a_viewer() {
 /// does - which is what makes the ladder two integers rather than one.
 #[compio::test]
 async fn the_billing_axis_refuses_where_the_rank_axis_would_allow() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "billorg").await;
     let admin = org.seat(&fx, "admin", "admin").await;
 
@@ -651,9 +643,7 @@ async fn the_billing_axis_refuses_where_the_rank_axis_would_allow() {
 /// way to observe that the statement itself refuses rather than the band.
 #[compio::test]
 async fn a_revoked_member_is_refused_by_the_statement_not_by_cedar() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "revorg").await;
     let admin = org.seat(&fx, "admin", "admin").await;
     let target = seed_user(&fx.pg, "target").await;
@@ -705,9 +695,7 @@ async fn a_revoked_member_is_refused_by_the_statement_not_by_cedar() {
 /// remedy rather than reporting a constraint.
 #[compio::test]
 async fn the_last_owner_can_be_neither_removed_nor_demoted() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "lastorg").await;
 
     let removed = organizations::remove_member(&fx.registry, org.owner, &org.id, org.owner, None)
@@ -786,9 +774,7 @@ async fn the_last_owner_can_be_neither_removed_nor_demoted() {
 /// grants rank 40 while giving up rank 40 in the same transaction.
 #[compio::test]
 async fn transfer_moves_ownership_and_steps_the_previous_owner_down() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "xferorg").await;
     let successor = org.seat(&fx, "successor", "developer").await;
 
@@ -831,9 +817,7 @@ async fn transfer_moves_ownership_and_steps_the_previous_owner_down() {
 /// once somebody else owns it the statement is false.
 #[compio::test]
 async fn transferring_a_personal_organization_converts_it_to_shared() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let creator = seed_user(&fx.pg, "solo").await;
     let project = organizations::ensure_personal_project(&fx.registry, creator)
         .await
@@ -932,9 +916,7 @@ async fn transferring_a_personal_organization_converts_it_to_shared() {
 /// is that sentence, made a test.
 #[compio::test]
 async fn a_demoted_inviter_cannot_seat_by_a_pending_invite() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "invorg").await;
     let admin = org.seat(&fx, "admin", "admin").await;
     let joiner = seed_user(&fx.pg, "joiner").await;
@@ -1027,9 +1009,7 @@ async fn a_demoted_inviter_cannot_seat_by_a_pending_invite() {
 /// and a redemption by the wrong ACCOUNT is refused even with the right token.
 #[compio::test]
 async fn an_invite_seats_only_the_address_it_names() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "addrorg").await;
     let invited = seed_user(&fx.pg, "invited").await;
     let bystander = seed_user(&fx.pg, "bystander").await;
@@ -1098,9 +1078,7 @@ async fn an_invite_seats_only_the_address_it_names() {
 /// the row grants at most their organization rank.
 #[compio::test]
 async fn a_project_seat_grants_and_ceilings_but_never_widens() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "prjorg").await;
     let developer = org.seat(&fx, "developer", "developer").await;
     let default_project = org.default_project(&fx).await;
@@ -1193,9 +1171,7 @@ async fn a_project_seat_grants_and_ceilings_but_never_widens() {
 /// as the caller's mistake rather than as a database failure.
 #[compio::test]
 async fn a_project_seat_requires_an_organization_seat() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let org = Org::new(&fx, "fkorg").await;
     let outsider = seed_user(&fx.pg, "outsider").await;
     let default_project = org.default_project(&fx).await;
@@ -1227,9 +1203,7 @@ async fn a_project_seat_requires_an_organization_seat() {
 /// An organization update is owner-only, and the predicate is in the UPDATE.
 #[compio::test]
 async fn renaming_an_organization_is_reserved_to_its_owners() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "updorg").await;
     let admin = org.seat(&fx, "admin", "admin").await;
 
@@ -1271,9 +1245,7 @@ async fn renaming_an_organization_is_reserved_to_its_owners() {
 /// carries one so the zero-config path never needs it.
 #[compio::test]
 async fn creating_a_project_needs_admin_authority() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "mkorg").await;
     let developer = org.seat(&fx, "developer", "developer").await;
 
@@ -1314,9 +1286,7 @@ async fn creating_a_project_needs_admin_authority() {
 /// create response is the ONE place it exists.
 #[compio::test]
 async fn a_listed_invite_never_carries_its_token() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let org = Org::new(&fx, "listorg").await;
     let joiner = seed_user(&fx.pg, "joiner").await;
 
@@ -1387,9 +1357,7 @@ fn the_redeem_body_names_the_token_field() {
 /// the second half of this test would pass and an admin could demote a peer.
 #[compio::test]
 async fn a_member_may_leave_and_still_may_not_remove_anyone_else() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "leaveorg").await;
     let viewer = org.seat(&fx, "viewer", "viewer").await;
     let peer = org.seat(&fx, "peer", "viewer").await;
@@ -1449,9 +1417,7 @@ async fn a_member_may_leave_and_still_may_not_remove_anyone_else() {
 /// out without argument.
 #[compio::test]
 async fn the_last_owner_cannot_walk_out_and_is_told_the_remedy() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "soleowner").await;
     let heir = org.seat(&fx, "heir", "admin").await;
 
@@ -1492,9 +1458,7 @@ async fn the_last_owner_cannot_walk_out_and_is_told_the_remedy() {
 /// Leaving an organization you hold no seat in is a 404, not a silent success.
 #[compio::test]
 async fn leaving_without_a_seat_is_not_found() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let org = Org::new(&fx, "strangerorg").await;
     let stranger = seed_user(&fx.pg, "stranger").await;
 
@@ -1517,9 +1481,7 @@ async fn leaving_without_a_seat_is_not_found() {
 /// A project is renamed and re-slugged in one call, and a developer cannot.
 #[compio::test]
 async fn renaming_a_project_needs_admin_authority() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "renameprj").await;
     let developer = org.seat(&fx, "dev", "developer").await;
     let project = org.default_project(&fx).await;
@@ -1582,9 +1544,7 @@ async fn renaming_a_project_needs_admin_authority() {
 /// remedy, not a constraint name.
 #[compio::test]
 async fn a_project_owning_an_app_is_not_deleted() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let org = Org::new(&fx, "prjapps").await;
     let project = org.default_project(&fx).await;
     let app_name = format!("lifecycle{}", Uuid::new_v4().simple());
@@ -1631,9 +1591,7 @@ async fn a_project_owning_an_app_is_not_deleted() {
 /// Deleting a project takes its project seats with it, and refuses a developer.
 #[compio::test]
 async fn deleting_a_project_needs_admin_and_takes_its_seats() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "prjdelete").await;
     let developer = org.seat(&fx, "dev", "developer").await;
     let project = org.default_project(&fx).await;
@@ -1677,9 +1635,7 @@ async fn deleting_a_project_needs_admin_and_takes_its_seats() {
 /// A project seat NARROWS in one statement, never by delete-then-add.
 #[compio::test]
 async fn a_project_seat_is_narrowed_atomically() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "prjrole").await;
     let developer = org.seat(&fx, "dev", "developer").await;
     let project = org.default_project(&fx).await;
@@ -1775,9 +1731,7 @@ async fn a_project_seat_is_narrowed_atomically() {
 /// names how many remain.
 #[compio::test]
 async fn an_organization_with_projects_is_not_dissolved() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let org = Org::new(&fx, "dissolveorg").await;
     let project = org.default_project(&fx).await;
 
@@ -1810,9 +1764,7 @@ async fn an_organization_with_projects_is_not_dissolved() {
 /// second dissolve - rather than trusting that they all share the fence.
 #[compio::test]
 async fn a_dissolved_organization_reads_and_refuses_every_change() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "closedorg").await;
     let member = org.seat(&fx, "member", "developer").await;
     let project = org.default_project(&fx).await;
@@ -1914,9 +1866,7 @@ async fn a_dissolved_organization_reads_and_refuses_every_change() {
 /// Only an owner closes an organization.
 #[compio::test]
 async fn closing_an_organization_is_reserved_to_its_owners() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let mut org = Org::new(&fx, "adminclose").await;
     let admin = org.seat(&fx, "admin", "admin").await;
     let project = org.default_project(&fx).await;
@@ -1957,9 +1907,7 @@ async fn closing_an_organization_is_reserved_to_its_owners() {
 /// partial unique index would stop them minting a replacement.
 #[compio::test]
 async fn closing_a_personal_organization_frees_the_creator_to_start_again() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let owner = seed_user(&fx.pg, "solo").await;
 
     let first = organizations::ensure_personal_project(&fx.registry, owner)
@@ -2041,9 +1989,7 @@ async fn closing_a_personal_organization_frees_the_creator_to_start_again() {
 /// token that only this one message and the create response ever hold.
 #[compio::test]
 async fn an_invitation_is_mailed_and_the_outcome_recorded() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let org = Org::new(&fx, "mailorg").await;
     let joiner = seed_user(&fx.pg, "joiner").await;
     let joiner_email = email_of(&fx.pg, joiner).await;
@@ -2129,9 +2075,7 @@ async fn an_invitation_is_mailed_and_the_outcome_recorded() {
 /// same token still redeems.
 #[compio::test]
 async fn a_failed_send_records_failure_and_keeps_the_invitation_usable() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let org = Org::new(&fx, "failmail").await;
     let joiner = seed_user(&fx.pg, "joiner").await;
     let joiner_email = email_of(&fx.pg, joiner).await;
@@ -2189,9 +2133,7 @@ async fn a_failed_send_records_failure_and_keeps_the_invitation_usable() {
 /// not suppressed - is what makes the refusal attributable to the suppression.
 #[compio::test]
 async fn a_suppressed_address_is_not_mailed_and_says_so() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let org = Org::new(&fx, "suppressed").await;
     let blocked = seed_user(&fx.pg, "blocked").await;
     let blocked_email = email_of(&fx.pg, blocked).await;
@@ -2288,9 +2230,7 @@ async fn delivery_of(fx: &Fx, invite_id: &str) -> Option<String> {
 /// logged and swallowed, not a failed request, so nothing else would notice.
 #[compio::test]
 async fn the_delivery_vocabulary_is_the_one_the_check_admits() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let org = Org::new(&fx, "deliveryvocab").await;
     let joiner = seed_user(&fx.pg, "joiner").await;
     let created = organizations::create_invite(
@@ -2344,9 +2284,7 @@ async fn the_delivery_vocabulary_is_the_one_the_check_admits() {
 /// organization is open and accepted once it is closed.
 #[compio::test]
 async fn a_closed_organization_releases_its_slug() {
-    let Some(fx) = Fx::new().await else {
-        return;
-    };
+    let fx = Fx::new().await;
     let owner = seed_user(&fx.pg, "slugowner").await;
     let slug = format!("acme-{}", Uuid::new_v4().simple());
     let body = || CreateOrganizationBody {
@@ -2444,8 +2382,12 @@ async fn a_closed_organization_releases_its_slug() {
 #[compio::test]
 #[should_panic(expected = "affected 0 row(s)")]
 async fn seating_an_app_that_does_not_exist_refuses_instead_of_seating_nobody() {
-    // `expect`, not a `let else` that fabricates the expected panic: this must
-    // fail on a missing database rather than report the refusal it never saw.
-    let fx = Fx::new().await.expect("a migrated database");
+    // This case is `#[should_panic]`, and it used to be the ONE site in this
+    // file that did not write `let Some(fx) = ... else { return }` - a comment
+    // here spelled out that a silent early return would report "did not panic"
+    // rather than the refusal it never saw. That exception is gone with the
+    // shape that made it necessary: `Fx::new` returns the fixture, and a
+    // database it cannot reach ends the run before any case is entered.
+    let fx = Fx::new().await;
     common::seat_app_organization_member(&fx.pg, &Uuid::new_v4(), &Uuid::new_v4(), "owner").await;
 }
