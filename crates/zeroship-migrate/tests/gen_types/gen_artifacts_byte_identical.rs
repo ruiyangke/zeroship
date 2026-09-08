@@ -15,7 +15,7 @@
 //!
 //! The production contexts are deliberately different. The build uses `public` and
 //! the generated TypeScript copy of the schema-emit inject charter. The service uses
-//! the app UUID as its schema and the exact app-bound default confined policy composed
+//! the app id as its schema and the exact app-bound default confined policy composed
 //! by `zeroship-migrate-server`. This test feeds each side only the inputs it actually
 //! owns. It also reverses the request's document vector so the service arm has to
 //! restore the filename order that its apply loop uses.
@@ -53,7 +53,6 @@ mod migrate_server_policy;
 
 const SCHEMA: &str = "public";
 const OWNER: &str = "app_test";
-const SERVER_APP_ID: &str = "018f0c34-7c76-7a3c-8b93-1f7ad785c321";
 const BUILD_SHAPE_MODULE: &str =
     include_str!("../../../../sdks/vite-plugin/src/gen-types/confined-system-shape.generated.ts");
 
@@ -254,7 +253,7 @@ fn raw_ops(documents: &[IrDocumentFixture]) -> Vec<Op> {
 
 /// Render the request as the migration service can immediately after apply.
 ///
-/// This follows the service's real seams: filename order, app UUID schema, exact
+/// This follows the service's real seams: filename order, app id schema, exact
 /// app-bound default confined policy, then the op renderer's production policy-
 /// resolution seam. A normal Vite-produced migrations.ir.json has no optional policy
 /// draft, so the default/no-draft branch is the production build-to-server path.
@@ -274,14 +273,14 @@ fn render_as_migration_service(
         "the server render consumes the same filename order as apply"
     );
 
-    let app_id = SERVER_APP_ID.parse().expect("fixture app id is a UUID");
+    let app_id = zeroship_core::app_id::AppId::mint();
     let policy_config =
         migrate_server_policy::ManagedPolicyConfig::default_confined(vec![0_u8; 32], 1)
             .expect("the production default confined policy loads");
     let effective = policy_config
         .compose_effective_for_app(&app_id, None, None)
         .expect("the service composes its no-draft app policy");
-    let project_schema = app_id.to_string();
+    let project_schema = zeroship_core::app_derivation::schema_name(&app_id);
 
     let ops = raw_ops(&documents);
 
