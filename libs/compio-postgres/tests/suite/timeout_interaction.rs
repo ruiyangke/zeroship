@@ -667,7 +667,7 @@ async fn acquire_timeout_cannot_steal_a_connection_in_command_recovery() {
             // `max_size(1)` and `client` holds a live lease across the whole
             // join, so a competing `get()` must time out whether or not
             // "recovery" is a distinguished state at all -- a plain saturated
-            // pool produces this same `connection timeout after`. Read it as
+            // pool produces this same acquisition timeout. Read it as
             // "the waiter was refused cleanly and classified as a pool acquire
             // timeout", not as evidence about recovery.
             //
@@ -682,7 +682,7 @@ async fn acquire_timeout_cannot_steal_a_connection_in_command_recovery() {
             // is worth; the counts already fail on the bug this guards.
             let error = acquire.expect_err("competing caller stole the recovering entry");
             assert!(
-                common::error_chain(&error).contains("connection timeout after"),
+                error.is_pool_timeout(),
                 "competing caller got the wrong pool error: {error:?}"
             );
             assert_eq!(pool.metrics.timeouts.get(), 1);

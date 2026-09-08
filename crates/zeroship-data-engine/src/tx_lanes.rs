@@ -246,12 +246,10 @@ impl TxConnection {
 /// **This is what SC-1's `WithdrawSession` means, and a plain `drop` is not it.**
 /// `OwnedPooledClient::drop` calls `pool.return_client(entry)`, which
 /// republishes the lease as idle - so dropping a withdrawn session hands the
-/// next borrower exactly the connection the protocol withdrew. Closing the
-/// client's request channel first makes `PoolEntry::is_pool_eligible` false (it
-/// tests `!client.is_closed()`), and `return_client` then evicts the entry and
-/// releases its capacity slot rather than publishing it. The same
-/// close-before-drop idiom is what `backend::lock_guard::LockGuard::drop` uses
-/// to terminate a session whose advisory lock it could not release.
+/// next borrower exactly the connection the protocol withdrew. The lease's
+/// consuming `discard()` closes the physical connection and releases its pool
+/// capacity without offering it to another borrower. The advisory lock guard
+/// uses the same disposal path when it cannot confirm an unlock.
 ///
 /// SQLite has no pool to return to - the handle is an `Rc` clone of the single
 /// writer actor - so the withdrawal is the best-effort detached `ROLLBACK` that
@@ -259,10 +257,7 @@ impl TxConnection {
 /// not touch the live transaction on the worker thread.
 pub fn destroy_tx_connection(client: TxConnection) {
     match client {
-        TxConnection::Postgres(mut client) => {
-            client.__private_api_close();
-            drop(client);
-        }
+        TxConnection::Postgres(client) => client.discard(),
         TxConnection::Sqlite(handle) => {
             if let Err(error) = handle.try_exec_detached("ROLLBACK", &[]) {
                 tracing::warn!(

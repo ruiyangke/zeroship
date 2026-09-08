@@ -2238,9 +2238,9 @@ mod sc1_driver {
     ///
     /// **Mutation that reddens this arm:** make
     /// `context::destroy_tx_connection`'s Postgres arm a plain `drop(client)`
-    /// (delete the `__private_api_close()` call). The lease returns to the pool,
-    /// `total_count` stays 1, and the next checkout reports the SAME backend PID
-    /// the protocol withdrew.
+    /// instead of `client.discard()`. The lease returns to the pool and retains
+    /// its capacity slot; the next checkout reports the same backend PID the
+    /// protocol withdrew.
     #[test]
     fn a_withdrawn_session_never_comes_back_from_the_pool() {
         const APP: &str = "zs_sc1drv_withdraw";

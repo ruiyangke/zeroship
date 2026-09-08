@@ -402,6 +402,8 @@ enum Kind {
     Config,
     RowCount,
     Connect,
+    PoolClosed,
+    PoolTimeout,
     /// A post-startup target-session probe produced a valid rejection, an SQL
     /// error, or an unusable result. This rejects the current configured host,
     /// skipping its other transports and addresses, but permits the next host.
@@ -499,6 +501,8 @@ impl fmt::Display for Error {
             Kind::Config => fmt.write_str("invalid configuration"),
             Kind::RowCount => fmt.write_str("query returned an unexpected number of rows"),
             Kind::Connect => fmt.write_str("error connecting to server"),
+            Kind::PoolClosed => fmt.write_str("pool is closed"),
+            Kind::PoolTimeout => fmt.write_str("pool acquisition timed out"),
             Kind::TargetSessionAttrs => fmt.write_str("error checking target session attributes"),
             Kind::TargetSessionAttrsFatal => {
                 fmt.write_str("error communicating during target session attribute check")
@@ -535,6 +539,22 @@ impl Error {
     /// Determines if the error was associated with closed connection.
     pub fn is_closed(&self) -> bool {
         self.0.kind == Kind::Closed
+    }
+
+    /// Whether acquisition was rejected because pool shutdown has begun.
+    #[must_use]
+    pub fn is_pool_closed(&self) -> bool {
+        self.0.kind == Kind::PoolClosed
+    }
+
+    /// Whether the pool's acquisition budget expired during startup or checkout.
+    ///
+    /// This includes connection setup, validation, and lifecycle hooks. It does
+    /// not imply that the pool was full or that the database was unreachable.
+    /// Command and socket deadlines have their own error predicates.
+    #[must_use]
+    pub fn is_pool_timeout(&self) -> bool {
+        self.0.kind == Kind::PoolTimeout
     }
 
     /// Whether the connection was refused because an earlier operation on it
@@ -765,6 +785,17 @@ impl Error {
         Error::new(Kind::Connect, Some(Box::new(e)))
     }
 
+    pub(crate) fn pool_closed() -> Error {
+        Error::new(Kind::PoolClosed, None)
+    }
+
+    pub(crate) fn pool_timeout(detail: String) -> Error {
+        Error::new(
+            Kind::PoolTimeout,
+            Some(Box::new(io::Error::new(io::ErrorKind::TimedOut, detail))),
+        )
+    }
+
     pub(crate) fn target_session_attrs(e: Error) -> Error {
         Error::new(Kind::TargetSessionAttrs, e.into_source())
     }
@@ -829,6 +860,38 @@ mod tests {
     use super::*;
     use bytes::BytesMut;
     use postgres_protocol::message::backend::Message;
+
+    #[test]
+    fn pool_errors_are_typed_independently_of_their_messages() {
+        let closed = Error::pool_closed();
+        let timeout = Error::pool_timeout("diagnostic context".into());
+        assert!(closed.is_pool_closed());
+        assert!(!closed.is_closed());
+        assert!(!closed.is_pool_timeout());
+        assert_eq!(closed.to_string(), "pool is closed");
+        assert!(timeout.is_pool_timeout());
+        assert!(!timeout.is_pool_closed());
+        assert!(!timeout.is_command_timeout());
+        assert!(!timeout.is_read_timeout());
+        assert_eq!(timeout.to_string(), "pool acquisition timed out");
+        let source = timeout
+            .source()
+            .unwrap()
+            .downcast_ref::<io::Error>()
+            .unwrap();
+        assert_eq!(source.kind(), io::ErrorKind::TimedOut);
+        assert_eq!(source.to_string(), "diagnostic context");
+        for error in [
+            Error::connect(io::Error::other("pool is closed")),
+            Error::connect(io::Error::other("pool acquisition timed out")),
+            Error::closed(),
+            Error::command_timeout(None),
+            Error::read_timeout(Duration::from_secs(1)),
+        ] {
+            assert!(!error.is_pool_closed(), "misclassified {error:?}");
+            assert!(!error.is_pool_timeout(), "misclassified {error:?}");
+        }
+    }
 
     /// Build a real `ErrorResponseBody` by framing `fields` and running the
     /// protocol crate's own parser over it, rather than reaching into its
