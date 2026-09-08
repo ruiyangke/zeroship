@@ -23,8 +23,9 @@ use zeroship_core::service_identity::{
     TrustDomain,
 };
 use zeroship_core::service_peers::{
-    load_peer_bundle, load_signing_key, service_issuer, PeerKeyError, ServiceAuth, ServiceKeyring,
-    AUTH_SERVICE_NAME, CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME, WORKER_SERVICE_NAME,
+    load_peer_bundle, load_signing_key, service_issuer, InstanceSigningKey, PeerKeyError,
+    ServiceAuth, ServiceKeyring, AUTH_SERVICE_NAME, CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME,
+    WORKER_SERVICE_NAME,
 };
 
 /// A generated ed25519 keypair written to a 0600 PKCS#8 PEM file.
@@ -622,6 +623,119 @@ async fn a_role_keyring_is_addressed_by_the_name_it_mints_under() {
         .await
         .expect("the role-to-role call is unchanged by the separation");
     assert!(identity.matches_principal(&gateway_principal()));
+}
+
+/// A bundle publishing exactly one public key, under exactly one issuer.
+///
+/// Built fresh per arm rather than cloned: a bundle is CONSUMED by the keyring
+/// it becomes, and two arms sharing one value would make the second arm's
+/// document whatever the first left behind.
+fn bundle_publishing(issuer: &ServiceIssuer, public: &[u8; 32]) -> ServiceTrustBundle {
+    let mut bundle = ServiceTrustBundle::new();
+    bundle
+        .trust(issuer, thumbprint_key_id(public), *public)
+        .expect("publish one key under one issuer");
+    bundle
+}
+
+/// A key generated at boot must appear in NO peer document, and that is the
+/// check that REPLACES the one `from_parts` applies.
+///
+/// `from_parts` refuses a key published under a FOREIGN issuer. Against a key
+/// drawn at boot that refusal cannot fire: a key nobody has ever seen is in no
+/// document. Inheriting it would leave the worker the one process whose F4
+/// own-key check reports exactly what a check that ruled and approved reports,
+/// having ruled on nothing. So the instance keyring refuses when its public half
+/// is in the bundle AT ALL - false on every honest boot, true on a planted entry
+/// or a key collision.
+///
+/// ONE VARIABLE, and it is the predicate itself: whether the key handed in is
+/// the one the document publishes. The control and the case take the SAME
+/// document, under the SAME issuer, through the SAME constructor. "The same key
+/// against two documents" is the other way to hold one variable and it is
+/// unwritable here by construction - the constructor MOVES the key, which is
+/// what stops a second handle on a boot-generated private half from existing.
+#[test]
+fn an_instance_keyring_refuses_a_key_the_peer_document_already_publishes() {
+    let instance = worker_instance_issuer();
+    let gateway = service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer");
+
+    let planted = InstanceSigningKey::generate();
+    let planted_public = *planted.public_key();
+
+    // THE CONTROL. The document is not empty and the issuer in it is the
+    // instance's own, so a refusal here could not be blamed on either; the key
+    // this boot drew is simply not the one published.
+    let honest = InstanceSigningKey::generate();
+    assert_ne!(
+        honest.public_key(),
+        &planted_public,
+        "two boot-generated keys are the ordinary case, and the whole check rests on it"
+    );
+    honest
+        .into_keyring(
+            instance.clone(),
+            bundle_publishing(&instance, &planted_public),
+        )
+        .expect("a key the document does not publish is what every honest boot draws");
+
+    // THE CASE. Same document, same issuer, and now the key handed in IS the
+    // published one. `from_parts` accepts exactly this shape - the issuer is the
+    // instance's own, so its foreign-issuer refusal has nothing to fire on - and
+    // nothing but the replaced check can refuse it.
+    let refusal = planted
+        .into_keyring(
+            instance.clone(),
+            bundle_publishing(&instance, &planted_public),
+        )
+        .expect_err("a boot-generated key the document already publishes must be refused");
+    match &refusal {
+        PeerKeyError::InstanceKeyAlreadyPublished {
+            instance_issuer,
+            published_under,
+        } => {
+            assert_eq!(instance_issuer, instance.as_str());
+            assert_eq!(published_under, instance.as_str());
+        }
+        other => panic!("the instance own-key refusal must be the one that speaks: {other:?}"),
+    }
+
+    // AND UNDER A FOREIGN ISSUER TOO, which is the half the inherited check
+    // would have covered. It is still the instance refusal that speaks, which is
+    // what makes this a replacement rather than a second opinion layered on one
+    // that can never rule.
+    let elsewhere = InstanceSigningKey::generate();
+    let elsewhere_public = *elsewhere.public_key();
+    let foreign = elsewhere
+        .into_keyring(
+            instance.clone(),
+            bundle_publishing(&gateway, &elsewhere_public),
+        )
+        .expect_err("a boot-generated key published under any issuer at all must be refused");
+    match &foreign {
+        PeerKeyError::InstanceKeyAlreadyPublished {
+            published_under, ..
+        } => assert_eq!(published_under, gateway.as_str()),
+        other => panic!("the instance refusal must cover a foreign issuer as well: {other:?}"),
+    }
+}
+
+/// The boot-generated private half has no printable rendering, pinned exactly.
+///
+/// Pinned by EQUALITY rather than by a "does not contain" sweep, because the
+/// bytes a leak would print are exactly the bytes this type refuses to hand out,
+/// so a test cannot name them to look for them. An added field shows up here as
+/// a changed string whether or not the author knew what it carried.
+#[test]
+fn a_boot_generated_instance_key_renders_only_its_key_id() {
+    let key = InstanceSigningKey::generate();
+    assert_eq!(
+        format!("{key:?}"),
+        format!(
+            "InstanceSigningKey {{ kid: \"{}\", .. }}",
+            thumbprint_key_id(key.public_key())
+        )
+    );
 }
 
 fn worker_principal() -> ServicePrincipal {
