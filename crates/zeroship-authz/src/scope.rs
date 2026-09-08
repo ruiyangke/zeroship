@@ -131,7 +131,7 @@ impl Scope {
             Self::AppsRead => "View your apps",
             Self::AppsWrite => "Create and modify your apps",
             Self::AppsDeploy => "Deploy code to your apps",
-            Self::AppsArchive => "Archive and restore your apps",
+            Self::AppsArchive => "Archive, restore and permanently delete your apps",
             Self::DeploymentsRead => "List deployment history",
             Self::EnvRead => "Read environment variables and allowed network hosts",
             Self::EnvWrite => "Modify environment variables and allowed network hosts",
@@ -265,9 +265,14 @@ mod tests {
     #[test]
     fn human_labels_are_consent_copy() {
         assert_eq!(Scope::AppsDeploy.human_label(), "Deploy code to your apps");
+        // `apps:archive` gates the TERMINAL delete as well as the reversible
+        // pair, so the copy has to say so. It said only "archive and restore"
+        // while `DELETE /api/apps/{id}` already required this same action - a
+        // screen naming one authority while the token carries another, which
+        // is the thing this function exists to prevent.
         assert_eq!(
             Scope::AppsArchive.human_label(),
-            "Archive and restore your apps"
+            "Archive, restore and permanently delete your apps"
         );
         assert_eq!(
             Scope::SecretsRead.human_label(),

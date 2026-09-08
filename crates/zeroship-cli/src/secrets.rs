@@ -528,9 +528,110 @@ fn curl_json(method: &str, url: &str, token: &str, body: Option<&str>) -> (u16, 
     }
 }
 
+/// The verbs `run` dispatches, and the scope each one's handler requires.
+///
+/// `vars` and `secrets` share a dispatcher but not an authority: the env
+/// handlers gate the var routes on `env:*` and the secret routes on
+/// `secrets:*`, so the same verb name needs a different scope depending on
+/// which resource it was reached through.
+#[cfg(test)]
+const VAR_VERB_SCOPES: &[(&str, &str)] = &[
+    ("set", "env:write"),
+    ("list", "env:read"),
+    ("ls", "env:read"),
+    ("rm", "env:write"),
+    ("del", "env:write"),
+    ("delete", "env:write"),
+];
+
+#[cfg(test)]
+const SECRET_VERB_SCOPES: &[(&str, &str)] = &[
+    ("set", "secrets:write"),
+    ("list", "secrets:read"),
+    ("ls", "secrets:read"),
+    ("rm", "secrets:write"),
+    ("del", "secrets:write"),
+    ("delete", "secrets:write"),
+    ("expose", "secrets:write"),
+    ("unexpose", "secrets:write"),
+    ("expose-list", "secrets:read"),
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use zeroship_core::device_grant::PLATFORM_CLI_ISSUABLE_SCOPES;
+
+    /// The peer of `every_shipped_verb_names_a_scope_the_cli_can_be_issued` in
+    /// `crate::organizations`, for the tool next door.
+    ///
+    /// It exists because the organization verbs were not the only ones outside
+    /// the ceiling: `var` needed `env:*` and `secret`'s mutating half needed
+    /// `secrets:write`, none of which a `zeroship login` token could carry, so
+    /// `var` answered 403 outright and `secret` was left with its two listing
+    /// verbs. Nothing was watching this tool when that was true.
+    ///
+    /// What it does NOT check, exactly as its peer does not: that the scope
+    /// named here is the one the handler requires. That mapping is prose;
+    /// only the reachability of what it names is mechanical.
+    #[test]
+    fn every_var_and_secret_verb_names_a_scope_the_cli_can_be_issued() {
+        let mut ruled_on = 0_usize;
+        for (table, tool) in [
+            (VAR_VERB_SCOPES, "zeroship var"),
+            (SECRET_VERB_SCOPES, "zeroship secret"),
+        ] {
+            for (verb, scope) in table {
+                assert!(
+                    PLATFORM_CLI_ISSUABLE_SCOPES.contains(scope),
+                    "`{tool} {verb}` needs {scope}, which no token `zeroship login` \
+                     can mint may carry: it is outside PLATFORM_CLI_ISSUABLE_SCOPES, \
+                     so the token policy denies the action at any rank"
+                );
+                ruled_on += 1;
+            }
+        }
+        assert!(
+            ruled_on >= 15,
+            "the verb tables shrank to {ruled_on}; a table that lost its rows \
+             rules on nothing and still passes"
+        );
+    }
+
+    /// Every verb `run` dispatches is declared above, so a verb added to the
+    /// match arm without a scope cannot slip past the guard by being invisible
+    /// to it.
+    #[test]
+    fn the_scope_tables_cover_every_verb_the_dispatcher_accepts() {
+        // Mirrors the match in `run`. Kept beside it deliberately: the compiler
+        // cannot derive this, so the guard is that both lists are edited here.
+        let dispatched = [
+            "set",
+            "list",
+            "ls",
+            "rm",
+            "del",
+            "delete",
+            "expose",
+            "unexpose",
+            "expose-list",
+        ];
+        for verb in dispatched {
+            // A var has no expose surface - exposure is what a SECRET needs, a
+            // var being readable already - so the var table is allowed to be
+            // the smaller one, and only the secret table must be total.
+            assert!(
+                SECRET_VERB_SCOPES.iter().any(|(name, _)| *name == verb),
+                "`run` dispatches `{verb}` but no secret scope is declared for it"
+            );
+        }
+        for (verb, _) in VAR_VERB_SCOPES {
+            assert!(
+                dispatched.contains(verb),
+                "`zeroship var {verb}` has a declared scope but `run` does not dispatch it"
+            );
+        }
+    }
 
     #[test]
     fn key_validation_matches_control_grammar() {
