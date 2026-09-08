@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
+use zeroship_core::service_assertion::ROLE_PATH_SEGMENTS;
 use zeroship_core::service_identity::{
     authorize, endpoints, service_allowlist, MechanismTag, ServiceEndpoint, ServiceIdentity,
     ServiceName, ServicePrincipal, TrustDomain,
@@ -239,6 +240,36 @@ fn each_principal_owns_exactly_one_allowlist_row() {
         assert_eq!(rows, 1, "{name} must own exactly one allowlist row");
     }
     assert_eq!(service_allowlist().len(), PRINCIPALS.len());
+}
+
+/// Every row names a ROLE, never one instance of a role.
+///
+/// This is the premise the arity rule in `ServiceIssuer::parse` rests on. That
+/// parser reads a role path as a role and one segment more as an INSTANCE of
+/// that role, handing the role to the principal either way, so a row written
+/// against an instance path would be a grant no verified principal could ever
+/// match: an instance's assertion resolves to its role, and equality with the
+/// finer name would fail. `matches_principal` stays exact equality precisely
+/// because the hierarchy is resolved before it - the row and the principal are
+/// both roles by the time they meet.
+///
+/// Measured over `PRINCIPALS`, which `each_principal_owns_exactly_one_allowlist_row`
+/// binds to the table itself: every name there matches exactly one row and the
+/// two counts are equal, so no row exists that this loop did not rule on.
+///
+/// The bound comes from the parser rather than a literal, so moving the rule
+/// re-rules the table against the new one instead of silently agreeing with the
+/// old one.
+#[test]
+fn every_allowlist_row_names_a_role_and_not_an_instance_of_one() {
+    for name in PRINCIPALS {
+        assert_eq!(
+            name.split('/').count(),
+            ROLE_PATH_SEGMENTS,
+            "{name} is not a role path, so no assertion an instance of it mints could match \
+             this row"
+        );
+    }
 }
 
 /// Endpoints are matched by value, not by constant, so two catalog entries

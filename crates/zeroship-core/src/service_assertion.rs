@@ -191,6 +191,19 @@ pub enum AssertionError {
     /// An issuer identifier was not a well-formed `spiffe://` URI.
     #[error("malformed service issuer identifier")]
     MalformedIssuer,
+    /// A well-formed identifier whose path named neither a role nor one
+    /// instance of a role.
+    ///
+    /// SEPARATE from [`AssertionError::MalformedIssuer`] because nothing is
+    /// wrong with the syntax: the scheme, the domain and every segment are
+    /// exactly what that error is about, and the operator who reaches this one
+    /// has written a legible name that this stack cannot resolve. Folding the
+    /// two together would answer "which segment did you mean as the instance"
+    /// with "your URI is malformed".
+    ///
+    /// See [`ServiceIssuer::parse`] for why arity is what decides.
+    #[error("service issuer path names neither a role nor one instance of a role")]
+    IssuerNotRoleOrInstance,
     /// Key material could not be read or encoded.
     #[error("service key material rejected: {0}")]
     KeyMaterial(String),
@@ -204,7 +217,19 @@ pub enum AssertionError {
 
 // ─── Issuer identifiers ──────────────────────────────────────────────────
 
-/// A SPIFFE-shaped service issuer identifier: `spiffe://<domain>/<name>`.
+/// How many segments a ROLE path has: `svc/<name>`.
+///
+/// Public because it is the rule, not a detail of one parser: the row names in
+/// [`crate::service_identity::service_allowlist`] are roles, and the test that
+/// holds them to it reads this rather than a literal of its own, so moving the
+/// rule re-rules the table instead of leaving it agreeing with the old value.
+pub const ROLE_PATH_SEGMENTS: usize = 2;
+
+/// How many segments a role-plus-instance path has.
+const INSTANCE_PATH_SEGMENTS: usize = ROLE_PATH_SEGMENTS + 1;
+
+/// A SPIFFE-shaped service issuer identifier: `spiffe://<domain>/<role>` or
+/// `spiffe://<domain>/<role>/<instance>`.
 ///
 /// One type serves both `iss` and `aud`: it is the `iss` of every assertion a
 /// service mints and the `aud` of every assertion addressed to a service by
@@ -219,22 +244,53 @@ pub enum AssertionError {
 /// audience-injection attacks. Both ends of this module take the typed form, so
 /// `aud: "control/get_routes"` - the shape an early draft of the design
 /// proposed - cannot be constructed here at all.
+///
+/// # An identifier names a ROLE, optionally with an INSTANCE of it
+///
+/// The hierarchy is resolved HERE, in the parse, and nowhere downstream. A
+/// worker instance mints under `svc/worker/<wkr_id>`; the principal that
+/// identifier yields is `svc/worker`, so
+/// [`crate::service_identity::ServiceIdentity::matches_principal`] stays exact
+/// equality and an instance authorizes on its role's row.
+///
+/// Putting it downstream instead - a prefix test, a `starts_with`, an ancestor
+/// walk inside the authorization comparison - is the shape to refuse. It would
+/// widen authorization for EVERY principal in the system rather than for
+/// worker instances, and it would make `svc/workerx` a hazard: a name that is
+/// not under `svc/worker` by any hierarchy, and is under it by string prefix.
+///
+/// [`ServiceIssuer::as_str`] is unaffected and returns the full identifier, so
+/// the trust-bundle index, `aud` equality and the replay-store key all keep
+/// telling two instances of one role apart.
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
 pub struct ServiceIssuer {
     uri: String,
     principal: ServicePrincipal,
+    instance: Option<Box<str>>,
 }
 
 impl ServiceIssuer {
-    /// Parse a `spiffe://<trust domain>/<service name>` identifier.
+    /// Parse a role identifier or one instance of a role.
+    ///
+    /// # Arity is the discriminator, and deeper paths are refused
+    ///
+    /// A path of [`ROLE_PATH_SEGMENTS`] names a role; one segment more names an
+    /// instance of that role. Anything else is refused, in BOTH directions, and
+    /// the refusal is what keeps the rule decidable rather than a narrowing for
+    /// its own sake: with a deeper path admitted there is no answer to which
+    /// segment is the instance, and with a shallower one admitted a role path
+    /// is itself ambiguous between a role and an instance of a shorter role.
+    /// Every name this stack mints or verifies is one of the two admitted
+    /// shapes, so nothing is given up by saying so.
     ///
     /// # Errors
     ///
-    /// Returns [`AssertionError::MalformedIssuer`] unless the value is exactly
-    /// that shape: the scheme, a non-empty trust domain, and a non-empty path
-    /// of non-empty segments, over the restricted character set that keeps an
-    /// identifier unambiguous when it is read by a human or joined into a
-    /// replay-store key.
+    /// Returns [`AssertionError::MalformedIssuer`] unless the value is the
+    /// scheme, a non-empty trust domain, and a non-empty path of non-empty
+    /// segments, over the restricted character set that keeps an identifier
+    /// unambiguous when it is read by a human or joined into a replay-store
+    /// key; and [`AssertionError::IssuerNotRoleOrInstance`] when that path is
+    /// well formed and names neither shape.
     pub fn parse(value: &str) -> Result<Self, AssertionError> {
         let rest = value
             .strip_prefix(SPIFFE_SCHEME)
@@ -251,22 +307,45 @@ impl ServiceIssuer {
         }) {
             return Err(AssertionError::MalformedIssuer);
         }
+        let (role, instance) = match path.split('/').count() {
+            ROLE_PATH_SEGMENTS => (path, None),
+            INSTANCE_PATH_SEGMENTS => {
+                // Total, and the count above already proves the separator is
+                // there: an `expect` here would be a panic nothing can reach.
+                let (role, instance) = path
+                    .rsplit_once('/')
+                    .ok_or(AssertionError::MalformedIssuer)?;
+                (role, Some(instance))
+            }
+            _ => return Err(AssertionError::IssuerNotRoleOrInstance),
+        };
         Ok(Self {
             uri: value.to_owned(),
             principal: ServicePrincipal::new(
                 TrustDomain::new(domain),
-                ServiceName::new(path),
+                ServiceName::new(role),
             ),
+            instance: instance.map(Into::into),
         })
     }
 
     /// Return the identifier exactly as it travels on the wire.
+    ///
+    /// The FULL identifier, instance segment included. Everything that joins an
+    /// issuer reads this - the trust-bundle index, `aud` equality, the
+    /// `<iss>|<jti>` replay-store key - and every one of them must keep telling
+    /// two instances of one role apart.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.uri
     }
 
-    /// Return the principal this identifier names.
+    /// Return the principal this identifier names: its ROLE.
+    ///
+    /// An instance identifier yields the principal of the role it is an
+    /// instance of, which is what the allowlist is written against. The
+    /// instance segment is reached through [`ServiceIssuer::instance`] instead,
+    /// so authorization never sees it and cannot accidentally compare it.
     ///
     /// Trust domain and name are carried together, never handed out
     /// separately: comparing a name without its scope is the defect behind
@@ -274,6 +353,19 @@ impl ServiceIssuer {
     #[must_use]
     pub const fn principal(&self) -> &ServicePrincipal {
         &self.principal
+    }
+
+    /// Return the instance segment, when this identifier names one.
+    ///
+    /// A DISTINGUISHER and not a boundary. Enrolment authenticates with the
+    /// shared ROLE key, so whoever holds that key can enrol as many instances
+    /// as they like and each is as genuine as the last; what this buys is
+    /// attribution, per-instance revocation and a countable event. Nothing here
+    /// narrows what an instance may do, and a caller must not treat a distinct
+    /// instance segment as evidence of a distinct holder.
+    #[must_use]
+    pub fn instance(&self) -> Option<&str> {
+        self.instance.as_deref()
     }
 }
 
