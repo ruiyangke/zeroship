@@ -16,8 +16,12 @@
 //! whether the whole chain resolves and produces the right authority.
 //!
 //! Requires a test database with the committed migration corpus applied
-//! (`PG_TEST_URL`).
+//! (`PG_TEST_URL`). Without one this target REFUSES rather than skipping; the
+//! reasoning is in `crates/zeroship-authz/tests/common/mod.rs`.
 
+mod common;
+
+use common::live_dsn;
 use compio_postgres::{connect, Client, NoTls};
 use std::future::Future;
 use uuid::Uuid;
@@ -221,18 +225,14 @@ where
     F: FnOnce(Client) -> Fut,
     Fut: Future<Output = ()>,
 {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skipping (no test database; set PG_TEST_URL)");
-        return;
-    };
     // The preflight, before the first fixture INSERT. On 2026-09-07 the
     // database this reads held every schema these tests need and had never seen
     // `db/migrations-ts/20260906000100_apps_organization_and_billing_subject.ts`,
     // so the resolve query below failed on a missing `apps.organization_id` and
     // this file reported a stale database as a code regression. It refuses now,
-    // naming `deploy/ops/db-migrate.sh`. Memoised per process; it is called from
-    // the one gate every test here goes through.
-    zeroship_testkit::live_db::require_once(&dsn, zeroship_testkit::live_db::PLATFORM_SCHEMAS);
+    // naming `deploy/ops/db-migrate.sh` - and refuses just as loudly when no DSN
+    // was configured at all.
+    let dsn = live_dsn();
     compio::runtime::Runtime::new()
         .expect("create compio runtime")
         .block_on(async move {
