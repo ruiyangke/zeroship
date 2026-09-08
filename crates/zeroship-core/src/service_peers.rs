@@ -52,12 +52,12 @@
 //! than a silently preferred value - an operator who edits a `kid` by hand is
 //! saying something about which key this is, and the two answers must agree.
 //!
-//! # NO KEY IS SHARED, AND BOTH HALVES OF THAT ARE CHECKED AT STARTUP
+//! # NO KEY IS SHARED, AND THAT IS CHECKED AT STARTUP
 //!
 //! The per-issuer index is the security property, so a key reachable under two
-//! issuers is the property's absence. Two independent refusals hold it, and
-//! NEITHER SUBSUMES THE OTHER - they cut the space along different axes, and a
-//! deployment can hit either one without the other:
+//! issuers is the property's absence. Independent refusals hold it, and NONE
+//! SUBSUMES ANOTHER where both apply - they cut the space along different axes,
+//! and a deployment can hit any one of them without the others:
 //!
 //! - [`load_peer_bundle`] refuses a DOCUMENT that publishes one public key
 //!   under two issuers, whoever loads it. It is a property of the file alone,
@@ -68,8 +68,17 @@
 //!   property of the private key against the document, and no reader of the
 //!   document alone can evaluate it: a document naming that key exactly once,
 //!   under a foreign issuer, is well formed and duplicate-free.
+//! - [`InstanceSigningKey::into_keyring`] refuses a key drawn at boot that the
+//!   document publishes AT ALL, under any issuer including the instance's own.
+//!   It REPLACES the one above for the one process whose private half exists
+//!   nowhere but its own memory, because there the foreign-issuer question has
+//!   no content: a key nobody has ever seen is in no document, so that refusal
+//!   cannot fire while reporting exactly what a refusal that ruled and approved
+//!   reports. "Published anywhere" is false on every honest boot and true on a
+//!   planted entry or a key collision.
 //!
-//! The second is what fence F4 needs and the first cannot supply. `iss` never
+//! The second is what fence F4 needs and the first cannot supply; the third is
+//! what F4 needs where the second has nothing to rule on. `iss` never
 //! travels on an identity envelope - only a thumbprint `kid` does, derived by
 //! signer and verifier alike from the public bytes - so a document filing the
 //! WORKER's own key under the GATEWAY's issuer makes the worker's signer stamp
@@ -80,8 +89,9 @@
 //! from the issuer parsed out of the assertion it was handed, so a shared key
 //! is the ability to present as either of them.
 //!
-//! Both refuse the BOOT, for the reason the next section gives, and neither has
-//! an override. A check with a bypass flag is the shape this design replaced.
+//! Every one of them refuses the BOOT, for the reason the next section gives,
+//! and none has an override. A check with a bypass flag is the shape this
+//! design replaced.
 //!
 //! # A missing or unparseable document REFUSES STARTUP
 //!
@@ -239,6 +249,27 @@ pub enum PeerKeyError {
         /// error's cause and requires it to implement `Error`, which a
         /// provenance string is not.
         document: String,
+    },
+    /// A key this process generated for itself at boot is already published.
+    ///
+    /// The replacement for [`PeerKeyError::OwnKeyUnderForeignIssuer`] on the one
+    /// path where that refusal cannot fire; see
+    /// [`InstanceSigningKey::into_keyring`]. It names no file because the
+    /// keyring that raises it holds material rather than paths, and the document
+    /// is not what an operator would reach for first anyway: a key drawn from
+    /// the operating system's CSPRNG moments ago cannot honestly be in anyone's
+    /// document.
+    #[error(
+        "this process generated the key for {instance_issuer} at boot, but the peer trust bundle \
+         already publishes that exact public key under {published_under}: a key drawn moments ago \
+         cannot honestly be published anywhere, so the bundle carries a planted entry or two keys \
+         collided. Restarting draws a fresh key; if it recurs, the bundle is what to look at."
+    )]
+    InstanceKeyAlreadyPublished {
+        /// The identifier this process was about to mint under.
+        instance_issuer: String,
+        /// The issuer the bundle already files this public key under.
+        published_under: String,
     },
     /// The key material was rejected by the assertion mechanism.
     #[error("service key material: {0}")]
@@ -492,6 +523,129 @@ impl ServiceKeyring {
         self.bundle.take()
     }
 }
+
+/// The seal around a boot-generated private key.
+///
+/// A module rather than a naming convention, because the property it holds is a
+/// PRIVACY property and Rust scopes field privacy to a module. Nothing outside
+/// this one can reach the [`ServiceSigningKey`] inside an
+/// [`InstanceSigningKey`], so nothing outside it can route that key to
+/// [`ServiceKeyring::from_parts`] and skip the check
+/// [`InstanceSigningKey::into_keyring`] applies. Put the type beside the keyring
+/// instead and the seal becomes a review convention.
+mod instance_key {
+    use std::fmt;
+
+    use super::{PeerKeyError, ServiceKeyring};
+    use crate::service_assertion::{
+        thumbprint_key_id, ServiceIssuer, ServiceSigningKey, ServiceTrustBundle,
+    };
+
+    /// A signing key a process draws for ITSELF at boot, in memory.
+    ///
+    /// The third source of a service's own private half, beside the operator's
+    /// file ([`ServiceKeyring::load`]) and material a caller already holds
+    /// ([`ServiceKeyring::from_parts`]) - and the only one whose key exists
+    /// nowhere else. It has no accessor for the key, no `Clone`, no
+    /// serialization and no path, so a second handle on the private half cannot
+    /// come into existence and the bytes reach neither disk nor a log.
+    /// [`InstanceSigningKey::into_keyring`] consumes it, and is the one thing
+    /// that can.
+    ///
+    /// # Per-instance identity is a DISTINGUISHER, not a boundary
+    ///
+    /// A process minting under a name of its own is attributable, individually
+    /// revocable, and countable. It is not contained: enrolment authenticates
+    /// with the SHARED role key, so whoever holds that key can enrol as many
+    /// instances as they like and each one is as genuine as the last. Nothing
+    /// here narrows what an instance may do.
+    pub struct InstanceSigningKey {
+        key: ServiceSigningKey,
+        /// Kept beside the key rather than re-derived, so the bytes the check
+        /// compares and the bytes the caller publishes are read once.
+        public: [u8; 32],
+    }
+
+    impl fmt::Debug for InstanceSigningKey {
+        fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+            formatter
+                .debug_struct("InstanceSigningKey")
+                .field("kid", &thumbprint_key_id(&self.public))
+                .finish_non_exhaustive()
+        }
+    }
+
+    impl InstanceSigningKey {
+        /// Draw a fresh keypair from the operating system's CSPRNG.
+        #[must_use]
+        pub fn generate() -> Self {
+            let key = ServiceSigningKey::generate();
+            let public = key.verifying_key_bytes();
+            Self { key, public }
+        }
+
+        /// The public half, which is the only half that leaves this type.
+        ///
+        /// Public key material, so handing it out concedes nothing: it is what a
+        /// peer needs in order to CHECK this instance's signatures, and it is
+        /// what the check below compares the bundle against.
+        #[must_use]
+        pub const fn public_key(&self) -> &[u8; 32] {
+            &self.public
+        }
+
+        /// Spend this key on the keyring it exists to become.
+        ///
+        /// # The own-key check is REPLACED here, not inherited
+        ///
+        /// [`ServiceKeyring::from_parts`] refuses a process whose own public
+        /// half is published under a FOREIGN issuer. That is fence F4's own-key
+        /// check, and against a key drawn at boot it is VACUOUS BY
+        /// CONSTRUCTION - a key nobody has ever seen is in no document - so it
+        /// cannot fire while reporting exactly what a check that ruled and
+        /// approved reports. Inheriting it would leave this the one process
+        /// whose F4 own-key check cannot rule.
+        ///
+        /// So this refuses when the public half appears in the bundle AT ALL,
+        /// under any issuer including its own. On a boot-generated key that
+        /// predicate is false on every honest boot and true on a key collision
+        /// or a planted entry. It is strictly the stronger of the two, which is
+        /// why `from_parts` is still what builds the keyring: by the time its
+        /// own check runs there is nothing left for it to find.
+        ///
+        /// # It carries a `UserEnvelopeSigner` on this key, structurally
+        ///
+        /// [`ServiceKeyring`] holds one unconditionally, so the keyring this
+        /// returns has one built on the instance key. Stated rather than left to
+        /// be discovered, because it is not an endorsement of using it: only the
+        /// GATEWAY's envelopes are trusted anywhere, and a callee builds its
+        /// [`crate::user_envelope::UserEnvelopeVerifier`] for the gateway issuer
+        /// alone, so an envelope signed here resolves to no key. Whether a
+        /// process should hold a second signer at all is a question for its boot
+        /// path; this constructor does not answer it.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`PeerKeyError::InstanceKeyAlreadyPublished`] when the bundle
+        /// already publishes this key under any issuer, and otherwise whatever
+        /// [`ServiceKeyring::from_parts`] returns.
+        pub fn into_keyring(
+            self,
+            issuer: ServiceIssuer,
+            bundle: ServiceTrustBundle,
+        ) -> Result<ServiceKeyring, PeerKeyError> {
+            if let Some(published_under) = bundle.issuers_publishing(&self.public).first() {
+                return Err(PeerKeyError::InstanceKeyAlreadyPublished {
+                    instance_issuer: issuer.as_str().to_owned(),
+                    published_under: (*published_under).to_owned(),
+                });
+            }
+            ServiceKeyring::from_parts(issuer, self.key, bundle)
+        }
+    }
+}
+
+pub use instance_key::InstanceSigningKey;
 
 /// One process's whole service-assertion capability: mint outbound, verify
 /// inbound, or neither.
