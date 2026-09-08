@@ -96,5 +96,6 @@ mod stream_forwarder_recompute_test;
 mod stripe_reconcile_test;
 mod stripe_store;
 mod stripe_webhook_test;
+mod worker_enrolment_test;
 mod workflow_instance_api_test;
 mod workflow_plugin;
