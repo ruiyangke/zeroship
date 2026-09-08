@@ -324,6 +324,12 @@ async fn an_admitted_enrolment_records_the_derived_address_and_a_minted_ring_key
         .await
         .expect("the enrolled row is readable");
 
+    // CLEAN UP BEFORE ASSERTING, not after. A failing assertion panics past
+    // whatever follows it, so a `forget` at the end of the body leaves the probe
+    // row behind on exactly the runs that matter - which is how a mutation run
+    // of this suite left two rows in the registry for a later reader to find.
+    forget(&fixture.state.control_pg, &instance_id).await;
+
     // THE HOST IS THE OBSERVED PEER'S, THE PORT IS THE CALLER'S. That split is
     // the whole design: reading the port off the socket would advertise the
     // worker's ephemeral source port, and reading the host off the body would
@@ -344,7 +350,6 @@ async fn an_admitted_enrolment_records_the_derived_address_and_a_minted_ring_key
 
     assert_eq!(row.get::<_, &str>("status"), "active");
 
-    forget(&fixture.state.control_pg, &instance_id).await;
     drop(fixture);
     common::drain_pg().await;
 }
@@ -384,6 +389,11 @@ async fn two_enrolments_with_identical_input_land_different_ring_keys() {
             .get("ring_key");
         ids.push(id);
         ring_keys.push(ring_key);
+    }
+
+    // Both rows go before either assertion fires; see the note in the arm above.
+    for id in &ids {
+        forget(&fixture.state.control_pg, id).await;
     }
 
     assert_ne!(ring_keys[0], ring_keys[1], "the ring key must not be derivable from the request");
