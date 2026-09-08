@@ -1310,6 +1310,13 @@ pub async fn update_organization(
 /// The effect statement carries the whole comparison: the actor's live seat is
 /// a join inside the INSERT, so a member demoted or removed between the Cedar
 /// call and this statement inserts nothing.
+///
+/// It also carries the `admin` FLOOR, for the same reason
+/// [`add_project_member`] does. The strict inequality alone lets a developer
+/// seat a viewer, because rank 20 does outrank rank 10 - so without the floor,
+/// the band Cedar puts on `organization:members:write` would be the ONLY thing
+/// refusing that, and this module's promise is that Cedar is never the only
+/// fence.
 pub async fn add_member(
     registry: &Registry,
     principal: Uuid,
@@ -1330,21 +1337,36 @@ pub async fn add_member(
          SELECT $1, $2, target_role.role, $4, $4 \
            FROM zeroship.organization_roles target_role, {seat} \
           WHERE target_role.role = $3 \
+            AND actor_role.rank >= {admin} \
             AND actor_role.rank > target_role.rank \
             AND actor_role.billing_rank >= target_role.billing_rank \
          RETURNING role, added_at",
         seat = actor_seat("$1", "$4"),
+        admin = ladder_rank("$5"),
     );
     let rows = tx
         .query(
             &sql,
-            &[&organization_id, &body.user_id, &body.role, &principal],
+            &[
+                &organization_id,
+                &body.user_id,
+                &body.role,
+                &principal,
+                &ROLE_ADMIN,
+            ],
         )
         .await
         .map_err(|err| member_conflict(&err, "add member"))?;
 
     let Some(row) = rows.first() else {
-        return Err(classify_seat_refusal(&tx, organization_id, principal, &body.role).await);
+        return Err(classify_seat_refusal(
+            &tx,
+            organization_id,
+            principal,
+            &body.role,
+            Some(ROLE_ADMIN),
+        )
+        .await);
     };
     let added_at: DateTime<Utc> = row.get("added_at");
     let role: String = row.get("role");
@@ -1832,6 +1854,10 @@ pub async fn transfer_ownership(
 /// below carries the same comparison against the actor's LIVE seat, so the
 /// CHECK never has to be the thing that catches an escalation - it is the
 /// backstop, not the fence.
+///
+/// It carries the `admin` floor too, for the reason spelled out on
+/// [`add_member`]: inviting is seating with a delay, so the two statements must
+/// refuse the same actors.
 pub async fn create_invite(
     registry: &Registry,
     principal: Uuid,
@@ -1867,11 +1893,13 @@ pub async fn create_invite(
                 NOW() + $7::text::interval \
            FROM zeroship.organization_roles target_role, {seat} \
           WHERE target_role.role = $5 \
+            AND actor_role.rank >= {admin} \
             AND actor_role.rank > target_role.rank \
             AND actor_role.billing_rank >= target_role.billing_rank \
          RETURNING id, organization_id, email::text AS email, role, issued_at, expires_at, \
                    consumed_at",
         seat = actor_seat("$3", "$6"),
+        admin = ladder_rank("$8"),
     );
     let rows = tx
         .query(
@@ -1884,13 +1912,21 @@ pub async fn create_invite(
                 &body.role,
                 &principal,
                 &ttl,
+                &ROLE_ADMIN,
             ],
         )
         .await
         .map_err(|err| invite_conflict(&err, "create invite"))?;
 
     let Some(row) = rows.first() else {
-        return Err(classify_seat_refusal(&tx, organization_id, principal, &body.role).await);
+        return Err(classify_seat_refusal(
+            &tx,
+            organization_id,
+            principal,
+            &body.role,
+            Some(ROLE_ADMIN),
+        )
+        .await);
     };
     let invite = row_to_invite(row);
 
@@ -2765,7 +2801,14 @@ pub async fn change_project_member_role(
         return Err(if seated.is_empty() {
             OrganizationError::MemberNotFound
         } else {
-            classify_seat_refusal(&tx, &organization_id, principal, &body.role).await
+            classify_seat_refusal(
+                &tx,
+                &organization_id,
+                principal,
+                &body.role,
+                Some(ROLE_ADMIN),
+            )
+            .await
         });
     };
     let added_at: DateTime<Utc> = row.get("added_at");
@@ -3117,17 +3160,32 @@ fn parse_project_id(raw: &str) -> Result<ProjectId, OrganizationError> {
 // diagnosis into the predicate would make the predicate describe the error
 // instead of the rule.
 
+/// `floor` is the ladder role the calling STATEMENT requires of the actor, or
+/// `None` for a statement that carries no floor. It is a parameter rather than a
+/// constant because the statements that reach here disagree: the seating and
+/// inviting writes require `admin`, while `change_member_role` and
+/// `remove_member` require only the strict inequality. A classifier that assumed
+/// either one would name the wrong refusal for the other half - and "needs a
+/// strictly higher rank" told to a developer who HAS a strictly higher rank is
+/// the kind of true-sounding message that sends a reader looking at the ladder
+/// instead of the floor.
 async fn classify_seat_refusal<C: GenericClient + Sync>(
     tx: &C,
     organization_id: &str,
     principal: Uuid,
     role: &str,
+    floor: Option<&str>,
 ) -> OrganizationError {
     let sql = format!(
         "SELECT (SELECT COUNT(*) FROM zeroship.organization_roles WHERE role = $3)::bigint \
                 AS role_known, \
-                (SELECT COUNT(*) FROM {seat})::bigint AS actor_seated",
+                (SELECT COUNT(*) FROM {seat})::bigint AS actor_seated, \
+                (SELECT COUNT(*) FROM {seat} WHERE actor_role.rank >= {floor})::bigint \
+                AS actor_over_floor",
         seat = actor_seat("$1", "$2"),
+        // No floor is spelled as rank >= 0, so `actor_over_floor` collapses onto
+        // `actor_seated` and the floor arm below cannot fire.
+        floor = floor.map_or_else(|| "0".to_string(), ladder_rank_of),
     );
     let rows = match tx.query(&sql, &[&organization_id, &principal, &role]).await {
         Ok(rows) => rows,
@@ -3138,6 +3196,7 @@ async fn classify_seat_refusal<C: GenericClient + Sync>(
     };
     let role_known: i64 = row.get("role_known");
     let actor_seated: i64 = row.get("actor_seated");
+    let actor_over_floor: i64 = row.get("actor_over_floor");
     if role_known == 0 {
         return OrganizationError::Invalid(format!(
             "unknown role {role:?}; the ladder is viewer, developer, billing, admin, owner"
@@ -3147,6 +3206,11 @@ async fn classify_seat_refusal<C: GenericClient + Sync>(
         return OrganizationError::Insufficient(
             "you hold no seat in this organization".to_string(),
         );
+    }
+    if let Some(floor) = floor.filter(|_| actor_over_floor == 0) {
+        return OrganizationError::Insufficient(format!(
+            "granting membership needs the {floor:?} rank or higher, whatever the role granted"
+        ));
     }
     OrganizationError::Insufficient(format!(
         "granting {role:?} needs a strictly higher rank and at least equal billing authority"
@@ -3187,7 +3251,10 @@ async fn classify_member_refusal<C: GenericClient + Sync>(
         return OrganizationError::LastOwner;
     }
     if let Some(role) = new_role {
-        return classify_seat_refusal(tx, organization_id, principal, role).await;
+        // `change_member_role`'s UPDATE carries no floor - the strict inequality
+        // against BOTH the held and the target role is its whole fence - so this
+        // classifier must not claim one.
+        return classify_seat_refusal(tx, organization_id, principal, role, None).await;
     }
     OrganizationError::Insufficient(format!(
         "removing a member holding {current_role:?} needs a strictly higher rank and at least \
@@ -3370,7 +3437,9 @@ async fn classify_project_seat_refusal<C: GenericClient + Sync>(
                     .to_string(),
             )
         }
-        Ok(_) => classify_seat_refusal(tx, organization_id, principal, role).await,
+        // The one caller is `add_project_member`, whose INSERT carries the
+        // `admin` floor.
+        Ok(_) => classify_seat_refusal(tx, organization_id, principal, role, Some(ROLE_ADMIN)).await,
         Err(err) => db_error(&err, "classify project seat refusal"),
     }
 }
