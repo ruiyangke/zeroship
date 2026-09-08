@@ -742,13 +742,18 @@ mod tests {
         // ceiling, so every one of those verbs answered 403 for every token
         // this function can ask for - `leave` included, which exists precisely
         // so a member can depart.
+        //
+        // `env:*` and `secrets:write` are the same defect one tool over:
+        // `zeroship var` and `zeroship secret` ship too, and with only
+        // `secrets:read` in the ceiling `var` was unusable outright and
+        // `secret` was reduced to its two listing verbs.
         assert_eq!(
             requested_scope(),
-            "apps:archive apps:deploy apps:read apps:write organization:admin \
-             organization:create organization:members:leave organization:members:read \
-             organization:members:write organization:read project:create \
-             project:members:read project:members:write project:read project:write \
-             secrets:read offline_access"
+            "apps:archive apps:deploy apps:read apps:write env:read env:write \
+             organization:admin organization:create organization:members:leave \
+             organization:members:read organization:members:write organization:read \
+             project:create project:members:read project:members:write project:read \
+             project:write secrets:read secrets:write offline_access"
         );
     }
 

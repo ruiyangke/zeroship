@@ -83,11 +83,23 @@ pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 /// the bearer path further intersects this ceiling with the principal's own
 /// stored grants (`crates/zeroship-authn/src/lib.rs`,
 /// `platform_cli_entitlement`).
-pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 16] = [
+pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 19] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    // `env:*` and `secrets:write` are here for the same reason the organization
+    // verbs are: the CLI SHIPS `zeroship var` and `zeroship secret`, and without
+    // these every verb but `secret ls` answers 403 for any credential the same
+    // tool can mint. `var` was unusable outright and `secret` was read-only.
+    // `env_handlers.rs` requires `EnvRead` to list vars, `EnvWrite` to set or
+    // remove one, and `SecretsWrite` to set, remove, expose or unexpose a
+    // secret; `secrets:read` alone covers only the two listing verbs.
+    //
+    // `env:*` also authorizes the egress allowlist, which the consent copy
+    // names outright rather than saying only "environment variables".
+    "env:read",
+    "env:write",
     // `organization:admin` is the one entry here whose loss a stolen token
     // would genuinely change, so it is the one that had to be argued rather
     // than assumed. It bands `dissolve` and `transfer` at owner rank, and
@@ -136,6 +148,7 @@ pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 16] = [
     "project:read",
     "project:write",
     "secrets:read",
+    "secrets:write",
 ];
 
 /// The scope that asks an OAuth authorization server for a refresh token.
@@ -153,11 +166,13 @@ pub const OFFLINE_ACCESS_SCOPE: &str = "offline_access";
 /// `zeroship login` that fails outright, not a verb that fails later.
 /// `the_registration_is_the_issuable_ceiling_plus_offline_access` holds them
 /// to that.
-pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 17] = [
+pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 20] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "env:read",
+    "env:write",
     "organization:admin",
     "organization:create",
     "organization:members:leave",
@@ -170,6 +185,7 @@ pub const PLATFORM_CLI_REGISTERED_SCOPES: [&str; 17] = [
     "project:read",
     "project:write",
     "secrets:read",
+    "secrets:write",
     OFFLINE_ACCESS_SCOPE,
 ];
 
