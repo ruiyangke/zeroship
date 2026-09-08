@@ -43,13 +43,10 @@
 //! nameable; the schema-aware layer above is what must choose it. That gap is
 //! real and is listed under what the types cannot enforce.
 //!
-//! This variant DERIVED its physical name until 2026-09-07, as `<col>_masked`,
-//! at one site. The storage flip moved the platform's stored form to a
-//! `__zs_raw__` prefix and stopped creating `<col>_masked` at all, so the
-//! derivation outlived the layout it described and rendered against a column no
-//! migration produces. Both names are now supplied by the caller, because where
-//! a value is physically stored is the storage owner's fact, not a rule a
-//! grammar can hold.
+//! Both names are supplied by the caller. Deriving the physical one here would
+//! make this grammar hold a rule about where a value is stored, which is the
+//! storage owner's fact - and a derivation that outlives the layout it
+//! describes renders against a column no migration produces.
 
 use crate::ident::{Ident, IdentRole};
 use crate::path::FieldPath;
@@ -162,11 +159,10 @@ pub enum ProjectionSource {
 ///
 /// # The fields are private, and that is the whole point
 ///
-/// All three were `pub` until 2026-09-07, which made every constructor below
-/// advisory: a struct literal could pair any [`ProjectionSource`] with any
-/// alias and any [`Exposure`].
+/// Public fields would make every constructor below advisory: a struct literal
+/// could pair any [`ProjectionSource`] with any alias and any [`Exposure`].
 ///
-/// That was survivable while a raw column could not be NAMED from outside this
+/// That is survivable only while a raw column cannot be NAMED from outside this
 /// crate - [`crate::IdentRole::Column`] refuses the platform's storage prefixes
 /// and the constructor that derived them was `pub(crate)`. Adding
 /// [`crate::IdentRole::StoredColumn`] the same day removed that barrier, and
@@ -229,10 +225,9 @@ impl ProjectedField {
 
     /// A JSON path projected under an explicit alias.
     ///
-    /// [`ProjectionSource::Path`] had no constructor until 2026-09-07, so the
-    /// only way to build one was a struct literal - which is the hole the
-    /// private fields close. A variant with no constructor is not a narrower
-    /// surface, it is the same surface reached by a worse route.
+    /// Every [`ProjectionSource`] variant needs a constructor. One without is
+    /// not a narrower surface, it is the same surface reached by a struct
+    /// literal - which is the route the private fields close.
     #[must_use]
     pub const fn path(path: FieldPath, alias: Ident) -> Self {
         Self {
@@ -248,10 +243,8 @@ impl ProjectedField {
     /// [`Projection::visible_aliases`] filters on: a platform field is selected
     /// and is not part of what the caller asked to see.
     ///
-    /// WHICH fields those are is deliberately not a fact this crate holds. It
-    /// kept its own list until 2026-09-07 and unioned it into every row
-    /// projection; see [`Projection::rows`] for what that cost. The caller
-    /// names them because the caller is the one that knows.
+    /// WHICH fields those are is deliberately not a fact this crate holds; see
+    /// [`Projection::rows`]. The caller names them because the caller knows.
     ///
     /// # Errors
     ///
@@ -341,32 +334,24 @@ pub struct Projection {
 impl Projection {
     /// A row projection: exactly the fields the caller supplies.
     ///
-    /// # This unioned a list of platform fields until 2026-09-07
+    /// # It adds nothing, and that is the contract
     ///
-    /// It held its own copy of the seven system-field names and appended any the
-    /// caller had not already declared. Two defects came from that, and both
-    /// were silent. `distinct("role")` was unrepresentable, because the union
-    /// widened a one-column projection back to eight. And an explicit
-    /// `select: ["email"]` returned eight columns rather than one, so a caller
-    /// asking to narrow got a row shape it did not ask for.
+    /// A grammar that appends columns of its own cannot express a narrowing:
+    /// `distinct("role")` becomes unrepresentable and an explicit
+    /// `select: ["email"]` returns a row shape the caller did not ask for, both
+    /// silently.
     ///
-    /// The deeper problem is that the list was platform policy living in a
-    /// grammar. Which fields a platform manages is not a property of SQL, this
-    /// crate had no way to be told the answer, and its own copy was a duplicate
-    /// of `zeroship-schema`'s `SYSTEM_FIELD_NAMES` that nothing kept in step -
-    /// the constant's doc comment said one of the two had to go.
-    ///
-    /// So the caller supplies the whole list now, and marks the platform's own
-    /// entries with [`ProjectedField::platform`] so [`Self::visible_aliases`]
-    /// can still tell them apart. The schema-aware layer above knows which
-    /// fields those are; this one does not and should not.
+    /// Which fields a platform manages is not a property of SQL, and this crate
+    /// has no way to be told the answer. So the caller supplies the whole list
+    /// and marks the platform's own entries with [`ProjectedField::platform`],
+    /// which is what lets [`Self::visible_aliases`] tell them apart. The
+    /// schema-aware layer above knows which fields those are; this one does not
+    /// and should not.
     ///
     /// # Errors
     ///
-    /// [`ProjectionError::Empty`] if the list is empty. This refusal is NEW and
-    /// it is not optional: the non-empty invariant used to be maintained by the
-    /// union, which could not produce an empty projection, so removing the union
-    /// removed the invariant with it. Without this arm an empty list renders
+    /// [`ProjectionError::Empty`] if the list is empty. Nothing else supplies
+    /// the non-empty invariant, and without this arm an empty list renders
     /// `SELECT  FROM`, which is a syntax error the grammar exists to prevent.
     ///
     /// [`ProjectionError::DuplicateAlias`] if two fields share an alias - two
@@ -579,10 +564,10 @@ mod tests {
     /// projections refuse one.
     ///
     /// In-crate because building the adversary needs a `ProjectedField` struct
-    /// literal, and the fields went private on 2026-09-07. From outside the
-    /// crate this is now unconstructible rather than refused, which is the
-    /// stronger property; these two assertions still bind the in-crate paths,
-    /// where `SearchBuilder::build` is the one legitimate installer.
+    /// literal and the fields are private. From outside the crate this shape is
+    /// unconstructible rather than refused, which is the stronger property;
+    /// these two assertions bind the in-crate paths, where
+    /// `SearchBuilder::build` is the one legitimate installer.
     #[test]
     fn a_stray_ranking_scalar_is_refused_by_both_projections() {
         let stray = ProjectedField {
