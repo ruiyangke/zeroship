@@ -37,7 +37,8 @@
 //! GRANT/ALTER/REVOKE naturally idempotent), so it is safe to run on every apply.
 
 use compio_postgres::Client;
-use uuid::Uuid;
+use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 use zeroship_migrate::ExecutorConfig;
 use zeroship_migrate_postgres::confinement::PostgresConfinementExt;
 use zeroship_migrate_postgres::role::migrator_role_name;
@@ -265,15 +266,36 @@ pub async fn provision_migrator(
     Ok(())
 }
 
-/// The schema an app's durable-workflow journal tables live in: `app_<uuid>`.
+/// The schema an app's durable-workflow journal tables live in.
 ///
-/// Distinct from the app's DATA schema, which is the bare `<uuid>`. Kept in
-/// sync with `zeroship_plugin_workflow::store::pg::app_schema_for`, which
-/// derives the same name on the read/write side; this crate does not depend on
-/// that one, so the derivation is duplicated rather than shared.
+/// Delegates to [`app_derivation::schema_name`] rather than composing a name.
+/// `zeroship_plugin_workflow::store::pg::app_schema_for` is the READER of this
+/// schema and asks the same seam function; this crate does not depend on that
+/// one, so agreement is what
+/// `zeroship_plugin_db`'s `journal_schema_derivations_agree` module holds the two
+/// producers to, and delegating is what makes agreement structural rather than
+/// coincidental.
+///
+/// # THIS IS NOW THE APP'S DATA SCHEMA, AND THE OWNERSHIP QUESTION IS OPEN
+///
+/// The journal schema was `app_<hyphenated uuid>` while the data schema was the
+/// bare uuid, so the two were distinct objects with distinct owners: the data
+/// schema belongs to the app's migrator role (`provision_migrator` step 3), the
+/// journal schema to the narrow [`WORKFLOW_OWNER_ROLE`]
+/// ([`workflow_journal_schema_sql`]). A printed app id already carries the
+/// `app_` prefix, so the seam's one derivation now names ONE schema for both.
+///
+/// That is coherent with where the rest of the platform's per-tenant state
+/// lives - the migration journal and the unmask audit table are already
+/// `__zeroship_`-prefixed relations inside the app's own schema - but it leaves
+/// [`workflow_journal_schema_sql`]'s `ALTER SCHEMA ... OWNER TO` pointed at the
+/// app's data schema, which would move it off the migrator. Whether the narrow
+/// owner role survives the collapse is a decision spanning this crate,
+/// `zeroship-plugin-workflow` and `zeroship-core`, not one to settle inside a
+/// derivation.
 #[must_use]
-pub fn workflow_journal_schema_name(app_id: &Uuid) -> String {
-    format!("app_{}", app_id.as_hyphenated())
+pub fn workflow_journal_schema_name(app_id: &AppId) -> String {
+    app_derivation::schema_name(app_id)
 }
 
 /// The DDL that gives an app its workflow journal schema, owned by the narrow
@@ -302,7 +324,7 @@ pub(crate) fn workflow_journal_schema_sql(app_schema: &str) -> String {
 ///
 /// Runs [`workflow_journal_schema_sql`], the one generator for this DDL; the
 /// apply path embeds the same text (`apply::runtime_dependents_sql`). Nothing
-/// else in the platform creates `app_<uuid>`: the worker and the control plane
+/// else in the platform creates it: the worker and the control plane
 /// provision the journal TABLES into it (`PgStore::provision`) holding no
 /// CREATE on the database and no authority to make a schema of their own - a
 /// process running creator code must not be able to author schemas
@@ -320,7 +342,7 @@ pub(crate) fn workflow_journal_schema_sql(app_schema: &str) -> String {
 /// connection is not the admin principal this expects.
 pub async fn provision_workflow_journal_schema(
     admin: &Client,
-    app_id: &Uuid,
+    app_id: &AppId,
 ) -> Result<(), compio_postgres::Error> {
     exec_retry(
         admin,

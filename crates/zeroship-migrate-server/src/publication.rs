@@ -1,13 +1,18 @@
 //! Migration-owned logical publication reconciliation.
 
 use compio_postgres::Client;
-use zeroship_core::replication_names::{publication_name, ReplicationNameError};
+use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 
 /// A failure to reconcile an app publication after its schema migration.
+///
+/// There is no invalid-name arm any more. The publication used to be named from
+/// an untyped `&str` through `zeroship_core::replication_names::publication_name`,
+/// whose two refusals are an empty id and an embedded NUL; an [`AppId`] can be
+/// neither, so [`app_derivation::publication_name`] is infallible and the arm
+/// had no producer left.
 #[derive(Debug, thiserror::Error)]
 pub enum PublicationError {
-    #[error("invalid app id for publication: {0}")]
-    InvalidName(#[from] ReplicationNameError),
     #[error("publication reconciliation database error: {0}")]
     Database(#[from] compio_postgres::Error),
 }
@@ -56,14 +61,26 @@ fn publication_membership_sql(
 /// This runs on the privileged migration connection after a successful apply.
 /// It excludes the entire reserved `__zeroship_` namespace, so current and
 /// future platform journals cannot enter the worker-visible WAL feed.
+///
+/// # Two identities, two derivations, one argument
+///
+/// This function spends its input on BOTH of the app id's meanings: the
+/// publication is TENANT-keyed (a change-stream subject, not a namespace) and
+/// the catalog filter is SCHEMA-keyed (`pg_namespace.nspname`). It used to take
+/// one `&str` and hand the same bytes to both, under a comment at its apply-path
+/// caller flagging the ambiguity as unresolved. It now takes the tenant and asks
+/// [`app_derivation`] for each derived name separately, so the day the two stop
+/// being the same string this reads correctly instead of silently naming one of
+/// them twice.
 pub async fn reconcile_app_publication(
     client: &Client,
-    app_id: &str,
+    app: &AppId,
 ) -> Result<(), PublicationError> {
-    let publication = publication_name(app_id)?;
+    let publication = app_derivation::publication_name(app);
+    let schema = app_derivation::schema_name(app);
     client.batch_execute("BEGIN").await?;
 
-    let result = reconcile_in_transaction(client, app_id, &publication).await;
+    let result = reconcile_in_transaction(client, &schema, &publication).await;
     match result {
         Ok(()) => {
             client.batch_execute("COMMIT").await?;
@@ -78,7 +95,7 @@ pub async fn reconcile_app_publication(
 
 async fn reconcile_in_transaction(
     client: &Client,
-    app_id: &str,
+    schema: &str,
     publication: &str,
 ) -> Result<(), PublicationError> {
     client
@@ -89,7 +106,7 @@ async fn reconcile_in_transaction(
         .await?;
 
     let rows = client
-        .query_text_params(creator_table_query(), &[app_id])
+        .query_text_params(creator_table_query(), &[schema])
         .await?;
     let tables = rows
         .iter()
@@ -102,7 +119,7 @@ async fn reconcile_in_transaction(
         )
         .await?
         .is_empty();
-    let sql = publication_membership_sql(publication, app_id, &tables, exists);
+    let sql = publication_membership_sql(publication, schema, &tables, exists);
     if !sql.is_empty() {
         client.batch_execute(&sql).await?;
     }

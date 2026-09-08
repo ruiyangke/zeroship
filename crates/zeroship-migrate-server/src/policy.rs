@@ -27,6 +27,8 @@
 use std::collections::BTreeMap;
 
 use uuid::Uuid;
+use zeroship_core::app_derivation;
+use zeroship_core::app_id::AppId;
 use zeroship_migrate::{effective_policy_from_charter_toml, seal, DestructiveOps, SealError, SealedPolicy};
 use zeroship_migrate_ir::policy_approval::{require_approval_level, ApprovalLevel};
 use zeroship_migrate_ir::policy_registry::{
@@ -121,12 +123,17 @@ impl ManagedPolicyConfig {
     /// (`admit`), not clamped.
     pub fn compose_effective_for_app(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         tier: Option<&str>,
         draft: Option<&ParsedDraft>,
     ) -> Result<EffectivePolicy, ManagedPolicyError> {
         let ceiling = self.catalog.resolve(app_id, tier);
-        let app_base = ceiling.effective_for_app_schema(&app_id.to_string())?;
+        // The ceiling is bound to the app's PHYSICAL SCHEMA, so the name comes
+        // from the derivation seam rather than from a second rendering of the id
+        // spelled here. A charter bound to the wrong schema name does not fail:
+        // it grants nothing on the schema the apply actually touches, and every
+        // creator statement is refused as out-of-scope.
+        let app_base = ceiling.effective_for_app_schema(&app_derivation::schema_name(app_id))?;
         let policy = match draft {
             // Admit the untrusted creator draft only after the operator charter has
             // been bound to this app's exact schema. Any grant outside it is rejected.
@@ -145,7 +152,7 @@ impl ManagedPolicyConfig {
     /// ceiling-only effective policy.
     pub fn current_ceiling_for_app(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         tier: Option<&str>,
     ) -> Result<EffectivePolicy, ManagedPolicyError> {
         self.compose_effective_for_app(app_id, tier, None)
@@ -153,7 +160,7 @@ impl ManagedPolicyConfig {
 
     pub fn seal_for_app(
         &self,
-        app_id: &Uuid,
+        app_id: &AppId,
         tier: Option<&str>,
         draft: Option<CreatorPolicyDraft<'_>>,
     ) -> Result<SealedManagedPolicy, ManagedPolicyError> {
@@ -322,7 +329,7 @@ impl ProfileCatalog {
     }
 
     #[must_use]
-    pub fn resolve(&self, _app_id: &Uuid, tier: Option<&str>) -> &ManagedCeiling {
+    pub fn resolve(&self, _app_id: &AppId, tier: Option<&str>) -> &ManagedCeiling {
         tier.and_then(|tier| self.tiers.get(tier))
             .unwrap_or(&self.default_ceiling)
     }
@@ -647,8 +654,8 @@ mod tests {
     /// We author none, so that arm is unreachable here and is not asserted.
     #[test]
     fn within_one_layer_a_false_grant_does_not_carve_out_but_exclude_does() {
-        let app_id = Uuid::new_v4();
-        let schema = app_id.to_string();
+        let app_id = AppId::mint();
+        let schema = app_derivation::schema_name(&app_id);
         let draft_toml = format!(
             r#"policy_version = 1
 
@@ -726,10 +733,16 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
             .expect("32-byte MAC key must be accepted");
     }
 
+    /// RED AS OF THE TYPED APP ID, AND THE FIX IS NOT HERE. Do NOT repair the
+    /// final assertion by lowercasing its expectation - see the paragraph on
+    /// `confined_guard_preserves_schema_bound_grants_without_inject`, which
+    /// carries the measurement. The scope this asserts is the same one the
+    /// grant lookup uses, and folding the expectation to match the charter
+    /// would hide a state in which no creator may create a table.
     #[test]
     fn no_draft_uses_default_confined_ceiling() {
         let cfg = config();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let effective = cfg
             .compose_effective_for_app(&app_id, None, None)
@@ -741,8 +754,11 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
         // system shape.
         assert_eq!(effective.managed.destructive_ops, DestructiveOps::Allow);
         // No `safety.require_approval` obligation on the default confined ceiling.
-        assert_eq!(effective.approval_level(&app_id.to_string()), ApprovalLevel::Never);
-        let app_schema = app_id.to_string();
+        assert_eq!(
+            effective.approval_level(&app_derivation::schema_name(&app_id)),
+            ApprovalLevel::Never
+        );
+        let app_schema = app_derivation::schema_name(&app_id);
         // `from_policy`, not the removed `confined_with_effective(schema, policy)`:
         // the schema is no longer passed alongside the policy because
         // `schema_scope()` derives it from the policy itself
@@ -774,7 +790,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
     /// it fires on anything that can actually appear.
     #[test]
     fn app_binding_refuses_a_schema_key_it_cannot_confine() {
-        let app_schema = Uuid::new_v4().to_string();
+        let app_schema = app_derivation::schema_name(&AppId::mint());
         let charter = format!(
             "{CONFINED_GUARD_CHARTER_TOML}\n\
              [[grant]]\n\
@@ -797,9 +813,42 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
             .expect("the shipped guard charter must still bind");
     }
 
+    /// RED AS OF THE TYPED APP ID. The failure is real, it is not this test's,
+    /// and lowercasing the expectation would convert a loud total outage into a
+    /// silent one.
+    ///
+    /// # What was measured
+    ///
+    /// An app schema is now the printed app id, which is mixed-case base62. The
+    /// policy language folds an UNQUOTED identifier to lowercase
+    /// (`zeroship_migrate_policy::scope::pattern::normalize_object_name`, "an
+    /// unquoted segment lowercases, a quoted one is verbatim"), while the object
+    /// the grant is looked up at is built from RAW bytes
+    /// (`zeroship_migrate_core::model::table_shape::object_for_create`). Driving
+    /// one charter binding at both spellings of the same id:
+    ///
+    /// - `app_034LP3yi4rdoa3amFkeBYL` - `schema.create_table` grants `false`
+    /// - `app_034lp3yi4rdoa3amfkebyl` - `schema.create_table` grants `true`
+    ///
+    /// So under a mixed-case tenant id EVERY creator `createTable` is denied.
+    /// The `injects_for` assertions below stay green throughout, because the
+    /// mandatory system-shape inject is authored at `scope = all`; the scope
+    /// equality at the end of this function is the only thing here that sees it.
+    ///
+    /// # Why the fix is not in this crate
+    ///
+    /// Quoting the schema in `schema_scope_value` restores the grant - measured
+    /// - but it then refuses every creator draft, because a draft authors its
+    /// scope unquoted and an unquoted pattern is not covered by a verbatim one.
+    /// Measured across the four combinations of quoted/unquoted ceiling and
+    /// draft: only matching spellings admit. Making creators quote is a change
+    /// to the creator-facing `migrate-policy.toml` contract, and the two
+    /// alternatives - a lowercase-only id body in `zeroship_core::typed_id`, or
+    /// a non-folding scope in `zeroship-migrate-policy` - are both outside this
+    /// crate. Whichever is chosen, this assertion is the one that says it worked.
     #[test]
     fn confined_guard_preserves_schema_bound_grants_without_inject() {
-        let app_schema = Uuid::new_v4().to_string();
+        let app_schema = app_derivation::schema_name(&AppId::mint());
         let guard_policy = confined_guard_policy_for_schema(&app_schema)
             .expect("fixed no-inject guard charter composes");
         let lower_charter = bind_confined_charter_to_schema(CONFINED_CEILING_TOML, &app_schema)
@@ -857,7 +906,7 @@ scope = {{ include = ["{schema}"], exclude = ["{schema}.secret"] }}
     #[test]
     fn require_approval_obligation_is_read_from_the_composed_policy() {
         let cfg = config();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         // A creator draft that authors the sealed approval obligation as a normal
         // `[[require]]` — `always`, scoped to the whole DB.
         let draft_toml = r#"policy_version = 1
@@ -874,7 +923,7 @@ scope = "all"
             .compose_effective_for_app(&app_id, None, Some(&draft))
             .expect("obligation draft composes (composes UP)");
         assert_eq!(
-            effective.approval_level(&app_id.to_string()),
+            effective.approval_level(&app_derivation::schema_name(&app_id)),
             ApprovalLevel::Always,
             "the composed policy must surface the sealed require_approval obligation"
         );
@@ -883,7 +932,7 @@ scope = "all"
     #[test]
     fn tighter_draft_composes_to_the_draft() {
         let cfg = config();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         // A draft that only TIGHTENS: forbid destructive ops.
         //
         // This draft also carried `runtime.lock_timeout_ms = 1000` as a second,
@@ -915,7 +964,7 @@ scope = "all"
     #[test]
     fn draft_permission_escalation_is_rejected_not_clamped() {
         let cfg = config();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         // The confined ceiling does NOT grant `sql.raw`; a draft that does
         // escalates beyond the ceiling.
         let draft_toml = r#"policy_version = 1
@@ -940,7 +989,7 @@ scope = "all"
     #[test]
     fn draft_cannot_escape_the_app_schema_boundary() {
         let cfg = config();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let draft = cfg
             .parse_draft(&CreatorPolicyDraft {
                 filename: MIGRATE_POLICY_FILENAME,
@@ -985,7 +1034,7 @@ scope = "all"
     #[test]
     fn draft_all_scope_on_a_literal_bound_key_refuses_as_not_representable() {
         let cfg = config();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
         let draft = cfg
             .parse_draft(&CreatorPolicyDraft {
                 filename: MIGRATE_POLICY_FILENAME,
@@ -1037,8 +1086,8 @@ scope = "all"
     #[test]
     fn draft_glob_scope_anchored_on_the_granted_schema_is_still_rejected() {
         let cfg = config();
-        let app_id = Uuid::new_v4();
-        let app_schema = app_id.to_string();
+        let app_id = AppId::mint();
+        let app_schema = app_derivation::schema_name(&app_id);
         // The glob's literal prefix IS the granted schema; the glob also covers
         // sibling schemas the ceiling never granted.
         let draft_toml = format!(
@@ -1082,7 +1131,7 @@ scope = {{ include = ["{app_schema}*"] }}
     #[test]
     fn sealed_effective_policy_round_trips() {
         let cfg = config();
-        let app_id = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         let sealed = cfg
             .seal_for_app(&app_id, None, None)
@@ -1114,3 +1163,4 @@ scope = {{ include = ["{app_schema}*"] }}
         ));
     }
 }
+
