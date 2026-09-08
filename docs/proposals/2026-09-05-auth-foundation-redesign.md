@@ -2024,6 +2024,28 @@ narrowed" literally rather than by proxy. The successor count is a config symbol
 not a constant in this prose; it bounds spillover to the eligible set instead of
 the fleet, which makes it a capacity parameter that is also a security parameter.
 
+*Why the ring key and the eligible set are ONE change, stated mechanically rather
+than as a slogan.* `HashRing::new` in `crates/zeroship-gateway/src/proxy.rs`
+derives every vnode position by hashing the worker's URL. `HashRing::select`
+hashes the app's ring key, walks from there, and returns the first worker under
+`max_per_worker`.
+
+So there are two rings in play the moment control starts computing an eligible
+set: control's, ordered by the ring keys it MINTS, and the gateway's, ordered by
+the URLs it was CONFIGURED with. Those orders are unrelated. A gateway routing on
+URL order would leave the eligible set on almost every dispatch, and the fence
+would read as a routing bug rather than as a refusal. The two must therefore
+consume the SAME ring key: control mints it, publishes it on the feed the gateway
+already pulls, and the gateway builds its ring from that instead of from the URL.
+Landing either half alone is not a partial fence; it is a disagreement.
+
+**The spillover fallback is the half to watch.** `select` walks for a worker
+under the cap and, finding none, falls back to the LEAST-LOADED worker in the
+fleet. That fallback must be confined to the eligible set too. Leave it fleet-wide
+and the narrowing holds exactly until the fleet is busy, which is when an attacker
+would want it to fail and when nobody is reading logs. A fence with a
+load-dependent bypass is worse than none, because it tests green.
+
 *Prerequisite, and it is unavoidable under any variant of this step.* Per-instance
 worker identity must land first. `ServiceKeyring::load` in
 `crates/zeroship-core/src/service_peers.rs` reads one signing key per BINARY ROLE
