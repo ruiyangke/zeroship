@@ -29,10 +29,10 @@
 //! prefix carries one meaning per schema. Until that lands, the two must not be
 //! joined, and this crate deliberately offers no conversion between them.
 //!
-//! Like [`crate::organization_id::OrganizationId`] and unlike
-//! [`crate::app_id::AppId`], this type exposes no route to the embedded bits: a
+//! Like every macro-declared id it exposes no route to the embedded bits, and
+//! like [`crate::organization_id::OrganizationId`] it seeds no physical name: a
 //! project id keys rows and scopes a subject derivation that lives in the auth
-//! process, and nothing derives a physical name from it.
+//! process.
 
 use crate::entity_id::declare_entity_id;
 use crate::typed_id::PROJECT_PREFIX;
