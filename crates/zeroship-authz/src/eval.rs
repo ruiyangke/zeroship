@@ -320,7 +320,7 @@ async fn audit_decision(
 /// silently filed under the wrong type.
 fn audit_resource(resource: &Resource) -> (&'static str, Option<String>) {
     match resource {
-        Resource::App { id } => ("app", Some(id.clone())),
+        Resource::App { id } => ("app", Some(id.as_str().to_owned())),
         Resource::Project { id } => ("project", Some(id.clone())),
         Resource::Organization { id } => ("organization", Some(id.clone())),
         Resource::Any => ("any", None),
@@ -345,7 +345,12 @@ mod tests {
     #[test]
     fn audit_tags_are_distinct_and_carry_the_id() {
         let cases = [
-            (Resource::App { id: "a".to_owned() }, "app"),
+            (
+                Resource::App {
+                    id: zeroship_core::app_id::AppId::mint(),
+                },
+                "app",
+            ),
             (Resource::Project { id: "p".to_owned() }, "project"),
             (
                 Resource::Organization { id: "o".to_owned() },
@@ -394,7 +399,7 @@ mod tests {
         let resources = [
             Resource::Any,
             Resource::App {
-                id: uuid::Uuid::nil().to_string(),
+                id: zeroship_core::app_id::AppId::mint(),
             },
             Resource::Project {
                 id: "prj_0123456789abcdefghijkl".to_owned(),

@@ -20,6 +20,7 @@ use zeroship_authz::{
     enforce, is_authorized_anywhere, load_platform_policies, Action, AuthzContext, AuthzDecision,
     Condition, Effect, Policy, Resource, Statement,
 };
+use zeroship_core::app_id::AppId;
 
 // ---------------------------------------------------------------------------
 // The two-call token intersection: TOKEN is a subset of USER
@@ -532,7 +533,7 @@ fn audit_records_the_resource_type_and_matched_bands() {
                 fixture.app(),
                 Action::AppsDeploy,
                 "app",
-                fixture.app_id.clone(),
+                fixture.app_id.as_str().to_owned(),
             ),
             (
                 fixture.project(),
@@ -692,8 +693,11 @@ pub struct Fixture {
     pub user_id: Uuid,
     pub organization_id: String,
     pub project_id: String,
-    pub app_uuid: Uuid,
-    pub app_id: String,
+    /// ONE field, where there used to be a `Uuid` and a `String` rendering of
+    /// it. Two fields meant every use had to pick, and picking wrong is silent:
+    /// the resolve reaches `zeroship.apps` by LEFT JOIN, so the wrong rendering
+    /// matches no row and reports the seat as absent rather than failing.
+    pub app_id: AppId,
 }
 
 impl Fixture {
@@ -707,7 +711,7 @@ impl Fixture {
         let user_id = Uuid::new_v4();
         let organization_id = typed_id("org");
         let project_id = typed_id("prj");
-        let app_uuid = Uuid::new_v4();
+        let app_id = AppId::mint();
 
         pg.execute(
             "INSERT INTO zeroship.users (id, email, name) VALUES ($1, $2::citext, $3)",
@@ -749,7 +753,7 @@ impl Fixture {
             "INSERT INTO zeroship.apps (id, name, project_id, organization_id) \
              SELECT $1, $2, p.id, p.organization_id FROM zeroship.projects p WHERE p.id = $3",
             &[
-                &app_uuid,
+                &app_id.as_str(),
                 &format!("authz-{label}-{}", Uuid::new_v4().simple()),
                 &project_id,
             ],
@@ -769,8 +773,7 @@ impl Fixture {
             user_id,
             organization_id,
             project_id,
-            app_uuid,
-            app_id: app_uuid.to_string(),
+            app_id,
         }
     }
 
@@ -861,7 +864,10 @@ impl Fixture {
             let _ = pg.execute(sql, &[&self.user_id]).await;
         }
         let _ = pg
-            .execute("DELETE FROM zeroship.apps WHERE id = $1", &[&self.app_uuid])
+            .execute(
+                "DELETE FROM zeroship.apps WHERE id = $1",
+                &[&self.app_id.as_str()],
+            )
             .await;
         let _ = pg
             .execute(

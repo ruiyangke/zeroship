@@ -1,16 +1,16 @@
 use serde_json::json;
 use zeroship_authz::{Action, Condition, Effect, Policy, Resource, Statement};
+use zeroship_core::app_id::AppId;
 
 #[test]
 fn policy_roundtrips_through_wrapper_json_shape() {
+    let app = AppId::mint();
     let policy = Policy {
         name: "test".to_owned(),
         statements: vec![Statement {
             effect: Effect::Allow,
             actions: vec![Action::AppsDeploy, Action::EnvRead],
-            resources: vec![Resource::App {
-                id: "blog".to_owned(),
-            }],
+            resources: vec![Resource::App { id: app.clone() }],
             conditions: vec![
                 Condition::IpRange {
                     cidrs: vec!["10.0.0.0/8".to_owned()],
@@ -33,7 +33,7 @@ fn policy_roundtrips_through_wrapper_json_shape() {
             "statements": [{
                 "effect": "allow",
                 "actions": ["apps:deploy", "env:read"],
-                "resources": [{"type": "app", "id": "blog"}],
+                "resources": [{"type": "app", "id": app.as_str()}],
                 "conditions": [
                     {"kind": "ip_range", "cidrs": ["10.0.0.0/8"]},
                     {"kind": "time_window", "start": "09:00", "end": "17:00", "tz": "UTC"}
@@ -93,12 +93,10 @@ fn action_cedar_ids_are_canonical() {
 
 #[test]
 fn resource_cedar_uids_are_canonical() {
+    let app = AppId::mint();
     assert_eq!(
-        Resource::App {
-            id: "blog".to_owned()
-        }
-        .cedar_uid(),
-        "App::\"blog\""
+        Resource::App { id: app.clone() }.cedar_uid(),
+        format!("App::\"{}\"", app.as_str())
     );
     assert_eq!(
         Resource::Project {
@@ -117,17 +115,32 @@ fn resource_cedar_uids_are_canonical() {
     assert_eq!(Resource::Any.cedar_uid(), "*");
 }
 
+/// The escaping is asserted on a `String`-typed id, which is the only kind that
+/// can still carry a Cedar break.
+///
+/// It used to be asserted on `Resource::App`. That id is an `AppId` now and the
+/// hostile value cannot be built, so the case moved to `Project` rather than
+/// being dropped: `cedar_uid` escapes through one shared `cedar_string`, and the
+/// two `String` ids are the ones that still reach it with unvalidated text. The
+/// second assertion is the App half of the same claim - the break is refused one
+/// step earlier, at construction, instead of being escaped on the way out.
 #[test]
 fn resource_cedar_uids_escape_string_literals() {
-    let resource = Resource::App {
-        id: "x\"; permit (principal, action, resource);".to_owned(),
+    let hostile = "x\"; permit (principal, action, resource);";
+    let resource = Resource::Project {
+        id: hostile.to_owned(),
     };
 
     assert_eq!(
         resource.cedar_uid(),
-        "App::\"x\\\"; permit (principal, action, resource);\""
+        "Project::\"x\\\"; permit (principal, action, resource);\""
     );
     assert!(resource.validate_ids().is_err());
+
+    assert!(
+        AppId::parse(hostile).is_err(),
+        "an app id carrying a Cedar break must not be constructible"
+    );
 }
 
 #[test]
