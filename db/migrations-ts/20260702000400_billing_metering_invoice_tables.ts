@@ -5,7 +5,7 @@ export default {
   schema() {
     table("app_spend_limit", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         spend_limit_cents: t.bigInt(),
         updated_at: t.timestamp().notNull().default(now()),
       },
@@ -14,7 +14,7 @@ export default {
     table("app_spend_limit", { schema: "zeroship" }).check("app_spend_limit_spend_limit_cents_check").add({ expr: (col) => col("spend_limit_cents").isNull().or(col("spend_limit_cents").ge(0)) });
     table("app_spend_state", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         state: t.domain("spend_state").notNull().default("allow"),
         spend_cents: t.bigInt().notNull().default(0),
         eval_limit_cents: t.bigInt().notNull().default(0),
@@ -54,7 +54,7 @@ export default {
     table("billing_line_provider_refs", { schema: "zeroship" }).create({
       columns: {
         invoice_id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         provider: t.text().notNull(),
         ref_kind: t.text().notNull(),
         external_id: t.text().notNull(),
@@ -72,7 +72,7 @@ export default {
         archived: t.boolean().notNull().default(false),
         last_seen_at: t.timestamp(),
         created_at: t.timestamp().notNull().default(now()),
-        owner_app: t.uuid(),
+        owner_app: t.text(),
       },
       primaryKey: ["metric"],
     });
@@ -220,7 +220,7 @@ export default {
     table("invoice_lines", { schema: "zeroship" }).create({
       columns: {
         invoice_id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         included_units: t.bigInt().notNull(),
         fx_pico_cents_per_unit: t.bigInt().notNull(),
         base_fee_cents: t.bigInt().notNull().default(0),
@@ -337,7 +337,7 @@ export default {
     table("plan_change_events", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         period: t.domain("billing_period").notNull(),
         from_plan_id: t.text(),
         to_plan_id: t.text().notNull(),
@@ -416,7 +416,7 @@ export default {
     table("spend_state_history", { schema: "zeroship" }).create({
       columns: {
         id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         period: t.domain("billing_period").notNull(),
         from_state: t.domain("spend_state").notNull(),
         to_state: t.domain("spend_state").notNull(),
@@ -438,7 +438,7 @@ export default {
     });
     table("usage_aggregates", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         period: t.domain("billing_period").notNull(),
         metric: t.text().notNull(),
         total: t.bigInt().notNull().default(0),

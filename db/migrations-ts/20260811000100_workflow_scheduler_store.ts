@@ -44,7 +44,7 @@ export default {
     zs("workflow_scheduler_timers").create({
       columns: {
         run_id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         wake_at: t.timestamp().notNull(),
         generation: t.bigInt().notNull().default(0),
         registered_at: t.timestamp().notNull().default(now()),
@@ -56,7 +56,7 @@ export default {
     zs("workflow_scheduler_inflight").create({
       columns: {
         run_id: t.text().notNull(),
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         deadline: t.timestamp().notNull(),
         dispatch_generation: t.bigInt().notNull(),
         dispatched_at: t.timestamp().notNull().default(now()),

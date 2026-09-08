@@ -6,7 +6,7 @@ export default {
     table("app_audit", { schema: "zeroship" }).create({
       columns: {
         id: t.uuid().notNull().default(uuidV4()),
-        app_id: t.uuid(),
+        app_id: t.text(),
         creator_id: t.uuid(),
         actor_user_id: t.uuid(),
         actor_token_id: t.uuid(),
@@ -20,7 +20,7 @@ export default {
     });
     table("app_env_expose", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         key_name: t.text().notNull(),
         updated_at: t.timestamp().notNull().default(now()),
       },
@@ -28,7 +28,7 @@ export default {
     });
     table("app_members", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         user_id: t.uuid().notNull(),
         role: t.text().notNull(),
         added_at: t.timestamp().notNull().default(now()),
@@ -36,10 +36,16 @@ export default {
       },
       primaryKey: ["app_id", "user_id"],
     });
+    // The shape the id must hold, mirroring `organizations_id_shape`. The
+    // character class is case-inclusive because `zeroship_core::typed_id`'s
+    // BASE62 alphabet is `0..9A..Za..z` and case is significant in it; a
+    // lower-only class would refuse most minted ids. Twenty-two characters is
+    // base62 of 128 bits.
+    table("apps", { schema: "zeroship" }).check("apps_id_shape").add({ expr: (col) => col("id").regex("^app_[0-9A-Za-z]{22}$") });
     table("app_members", { schema: "zeroship" }).check("app_members_role_check").add({ expr: (col) => col("role").in(["owner", "editor", "viewer"]) });
     table("app_net_grants", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         host: t.text().notNull(),
         port: t.int().notNull(),
         granted_by: t.text().notNull(),
@@ -51,7 +57,7 @@ export default {
     table("app_net_grants", { schema: "zeroship" }).check("app_net_grants_port_check").add({ expr: (col) => col("port").ge(1).and(col("port").le(65535)) });
     table("app_oauth_clients", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         client_id: t.text().notNull(),
         sector_identifier: t.text().notNull(),
         created_at: t.timestamp().notNull().default(now()),
@@ -81,7 +87,7 @@ export default {
     // that advanced the schema.
     table("app_schema_applies", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         migration_id: t.uuid().notNull(),
         status: t.text().notNull(),
         request_body: t.json().notNull(),
@@ -105,7 +111,7 @@ export default {
     table("app_schema_applies", { schema: "zeroship" }).check("app_schema_applies_status_check").add({ expr: (col) => col("status").in(["submitted", "applied", "failed"]) });
     table("app_scope_defs", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         scope_id: t.text().notNull(),
         label: t.text().notNull(),
         description: t.text(),
@@ -114,7 +120,7 @@ export default {
     });
     table("app_secrets", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         key_name: t.text().notNull(),
         ciphertext: t.bytes().notNull(),
         updated_at: t.timestamp().notNull().default(now()),
@@ -123,7 +129,7 @@ export default {
     });
     table("app_usage", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         resource: t.text().notNull(),
         value: t.bigInt().notNull().default(0),
       },
@@ -131,7 +137,7 @@ export default {
     });
     table("app_usage_history", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         period: t.text().notNull(),
         counters: t.json().notNull(),
         created_at: t.timestamp().notNull().default(now()),
@@ -140,7 +146,7 @@ export default {
     });
     table("app_vars", { schema: "zeroship" }).create({
       columns: {
-        app_id: t.uuid().notNull(),
+        app_id: t.text().notNull(),
         key_name: t.text().notNull(),
         value: t.text().notNull(),
         updated_at: t.timestamp().notNull().default(now()),
@@ -149,7 +155,11 @@ export default {
     });
     table("apps", { schema: "zeroship" }).create({
       columns: {
-        id: t.uuid().notNull().default(uuidV4()),
+        // A typed id, and deliberately WITHOUT a database default: a SQL-side
+        // generator for `app_<base62>` would be a second minter beside
+        // `AppId::mint`, and one producer per identifier is what makes a
+        // derived name answerable. Every insert supplies the id.
+        id: t.text().notNull(),
         name: t.text().notNull(),
         plan_id: t.text().notNull().default("free"),
         deploy_hash: t.text(),
