@@ -199,6 +199,34 @@ stack_workspace() {
   ZEROSHIP_GATEWAY_BROKER_SECRET_FILE="$WORK/gate-secret"
   e2e_export_runtime_secrets "$WORK" || return 1
 
+  # --- the worker-enrolment envelope ---------------------------------------
+  #
+  # Control derives a worker instance's advertised address from the OBSERVED
+  # peer socket of the enrolment connection and validates it against these two
+  # settings. Both halves must be declared or `EnrolmentEnvelope::is_declared`
+  # is false and control answers every enrolment `envelope_unset` with a 503:
+  # absence refuses, it does not default open. Until this block existed, no
+  # file in this repository declared one, so enrolment could not succeed
+  # anywhere.
+  #
+  # LOOPBACK IS ADMITTED BECAUSE IT IS DECLARED, NOT BY DEFAULT. The network
+  # comparison in `derive_address`
+  # (crates/zeroship-control/src/worker_enrolment.rs) is the only thing that
+  # admits a loopback peer, and an undeclared envelope still refuses one.
+  # Everything this file starts runs on localhost, so `127.0.0.0/8` is what the
+  # peer socket reports and `127.0.0.0/8` is what is stated here.
+  #
+  # THE PORT HALF IS DERIVED FROM THE WORKER'S OWN PORT, not written out. A
+  # literal would drift the first time a harness moved the worker, and control
+  # would then refuse the enrolment as `port_outside_envelope` while every
+  # health probe in this file stayed green. A harness whose topology runs
+  # workers on ports other than $ZEROSHIP_WORKER_PORT - tests/e2e_platform.sh
+  # runs three - has to state its own range by exporting this before calling
+  # here; the `:-` keeps that override.
+  ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS="${ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS:-127.0.0.0/8}"
+  ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS="${ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS:-$ZEROSHIP_WORKER_PORT}"
+  export ZEROSHIP_CONTROL_WORKER_ENROLMENT_NETWORKS ZEROSHIP_CONTROL_WORKER_ENROLMENT_PORTS
+
   export WORK PIDFILE DBURL PG_CONTAINER
   return 0
 }
