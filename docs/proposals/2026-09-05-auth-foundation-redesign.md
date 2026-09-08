@@ -2110,8 +2110,17 @@ reports. The instance keyring therefore refuses when its public half appears in
 the bundle AT ALL. That predicate has content on a boot-generated key: it fires
 on a key collision or on a planted key, and it is false on every honest boot.
 
-The `UserEnvelopeSigner` minted by `from_parts` is the gateway's capability - the
-only non-definition consumer found is `crates/zeroship-gateway/src/oidc_rp.rs`.
+The `UserEnvelopeSigner` minted by `from_parts` is the gateway's capability. Its
+live consumers are in `crates/zeroship-gateway/src/router/auth.rs`, where
+`decode_user_header` and its neighbours call the accessor.
+
+**This paragraph named `crates/zeroship-gateway/src/oidc_rp.rs` until 2026-09-08,
+and that was WRONG in the way this file warns about elsewhere.** That file names
+the TYPE in a parameter position and never calls the accessor. The claim came from
+grepping the type name and reading a type-position match as a consumer, which is
+spelling rather than behaviour. Search for the CALL when the question is who
+exercises a capability.
+
 Part 2 must confirm the worker's copy has no consumer before it constructs a
 second one, and must not mint one on the instance key on the strength of this
 paragraph alone.
