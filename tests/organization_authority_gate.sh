@@ -188,7 +188,14 @@ SELECT probe('project_member_naming_a_non_member', $$
 -- column, so every one of these would record `column:?`. That is the failure
 -- this gate's header warns about - a refusal that is not evidence - and
 -- `app_with_no_project` is where it bites hardest, because that case exists
--- precisely to name `column:project_id` as the witness.
+-- precisely to name the fence that keeps a live app attached to a project.
+--
+-- That fence is a NAMED CHECK, not `NOT NULL`, since
+-- db/migrations-ts/20260908000100_delete_apps.ts: a DELETED app detaches from
+-- its project, so nullability had to move from the column to a predicate that
+-- exempts only the deleted. The invariant is unchanged and the witness is now
+-- more specific than a column name, which is why the expectation names the
+-- constraint.
 --
 -- `organization_id` IS NAMED, and its absence was exactly that failure in a
 -- quieter form. It became NOT NULL in
@@ -321,7 +328,7 @@ project_member_naming_another_organizations_project|refused|project_members_proj
 project_member_naming_a_non_member|refused|project_members_organization_member_fkey
 app_in_a_project|accepted|
 app_naming_an_absent_project|refused|apps_project_ownership_fkey
-app_with_no_project|refused|column:project_id
+app_with_no_project|refused|apps_live_app_has_project
 delete_a_project_that_still_owns_an_app|refused|apps_project_ownership_fkey
 delete_an_organization_that_still_owns_a_project|refused|projects_organization_id_fkey
 losing_organization_membership_drops_project_membership|accepted|project_members_left:0"
