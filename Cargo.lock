@@ -7245,7 +7245,6 @@ dependencies = [
  "uuid",
  "zeroship-authz",
  "zeroship-core",
- "zeroship-test-support",
 ]
 
 [[package]]
@@ -7282,7 +7281,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "uuid",
- "zeroship-test-support",
  "zstd",
 ]
 
@@ -7452,7 +7450,6 @@ dependencies = [
  "zeroship-bundle",
  "zeroship-config-contract",
  "zeroship-config-macros",
- "zeroship-test-support",
 ]
 
 [[package]]
@@ -7614,7 +7611,6 @@ dependencies = [
  "uuid",
  "x509-parser",
  "zeroship-core",
- "zeroship-test-support",
 ]
 
 [[package]]
@@ -7822,7 +7818,6 @@ dependencies = [
  "zeroship-migrate-postgres",
  "zeroship-runtime",
  "zeroship-schema",
- "zeroship-test-support",
 ]
 
 [[package]]
@@ -7882,7 +7877,6 @@ dependencies = [
  "zeroship-runtime",
  "zeroship-runtime-macros",
  "zeroship-schema",
- "zeroship-test-support",
 ]
 
 [[package]]
@@ -7902,7 +7896,6 @@ dependencies = [
  "zeroship-metering",
  "zeroship-runtime",
  "zeroship-runtime-macros",
- "zeroship-test-support",
 ]
 
 [[package]]
@@ -7923,7 +7916,6 @@ dependencies = [
  "zeroship-core",
  "zeroship-metering",
  "zeroship-runtime",
- "zeroship-test-support",
 ]
 
 [[package]]
@@ -8027,7 +8019,6 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "zeroship-core",
- "zeroship-test-support",
 ]
 
 [[package]]
@@ -8043,7 +8034,6 @@ dependencies = [
  "compio-postgres",
  "sha2 0.10.9",
  "tempfile",
- "zeroship-test-support",
 ]
 
 [[package]]
