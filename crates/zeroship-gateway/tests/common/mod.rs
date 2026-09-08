@@ -10,8 +10,10 @@ use uuid::Uuid;
 
 /// The test database, with the live-database preflight already run.
 ///
-/// EVERY DATABASE GATE IN THIS CRATE GOES THROUGH HERE, and the reason is a run
-/// that cost real time. On 2026-09-07 the database the overlay names held every
+/// EVERY GATE THAT READS THE PLATFORM SCHEMA GOES THROUGH HERE, and the reason
+/// is a run that cost real time. (`db_pool_smoke` is the one target that reads
+/// no schema; it takes [`require_any_db`], which is the same refusal asking for
+/// less.) On 2026-09-07 the database the overlay names held every
 /// schema these targets need and had never seen
 /// `db/migrations-ts/20260906000100_apps_organization_and_billing_subject.ts`,
 /// so `zeroship.apps` had no `organization_id` and this crate's five database
