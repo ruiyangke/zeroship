@@ -12,7 +12,7 @@ use crate::common;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use uuid::Uuid;
+use zeroship_core::app_id::AppId;
 
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::rpc::abort;
@@ -28,13 +28,13 @@ use common::wrap_with_synthetic_entry;
 /// Build a Runtime with `app_id` set + a tiny `default.{fetch,rpc}`
 /// shim that exposes named exports of `user_source`. Mirrors
 /// `common::wrap_with_synthetic_entry` but binds an `app_id`.
-fn build_runtime_with_app(app_id: Uuid, user_source: &str, procs_block: &str) -> Runtime {
+fn build_runtime_with_app(app_id: &AppId, user_source: &str, procs_block: &str) -> Runtime {
     init_v8();
     let modules = wrap_with_synthetic_entry(user_source, procs_block);
     Runtime::builder()
         .modules(modules)
         .env_vars(HashMap::new())
-        .app_id(app_id)
+        .app_id(app_id.clone())
         .build()
 }
 
@@ -92,14 +92,14 @@ fn await_outcome(runtime: Runtime, outcome: FetchOutcome) -> (u16, String) {
 
 #[test]
 fn eviction_fires_single_inflight_controller() {
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
 
     // Procedure: install an `abort` listener that flips a global flag,
     // then await a long timeout that won't resolve before the test
     // ends. The eviction sweep fires the controller; the listener
     // observes it and sets `globalThis.__zsAbortFired = true`.
     let rt = build_runtime_with_app(
-        app_id,
+        &app_id,
         r#"
         export async function pending() {
             const ctx = __zeroshipGetRpcCtx();
@@ -130,12 +130,12 @@ fn eviction_fires_single_inflight_controller() {
         }
 
         // The registry must hold exactly one entry for this app.
-        assert_eq!(abort::entries_for_app(app_id), 1, "registry should hold one entry");
+        assert_eq!(abort::entries_for_app(&app_id), 1, "registry should hold one entry");
 
         // Fire eviction. After this, the controller's signal-abort
         // algorithm has run synchronously — the listener fires inside
         // `entered_for_eviction`'s scope.
-        rt_clone.with_scope(|scope| abort::entered_for_eviction(scope, app_id));
+        rt_clone.with_scope(|scope| abort::entered_for_eviction(scope, &app_id));
 
         // Yield once so any microtasks queued by the abort listener
         // get a chance to run before we check the flag. The abort
@@ -177,9 +177,9 @@ fn eviction_fires_single_inflight_controller() {
 
 #[test]
 fn eviction_fires_all_inflight_controllers() {
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let rt = build_runtime_with_app(
-        app_id,
+        &app_id,
         r#"
         globalThis.__zsAbortCount = 0;
         export async function p1() {
@@ -209,9 +209,9 @@ fn eviction_fires_all_inflight_controllers() {
         let _o2 = start_rpc(&rt_clone, "p2", "[]");
 
         // Two pending procedures → two registry entries.
-        assert_eq!(abort::entries_for_app(app_id), 2);
+        assert_eq!(abort::entries_for_app(&app_id), 2);
 
-        rt_clone.with_scope(|scope| abort::entered_for_eviction(scope, app_id));
+        rt_clone.with_scope(|scope| abort::entered_for_eviction(scope, &app_id));
         compio::time::sleep(Duration::ZERO).await;
 
         let outcome = start_rpc(&rt_clone, "readCount", "[]");
@@ -244,9 +244,9 @@ fn eviction_fires_all_inflight_controllers() {
 
 #[test]
 fn eviction_clears_registry() {
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let rt = build_runtime_with_app(
-        app_id,
+        &app_id,
         r#"
         export async function pending() {
             await new Promise(r => setTimeout(r, 60_000));
@@ -259,11 +259,11 @@ fn eviction_clears_registry() {
     compio::runtime::Runtime::new().unwrap().block_on(async move {
         rt_clone.start_pump();
         let _outcome = start_rpc(&rt_clone, "pending", "[]");
-        assert_eq!(abort::entries_for_app(app_id), 1);
+        assert_eq!(abort::entries_for_app(&app_id), 1);
 
-        rt_clone.with_scope(|scope| abort::entered_for_eviction(scope, app_id));
+        rt_clone.with_scope(|scope| abort::entered_for_eviction(scope, &app_id));
         assert_eq!(
-            abort::entries_for_app(app_id),
+            abort::entries_for_app(&app_id),
             0,
             "registry should be empty post-eviction"
         );
@@ -276,9 +276,9 @@ fn eviction_clears_registry() {
 
 #[test]
 fn sync_procedure_unregisters_on_return() {
-    let app_id = Uuid::new_v4();
+    let app_id = AppId::mint();
     let rt = build_runtime_with_app(
-        app_id,
+        &app_id,
         r#"
         export function check() {
             return { aborted: __zeroshipGetRpcCtx().signal.aborted };
@@ -295,7 +295,7 @@ fn sync_procedure_unregisters_on_return() {
 
     // Drop has run for the AbortGuard — registry must be empty.
     assert_eq!(
-        abort::entries_for_app(app_id),
+        abort::entries_for_app(&app_id),
         0,
         "sync procedure left a registry entry"
     );
@@ -307,7 +307,7 @@ fn sync_procedure_unregisters_on_return() {
 // ---------------------------------------------------------------------------
 //
 // The worker's eviction path (cache.rs::evict_lru) runs:
-//     1. runtime.with_scope(|scope| abort::entered_for_eviction(scope, app_id))
+//     1. runtime.with_scope(|scope| abort::entered_for_eviction(scope, &app_id))
 //     2. cache.isolates.remove(&oldest_id)
 //
 // We can't import the worker crate (it's a binary) so we replay the
@@ -319,11 +319,11 @@ fn sync_procedure_unregisters_on_return() {
 
 #[test]
 fn integration_two_isolates_eviction_walks_correct_registry() {
-    let app_a = Uuid::new_v4();
-    let app_b = Uuid::new_v4();
+    let app_a = AppId::mint();
+    let app_b = AppId::mint();
 
     let rt_a = build_runtime_with_app(
-        app_a,
+        &app_a,
         r#"
         globalThis.__zsAbortFired = false;
         export async function pending() {
@@ -339,7 +339,7 @@ fn integration_two_isolates_eviction_walks_correct_registry() {
     rt_a.exit_isolate();
 
     let rt_b = build_runtime_with_app(
-        app_b,
+        &app_b,
         r#"
         export async function pending() {
             await new Promise(r => setTimeout(r, 60_000));
@@ -366,17 +366,17 @@ fn integration_two_isolates_eviction_walks_correct_registry() {
         rt_b_clone.exit_isolate();
 
         // Each app contributes one entry under its own key.
-        assert_eq!(abort::entries_for_app(app_a), 1);
-        assert_eq!(abort::entries_for_app(app_b), 1);
+        assert_eq!(abort::entries_for_app(&app_a), 1);
+        assert_eq!(abort::entries_for_app(&app_b), 1);
 
         // Simulate the worker evicting app A. `with_scope` enters
         // app A's isolate just for the registry walk + abort dispatch.
-        rt_a_clone.with_scope(|scope| abort::entered_for_eviction(scope, app_a));
+        rt_a_clone.with_scope(|scope| abort::entered_for_eviction(scope, &app_a));
 
         // App A's entries cleared; app B's entries still present
         // (eviction is per-app_id, never wholesale).
-        assert_eq!(abort::entries_for_app(app_a), 0);
-        assert_eq!(abort::entries_for_app(app_b), 1);
+        assert_eq!(abort::entries_for_app(&app_a), 0);
+        assert_eq!(abort::entries_for_app(&app_b), 1);
 
         compio::time::sleep(Duration::ZERO).await;
 
@@ -412,6 +412,6 @@ fn integration_two_isolates_eviction_walks_correct_registry() {
 
         // Cleanup: walk B's registry too so the test doesn't leak
         // entries into the next test running on this thread.
-        rt_b_clone.with_scope(|scope| abort::entered_for_eviction(scope, app_b));
+        rt_b_clone.with_scope(|scope| abort::entered_for_eviction(scope, &app_b));
     });
 }

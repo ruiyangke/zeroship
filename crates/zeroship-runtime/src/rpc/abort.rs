@@ -42,6 +42,7 @@
 //! the isolate" timer; the runtime disposes immediately after firing
 //! the abort fan-out.
 
+use zeroship_core::app_id::AppId;
 use std::cell::RefCell;
 use std::collections::HashMap;
 
@@ -66,7 +67,7 @@ thread_local! {
 
 #[derive(Hash, Eq, PartialEq, Clone, Debug)]
 struct RegistryKey {
-    app_id: Uuid,
+    app_id: AppId,
     request_id: u64,
 }
 
@@ -107,11 +108,14 @@ impl Drop for AbortGuard {
 /// clears the entry.
 pub fn register_in_flight(
     scope: &mut v8::PinScope,
-    app_id: Uuid,
+    app_id: &AppId,
     request_id: u64,
     controller: v8::Local<v8::Object>,
 ) -> AbortGuard {
-    let key = RegistryKey { app_id, request_id };
+    let key = RegistryKey {
+        app_id: app_id.clone(),
+        request_id,
+    };
     let global = v8::Global::new(scope, controller);
     REGISTRY.with(|r| {
         r.borrow_mut().insert(key.clone(), global);
@@ -137,7 +141,7 @@ pub fn register_in_flight(
 /// would reinsert via [`register_in_flight`], but the worker removes
 /// the isolate immediately after this returns so that path is
 /// unreachable in practice.
-pub fn entered_for_eviction(scope: &mut v8::PinScope, app_id: Uuid) {
+pub fn entered_for_eviction(scope: &mut v8::PinScope, app_id: &AppId) {
     // Snapshot keys + globals matching `app_id`. Done in a single
     // borrow + clear pass so the registry is empty BEFORE we re-enter
     // user code via `controller.abort()` — even if a hypothetical abort
@@ -147,7 +151,7 @@ pub fn entered_for_eviction(scope: &mut v8::PinScope, app_id: Uuid) {
         let mut map = r.borrow_mut();
         let matching: Vec<_> = map
             .keys()
-            .filter(|k| k.app_id == app_id)
+            .filter(|k| &k.app_id == app_id)
             .cloned()
             .collect();
         matching
@@ -178,7 +182,7 @@ pub fn entered_for_eviction(scope: &mut v8::PinScope, app_id: Uuid) {
             Some(v) => v,
             None => {
                 tracing::warn!(
-                    app_id = %key.app_id,
+                    app_id = key.app_id.as_str(),
                     request_id = key.request_id,
                     "rpc abort: controller.abort getter returned None"
                 );
@@ -189,7 +193,7 @@ pub fn entered_for_eviction(scope: &mut v8::PinScope, app_id: Uuid) {
             Ok(f) => f,
             Err(_) => {
                 tracing::warn!(
-                    app_id = %key.app_id,
+                    app_id = key.app_id.as_str(),
                     request_id = key.request_id,
                     "rpc abort: controller.abort is not a function"
                 );
@@ -207,7 +211,7 @@ pub fn entered_for_eviction(scope: &mut v8::PinScope, app_id: Uuid) {
                 .map(|e| e.to_rust_string_lossy(tc))
                 .unwrap_or_else(|| "<no exception>".to_string());
             tracing::warn!(
-                app_id = %key.app_id,
+                app_id = key.app_id.as_str(),
                 request_id = key.request_id,
                 error = %msg,
                 "rpc abort: controller.abort threw during eviction"
@@ -223,6 +227,6 @@ pub fn entered_for_eviction(scope: &mut v8::PinScope, app_id: Uuid) {
 /// Test-only: count registry entries currently held for `app_id`.
 /// Cheap full-map scan — only called from unit tests.
 #[doc(hidden)]
-pub fn entries_for_app(app_id: Uuid) -> usize {
-    REGISTRY.with(|r| r.borrow().keys().filter(|k| k.app_id == app_id).count())
+pub fn entries_for_app(app_id: &AppId) -> usize {
+    REGISTRY.with(|r| r.borrow().keys().filter(|k| &k.app_id == app_id).count())
 }
