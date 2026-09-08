@@ -30,6 +30,13 @@ poisoned transaction. Rust callback transactions use the same protocol as the
 worker, including savepoints and cancellation cleanup. Handles returned from a
 Rust transaction callback expire when that callback finishes.
 
+PostgreSQL operations and transactions acquire leases from the same bounded
+pool. Warm-up and checkout have a pool acquisition budget, including async
+hooks. A transaction keeps an owned lease through settlement; withdrawal
+consumes that lease with `discard()` so an uncertain session cannot be reused.
+Pool shutdown interrupts pending acquisition without invalidating leases still
+held by callers. The pool contract is documented in `libs/compio-postgres/README.md`.
+
 Implementation: `crates/zeroship-data-engine/src/orm.rs`,
 `crates/zeroship-data-query-builder/src/filter.rs`, and
 `crates/zeroship-plugin-db/src/v8_classes/dispatch.rs`.

@@ -300,85 +300,16 @@ impl PostgresBackend {
 impl SqlExecutor for PostgresBackend {
     type Client = compio_postgres::OwnedPooledClient;
 
-    /// Check a connection out of the pool for the caller's own use.
+    /// Reserve an owned lease from the same pool used by ordinary operations.
     ///
-    /// **This is a capacity-model change, not a refactor.** Until 2026-08-27
-    /// this opened a brand new TCP connection per transaction with
-    /// `compio_postgres::connect` and a detached task per connection - it never
-    /// touched the pool. The concurrent-transaction ceiling was therefore
-    /// *unbounded*, and a worker multiplexing ~200 apps that each open a
-    /// transaction opened ~200 backends. That is a way to exhaust a cluster's
-    /// `max_connections` from one worker, which takes every tenant down rather
-    /// than slowing one. Operator decision, 2026-08-27: connections always come
-    /// from a pool.
-    ///
-    /// The inversion is real and is stated rather than discovered: a
-    /// transaction that used to get a connection now **queues**, and the pool
-    /// size is the ceiling for the whole worker.
-    ///
-    /// ## Policy chosen here, and OWED to a later decision
-    ///
-    /// Three questions are deliberately not settled by the design, and this
-    /// code takes the conservative option on each rather than inventing an
-    /// answer. Each is owed a decision before this ships to a real tenant:
-    ///
-    /// 1. **Ceiling** - the shared data pool's `max_size` (`lib.rs`:
-    ///    `Pool::connect(&url, 8)`). Conservative because it adds no new
-    ///    connections to what the process already opens. A dedicated
-    ///    transaction pool would raise the total and needs a sizing decision.
-    /// 2. **Exhaustion** - queue on the pool's existing `acquire_timeout`
-    ///    rather than refuse immediately. Conservative because a bounded wait
-    ///    degrades to the previous behaviour under light load and refuses only
-    ///    when the wait genuinely expires. It is NOT yet tied to SC-1's
-    ///    deadline; when that lands, the acquire wait must be inside it.
-    /// 3. **Starvation** - one app CAN now starve others: the pool is shared,
-    ///    the queue is FIFO across apps, and nothing here is per-app. The
-    ///    unbounded model made this impossible. No per-app fairness is
-    ///    implemented, because inventing one would settle a question the
-    ///    design explicitly left open.
-    /// 4. **Autocommit work shares the same slots, and this is the one that
-    ///    bites first.** The three questions above are the design's; this one
-    ///    is not a refinement of the third, it is a fourth. A transaction does
-    ///    not merely compete with other *transactions* for the pool - it
-    ///    competes with every co-resident autocommit operation, because those
-    ///    take a SECOND checkout from the very same pool:
-    ///    `exec::query_postgres_pool_with_autocommit_role`, `pool_exec` just
-    ///    below, the unmask path in `crud::unmask` and `audit::write_audit_row`
-    ///    all call `pool.get()` / `pool.query_*`. `TxRoute` routes an operation
-    ///    with no transaction in its call chain to the pool *deliberately*,
-    ///    including while that app holds a transaction open, so this is the
-    ///    designed path and not a leak.
-    ///
-    ///    With `max_size = 8`, eight concurrent transactions on one worker
-    ///    thread therefore pin every slot, and each co-resident autocommit op
-    ///    blocks for the full `acquire_timeout` before failing - while a
-    ///    transaction may hold its slot idle for `DB_IDLE_IN_TX_TIMEOUT_MS`
-    ///    plus a statement timeout per statement. The unbounded model made
-    ///    this shape impossible, because a transaction never touched the pool.
-    ///    Nothing here reserves headroom for autocommit work, and adding a
-    ///    reservation is a sizing decision - like (1) - that this change does
-    ///    not get to take on its own.
-    ///
-    /// `_app_id` is unused here and that is correct rather than lazy: a pooled
-    /// checkout is app-agnostic, and the per-app constraint the PostgreSQL arm
-    /// does enforce is the role, applied separately by
-    /// `transaction::apply_per_app_role` on the connection this returns.
+    /// Pool capacity and acquisition deadlines apply to both paths. The lease
+    /// remains checked out until transaction settlement or explicit disposal;
+    /// tenant role setup belongs to the transaction protocol.
     async fn acquire_dedicated_client(&self, _app_id: &str) -> Result<Self::Client, DbError> {
-        self.pool.get_owned().await.map_err(|e| {
-            // Walk the source chain. The pool renders an exhausted acquire as
-            // the generic "error connecting to server" wrapper and puts
-            // "connection timeout after 400ms (pool: 0/1 idle, 1/1 total)" in
-            // its source - so the bare Display tells an operator the server is
-            // unreachable when what actually happened is that this worker hit
-            // its own ceiling. Those need different responses.
-            let mut message = format!("db: pooled checkout for a dedicated client failed: {e}");
-            let mut cur: &dyn std::error::Error = &e;
-            while let Some(source) = std::error::Error::source(cur) {
-                message.push_str(&format!(" - caused by: {source}"));
-                cur = source;
-            }
-            DbError::Transient { message }
-        })
+        self.pool
+            .get_owned()
+            .await
+            .map_err(|error| pg_error::classify(&error))
     }
 
     async fn pool_exec(&self, sql: &str, params: &[&str]) -> Result<u64, DbError> {

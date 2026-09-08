@@ -249,13 +249,17 @@ impl PoolConfig {
         self.idle_timeout
     }
 
-    /// Set how long `get()` waits for a connection (default: 30 s).
+    /// Set the total budget for pool warm-up and for each checkout.
+    ///
+    /// Warm-up shares a deadline across its connections, retries, and hooks.
+    /// Each checkout shares a deadline across FIFO waiting, connection setup,
+    /// validation, and hooks. Use [`Error::is_pool_timeout`] to recognize expiry.
     pub fn acquire_timeout(&mut self, acquire_timeout: Duration) -> &mut Self {
         self.acquire_timeout = acquire_timeout;
         self
     }
 
-    /// Get the connection timeout.
+    /// Get the pool initialization and acquisition budget.
     #[must_use]
     pub fn get_acquire_timeout(&self) -> Duration {
         self.acquire_timeout
@@ -594,46 +598,6 @@ fn pool_error(msg: impl Into<String>) -> Error {
     Error::connect(io::Error::other(msg.into()))
 }
 
-#[derive(Debug)]
-struct PoolClosedError;
-
-impl std::fmt::Display for PoolClosedError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("pool is closed")
-    }
-}
-
-impl std::error::Error for PoolClosedError {}
-
-fn pool_closed_error() -> Error {
-    Error::connect(io::Error::other(PoolClosedError))
-}
-
-impl Error {
-    /// Whether this error reports an acquisition rejected by a closed pool.
-    #[must_use]
-    pub fn is_pool_closed(&self) -> bool {
-        let mut source = std::error::Error::source(self);
-        while let Some(error) = source {
-            if error.is::<PoolClosedError>() {
-                return true;
-            }
-            // `Error::connect` stores an `io::Error`, whose custom payload is
-            // available through `get_ref()` but is not exposed as its standard
-            // error-chain source on every supported Rust version.
-            if let Some(io_error) = error.downcast_ref::<io::Error>()
-                && io_error
-                    .get_ref()
-                    .is_some_and(<dyn std::error::Error + Send + Sync>::is::<PoolClosedError>)
-            {
-                return true;
-            }
-            source = error.source();
-        }
-        false
-    }
-}
-
 /// Reject a mode that needs a TLS connector this build does not contain.
 ///
 /// This is a build-capability check, not a policy: the contradictions between
@@ -708,17 +672,22 @@ impl Transport {
     /// Open a single client + spawn its Connection task. Returns the Client;
     /// the task is detached and self-terminates when the Client's sender is
     /// closed (i.e. when the Client is dropped).
-    async fn connect_one(&self) -> Result<Client, Error> {
-        #[cfg(feature = "tls")]
-        if let Some(tls) = &self.tls {
-            let (client, connection) = self.config.connect(tls.clone()).await?;
-            spawn_connection_task(connection);
-            return Ok(client);
-        }
+    fn connect_one(&self) -> Pin<Box<dyn Future<Output = Result<Client, Error>> + '_>> {
+        // Erase the driver's nested connection future at the physical-connect
+        // boundary. Pool callers then keep a bounded layout depth without
+        // allocating a boxed future when reusing an idle connection.
+        Box::pin(async move {
+            #[cfg(feature = "tls")]
+            if let Some(tls) = &self.tls {
+                let (client, connection) = self.config.connect(tls.clone()).await?;
+                spawn_connection_task(connection);
+                return Ok(client);
+            }
 
-        let (client, connection) = self.config.connect(NoTls).await?;
-        spawn_connection_task(connection);
-        Ok(client)
+            let (client, connection) = self.config.connect(NoTls).await?;
+            spawn_connection_task(connection);
+            Ok(client)
+        })
     }
 
     /// Send an out-of-band `CancelRequest` with the same transport policy as
@@ -814,6 +783,8 @@ pub struct Pool {
     /// Every in-progress close gets its own wake slot. A single stored Waker
     /// would strand concurrent close callers by overwriting the earlier one.
     close_waiters: RefCell<Vec<Rc<CloseWaiterSlot>>>,
+    /// Acquisitions waiting for shutdown, including ones inside hooks or I/O.
+    close_event_waiters: RefCell<Vec<Rc<CloseWaiterSlot>>>,
     /// Retaining the handle makes dropping the pool cancel housekeeping even
     /// if the task is blocked in a connection attempt. The task itself holds
     /// only a `Weak<Pool>`, so this field does not form a reference cycle.
@@ -844,7 +815,7 @@ impl Pool {
     /// rejects future acquisitions, wakes every queued acquisition with a
     /// pool-closed error, discards idle and not-yet-claimed hand-off entries,
     /// and cancels the housekeeper. Connections still held by callers remain
-    /// usable until their [`PooledClient`] is dropped; each is then closed
+    /// usable until their lease is dropped; each is then closed
     /// instead of returned to idle. The future completes when `active == 0`.
     ///
     /// Calls are idempotent. Concurrent and later callers join the same drain,
@@ -856,12 +827,13 @@ impl Pool {
     /// cancelling it (including through an elapsed timeout) leaves the pool
     /// closed; existing borrowers remain usable, and a later `close()` resumes
     /// waiting for them. A timeout whose timer wins before polling `close()`
-    /// has not begun shutdown. An acquisition already inside an async
-    /// connection or hook await is not a borrower and is not awaited; when it
-    /// resumes (or is cancelled), its capacity guard discards the candidate.
+    /// has not begun shutdown. Pending acquisitions are woken even inside
+    /// connection setup or a hook. Their next poll cancels that work and
+    /// releases its candidate and capacity slot. Close waits for borrowed
+    /// leases; it does not wait for acquisition futures to be polled again.
     pub async fn close(&self) {
         self.begin_close();
-        CloseWaiter::new(self).await;
+        CloseWaiter::new(self, CloseEvent::Drained).await;
     }
 
     /// Whether graceful shutdown has begun.
@@ -872,7 +844,7 @@ impl Pool {
 
     fn ensure_open(&self) -> Result<(), Error> {
         if self.closed.get() {
-            Err(pool_closed_error())
+            Err(Error::pool_closed())
         } else {
             Ok(())
         }
@@ -955,6 +927,8 @@ impl Pool {
     /// Returns an error for invalid pool or transport configuration, failed
     /// connection warm-up, a rejected `after_connect` callback, or a warm-up
     /// connection that becomes unusable before the pool can be published.
+    /// [`PoolConfig::acquire_timeout`] bounds asynchronous initialization;
+    /// expiry is identified by [`Error::is_pool_timeout`].
     pub async fn connect_with_config(
         connection_config: Config,
         pool_config: PoolConfig,
@@ -962,6 +936,43 @@ impl Pool {
         pool_config.validate()?;
         let transport = Transport::resolve(connection_config)?;
 
+        let entries = compio::time::timeout(
+            pool_config.acquire_timeout,
+            Self::warm_up(&transport, &pool_config),
+        )
+        .await
+        .map_err(|_| {
+            Error::pool_timeout(format!(
+                "pool initialization exceeded {:?}",
+                pool_config.acquire_timeout,
+            ))
+        })??;
+
+        let total = entries.len();
+        let pool = Self {
+            transport,
+            config: pool_config,
+            idle: RefCell::new(entries),
+            active: Cell::new(0),
+            total: Cell::new(total),
+            waiters: RefCell::new(VecDeque::new()),
+            handoffs: RefCell::new(Vec::new()),
+            closed: Cell::new(false),
+            close_waiters: RefCell::new(Vec::new()),
+            close_event_waiters: RefCell::new(Vec::new()),
+            housekeeper: RefCell::new(None),
+            metrics: PoolMetrics::new(),
+        };
+        for _ in 0..total {
+            pool.metrics.inc_created();
+        }
+        Ok(pool)
+    }
+
+    async fn warm_up(
+        transport: &Transport,
+        pool_config: &PoolConfig,
+    ) -> Result<Vec<PoolEntry>, Error> {
         // `max(1)` keeps a `min_idle` of 0 from making the constructor prove
         // nothing about the connection settings - one connection verifies
         // them. No `min(max_size)`: with both guards above in place,
@@ -1019,24 +1030,7 @@ impl Pool {
             return Err(error);
         }
 
-        let total = entries.len();
-        let pool = Self {
-            transport,
-            config: pool_config,
-            idle: RefCell::new(entries),
-            active: Cell::new(0),
-            total: Cell::new(total),
-            waiters: RefCell::new(VecDeque::new()),
-            handoffs: RefCell::new(Vec::new()),
-            closed: Cell::new(false),
-            close_waiters: RefCell::new(Vec::new()),
-            housekeeper: RefCell::new(None),
-            metrics: PoolMetrics::new(),
-        };
-        for _ in 0..total {
-            pool.metrics.inc_created();
-        }
-        Ok(pool)
+        Ok(entries)
     }
 
     /// Start the background housekeeper task. Runs every 30 seconds:
@@ -1092,7 +1086,11 @@ impl Pool {
         let mut discarded_entries = std::mem::take(&mut *self.idle.borrow_mut());
         let queued_waiters: Vec<_> = self.waiters.borrow_mut().drain(..).collect();
         let assigned_handoffs = std::mem::take(&mut *self.handoffs.borrow_mut());
-        let mut wakers = Vec::with_capacity(queued_waiters.len() + assigned_handoffs.len());
+        let closing = std::mem::take(&mut *self.close_event_waiters.borrow_mut());
+        let mut wakers: Vec<_> = closing
+            .into_iter()
+            .filter_map(|slot| slot.waker.borrow_mut().take())
+            .collect();
 
         for slot in queued_waiters {
             if let Some(waker) = slot.waker.borrow_mut().take() {
@@ -1194,14 +1192,13 @@ impl Pool {
 
     /// Acquire a connection from the pool.
     ///
-    /// Tries idle connections first (with alive-bypass validation), then
-    /// creates a new connection if under `max_size`, then waits up to
-    /// `acquire_timeout` for a connection to be returned. Async lifecycle
-    /// hooks are inside that timeout; cancellation discards their candidate and
-    /// releases its capacity slot.
+    /// Reuses idle connections or opens a connection within `max_size`, joining
+    /// the FIFO queue when capacity is occupied. The whole acquisition,
+    /// including connection setup, validation, and hooks, shares
+    /// `acquire_timeout`. Shutdown interrupts pending acquisition; cancellation
+    /// discards its candidate and releases its capacity slot.
     pub async fn get(&self) -> Result<PooledClient<'_>, Error> {
-        let entry = self.checkout().await?;
-        Ok(PooledClient::new(entry, self))
+        self.checkout().await
     }
 
     /// Acquire a connection whose lease owns an `Rc` of this pool.
@@ -1219,15 +1216,37 @@ impl Pool {
     /// Identical to [`Pool::get`]: pool closed, acquisition timeout, or a
     /// connection/lifecycle-hook failure.
     pub async fn get_owned(self: &Rc<Self>) -> Result<OwnedPooledClient, Error> {
-        let entry = self.checkout().await?;
-        Ok(OwnedPooledClient::new(entry, Rc::clone(self)))
+        let mut lease = self.checkout().await?;
+        Ok(OwnedPooledClient {
+            entry: lease.entry.take(),
+            pool: Rc::clone(self),
+        })
     }
 
     /// The shared acquisition body behind [`Pool::get`] and
     /// [`Pool::get_owned`]: one deadline, one FIFO turn, one entry.
-    async fn checkout(&self) -> Result<PoolEntry, Error> {
+    async fn checkout(&self) -> Result<PooledClient<'_>, Error> {
         self.ensure_open()?;
-        match compio::time::timeout(self.config.acquire_timeout, self.get_inner()).await {
+        let acquisition = async {
+            let mut closing = std::pin::pin!(CloseWaiter::new(self, CloseEvent::Started));
+            let mut checkout = std::pin::pin!(self.get_inner_leased());
+            std::future::poll_fn(|cx| {
+                if self.is_closed() {
+                    return Poll::Ready(Err(Error::pool_closed()));
+                }
+                match checkout.as_mut().poll(cx) {
+                    Poll::Ready(result) => Poll::Ready(result),
+                    // Register only after acquisition yields: an immediately
+                    // available connection needs no shutdown subscription.
+                    Poll::Pending => closing
+                        .as_mut()
+                        .poll(cx)
+                        .map(|()| Err(Error::pool_closed())),
+                }
+            })
+            .await
+        };
+        match compio::time::timeout(self.config.acquire_timeout, acquisition).await {
             Ok(result) => result,
             Err(_) => {
                 // If shutdown raced the timeout, report the terminal state and
@@ -1235,16 +1254,10 @@ impl Pool {
                 // again, so this is the more specific and stable answer.
                 self.ensure_open()?;
                 self.metrics.inc_timeouts();
-                Err(pool_error(format!(
-                    // `{:?}` on a Duration, not `as_secs()`: that truncated, so
-                    // every sub-second acquire timeout described itself as
-                    // `0s` - which reads as a misconfigured zero and sends the
-                    // caller after the wrong thing. Debug renders `300ms`,
-                    // `1.5s`, `2s`.
-                    "connection timeout after {:?} (pool: {}/{} idle, {}/{} total)",
+                Err(Error::pool_timeout(format!(
+                    "acquisition exceeded {:?} (pool: {} idle, {} total, {} maximum)",
                     self.config.acquire_timeout,
                     self.idle.borrow().len(),
-                    self.config.max_size,
                     self.total.get(),
                     self.config.max_size,
                 )))
@@ -1252,11 +1265,8 @@ impl Pool {
         }
     }
 
-    /// `get_inner` wrapped in a borrowed lease, for the tests that drive the
-    /// acquisition loop directly (no `acquire_timeout`) and still need the
-    /// entry to be returned to the pool on drop. A bare `PoolEntry` has no
-    /// `Drop` accounting, so a test holding one would leak `active`.
-    #[cfg(test)]
+    /// Commit ownership before shutdown-listener cleanup can invoke caller
+    /// wakers. Cancellation or unwinding must always have a lease to return.
     async fn get_inner_leased(&self) -> Result<PooledClient<'_>, Error> {
         Ok(PooledClient::new(self.get_inner().await?, self))
     }
@@ -2479,21 +2489,46 @@ impl CloseWaiterSlot {
     }
 }
 
+#[derive(Clone, Copy)]
+enum CloseEvent {
+    Started,
+    Drained,
+}
+
 struct CloseWaiter<'a> {
     pool: &'a Pool,
+    event: CloseEvent,
     slot: Option<Rc<CloseWaiterSlot>>,
 }
 
 impl<'a> CloseWaiter<'a> {
-    fn new(pool: &'a Pool) -> Self {
-        Self { pool, slot: None }
+    fn new(pool: &'a Pool, event: CloseEvent) -> Self {
+        Self {
+            pool,
+            event,
+            slot: None,
+        }
+    }
+
+    fn ready(&self) -> bool {
+        match self.event {
+            CloseEvent::Started => self.pool.is_closed(),
+            CloseEvent::Drained => self.pool.active.get() == 0,
+        }
+    }
+
+    fn registrations(&self) -> &'a RefCell<Vec<Rc<CloseWaiterSlot>>> {
+        match self.event {
+            CloseEvent::Started => &self.pool.close_event_waiters,
+            CloseEvent::Drained => &self.pool.close_waiters,
+        }
     }
 
     fn remove_slot(&self) {
         let Some(slot) = &self.slot else {
             return;
         };
-        let mut close_waiters = self.pool.close_waiters.borrow_mut();
+        let mut close_waiters = self.registrations().borrow_mut();
         if let Some(index) = close_waiters
             .iter()
             .position(|registered| Rc::ptr_eq(registered, slot))
@@ -2507,7 +2542,7 @@ impl Future for CloseWaiter<'_> {
     type Output = ();
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        if self.pool.active.get() == 0 {
+        if self.ready() {
             return Poll::Ready(());
         }
 
@@ -2515,12 +2550,12 @@ impl Future for CloseWaiter<'_> {
         // registration container, then re-check the completion condition in
         // case that callback returned the last active client.
         let new_waker = cx.waker().clone();
-        if self.pool.active.get() == 0 {
+        if self.ready() {
             return Poll::Ready(());
         }
 
         let current_slot = self.slot.as_ref().map(Rc::clone);
-        let mut close_waiters = self.pool.close_waiters.borrow_mut();
+        let mut close_waiters = self.registrations().borrow_mut();
         // Carried out for the same reason as in `Waiter::poll`: a replaced
         // `Waker` is arbitrary caller code and must not be destroyed while a
         // borrow is held.
@@ -2616,6 +2651,15 @@ pub struct PooledClient<'a> {
 }
 
 impl PooledClient<'_> {
+    /// Consume this lease and close its physical connection immediately.
+    ///
+    /// Use this when session cleanup cannot be confirmed. The connection is
+    /// never offered to another borrower; dropping the lease releases its
+    /// capacity and wakes a queued acquisition. Release hooks are skipped.
+    pub fn discard(self) {
+        self.force_close();
+    }
+
     fn new(mut entry: PoolEntry, pool: &Pool) -> PooledClient<'_> {
         entry.client.activate_pool_cancel_lease();
         PooledClient {
@@ -2811,12 +2855,13 @@ pub struct OwnedPooledClient {
 }
 
 impl OwnedPooledClient {
-    fn new(mut entry: PoolEntry, pool: Rc<Pool>) -> Self {
-        entry.client.activate_pool_cancel_lease();
-        Self {
-            entry: Some(entry),
-            pool,
-        }
+    /// Consume this lease and close its physical connection immediately.
+    ///
+    /// Use this when session cleanup cannot be confirmed. The connection is
+    /// never offered to another borrower; dropping the lease releases its
+    /// capacity and wakes a queued acquisition. Release hooks are skipped.
+    pub fn discard(self) {
+        self.force_close();
     }
 
     /// Run one exclusive logical command under the pool's command deadline.
@@ -2984,37 +3029,6 @@ mod tests {
             woken.load(Ordering::Relaxed),
             2,
             "a panicking waker stranded the waiters queued behind it"
-        );
-    }
-
-    /// `is_pool_closed` must find the marker in EITHER chain shape.
-    ///
-    /// The pool raises it as `Error::connect(io::Error::other(PoolClosedError))`,
-    /// so today it sits in an io payload and the live suite reaches it that way.
-    /// The source comment records that whether such a payload ALSO surfaces as
-    /// a standard error-chain source depends on the Rust version - which is why
-    /// the function tries both, and why only one of the two arms can be
-    /// exercised by the pool's own constructor on any given toolchain. The
-    /// other is reachable here because `PoolClosedError` is crate-private and
-    /// this is the crate.
-    ///
-    /// Without the direct-source arm, a toolchain that starts exposing io
-    /// payloads as sources would silently turn every closed-pool rejection into
-    /// an ordinary connect failure, and callers branching on this predicate
-    /// would retry a pool that is never coming back.
-    #[test]
-    fn is_pool_closed_finds_the_marker_in_either_chain_shape() {
-        assert!(
-            pool_closed_error().is_pool_closed(),
-            "the shape the pool actually raises was not recognised"
-        );
-        assert!(
-            Error::tls(Box::new(PoolClosedError)).is_pool_closed(),
-            "a directly-sourced marker was not recognised"
-        );
-        assert!(
-            !Error::tls("an unrelated tls failure".into()).is_pool_closed(),
-            "an unrelated error was reported as a closed pool"
         );
     }
 
@@ -3314,6 +3328,7 @@ mod tests {
             handoffs: RefCell::new(Vec::new()),
             closed: Cell::new(false),
             close_waiters: RefCell::new(Vec::new()),
+            close_event_waiters: RefCell::new(Vec::new()),
             housekeeper: RefCell::new(None),
             metrics: PoolMetrics::new(),
         }
@@ -4776,7 +4791,7 @@ mod tests {
     fn cloning_a_close_waiter_waker_does_not_borrow_pool_state() {
         let pool = Rc::new(test_pool(PoolConfig::default(), Vec::new(), 0, 1));
         pool.active.set(1);
-        let mut waiter = Box::pin(CloseWaiter::new(&pool));
+        let mut waiter = Box::pin(CloseWaiter::new(&pool, CloseEvent::Drained));
         assert!(poll_once(waiter.as_mut()).is_pending());
         let slot = pool
             .close_waiters

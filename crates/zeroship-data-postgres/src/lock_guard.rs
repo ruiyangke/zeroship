@@ -36,9 +36,9 @@
 //!    Issues `pg_advisory_unlock` and hands the now-unlocked client
 //!    back to the caller (so it can be parked or reused).
 //! 2. **Panic / catastrophic propagation** — `Drop` runs, logs an
-//!    error, closes the pooled client so the backend session dies,
-//!    and lets the now-closed entry fall out of the pool on the next
-//!    checkout. That tears down the session-scoped advisory lock even
+//!    error, and consumes the pooled lease with `discard()`. That closes the
+//!    physical connection and frees its pool capacity immediately. It tears
+//!    down the session-scoped advisory lock even
 //!    though `Drop` cannot await `pg_advisory_unlock`. This is still a
 //!    fallback only; production code should always reach `release()`.
 //!
@@ -223,8 +223,8 @@ impl Drop for LockGuard {
             // This branch is the catastrophic-path fallback (panic
             // unwind, missed `release()` call). Production code should
             // always reach `release()`.
-            if let Some(client) = self.client.as_mut() {
-                client.__private_api_close();
+            if let Some(client) = self.client.take() {
+                client.discard();
             }
             tracing::error!(
                 key = %self.key,

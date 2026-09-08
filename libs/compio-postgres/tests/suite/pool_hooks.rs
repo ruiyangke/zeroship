@@ -3,7 +3,7 @@
 use compio_postgres::config::TargetSessionAttrs;
 use compio_postgres::error::SqlState;
 use compio_postgres::{Config, Pool, PoolConfig};
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::io::{ErrorKind, Read, Write};
 use std::net::TcpListener;
 use std::rc::Rc;
@@ -14,6 +14,58 @@ use crate::common;
 
 fn test_url() -> String {
     common::test_url()
+}
+
+#[compio::test]
+async fn warm_up_bounds_after_connect_and_closes_every_candidate() {
+    let entered = Rc::new(Cell::new(0));
+    let hook_entered = Rc::clone(&entered);
+    let pids = Rc::new(RefCell::new(Vec::new()));
+    let hook_pids = Rc::clone(&pids);
+    let mut config = config(2, 2);
+    config.acquire_timeout(Duration::from_millis(300));
+    config.after_connect(move |client| {
+        let entered = Rc::clone(&hook_entered);
+        hook_pids.borrow_mut().push(client.process_id());
+        Box::pin(async move {
+            entered.set(entered.get() + 1);
+            if entered.get() == 2 {
+                std::future::pending::<()>().await;
+            }
+            Ok(())
+        })
+    });
+    let result = compio::time::timeout(
+        Duration::from_secs(3),
+        Pool::connect_with_pool_config(&test_url(), config),
+    )
+    .await
+    .expect("pool warm-up ignored acquire_timeout while its hook was pending");
+    assert_eq!(entered.get(), 2, "warm-up never reached the blocked hook");
+    let error = result.expect_err("pool published a candidate before initialization completed");
+    assert!(
+        error.is_pool_timeout(),
+        "wrong initialization error: {error:?}"
+    );
+    let pids = pids.borrow().clone();
+    let observer = connect_pool(&test_url(), PoolConfig::new()).await;
+    compio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let rows = observer
+                .query(
+                    "SELECT pid FROM pg_stat_activity WHERE pid = ANY($1)",
+                    &[&pids],
+                )
+                .await
+                .unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("timed-out warm-up retained a database session");
 }
 
 fn config(max_size: usize, min_idle: usize) -> PoolConfig {

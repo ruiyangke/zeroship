@@ -1,6 +1,6 @@
 //! Live coverage for graceful pool shutdown.
 
-use compio_postgres::{Error, Pool, PoolConfig};
+use compio_postgres::{Client, Error, Pool, PoolConfig};
 use futures_channel::oneshot;
 use std::cell::{Cell, RefCell};
 use std::future::Future;
@@ -75,6 +75,121 @@ fn assert_drained(pool: &Pool) {
         0,
         "closed pool retained a FIFO waiter"
     );
+}
+
+async fn abandon_running_query(client: &Client, observer: &Pool) {
+    // PostgreSQL must check for a disconnected client while executing the
+    // query; otherwise pg_sleep can finish before it observes the closed socket.
+    client
+        .batch_execute("SET client_connection_check_interval = '10ms'")
+        .await
+        .unwrap();
+    let pid = client.process_id();
+    let query = std::pin::pin!(client.batch_execute("SELECT pg_sleep(30)"));
+    let observed =
+        std::pin::pin!(async {
+            loop {
+                let rows = observer.query(
+                "SELECT pid FROM pg_stat_activity WHERE pid = $1 AND wait_event = 'PgSleep'",
+                &[&pid],
+            ).await.unwrap();
+                if !rows.is_empty() {
+                    break;
+                }
+                compio::time::sleep(Duration::from_millis(10)).await;
+            }
+        });
+    let outcome = compio::time::timeout(
+        Duration::from_secs(3),
+        futures_util::future::select(observed, query),
+    )
+    .await
+    .expect("query never reached PostgreSQL");
+    assert!(
+        matches!(outcome, futures_util::future::Either::Left(_)),
+        "query ended before disposal could be exercised"
+    );
+}
+
+async fn discarded_lease_closes_session_and_wakes_waiter(owned: bool) {
+    let release_calls = Rc::new(Cell::new(0));
+    let calls = Rc::clone(&release_calls);
+    let mut config = config(1, 1);
+    config.after_release(move |_| {
+        calls.set(calls.get() + 1);
+        true
+    });
+    let pool = Rc::new(connect_pool(&test_url(), config).await);
+    let observer = connect_pool(&test_url(), PoolConfig::new()).await;
+    let (pid, discard): (i32, Box<dyn FnOnce() + '_>) = if owned {
+        let client = pool.get_owned().await.unwrap();
+        abandon_running_query(&client, &observer).await;
+        (client.process_id(), Box::new(move || client.discard()))
+    } else {
+        let client = pool.get().await.unwrap();
+        abandon_running_query(&client, &observer).await;
+        (client.process_id(), Box::new(move || client.discard()))
+    };
+    let wakes = Arc::new(AtomicUsize::new(0));
+    let waker = counting_waker(&wakes);
+    let mut waiter = Box::pin(pool.get());
+    assert!(poll_with_waker(waiter.as_mut(), &waker).is_pending());
+    assert_eq!(pool.pending_count(), 1);
+    discard();
+    assert_eq!(pool.active_count(), 0);
+    assert_eq!(pool.idle_count(), 0);
+    assert_eq!(pool.total_count(), 0);
+    assert_eq!(release_calls.get(), 0, "disposal ran a reuse hook");
+    assert!(
+        wakes.load(Ordering::Relaxed) > 0,
+        "disposal stranded a waiter"
+    );
+    let replacement = waiter.await.unwrap();
+    assert_ne!(
+        replacement.process_id(),
+        pid,
+        "discarded session was reused"
+    );
+    compio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let rows = observer
+                .query("SELECT pid FROM pg_stat_activity WHERE pid = $1", &[&pid])
+                .await
+                .unwrap();
+            if rows.is_empty() {
+                break;
+            }
+            compio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("discard left the abandoned query running on the server");
+    assert_eq!(
+        replacement
+            .query_one("SELECT 42", &[])
+            .await
+            .unwrap()
+            .get::<_, i32>(0),
+        42
+    );
+    drop(replacement);
+    assert_eq!(
+        release_calls.get(),
+        1,
+        "ordinary return skipped its reuse hook"
+    );
+    pool.close().await;
+    assert_drained(&pool);
+}
+
+#[compio::test]
+async fn discarding_a_borrowed_lease_stops_its_query_and_releases_capacity() {
+    discarded_lease_closes_session_and_wakes_waiter(false).await;
+}
+
+#[compio::test]
+async fn discarding_an_owned_lease_stops_its_query_and_releases_capacity() {
+    discarded_lease_closes_session_and_wakes_waiter(true).await;
 }
 
 #[compio::test]
@@ -304,7 +419,7 @@ async fn after_release_is_skipped_when_a_borrower_returns_during_close() {
 }
 
 #[compio::test]
-async fn acquisition_in_a_hook_cannot_commit_after_close() {
+async fn close_interrupts_acquisition_without_waiting_for_its_hook() {
     let url = test_url();
     let entered = Rc::new(Cell::new(false));
     let hook_entered = Rc::clone(&entered);
@@ -348,18 +463,19 @@ async fn acquisition_in_a_hook_cannot_commit_after_close() {
         "close waited for or stole a non-borrowed hook candidate"
     );
 
-    release_tx
-        .send(())
-        .expect("before_acquire gate was dropped");
     assert!(
         wakes.load(Ordering::Relaxed) > 0,
-        "hook release did not wake checkout"
+        "pool close did not wake the acquisition parked in its hook"
     );
     match poll_with_waker(acquire.as_mut(), &waker) {
         Poll::Ready(Err(error)) => assert_pool_closed(&error),
         Poll::Ready(Ok(_)) => panic!("hook candidate became active after close"),
-        Poll::Pending => panic!("released hook candidate stayed pending"),
+        Poll::Pending => panic!("closed pool kept waiting for its hook"),
     }
+    assert!(
+        release_tx.send(()).is_err(),
+        "closed acquisition retained its hook"
+    );
     assert_eq!(pool.metrics.timeouts.get(), 0);
     assert_drained(&pool);
 }
