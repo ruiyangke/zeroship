@@ -133,7 +133,6 @@ zeroship-data-sqlite = { workspace = true, features = ["test-helpers"] }
 # `cfg(any(test, feature = "test-helpers"))` in the engine - where `test` is the
 # ENGINE's test build, never this crate's. The feature is what carries.
 zeroship-data-engine = { workspace = true, features = ["test-helpers"] }
-zeroship-test-support = { workspace = true }
 # The DbPlan IR. A DEV dependency on purpose: nothing in this crate's `src/`
 # uses it yet, and declaring it a normal dependency would say otherwise. The
 # search family's lowering is exercised by `tests/search_ir_live.rs`, which

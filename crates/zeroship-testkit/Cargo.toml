@@ -22,7 +22,6 @@ clap = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-zeroship-test-support = { workspace = true }
 
 [lints]
 workspace = true

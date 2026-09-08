@@ -38,25 +38,65 @@ fn repo_root() -> PathBuf {
 
 /// The overlay names the server; without one there is nothing to dial.
 ///
-/// The announcement is the marker `tests/lib/skip_census.sh` counts, so a green
-/// tally cannot hide a run that exercised nothing.
-fn server() -> Option<(overlay::Loaded, admin::Server)> {
-    let loaded = match overlay::load(&repo_root()) {
-        Ok(loaded) => loaded,
-        Err(_) => {
-            zeroship_test_support::skip(
-                "no deploy/ops/zeroship.test.toml; run tests/provision_test_backends.sh",
-            );
-            return None;
-        }
-    };
-    let server = admin::Server::from_overlay(&loaded).ok()?;
+/// IT PANICS RATHER THAN SKIPPING, and that is the whole point of the file.
+/// Every arm here rules on a real `CREATE DATABASE` against a real server; with
+/// no server there is nothing to rule on, and an early return would report the
+/// same green a full run reports. There is no environment variable that turns
+/// this back into a skip.
+fn server() -> (overlay::Loaded, admin::Server) {
+    let loaded = overlay::load(&repo_root()).unwrap_or_else(|error| {
+        panic!(
+            "The test overlay is missing, and this suite requires it.\n\
+             \n\
+             \x20 backend: PostgreSQL (named by deploy/ops/zeroship.test.toml)\n\
+             \x20 error:   {error}\n\
+             \n\
+             Write the overlay and bring the server up:\n\
+             \x20 tests/provision_test_backends.sh\n\
+             \n\
+             That starts deploy/compose's `postgres` and `redis` services, waits\n\
+             for both to be healthy, and writes the overlay naming them. Use\n\
+             `--check` instead if the servers are already running and you only\n\
+             need them described.\n\
+             \n\
+             There is no environment variable that makes this a skip. A suite\n\
+             that cannot reach its database is a failed run, not a green one."
+        )
+    });
+    let server = admin::Server::from_overlay(&loaded).unwrap_or_else(|error| {
+        panic!(
+            "The test overlay does not describe a PostgreSQL this suite can dial.\n\
+             \n\
+             \x20 backend: PostgreSQL\n\
+             \x20 overlay: deploy/ops/zeroship.test.toml\n\
+             \x20 error:   {error}\n\
+             \n\
+             Rewrite it from the servers you actually have:\n\
+             \x20 tests/provision_test_backends.sh --check\n\
+             \n\
+             There is no environment variable that makes this a skip."
+        )
+    });
     let mut probe = admin::PgAdmin::new(server.clone());
-    if admin::DbAdmin::exists(&mut probe, "postgres").is_err() {
-        zeroship_test_support::skip("the overlay's PostgreSQL is not reachable");
-        return None;
+    if let Err(error) = admin::DbAdmin::exists(&mut probe, "postgres") {
+        panic!(
+            "PostgreSQL is unreachable, and this suite requires it.\n\
+             \n\
+             \x20 backend: PostgreSQL\n\
+             \x20 dialled: {host}:{port} (from deploy/ops/zeroship.test.toml)\n\
+             \x20 error:   {error}\n\
+             \n\
+             Nothing answered the `postgres` maintenance database, so provision\n\
+             it and re-run:\n\
+             \x20 tests/provision_test_backends.sh\n\
+             \n\
+             There is no environment variable that makes this a skip. A database\n\
+             this suite cannot reach is a failed run, not a green one.",
+            host = server.host,
+            port = server.port,
+        )
     }
-    Some((loaded, server))
+    (loaded, server)
 }
 
 /// A name no other run can collide with, and short enough for the 63-byte limit.
@@ -105,7 +145,7 @@ fn drop_scratch(server: &admin::Server, name: &str) {
 
 #[test]
 fn an_absent_database_is_created_and_the_next_run_reuses_it_untouched() {
-    let Some((_, server)) = server() else { return };
+    let (_, server) = server();
     let name = scratch_name("reuse");
     let mut admin = admin::PgAdmin::new(server.clone());
     let mut said = String::new();
@@ -129,7 +169,7 @@ fn an_absent_database_is_created_and_the_next_run_reuses_it_untouched() {
 
 #[test]
 fn losing_a_real_create_race_is_success() {
-    let Some((_, server)) = server() else { return };
+    let (_, server) = server();
     let name = scratch_name("race");
 
     /// Creates the database for real just before delegating, so the delegate's
@@ -187,7 +227,7 @@ fn two_provision_processes_do_not_overlap() {
     // prove nothing on their own, since they might simply not have collided.
     // The command each one runs records the interval it ran for, and the check
     // is that the two intervals do not intersect.
-    let Some((loaded, server)) = server() else { return };
+    let (loaded, server) = server();
     let name = scratch_name("lock");
     let scratch = tempfile::tempdir().expect("scratch root");
     let root = scratch.path();
@@ -300,7 +340,7 @@ fn run_in(server: &admin::Server, database: &str, sql: &str) -> bool {
 fn admin_statements_do_not_abandon_their_connections() {
     const STATEMENTS: usize = 8;
 
-    let Some((_, server)) = server() else { return };
+    let (_, server) = server();
     let live = std::thread::spawn(move || {
         let mut admin = admin::PgAdmin::new(server);
         for _ in 0..STATEMENTS {

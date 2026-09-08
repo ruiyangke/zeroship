@@ -35,9 +35,10 @@
 //! on main for every developer here.
 //!
 //! It fails in the exact family this module's own header warns about: a check
-//! bound to something other than what it is checking. And it fails INVISIBLY in
-//! CI, because with no overlay at all `server()` returns `None` and the file
-//! skips -- green forever centrally, red on every desk.
+//! bound to something other than what it is checking. And it USED TO fail
+//! INVISIBLY in CI, because with no overlay at all `server()` returned `None`
+//! and the file skipped -- green forever centrally, red on every desk. That
+//! half is closed: `server()` panics, naming the provisioning script.
 //!
 //! So: the overlay supplies HOST, PORT, USER, PASSWORD and nothing else. Its
 //! `database` field is read by nothing here. Every database an arm rules on is
@@ -129,22 +130,64 @@ fn repo_root() -> PathBuf {
 
 /// The SERVER the overlay names. Its database is deliberately not returned.
 ///
-/// The announcement is the marker `tests/lib/skip_census.sh` counts, so a green
-/// tally cannot hide a run that exercised nothing.
-fn server() -> Option<admin::Server> {
-    let Ok(loaded) = overlay::load(&repo_root()) else {
-        zeroship_test_support::skip(
-            "no deploy/ops/zeroship.test.toml; run tests/provision_test_backends.sh",
-        );
-        return None;
-    };
-    let server = admin::Server::from_overlay(&loaded).ok()?;
+/// IT PANICS RATHER THAN SKIPPING. The header above records what the skip cost:
+/// with no overlay at all this returned `None` and every arm returned early, so
+/// the file was green forever in CI and red on every desk. An absent server is
+/// now a failure naming the script that provisions one.
+fn server() -> admin::Server {
+    let loaded = overlay::load(&repo_root()).unwrap_or_else(|error| {
+        panic!(
+            "The test overlay is missing, and this suite requires it.\n\
+             \n\
+             \x20 backend: PostgreSQL (named by deploy/ops/zeroship.test.toml)\n\
+             \x20 error:   {error}\n\
+             \n\
+             Write the overlay and bring the server up:\n\
+             \x20 tests/provision_test_backends.sh\n\
+             \n\
+             That starts deploy/compose's `postgres` and `redis` services, waits\n\
+             for both to be healthy, and writes the overlay naming them. Use\n\
+             `--check` instead if the servers are already running and you only\n\
+             need them described.\n\
+             \n\
+             There is no environment variable that makes this a skip. A suite\n\
+             that cannot reach its database is a failed run, not a green one."
+        )
+    });
+    let server = admin::Server::from_overlay(&loaded).unwrap_or_else(|error| {
+        panic!(
+            "The test overlay does not describe a PostgreSQL this suite can dial.\n\
+             \n\
+             \x20 backend: PostgreSQL\n\
+             \x20 overlay: deploy/ops/zeroship.test.toml\n\
+             \x20 error:   {error}\n\
+             \n\
+             Rewrite it from the servers you actually have:\n\
+             \x20 tests/provision_test_backends.sh --check\n\
+             \n\
+             There is no environment variable that makes this a skip."
+        )
+    });
     let mut probe = admin::PgAdmin::new(server.clone());
-    if admin::DbAdmin::exists(&mut probe, "postgres").is_err() {
-        zeroship_test_support::skip("the overlay's PostgreSQL is not reachable");
-        return None;
+    if let Err(error) = admin::DbAdmin::exists(&mut probe, "postgres") {
+        panic!(
+            "PostgreSQL is unreachable, and this suite requires it.\n\
+             \n\
+             \x20 backend: PostgreSQL\n\
+             \x20 dialled: {host}:{port} (from deploy/ops/zeroship.test.toml)\n\
+             \x20 error:   {error}\n\
+             \n\
+             Nothing answered the `postgres` maintenance database, so provision\n\
+             it and re-run:\n\
+             \x20 tests/provision_test_backends.sh\n\
+             \n\
+             There is no environment variable that makes this a skip. A database\n\
+             this suite cannot reach is a failed run, not a green one.",
+            host = server.host,
+            port = server.port,
+        )
     }
-    Some(server)
+    server
 }
 
 /// A name no other run can collide with, and short enough for the 63-byte limit.
@@ -279,7 +322,7 @@ fn drop_scratch(server: &admin::Server, scratch: &Scratch) {
 /// is about.
 #[test]
 fn one_database_answers_ready_for_a_schema_it_has_and_refuses_for_one_it_does_not() {
-    let Some(server) = server() else { return };
+    let server = server();
     let db = scratch(&server, "schema_axis", PLATFORM_SCHEMAS);
     seed_journal(&db.dsn, migrations_carried());
 
@@ -326,7 +369,7 @@ fn one_database_answers_ready_for_a_schema_it_has_and_refuses_for_one_it_does_no
 /// the preflight, it is testing the machine.
 #[test]
 fn the_same_question_answers_ready_on_a_seeded_database_and_refuses_on_a_fresh_one() {
-    let Some(server) = server() else { return };
+    let server = server();
     let seeded = scratch(&server, "db_axis_seeded", PLATFORM_SCHEMAS);
     seed_journal(&seeded.dsn, migrations_carried());
     let fresh = scratch(&server, "db_axis_fresh", &[]);
@@ -392,7 +435,7 @@ fn an_unreachable_server_refuses_differently_from_an_unmigrated_database() {
 /// its journal; topping the journal up in place leaves exactly one variable.
 #[test]
 fn one_database_refuses_on_a_short_journal_and_is_ready_once_it_is_topped_up() {
-    let Some(server) = server() else { return };
+    let server = server();
     let carried = migrations_carried();
     let db = scratch(&server, "ledger_axis", PLATFORM_SCHEMAS);
 
@@ -434,7 +477,7 @@ fn one_database_refuses_on_a_short_journal_and_is_ready_once_it_is_topped_up() {
 /// about a corpus it does not use.
 #[test]
 fn a_caller_that_never_asked_for_the_journal_is_not_judged_on_it() {
-    let Some(server) = server() else { return };
+    let server = server();
     let db = scratch(&server, "ledger_switch", PLATFORM_SCHEMAS);
     seed_journal(&db.dsn, 0);
 

@@ -6,9 +6,11 @@
 //! put → get → byte-compare exercises the S3 multipart path end to end.
 //!
 //! `LocalFs` always runs (temp dir). The `S3` leg starts its own MinIO
-//! container and **skips cleanly** when Docker is unavailable, so CI / dev
-//! machines without Docker stay green. The whole-object size caps were
-//! removed as a buffering limit, so the large test really does stream.
+//! container and **FAILS** when Docker is unavailable - it used to skip, which
+//! meant a machine without Docker reported the same green as a machine that had
+//! actually compared the two backends, and comparing them is the entire point
+//! of the file. The whole-object size caps were removed as a buffering limit,
+//! so the large test really does stream.
 //!
 //! Run explicitly:
 //!   `cargo test -p zeroship-plugin-storage --features s3 --test backend_parity -- --nocapture`
@@ -587,14 +589,39 @@ const MINIO_CONTAINER: &str = "zs-plugin-storage-minio-test";
 const MINIO_PORT: u16 = 9113;
 const MINIO_BUCKET: &str = "zs-storage-test";
 
-fn docker_available() -> bool {
-    Command::new("docker")
+/// Refuse the run unless a docker daemon answers `docker info`.
+///
+/// # Panics
+///
+/// When docker is absent or its daemon is not running. It used to announce a
+/// skip, so the S3 half of a parity suite - the half with a second
+/// implementation in it - reported the same green on a machine with no docker
+/// as on one that ran it.
+fn require_docker() {
+    let answered = Command::new("docker")
         .args(["info"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+        .is_ok_and(|status| status.success());
+    assert!(
+        answered,
+        "Docker is unavailable, and the S3 half of this parity suite requires it.\n\
+         \n\
+         \x20 backend: MinIO (S3), in a container this test starts itself\n\
+         \x20 probe:   `docker info` did not succeed\n\
+         \n\
+         Nothing in this repository provisions this container - the test does it\n\
+         inline - so what is missing is docker itself. Install it, start the\n\
+         daemon, and check that your user can reach it:\n\
+         \x20 docker info\n\
+         \n\
+         The suite then pulls `minio/minio` on first run, so the first run needs\n\
+         network access to the registry.\n\
+         \n\
+         There is no environment variable that makes this a skip. A backend this\n\
+         suite cannot reach is a failed run, not a green one."
+    );
 }
 
 fn minio_cleanup() {
@@ -605,7 +632,15 @@ fn minio_cleanup() {
         .status();
 }
 
-fn start_minio() -> bool {
+/// Start the MinIO container this suite's S3 leg runs against.
+///
+/// # Panics
+///
+/// When the container cannot be started, or never becomes ready. Both used to
+/// announce a skip and return `false`, and the caller returned on `false` - so
+/// a docker daemon that WAS present but refused the run, or a MinIO that never
+/// came up, produced the same pass as a successful S3 parity run.
+fn start_minio() {
     minio_cleanup();
     let run = Command::new("docker")
         .args([
@@ -624,10 +659,25 @@ fn start_minio() -> bool {
             "/data",
         ])
         .status();
-    if !matches!(run, Ok(s) if s.success()) {
-        zeroship_test_support::skip("skip: failed to start MinIO container");
-        return false;
-    }
+    assert!(
+        matches!(run, Ok(s) if s.success()),
+        "The MinIO container this suite needs would not start.\n\
+         \n\
+         \x20 backend:   MinIO (S3)\n\
+         \x20 image:     minio/minio\n\
+         \x20 container: {MINIO_CONTAINER}\n\
+         \x20 port:      {MINIO_PORT} on the host, mapped to 9000\n\
+         \n\
+         `docker run` failed. The usual causes, in the order worth checking:\n\
+         \x20 docker ps -a --filter name={MINIO_CONTAINER}   # a leftover container\n\
+         \x20 ss -lptn 'sport = :{MINIO_PORT}'                    # the port is taken\n\
+         \x20 docker pull minio/minio                       # the image is not local\n\
+         \n\
+         Nothing in this repository provisions it; the test starts and removes\n\
+         it itself, so there is no script to run - fix the daemon and re-run.\n\
+         \n\
+         There is no environment variable that makes this a skip."
+    );
     for _ in 0..40 {
         std::thread::sleep(Duration::from_millis(500));
         let alias = Command::new("docker")
@@ -652,13 +702,32 @@ fn start_minio() -> bool {
                 .stderr(std::process::Stdio::null())
                 .status();
             if matches!(mb, Ok(s) if s.success()) {
-                return true;
+                return;
             }
         }
     }
-    zeroship_test_support::skip("skip: MinIO did not become ready / bucket create failed");
     minio_cleanup();
-    false
+    panic!(
+        "The MinIO container started but never became usable.\n\
+         \n\
+         \x20 backend:   MinIO (S3)\n\
+         \x20 container: {MINIO_CONTAINER} (already removed, so it is not in the way)\n\
+         \x20 endpoint:  http://127.0.0.1:{MINIO_PORT}\n\
+         \x20 bucket:    {MINIO_BUCKET}\n\
+         \n\
+         The readiness loop ran to its ceiling without both `mc alias set` and\n\
+         `mc mb` succeeding inside the container. Re-run it by hand to see what\n\
+         MinIO said:\n\
+         \x20 docker run -d --name {MINIO_CONTAINER} -p {MINIO_PORT}:9000 \\\n\
+         \x20   -e MINIO_ROOT_USER={MINIO_ACCESS} -e MINIO_ROOT_PASSWORD={MINIO_SECRET} \\\n\
+         \x20   minio/minio server /data\n\
+         \x20 docker logs {MINIO_CONTAINER}\n\
+         \n\
+         An `mc` that is missing from the image is the one cause this loop\n\
+         cannot outwait; the rest are slow starts, which a re-run clears.\n\
+         \n\
+         There is no environment variable that makes this a skip."
+    )
 }
 
 #[cfg(feature = "s3")]
@@ -688,13 +757,8 @@ fn make_s3_tuned(
 #[cfg(feature = "s3")]
 #[test]
 fn s3_parity_and_large_stream() {
-    if !docker_available() {
-        zeroship_test_support::skip("skip: docker unavailable");
-        return;
-    }
-    if !start_minio() {
-        return;
-    }
+    require_docker();
+    start_minio();
 
     let result = std::panic::catch_unwind(|| {
         let backend = make_s3();

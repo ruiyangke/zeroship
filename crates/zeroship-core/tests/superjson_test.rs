@@ -268,38 +268,77 @@ fn from_bytes_rejects_unknown_tag() {
 
 // ---- npm-side deserialize compatibility (shells out to node) ----
 
-#[cfg(test)]
-fn node_available() -> bool {
-    std::process::Command::new("node")
+/// The directory the npm `superjson` this test cross-checks against is
+/// installed into.
+///
+/// NOTHING IN THIS REPOSITORY CREATES IT. The comment below used to say it was
+/// "created in the setup phase"; there is no such phase - no script, no
+/// workflow step, no fixture target anywhere in the tree writes this path. The
+/// remedy in the refusal is therefore two commands a developer runs by hand,
+/// not a script to point at.
+const NPM_FIXTURE_DIR: &str = "/tmp/sj-fixture";
+
+/// Refuse the run unless `node` answers `node --version`.
+///
+/// # Panics
+///
+/// When node is absent. It used to announce a skip, so the one test that proves
+/// npm accepts what we emit - the wire-format contract this file exists to
+/// hold - reported green wherever node was not installed.
+fn require_node() {
+    let answered = std::process::Command::new("node")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|output| output.status.success());
+    assert!(
+        answered,
+        "Node.js is unavailable, and this test requires it.\n\
+         \n\
+         \x20 backend: the npm `superjson` package, run under node\n\
+         \x20 probe:   `node --version` did not succeed\n\
+         \n\
+         This is the only check that the RECEIVING end accepts our bytes; the\n\
+         rest of this file compares us against recorded fixtures, which cannot\n\
+         catch a fixture and an encoder that drifted together.\n\
+         \n\
+         Install node, then provision the package fixture:\n\
+         \x20 mkdir -p {NPM_FIXTURE_DIR}\n\
+         \x20 cd {NPM_FIXTURE_DIR} && npm install superjson@2\n\
+         \n\
+         There is no environment variable that makes this a skip."
+    );
 }
 
 /// Round-trip our `to_bytes` output through `superjson.deserialize` in npm
 /// to prove the receiving end accepts what we emit.
 #[test]
 fn npm_deserialize_accepts_our_bytes() {
-    if !node_available() {
-        zeroship_test_support::skip("skipping: node not available");
-        return;
-    }
-    // Use a tmpdir that already has superjson installed (created in the
-    // setup phase). If the package is missing OR incompletely installed
-    // (e.g. an empty `dist/` with no `package.json`, which Node cannot
-    // resolve), skip rather than hard-fail — the fixture is an untracked
-    // tmpdir and may be partially populated.
-    let tmp = "/tmp/sj-fixture";
-    if !std::path::Path::new(&format!("{tmp}/node_modules/superjson/package.json"))
-        .exists()
-    {
-        zeroship_test_support::skip(
-            "skipping: /tmp/sj-fixture/node_modules/superjson/package.json missing \
-             (fixture absent or incomplete)"
-        );
-        return;
-    }
+    require_node();
+    // The npm package lives in an untracked tmpdir. `package.json` is the file
+    // probed rather than the directory, because an interrupted install leaves a
+    // `superjson/` that node cannot resolve, and a directory check would call
+    // that present.
+    let tmp = NPM_FIXTURE_DIR;
+    let manifest = format!("{tmp}/node_modules/superjson/package.json");
+    assert!(
+        std::path::Path::new(&manifest).exists(),
+        "The npm `superjson` fixture is missing, and this test requires it.\n\
+         \n\
+         \x20 backend: the npm `superjson` package, run under node\n\
+         \x20 wanted:  {manifest}\n\
+         \n\
+         NOTHING IN THIS REPOSITORY PROVISIONS THIS PATH - no script, no CI\n\
+         step. Install it by hand:\n\
+         \x20 mkdir -p {tmp}\n\
+         \x20 cd {tmp} && npm install superjson@2\n\
+         \n\
+         The major version matters: the fixtures in tests/superjson_fixtures/\n\
+         are the 2.x wire format, and this test asserts that npm accepts what we\n\
+         emit for it.\n\
+         \n\
+         There is no environment variable that makes this a skip. Without the\n\
+         package, nothing checks our encoder against the real receiver."
+    );
 
     for name in ["composite", "date", "bigint", "map", "set", "url", "regexp"] {
         let bytes = fx(name);

@@ -21,7 +21,6 @@ compio-s3 = { workspace = true }
 futures = { workspace = true }
 
 [dev-dependencies]
-zeroship-test-support = { workspace = true }
 compio = { workspace = true, features = ["fs", "macros", "runtime"] }
 
 [lints]

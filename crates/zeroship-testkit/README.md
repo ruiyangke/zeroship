@@ -100,8 +100,10 @@ bound to repository history rather than to the variable it means to vary. Left
 alone here deliberately: matching `main` exactly, failure and all, is what shows
 the port changed no behaviour.
 
-The live tests need `deploy/ops/zeroship.test.toml`; without it they announce a
-skip that `tests/lib/skip_census.sh` counts, rather than passing silently.
+The live tests need `deploy/ops/zeroship.test.toml`. Without it they FAIL,
+naming `tests/provision_test_backends.sh` and what it does. They used to
+announce a skip, which cargo counts as a pass, so a checkout with no overlay
+reported exactly what a full run reported.
 
 The real gate is `tests/run_auth_suite.sh`, which provisions through this crate
 and must reach its floor.

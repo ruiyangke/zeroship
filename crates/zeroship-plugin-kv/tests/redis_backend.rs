@@ -10,10 +10,14 @@
 //!              deploy/compose publishes this workspace's Redis on 6390
 //!              precisely because 6379 is the port some OTHER project's
 //!              container is already holding on a shared development machine.
-//! Cluster:     OPTIONAL, and the only skip left in this file. Nothing in this
-//!              repository provisions a Dragonfly cluster; see the "WHAT IT
-//!              DOES NOT PROVISION" list in tests/provision_test_backends.sh.
-//!              set `DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002'`
+//! Cluster:     REQUIRED TOO, and nothing here skips any more.
+//!              `tests/provision_test_backends.sh` does not stand it up - see
+//!              its "WHAT IT DOES NOT PROVISION" list - so the two commands
+//!              that do are named in `cluster_seeds`'s refusal:
+//!                docker compose -f deploy/compose/cluster.yml up -d
+//!                deploy/scripts/bootstrap-dragonfly-cluster.sh
+//!              then set
+//!              `DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002'`
 
 #![cfg(feature = "redis")]
 
@@ -44,13 +48,48 @@ fn redis_url() -> String {
     zeroship_core::config::test_kv_url()
 }
 
-fn cluster_url() -> Option<String> {
-    let seeds = zeroship_core::test_env!("DRAGONFLY_CLUSTER_SEEDS")?;
-    let mut it = seeds.split(',');
-    let first = it.next()?.trim().to_string();
+/// The seed list the live-cluster tests dial.
+///
+/// # Panics
+///
+/// When `DRAGONFLY_CLUSTER_SEEDS` names no seed, with the two commands that
+/// stand a cluster up. It used to announce a skip, which cargo counts as a
+/// pass: the cluster arms of this file reported green on every machine that had
+/// never heard of Dragonfly, which is every machine.
+fn cluster_seeds() -> String {
+    let seeds = zeroship_core::test_env!("DRAGONFLY_CLUSTER_SEEDS").unwrap_or_default();
+    assert!(
+        !seeds.split(',').next().unwrap_or_default().trim().is_empty(),
+        "A Dragonfly CLUSTER is unreachable, and this test requires it.\n\
+         \n\
+         \x20 backend: Dragonfly, cluster mode, three nodes\n\
+         \x20 missing: DRAGONFLY_CLUSTER_SEEDS names no seed\n\
+         \n\
+         `tests/provision_test_backends.sh` does NOT stand this up - it\n\
+         provisions single-node postgres and redis only. Bring the cluster up\n\
+         yourself, in this order:\n\
+         \x20 docker compose -f deploy/compose/cluster.yml up -d\n\
+         \x20 deploy/scripts/bootstrap-dragonfly-cluster.sh\n\
+         \n\
+         The second command is not optional: a `cluster_mode=yes` node ships\n\
+         with no slot map and answers nothing until it is pushed one. Then\n\
+         export the seeds and re-run:\n\
+         \x20 DRAGONFLY_CLUSTER_SEEDS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002\n\
+         \n\
+         Tear it down with `docker compose -f deploy/compose/cluster.yml down -v`.\n\
+         \n\
+         There is no environment variable that makes this a skip. A cluster\n\
+         this test cannot reach is a failed run, not a green one."
+    );
+    seeds
+}
+
+fn cluster_url() -> String {
+    let seeds = cluster_seeds();
+    let first = seeds.split(',').next().unwrap_or_default().trim().to_string();
     // Build the "plugin-kv" cluster URL: cluster=true + seeds=... with
     // the base URL pointing at the first seed.
-    Some(format!("{first}?cluster=true&seeds={seeds}"))
+    format!("{first}?cluster=true&seeds={seeds}")
 }
 
 #[compio::test]
@@ -96,11 +135,7 @@ async fn list_all(b: &Redis, app: &str, prefix: &str) -> Vec<String> {
 
 #[compio::test]
 async fn cluster_roundtrip_via_backend() {
-    let Some(url) = cluster_url() else {
-        zeroship_test_support::skip("skip: DRAGONFLY_CLUSTER_SEEDS not set");
-        return;
-    };
-    let b = Redis::new(url);
+    let b = Redis::new(cluster_url());
     let app = "kv-test-cluster";
 
     b.delete(app, "k1").await.ok();
@@ -131,7 +166,7 @@ async fn cluster_roundtrip_via_backend() {
 
 #[compio::test]
 async fn ttl_expires_in_cluster_mode() {
-    let Some(url) = cluster_url() else { return; };
+    let url = cluster_url();
     let b = Redis::new(url);
     let app = "kv-test-cluster-ttl";
 
@@ -148,19 +183,20 @@ async fn ttl_expires_in_cluster_mode() {
 // whichever backend is available.
 // -----------------------------------------------------------------
 
-/// Run `body` against the single-node Redis, plus the Dragonfly cluster when
-/// one is configured. The single node is REQUIRED - `redis_url` panics without
-/// it - so this can no longer run zero backends and report a pass, which is
-/// what "silently skips when nothing is set" used to describe.
+/// Run `body` against the single-node Redis AND the Dragonfly cluster.
+///
+/// BOTH BACKENDS ARE REQUIRED, and the cluster leg is no longer conditional.
+/// `redis_url` and `cluster_seeds` each panic when their backend is absent, so
+/// this cannot run one backend, or zero, and report the green a two-backend run
+/// reports. The `label` an assertion carries is the only thing that told the
+/// two apart in a failure, and it told a reader nothing about which legs ran.
 async fn for_each_backend<F, Fut>(f: F)
 where
     F: Fn(Redis, &'static str) -> Fut,
     Fut: std::future::Future<Output = ()>,
 {
     f(Redis::new(redis_url()), "single").await;
-    if let Some(url) = cluster_url() {
-        f(Redis::new(url), "cluster").await;
-    }
+    f(Redis::new(cluster_url()), "cluster").await;
 }
 
 #[compio::test]
@@ -367,10 +403,7 @@ async fn same_sorted_seeds_share_cluster_handle() {
     // via one are visible to the other — which is inherent to any
     // correctness-focused KV, but also shows the pool is re-used (no
     // flakiness from duplicate bootstrap).
-    let Some(seeds) = zeroship_core::test_env!("DRAGONFLY_CLUSTER_SEEDS") else {
-        zeroship_test_support::skip("skip: DRAGONFLY_CLUSTER_SEEDS not set");
-        return;
-    };
+    let seeds = cluster_seeds();
     let parts: Vec<&str> = seeds.split(',').map(str::trim).collect();
     assert!(parts.len() >= 2, "need >= 2 seeds for this test");
 

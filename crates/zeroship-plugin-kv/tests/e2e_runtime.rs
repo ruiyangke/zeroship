@@ -841,10 +841,12 @@ fn e2e_dragonfly() {
 }
 
 // ---------------------------------------------------------------------------
-// Dragonfly CLUSTER (live 3-node) — runs only when DRAGONFLY_CLUSTER_SEEDS is
-// set (comma-joined seed URLs, e.g.
+// Dragonfly CLUSTER (live 3-node) — REQUIRES DRAGONFLY_CLUSTER_SEEDS
+// (comma-joined seed URLs, e.g.
 // redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002).
-// Skips (does not fail) when unset.
+// FAILS when unset, naming the two commands that stand a cluster up. It used to
+// skip, so the only end-to-end cluster coverage in the tree reported green on
+// every machine that had no cluster.
 //
 // This is the ONLY end-to-end coverage of the cluster code path through the
 // real runtime: hash-tag scoping keeps an app's keys in one slot, the `incr`
@@ -856,22 +858,37 @@ fn e2e_dragonfly() {
 #[cfg(feature = "redis")]
 #[test]
 fn e2e_dragonfly_cluster() {
-    let Some(seeds) = zeroship_core::test_env!("DRAGONFLY_CLUSTER_SEEDS") else {
-        zeroship_test_support::skip(
-            "e2e_dragonfly_cluster: DRAGONFLY_CLUSTER_SEEDS unset — skipping live-cluster \
-             test. Set e.g. DRAGONFLY_CLUSTER_SEEDS=\
-             redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002 to run it."
-        );
-        return;
-    };
+    let seeds = zeroship_core::test_env!("DRAGONFLY_CLUSTER_SEEDS").unwrap_or_default();
     // Build the plugin-kv cluster URL exactly like
     // redis_backend.rs::cluster_url(): base URL = first seed, plus
     // ?cluster=true&seeds=<comma-joined seeds>.
-    let first = seeds.split(',').next().map(str::trim).unwrap_or("").to_string();
-    if first.is_empty() {
-        zeroship_test_support::skip("e2e_dragonfly_cluster: DRAGONFLY_CLUSTER_SEEDS empty — skipping.");
-        return;
-    }
+    let first = seeds.split(',').next().unwrap_or_default().trim().to_string();
+    assert!(
+        !first.is_empty(),
+        "A Dragonfly CLUSTER is unreachable, and this test requires it.\n\
+         \n\
+         \x20 backend: Dragonfly, cluster mode, three nodes\n\
+         \x20 missing: DRAGONFLY_CLUSTER_SEEDS names no seed\n\
+         \n\
+         This is the only end-to-end cluster coverage in the tree, so an absent\n\
+         cluster leaves the whole path unexercised.\n\
+         \n\
+         `tests/provision_test_backends.sh` does NOT stand this up - it\n\
+         provisions single-node postgres and redis only. Bring the cluster up\n\
+         yourself, in this order:\n\
+         \x20 docker compose -f deploy/compose/cluster.yml up -d\n\
+         \x20 deploy/scripts/bootstrap-dragonfly-cluster.sh\n\
+         \n\
+         The second command is not optional: a `cluster_mode=yes` node ships\n\
+         with no slot map and answers nothing until it is pushed one. Then\n\
+         export the seeds and re-run:\n\
+         \x20 DRAGONFLY_CLUSTER_SEEDS=redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002\n\
+         \n\
+         Tear it down with `docker compose -f deploy/compose/cluster.yml down -v`.\n\
+         \n\
+         There is no environment variable that makes this a skip. A cluster\n\
+         this test cannot reach is a failed run, not a green one."
+    );
     let cluster_url = format!("{first}?cluster=true&seeds={seeds}");
     let backend = Redis::new(cluster_url);
     let (status, body) = run_e2e(Arc::new(backend));
