@@ -5,12 +5,20 @@ edition = "2021"
 description = "Test-only helpers shared across the workspace. Not published; consumed as a dev-dependency."
 publish = false
 
-# No dependencies. The crate held one on `zeroship-core` for the declared-env
-# accessors, which existed solely to read `ZEROSHIP_REQUIRE_LIVE_BACKENDS`.
-# With that flag deleted this crate reads no environment at all, so the
-# dependency (and the dev-dependency cycle it formed with `crates/core`) goes
-# with it. It must stay that way: an announcer that reads configuration is a
-# flag again.
+# No dependencies, and the reason outlived the code it was written for. The
+# crate held one on `zeroship-core` for the declared-env accessors, which
+# existed solely to read `ZEROSHIP_REQUIRE_LIVE_BACKENDS`. With that flag
+# deleted this crate reads no environment at all, so the dependency (and the
+# dev-dependency cycle it formed with `crates/core`) went with it.
+#
+# It must stay that way. The rule was once "an announcer that reads
+# configuration is a flag again"; the announcer is gone and the rule is
+# unchanged, because what it really protects is the LEAF property. Three crates
+# take this as a dev-dependency for one fixture, and `tests/lib/env_name_census.sh`
+# scans this src directory alongside every `tests/` tree precisely because a
+# shared test helper is where an unlisted environment read would be least
+# visible. A dependency here is also a build-graph edge into three test
+# binaries that want nothing from it.
 [dependencies]
 
 [lints]
