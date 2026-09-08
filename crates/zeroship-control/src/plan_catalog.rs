@@ -62,17 +62,7 @@ impl PlanCatalog {
     /// is poison). See [`row_to_plan`].
     pub async fn get(&self, id: &str) -> Result<Option<Plan>, RegistryError> {
         let conn = self.registry.conn().await?;
-        let rows = conn
-            .query(
-                "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
-                        runtime_limits_json, net_policy_limits_json, \
-                        spend_limit_default_cents, archived, \
-                        assignable_by_creator \
-                 FROM zeroship.plans WHERE id = $1",
-                &[&id],
-            )
-            .await?;
-        rows.first().map(row_to_plan).transpose()
+        get_on(&conn, id).await
     }
 
     /// List every plan (including archived ones) ordered by id.
@@ -235,6 +225,38 @@ impl PlanCatalog {
             .await?;
         Ok(n > 0)
     }
+}
+
+/// Fetch one plan by id over a CALLER-SUPPLIED connection.
+///
+/// [`PlanCatalog::get`] is this function plus a connection from the registry.
+/// The split exists because a caller that already holds a connection - or a
+/// TRANSACTION - has to read the catalog on it rather than opening a second
+/// session: `billing_read::outstanding_billing` runs inside the dissolve
+/// transaction, and `cron::billing_reconcile::price_period_lines` runs on the
+/// reconciler's connection. Neither can be handed a `Registry`, and neither may
+/// carry its own copy of this SELECT.
+///
+/// `None` if no such row (archived plans ARE returned - the caller decides
+/// whether to reject an archived plan).
+///
+/// # Errors
+/// [`RegistryError`] on a driver failure or an undecodable row.
+pub async fn get_on<C: compio_postgres::GenericClient + Sync>(
+    conn: &C,
+    id: &str,
+) -> Result<Option<Plan>, RegistryError> {
+    let rows = conn
+        .query(
+            "SELECT id, name, base_fee_cents, included_units, fx_pico_cents_per_unit, \
+                    runtime_limits_json, net_policy_limits_json, \
+                    spend_limit_default_cents, archived, \
+                    assignable_by_creator \
+             FROM zeroship.plans WHERE id = $1",
+            &[&id],
+        )
+        .await?;
+    rows.first().map(row_to_plan).transpose()
 }
 
 /// Decode a `plans` row into a [`Plan`]. The price model is scalar (CU pricing);

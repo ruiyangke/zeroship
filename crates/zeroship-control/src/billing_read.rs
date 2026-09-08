@@ -17,7 +17,7 @@
 //! second policy. See that function's header for the arms and for what each one
 //! deliberately does not count.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use chrono::NaiveDate;
@@ -718,31 +718,49 @@ pub struct UnpaidInvoice {
     pub owed_cents: i64,
 }
 
-/// One CLOSED billing period whose usage never became an invoice.
+/// One CLOSED billing period that OWED MONEY and never became an invoice.
 #[derive(Debug, Clone, Serialize)]
 pub struct UnbilledPeriod {
     pub period: String,
     pub apps: i64,
-    /// Raw metered units, NOT money. Turning units into cents means re-running
-    /// the pricing kernel over live aggregates, which is what
-    /// [`projected_charge`] does and labels `authoritative: false`; a refusal
-    /// must not quote a figure that is not a bill.
-    pub units: i64,
+    /// What the period comes to in cents, re-priced by
+    /// [`crate::cron::billing_reconcile::price_period_lines`] - the same
+    /// function, not a second spelling of it, that the reconciler runs to build
+    /// the invoice it finalizes. Positive on every row that is here: a period
+    /// that prices to nothing is not a debt and is not reported.
+    ///
+    /// THIS FIELD USED TO BE RAW METERED UNITS, and that is the defect it
+    /// exists to close. Units cannot tell a month that owed money from a month
+    /// covered by the included quota, so every quota-covered free-tier month
+    /// read as a debt and no such account could ever be closed. The file's own
+    /// header already made this argument about the CURRENT month; it was never
+    /// carried through to a closed one whose charge was nil.
+    pub charge_cents: i64,
 }
 
-/// The one action that clears a billing blocker. Both arms name a route that
-/// exists today: attaching a default payment method is the ONLY remedy wired
-/// end to end (`credit::grant`, `refund::issue_refund` and
-/// `void_reissue::void_and_reissue` are complete and reachable only from tests),
-/// and it is also what lets the reconciler bill usage it is currently skipping
-/// for want of a Stripe Customer.
+/// The one action that clears a billing blocker.
+///
+/// Every arm names a route that exists AND that would actually change the
+/// answer. That second half is what the unbilled arm used to get wrong: it told
+/// the creator to wait for a sweep, and
+/// [`crate::cron::billing_reconcile::previous_period_start_unix`] bills only the
+/// immediately previous month, so for anything older the named remedy could
+/// never run. A refusal whose stated remedy cannot possibly work is worse than a
+/// blunt one - it reads as progress and produces none.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum BillingRemedy {
     /// A finalized invoice is short of cash.
     SettleInvoices,
-    /// Closed-period usage never became an invoice.
-    BillOutstandingUsage,
+    /// A closed period owed money and no payment identity exists to bill it to.
+    /// The creator's attachment is the missing piece and nothing bills without
+    /// it, so this outranks the reconcile below.
+    AttachPaymentMethod,
+    /// A closed period owed money, a payment identity IS on file, and no
+    /// invoice was ever raised. Nothing the creator can do moves this: the
+    /// automatic sweep only ever bills last month, so an older period needs the
+    /// operator trigger that takes a period.
+    ReconcileClosedPeriod,
 }
 
 impl BillingRemedy {
@@ -755,12 +773,18 @@ impl BillingRemedy {
                  POST /api/organizations/{organization_id}/billing/setup; Stripe then \
                  collects the open invoice"
             }
-            Self::BillOutstandingUsage => {
-                "this organization has usage in a closed period that was never invoiced, \
-                 which is what happens when no Stripe Customer exists to bill; attach a \
-                 default payment method with \
-                 POST /api/organizations/{organization_id}/billing/setup so the next \
-                 billing sweep can bill and collect it"
+            Self::AttachPaymentMethod => {
+                "this organization has closed-period usage that priced to money and no \
+                 payment identity to bill it to; attach a default payment method with \
+                 POST /api/organizations/{organization_id}/billing/setup, which is what \
+                 the reconciler is waiting for"
+            }
+            Self::ReconcileClosedPeriod => {
+                "this organization has closed-period usage that priced to money and was \
+                 never invoiced; the automatic sweep bills only the immediately previous \
+                 month, so an operator must run \
+                 POST /internal/billing/reconcile?period=<unix-seconds> for the period \
+                 named in unbilled_periods"
             }
         }
     }
@@ -776,6 +800,12 @@ pub struct OutstandingBilling {
     pub organization_id: String,
     pub unpaid_invoices: Vec<UnpaidInvoice>,
     pub unbilled_periods: Vec<UnbilledPeriod>,
+    /// Whether a provider customer exists for this organization (presence only,
+    /// never the raw `cus_…`). It decides WHICH remedy the unbilled arm names:
+    /// with no customer the reconciler cannot bill at all and the creator's
+    /// attachment is the missing piece; with one, the period simply was never
+    /// invoiced and only a reconcile of THAT period raises it.
+    pub billing_identity_on_file: bool,
 }
 
 impl OutstandingBilling {
@@ -786,12 +816,22 @@ impl OutstandingBilling {
     }
 
     /// Cash owed across the unpaid invoices. Unbilled usage contributes
-    /// NOTHING here on purpose — it has no price until a finalize prices it,
-    /// and a refusal that quoted a re-priced projection would be quoting a
-    /// number no invoice will ever match.
+    /// NOTHING here on purpose, and the reason survives the move onto money:
+    /// this is CLAIMED cash, the figure a person can pay today. An unbilled
+    /// period has a price but no claim - no invoice, no due date, nothing to
+    /// settle - and folding it in would quote a total no payment could clear.
+    /// [`Self::unbilled_cents`] carries that half separately.
     #[must_use]
     pub fn owed_cents(&self) -> i64 {
         self.unpaid_invoices.iter().map(|i| i.owed_cents).sum()
+    }
+
+    /// What the unbilled closed periods come to, as re-priced by the
+    /// reconciler's own pricing pass. Not yet a claim on anyone - see
+    /// [`Self::owed_cents`] for why the two are not summed.
+    #[must_use]
+    pub fn unbilled_cents(&self) -> i64 {
+        self.unbilled_periods.iter().map(|p| p.charge_cents).sum()
     }
 
     /// The currency the owed cash is denominated in, taken from the invoices
@@ -807,15 +847,23 @@ impl OutstandingBilling {
 
     /// The action to name in the refusal. Cash already claimed outranks usage
     /// not yet claimed: settling the invoice is concrete and immediate, while
-    /// the usage arm's remedy is the same attachment plus a wait for the sweep.
+    /// the usage arm needs a bill to be raised before anything can be paid.
+    ///
+    /// Within the usage arm the split is by WHAT IS MISSING, not by age. No
+    /// payment identity means nothing can bill or collect however many times
+    /// the period is reconciled, so the creator's attachment comes first; with
+    /// one on file the only thing missing is the invoice, and only the
+    /// period-taking operator trigger raises it.
     #[must_use]
     pub fn remedy(&self) -> Option<BillingRemedy> {
         if !self.unpaid_invoices.is_empty() {
             Some(BillingRemedy::SettleInvoices)
         } else if self.unbilled_periods.is_empty() {
             None
+        } else if self.billing_identity_on_file {
+            Some(BillingRemedy::ReconcileClosedPeriod)
         } else {
-            Some(BillingRemedy::BillOutstandingUsage)
+            Some(BillingRemedy::AttachPaymentMethod)
         }
     }
 }
@@ -847,19 +895,42 @@ impl OutstandingBilling {
 /// disagreeing with it here would make the refusal and the refund cap read
 /// different balances.
 ///
-/// **Unbilled closed-period usage.** A `usage_aggregates` row with usage, in a
-/// period strictly BEFORE the current month, for which no non-void invoice
-/// exists. The current month is excluded because it always has accrued usage
-/// and never has an invoice — including it would mean no account could ever be
-/// closed. Archived apps are NOT filtered, matching the reconciler, which bills
-/// them on purpose. The arm is asked only under [`LocalInvoicing::Yes`].
+/// **Unbilled closed-period usage.** A period strictly BEFORE the current month
+/// that carries usage, has NO invoice row of any status, and RE-PRICES TO MONEY.
+/// The current month is excluded because it always has accrued usage and never
+/// has an invoice — including it would mean no account could ever be closed.
+/// Archived apps are NOT filtered, matching the reconciler, which bills them on
+/// purpose. The arm is asked only under [`LocalInvoicing::Yes`].
+///
+/// **THIS ARM USED TO KEY ON RAW METERED UNITS, AND THAT TRAPPED THE ORDINARY
+/// FREE-TIER CREATOR FOREVER.** Any unit in a closed period with no invoice read
+/// as a debt, while `cron::billing_reconcile` writes no invoice row at all for a
+/// period that prices to nothing — the free tier's normal month, whose usage
+/// stayed inside the included quota. A month that owed NOTHING was therefore
+/// indistinguishable from one that was never billed, at all three enforcement
+/// points, permanently. The pricing pass below is the same function the
+/// reconciler runs at finalize, not a second spelling of it, because two pricing
+/// paths that can disagree is a worse defect than the one being fixed.
+///
+/// **A VOID INVOICE SETTLES THE PERIOD RATHER THAN LEAVING IT UNBILLED.** The
+/// old `status <> 'void'` filter made a voided invoice invisible to this arm, so
+/// voiding one moved the organization from "owes on an invoice" to "owes on
+/// unbilled usage" — the two arms contradicting each other over the same act.
+/// Voiding RELEASES the claim, which is the whole point of the one transition
+/// `invoices_immutable()` permits; it is a deliberate statement that the period
+/// is done, not evidence that it was never billed.
+///
+/// Pricing FAILS CLOSED. An unresolved FX or a compute-unit overflow propagates
+/// as an error, never as a silent zero — a zero here would clear a debt, which
+/// is the exact direction this predicate must never fail in.
 ///
 /// # Errors
 ///
-/// [`RegistryError::Database`] on a driver failure. There is no success value
-/// that means "could not tell": every caller treats an error as a refusal,
-/// because a deletion allowed on the strength of a check that did not run is
-/// the failure this whole predicate exists to prevent.
+/// [`RegistryError::Database`] on a driver failure, and
+/// [`RegistryError::FxUnresolved`] when the platform cannot price. There is no
+/// success value that means "could not tell": every caller treats an error as a
+/// refusal, because a deletion allowed on the strength of a check that did not
+/// run is the failure this whole predicate exists to prevent.
 pub async fn outstanding_billing<C: GenericClient + Sync>(
     conn: &C,
     organization_id: &str,
@@ -900,44 +971,130 @@ pub async fn outstanding_billing<C: GenericClient + Sync>(
         .collect();
 
     let unbilled_periods = if invoicing.asks_about_unbilled_usage() {
-        let usage_rows = conn
-            .query(
-                "SELECT u.period::text AS period, \
-                        COUNT(DISTINCT u.app_id)::bigint AS apps, \
-                        SUM(u.total)::bigint AS units \
-                   FROM zeroship.usage_aggregates u \
-                   JOIN zeroship.apps a ON a.id = u.app_id \
-                  WHERE a.organization_id = $1 \
-                    AND u.total > 0 \
-                    AND u.period < date_trunc('month', NOW())::date \
-                    AND NOT EXISTS ( \
-                          SELECT 1 FROM zeroship.invoices i \
-                           WHERE i.organization_id = a.organization_id \
-                             AND i.period = u.period \
-                             AND i.status <> 'void') \
-                  GROUP BY u.period \
-                  ORDER BY u.period",
-                &[&organization_id],
-            )
-            .await
-            .map_err(|e| RegistryError::Database(e.to_string()))?;
-        usage_rows
-            .iter()
-            .map(|r| UnbilledPeriod {
-                period: r.get("period"),
-                apps: r.get("apps"),
-                units: r.get("units"),
-            })
-            .collect()
+        unbilled_priced_periods(conn, organization_id).await?
     } else {
         Vec::new()
     };
+
+    // Presence only, never the raw provider id — the same read
+    // [`payment_method_status`] does, and for the same reason.
+    let identity_rows = conn
+        .query(
+            "SELECT EXISTS ( \
+                   SELECT 1 FROM zeroship.billing_customer_refs r \
+                    WHERE r.organization_id = $1 AND r.provider = 'stripe' \
+                 ) AS present",
+            &[&organization_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
 
     Ok(OutstandingBilling {
         organization_id: organization_id.to_string(),
         unpaid_invoices,
         unbilled_periods,
+        billing_identity_on_file: identity_rows.first().is_some_and(|r| r.get("present")),
     })
+}
+
+/// The unbilled-usage arm: closed periods that owed MONEY and were never
+/// invoiced.
+///
+/// Two steps, and the split is deliberate. The SQL narrows to CANDIDATES — a
+/// period is a candidate when it is closed, carries a usage row, and has no
+/// invoice row at all — because that is the whole of what a row-level predicate
+/// can decide. Whether a candidate owed anything is a question only the pricing
+/// kernel can answer, so the second step re-prices each candidate through
+/// [`crate::cron::billing_reconcile::price_period_lines`], the function the
+/// reconciler itself runs. A candidate that prices to nothing is dropped: it is
+/// the free tier's ordinary month and it owes nobody anything.
+///
+/// **The app set is the organization's WHOLE roster, not the apps that accrued.**
+/// That is what the reconciler prices - its per-organization path resolves apps
+/// through `owned_app_ids`, and its usage prefilter decides only which
+/// ORGANIZATIONS a sweep visits. The difference is money: a plan with a
+/// `base_fee_cents` is charged whether or not the app served a request, so an
+/// app-set narrowed to accruers here would price a period lower than the
+/// invoice would.
+async fn unbilled_priced_periods<C: GenericClient + Sync>(
+    conn: &C,
+    organization_id: &str,
+) -> Result<Vec<UnbilledPeriod>, RegistryError> {
+    // Candidate periods. No `total > 0` filter: whether the period is worth
+    // anything is the pricing pass's answer, not this predicate's, and a base
+    // fee makes a zero-usage period cost money.
+    let candidate_rows = conn
+        .query(
+            "SELECT DISTINCT u.period::date AS period \
+               FROM zeroship.usage_aggregates u \
+               JOIN zeroship.apps a ON a.id = u.app_id \
+              WHERE a.organization_id = $1 \
+                AND u.period < date_trunc('month', NOW())::date \
+                AND NOT EXISTS ( \
+                      SELECT 1 FROM zeroship.invoices i \
+                       WHERE i.organization_id = a.organization_id \
+                         AND i.period = u.period) \
+              ORDER BY 1",
+            &[&organization_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    if candidate_rows.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    // The same roster read the reconciler bills, so the two cannot price a
+    // different set of apps for one period.
+    let app_rows = conn
+        .query(
+            "SELECT a.id AS app_id FROM zeroship.apps a \
+              WHERE a.organization_id = $1 \
+              ORDER BY a.id",
+            &[&organization_id],
+        )
+        .await
+        .map_err(|e| RegistryError::Database(e.to_string()))?;
+    let app_ids: Vec<Uuid> = app_rows.iter().map(|r| r.get::<_, Uuid>("app_id")).collect();
+
+    // The pricing inputs, read ONCE for the whole organization: the global cost
+    // model and the global default FX are exactly what the reconciler's sweep
+    // loads per tick.
+    let weights = crate::pricing_store::weights_on(conn).await?;
+    let default_fx = crate::pricing_store::default_fx_pico_cents_per_unit_on(conn).await?;
+
+    let mut periods = Vec::with_capacity(candidate_rows.len());
+    for row in &candidate_rows {
+        let period: NaiveDate = row.get("period");
+        let period_start = period
+            .and_hms_opt(0, 0, 0)
+            .map_or(0, |dt| dt.and_utc().timestamp());
+        // Fails closed: an unresolved FX or a CU overflow is an error, never a
+        // zero that would silently clear the debt.
+        let (lines, charge) = crate::cron::billing_reconcile::price_period_lines(
+            conn,
+            &weights,
+            default_fx,
+            &app_ids,
+            period_start,
+        )
+        .await?;
+        if charge == 0 {
+            continue;
+        }
+        let apps: HashSet<Uuid> = lines.iter().map(crate::cron::billing_reconcile::billed_app)
+            .collect();
+        periods.push(UnbilledPeriod {
+            period: period.to_string(),
+            apps: apps.len() as i64,
+            charge_cents: i64::try_from(charge).map_err(|_| {
+                RegistryError::Database(format!(
+                    "outstanding_billing: unbilled charge {charge} exceeds i64::MAX — \
+                     refusing to clamp a figure a refusal would quote"
+                ))
+            })?,
+        });
+    }
+    Ok(periods)
 }
 
 #[cfg(test)]
@@ -1026,15 +1183,24 @@ mod tests {
         UnbilledPeriod {
             period: "2026-01-01".into(),
             apps: 1,
-            units: 42,
+            charge_cents: 4_200,
         }
     }
 
     fn outstanding(invoices: Vec<UnpaidInvoice>, periods: Vec<UnbilledPeriod>) -> OutstandingBilling {
+        outstanding_with_identity(invoices, periods, false)
+    }
+
+    fn outstanding_with_identity(
+        invoices: Vec<UnpaidInvoice>,
+        periods: Vec<UnbilledPeriod>,
+        billing_identity_on_file: bool,
+    ) -> OutstandingBilling {
         OutstandingBilling {
             organization_id: "org_x".into(),
             unpaid_invoices: invoices,
             unbilled_periods: periods,
+            billing_identity_on_file,
         }
     }
 
@@ -1050,15 +1216,19 @@ mod tests {
         assert!(!outstanding(vec![invoice(1000)], vec![usage()]).is_settled());
     }
 
-    /// Unbilled usage carries units, never cents, so it must not move the
-    /// owed figure a refusal quotes.
+    /// An unbilled period now carries a PRICE, and it still must not move the
+    /// owed figure a refusal quotes: `owed_cents` is claimed cash, the number a
+    /// person can pay today, and no payment can settle a period nothing has
+    /// invoiced. The two totals are reported side by side, never summed.
     #[test]
-    fn owed_cents_sums_invoices_only() {
-        assert_eq!(outstanding(vec![], vec![usage()]).owed_cents(), 0);
-        assert_eq!(
-            outstanding(vec![invoice(1000), invoice(250)], vec![usage()]).owed_cents(),
-            1250
-        );
+    fn owed_cents_sums_invoices_only_and_unbilled_cents_the_rest() {
+        let usage_only = outstanding(vec![], vec![usage()]);
+        assert_eq!(usage_only.owed_cents(), 0);
+        assert_eq!(usage_only.unbilled_cents(), 4_200);
+
+        let both = outstanding(vec![invoice(1000), invoice(250)], vec![usage()]);
+        assert_eq!(both.owed_cents(), 1250);
+        assert_eq!(both.unbilled_cents(), 4_200);
     }
 
     /// The remedy is derived, ordered, and total. Cash already claimed wins:
@@ -1077,21 +1247,49 @@ mod tests {
         );
         assert_eq!(
             outstanding(vec![], vec![usage()]).remedy(),
-            Some(BillingRemedy::BillOutstandingUsage)
+            Some(BillingRemedy::AttachPaymentMethod)
+        );
+    }
+
+    /// Within the usage arm the remedy follows what is MISSING. The pair
+    /// differs in one variable - whether a payment identity is on file - and
+    /// nothing else, because that is the only thing that decides whether the
+    /// creator has an action at all.
+    #[test]
+    fn the_usage_remedy_follows_whether_a_payment_identity_exists() {
+        assert_eq!(
+            outstanding_with_identity(vec![], vec![usage()], false).remedy(),
+            Some(BillingRemedy::AttachPaymentMethod),
+            "no customer: nothing bills or collects until one is attached"
+        );
+        assert_eq!(
+            outstanding_with_identity(vec![], vec![usage()], true).remedy(),
+            Some(BillingRemedy::ReconcileClosedPeriod),
+            "customer on file: the invoice is the only missing piece"
         );
     }
 
     /// Every remedy names a route, because a refusal with no next step is a
-    /// dead end. The route named is the one that is wired end to end.
+    /// dead end - and it must name a route that would CHANGE THE ANSWER. The
+    /// arm that used to send the creator to wait for a billing sweep failed the
+    /// second half: `previous_period_start_unix` bills only last month, so for
+    /// an older period the named remedy could never run. Nothing here may name
+    /// a sweep, and everything here must name a route.
     #[test]
-    fn every_remedy_names_a_route_that_exists() {
+    fn every_remedy_names_a_route_that_exists_and_none_names_the_sweep() {
         for remedy in [
             BillingRemedy::SettleInvoices,
-            BillingRemedy::BillOutstandingUsage,
+            BillingRemedy::AttachPaymentMethod,
+            BillingRemedy::ReconcileClosedPeriod,
         ] {
+            let text = remedy.instruction();
             assert!(
-                remedy.instruction().contains("/billing/setup"),
-                "{remedy:?} names no reachable route"
+                text.contains("/billing/setup") || text.contains("/internal/billing/reconcile"),
+                "{remedy:?} names no reachable route: {text}"
+            );
+            assert!(
+                !text.contains("next billing sweep"),
+                "{remedy:?} sends the creator to a sweep that only covers last month: {text}"
             );
         }
     }

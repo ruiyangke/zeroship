@@ -142,8 +142,10 @@ pub struct BillingBlocker {
     /// nothing; this is the case the ownership rule does not see.
     pub dissolved: bool,
     /// Cash owed across the unpaid invoices, in [`Self::currency`]'s minor
-    /// unit. Zero when only unbilled usage remains - usage has no price until
-    /// a finalize prices it.
+    /// unit. Zero when only unbilled usage remains - an unbilled period HAS a
+    /// price, and `outstanding.unbilled_periods` carries it, but no claim
+    /// exists that a payment could settle. See
+    /// [`crate::billing_read::OutstandingBilling::owed_cents`].
     pub owed_cents: i64,
     pub currency: String,
     pub unpaid_invoice_count: i64,
@@ -423,6 +425,7 @@ mod tests {
                 organization_id: "org_0000000000000000000001".into(),
                 unpaid_invoices: vec![],
                 unbilled_periods: vec![],
+                billing_identity_on_file: false,
             },
         }
     }

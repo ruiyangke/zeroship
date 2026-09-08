@@ -72,7 +72,6 @@ use crate::metering::provider::{
     AdjustmentNote, AggregateQuery, BillingPeriod, CorrectionCapability, SubjectRef,
 };
 use crate::metering::{period_date, Metering};
-use crate::plan_catalog::PlanCatalog;
 use crate::pricing::{charge_cents, MetricWeight, MetricWeights};
 use crate::registry::RegistryError;
 use crate::stripe_client::{Period, StripeApi, StripeClient};
@@ -1261,7 +1260,6 @@ fn invoice_line_quantity_for_meter(usage: &serde_json::Value, meter: &str) -> Op
 pub(crate) async fn bill_organization<S: StripeApi>(
     state: &AppState,
     stripe: &S,
-    catalog: &PlanCatalog,
     weights: &MetricWeights,
     default_fx: Option<u64>,
     organization_id: &str,
@@ -1273,7 +1271,6 @@ pub(crate) async fn bill_organization<S: StripeApi>(
         &state.stripe_store,
         state.tax_provider.as_ref(),
         stripe,
-        catalog,
         weights,
         default_fx,
         organization_id,
@@ -1293,7 +1290,6 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
     stripe_store: &crate::stripe_store::StripeStore,
     tax_provider: &dyn crate::tax::TaxProvider,
     stripe: &S,
-    catalog: &PlanCatalog,
     weights: &MetricWeights,
     default_fx: Option<u64>,
     organization_id: &str,
@@ -1345,163 +1341,12 @@ pub(crate) async fn bill_organization_with_parts<S: StripeApi>(
         Err(e) => return Err(RegistryError::Database(format!("get_customer: {e}"))),
     };
 
-    // Price each owned app's closed-period usage, capturing the SNAPSHOT inputs
-    // (usage, applied weights, included_units, resolved FX, base fee, authoritative
-    // amount) so a finalized line replays bit-for-bit via charge_cents.
-    //
-    // PR-4 (full usage-segment proration): an app with N plan-change events in the
-    // period splits into N+1 SEGMENTS. Each segment is priced under ITS OWN plan
-    // over the cumulative-snapshot usage DELTA and emitted as a SEPARATE line. The
-    // no-change case degenerates to exactly one segment_no=0 line (full period,
-    // current plan) — byte-for-byte today's behaviour.
-    //
-    // C1 (replay-faithful snapshot): freeze the FULL weights map that was ACTUALLY
-    // PASSED to `charge_cents` — weights are GLOBAL (segment-agnostic). Each segment
-    // line's `usage_snapshot` is its own DELTA, so the segments' snapshots telescope
-    // back to the full-period total.
-    let weights_snapshot: std::collections::BTreeMap<String, MetricWeight> =
-        weights.iter().map(|(m, w)| (m.clone(), *w)).collect();
-    let mut lines: Vec<BilledLine> = Vec::new();
-    let mut total_cents: u64 = 0;
-    for app_id in app_ids {
-        // Resolve the app's CURRENT plan (FK into the catalog) — the tail's source
-        // of truth (MAJOR-4) and the single segment's plan on the no-change path. A
-        // missing/poison plan is skipped, not fatal.
-        let plan_id = lookup_plan_id_on(&conn, app_id).await?;
-        let Some(current_plan_id) = plan_id else { continue };
-        if catalog.get(&current_plan_id).await?.is_none() {
-            tracing::warn!(app_id = %app_id, plan_id = %current_plan_id, "billing_reconcile: plan not in catalog — skipping app");
-            continue;
-        }
-
-        // The period-end cumulative totals (the END of the last segment).
-        let period_end_totals = Metering::period_totals_on(&conn, app_id, period_start).await?;
-
-        // The period's plan-change events, effective_at order. Each opens a segment.
-        let change_rows = conn
-            .query(
-                "SELECT to_plan_id, from_plan_id, effective_at, usage_at_change \
-                 FROM zeroship.plan_change_events \
-                 WHERE app_id = $1 AND period = $2::date \
-                 ORDER BY effective_at, id",
-                &[app_id, &period],
-            )
-            .await?;
-        let mut period_changes: Vec<crate::proration::PlanChange> = Vec::with_capacity(change_rows.len());
-        for r in &change_rows {
-            let usage_json: serde_json::Value = r.get("usage_at_change");
-            // MINOR-4: a malformed `usage_at_change` MUST NOT silently become `{}` —
-            // that would zero the segment START snapshot and over-count the whole
-            // segment (every metric billed from 0 instead of its true cumulative
-            // start). Propagate the parse error so the per-organization loop in `sweep`
-            // logs it and SKIPS this organization's billing this tick, rather than
-            // emitting an over-bill off a silently-empty snapshot.
-            let usage_at_change: std::collections::HashMap<String, i64> =
-                serde_json::from_value(usage_json).map_err(|e| {
-                    RegistryError::Database(format!(
-                        "billing_reconcile: corrupt usage_at_change for app {app_id} — \
-                         refusing to price off an empty snapshot (would over-bill): {e}"
-                    ))
-                })?;
-            period_changes.push(crate::proration::PlanChange {
-                to_plan_id: r.get::<_, String>("to_plan_id"),
-                effective_at: r.get::<_, chrono::DateTime<Utc>>("effective_at"),
-                usage_at_change,
-            });
-        }
-        // The plan running at period START (segment 0's plan): the first change's
-        // `from_plan_id`. That column is NULL for an initial plan assignment (no
-        // prior plan existed) — in which case there is no distinct pre-change plan,
-        // so segment 0 falls back to the current plan. It is also the current plan
-        // when there were NO changes this period (`change_rows` empty ⇒ `.first()` is
-        // None). Both fallbacks resolve via `unwrap_or_else`.
-        let prior_plan_id: String = change_rows
-            .first()
-            .and_then(|r| r.get::<_, Option<String>>("from_plan_id"))
-            .unwrap_or_else(|| current_plan_id.clone());
-
-        // Resolve the (FX-effective) PlanPrice for every plan a segment may use:
-        // the prior plan, the current plan, and each change's to-plan.
-        let mut plan_prices: std::collections::HashMap<String, crate::pricing::PlanPrice> =
-            std::collections::HashMap::new();
-        let mut needed: std::collections::HashSet<String> = std::collections::HashSet::new();
-        needed.insert(prior_plan_id.clone());
-        needed.insert(current_plan_id.clone());
-        for ch in &period_changes {
-            needed.insert(ch.to_plan_id.clone());
-        }
-        for pid in &needed {
-            if let Some(p) = catalog.get(pid).await? {
-                plan_prices.insert(pid.clone(), p.price.with_effective_fx(default_fx));
-            }
-        }
-
-        let segments = crate::proration::build_segments_with_prior(
-            period_start,
-            &prior_plan_id,
-            &period_changes,
-            &period_end_totals,
-            &current_plan_id,
-            &plan_prices,
-        );
-
-        for seg in &segments {
-            // Price the segment under ITS OWN plan: the day-pro-rated base fee +
-            // quota and the segment plan's FX, over the segment's usage DELTA.
-            let seg_price = crate::pricing::PlanPrice {
-                base_fee_cents: seg.base_fee_cents,
-                included_units: seg.included_units,
-                // None ⇒ unresolved FX ⇒ charge_cents fails closed (no silent $0).
-                fx_pico_cents_per_unit: seg.fx_pico_cents_per_unit,
-                spend_limit_default_cents: 0,
-            };
-            // MAJOR-1/MAJOR-2: pricing is fallible and MUST NOT silently clamp.
-            //   * UnresolvedFx ⇒ propagate so the sweep ABORTS, never a $0 invoice.
-            //   * ComputeUnitOverflow ⇒ a hard error that skips THIS organization.
-            let breakdown = match charge_cents(&seg_price, &seg.usage_delta, weights) {
-                Ok(b) => b,
-                Err(crate::pricing::PricingError::UnresolvedFx) => {
-                    tracing::error!(
-                        app_id = %app_id,
-                        plan_id = %seg.plan_id,
-                        segment_no = seg.segment_no,
-                        "billing_reconcile: global default FX missing — cannot price; ABORTING sweep"
-                    );
-                    return Err(RegistryError::FxUnresolved);
-                }
-                Err(e @ crate::pricing::PricingError::ComputeUnitOverflow { .. }) => {
-                    return Err(RegistryError::Database(format!(
-                        "billing_reconcile: {e} — refusing to bill app {app_id} segment {}",
-                        seg.segment_no
-                    )));
-                }
-            };
-            if breakdown.total_cents == 0 {
-                // A $0 segment posts no Stripe item / line (mirrors the per-app
-                // skip today). The N=0 path skips a $0 app exactly as before.
-                continue;
-            }
-            let desc = segment_description(*app_id, seg, period_start, segments.len());
-            lines.push(BilledLine {
-                app_id: *app_id,
-                segment_no: seg.segment_no,
-                plan_id: seg.plan_id.clone(),
-                desc,
-                amount: breakdown.total_cents,
-                usage: seg.usage_delta.clone(),
-                weights_snapshot: weights_snapshot.clone(),
-                included_units: seg.included_units,
-                // charge_cents succeeded above ⇒ the FX resolved to Some; freeze it.
-                fx_pico_cents_per_unit: seg.fx_pico_cents_per_unit.unwrap_or(0),
-                base_fee_cents: seg.base_fee_cents,
-                // Descriptive CU (frozen from the SAME breakdown that set `amount`).
-                total_units: breakdown.total_units,
-                billable_units: breakdown.billable_units,
-                segment_label: segment_label(seg, segments.len()),
-            });
-            total_cents = total_cents.saturating_add(breakdown.total_cents);
-        }
-    }
+    // Price each owned app's closed-period usage. ONE pricing path serves both
+    // this finalize and the deletion predicate's "did this period owe money"
+    // question (`crate::billing_read::outstanding_billing`); two paths that can
+    // disagree would let a refusal quote a debt no invoice would ever carry.
+    let (lines, total_cents) =
+        price_period_lines(&conn, weights, default_fx, app_ids, period_start).await?;
 
     if total_cents == 0 {
         // Nothing to bill this period for this organization.
@@ -1950,11 +1795,213 @@ fn is_already_finalized(e: &crate::stripe_store::StripeError) -> bool {
     )
 }
 
+/// Price one organization's apps over one period, returning the per-segment
+/// lines and their cents total.
+///
+/// THE ONE PRICING PATH, and it has two callers on purpose.
+/// [`bill_organization_with_parts`] runs it to build the invoice it finalizes;
+/// [`crate::billing_read::outstanding_billing`] runs it to answer whether a
+/// closed period that carries no invoice actually OWED anything. That predicate
+/// used to key on raw metered units, which reads every quota-covered free-tier
+/// month as a debt and traps the account forever. A second pricing path spelled
+/// beside this one could answer a different number than the invoice would carry,
+/// which is a worse defect than the one it would be fixing - so there is one.
+///
+/// Everything below is exactly what the reconciler always did:
+///
+/// Capture the SNAPSHOT inputs (usage, applied weights, `included_units`,
+/// resolved FX, base fee, authoritative amount) so a finalized line replays
+/// bit-for-bit via `charge_cents`.
+///
+/// PR-4 (full usage-segment proration): an app with N plan-change events in the
+/// period splits into N+1 SEGMENTS. Each segment is priced under ITS OWN plan
+/// over the cumulative-snapshot usage DELTA and emitted as a SEPARATE line. The
+/// no-change case degenerates to exactly one `segment_no = 0` line (full period,
+/// current plan).
+///
+/// C1 (replay-faithful snapshot): freeze the FULL weights map that was ACTUALLY
+/// PASSED to `charge_cents` - weights are GLOBAL (segment-agnostic). Each
+/// segment line's `usage_snapshot` is its own DELTA, so the segments' snapshots
+/// telescope back to the full-period total.
+///
+/// # Errors
+/// Pricing fails CLOSED and never returns a plausible-but-wrong zero:
+/// [`RegistryError::FxUnresolved`] when the platform cannot resolve an FX, and
+/// [`RegistryError::Database`] on a compute-unit overflow or a corrupt
+/// `usage_at_change` snapshot.
+#[allow(clippy::future_not_send)]
+pub(crate) async fn price_period_lines<C: compio_postgres::GenericClient + Sync>(
+    conn: &C,
+    weights: &MetricWeights,
+    default_fx: Option<u64>,
+    app_ids: &[Uuid],
+    period_start: i64,
+) -> Result<(Vec<BilledLine>, u64), RegistryError> {
+    let period = period_date(period_start);
+    let weights_snapshot: std::collections::BTreeMap<String, MetricWeight> =
+        weights.iter().map(|(m, w)| (m.clone(), *w)).collect();
+    let mut lines: Vec<BilledLine> = Vec::new();
+    let mut total_cents: u64 = 0;
+    for app_id in app_ids {
+        // Resolve the app's CURRENT plan (FK into the catalog) — the tail's source
+        // of truth (MAJOR-4) and the single segment's plan on the no-change path. A
+        // missing/poison plan is skipped, not fatal.
+        let plan_id = lookup_plan_id_on(conn, app_id).await?;
+        let Some(current_plan_id) = plan_id else { continue };
+        if crate::plan_catalog::get_on(conn, &current_plan_id)
+            .await?
+            .is_none()
+        {
+            tracing::warn!(app_id = %app_id, plan_id = %current_plan_id, "billing_reconcile: plan not in catalog — skipping app");
+            continue;
+        }
+
+        // The period-end cumulative totals (the END of the last segment).
+        let period_end_totals = Metering::period_totals_on(conn, app_id, period_start).await?;
+
+        // The period's plan-change events, effective_at order. Each opens a segment.
+        let change_rows = conn
+            .query(
+                "SELECT to_plan_id, from_plan_id, effective_at, usage_at_change \
+                 FROM zeroship.plan_change_events \
+                 WHERE app_id = $1 AND period = $2::date \
+                 ORDER BY effective_at, id",
+                &[app_id, &period],
+            )
+            .await?;
+        let mut period_changes: Vec<crate::proration::PlanChange> =
+            Vec::with_capacity(change_rows.len());
+        for r in &change_rows {
+            let usage_json: serde_json::Value = r.get("usage_at_change");
+            // MINOR-4: a malformed `usage_at_change` MUST NOT silently become `{}` —
+            // that would zero the segment START snapshot and over-count the whole
+            // segment (every metric billed from 0 instead of its true cumulative
+            // start). Propagate the parse error so the per-organization loop in `sweep`
+            // logs it and SKIPS this organization's billing this tick, rather than
+            // emitting an over-bill off a silently-empty snapshot.
+            let usage_at_change: std::collections::HashMap<String, i64> =
+                serde_json::from_value(usage_json).map_err(|e| {
+                    RegistryError::Database(format!(
+                        "billing_reconcile: corrupt usage_at_change for app {app_id} — \
+                         refusing to price off an empty snapshot (would over-bill): {e}"
+                    ))
+                })?;
+            period_changes.push(crate::proration::PlanChange {
+                to_plan_id: r.get::<_, String>("to_plan_id"),
+                effective_at: r.get::<_, chrono::DateTime<Utc>>("effective_at"),
+                usage_at_change,
+            });
+        }
+        // The plan running at period START (segment 0's plan): the first change's
+        // `from_plan_id`. That column is NULL for an initial plan assignment (no
+        // prior plan existed) — in which case there is no distinct pre-change plan,
+        // so segment 0 falls back to the current plan. It is also the current plan
+        // when there were NO changes this period (`change_rows` empty ⇒ `.first()` is
+        // None). Both fallbacks resolve via `unwrap_or_else`.
+        let prior_plan_id: String = change_rows
+            .first()
+            .and_then(|r| r.get::<_, Option<String>>("from_plan_id"))
+            .unwrap_or_else(|| current_plan_id.clone());
+
+        // Resolve the (FX-effective) PlanPrice for every plan a segment may use:
+        // the prior plan, the current plan, and each change's to-plan.
+        let mut plan_prices: std::collections::HashMap<String, crate::pricing::PlanPrice> =
+            std::collections::HashMap::new();
+        let mut needed: std::collections::HashSet<String> = std::collections::HashSet::new();
+        needed.insert(prior_plan_id.clone());
+        needed.insert(current_plan_id.clone());
+        for ch in &period_changes {
+            needed.insert(ch.to_plan_id.clone());
+        }
+        for pid in &needed {
+            if let Some(p) = crate::plan_catalog::get_on(conn, pid).await? {
+                plan_prices.insert(pid.clone(), p.price.with_effective_fx(default_fx));
+            }
+        }
+
+        let segments = crate::proration::build_segments_with_prior(
+            period_start,
+            &prior_plan_id,
+            &period_changes,
+            &period_end_totals,
+            &current_plan_id,
+            &plan_prices,
+        );
+
+        for seg in &segments {
+            // Price the segment under ITS OWN plan: the day-pro-rated base fee +
+            // quota and the segment plan's FX, over the segment's usage DELTA.
+            let seg_price = crate::pricing::PlanPrice {
+                base_fee_cents: seg.base_fee_cents,
+                included_units: seg.included_units,
+                // None ⇒ unresolved FX ⇒ charge_cents fails closed (no silent $0).
+                fx_pico_cents_per_unit: seg.fx_pico_cents_per_unit,
+                spend_limit_default_cents: 0,
+            };
+            // MAJOR-1/MAJOR-2: pricing is fallible and MUST NOT silently clamp.
+            //   * UnresolvedFx ⇒ propagate so the sweep ABORTS, never a $0 invoice.
+            //   * ComputeUnitOverflow ⇒ a hard error that skips THIS organization.
+            let breakdown = match charge_cents(&seg_price, &seg.usage_delta, weights) {
+                Ok(b) => b,
+                Err(crate::pricing::PricingError::UnresolvedFx) => {
+                    tracing::error!(
+                        app_id = %app_id,
+                        plan_id = %seg.plan_id,
+                        segment_no = seg.segment_no,
+                        "billing_reconcile: global default FX missing — cannot price; ABORTING sweep"
+                    );
+                    return Err(RegistryError::FxUnresolved);
+                }
+                Err(e @ crate::pricing::PricingError::ComputeUnitOverflow { .. }) => {
+                    return Err(RegistryError::Database(format!(
+                        "billing_reconcile: {e} — refusing to bill app {app_id} segment {}",
+                        seg.segment_no
+                    )));
+                }
+            };
+            if breakdown.total_cents == 0 {
+                // A $0 segment posts no Stripe item / line (mirrors the per-app
+                // skip today). The N=0 path skips a $0 app exactly as before.
+                continue;
+            }
+            let desc = segment_description(*app_id, seg, period_start, segments.len());
+            lines.push(BilledLine {
+                app_id: *app_id,
+                segment_no: seg.segment_no,
+                plan_id: seg.plan_id.clone(),
+                desc,
+                amount: breakdown.total_cents,
+                usage: seg.usage_delta.clone(),
+                weights_snapshot: weights_snapshot.clone(),
+                included_units: seg.included_units,
+                // charge_cents succeeded above ⇒ the FX resolved to Some; freeze it.
+                fx_pico_cents_per_unit: seg.fx_pico_cents_per_unit.unwrap_or(0),
+                base_fee_cents: seg.base_fee_cents,
+                // Descriptive CU (frozen from the SAME breakdown that set `amount`).
+                total_units: breakdown.total_units,
+                billable_units: breakdown.billable_units,
+                segment_label: segment_label(seg, segments.len()),
+            });
+            total_cents = total_cents.saturating_add(breakdown.total_cents);
+        }
+    }
+    Ok((lines, total_cents))
+}
+
+/// Which app a priced line belongs to. [`BilledLine`]'s fields stay private to
+/// this module because everything about a line except its subject is the
+/// reconciler's own business; the deletion predicate needs only to count the
+/// distinct apps behind a period's charge.
+#[must_use]
+pub(crate) fn billed_app(line: &BilledLine) -> Uuid {
+    line.app_id
+}
+
 /// One priced per-SEGMENT line during a reconcile, carrying the frozen charge
 /// inputs (the snapshot) so a finalized invoice replays bit-for-bit. PR-4: an app
 /// with N plan-change events emits N+1 of these (one per segment); the no-change
 /// path emits exactly one at `segment_no = 0`.
-struct BilledLine {
+pub(crate) struct BilledLine {
     app_id: Uuid,
     segment_no: i16,
     plan_id: String,

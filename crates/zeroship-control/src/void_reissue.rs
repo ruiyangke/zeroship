@@ -226,14 +226,13 @@ pub async fn void_and_reissue<S: StripeApi>(
     // invoice. It takes the per-organization advisory lock again (inside consume), so it
     // can't race a concurrent reconcile.
     let period_start = period_start_unix_for(period);
-    let catalog = crate::plan_catalog::PlanCatalog::new(state.registry.clone());
     let pricing = crate::pricing_store::PricingStore::new(state.registry.clone());
     let weights = pricing.weights().await?;
     let default_fx = pricing.default_fx_pico_cents_per_unit().await?;
     let app_ids = billing_reconcile::owned_app_ids(state, &organization_id).await?;
 
     let _reissued = billing_reconcile::bill_organization(
-        state, stripe, &catalog, &weights, default_fx, &organization_id, &app_ids, period_start,
+        state, stripe, &weights, default_fx, &organization_id, &app_ids, period_start,
     )
     .await?;
 
