@@ -1,9 +1,11 @@
-//! Live-PG mailer test — suppression check + `StdoutMailer` happy path.
+//! Live-PG mailer test — suppression check + `StdoutMailer` happy path, plus
+//! the real SMTP transport against a real sink.
 //!
-//! A test database is REQUIRED. This used to skip silently without one, so a
-//! run against no database reported the same green as a run against one.
-//! `tests/provision_test_backends.sh` stands one up and writes its address into
-//! the test overlay; `PG_TEST_URL` overrides that.
+//! A test database is REQUIRED, and so is the sink. Both used to skip silently
+//! when absent, so a run against neither reported the same green as a run
+//! against both. `tests/provision_test_backends.sh` stands up all of them and
+//! writes the DSN into the test overlay; `PG_TEST_URL` and
+//! `AUTH_TEST_SMTP_SINK` REDIRECT those two, they do not enable them.
 //! Mirrors the `migrations_smoke.rs` harness: `connect(...)` returns
 //! `(Client, Connection)` and the connection future must be spawned + detached
 //! on the compio runtime or queries hang.
@@ -12,6 +14,17 @@ use compio_postgres::{connect, NoTls};
 use zeroship_mailer::stdout::StdoutMailer;
 use zeroship_mailer::suppressions;
 use zeroship_mailer::{Address, Email, Mailer, SmtpConfig, SmtpMailer, SmtpTls};
+
+/// Where the provisioned sink listens, and the same relationship to
+/// `AUTH_TEST_SMTP_SINK` that the compiled Postgres and Redis defaults in
+/// `libs/compio-postgres/tests/common/mod.rs` and
+/// `libs/compio-redis/tests/common/mod.rs` have to their own override
+/// variables: the provisioner's address is the default, the variable redirects.
+///
+/// `tests/provision_test_backends.sh` publishes this port. If it moves there,
+/// move it here in the same commit - that script's header names this file for
+/// exactly that reason.
+const DEFAULT_SMTP_SINK: &str = "127.0.0.1:1025";
 
 #[compio::test]
 async fn stdout_mailer_sends_when_not_suppressed() {
@@ -121,31 +134,43 @@ async fn stdout_mailer_refuses_suppressed() {
 /// message of type InvalidContentType", so every send to a plaintext sink
 /// FAILED. With `SmtpTls::Plaintext` the send must succeed.
 ///
-/// It needs a test database for the suppression check AND a plaintext sink at
-/// `AUTH_TEST_SMTP_SINK` (`host:port`). It USED TO SKIP when either was absent,
-/// which is how the bug above shipped: the one test that drives the real
-/// transport against a real sink was green on every machine without a sink,
-/// which was every machine. Both are required now.
+/// It needs a test database for the suppression check AND a plaintext sink. It
+/// USED TO SKIP when either was absent, which is how the bug above shipped: the
+/// one test that drives the real transport against a real sink was green on
+/// every machine without a sink, which was every machine. Both are required now,
+/// and both are provisioned by `tests/provision_test_backends.sh` - "fail if
+/// missing" is only honest when the thing is obtainable from the documented
+/// setup.
 #[compio::test]
 async fn smtp_plaintext_sink_delivers_relay_forward() {
     let dsn = zeroship_core::config::test_database_url();
-    let sink = zeroship_core::test_env!("AUTH_TEST_SMTP_SINK").unwrap_or_default();
+    let sink = zeroship_core::test_env!("AUTH_TEST_SMTP_SINK")
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_SMTP_SINK.to_string());
+    let (host, port) = sink
+        .rsplit_once(':')
+        .map(|(h, p)| (h.to_string(), p.parse::<u16>().expect("sink port")))
+        .unwrap_or((sink.clone(), 1025));
+
+    // Dial before building the mailer, so an absent sink names itself instead of
+    // arriving as lettre's connection error inside a `spawn_blocking`.
     assert!(
-        !sink.trim().is_empty(),
+        std::net::TcpStream::connect((host.as_str(), port)).is_ok(),
         "A plaintext SMTP sink is unreachable, and this test requires it.\n\
          \n\
          \x20 backend: any SMTP server that accepts a plaintext session\n\
-         \x20 missing: AUTH_TEST_SMTP_SINK is unset or empty (wants host:port)\n\
+         \x20 dialled: {sink}\n\
          \n\
-         NOTHING IN THIS REPOSITORY PROVISIONS A SINK.\n\
-         `tests/provision_test_backends.sh` stands up postgres and redis only.\n\
-         Run one yourself - mailpit needs no configuration:\n\
+         Provision one, along with every other backend this workspace's tests\n\
+         require:\n\
          \n\
-         \x20 docker run -d --name zs-mailer-test-sink -p 1025:1025 -p 8025:8025 \\\n\
-         \x20   axllent/mailpit\n\
+         \x20 tests/provision_test_backends.sh\n\
          \n\
-         Then re-run with AUTH_TEST_SMTP_SINK=127.0.0.1:1025, and read what\n\
-         arrived at http://127.0.0.1:8025.\n\
+         It runs mailpit at the address above and prints the web inbox, which is\n\
+         where you read what a send actually delivered. AUTH_TEST_SMTP_SINK\n\
+         (host:port) redirects this test at a sink of your own; it does not\n\
+         enable it.\n\
          \n\
          PLAINTEXT IS THE POINT: this test exists because the SmtpTls::Plaintext\n\
          arm did not, and a sink that insists on STARTTLS reproduces the failure\n\
@@ -153,10 +178,6 @@ async fn smtp_plaintext_sink_delivers_relay_forward() {
          \n\
          There is no environment variable that makes this a skip."
     );
-    let (host, port) = sink
-        .rsplit_once(':')
-        .map(|(h, p)| (h.to_string(), p.parse::<u16>().expect("sink port")))
-        .unwrap_or((sink.clone(), 1025));
 
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
