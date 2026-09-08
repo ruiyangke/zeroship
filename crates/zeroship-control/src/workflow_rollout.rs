@@ -6,7 +6,6 @@
 use compio_postgres::GenericClient;
 use uuid::Uuid;
 use zeroship_core::app_derivation;
-use zeroship_core::app_id::AppId;
 
 use crate::registry::RegistryError;
 
@@ -24,9 +23,7 @@ where
     // before archive returns or observe the archived marker afterwards.
     conn.query_one(
         "SELECT pg_advisory_xact_lock_shared(hashtextextended($1, 0))",
-        &[&app_derivation::lifecycle_lock_seed(&AppId::from_uuid(
-            app_id,
-        ))],
+        &[&app_derivation::lifecycle_lock_seed_for_stored_uuid(app_id)],
     )
     .await
     .map_err(RegistryError::from)?;
