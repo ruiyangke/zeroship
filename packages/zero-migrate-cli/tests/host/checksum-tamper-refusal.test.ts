@@ -350,11 +350,14 @@ test("MySQL refuses an edited already-applied migration, and lands nothing", asy
   }
 });
 
-test("the recorded checksum is the same on both servers", async (ctx) => {
-  if (!PG_URL || !MYSQL_URL) {
-    ctx.skip("both database URLs required for the cross-dialect checksum arm");
-    return;
-  }
+// This arm compares the two servers to EACH OTHER, so it needs both DSNs and a
+// missing one leaves it nothing to compare. It used to `ctx.skip` for that, which
+// is the shape its two siblings above already refused: a skip and a pass print
+// the same exit code, so a machine with only PostgreSQL configured reported the
+// cross-dialect agreement as established when it had never been asked.
+test("the recorded checksum is the same on both servers", async () => {
+  requireLiveDb(PG_URL, PG_URL_ENV, "PostgreSQL");
+  requireLiveDb(MYSQL_URL, MYSQL_URL_ENV, "MySQL");
   const pg = await postgres();
   const my = await mysql();
   try {
