@@ -1,26 +1,23 @@
 //! The storage-capability traits: what a backend must be able to do.
 //!
-//! Eight traits, carved out of what used to be one monolithic `Backend`. Each
-//! is a CONTRACT and nothing more - an associated type or two, and method
-//! signatures over the vocabulary in [`crate::capability`]. None of them names
-//! a database driver, a runtime or V8, and none carries a default body that
-//! does; that is what rank 0 means, and it is why they can sit below every
-//! tier that implements them.
+//! Eight narrow traits rather than one monolithic `Backend`. Each is a CONTRACT
+//! and nothing more - an associated type or two, and method signatures over the
+//! vocabulary in [`crate::capability`]. None of them names a database driver, a
+//! runtime or V8, and none carries a default body that does; that is what rank 0
+//! means, and it is why they can sit below every tier that implements them.
 //!
-//! Moved from `zeroship-plugin-db`'s `backend/mod.rs` on 2026-09-02, after the
-//! two things that would have made the move unbuildable were dealt with first:
+//! Two shapes are excluded on purpose, because either would break rank 0:
 //!
-//! * `LockManager::try_acquire_with_backoff` was a DEFAULT METHOD BODY holding
-//!   a `compio::time::sleep` schedule. A default body travels with its trait,
-//!   so this would have put an async executor in a crate that declares no
-//!   runtime. It is now `zeroship-plugin-db`'s `lock_policy::BoundedLockAcquire`
-//!   extension trait, blanket-implemented over every `LockManager`.
-//! * `ChangeStream` used to hand out `BrokerPauseGuard` and
-//!   `SchemaPendingGuard`, whose `Drop` impls drive the engine's broker
-//!   registries - a `data-core -> data-engine` edge against the dependency that
-//!   already runs the other way. Those two methods were deleted rather than
-//!   moved: all four implementations were the same two lines and ignored
-//!   `self`, so they were never vendor behaviour at all.
+//! * A DEFAULT METHOD BODY that awaits. A default body travels with its trait,
+//!   so a backoff schedule built on `compio::time::sleep` would put an async
+//!   executor in a crate that declares no runtime. Bounded acquisition lives in
+//!   `zeroship-plugin-db`'s `lock_policy::BoundedLockAcquire` extension trait,
+//!   blanket-implemented over every `LockManager`.
+//! * A method handing out `BrokerPauseGuard` or `SchemaPendingGuard`, whose
+//!   `Drop` impls drive the engine's broker registries. That is a
+//!   `data-core -> data-engine` edge against the dependency that already runs
+//!   the other way, and it is not vendor behaviour in the first place: every
+//!   implementation would ignore `self`.
 //!
 //! # Implementations stay above
 //!
@@ -32,29 +29,27 @@
 //! # NO `cfg(feature)` ON A TRAIT OR A TRAIT MEMBER IN THIS FILE
 //!
 //! This file declares CONTRACTS, and a contract whose shape depends on a
-//! feature is not one. Every `#[cfg(feature = "test-helpers")]` that used to
-//! sit on a trait or a member here is gone as of 2026-09-04; `test-helpers`
-//! gates HELPERS AND FIXTURES - `DbBinding::cold_start`, the broker's
-//! per-thread test isolation, `schema_cache::reset_for_tests` - and never the
-//! shape of a capability.
+//! feature is not one. No trait or trait member here carries a
+//! `#[cfg(feature = ...)]`. `test-helpers` gates HELPERS AND FIXTURES -
+//! `DbBinding::cold_start`, the broker's per-thread test isolation,
+//! `schema_cache::reset_for_tests` - and never the shape of a capability.
 //!
 //! It is not a style rule. `test-helpers` is a DEV-dependency feature of every
 //! crate above this one, so `--all-targets`, `--all-features`, clippy and every
 //! `cargo test` invocation unify it ON and report a shape no shipped binary
-//! has. Three distinct breakages have come out of that blind spot:
+//! has. Three distinct breakages hide in that blind spot:
 //!
-//! * A REQUIRED member behind the gate (`DialectBuilder::sql_dialect`) turns
-//!   into `error[E0046]: not all trait items implemented` in any build that
-//!   enables this crate's feature without the vendor's - feature unification
-//!   makes that reachable from a single dependent's manifest, and it was
-//!   already observed against `zeroship-data-postgres`.
+//! * A REQUIRED member behind the gate (`DialectBuilder::sql_dialect`) is
+//!   `error[E0046]: not all trait items implemented` in any build that enables
+//!   this crate's feature without the vendor's, and feature unification makes
+//!   that reachable from a single dependent's manifest.
 //! * An OVERRIDE behind the gate (`SqlExecutor::pool_exec_ddl` on the PG arm)
 //!   is `error[E0407]` in the mirror configuration, and worse than an error in
 //!   the one that compiles: the default body silently takes over, sending
 //!   multi-statement DDL down the extended protocol PostgreSQL rejects.
-//! * A whole TRAIT behind the gate (`SchemaIntrospect`) stopped the shipped
-//!   worker and CLI binaries from compiling for a day on 2026-09-04, the moment
-//!   a production caller reached it.
+//! * A whole TRAIT behind the gate (`SchemaIntrospect`) stops the shipped worker
+//!   and CLI binaries from compiling the moment a production caller reaches it,
+//!   while every test configuration stays green.
 //!
 //! The invariant is checkable rather than remembered:
 //!
@@ -166,10 +161,9 @@ pub trait SqlExecutor: 'static {
     /// natively multi-statement) and for mocks. The Postgres backend
     /// overrides it to use `batch_execute`.
     ///
-    /// **UNGATED, and it was `#[cfg(feature = "test-helpers")]` until
-    /// 2026-09-04.** A defaulted member is the WORST place to put a feature
-    /// gate, because only one of its two failure modes is an error. Gate the
-    /// member and leave the PG override ungated and you get `error[E0407]:
+    /// **KEEP THIS UNGATED.** A defaulted member is the WORST place to put a
+    /// feature gate, because only one of its two failure modes is an error.
+    /// Gate the member and leave the PG override ungated and you get `error[E0407]:
     /// method `pool_exec_ddl` is not a member of trait `SqlExecutor``. Gate
     /// both, then enable this crate's feature without the vendor's - which
     /// feature unification does from a single dependent's manifest - and it
@@ -225,11 +219,10 @@ pub trait SqlExecutor: 'static {
 /// The bounded-retry acquisition policy - the schedule, the
 /// `compio::time::sleep` between attempts, the per-retry tracing - is
 /// [`BoundedLockAcquire`](crate::lock_policy::BoundedLockAcquire), blanket-
-/// implemented for every `LockManager`. It lived here as a DEFAULT METHOD BODY
-/// until 2026-09-02, and a default body travels with its trait: moving this
-/// trait down would have carried an async executor into a crate that declares
-/// no runtime. Call `acquire` with `use crate::lock_policy::BoundedLockAcquire;`
-/// in scope.
+/// implemented for every `LockManager`. It is deliberately not a DEFAULT METHOD
+/// BODY here: a default body travels with its trait, and this trait sits in a
+/// crate that declares no runtime. Call `acquire` with
+/// `use crate::lock_policy::BoundedLockAcquire;` in scope.
 ///
 /// **Two-tier surface**:
 ///
@@ -245,13 +238,12 @@ pub trait SqlExecutor: 'static {
 ///   [`Self::release_advisory_lock`]) takes raw `(key1, key2)`
 ///   strings. The `try_*` / `release_*` halves remain the underlying
 ///   primitives the typed API dispatches through, and the PG impl's
-///   `hashtext()` SQL lives at this layer. `acquire_advisory_lock`
-///   itself is **no longer routed through** by the typed surface —
-///   a security fix replaced the indefinite-wait dispatch with the bounded
-///   retry loop, since the indefinite wait let a malicious app holding its own
-///   lock stall every other caller. All three legacy methods stay
-///   `#[doc(hidden)]`; eager removal of `acquire_advisory_lock` is unblocked
-///   but not done.
+///   `hashtext()` SQL lives at this layer. `acquire_advisory_lock` itself is
+///   **unreachable from the typed surface, and must stay that way**: it waits
+///   indefinitely, which lets a malicious app holding its own lock stall every
+///   other caller. The typed API dispatches through the bounded retry loop
+///   instead. All three raw methods stay `#[doc(hidden)]`; nothing blocks
+///   deleting `acquire_advisory_lock` outright.
 pub trait LockManager: SqlExecutor {
     /// Try to acquire a session-scoped advisory lock for the given
     /// [`LockScope`]; `Ok(false)` if another holder already owns it.
@@ -359,56 +351,44 @@ pub trait LockManager: SqlExecutor {
 /// Live-schema introspection capability — "read the catalog and return
 /// a typed snapshot the diff engine can consume".
 ///
-/// Carved out of the monolithic `Backend` trait (see
+/// A narrow capability rather than part of an omnibus super-trait (see
 /// `docs/archive/p0-implementation-plan.md` and
-/// `docs/archive/db-system-design.md` §7). The trait owns the
-/// `LiveSchema` associated type that used to live on `Backend` —
-/// pinning it here means test helpers and conformance assertions use a narrow
-/// capability trait instead of the omnibus super-trait. `Backend` re-anchors the same
-/// associated type via the `SchemaIntrospect<LiveSchema = LiveSchema>`
-/// super-bound below so the constraint is unchanged for existing
-/// callers.
+/// `docs/archive/db-system-design.md` §7). The trait owns the `LiveSchema`
+/// associated type, so test helpers and conformance assertions bind to this
+/// instead of to `Backend`. `Backend` re-anchors the same associated type via
+/// the `SchemaIntrospect<LiveSchema = LiveSchema>` super-bound below, so the
+/// constraint is identical for callers that do want the omnibus trait.
 ///
-/// **UNGATED, and it was `#[cfg(feature = "test-helpers")]` until 2026-09-04.**
-/// The gate was correct while the only consumers were conformance assertions
-/// and the migration-facing diff. It stopped being correct the moment
-/// `zeroship_data_engine::crud::protection_floor` made a catalog read a
-/// PRODUCTION SECURITY FENCE on the write path: the floor refuses a write whose
-/// descriptor dropped a mask or an encryption block the database still records,
-/// and it recovers those records through this trait. A fence that compiles only
-/// into test builds is not a fence, so the capability ships.
+/// **KEEP THIS UNGATED.** A catalog read is a PRODUCTION SECURITY FENCE on the
+/// write path: `zeroship_data_engine::crud::protection_floor` refuses a write
+/// whose descriptor dropped a mask or an encryption block the database still
+/// records, and it recovers those records through this trait. A fence that
+/// compiles only into test builds is not a fence. Shipping it costs nothing -
+/// both impls read their own vendor's catalog with the driver the crate already
+/// depends on, so there is no new dependency in either tier.
 ///
-/// It cost nothing to ship. Both impls read their own vendor's catalog with the
-/// driver the crate already depends on; ungating pulled in no new dependency in
-/// either tier.
+/// The same reasoning covers [`Backup`], which is a capability CONTRACT and is
+/// ungated for the same reason. What sits behind the feature there are its two
+/// vendor IMPLS - a separate decision with a separate cost; see that trait's own
+/// rustdoc. "Only tests call it today" is a fact about the call graph, never
+/// about the shape, and it is not a reason to gate a contract.
 ///
-/// **This paragraph named `Backup` as something that "stays gated" until later
-/// the same day, and that was the wrong lesson to draw from its own fix.** The
-/// trait it named is a capability CONTRACT, and it was gated for the same
-/// reason this one was: at the time the only callers were tests. That is a fact
-/// about the call graph, not about the shape, and it is the fact that expired
-/// here overnight. [`Backup`] is ungated too now; what stayed behind the
-/// feature are its two vendor IMPLS, which is a separate decision with a
-/// separate cost - see that trait's own rustdoc.
-///
-/// What is still genuinely test-only, and still a code SPAN rather than an
+/// What is genuinely test-only, and named as a code SPAN rather than an
 /// intra-doc link: `PgSqlExecutor`'s raw-pool escape hatch and the `Backend`
 /// conformance marker. Both are cfg-gated out of a default build, and
 /// `tests/run_doc_gate.sh` requires zero unresolved links in the default and
-/// `--all-features` doc builds alike, so a link to either would be red in one
-/// of them whichever way it was written.
+/// `--all-features` doc builds alike, so a link to either is red in one of them
+/// whichever way it is written.
 pub trait SchemaIntrospect: 'static {
     /// Concrete live-schema snapshot returned by
     /// [`Self::introspect_schema`]. The Postgres impl uses
     /// [`zeroship_schema::diff::LiveSchema`]; each vendor tier populates that
     /// neutral shape from its own catalog.
     ///
-    /// Both links said `crate::diff::…` until 2026-09-04 and resolved to
-    /// nothing: this crate has no `diff` module, and never has - the path is a
-    /// leftover from when these traits lived in `zeroship-plugin-db`. It went
-    /// unnoticed because the trait was `cfg(feature = "test-helpers")`, so a
-    /// DEFAULT doc build never rendered it; ungating the trait is what put the
-    /// two dead links in front of `tests/run_doc_gate.sh`.
+    /// Both links must name `zeroship_schema::diff::…`. A bare `crate::diff::…`
+    /// resolves to nothing here - this crate has no `diff` module - and
+    /// `tests/run_doc_gate.sh` only sees it while the trait is ungated, because
+    /// a cfg-gated trait is never rendered in a default doc build.
     type LiveSchema;
 
     /// Introspect the live schema for an app. Returns the typed
@@ -571,13 +551,13 @@ pub trait ChangeStream: 'static {
         worker_id: &str,
     ) -> Result<Self::ConsumerHandle, DbError>;
 
-    // `pause_broker` and `engage_schema_pending` were here until 2026-09-02.
-    // They were not vendor behaviour: all four impls - PG and SQLite - were the
-    // same two lines, ignored `self`, and touched no backend state. They now
-    // live as `broker::BrokerPauseGuard::new` / `SchemaPendingGuard::new`, in
-    // the module owning the registries they mutate. Returning them from here
-    // would also force those guards to rank 0 while their `Drop` drives the
-    // engine, which is a Cargo cycle the split cannot build.
+    // Broker pause and schema-pending engagement do NOT belong on this trait.
+    // They are not vendor behaviour - the PG and SQLite bodies would be the same
+    // two lines, ignoring `self` and touching no backend state - and they live
+    // as `broker::BrokerPauseGuard::new` / `SchemaPendingGuard::new`, in the
+    // module owning the registries they mutate. Returning those guards from here
+    // would also force them to rank 0 while their `Drop` drives the engine,
+    // which is a Cargo cycle that cannot build.
 }
 
 /// Vector-index capability — the "build an ANN index over a `float[]`
@@ -642,12 +622,11 @@ pub trait VectorIndex: 'static {
     #[allow(clippy::too_many_arguments)] // mirrors the SDK's flat vector-search call shape; a params struct would just move the fields
     /// `schema` is the caller-resolved descriptor slice for `collection`.
     ///
-    /// **A parameter, not a lookup.** Both impls used to call
-    /// `descriptor::collection_schema(binding, collection)` themselves, which
-    /// reaches the ENGINE's per-isolate context - an edge that cannot compile
-    /// once the backends are their own crates. The caller already holds the
-    /// descriptor; `binding` and `collection` stay because the SQL still names
-    /// the schema and table.
+    /// **A parameter, not a lookup.** An impl calling
+    /// `descriptor::collection_schema(binding, collection)` itself would reach
+    /// the ENGINE's per-isolate context - an edge that cannot compile from a
+    /// vendor crate. The caller already holds the descriptor; `binding` and
+    /// `collection` stay because the SQL still names the schema and table.
     async fn vector_search(
         &self,
         binding: &DbBinding,
@@ -709,14 +688,12 @@ pub trait SpatialIndex: 'static {
 ///
 /// # The CONTRACT ships; the IMPLEMENTATIONS do not
 ///
-/// **This trait was `#[cfg(feature = "test-helpers")]` until 2026-09-04**, and
-/// the rustdoc here opened with "This capability is NOT in a release build".
-/// Both halves of that were true and only one of them still is. The trait ships
-/// now, for the reason at the top of this file: a contract whose shape depends
-/// on a feature is not a contract, and this one is the sibling of
-/// [`ChangeStream`], [`VectorIndex`] and [`SpatialIndex`], none of which was
-/// ever gated. A trait declaration with no implementor generates no code, so
-/// the cost of shipping it is zero and not merely small.
+/// **The trait is UNGATED and must stay that way**, for the reason at the top of
+/// this file: a contract whose shape depends on a feature is not a contract.
+/// This one is the sibling of [`ChangeStream`], [`VectorIndex`] and
+/// [`SpatialIndex`], which are ungated for the same reason. A trait declaration
+/// with no implementor generates no code, so shipping it costs zero and not
+/// merely little.
 ///
 /// What is STILL out of a release build is everything that does work:
 ///
@@ -728,11 +705,9 @@ pub trait SpatialIndex: 'static {
 /// * the three compile-time assertions in `zeroship-data-engine`'s
 ///   `backend::tests`.
 ///
-/// This list named `BackendHandle::as_backup_*` until 2026-09-07. Those
-/// accessors are gone; `zeroship-data-engine`'s `backend_handle` carries the
-/// tombstone recording why. A bullet describing a symbol that no longer exists
-/// reads as an inventory of what is gated, which is the one thing this block is
-/// for.
+/// The list is an inventory of what is gated, so every entry must name a symbol
+/// that exists. One that does not reads as gated surface and is worse than an
+/// omission.
 ///
 /// That line is drawn deliberately and is not the same line the gate on the
 /// trait drew. A capability contract costs nothing to ship and is what a future
@@ -741,32 +716,28 @@ pub trait SpatialIndex: 'static {
 /// worker, gateway and CLI binary in order to satisfy a symmetry argument.
 /// Whoever gives this capability a caller ungates the impls in the same change,
 /// and `tests/shipped_config_gate.sh` makes that a compile error rather than a
-/// discovery: an ungated caller of a gated impl fails the lib/bins build the
-/// way `SchemaIntrospect` did.
+/// discovery: an ungated caller of a gated impl fails the lib/bins build.
 ///
 /// # Why there is no `pitr_replay`, and what it would take
 ///
-/// This trait carried a third method until 2026-09-07 and it never worked on
-/// either backend. Recording the reason here is the point of this section: the
-/// method looked like an unfinished implementation and was in fact a shape
-/// problem, so deleting it without the reason invites the next author to add it
-/// back.
+/// There is no `pitr_replay` here, and the reason is a shape problem rather
+/// than unfinished work - which is why it is written down. Without it, PITR
+/// reads as an obvious gap for the next author to fill.
 ///
 /// PostgreSQL point-in-time recovery is driven by server-level configuration -
-/// `restore_command`, `recovery_target_*`, an `archive_command` that was already
-/// running before the window being recovered. None of that can be initiated over
-/// a client connection, so the PG arm never replayed anything; it recorded a
-/// requested target into a table for an operator to act on out of band. That
-/// table lived in the platform system schema deleted on 2026-08-27 under
-/// AGENTS.md's privilege invariant, and PITR targets were never rehomed, so the
-/// recording had nowhere to land. The SQLite arm refused unconditionally, having
-/// no WAL-archive substrate to replay from.
+/// `restore_command`, `recovery_target_*`, an `archive_command` that must
+/// already have been running before the window being recovered. None of that can
+/// be initiated over a client connection, so a PG arm here could only record a
+/// requested target for an operator to act on out of band, and there is nowhere
+/// for a worker-reachable method to durably record it: AGENTS.md's privilege
+/// invariant reserves that kind of state for a schema a separate service writes.
+/// SQLite has no WAL-archive substrate to replay from at all.
 ///
 /// So PITR is an operator capability with a database-server contract, not a
 /// per-app data-store method. Whoever gives it a home should start from where an
 /// operator's request is durably recorded and who is allowed to write there -
-/// not from this trait, whose two remaining methods are both things a client
-/// connection can actually perform.
+/// not from this trait, whose two methods are both things a client connection
+/// can actually perform.
 pub trait Backup: 'static {
     /// Take a snapshot of the per-app data store and stream it to
     /// `dest_uri`. Returns a handle with the content hash for
