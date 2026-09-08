@@ -206,10 +206,13 @@ pub enum AssertionError {
 
 /// A SPIFFE-shaped service issuer identifier: `spiffe://<domain>/<name>`.
 ///
-/// It is the `iss` of every assertion the service mints and the `aud` of every
-/// assertion sent TO it. Section 13 of the service-identity proposal chose this
-/// spelling so the same identifiers carry unchanged into X.509 SANs if mTLS
-/// ever arrives.
+/// One type serves both `iss` and `aud`: it is the `iss` of every assertion a
+/// service mints and the `aud` of every assertion addressed to a service by
+/// that name. The two need not be the SAME VALUE for one process - see
+/// [`crate::service_peers::ServiceKeyring::audience`] - but they are always
+/// this shape. Section 13 of the service-identity proposal chose this spelling
+/// so the same identifiers carry unchanged into X.509 SANs if mTLS ever
+/// arrives.
 ///
 /// `aud` being an issuer identifier rather than an endpoint URL is the
 /// `draft-ietf-oauth-rfc7523bis` rule, adopted after the 2025

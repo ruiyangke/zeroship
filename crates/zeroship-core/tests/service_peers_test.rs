@@ -15,14 +15,15 @@ use ed25519_dalek::pkcs8::EncodePrivateKey as _;
 use rand::RngCore as _;
 
 use zeroship_core::service_assertion::{
-    thumbprint_key_id, InMemoryReplayStore, ServiceAssertionVerifier, ServiceTrustBundle,
+    thumbprint_key_id, InMemoryReplayStore, ServiceAssertionVerifier, ServiceIssuer,
+    ServiceTrustBundle, TransportAssertionVerifier,
 };
 use zeroship_core::service_identity::{
     endpoints, verify_service_call, AuthError, ServiceName, ServicePrincipal,
     TrustDomain,
 };
 use zeroship_core::service_peers::{
-    load_peer_bundle, load_signing_key, service_issuer, PeerKeyError, ServiceKeyring,
+    load_peer_bundle, load_signing_key, service_issuer, PeerKeyError, ServiceAuth, ServiceKeyring,
     AUTH_SERVICE_NAME, CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME, WORKER_SERVICE_NAME,
 };
 
@@ -483,9 +484,156 @@ fn from_parts_is_not_a_way_around_the_own_key_refusal() {
     assert!(message.contains(gateway.as_str()), "{message}");
 }
 
+/// The identifier a worker instance mints under, once it has enrolled.
+///
+/// A `wkr_` typed id is base62 over a UUIDv7, and the literal here is one shaped
+/// like the ones `worker_enrolment` returns. It is written out rather than
+/// generated so the multi-segment path this whole separation rests on is visible
+/// in the test that depends on it.
+fn worker_instance_issuer() -> ServiceIssuer {
+    ServiceIssuer::parse(&format!(
+        "spiffe://zeroship.ai/{WORKER_SERVICE_NAME}/wkr_3Kd9QmZp2XvB"
+    ))
+    .expect("an instance path is a well-formed issuer identifier")
+}
+
+/// A worker instance is ADDRESSED by its role and MINTS under its instance name.
+///
+/// The two were one value until this split: `ServiceAuth::verify` sourced the
+/// audience it requires of inbound callers from `keyring.issuer()`, the
+/// identifier the process mints under. Per-instance worker identity needs them
+/// apart, because the gateway holds one name for the whole role - it dispatches
+/// over a hash ring and cannot know which instance it reached - so a worker that
+/// required its own minting name would refuse every caller.
+///
+/// This is a DISTINGUISHER and not a boundary. Enrolment authenticates with the
+/// shared `svc/worker` role key, so a holder of that key can enrol as many
+/// instances as it likes; what an instance name buys is attribution,
+/// per-instance revocation and a countable event.
+#[compio::test]
+async fn a_service_requires_the_audience_it_is_addressed_by_not_the_one_it_mints_under() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let gateway_file = write_key(dir.path(), "gateway.pem");
+    let instance_file = write_key(dir.path(), "worker-instance.pem");
+
+    // The document both processes read. The instance's own public half is
+    // deliberately absent from it: a process may not find its own key published
+    // under a foreign issuer, and no peer needs to verify the instance here.
+    let peers = write_peers(dir.path(), &[entry(GATEWAY_SERVICE_NAME, &gateway_file.public)]);
+
+    let role = service_issuer(WORKER_SERVICE_NAME).expect("the worker ROLE issuer");
+    let instance = worker_instance_issuer();
+    assert_ne!(instance, role, "the instance name must be the finer of the two");
+
+    let mut keyring = ServiceKeyring::from_parts(
+        instance.clone(),
+        load_signing_key(&instance_file.path).expect("the instance's private half"),
+        load_peer_bundle(&peers).expect("the instance loads the peer bundle"),
+    )
+    .expect("an instance keyring")
+    .addressed_as(role.clone());
+    assert_eq!(keyring.issuer(), &instance, "it mints under the instance name");
+    assert_eq!(keyring.audience(), &role, "it is addressed by the role name");
+
+    let bundle = keyring.take_bundle().expect("the verifier takes the bundle");
+    let worker_auth = ServiceAuth::new(keyring, Arc::new(TransportAssertionVerifier::new(bundle)));
+
+    let gateway = ServiceKeyring::from_parts(
+        service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer"),
+        load_signing_key(&gateway_file.path).expect("the gateway's private half"),
+        load_peer_bundle(&peers).expect("the gateway loads the peer bundle"),
+    )
+    .expect("the gateway's keyring");
+
+    // The gateway addresses the ROLE, which is the only worker name it holds.
+    let identity = worker_auth
+        .verify(
+            Some(&format!(
+                "Bearer {}",
+                gateway.mint_for(&role).expect("mint for the worker role")
+            )),
+            endpoints::WORKER_DISPATCH,
+        )
+        .await
+        .expect("an instance must accept a caller that addresses the role");
+    assert!(identity.matches_principal(&gateway_principal()));
+
+    // ONE VARIABLE: the same caller, the same key, the same endpoint, addressing
+    // the INSTANCE path instead. Refused - the minting name is not an address,
+    // so learning which instance answered buys a caller no second way in.
+    let refused = worker_auth
+        .verify(
+            Some(&format!(
+                "Bearer {}",
+                gateway
+                    .mint_for(&instance)
+                    .expect("mint for the instance path")
+            )),
+            endpoints::WORKER_DISPATCH,
+        )
+        .await;
+    assert_eq!(refused.err(), Some(AuthError::CredentialRejected));
+}
+
+/// The control for the pair above: a keyring that never separated the two.
+///
+/// Every service whose identity IS its role name - the gateway, control, the
+/// auth service, and a worker until it enrols - keeps requiring its own issuer,
+/// and this arm is what makes the refusal above a statement about the audience
+/// rather than about a keyring that had stopped accepting anyone.
+#[compio::test]
+async fn a_role_keyring_is_addressed_by_the_name_it_mints_under() {
+    let dir = tempfile::tempdir().expect("a scratch directory");
+    let gateway_file = write_key(dir.path(), "gateway.pem");
+    let worker_file = write_key(dir.path(), "worker.pem");
+    let peers = write_peers(dir.path(), &[entry(GATEWAY_SERVICE_NAME, &gateway_file.public)]);
+
+    let role = service_issuer(WORKER_SERVICE_NAME).expect("the worker ROLE issuer");
+    let mut keyring = ServiceKeyring::from_parts(
+        role.clone(),
+        load_signing_key(&worker_file.path).expect("the worker's private half"),
+        load_peer_bundle(&peers).expect("the worker loads the peer bundle"),
+    )
+    .expect("a role keyring");
+    assert_eq!(
+        keyring.issuer(),
+        keyring.audience(),
+        "without addressed_as the two are the same identifier"
+    );
+
+    let bundle = keyring.take_bundle().expect("the verifier takes the bundle");
+    let worker_auth = ServiceAuth::new(keyring, Arc::new(TransportAssertionVerifier::new(bundle)));
+
+    let gateway = ServiceKeyring::from_parts(
+        service_issuer(GATEWAY_SERVICE_NAME).expect("gateway issuer"),
+        load_signing_key(&gateway_file.path).expect("the gateway's private half"),
+        load_peer_bundle(&peers).expect("the gateway loads the peer bundle"),
+    )
+    .expect("the gateway's keyring");
+
+    let identity = worker_auth
+        .verify(
+            Some(&format!(
+                "Bearer {}",
+                gateway.mint_for(&role).expect("mint for the worker role")
+            )),
+            endpoints::WORKER_DISPATCH,
+        )
+        .await
+        .expect("the role-to-role call is unchanged by the separation");
+    assert!(identity.matches_principal(&gateway_principal()));
+}
+
 fn worker_principal() -> ServicePrincipal {
     ServicePrincipal::new(
         TrustDomain::new("zeroship.ai"),
         ServiceName::new(WORKER_SERVICE_NAME),
+    )
+}
+
+fn gateway_principal() -> ServicePrincipal {
+    ServicePrincipal::new(
+        TrustDomain::new("zeroship.ai"),
+        ServiceName::new(GATEWAY_SERVICE_NAME),
     )
 }

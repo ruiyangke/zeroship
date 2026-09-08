@@ -345,8 +345,11 @@ pub async fn verify_identity(
 ///
 /// 1. a credential was presented at all ([`verify_identity`]);
 /// 2. it verifies under the peer bundle for the issuer it claims, against
-///    `expected_audience` - which must be the CALLEE's own issuer identifier,
-///    never an endpoint URL;
+///    `expected_audience` - which must be the issuer identifier the CALLEE is
+///    ADDRESSED by, never an endpoint URL. That is usually the callee's own
+///    issuer and is not always it: a process may mint under a finer name than
+///    its callers hold, which is why
+///    [`crate::service_peers::ServiceKeyring`] carries the two separately;
 /// 3. the verified principal holds the machine grant for `endpoint`.
 ///
 /// Step 3 is what makes a valid credential insufficient. Without it any service

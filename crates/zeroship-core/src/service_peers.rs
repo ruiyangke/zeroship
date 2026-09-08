@@ -101,10 +101,10 @@
 //! binary.
 //!
 //! ONE document is handed to every service. That grants nothing extra: a
-//! verified identity still has to pass `aud` equality with the callee's own
-//! issuer and the endpoint allowlist in
-//! [`crate::service_identity::authorize`], so holding a peer's PUBLIC key is
-//! the ability to check that peer's signature and nothing else.
+//! verified identity still has to pass `aud` equality with the identifier the
+//! callee is ADDRESSED by ([`ServiceKeyring::audience`]) and the endpoint
+//! allowlist in [`crate::service_identity::authorize`], so holding a peer's
+//! PUBLIC key is the ability to check that peer's signature and nothing else.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -303,6 +303,7 @@ struct PeerKeyDocument {
 #[derive(Debug)]
 pub struct ServiceKeyring {
     issuer: ServiceIssuer,
+    audience: ServiceIssuer,
     minter: ServiceAssertionMinter,
     envelope: UserEnvelopeSigner,
     bundle: Option<ServiceTrustBundle>,
@@ -410,6 +411,7 @@ impl ServiceKeyring {
         // key material after a rotation.
         let envelope = UserEnvelopeSigner::new(signing_key)?;
         Ok(Self {
+            audience: issuer.clone(),
             issuer,
             minter,
             envelope,
@@ -417,10 +419,43 @@ impl ServiceKeyring {
         })
     }
 
-    /// The issuer identifier this service mints under and is addressed by.
+    /// The issuer identifier this service MINTS under.
+    ///
+    /// Not necessarily the identifier it is ADDRESSED by; that is
+    /// [`ServiceKeyring::audience`], and the two were one value until a worker
+    /// instance needed a name of its own.
     #[must_use]
     pub const fn issuer(&self) -> &ServiceIssuer {
         &self.issuer
+    }
+
+    /// The identifier a caller must put in `aud` to reach this service.
+    ///
+    /// Equal to [`ServiceKeyring::issuer`] for every process whose identity IS
+    /// its role name, which is why a keyring that says nothing gets that. They
+    /// come apart where a process mints under a FINER name than its callers
+    /// hold: a worker instance mints as `svc/worker/<instance>` so its outbound
+    /// calls are attributable to one process, while the gateway dispatches over
+    /// a hash ring holding only the role name `svc/worker`. Requiring the
+    /// minting name as the audience would refuse every caller.
+    ///
+    /// It is one identifier compared for equality, never a set: separating the
+    /// two decides WHICH name is admitted, not how many.
+    #[must_use]
+    pub const fn audience(&self) -> &ServiceIssuer {
+        &self.audience
+    }
+
+    /// Declare the identifier callers address this service as, when it is not
+    /// the one it mints under.
+    ///
+    /// The whole of what "per-instance identity" costs the inbound side. A
+    /// process that does not call this requires its own issuer, so no existing
+    /// service changes behaviour by the separation existing.
+    #[must_use]
+    pub fn addressed_as(mut self, audience: ServiceIssuer) -> Self {
+        self.audience = audience;
+        self
     }
 
     /// Mint one assertion naming `audience`, valid from now.
@@ -496,7 +531,14 @@ impl fmt::Debug for ServiceAuth {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("ServiceAuth")
-            .field("issuer", &self.keyring.as_ref().map(|k| k.issuer().as_str()))
+            .field(
+                "issuer",
+                &self.keyring.as_ref().map(|k| k.issuer().as_str()),
+            )
+            .field(
+                "audience",
+                &self.keyring.as_ref().map(|k| k.audience().as_str()),
+            )
             .field("can_verify", &self.verifier.is_some())
             .field("user_envelope", &self.user_envelope)
             .finish()
@@ -610,10 +652,13 @@ impl ServiceAuth {
             );
             return Err(AuthError::CredentialRejected);
         };
+        // The AUDIENCE, not the issuer. A process requires callers to address
+        // the name they hold for it, which is not always the name it mints
+        // under - see [`ServiceKeyring::audience`].
         verify_service_call(
             verifier.as_ref(),
             authorization,
-            keyring.issuer().as_str(),
+            keyring.audience().as_str(),
             endpoint,
         )
         .await
