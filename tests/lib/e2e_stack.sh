@@ -379,8 +379,22 @@ stack_up() {
 #
 # The scope list is one scope string per Cedar action. Billing is NOT in it; a
 # harness that needs `billing:*` passes its own list as the first argument.
+#
+# `organization:create` IS LOAD-BEARING AND IS NOT SPARE BREADTH. The token scope
+# is a CEILING, so it must carry the authority the personal-organization mint
+# described above needs: `create_app` with no `project_id` requires
+# `organization:create` at `Resource::Any` BEFORE it mints anything, so without
+# this the very first `POST /api/apps` is a 403 and every later step of every
+# harness that creates an app is unreachable.
+#
+# It was missing from 2026-09-06 to 2026-09-08, and the shape of that omission is
+# worth keeping: the SAME commit that made the scope mandatory also edited this
+# line (to drop `deployments:rollback`) and wrote the paragraph above describing
+# the mint -- so the prose documenting the flow and the list forbidding it landed
+# together. A comment describing a mechanism is not evidence the mechanism is
+# reachable. Five harnesses were red on it.
 mint_creator_bearer() {
-  local scope="${1:-apps:read apps:write apps:deploy apps:archive deployments:read env:read env:write secrets:read secrets:write}"
+  local scope="${1:-organization:create apps:read apps:write apps:deploy apps:archive deployments:read env:read env:write secrets:read secrets:write}"
   local owner pg_database
   pg_database="${E2E_PG_DATABASE:-zeroship}"
   owner="$(node -e 'console.log(require("crypto").randomUUID())')"
