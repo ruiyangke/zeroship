@@ -53,6 +53,29 @@
 //! The reaper is the only actor running at the moment of erasure, so it asks
 //! again ([`still_erasable`]) and refuses on either rule.
 //!
+//! ## The ownership rule is re-decided INSIDE the transaction, under the lock
+//!
+//! [`still_erasable`] is an HTTP round trip, so it necessarily happens outside
+//! the erasure transaction and before it - and a check that is not in the
+//! transaction is a check something can invalidate between the answer and the
+//! commit. Two triggers did: a co-owner who leaves in that window (their
+//! departure passes, because two owners were still seated when it ran), and a
+//! second replica ticking the same due batch. Either way both statements
+//! commit and the organization is left with no owner - the state
+//! `zeroship_control::organizations`'s module header says no route can repair,
+//! for the reason it gives there: the rule is about a SET of rows, so no CHECK
+//! can hold it, and every other membership mutation is serialized on the
+//! organization row instead.
+//!
+//! Erasure was the one membership mutation that took no such lock:
+//! `organization_members.user_id` is `ON DELETE CASCADE`, so the seat goes away
+//! as a consequence of deleting a `zeroship.users` row and nothing ever names
+//! the organization. [`refuse_if_it_strands_an_organization`] is that lock,
+//! taken by the same statement shape and therefore against the same waiters.
+//! The HTTP preflight is not redundant: it still carries the money rule and the
+//! per-organization remedy a person reads, neither of which is answerable from
+//! this connection.
+//!
 //! ## A failure is loud, per user, and durable
 //!
 //! `23503` (foreign key) and `23514` (check) are the two SQLSTATEs a correct
@@ -65,8 +88,11 @@
 //! pending forever otherwise, and a pending user nobody can see is a deletion
 //! request that silently never happens. Every refusal carries a `stage` an
 //! operator can select on - `billing` when the organization owes, `preflight`
-//! for the ownership rule and for a control plane that could not answer,
-//! `constraint`/`database` for a DELETE that failed - so
+//! for the ownership rule as the control plane answered it and for a control
+//! plane that could not answer, `ownership` for the in-transaction fence below
+//! (a `preflight` that answered clear and was then overtaken, which is a
+//! different event and worth telling apart), `constraint`/`database` for a
+//! DELETE that failed - so
 //!
 //!   SELECT actor_user_id, detail FROM zeroship.audit_events
 //!    WHERE event_type = 'account_erasure_failed' AND detail->>'stage' = 'billing'
@@ -85,6 +111,7 @@ use compio_postgres::{Client, GenericClient};
 use serde_json::json;
 use uuid::Uuid;
 
+use crate::advisory_lock::{self, ACCOUNT_REAPER_SWEEP_LOCK};
 use crate::audit::{self, AuditEvent};
 use crate::control_client::{self, PreflightError};
 use crate::error::{AuthError, Result};
@@ -128,6 +155,20 @@ pub struct ReaperReport {
 ///
 /// A failing tick is logged and swallowed so a transient PG hiccup doesn't kill
 /// the task (mirrors `token_sweep::run`). The sleep is one hour.
+///
+/// # One reaper per fleet, per tick
+///
+/// `cron::spawn_all` detaches this task in EVERY auth process, and [`find_due`]
+/// is an unsharded scan of the whole table, so every replica would otherwise
+/// erase the same batch at the same moment. The lease
+/// ([`ACCOUNT_REAPER_SWEEP_LOCK`]) is the single-flight, and a loser skips the
+/// tick rather than queueing behind the winner to redo its work an hour late.
+///
+/// It is hygiene, NOT the ownership fence. A lease bounds how many reapers run
+/// at once; it says nothing about the creator who leaves an organization while
+/// the one reaper is mid-erasure. That is
+/// [`refuse_if_it_strands_an_organization`], and it holds whether or not this
+/// lease exists.
 //
 // The per-thread connection pool is `!Send`; the lint is structural.
 #[allow(clippy::future_not_send)]
@@ -147,7 +188,22 @@ pub async fn run(refresh_pool: crate::oidc::refresh::RefreshSessionPool, control
                 .get()
                 .await
                 .map_err(|e| AuthError::Db(format!("account_reaper checkout: {e}")))?;
-            tick(&mut conn, &control).await
+            if !advisory_lock::try_acquire_advisory_lock(&conn, ACCOUNT_REAPER_SWEEP_LOCK).await? {
+                tracing::debug!("account_reaper: another instance holds the sweep lease");
+                return Ok(ReaperReport::default());
+            }
+            let result = tick(&mut conn, &control).await;
+            // Released on every arm, including the failing one. The lock is
+            // scoped to this physical session and the session goes back to the
+            // pool, so an unreleased key would take the whole sweep out of
+            // service for as long as the pool keeps this connection - a failure
+            // that reads as "there was nothing to erase".
+            if let Err(e) =
+                advisory_lock::release_advisory_lock(&conn, ACCOUNT_REAPER_SWEEP_LOCK).await
+            {
+                tracing::error!(error = %e, "account_reaper: sweep lease release failed");
+            }
+            result
         }
         .await;
         match result {
@@ -194,6 +250,10 @@ pub async fn tick(db: &mut Client, control: &ControlAccess) -> Result<ReaperRepo
         match erase_one(db, user_id).await {
             Ok(EraseOutcome::Erased) => report.erased += 1,
             Ok(EraseOutcome::Skipped) => {}
+            Ok(EraseOutcome::Refused(refusal)) => {
+                report.failed += 1;
+                record_failure(db, user_id, refusal.stage, &refusal.reason, None).await;
+            }
             Err(e) => {
                 report.failed += 1;
                 let (stage, constraint) = classify(&e);
@@ -311,10 +371,14 @@ async fn find_due(db: &Client) -> Result<Vec<Uuid>> {
     Ok(rows.iter().map(|r| r.get::<_, Uuid>("id")).collect())
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum EraseOutcome {
     Erased,
     Skipped,
+    /// The transaction decided, under the organization row lock, that this
+    /// erasure would strand an organization. The audit row is written by the
+    /// caller, after the rollback, for the reason [`record_failure`] gives.
+    Refused(Refusal),
 }
 
 /// Erase one due user inside a single transaction.
@@ -325,11 +389,11 @@ async fn erase_one(conn: &mut Client, user_id: Uuid) -> Result<EraseOutcome> {
         .map_err(|e| AuthError::Db(format!("account_reaper begin: {e}")))?;
     let result = erase_one_tx(&tx, user_id).await;
     match result {
-        Ok(EraseOutcome::Skipped) => {
+        Ok(outcome @ (EraseOutcome::Skipped | EraseOutcome::Refused(_))) => {
             tx.rollback()
                 .await
                 .map_err(|e| AuthError::Db(format!("account_reaper rollback skip: {e}")))?;
-            Ok(EraseOutcome::Skipped)
+            Ok(outcome)
         }
         Ok(outcome) => {
             tx.commit()
@@ -365,8 +429,103 @@ async fn erase_one_tx(conn: &(impl GenericClient + Sync), user_id: Uuid) -> Resu
     if due.is_empty() {
         return Ok(EraseOutcome::Skipped);
     }
+    if let Some(refusal) = refuse_if_it_strands_an_organization(conn, user_id).await? {
+        return Ok(EraseOutcome::Refused(refusal));
+    }
     hard_delete_user(conn, user_id).await?;
     Ok(EraseOutcome::Erased)
+}
+
+/// Decide the ownership rule where it can be enforced: inside the erasure
+/// transaction, under the same `zeroship.organizations` row lock every other
+/// membership mutation takes.
+///
+/// # Two statements, and the order is the mechanism
+///
+/// The first LOCKS every live organization this human holds an owner seat on.
+/// The second re-reads the rule. They are separate statements deliberately: in
+/// READ COMMITTED each statement takes its own snapshot, so the second one sees
+/// whatever committed while the first was blocked on a concurrent departure.
+/// Folding them into one statement puts the decisive `NOT EXISTS` in the
+/// snapshot the lock was taken FROM, which is the snapshot that is out of date.
+///
+/// A departure that arrives the other way round loses the same way: it takes
+/// this lock in `leave_organization`, waits for this transaction, and then
+/// evaluates its own `owners > 1` predicate against a database in which the
+/// erased seat is gone - so it refuses instead. Neither order produces an
+/// ownerless organization.
+///
+/// # Why the candidate set cannot grow underneath us
+///
+/// A seat added to this human after the locking statement would be a live
+/// organization nobody locked. It cannot commit: an INSERT into
+/// `organization_members` takes `FOR KEY SHARE` on the referenced
+/// `zeroship.users` row for its foreign key, and the caller already holds
+/// `FOR UPDATE` on exactly that row. So the set can only SHRINK while this
+/// transaction runs, and shrinking is what the second statement rules on.
+///
+/// # Deterministic lock order
+///
+/// `ORDER BY o.id` with `FOR UPDATE` locks in sorted order - PostgreSQL puts
+/// `LockRows` above `Sort` - so two reapers erasing two co-owners walk the
+/// shared organizations in the same direction and one waits rather than
+/// deadlocking.
+///
+/// # Scope
+///
+/// This is the OWNERSHIP rule only, and only for LIVE organizations - the rule
+/// whose violation no route repairs. The money rule stays with the control
+/// plane, which owns the billing tables and the remedies a person is shown.
+async fn refuse_if_it_strands_an_organization(
+    conn: &(impl GenericClient + Sync),
+    user_id: Uuid,
+) -> Result<Option<Refusal>> {
+    conn.query(
+        "SELECT o.id FROM zeroship.organizations o \
+          WHERE o.dissolved_at IS NULL \
+            AND EXISTS (SELECT 1 FROM zeroship.organization_members m \
+                         WHERE m.organization_id = o.id \
+                           AND m.user_id = $1 \
+                           AND m.role = 'owner') \
+          ORDER BY o.id \
+          FOR UPDATE",
+        &[&user_id],
+    )
+    .await
+    .map_err(|e| AuthError::Db(format!("account_reaper lock owned organizations: {e}")))?;
+
+    let stranded = conn
+        .query(
+            "SELECT o.slug::text AS slug FROM zeroship.organizations o \
+              WHERE o.dissolved_at IS NULL \
+                AND EXISTS (SELECT 1 FROM zeroship.organization_members m \
+                             WHERE m.organization_id = o.id \
+                               AND m.user_id = $1 \
+                               AND m.role = 'owner') \
+                AND NOT EXISTS (SELECT 1 FROM zeroship.organization_members rival \
+                                 WHERE rival.organization_id = o.id \
+                                   AND rival.role = 'owner' \
+                                   AND rival.user_id <> $1) \
+              ORDER BY o.slug",
+            &[&user_id],
+        )
+        .await
+        .map_err(|e| AuthError::Db(format!("account_reaper recheck ownership: {e}")))?;
+    if stranded.is_empty() {
+        return Ok(None);
+    }
+    let named = stranded
+        .iter()
+        .map(|row| row.get::<_, String>("slug"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    Ok(Some(Refusal {
+        stage: "ownership",
+        reason: format!(
+            "erasure would leave these organizations without an owner: {named}; \
+             the preflight cleared before the last co-owner departed"
+        ),
+    }))
 }
 
 /// Hard-delete the `users` row. Every FK into `users(id)` is CASCADE or SET

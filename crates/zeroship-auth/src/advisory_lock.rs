@@ -10,10 +10,43 @@ use crate::error::{AuthError, Result};
 /// Stable process-wide lock for platform OP signing-key registry reconciliation.
 pub const OP_SIGNING_KEY_BOOTSTRAP_LOCK: i64 = 0x0042_B007_A071_0003;
 
+/// Fleet-wide single-flight lease for the account-erasure sweep
+/// (`crate::cron::account_reaper`).
+///
+/// Every auth process detaches that cron with no coordination, and its due-scan
+/// is an unsharded scan of the whole table, so without a lease every replica
+/// ticks the same batch at the same time. That is not merely wasted work: two
+/// reapers erasing two co-owners of one organization each observed the other's
+/// seat and both committed, which is the state
+/// `zeroship_control::organizations`'s module header says no route can repair.
+pub const ACCOUNT_REAPER_SWEEP_LOCK: i64 = 0x0042_B007_A071_0004;
+
 /// Refresh-token family hierarchy namespace for the outer per-user lock.
 pub const NS_USER: i32 = 0x7a55_0001;
 /// Refresh-token family hierarchy namespace for the inner per-family lock.
 pub const NS_FAM: i32 = 0x7a55_0002;
+
+/// Every one-argument advisory key this crate takes, paired with what takes it.
+///
+/// The registry is the coverage: [`tests::all_one_argument_keys_are_distinct`]
+/// iterates it, so a key outside it is a key nothing checks. Two sweeps sharing
+/// a key block each other fleet-wide and the loser simply stops running, with
+/// nothing to read but an absence - the failure
+/// `zeroship_control::cron::lock_keys` was built around.
+///
+/// `NS_USER` / `NS_FAM` are deliberately absent: they are the FIRST argument of
+/// the two-argument form, which PostgreSQL keeps in a different key space from
+/// the one-argument form, so comparing them against these would be comparing
+/// values that can never collide.
+///
+/// The one-argument space IS shared with the control plane, which runs its own
+/// sweeps against this same database. Distinctness across that boundary rests
+/// on the two prefixes: auth's keys begin `0x0042_B007`, control's begin
+/// `0x7a73`. Neither crate can see the other's list, so keep the prefix.
+pub const ONE_ARGUMENT_KEYS: [(i64, &str); 2] = [
+    (OP_SIGNING_KEY_BOOTSTRAP_LOCK, "OP signing-key bootstrap"),
+    (ACCOUNT_REAPER_SWEEP_LOCK, "account reaper sweep"),
+];
 
 /// Run `f` while holding a session-scoped PostgreSQL advisory lock.
 ///
@@ -44,6 +77,29 @@ where
     }
 }
 
+/// Try to take a session-scoped advisory lock, returning `false` when a peer
+/// process already holds it.
+///
+/// The waiting form is wrong for a periodic sweep: a tick that queued behind
+/// every peer would still run, one after another, which is the pile-up the
+/// lease exists to prevent. A loser skips and the next cadence retries.
+///
+/// The caller MUST release on the same [`Client`] (see
+/// [`release_advisory_lock`]) - the lock is scoped to the physical session, and
+/// a pooled connection handed back while still holding it takes the lock out of
+/// circulation for as long as the pool keeps it.
+///
+/// # Errors
+///
+/// [`AuthError::Db`] if the lock statement itself failed.
+pub async fn try_acquire_advisory_lock(conn: &Client, key: i64) -> Result<bool> {
+    let rows = conn
+        .query("SELECT pg_try_advisory_lock($1) AS locked", &[&key])
+        .await
+        .map_err(|e| AuthError::Db(format!("pg_try_advisory_lock({key}): {e}")))?;
+    Ok(rows.first().is_some_and(|row| row.get::<_, bool>("locked")))
+}
+
 async fn acquire_advisory_lock(conn: &Client, key: i64) -> Result<()> {
     conn.execute("SELECT pg_advisory_lock($1)", &[&key])
         .await
@@ -51,7 +107,12 @@ async fn acquire_advisory_lock(conn: &Client, key: i64) -> Result<()> {
     Ok(())
 }
 
-async fn release_advisory_lock(conn: &Client, key: i64) -> Result<()> {
+/// Release a session-scoped advisory lock taken on this same `conn`.
+///
+/// # Errors
+///
+/// [`AuthError::Db`] if the unlock statement failed.
+pub async fn release_advisory_lock(conn: &Client, key: i64) -> Result<()> {
     conn.execute("SELECT pg_advisory_unlock($1)", &[&key])
         .await
         .map_err(|e| AuthError::Db(format!("pg_advisory_unlock({key}): {e}")))?;
@@ -161,8 +222,45 @@ mod tests {
 
     use compio_postgres::{connect, Client, NoTls};
 
-    use super::with_advisory_lock;
+    use super::{
+        release_advisory_lock, try_acquire_advisory_lock, with_advisory_lock, ONE_ARGUMENT_KEYS,
+    };
     use crate::error::AuthError;
+
+    /// Two sweeps sharing a key block each other across the whole fleet, and
+    /// the loser reports nothing at all - "no work done" and "never ran" are
+    /// the same observation. The registry is what makes this hold for a key
+    /// added later, which a hand-written pair comparison structurally cannot.
+    #[test]
+    fn all_one_argument_keys_are_distinct() {
+        let mut seen = std::collections::HashMap::<i64, &str>::new();
+        for (key, name) in ONE_ARGUMENT_KEYS {
+            if let Some(previous) = seen.insert(key, name) {
+                panic!(
+                    "advisory key {key:#x} is taken by both '{previous}' and '{name}'; \
+                     one of the two would silently stop running"
+                );
+            }
+        }
+        assert_eq!(seen.len(), ONE_ARGUMENT_KEYS.len());
+    }
+
+    /// A key declared as a `const` but left out of the registry is invisible to
+    /// the test above, so name each one here: adding a key without extending
+    /// [`ONE_ARGUMENT_KEYS`] fails rather than quietly narrowing what is
+    /// checked.
+    #[test]
+    fn every_declared_one_argument_key_is_registered() {
+        for key in [
+            super::OP_SIGNING_KEY_BOOTSTRAP_LOCK,
+            super::ACCOUNT_REAPER_SWEEP_LOCK,
+        ] {
+            assert!(
+                ONE_ARGUMENT_KEYS.iter().any(|(k, _)| *k == key),
+                "key {key:#x} is declared but unregistered, so nothing checks it"
+            );
+        }
+    }
 
     async fn pg_connect(dsn: &str) -> Client {
         let (client, conn) = connect(dsn, NoTls).await.expect("connect");
@@ -230,5 +328,35 @@ mod tests {
             !overlapped.load(Ordering::SeqCst),
             "second session entered while first session still held the advisory lock"
         );
+    }
+
+    /// The single-flight form a periodic sweep leases on: a peer that already
+    /// holds the key is told so rather than queued behind it, and the key
+    /// becomes available again once the holder releases.
+    ///
+    /// The RELEASE half is the part worth binding. A lease that acquired but
+    /// never freed would pass a test that only checked the refusal, and would
+    /// then wedge the sweep for the life of the connection.
+    #[compio::test]
+    async fn a_second_session_is_refused_the_sweep_key_until_the_holder_releases() {
+        let dsn = zeroship_core::config::test_database_url();
+        let holder = pg_connect(&dsn).await;
+        let peer = pg_connect(&dsn).await;
+        let key = 0x0042_B007_A071_2002_i64;
+
+        assert!(
+            try_acquire_advisory_lock(&holder, key).await.expect("hold"),
+            "an unheld key is available"
+        );
+        assert!(
+            !try_acquire_advisory_lock(&peer, key).await.expect("peer"),
+            "a peer process must be refused, not queued, while the key is held"
+        );
+        release_advisory_lock(&holder, key).await.expect("release");
+        assert!(
+            try_acquire_advisory_lock(&peer, key).await.expect("peer"),
+            "the key is available again once the holder releases"
+        );
+        release_advisory_lock(&peer, key).await.expect("release");
     }
 }
