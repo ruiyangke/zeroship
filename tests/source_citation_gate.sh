@@ -191,7 +191,11 @@ DOC_EXCLUDED="archive decisions proposals superpowers reviews research"
 #     cite it for what it DID, and each was edited on 2026-09-04 to say the
 #     target is gone rather than to point somewhere plausible. The two
 #     `NOTES-s*.md` are dated session records: they measured against that file
-#     when it existed, so repointing would falsify a measurement.
+#     when it existed, so repointing would falsify a measurement. `NOTES.md`
+#     joined them when `e2a6d8fdd` deleted `identity_bridge.rs`: its citations
+#     of that module sit under a **VERIFIED** label the file defines as "I read
+#     the cited lines in this worktree", and the same document already records
+#     the module as deleted. A repointed **VERIFIED** claim is a false one.
 #   * FIXTURE DATA, not pointers. `ci_wiring_gate.sh` and `sync_claim_gate.sh`
 #     build synthetic trees in `$tmp` and assert on them; `tests/x_gate.sh` and
 #     `crates/zeroship-alpha/src/lib.rs` are inputs those gates WRITE. Renaming
@@ -220,6 +224,7 @@ db/migrations-ts/20260811000400_rate_limits_write_grants.ts:crates/auth/src/stor
 db/migrations-ts/20260816000100_service_assertion_replay.ts:crates/zeroship-migrate-adapter/tests/platform_migrate.rs
 db/migrations-ts/20260818000000_auth_principal_grants_select.ts:crates/zeroship-migrate-adapter/src/platform.rs
 db/migrations-ts/20260818000200_worker_database_authority.ts:crates/zeroship-migrate-adapter/tests/platform_migrate.rs
+NOTES.md:crates/zeroship-control/src/identity_bridge.rs
 NOTES-s31.md:crates/zeroship-migrate-adapter/tests/platform_migrate.rs
 NOTES-s40.md:crates/zeroship-migrate-adapter/src/platform.rs
 NOTES-s40.md:crates/zeroship-migrate-adapter/tests/platform_migrate.rs

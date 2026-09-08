@@ -9,6 +9,15 @@ were repointed at the files that MOVED, because the file is still the evidence.
 DELETED (`ccda4bb42`), so it keeps its old spelling: a measurement recorded
 against a deleted file cannot be repointed without falsifying it.
 
+**The instrument this session used is itself gone.** The skip announcer, the
+`ZEROSHIP-TEST-SKIPPED` marker it wrote and the shell census that counted the
+marker in a suite log were all deleted on 2026-09-08, by an operator decision
+that a test which cannot reach its backend FAILS. Every reading below that
+counts markers, and every sentence written in the present tense about a census
+reporting or an allowlist excusing one, describes that instrument as it stood
+on the day it was read. None of it describes the tree now: there is no marker
+to count, no census to report it and no allowlist to excuse it.
+
 ## Instrument
 
 - `ZEROSHIP_REQUIRE_LIVE_BACKENDS=1` turned a self-skip into a hard failure.
@@ -18,7 +27,12 @@ against a deleted file cannot be repointed without falsifying it.
   required unconditionally: `tests/provision_test_backends.sh` stands them up,
   the driver suites fail with the address they dialled, and the suite gates fail
   on any announced skip they do not allowlist.
-- Skip announcements carry `ZEROSHIP-TEST-SKIPPED` (tests/lib/skip_census.sh:38).
+- Skip announcements carried `ZEROSHIP-TEST-SKIPPED`, written straight to the
+  stderr handle by a shared announcer and counted by a shell census under
+  `tests/`. The marker is spelled out here because the readings further down are
+  counts of it; the announcer, the census and the allowlist are deleted, so
+  neither the file that defined the marker nor the one that counted it exists to
+  cite.
 - Live PG confirmed on 127.0.0.1:5440 (PostgreSQL 16.14, `wal_level=replica`).
   That server was `zs-auth-pg-5440`, started by hand and owned by no file in
   this tree, squatting the port `deploy/compose`'s own postgres publishes. The
