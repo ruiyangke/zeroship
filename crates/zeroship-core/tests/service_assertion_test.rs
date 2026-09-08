@@ -32,8 +32,8 @@ use zeroship_core::service_assertion::{
     MAX_JTI_LEN, MAX_REPLAY_STORE_CLOCK_SKEW, SERVICE_ASSERTION_TYP,
 };
 use zeroship_core::service_identity::{
-    verify_identity, AuthError, PeerCredentials, ServiceIdentity, ServiceName, ServicePrincipal,
-    TrustDomain,
+    authorize, endpoints, verify_identity, AuthError, PeerCredentials, ServiceIdentity,
+    ServiceName, ServicePrincipal, TrustDomain,
 };
 
 const CALLER: &str = "spiffe://zeroship.ai/svc/gateway";
@@ -275,14 +275,13 @@ fn issuer_identifiers_reject_everything_that_is_not_one() {
 
     // The ADMITTED shapes, first, so the refusals below are a statement about
     // what is wrong with them rather than about a parser that takes nothing.
-    // The deeper paths are what per-instance service identity rests on: a worker
+    // The instance path is what per-instance service identity rests on: a worker
     // instance mints under `svc/worker/<wkr_id>`, and a typed id is base62 with
-    // an underscore-joined prefix. If any of these stopped parsing, that
+    // an underscore-joined prefix. If either of these stopped parsing, that
     // identity would need a wire change rather than a name.
     for admitted in [
         "spiffe://zeroship.ai/svc/worker",
         "spiffe://zeroship.ai/svc/worker/wkr_3Kd9QmZp2XvB",
-        "spiffe://zeroship.ai/svc/worker/wkr_3Kd9QmZp2XvB/thread-7",
     ] {
         let parsed = ServiceIssuer::parse(admitted)
             .unwrap_or_else(|_| panic!("{admitted:?} must parse as a service issuer identifier"));
@@ -317,6 +316,197 @@ fn issuer_identifiers_reject_everything_that_is_not_one() {
             "{malformed:?} must not parse as a service issuer identifier"
         );
     }
+
+    // Well formed as a URI and still refused, because the parser has to decide
+    // WHICH segment is the instance and a deeper path leaves that ambiguous.
+    // Nothing in the tree mints one; admitting them would make the arity rule
+    // undecidable in exchange for a shape no caller wants.
+    for too_deep in [
+        "spiffe://zeroship.ai/svc/worker/wkr_3Kd9QmZp2XvB/thread-7",
+        "spiffe://zeroship.ai/a/b/c/d/e",
+        // Fewer segments than a role is the same rule read the other way: admit
+        // it and a two-segment path becomes ambiguous between a role and an
+        // instance of a one-segment role.
+        "spiffe://zeroship.ai/worker",
+    ] {
+        assert_eq!(
+            ServiceIssuer::parse(too_deep),
+            Err(AssertionError::IssuerNotRoleOrInstance),
+            "{too_deep:?} names neither a role nor one instance of a role, and says so \
+             rather than reporting a syntax fault in a legible URI"
+        );
+    }
+}
+
+// ─── Roles and their instances ───────────────────────────────────────────
+
+/// The role a worker instance is one of, and two instances of it.
+///
+/// The role is the identifier `THIRD_PARTY` also names. Spelled again under its
+/// own name because the two are read for different things - one is a service
+/// the callee does not expect, the other is the role an instance belongs to -
+/// and a test that renamed `THIRD_PARTY` would otherwise silently change what
+/// the instance cases are about.
+const WORKER_ROLE: &str = "spiffe://zeroship.ai/svc/worker";
+const WORKER_INSTANCE: &str = "spiffe://zeroship.ai/svc/worker/wkr_3Kd9QmZp2XvB";
+const OTHER_WORKER_INSTANCE: &str = "spiffe://zeroship.ai/svc/worker/wkr_7Rm2FpQt9Ycd";
+
+fn worker_role_principal() -> ServicePrincipal {
+    ServicePrincipal::new(
+        TrustDomain::new("zeroship.ai"),
+        ServiceName::new("svc/worker"),
+    )
+}
+
+/// An instance identifier names its ROLE as a principal and ITSELF on the wire.
+///
+/// The two halves are the whole of the design. Authorization compares
+/// principals, so the principal has to be the role or no grant could ever
+/// match; every other consumer - the trust-bundle index, `aud` equality, the
+/// replay-store key - joins `as_str()`, so that has to stay the full identifier
+/// or two instances collapse into one.
+#[test]
+fn an_instance_issuer_names_its_role_and_keeps_its_own_identifier() {
+    let role = issuer(WORKER_ROLE);
+    let instance = issuer(WORKER_INSTANCE);
+    let sibling = issuer(OTHER_WORKER_INSTANCE);
+
+    assert_eq!(
+        instance.principal(),
+        &worker_role_principal(),
+        "an instance of a role is that role's principal, which is what the allowlist holds"
+    );
+    assert_eq!(
+        role.principal(),
+        instance.principal(),
+        "a role and an instance of it are one principal"
+    );
+    assert_eq!(
+        sibling.principal(),
+        instance.principal(),
+        "two instances of one role are one principal"
+    );
+
+    assert_eq!(
+        instance.as_str(),
+        WORKER_INSTANCE,
+        "the identifier travels on the wire exactly as it was written"
+    );
+    assert_ne!(
+        instance, sibling,
+        "one principal, and still two identifiers: an instance is distinguishable"
+    );
+    assert_ne!(
+        instance, role,
+        "the instance identifier is the finer of the two"
+    );
+
+    assert_eq!(
+        instance.instance(),
+        Some("wkr_3Kd9QmZp2XvB"),
+        "the instance segment is reachable on its own, away from authorization"
+    );
+    assert_eq!(
+        sibling.instance(),
+        Some("wkr_7Rm2FpQt9Ycd"),
+        "and it is the segment this identifier carries, not the other one's"
+    );
+    assert_eq!(role.instance(), None, "a role is an instance of nothing");
+}
+
+/// An instance authorizes on its ROLE's grants, end to end.
+///
+/// Minted under the instance name, verified as a credential, and put to
+/// `authorize` - not a unit test of the parser. Paired with the one-variable
+/// control below, because a true arm on its own cannot tell a working grant
+/// from a table that authorizes everything.
+#[compio::test]
+async fn an_instance_issuer_authorizes_on_the_grants_of_its_role() {
+    let key = TestKey::generate();
+    let key_id = "worker-instance-kid";
+    let minter = ServiceAssertionMinter::new(issuer(WORKER_INSTANCE), key_id, &key.service_key())
+        .expect("a minter on the instance key");
+    let mut bundle = ServiceTrustBundle::new();
+    bundle
+        .trust(&issuer(WORKER_INSTANCE), key_id, key.public)
+        .expect("control trusts this instance's key under the instance issuer");
+    let verifier = ServiceAssertionVerifier::new(bundle, Arc::new(InMemoryReplayStore::new()));
+
+    let assertion = minter.mint(&issuer(CALLEE)).expect("mint for control");
+    let observed = PeerCredentials::new(Some(&assertion), None, CALLEE);
+    let identity = verify_identity(&verifier, &observed)
+        .await
+        .expect("an instance's assertion verifies against the key published for it");
+
+    assert!(
+        identity.matches_principal(&worker_role_principal()),
+        "the verified principal is the ROLE, so the allowlist row for it applies"
+    );
+    assert!(
+        authorize(&identity, endpoints::CONTROL_VERSIONS),
+        "an instance holds the grants of svc/worker"
+    );
+    // CONTROL, differing in one variable: an endpoint the role does NOT hold.
+    // Without it this test would pass just as well against a table that granted
+    // every endpoint to every principal.
+    assert!(
+        !authorize(&identity, endpoints::CONTROL_ROUTES),
+        "an instance holds the grants of its role and no others"
+    );
+}
+
+/// Two instances of one role claim DIFFERENT replay keys.
+///
+/// The replay key is `<iss>|<jti>`, and `iss` is the full identifier rather
+/// than the principal. If the two collapsed onto one key, an assertion captured
+/// from one instance would be accepted as the other's - and worse, the first
+/// instance's claim would burn the second's `jti` space.
+#[compio::test]
+async fn two_instances_of_one_role_claim_distinct_replay_keys() {
+    let store = Arc::new(RecordingReplayStore::default());
+    let mut bundle = ServiceTrustBundle::new();
+    let mut minters = Vec::new();
+    for name in [WORKER_INSTANCE, OTHER_WORKER_INSTANCE] {
+        let key = TestKey::generate();
+        let key_id = format!("{name}-kid");
+        bundle
+            .trust(&issuer(name), key_id.clone(), key.public)
+            .expect("trust each instance under its own identifier");
+        minters.push(
+            ServiceAssertionMinter::new(issuer(name), key_id, &key.service_key())
+                .expect("a minter per instance"),
+        );
+    }
+    let verifier = ServiceAssertionVerifier::new(
+        bundle,
+        Arc::clone(&store) as Arc<dyn ReplayStore + Send + Sync>,
+    );
+
+    for minter in &minters {
+        let assertion = minter.mint(&issuer(CALLEE)).expect("mint for control");
+        let observed = PeerCredentials::new(Some(&assertion), None, CALLEE);
+        verify_identity(&verifier, &observed)
+            .await
+            .expect("each instance's assertion verifies");
+    }
+
+    let calls = store.calls.lock();
+    let keys: Vec<&str> = calls.iter().map(|(key, _)| key.as_str()).collect();
+    assert_eq!(keys.len(), 2, "one claim per verification");
+    assert!(
+        keys[0].starts_with(&format!("{WORKER_INSTANCE}|")),
+        "the key is scoped by the full instance identifier: {}",
+        keys[0]
+    );
+    assert!(
+        keys[1].starts_with(&format!("{OTHER_WORKER_INSTANCE}|")),
+        "the key is scoped by the full instance identifier: {}",
+        keys[1]
+    );
+    assert_ne!(
+        keys[0], keys[1],
+        "two instances must not share a replay key, or one replays as the other"
+    );
 }
 
 #[compio::test]
