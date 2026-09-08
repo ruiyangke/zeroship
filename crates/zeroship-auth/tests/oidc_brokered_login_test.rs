@@ -18,7 +18,6 @@ use zeroship_auth::oidc::{
     AccessTokenClaims, BrokerSecrets, IdTokenClaims, Issuer, ACCESS_TOKEN_TYP, ID_TOKEN_TYP,
 };
 use zeroship_auth::server;
-use zeroship_core::config::Operational;
 use zeroship_auth::sessions::login as session_cookie;
 use zeroship_auth::store::sessions as session_store;
 
@@ -117,22 +116,14 @@ impl Fixture {
             .expect("cookie pair")
             .to_string();
 
-        let mut cfg = test_auth_config(&db_url);
         // Refresh-token issuance (offline_access) needs the HMAC + idempotency
-        // keys — brokered clients keep the refresh anchor, so the fixture must
-        // configure them for the MED-2 refresh path.
-        let key_dir = std::env::temp_dir().join(format!("p5a-broker-keys-{}", Uuid::new_v4()));
-        std::fs::create_dir_all(&key_dir).expect("key dir");
-        let hash_key_file = key_dir.join("refresh-hmac.keys");
-        let idem_key_file = key_dir.join("refresh-idem.key");
-        write_owner_only(
-            &hash_key_file,
-            b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-        );
-        write_owner_only(&idem_key_file, b"refresh-idem-key-material-32-bytes");
-        cfg.settings.refresh_hash_key_file = Operational::new(hash_key_file);
-        cfg.settings.refresh_idem_key_file = Operational::new(idem_key_file);
-        let cfg = Arc::new(cfg);
+        // keys - brokered clients keep the refresh anchor, so the fixture must
+        // be configured for the MED-2 refresh path. `test_auth_config` sets
+        // them from `zeroship_test_support::session_key_files`; this fixture
+        // used to write a second pair of its own and overwrite them with
+        // material of the same shape, and that second copy is how the control
+        // plane's fixture came to have no keyring at all.
+        let cfg = Arc::new(test_auth_config(&db_url));
         let cfg_state = cfg.clone();
         let db_state = db.clone();
         let issuer_state = issuer.clone();
@@ -386,13 +377,6 @@ async fn refresh_request(
             .expect("authorization");
     }
     req.body(body).send().await
-}
-
-fn write_owner_only(path: &std::path::Path, bytes: &[u8]) {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::write(path, bytes).expect("write secret file");
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .expect("chmod 0600 secret file");
 }
 
 fn db_url() -> Option<String> {

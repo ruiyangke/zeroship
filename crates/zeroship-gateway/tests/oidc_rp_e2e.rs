@@ -490,18 +490,9 @@ async fn start_platform_op(
     pg_client: Arc<Client>,
     issuer: Arc<Issuer>,
 ) -> test::TestServer {
-    let (mut cfg, _auth_secret_files) = test_auth_config(db_url);
-    let key_dir = std::env::temp_dir().join(format!("gateway-op-refresh-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&key_dir).expect("refresh key dir");
-    let hash_key_file = key_dir.join("refresh-hmac.keys");
-    let idem_key_file = key_dir.join("refresh-idem.key");
-    write_secret_file(
-        &hash_key_file,
-        b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-    );
-    write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
-    cfg.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_key_file);
-    cfg.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_key_file);
+    // The session keyring comes from `test_auth_config`, which is the ONE
+    // place in this file that decides what a booted OP is configured with.
+    let (cfg, _auth_secret_files) = test_auth_config(db_url);
     let cfg = Arc::new(cfg);
     let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.to_string(), 4);
 
@@ -646,6 +637,18 @@ async fn browser_pkce_tokens(rp: &OidcRp, auth_base: &str, client_id: &str, emai
 /// The tempdir is returned, not dropped here: deleting it before the caller is
 /// done would be harmless for the already-resolved config but makes the
 /// lifetime obvious rather than accidental.
+///
+/// The session-secret keyring is set HERE rather than by each caller. Both
+/// callers used to write their own `refresh-hmac` / `refresh-idem` pair into
+/// their own temp directory, which is the duplication that let the control
+/// plane's fixture ship without one at all and answer every token exchange
+/// with `refresh hash key is not configured`. `session_key_files` is the one
+/// definition of that operation for the whole workspace, so a third fixture
+/// added here inherits the keyring instead of having to remember it.
+///
+/// It is NOT written into the tempdir above: that directory is dropped with
+/// the caller, while `session_key_files` is memoised for the process, and
+/// `SessionSecretKeys::from_files` re-reads the paths on every exchange.
 fn test_auth_config(db_url: &str) -> (AuthConfig, tempfile::TempDir) {
     let dir = tempfile::tempdir().expect("temp dir for auth secrets");
     // `write_secret_file`, not a bare `std::fs::write`: all three of these are
@@ -664,7 +667,7 @@ fn test_auth_config(db_url: &str) -> (AuthConfig, tempfile::TempDir) {
         "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
     );
 
-    let config = AuthConfig::parse_from([
+    let mut config = AuthConfig::parse_from([
         "zeroship-auth",
         "--addr",
         "127.0.0.1:0",
@@ -681,6 +684,9 @@ fn test_auth_config(db_url: &str) -> (AuthConfig, tempfile::TempDir) {
         "--public-url",
         "http://localhost:0",
     ]);
+    let (hash_file, idem_file) = zeroship_test_support::session_key_files();
+    config.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_file);
+    config.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_file);
     (config, dir)
 }
 
@@ -993,18 +999,8 @@ async fn gateway_oidc_rp_full_dance_against_platform_op() {
     )
     .await;
 
-    let (mut cfg, _auth_secret_files) = test_auth_config(&db_url);
-    let key_dir = std::env::temp_dir().join(format!("gateway-op-refresh-{}", Uuid::new_v4()));
-    std::fs::create_dir_all(&key_dir).expect("refresh key dir");
-    let hash_key_file = key_dir.join("refresh-hmac.keys");
-    let idem_key_file = key_dir.join("refresh-idem.key");
-    write_secret_file(
-        &hash_key_file,
-        b"1:000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
-    );
-    write_secret_file(&idem_key_file, b"refresh-idem-key-material-32-bytes");
-    cfg.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_key_file);
-    cfg.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_key_file);
+    // Keyring via `test_auth_config`, as `start_platform_op` does.
+    let (cfg, _auth_secret_files) = test_auth_config(&db_url);
     let cfg = Arc::new(cfg);
     let refresh_pool = zeroship_auth::oidc::refresh::RefreshSessionPool::new(db_url.clone(), 4);
     let srv = {

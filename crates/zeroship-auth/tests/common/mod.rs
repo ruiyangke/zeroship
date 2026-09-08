@@ -158,14 +158,21 @@ pub fn test_auth_config_with(db_url: &str, extra: &[&str]) -> AuthConfig {
     //
     // That gap is what a device-grant test found: it configured no keyring
     // (it never asked for `offline_access`), and the exchange answered 500.
-    // The fixture was simply less configured than any real deployment, so the
-    // fix is here rather than in the three tests that already set these by
-    // hand for their own reasons.
+    // The fixture was simply less configured than any real deployment.
     //
     // The pair comes from `zeroship-test-support` rather than from a local
     // helper, because the control plane's `PlatformOp` fixture builds its own
     // `AuthConfig` the same way and MISSED this when it was added here. One
-    // function is what stops the two drifting again.
+    // function is what stops the two drifting again, and the fixtures that
+    // used to write a second pair of their own on top of this one no longer
+    // do - a duplicate of this operation is precisely how the control plane's
+    // copy came to be missing. `tests/session_keyring_fixture_gate.sh` rules
+    // on that: a fixture that mounts the auth server and drives a token
+    // exchange must have a keyring, whatever route it takes to one.
+    //
+    // `cli_device_refresh_test.rs` is the one fixture that still writes its
+    // own pair after calling this. It is correct - it configures both fields
+    // - so the gate passes it; it is simply not consolidated.
     let (hash_file, idem_file) = zeroship_test_support::session_key_files();
     cfg.settings.refresh_hash_key_file = zeroship_core::config::Operational::new(hash_file);
     cfg.settings.refresh_idem_key_file = zeroship_core::config::Operational::new(idem_file);
