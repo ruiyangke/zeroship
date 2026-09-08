@@ -45,15 +45,18 @@ const CLI_SCOPE: &str = "offline_access apps:deploy apps:read";
 /// band grants both at `Resource::Any` only.
 ///
 /// The membership and project scopes are the verb table
-/// `zeroship organization` ships. A scope missing from the REGISTRATION is
-/// refused with `invalid_scope` at the device-authorization endpoint, so a
-/// short list here is a login that fails outright rather than a verb that
-/// fails later.
-const EXPECTED_REGISTERED_SCOPES: [&str; 17] = [
+/// `zeroship organization` ships, and `env:*` plus `secrets:write` are the
+/// verb tables `zeroship var` and `zeroship secret` ship. A scope missing from
+/// the REGISTRATION is refused with `invalid_scope` at the
+/// device-authorization endpoint, so a short list here is a login that fails
+/// outright rather than a verb that fails later.
+const EXPECTED_REGISTERED_SCOPES: [&str; 20] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "env:read",
+    "env:write",
     "organization:admin",
     "organization:create",
     "organization:members:leave",
@@ -66,15 +69,18 @@ const EXPECTED_REGISTERED_SCOPES: [&str; 17] = [
     "project:read",
     "project:write",
     "secrets:read",
+    "secrets:write",
     "offline_access",
 ];
 /// The scopes the CLI's token may carry AUTHORITY for. `offline_access` is
 /// deliberately absent: it manages the grant, it does not widen it.
-const EXPECTED_ISSUABLE_SCOPES: [&str; 16] = [
+const EXPECTED_ISSUABLE_SCOPES: [&str; 19] = [
     "apps:archive",
     "apps:deploy",
     "apps:read",
     "apps:write",
+    "env:read",
+    "env:write",
     "organization:admin",
     "organization:create",
     "organization:members:leave",
@@ -87,6 +93,7 @@ const EXPECTED_ISSUABLE_SCOPES: [&str; 16] = [
     "project:read",
     "project:write",
     "secrets:read",
+    "secrets:write",
 ];
 
 // ─── Lifetime ceilings, as LITERALS ──────────────────────────────────────────
