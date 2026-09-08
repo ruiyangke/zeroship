@@ -84,16 +84,42 @@
 //! does not name `zeroship_migrations` in `required_schemas` is not claiming to
 //! need the platform corpus, and counting a corpus it never wanted would refuse
 //! databases that are correct for it.
+//!
+//! THE STATES A REFUSAL MUST KEEP APART. Every converted target in this
+//! workspace shows whatever this module prints, so a message that names the
+//! wrong cause sends every one of their readers to the wrong place. There are
+//! three answers, and each has a remedy the other two do not:
+//!
+//!   nothing answered at the DSN     -> provision and start the backends
+//!   a server answered, no corpus    -> apply the corpus to THAT database
+//!   a server answered, corpus there -> proceed
+//!
+//! The ledger question used to collapse the first two. It was ONE statement
+//! guarding the count with `to_regclass`, and `PostgreSQL` resolves every
+//! relation a statement names at PARSE time, before any `CASE` in it is
+//! evaluated -- so on a database with no journal table the statement ERRORED
+//! rather than returning zero, the error surfaced as "the server did not
+//! answer", and the remedy printed was `tests/provision_test_backends.sh`:
+//! restart a server that was already running, for a database that only needed
+//! `deploy/ops/db-migrate.sh`. The guard now takes the table name as a VALUE in
+//! its own round trip ([`count_journal`]), which is the only form that survives
+//! the table's absence.
 
 use std::io::Write as _;
 
-use compio_postgres::{Config, NoTls};
+use compio_postgres::{Client, Config, NoTls};
 
 /// The schema the platform runner journals into.
 ///
 /// Naming it in `required_schemas` is what turns the ledger stage on; see the
 /// module header for why that is the switch.
 pub const JOURNAL_SCHEMA: &str = "zeroship_migrations";
+
+/// The journal TABLE, qualified by [`JOURNAL_SCHEMA`].
+///
+/// Public because the live preflight test seeds a journal in this shape, and a
+/// copy of the name there would go on testing the old one the day it moves.
+pub const JOURNAL_TABLE: &str = "zeroship_migrations.__zeroship_schema_migrations";
 
 /// What a target reading the PLATFORM schema must ask for.
 ///
@@ -267,17 +293,24 @@ fn inspect_here(dsn: &str, required_schemas: &[String]) -> Verdict {
             return Verdict::Refused(refusal(
                 &where_,
                 &format!("the io_uring runtime would not start: {error}"),
-                DSN_REMEDY,
+                RUNTIME_REMEDY,
             ))
         }
     };
 
     let found = match probe {
-        Err(error) => {
+        Err(ProbeFailure::NoServer(error)) => {
             return Verdict::Refused(refusal(
                 &where_,
-                &format!("the server did not answer: {error}"),
+                &format!("nothing answered at that address: {error}"),
                 UNREACHABLE_REMEDY,
+            ))
+        }
+        Err(ProbeFailure::Refused { question, error }) => {
+            return Verdict::Refused(refusal(
+                &where_,
+                &format!("a server answered, then refused to {question}: {error}"),
+                ROLE_REMEDY,
             ))
         }
         Ok(found) => found,
@@ -292,7 +325,8 @@ fn inspect_here(dsn: &str, required_schemas: &[String]) -> Verdict {
         return Verdict::Refused(refusal(
             &where_,
             &format!(
-                "it holds no schema {} (it has {} other schema(s))",
+                "a server answered, but the database holds no schema {} (it has {} other schema(s)), \
+                 so the corpus was never applied to it",
                 names.join(", "),
                 found.schemas.len()
             ),
@@ -300,9 +334,17 @@ fn inspect_here(dsn: &str, required_schemas: &[String]) -> Verdict {
         ));
     }
 
-    match found.applied_migrations {
-        None => Verdict::Ready,
-        Some(applied) => ledger_verdict(&where_, applied),
+    match found.ledger {
+        Ledger::NotAsked => Verdict::Ready,
+        Ledger::Absent => Verdict::Refused(refusal(
+            &where_,
+            &format!(
+                "a server answered and the database holds \"{JOURNAL_SCHEMA}\", but there is no \
+                 {JOURNAL_TABLE} in it, so no migration has ever been recorded there"
+            ),
+            UNMIGRATED_REMEDY,
+        )),
+        Ledger::Applied(applied) => ledger_verdict(&where_, applied),
     }
 }
 
@@ -363,70 +405,142 @@ fn repo_root() -> &'static std::path::Path {
 struct Probe {
     /// Every non-system schema the database holds.
     schemas: Vec<String>,
-    /// Distinct applied migration checksums, or `None` when the caller did not
-    /// ask for the journal schema and the ledger stage is therefore off.
-    applied_migrations: Option<usize>,
+    /// What the journal had to say, if the caller asked about it at all.
+    ledger: Ledger,
 }
 
-/// One connection, both questions.
+/// The journal's state, as far as one connection can see it.
 ///
-/// The schema list is what lets the refusal say what IS there. "84 other
-/// schemas" is the line that told a reader the database had been used by
-/// something else entirely; "no schema zeroship" alone does not.
+/// THE THREE ARMS ARE THREE DIFFERENT REFUSALS, which is why this is an enum
+/// and not an `Option<usize>` with zero standing in for absent. A journal table
+/// that does not exist and a journal table that exists with nothing applied
+/// send a reader to the same command today, but they are different statements
+/// about the database, and the second one is a half-applied corpus rather than
+/// an untouched database.
+enum Ledger {
+    /// The caller never named [`JOURNAL_SCHEMA`], so the stage is off and no
+    /// question about the corpus was asked.
+    NotAsked,
+    /// There is no journal table at all.
+    Absent,
+    /// Distinct applied migration checksums.
+    Applied(usize),
+}
+
+/// Why the preflight could not finish its questions.
 ///
-/// The ledger count is asked for in the SAME round trip rather than a second
-/// dial, and it is asked with `to_regclass` in front of it: a database that
-/// holds the journal SCHEMA but not the journal TABLE is a real state (a
-/// half-dismantled database is exactly the 2026-08-21 case), and a bare
-/// `SELECT` there would come back as "the server did not answer", which names
-/// the wrong problem and prints the wrong remedy.
-async fn probe(config: &Config, want_ledger: bool) -> Result<Probe, String> {
-    let (client, connection) = config.connect(NoTls).await.map_err(|e| e.to_string())?;
+/// The two arms are the two remedies. A connect that never landed is a backend
+/// that is not running; a question refused after a successful connect is a
+/// server that IS running and a role that could not answer, and telling someone
+/// to restart the former when they have the latter is the misdiagnosis this
+/// whole module exists to remove.
+enum ProbeFailure {
+    /// Nothing answered at that address.
+    NoServer(String),
+    /// A server answered the connect, then refused a question.
+    Refused {
+        /// What was being asked, phrased to follow "refused to ...".
+        question: &'static str,
+        error: String,
+    },
+}
+
+/// Every non-system schema, which is what lets a refusal say what IS there.
+///
+/// "84 other schemas" is the line that told a reader the database had been used
+/// by something else entirely; "no schema zeroship" alone does not.
+const SCHEMAS_SQL: &str = "SELECT nspname FROM pg_namespace \
+     WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' \
+     ORDER BY nspname";
+
+/// One connection, every question, and one shutdown on every path.
+async fn probe(config: &Config, want_ledger: bool) -> Result<Probe, ProbeFailure> {
+    let (client, connection) = config
+        .connect(NoTls)
+        .await
+        .map_err(|e| ProbeFailure::NoServer(e.to_string()))?;
     let driver = compio::runtime::spawn(async move {
         let _ = connection.run().await;
     });
-    let schemas = client
-        .query(
-            "SELECT nspname FROM pg_namespace \
-             WHERE nspname NOT LIKE 'pg\\_%' AND nspname <> 'information_schema' \
-             ORDER BY nspname",
-            &[],
-        )
-        .await;
-    let ledger = if want_ledger {
-        Some(
-            client
-                .query_one(
-                    "SELECT CASE WHEN to_regclass($1) IS NULL THEN 0 ELSE ( \
-                       SELECT count(DISTINCT checksum) \
-                       FROM zeroship_migrations.__zeroship_schema_migrations \
-                       WHERE event_kind = 'applied') END",
-                    &[&"zeroship_migrations.__zeroship_schema_migrations"],
-                )
-                .await,
-        )
-    } else {
-        None
-    };
+
+    let found = interrogate(&client, want_ledger).await;
+
     // Drop the client first so the driver is asked to shut down, then WAIT for
     // it rather than detaching: a detached driver parked on a read holds an
     // io_uring submission, and the submission holds the runtime's inner state
     // alive past `Runtime::drop`, stranding the ring, its eventfd and the
     // socket. `crates/zeroship-testkit/src/admin.rs` carries the long form.
+    //
+    // It is BELOW the questions and not inside them so that an early return
+    // from any of them still passes through here.
     drop(client);
     let _ = driver.await;
-    let rows = schemas.map_err(|e| e.to_string())?;
-    let applied_migrations = match ledger {
-        None => None,
-        Some(row) => {
-            let count: i64 = row.map_err(|e| e.to_string())?.get(0);
-            Some(usize::try_from(count).unwrap_or(0))
-        }
+    found
+}
+
+/// The questions, on a connection that is already open.
+async fn interrogate(client: &Client, want_ledger: bool) -> Result<Probe, ProbeFailure> {
+    let rows = client
+        .query(SCHEMAS_SQL, &[])
+        .await
+        .map_err(|e| ProbeFailure::asking("list the schemas this database holds", &e))?;
+    let schemas = rows.iter().map(|row| row.get::<_, String>(0)).collect();
+    let ledger = if want_ledger {
+        count_journal(client).await?
+    } else {
+        Ledger::NotAsked
     };
-    Ok(Probe {
-        schemas: rows.iter().map(|row| row.get::<_, String>(0)).collect(),
-        applied_migrations,
-    })
+    Ok(Probe { schemas, ledger })
+}
+
+/// Stage two's one question, asked in TWO round trips on purpose.
+///
+/// `PostgreSQL` resolves the relations a statement names at PARSE time, before
+/// any `CASE` in that statement is evaluated. A single guarded statement, of
+/// the form
+///
+/// ```text
+/// SELECT CASE WHEN to_regclass($1) IS NULL THEN 0
+///             ELSE (SELECT count(DISTINCT checksum) FROM <the journal>) END
+/// ```
+///
+/// therefore does NOT return zero on a database without the table: it fails
+/// outright with `42P01`, which reached the caller as "the server did not
+/// answer" and printed the remedy for an unreachable backend.
+///
+/// `to_regclass` takes the name as a VALUE, so a statement that asks ONLY that
+/// question names no relation and survives the table's absence. The count is
+/// then issued only once the table is known to be there.
+async fn count_journal(client: &Client) -> Result<Ledger, ProbeFailure> {
+    let exists: bool = client
+        .query_one("SELECT to_regclass($1) IS NOT NULL", &[&JOURNAL_TABLE])
+        .await
+        .map_err(|e| ProbeFailure::asking("say whether the migration journal exists", &e))?
+        .get(0);
+    if !exists {
+        return Ok(Ledger::Absent);
+    }
+    // `JOURNAL_TABLE` is a literal in this file, never caller input; an
+    // identifier cannot travel as a parameter, and spelling the name a second
+    // time is how the two halves of this function would drift apart.
+    let sql = format!(
+        "SELECT count(DISTINCT checksum) FROM {JOURNAL_TABLE} WHERE event_kind = 'applied'"
+    );
+    let count: i64 = client
+        .query_one(sql.as_str(), &[])
+        .await
+        .map_err(|e| ProbeFailure::asking("count the migrations its journal has applied", &e))?
+        .get(0);
+    Ok(Ledger::Applied(usize::try_from(count).unwrap_or(0)))
+}
+
+impl ProbeFailure {
+    fn asking(question: &'static str, error: &compio_postgres::Error) -> Self {
+        Self::Refused {
+            question,
+            error: error.to_string(),
+        }
+    }
 }
 
 /// Host, port and database name, with the password removed.
@@ -468,6 +582,28 @@ const DSN_REMEDY: &str = "\
 const UNREACHABLE_REMEDY: &str = "\
     Start the test backends and rewrite the overlay from them:\n\
     \x20     tests/provision_test_backends.sh\n";
+
+/// The remediation for a server that answered and then refused a question.
+///
+/// IT IS NOT [`UNREACHABLE_REMEDY`], and the distinction is the whole point:
+/// restarting a server that is already running changes nothing. What separates
+/// this state is the ROLE - a DSN whose user cannot read `pg_namespace`, or
+/// cannot select the journal, connects fine and fails at the first question.
+const ROLE_REMEDY: &str = "\
+    The server is up; the role in that DSN could not answer. Check that role\n\
+    \x20   can read the catalog and the migration journal, or rewrite the\n\
+    \x20   overlay from the backends this tree provisions:\n\
+    \x20     tests/provision_test_backends.sh\n";
+
+/// The remediation for a machine that cannot start an `io_uring` runtime.
+///
+/// It named the overlay until this was measured: no rewrite of a DSN makes a
+/// kernel offer `io_uring`, and the reader was sent to edit a file that was not
+/// the problem.
+const RUNTIME_REMEDY: &str = "\
+    This is the machine, not the database. Nothing in this tree runs without\n\
+    \x20   io_uring; check the kernel permits it for this process:\n\
+    \x20     sysctl kernel.io_uring_disabled\n";
 
 /// The remediation an unmigrated database gets.
 ///
@@ -609,6 +745,35 @@ mod tests {
         let where_ = Coordinates::of("postgres://postgres@127.0.0.1:5440/zeroship");
         assert_eq!(where_.redacted, "postgres://postgres@127.0.0.1:5440/zeroship");
         assert_eq!(where_.database, "zeroship");
+    }
+
+    /// The three answers a reader can get must not share a remedy.
+    ///
+    /// This is the property GAP 1 broke without breaking any assertion: an
+    /// unmigrated database was reported with the UNREACHABLE remedy, so two
+    /// states that need different commands printed the same one. Distinctness
+    /// is cheap to state and is what a caller relies on.
+    #[test]
+    fn the_states_a_reader_must_tell_apart_print_different_remedies() {
+        let remedies = [
+            UNREACHABLE_REMEDY,
+            UNMIGRATED_REMEDY,
+            ROLE_REMEDY,
+            RUNTIME_REMEDY,
+            DSN_REMEDY,
+        ];
+        for (index, one) in remedies.iter().enumerate() {
+            for other in &remedies[index + 1..] {
+                assert_ne!(one, other, "two states print the same remedy");
+            }
+        }
+        // The one a database that only needs the corpus must get, and the one
+        // it must NOT get.
+        assert!(UNMIGRATED_REMEDY.contains("deploy/ops/db-migrate.sh"));
+        assert!(!UNREACHABLE_REMEDY.contains("db-migrate.sh"));
+        assert!(!ROLE_REMEDY.contains("db-migrate.sh"));
+        // A kernel without io_uring is not fixed by editing a DSN.
+        assert!(!RUNTIME_REMEDY.contains("provision_test_backends.sh"));
     }
 
     /// An unparseable DSN must refuse rather than reach the connect.

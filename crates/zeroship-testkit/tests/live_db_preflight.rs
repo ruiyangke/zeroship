@@ -10,7 +10,13 @@
 //!
 //!   same database, different schema asked for   -> Ready / Refused
 //!   same schema asked for, different database   -> Ready / Refused
+//!   same database and schemas, journal absent   -> Refused / Ready
 //!   same database and schemas, journal short    -> Refused / Ready
+//!
+//! AND EVERY REFUSED SIDE ASSERTS ON THE REMEDY, not only on the refusal. A
+//! preflight that refuses correctly and prints the wrong command is the defect
+//! it exists to remove, one indirection out: the reader is still sent to the
+//! wrong place, and no arm that checks only "did it refuse" can see it.
 //!
 //! Without both directions the file is worthless in the specific way the thing
 //! it guards was worthless: a check that always says the same thing reads as a
@@ -86,7 +92,11 @@ const NEVER_CREATED: &str = "zs_schema_that_is_never_created";
 /// shape CHECK, none of which the preflight looks at. Reproducing them here
 /// would pin this file to a schema it does not test and would go stale the
 /// first time the journal grows a column.
-const JOURNAL_TABLE: &str = "zeroship_migrations.__zeroship_schema_migrations";
+///
+/// THE NAME IS THE PRODUCTION CONSTANT, for the same reason
+/// [`PLATFORM_SCHEMAS`] is: a copy here would go on seeding the old name the
+/// day the journal moves, and every arm below would still pass.
+const JOURNAL_TABLE: &str = live_db::JOURNAL_TABLE;
 
 /// How many migration files this checkout carries, which is what a current
 /// journal must have consumed.
@@ -394,6 +404,72 @@ fn the_same_question_answers_ready_on_a_seeded_database_and_refuses_on_a_fresh_o
         text.contains(&format!("/{}", fresh.name)),
         "the refusal must name the database it dialled; got {text}"
     );
+    // THE THREE ASSERTIONS BELOW ARE THE REGRESSION. This arm used to check
+    // only the database NAME, and passed while the refusal said "the server did
+    // not answer" and printed the remedy for an unreachable backend -- for a
+    // database that had just answered two connections from this very test. The
+    // cause was the ledger statement naming its table at parse time; see
+    // `live_db::count_journal`. A fresh database is the commonest input this
+    // preflight ever sees, so the message it gets is the one that matters most.
+    assert!(
+        text.contains("a server answered"),
+        "an empty database is not an absent server; got {text}"
+    );
+    assert!(
+        text.contains("db-migrate.sh"),
+        "an empty database must be sent to the applier; got {text}"
+    );
+    assert!(
+        !text.contains("provision_test_backends.sh"),
+        "an empty database must not be blamed on a backend that is not running; got {text}"
+    );
+}
+
+/// ARM 2b -- the half-dismantled database: both platform schemas, no journal
+/// TABLE.
+///
+/// It is a real state, not a contrivance: the 2026-08-21 database had been
+/// migrated and then had objects dropped out of it. It is also the one input
+/// that reaches the ledger stage with nothing for it to count, which is where
+/// the parse-time resolution bug lived.
+///
+/// The pair is against the SAME database seconds apart, differing only in
+/// whether the journal table exists.
+#[test]
+fn a_database_with_the_schemas_but_no_journal_table_is_told_to_apply_the_corpus() {
+    let server = server();
+    let db = scratch(&server, "no_journal", PLATFORM_SCHEMAS);
+
+    let without_table = live_db::inspect(&db.dsn, PLATFORM_SCHEMAS);
+    seed_journal(&db.dsn, migrations_carried());
+    let with_table = live_db::inspect(&db.dsn, PLATFORM_SCHEMAS);
+
+    drop_scratch(&server, &db);
+
+    let text = without_table
+        .refusal()
+        .unwrap_or_else(|| panic!("{} has no journal table, so it has applied nothing", db.name));
+    assert!(
+        text.contains("a server answered"),
+        "the server answered every question but the last; got {text}"
+    );
+    assert!(
+        text.contains("no zeroship_migrations.__zeroship_schema_migrations"),
+        "the refusal must name what is missing; got {text}"
+    );
+    assert!(
+        text.contains("db-migrate.sh"),
+        "a database missing the journal needs the applier; got {text}"
+    );
+    assert!(
+        !text.contains("provision_test_backends.sh"),
+        "a reachable database must not be reported as an unreachable server; got {text}"
+    );
+    assert!(
+        with_table.is_ready(),
+        "the same database with a seeded journal must be ready; got {}",
+        with_table.refusal().unwrap_or("")
+    );
 }
 
 /// ARM 3 -- a server that is not there must refuse with the UNREACHABLE remedy,
@@ -411,8 +487,12 @@ fn an_unreachable_server_refuses_differently_from_an_unmigrated_database() {
         .expect("nothing listens on port 1")
         .to_string();
     assert!(
-        text.contains("did not answer"),
+        text.contains("nothing answered at that address"),
         "an unreachable server must say so; got {text}"
+    );
+    assert!(
+        text.contains("provision_test_backends.sh"),
+        "an unreachable server must be sent to the provisioner; got {text}"
     );
     assert!(
         !text.contains("db-migrate.sh"),
