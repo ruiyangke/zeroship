@@ -47,25 +47,32 @@
 //!   --test column_grants -- --test-threads=1
 //! ```
 
+#[path = "support/schema.rs"]
+mod schema_fixture;
+#[allow(unused_imports)]
+use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+#[allow(unused_imports)]
+use zeroship_migrate::schema::query::FkEmission;
+
 use std::collections::BTreeSet;
 
 use compio_postgres::{Client, NoTls};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 use zeroship_data_query_builder::render::postgres::{render_delete, render_update};
 use zeroship_data_query_builder::{
     Assignment as PlanAssignment, ColumnAssignment as PlanColumnAssignment,
-    CompareOp as PlanCompareOp, Delete as PlanDelete, Ident as PlanIdent, IdentRole as PlanIdentRole,
-    Literal as PlanLiteral, Operand as PlanOperand, Predicate as PlanPredicate,
-    ProjectedField as PlanProjectedField, Projection as PlanProjection,
+    CompareOp as PlanCompareOp, Delete as PlanDelete, Ident as PlanIdent,
+    IdentRole as PlanIdentRole, Literal as PlanLiteral, Operand as PlanOperand,
+    Predicate as PlanPredicate, ProjectedField as PlanProjectedField, Projection as PlanProjection,
     Returning as PlanReturning, RowLimit as PlanRowLimit, Update as PlanUpdate,
 };
-use zeroship_plugin_db::query::{
-    FkEmission, SYSTEM_FIELD_NAMES, SqlDialect, SystemFieldAutoBump, build_create_table_with_fks,
+use zeroship_plugin_db::compile::{
     build_delete_many, build_delete_one, build_insert, build_insert_many,
     build_restore_many_with_system_fields, build_restore_one_with_system_fields,
     build_returning_expr, build_soft_delete_many_with_system_fields,
     build_soft_delete_one_with_system_fields, build_update_many_with_system_fields,
-    build_update_one_with_system_fields, build_upsert, quote_ident, raw_column_name,
+    build_update_one_with_system_fields, build_upsert, quote_ident, raw_column_name, SqlDialect,
+    SystemFieldAutoBump, SYSTEM_FIELD_NAMES,
 };
 
 /// The collection every arm writes.
@@ -152,8 +159,13 @@ async fn fixture(admin: &Client, suffix: &str) -> (String, String) {
         .await
         .expect("create the app schema");
 
-    let ddl = build_create_table_with_fks(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, &schema, &FkEmission::Inline)
-        .expect("the platform's own CREATE TABLE emitter");
+    let ddl = fixture_table_sql(
+        &zeroship_data_query_builder::SchemaName::new(&app).expect("fixture schema name"),
+        COLLECTION,
+        &schema,
+        &FkEmission::Inline,
+    )
+    .expect("the platform's own CREATE TABLE emitter");
     admin
         .batch_execute(&ddl)
         .await
@@ -249,10 +261,7 @@ async fn server_version_num(client: &Client) -> String {
 /// Begin one role-scoped test arm and prove `SET LOCAL ROLE` took effect.
 async fn begin_as_role(session: &Client, role: &str) {
     session
-        .batch_execute(&format!(
-            "BEGIN; SET LOCAL ROLE {}",
-            quote_ident(role)
-        ))
+        .batch_execute(&format!("BEGIN; SET LOCAL ROLE {}", quote_ident(role)))
         .await
         .expect("begin the role-scoped arm");
     let rows = session
@@ -289,12 +298,12 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let filter = json!({ "id": "psn_seed" });
     let update = json!({ "nickname": "updated" });
     let mk =
-        |verb: &'static str, bq: zeroship_plugin_db::query::BuiltQuery| (verb, bq.sql, bq.params);
+        |verb: &'static str, bq: zeroship_plugin_db::compile::BuiltQuery| (verb, bq.sql, bq.params);
     vec![
         mk(
             "insert",
             build_insert(
-                &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &json!({ "id": "psn_ins", "nickname": "a" }),
@@ -304,7 +313,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "insertMany",
             build_insert_many(
-                &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &json!([{ "id": "psn_m1", "nickname": "b" }, { "id": "psn_m2", "nickname": "c" }]),
@@ -314,7 +323,7 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         mk(
             "upsert",
             build_upsert(
-                &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &json!({ "id": "psn_up", "nickname": "d" }),
@@ -324,23 +333,45 @@ fn column_grant_ready_statements(app: &str, schema: &Value) -> Vec<Statement> {
         ),
         mk(
             "updateMany",
-            build_update_many_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, &update, d, &ab)
-                .unwrap(),
+            build_update_many_with_system_fields(
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+                COLLECTION,
+                schema,
+                &filter,
+                &update,
+                d,
+                &ab,
+            )
+            .unwrap(),
         ),
         mk(
             "softDeleteMany",
-            build_soft_delete_many_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, d, &ab)
-                .unwrap(),
+            build_soft_delete_many_with_system_fields(
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+                COLLECTION,
+                schema,
+                &filter,
+                d,
+                &ab,
+            )
+            .unwrap(),
         ),
         mk(
             "restoreMany",
-            build_restore_many_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, d, &ab)
-                .unwrap(),
+            build_restore_many_with_system_fields(
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+                COLLECTION,
+                schema,
+                &filter,
+                d,
+                &ab,
+            )
+            .unwrap(),
         ),
         mk(
             "deleteMany",
             build_delete_many(
-                &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
                 COLLECTION,
                 schema,
                 &json!({ "id": "psn_ins" }),
@@ -359,32 +390,63 @@ fn single_row_statements(app: &str, schema: &Value) -> Vec<Statement> {
     let filter = json!({ "id": "psn_seed" });
     let update = json!({ "nickname": "updated" });
     let mk =
-        |verb: &'static str, bq: zeroship_plugin_db::query::BuiltQuery| (verb, bq.sql, bq.params);
+        |verb: &'static str, bq: zeroship_plugin_db::compile::BuiltQuery| (verb, bq.sql, bq.params);
     vec![
         mk(
             "updateOne",
-            build_update_one_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, &update, d, &ab)
-                .unwrap(),
+            build_update_one_with_system_fields(
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+                COLLECTION,
+                schema,
+                &filter,
+                &update,
+                d,
+                &ab,
+            )
+            .unwrap(),
         ),
         mk(
             "softDeleteOne",
-            build_soft_delete_one_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, d, &ab)
-                .unwrap(),
+            build_soft_delete_one_with_system_fields(
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+                COLLECTION,
+                schema,
+                &filter,
+                d,
+                &ab,
+            )
+            .unwrap(),
         ),
         mk(
             "restoreOne",
-            build_restore_one_with_system_fields(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter, d, &ab).unwrap(),
+            build_restore_one_with_system_fields(
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+                COLLECTION,
+                schema,
+                &filter,
+                d,
+                &ab,
+            )
+            .unwrap(),
         ),
         mk(
             "deleteOne",
-            build_delete_one(&zeroship_schema::SchemaName::new(&app).expect("fixture schema name"), COLLECTION, schema, &filter).unwrap(),
+            build_delete_one(
+                &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+                COLLECTION,
+                schema,
+                &filter,
+            )
+            .unwrap(),
         ),
     ]
 }
 
 /// Render the replacement data-plan's two bounded PostgreSQL writes against
 /// the same physical fixture as the shipped builders.
-fn bounded_data_plan_statements(app: &str) -> Vec<(&'static str, zeroship_data_query_builder::RenderedSql)> {
+fn bounded_data_plan_statements(
+    app: &str,
+) -> Vec<(&'static str, zeroship_data_query_builder::RenderedSql)> {
     let namespace = PlanIdent::parse_as(app, PlanIdentRole::Namespace).expect("namespace");
     let collection =
         PlanIdent::parse_as(COLLECTION, PlanIdentRole::Collection).expect("collection");
@@ -503,7 +565,7 @@ async fn column_scoped_reads_complete_every_projected_write_verb() {
     // Seed one row the update / delete / restore verbs act on, as the ROLE.
     begin_as_role(&session, &role).await;
     let seed = build_insert(
-        &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw.clone(): "123-45-6789" }),
@@ -585,7 +647,7 @@ async fn the_same_verbs_are_refused_outright_when_the_returning_clause_stars() {
     let session = connect(&url).await;
     begin_as_role(&session, &role).await;
     let seed = build_insert(
-        &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &json!({ "id": "psn_seed", "nickname": "s" }),
@@ -679,7 +741,7 @@ async fn the_single_row_verbs_succeed_without_ctid_access() {
 
     let raw = raw_column_name("ssn");
     let seed = build_insert(
-        &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
@@ -703,9 +765,7 @@ async fn the_single_row_verbs_succeed_without_ctid_access() {
         let rows = session
             .query_text_params(sql, &refs)
             .await
-            .unwrap_or_else(|e| {
-                panic!("{verb} must execute under column grants: {e}\n{sql}")
-            });
+            .unwrap_or_else(|e| panic!("{verb} must execute under column grants: {e}\n{sql}"));
         assert_eq!(rows.len(), 1, "{verb} must affect exactly the seeded row");
         ruled_on += 1;
     }
@@ -735,7 +795,7 @@ async fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
     begin_as_role(&session, &role).await;
     let raw = raw_column_name("ssn");
     let seed = build_insert(
-        &zeroship_schema::SchemaName::new(&app).expect("fixture schema name"),
+        &zeroship_data_query_builder::SchemaName::new(&app).expect("fixture schema name"),
         COLLECTION,
         &schema,
         &json!({ "id": "psn_seed", "nickname": "seed", "ssn": "***", raw: "123-45-6789" }),
@@ -748,7 +808,11 @@ async fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
         .unwrap_or_else(|e| panic!("the role must be able to seed a row: {e}\n{}", seed.sql));
 
     let statements = bounded_data_plan_statements(&app);
-    assert_eq!(statements.len(), 2, "update and delete must both be ruled on");
+    assert_eq!(
+        statements.len(),
+        2,
+        "update and delete must both be ruled on"
+    );
     let mut ruled_on = 0usize;
     for (verb, rendered) in statements {
         let owned = bounded_data_plan_params(rendered.params());
@@ -757,7 +821,10 @@ async fn bounded_data_plan_writes_succeed_with_column_scoped_reads() {
             .query_text_params(rendered.sql(), &params)
             .await
             .unwrap_or_else(|e| {
-                panic!("{verb} must execute under column grants: {e}\n{}", rendered.sql())
+                panic!(
+                    "{verb} must execute under column grants: {e}\n{}",
+                    rendered.sql()
+                )
             });
         assert_eq!(rows.len(), 1, "{verb} must affect exactly the bounded row");
         ruled_on += 1;

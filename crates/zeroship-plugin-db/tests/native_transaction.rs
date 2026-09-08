@@ -70,7 +70,7 @@ use zeroship_plugin_db::service::{DbService, DbServiceConfig};
 use zeroship_runtime::channel::CancelFlag;
 use zeroship_runtime::plugin::NativePlugin;
 use zeroship_runtime::runtime::Runtime;
-use zeroship_runtime::{EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch, init_v8};
+use zeroship_runtime::{init_v8, EnvSnapshot, FetchOutcome, ModuleEntry, RequestCtx, SettledFetch};
 
 fn pg_url() -> String {
     zeroship_core::config::test_database_url()
@@ -480,15 +480,13 @@ fn dispatch_zs_for_app_with_descriptor(
         specifier: "index.js".into(),
         source: source.into(),
     }];
-    let plugins: Vec<Arc<dyn NativePlugin>> = vec![
-        DbService::new(DbServiceConfig {
-            url: url.to_string(),
-            worker_id: "native-transaction-test-worker".to_string(),
-            meter: None,
-        })
-        .expect("db service")
-        .plugin(),
-    ];
+    let plugins: Vec<Arc<dyn NativePlugin>> = vec![DbService::new(DbServiceConfig {
+        url: url.to_string(),
+        worker_id: "native-transaction-test-worker".to_string(),
+        meter: None,
+    })
+    .expect("db service")
+    .plugin()];
     let mut env_vars = std::collections::HashMap::new();
     if let Some(app_id) = app_id {
         env_vars.insert("APP_ID".to_string(), app_id.to_string());
@@ -1496,7 +1494,7 @@ const _procedures = { seed, failBulk };
     );
     let expected_probe_suffix = format!(
         " LIMIT {} FOR UPDATE",
-        zeroship_plugin_db::query::MAX_QUERY_LIMIT + 1
+        zeroship_plugin_db::compile::MAX_QUERY_LIMIT + 1
     );
     assert!(
         counters.target_row_resolution_sql[0].ends_with(&expected_probe_suffix),
@@ -2015,8 +2013,8 @@ mod sc1_driver {
     /// Derived from the app id here because these fixtures still mint one
     /// string for both identities - the same thing production does today. The
     /// point of the parameter is that the CALL now states which it means.
-    fn app_schema(app_id: &str) -> zeroship_schema::SchemaName {
-        zeroship_schema::SchemaName::new(app_id).expect("fixture schema name")
+    fn app_schema(app_id: &str) -> zeroship_data_query_builder::SchemaName {
+        zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema name")
     }
 
     async fn probe_backend() -> zeroship_plugin_db::backend::BackendHandle {

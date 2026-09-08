@@ -9,7 +9,7 @@ PostgreSQL renderer
 `zeroship-plugin-db` declares it under `[dev-dependencies]` only, and
 `grep -rn data_query_builder crates/zeroship-plugin-db/src/` returns zero hits.
 The runtime still executes SQL built by string concatenation in
-`crates/zeroship-schema/src/query.rs`. The **source ledger does not exist**;
+`crates/zeroship-schema/src/query.rs`. The **source ledger does not exist**; (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 `grep -rn source_symbol tests/ crates/` is empty.
 
 Live defects cited by number (L11, L12, L16, L29, L31) live in
@@ -27,7 +27,7 @@ ledger that counts what is left.
 
 ### The scope
 
-Measured at HEAD `a3706db6f`: `crates/zeroship-schema/src/query.rs` is 14,309
+Measured at HEAD `a3706db6f`: `crates/zeroship-schema/src/query.rs` is 14,309 (DELETED; runtime compilation now lives in `crates/zeroship-data-query-builder/src/compile.rs`, and migration DDL in `crates/zeroship-migrate-core/src/schema/query.rs`.)
 lines and exposes **87** `pub` / `pub(crate)` function items at any indentation.
 They do not share a destination, and that is what makes the port tractable:
 

@@ -496,12 +496,14 @@ pub const GRANT_REVOKED_MESSAGE: &str =
 /// populated by `OpError::coded` and then dropped -- `build_verbose_error_body`
 /// emits `message`/`name`/`code`/`details`/`retryable` and never `hint`. A
 /// creator reading the HTTP response only ever sees the message.
-pub const MISSING_ROLE_MESSAGE: &str = "this app's database is not provisioned: its per-app Postgres role does not \
+pub const MISSING_ROLE_MESSAGE: &str =
+    "this app's database is not provisioned: its per-app Postgres role does not \
      exist. Run `zeroship migrate` for this app, then retry.";
 
 /// Operator/`env.db`-caller hint for [`SCHEMA_NOT_PROVISIONED`]. Reaches app
 /// JS as `err.hint` on a direct native throw; does NOT reach the HTTP wire.
-pub const MISSING_ROLE_HINT: &str = "`zeroship migrate` creates the app's schema and per-app role. A deploy \
+pub const MISSING_ROLE_HINT: &str =
+    "`zeroship migrate` creates the app's schema and per-app role. A deploy \
      alone does not: the first `env.db` call is what discovers the role is \
      missing.";
 
@@ -677,7 +679,6 @@ impl DbError {
             ),
         }
     }
-
 }
 
 // `DbError::backend_unsupported(op)` stood here until 2026-09-04, when it was
@@ -742,10 +743,7 @@ pub fn prefix_message(err: &mut DbError, prefix: &str) {
 ///
 /// Generic over the row type so core does not need to know any backend's row
 /// representation and test code can exercise the helper with plain values.
-pub fn first_row_or_internal<'a, R>(
-    rows: &'a [R],
-    op: &'static str,
-) -> Result<&'a R, DbError> {
+pub fn first_row_or_internal<'a, R>(rows: &'a [R], op: &'static str) -> Result<&'a R, DbError> {
     rows.first().ok_or_else(|| DbError::Internal {
         message: format!("{op}: returned no row"),
     })
@@ -794,9 +792,9 @@ impl From<zeroship_core::database_role::PerAppRoleNameError> for DbError {
 // boundary. Builder errors are user-input refusals (bad filter, bad
 // collection name, bad identifier) — modelled as `ValidationFailed`
 // with a static code the SDK can branch on.
-impl From<zeroship_schema::query::QueryError> for DbError {
-    fn from(e: zeroship_schema::query::QueryError) -> Self {
-        use zeroship_schema::query::QueryError;
+impl From<zeroship_data_query_builder::compile::QueryError> for DbError {
+    fn from(e: zeroship_data_query_builder::compile::QueryError) -> Self {
+        use zeroship_data_query_builder::compile::QueryError;
         // `ReservedSystemFieldName` carries a fixed hint
         // listing the seven system fields so SDK consumers see the same
         // remediation message Rust prints in test failures. The other
@@ -841,19 +839,18 @@ impl From<zeroship_schema::query::QueryError> for DbError {
 }
 
 // The mask-sentinel codec
-// (`zeroship_schema::mask_codec::parse_mask_sentinel`) was relocated into the
-// leaf crate and returns [`zeroship_schema::error::MaskSentinelError`] whose
+// (`zeroship_data_query_builder::mask_codec::parse_mask_sentinel`) was relocated into the
+// leaf crate and returns [`zeroship_data_query_builder::schema_error::MaskSentinelError`] whose
 // `.message` already carries the `mask_sentinel_malformed: …` prefix the SDK
 // contract + introspector expect. The pre-extraction parser returned
 // `DbError::internal(<that same message>)`; this `From` reproduces it exactly,
 // so the `mask_sentinel_malformed` code-discriminator the SDK round-trips is
 // preserved.
-impl From<zeroship_schema::error::MaskSentinelError> for DbError {
-    fn from(e: zeroship_schema::error::MaskSentinelError) -> Self {
+impl From<zeroship_data_query_builder::schema_error::MaskSentinelError> for DbError {
+    fn from(e: zeroship_data_query_builder::schema_error::MaskSentinelError) -> Self {
         DbError::internal(e.message)
     }
 }
-
 
 #[cfg(test)]
 mod isolation_level_tests {

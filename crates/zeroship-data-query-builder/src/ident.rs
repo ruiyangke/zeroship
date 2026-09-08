@@ -2,7 +2,7 @@
 //!
 //! # The problem this replaces
 //!
-//! `crates/zeroship-schema/src/query.rs` builds SQL by string concatenation.
+//! `crates/zeroship-data-query-builder/src/compile.rs` builds SQL by string concatenation.
 //! A caller-supplied name reaches a `format!` and correctness rests on a
 //! validator having been called first, on a path that is not the one doing the
 //! formatting. The validators are good ones - `validate_collection` and
@@ -85,7 +85,7 @@ use core::fmt;
 /// emits a NOTICE, so two distinct names can collapse onto one. Refusing here
 /// is right for names a creator *chose* - they can shorten them, and the
 /// refusal says so. It would be wrong for names the platform *derives*, which
-/// is why `zeroship_schema::ident::cap_ident_name` caps rather than refuses;
+/// is why `zeroship_data_query_builder::derived_ident::cap_ident_name` caps rather than refuses;
 /// this crate never derives a name.
 pub const MAX_IDENT_BYTES: usize = 63;
 
@@ -193,7 +193,8 @@ impl Reservation {
             // and `pg_foo` are the same catalog name and a case-sensitive fence
             // would miss one of them.
             Self::Prefix(p) => {
-                name.len() >= p.len() && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
+                name.len() >= p.len()
+                    && name.as_bytes()[..p.len()].eq_ignore_ascii_case(p.as_bytes())
             }
             Self::Suffix(s) => name.ends_with(s),
         }
@@ -237,10 +238,8 @@ const NAMESPACE_RESERVATIONS: &[Reservation] = &[
 /// engine fences the union from every registered backend against later
 /// retargeting. The behavioral parity suite derives the real shipping set and
 /// fails when this zero-dependency runtime copy drifts.
-const BACKEND_CATALOG_RESERVATIONS: &[Reservation] = &[
-    Reservation::Prefix("pg_"),
-    Reservation::Prefix("sqlite_"),
-];
+const BACKEND_CATALOG_RESERVATIONS: &[Reservation] =
+    &[Reservation::Prefix("pg_"), Reservation::Prefix("sqlite_")];
 
 /// Column-name fences, in `RESERVED_NAMES` order so the error a given name
 /// produces is the same one it produces today.
@@ -409,7 +408,10 @@ impl Ident {
                 len: raw.len(),
             });
         }
-        if let Some(bad) = raw.chars().find(|c| !(c.is_ascii_alphanumeric() || *c == '_')) {
+        if let Some(bad) = raw
+            .chars()
+            .find(|c| !(c.is_ascii_alphanumeric() || *c == '_'))
+        {
             return Err(IdentError::IllegalCharacter {
                 role,
                 character: bad,
@@ -468,7 +470,6 @@ impl Ident {
     pub fn as_str(&self) -> &str {
         &self.0
     }
-
 }
 
 impl fmt::Display for Ident {
@@ -487,7 +488,10 @@ mod tests {
     #[test]
     fn the_reservation_predicate_can_actually_fail() {
         assert!(Reservation::Prefix("pg_").matches("pg_class"));
-        assert!(Reservation::Prefix("pg_").matches("PG_CLASS"), "prefix fence must be case-insensitive");
+        assert!(
+            Reservation::Prefix("pg_").matches("PG_CLASS"),
+            "prefix fence must be case-insensitive"
+        );
         assert!(!Reservation::Prefix("pg_").matches("page_views"));
         assert!(Reservation::Suffix("_masked").matches("ssn_masked"));
         assert!(!Reservation::Suffix("_masked").matches("masked_ssn"));

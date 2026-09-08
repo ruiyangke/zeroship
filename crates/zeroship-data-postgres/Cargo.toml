@@ -14,7 +14,7 @@ compio-postgres = { workspace = true, features = ["with-uuid-1"] }
 compio = { workspace = true }
 
 zeroship-data-core = { workspace = true }
-zeroship-schema = { workspace = true }
+zeroship-data-query-builder = { workspace = true }
 zeroship-core = { workspace = true }
 
 serde_json = { workspace = true }

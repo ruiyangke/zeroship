@@ -83,9 +83,9 @@
 
 use compio_postgres::Pool;
 
-use crate::backend::BackendHandle;
 use crate::backend::pg_error;
-use zeroship_data_core::error::{DbError, prefix_message};
+use crate::backend::BackendHandle;
+use zeroship_data_core::error::{prefix_message, DbError};
 
 /// Options for [`drop_namespace`].
 #[derive(Debug, Clone)]
@@ -184,7 +184,7 @@ pub async fn drop_namespace(
     // ---- Step 4: DROP SCHEMA CASCADE ----
     // Slots are gone before schema teardown. Postgres removes dropped-table
     // membership from the retained publication. Idempotent.
-    let schema = crate::query::quote_ident(app_id);
+    let schema = crate::compile::quote_ident(app_id);
     pool.query_text_params(&format!("DROP SCHEMA IF EXISTS {schema} CASCADE"), &[])
         .await
         .map_err(|e| {

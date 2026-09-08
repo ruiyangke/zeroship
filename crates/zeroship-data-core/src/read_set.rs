@@ -91,7 +91,7 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 
 use serde_json::Value;
-use zeroship_schema::diff::MaskKind;
+use zeroship_data_query_builder::catalog::MaskKind;
 
 use crate::masking::apply_mask_kind;
 
@@ -332,10 +332,7 @@ pub fn normalise_filter(filter: &Value, schema: &Value) -> Option<Predicate> {
                         // $in / $nin / $exists / $like / regex / etc.
                         _ => return None,
                     };
-                    if !matches!(
-                        val,
-                        Value::String(_) | Value::Number(_) | Value::Bool(_)
-                    ) {
+                    if !matches!(val, Value::String(_) | Value::Number(_) | Value::Bool(_)) {
                         return None;
                     }
                     // A range over a mask is not a range over the value.
@@ -645,7 +642,8 @@ mod tests {
 
     #[test]
     fn normalise_explicit_eq_operator() {
-        let p = normalise_filter(&json!({ "userId": { "$eq": 42 } }), &json!({})).expect("op normalises");
+        let p = normalise_filter(&json!({ "userId": { "$eq": 42 } }), &json!({}))
+            .expect("op normalises");
         assert!(p.matches(&row(&[("userId", "42")])));
     }
 
@@ -659,8 +657,11 @@ mod tests {
 
     #[test]
     fn normalise_range_combination() {
-        let p =
-            normalise_filter(&json!({ "createdAt": { "$gte": 1000, "$lt": 2000 } }), &json!({})).unwrap();
+        let p = normalise_filter(
+            &json!({ "createdAt": { "$gte": 1000, "$lt": 2000 } }),
+            &json!({}),
+        )
+        .unwrap();
         assert!(p.matches(&row(&[("createdAt", "1000")])));
         assert!(p.matches(&row(&[("createdAt", "1500")])));
         assert!(!p.matches(&row(&[("createdAt", "2000")])));

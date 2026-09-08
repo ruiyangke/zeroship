@@ -65,8 +65,8 @@
 //! constant they used to stamp was a latent SQLite bug.
 
 use crate::backend::BackendHandle;
-use crate::query::SqlDialect;
-use zeroship_schema::SchemaName;
+use crate::compile::SqlDialect;
+use zeroship_data_query_builder::SchemaName;
 
 /// The routing decision, frozen at the dispatch frame and not yet bound to a
 /// backend.

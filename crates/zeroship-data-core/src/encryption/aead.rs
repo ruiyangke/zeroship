@@ -52,7 +52,7 @@ pub struct AeadKey {
     pub k_siv: [u8; 32],
 }
 
-/// Encrypt under the column's declared [`zeroship_schema::descriptors::EncryptionMode`].
+/// Encrypt under the column's declared [`zeroship_data_query_builder::descriptors::EncryptionMode`].
 ///
 /// The mode-to-function mapping had no home of its own until 2026-09-02: it
 /// was the body of `EncryptedColumn::encrypt`, written identically on both
@@ -67,13 +67,17 @@ pub struct AeadKey {
 /// they then ignored. [`decrypt`] therefore does not ask for one.
 pub fn encrypt(
     key: &AeadKey,
-    mode: zeroship_schema::descriptors::EncryptionMode,
+    mode: zeroship_data_query_builder::descriptors::EncryptionMode,
     plaintext: &[u8],
     aad: &[u8],
 ) -> Result<Vec<u8>, DbError> {
     match mode {
-        zeroship_schema::descriptors::EncryptionMode::Randomised => encrypt_randomised(key, plaintext, aad),
-        zeroship_schema::descriptors::EncryptionMode::Deterministic => encrypt_deterministic(key, plaintext, aad),
+        zeroship_data_query_builder::descriptors::EncryptionMode::Randomised => {
+            encrypt_randomised(key, plaintext, aad)
+        }
+        zeroship_data_query_builder::descriptors::EncryptionMode::Deterministic => {
+            encrypt_deterministic(key, plaintext, aad)
+        }
     }
 }
 

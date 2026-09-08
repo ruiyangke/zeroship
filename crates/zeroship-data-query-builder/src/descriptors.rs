@@ -1,13 +1,4 @@
-//! Schema-shape descriptor enums shared between the DDL/diff layer and
-//! plugin-db's data plane.
-//!
-//! These were relocated verbatim out of `zeroship_plugin_db::backend`
-//! (the `VectorMetric` / `EncryptionMode` / `GeoPoint` triple): they are
-//! pure *shape* descriptors — no DB round-trip, no crypto, no runtime —
-//! and the DDL builders in [`crate::query`] consume them. plugin-db's
-//! `backend` module re-exports them so existing `crate::backend::…`
-//! references keep resolving (the data-plane crypto/spatial impls that
-//! name them are unchanged).
+//! Value descriptors shared by runtime catalog readers and storage backends.
 
 /// Distance metric for a vector index. The three metrics map 1:1 to
 /// pgvector's operator class set (`vector_cosine_ops`,

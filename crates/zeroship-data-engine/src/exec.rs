@@ -55,9 +55,9 @@ use std::rc::Rc;
 
 use serde_json::Value;
 
-use crate::backend::BackendHandle;
 use crate::backend::pg_error;
 use crate::backend::pg_row_json::rows_to_json_value;
+use crate::backend::BackendHandle;
 // THE ADAPTER IMPORT THAT USED TO SIT HERE IS GONE, and it had to be. It was
 // `#[cfg(any(test, feature = "test-helpers"))] use crate::context;`, read only
 // by `ambient_route_for_tests`, and the note above it said the gate kept the
@@ -71,16 +71,16 @@ use crate::backend::pg_row_json::rows_to_json_value;
 //
 // The fix is the one the crate has taken three times already: the backend is a
 // PARAMETER. See `ambient_route_for_tests` below.
+use crate::compile::BuiltQuery;
 use crate::tx_lanes::TxConnection;
-use zeroship_data_core::error::DbError;
-use crate::query::BuiltQuery;
 use crate::tx_route::TxRoute;
+use zeroship_data_core::error::DbError;
 
 // The metric names and the emit point moved to `crate::metrics` on 2026-09-01.
 // They were private to this file, which made the BILLED surface accidentally
 // equal to "whatever flows through `run_sql` / `exec_mutation`" - and the search
 // family and every unmask statement do not.
-use crate::metrics::{DB_READS, DB_ROWS_WRITTEN, DB_WRITES, emit_db_metric};
+use crate::metrics::{emit_db_metric, DB_READS, DB_ROWS_WRITTEN, DB_WRITES};
 
 fn sqlite_shared_crud_unavailable() -> DbError {
     DbError::Configuration {
@@ -186,11 +186,7 @@ pub(crate) fn take_tx_lane(route: &TxRoute) -> Result<crate::tx_lanes::TxClientS
 
 /// Execute SQL with text params — uses the app's TX connection when this
 /// dispatch was issued inside that transaction, otherwise the pool.
-pub async fn run_sql(
-    route: &TxRoute,
-    sql: &str,
-    params: &[&str],
-) -> Result<Vec<Value>, DbError> {
+pub async fn run_sql(route: &TxRoute, sql: &str, params: &[&str]) -> Result<Vec<Value>, DbError> {
     let app_id = route.app_id();
     // Structural, not temporal: `route.in_tx()` was frozen at the V8
     // dispatch frame from the continuation-preserved transaction scope,
@@ -199,21 +195,19 @@ pub async fn run_sql(
     // comparison: a co-resident app's callback plants ITS app_id, so this
     // app reads `false` and takes its own autocommit path.
     if route.in_tx() {
-        // Use this app's transaction connection
-        let client = crate::tx_lanes::with_mut(|l| l.take_tx_client_for(app_id))
-            .ok_or_else(|| tx_slot_unavailable(app_id))?;
-        let result = match &client {
-            TxConnection::Postgres(client) => client.query_text_params(sql, params).await,
-            TxConnection::Sqlite(_) => {
-                crate::tx_lanes::with_mut(|l| l.put_tx_client_for(app_id, client));
-                return Err(sqlite_shared_crud_unavailable());
+        return crate::transaction::driver::execute_operation(app_id, async {
+            let client = crate::tx_lanes::TxClientSlotGuard::take(app_id)
+                .map_err(|_| tx_slot_unavailable(app_id))?;
+            match client.client() {
+                TxConnection::Postgres(client) => client
+                    .query_text_params(sql, params)
+                    .await
+                    .map(|rows| rows_to_json_value(&rows))
+                    .map_err(|e| pg_error::classify(&e)),
+                TxConnection::Sqlite(_) => Err(sqlite_shared_crud_unavailable()),
             }
-        };
-        // Put it back
-        crate::tx_lanes::with_mut(|l| l.put_tx_client_for(app_id, client));
-        return result
-            .map(|rows| rows_to_json_value(&rows))
-            .map_err(|e| pg_error::classify(&e));
+        })
+        .await;
     }
 
     // No transaction — use pool. On the SQLite arm the shared CRUD
@@ -372,22 +366,25 @@ async fn exec_sqlite_json(
     // route that says "in transaction" means either the transaction has
     // settled or another op holds its connection. Re-typed so the creator
     // sees the same coded errors the Postgres arm produces.
-    let client = crate::tx_lanes::TxClientSlotGuard::take(route.app_id())
-        .map_err(|_| tx_slot_unavailable(route.app_id()))?;
-    let result = match client.client() {
-        TxConnection::Sqlite(client) => {
-            #[cfg(test)]
-            tests::record_sqlite_tx_route();
-            let typed = client.query_typed_internal(sql, params).await?;
-            Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(
-                &typed,
-            ))
-        }
-        TxConnection::Postgres(_) => Err(DbError::internal(
-            "db: sqlite backend active with postgres transaction connection",
-        )),
-    };
-    result
+    crate::transaction::driver::execute_operation(route.app_id(), async {
+        let client = crate::tx_lanes::TxClientSlotGuard::take(route.app_id())
+            .map_err(|_| tx_slot_unavailable(route.app_id()))?;
+        let result = match client.client() {
+            TxConnection::Sqlite(client) => {
+                #[cfg(test)]
+                tests::record_sqlite_tx_route();
+                let typed = client.query_typed_internal(sql, params).await?;
+                Ok(crate::backend::sqlite::row_json::typed_rows_to_json_value(
+                    &typed,
+                ))
+            }
+            TxConnection::Postgres(_) => Err(DbError::internal(
+                "db: sqlite backend active with postgres transaction connection",
+            )),
+        };
+        result
+    })
+    .await
 }
 
 /// Execute a mutation, then emit a [`crate::broker::emit_local`]
@@ -690,8 +687,8 @@ pub fn clear_pending_emits(app_id: &str) {
 #[cfg(any(test, feature = "test-helpers"))]
 pub fn ambient_route_for_tests(app_id: &str, backend: crate::backend::BackendHandle) -> TxRoute {
     let dialect = match &backend {
-        crate::backend::BackendHandle::Postgres(_) => crate::query::SqlDialect::Postgres,
-        crate::backend::BackendHandle::Sqlite(_) => crate::query::SqlDialect::Sqlite,
+        crate::backend::BackendHandle::Postgres(_) => crate::compile::SqlDialect::Postgres,
+        crate::backend::BackendHandle::Sqlite(_) => crate::compile::SqlDialect::Sqlite,
     };
     let captured = if crate::tx_lanes::with(|l| l.has_tx_for(app_id)) {
         crate::tx_route::CapturedRoute::tx_for_tests(app_id, dialect)
@@ -861,19 +858,19 @@ mod tests {
             let derived = ambient_route_for_tests("app_route_dialect", handle.clone());
             assert_eq!(
                 derived.dialect(),
-                crate::query::SqlDialect::Sqlite,
+                crate::compile::SqlDialect::Sqlite,
                 "a route bound to a SQLite handle must not claim PostgreSQL: \
                  every builder it reaches would emit the wrong SQL",
             );
 
             let stated = crate::tx_route::CapturedRoute::pool_for_tests(
                 "app_route_dialect",
-                crate::query::SqlDialect::Postgres,
+                crate::compile::SqlDialect::Postgres,
             )
             .bind(handle);
             assert_eq!(
                 stated.dialect(),
-                crate::query::SqlDialect::Postgres,
+                crate::compile::SqlDialect::Postgres,
                 "the dialect is the constructor's input; `bind` must not \
                  re-derive it from the handle",
             );
@@ -1182,8 +1179,11 @@ mod tests {
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()), crate::encryption::LocalKeySource::env_var())
-                    .expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(
+                    PathBuf::from(dir.path()),
+                    crate::encryption::LocalKeySource::env_var(),
+                )
+                .expect("open sqlite backend"),
             );
             let handle = BackendHandle::Sqlite(Rc::clone(&backend));
             let sub = crate::broker::subscribe(
@@ -1198,7 +1198,8 @@ mod tests {
                 /* in_tx */ false,
                 // The SQLite arm: its commit hook publishes, so the local emit
                 // must short-circuit. This is the one site that passes `true`.
-                /* backend_publishes */ true,
+                /* backend_publishes */
+                true,
                 "messages",
                 ChangeOp::Insert,
             );
@@ -1255,8 +1256,11 @@ mod tests {
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()), crate::encryption::LocalKeySource::env_var())
-                    .expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(
+                    PathBuf::from(dir.path()),
+                    crate::encryption::LocalKeySource::env_var(),
+                )
+                .expect("open sqlite backend"),
             );
             backend
                 .attach_app_file("app_exec")
@@ -1279,18 +1283,17 @@ mod tests {
             // engine cannot name it any more.
             let handle = BackendHandle::Sqlite(Rc::clone(&backend));
 
-            let client = backend
-                .acquire_dedicated_client("app_exec")
-                .await
-                .expect("acquire tx client");
-            backend
-                .client_exec(&client, "BEGIN", &[])
-                .await
-                .expect("BEGIN");
-            crate::tx_lanes::with_mut(|l| {
-                let prev = l.install_tx_client("app_exec", TxConnection::Sqlite(client));
-                assert!(prev.is_none(), "tx slot should start empty");
-            });
+            let admission = crate::transaction::TxAdmission::acquire("app_exec".to_owned()).await;
+            crate::transaction::exec_begin_or_savepoint(
+                false,
+                None,
+                "app_exec",
+                zeroship_data_query_builder::SchemaName::new("app_exec").unwrap(),
+                handle.clone(),
+            )
+            .await
+            .expect("begin through the transaction protocol");
+            admission.handed_to_reducer();
 
             reset_sqlite_route();
             let inserted = exec_mutation(
@@ -1348,13 +1351,10 @@ mod tests {
             );
             assert_eq!(rows[0].get("title").and_then(Value::as_str), Some("tx-row"));
 
-            if let Some(TxConnection::Sqlite(client)) =
-                crate::tx_lanes::with_mut(|l| l.take_tx_client_for("app_exec"))
-            {
-                let _ = client.exec("ROLLBACK", &[]).await;
-            } else {
-                panic!("sqlite tx client should still be parked for cleanup");
-            }
+            assert!(matches!(
+                crate::transaction::exec_settle("app_exec", false, None).await,
+                crate::transaction::SettleOutcome::Ok
+            ));
         });
         reset_world("app_exec");
     }
@@ -1376,8 +1376,11 @@ mod tests {
             let app_id = "00000000-0000-7000-8000-0000000000e5";
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()), crate::encryption::LocalKeySource::env_var())
-                    .expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(
+                    PathBuf::from(dir.path()),
+                    crate::encryption::LocalKeySource::env_var(),
+                )
+                .expect("open sqlite backend"),
             );
             backend
                 .attach_app_file(app_id)
@@ -1504,8 +1507,11 @@ mod tests {
         run(async {
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()), crate::encryption::LocalKeySource::env_var())
-                    .expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(
+                    PathBuf::from(dir.path()),
+                    crate::encryption::LocalKeySource::env_var(),
+                )
+                .expect("open sqlite backend"),
             );
             // The handle is held HERE rather than parked in the adapter's
             // per-isolate context. These tests only ever used that context as a
@@ -1577,8 +1583,11 @@ mod tests {
 
             let dir = tempfile::tempdir().expect("tempdir");
             let backend = Rc::new(
-                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir.path()), crate::encryption::LocalKeySource::env_var())
-                    .expect("open sqlite backend"),
+                crate::backend_selection::new_sqlite_backend(
+                    PathBuf::from(dir.path()),
+                    crate::encryption::LocalKeySource::env_var(),
+                )
+                .expect("open sqlite backend"),
             );
             backend
                 .attach_app_file("app_exec_cancel")
@@ -1609,18 +1618,18 @@ mod tests {
             // engine cannot name it any more.
             let handle = BackendHandle::Sqlite(Rc::clone(&backend));
 
-            let client = backend
-                .acquire_dedicated_client("app_exec_cancel")
-                .await
-                .expect("acquire tx client");
-            backend
-                .client_exec(&client, "BEGIN", &[])
-                .await
-                .expect("BEGIN");
-            crate::tx_lanes::with_mut(|l| {
-                let prev = l.install_tx_client("app_exec_cancel", TxConnection::Sqlite(client));
-                assert!(prev.is_none(), "tx slot should start empty");
-            });
+            let admission =
+                crate::transaction::TxAdmission::acquire("app_exec_cancel".to_owned()).await;
+            crate::transaction::exec_begin_or_savepoint(
+                false,
+                None,
+                "app_exec_cancel",
+                zeroship_data_query_builder::SchemaName::new("app_exec_cancel").unwrap(),
+                handle.clone(),
+            )
+            .await
+            .expect("begin through the transaction protocol");
+            admission.handed_to_reducer();
 
             let gate = backend.arm_next_command_gate_for_tests();
             let spawned_handle = handle.clone();
@@ -1635,8 +1644,9 @@ mod tests {
                 )
                 .await
             });
-            gate.wait_until_blocked()
+            compio::time::timeout(Duration::from_secs(5), gate.wait_until_blocked())
                 .await
+                .expect("the operation must reach the gate")
                 .expect("worker must block on test gate");
             drop(task);
             gate.release();
@@ -1647,6 +1657,11 @@ mod tests {
                 "dropping the in-flight future must restore the tx slot"
             );
 
+            assert!(matches!(
+                crate::transaction::exec_settle("app_exec_cancel", false, None).await,
+                crate::transaction::SettleOutcome::Ok
+            ));
+
             let rows = exec_query(
                 &ambient_route_for_tests("app_exec_cancel", handle.clone()),
                 BuiltQuery {
@@ -1655,19 +1670,11 @@ mod tests {
                 },
             )
             .await
-            .expect("subsequent query must reuse restored tx slot");
+            .expect("subsequent query must work after rollback");
             assert_eq!(
                 rows[0].get("title").and_then(Value::as_str),
                 Some("persisted")
             );
-
-            if let Some(TxConnection::Sqlite(client)) =
-                crate::tx_lanes::with_mut(|l| l.take_tx_client_for("app_exec_cancel"))
-            {
-                let _ = client.exec("ROLLBACK", &[]).await;
-            } else {
-                panic!("sqlite tx client should still be parked for cleanup");
-            }
         });
         reset_world("app_exec_cancel");
     }
@@ -1692,12 +1699,16 @@ mod tests {
 
             let dir_a = tempfile::tempdir().expect("tempdir a");
             let dir_b = tempfile::tempdir().expect("tempdir b");
-            let backend_a =
-                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir_a.path()), crate::encryption::LocalKeySource::env_var())
-                    .expect("open backend a");
-            let backend_b =
-                crate::backend_selection::new_sqlite_backend(PathBuf::from(dir_b.path()), crate::encryption::LocalKeySource::env_var())
-                    .expect("open backend b");
+            let backend_a = crate::backend_selection::new_sqlite_backend(
+                PathBuf::from(dir_a.path()),
+                crate::encryption::LocalKeySource::env_var(),
+            )
+            .expect("open backend a");
+            let backend_b = crate::backend_selection::new_sqlite_backend(
+                PathBuf::from(dir_b.path()),
+                crate::encryption::LocalKeySource::env_var(),
+            )
+            .expect("open backend b");
 
             let _gate = backend_a.arm_next_command_gate_for_tests();
 
@@ -1780,7 +1791,7 @@ mod tests {
             let app_id = "p2c1leak";
             let role = zeroship_core::database_role::per_app_role_name(app_id)
                 .expect("test app role name");
-            let role_ident = crate::query::quote_ident(&role);
+            let role_ident = crate::compile::quote_ident(&role);
 
             // Discover the login role so we can (a) GRANT it membership
             // in the app role (required for SET LOCAL ROLE) and (b)
@@ -1806,7 +1817,7 @@ mod tests {
                     .expect("create app role");
                 c.simple_query(&format!(
                     "GRANT {role_ident} TO {}",
-                    crate::query::quote_ident(&login_user)
+                    crate::compile::quote_ident(&login_user)
                 ))
                 .await
                 .expect("grant membership");
@@ -1820,7 +1831,7 @@ mod tests {
                 Duration::from_millis(100),
                 crate::backend::pg_autocommit::roled_rows(
                     &pool,
-                    &zeroship_schema::SchemaName::new(app_id).expect("fixture schema"),
+                    &zeroship_data_query_builder::SchemaName::new(app_id).expect("fixture schema"),
                     "SELECT pg_sleep(1)",
                     &[],
                 ),
@@ -1864,7 +1875,7 @@ mod tests {
             let _ = c
                 .simple_query(&format!(
                     "REVOKE {role_ident} FROM {}",
-                    crate::query::quote_ident(&login_user)
+                    crate::compile::quote_ident(&login_user)
                 ))
                 .await;
             let _ = c

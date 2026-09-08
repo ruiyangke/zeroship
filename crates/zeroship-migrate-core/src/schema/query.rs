@@ -99,10 +99,10 @@ pub struct BuiltQuery {
 /// kept this move from dragging `render::declarative` and `render::lower` (and
 /// therefore the whole engine) into the leaf.
 pub use zeroship_migrate_backend::schema::{
-    MAX_MASKED_FIELD_NAME_BYTES, RAW_COLUMN_PREFIX, SchemaRenderer, char_len,
-    decimal_precision_scale, def_case_sensitive, encryption_sentinel_body_for_field,
+    char_len, decimal_precision_scale, def_case_sensitive, encryption_sentinel_body_for_field,
     is_schema_metadata_key, mask_sentinel_for_field, max_length, raw_column_for_field,
-    raw_column_name, string_enum_values,
+    raw_column_name, string_enum_values, SchemaRenderer, MAX_MASKED_FIELD_NAME_BYTES,
+    RAW_COLUMN_PREFIX,
 };
 
 /// The schema renderer for a dialect.
@@ -268,7 +268,7 @@ mod schema_renderer_tests {
  * next person to add encrypted-column support would have built on top of it.
  */
 
-/// Platform-owned collection prefixes mirrored by `zeroship-schema`.
+/// Platform-owned collection prefixes mirrored by `zeroship-data-query-builder`.
 ///
 /// This is public only so the downstream parity suite can enforce exact
 /// agreement without adding a production dependency across the engine boundary.
@@ -3199,10 +3199,7 @@ columns = [
             build_create_table_with_fks("app1", "posts", &schema, &FkEmission::Inline).unwrap();
         // Bytewise TEXT column for the FK, matching the comparison domain of
         // the injected typed-id primary key.
-        assert!(
-            sql.contains("\"authorId\" TEXT COLLATE \"C\""),
-            "{sql}"
-        );
+        assert!(sql.contains("\"authorId\" TEXT COLLATE \"C\""), "{sql}");
         // Inline FK clause with SQL/Postgres defaults omitted.
         assert!(sql.contains("CONSTRAINT \"posts_authorId_fkey\""), "{sql}");
         assert!(sql.contains("FOREIGN KEY (\"authorId\")"), "{sql}");
@@ -3423,10 +3420,7 @@ columns = [
                 .unwrap();
         // FK is deferred - column still present but no FOREIGN KEY clause.
         // The ref storage domain matches the injected id's bytewise collation.
-        assert!(
-            sql.contains("\"authorId\" TEXT COLLATE \"C\""),
-            "{sql}"
-        );
+        assert!(sql.contains("\"authorId\" TEXT COLLATE \"C\""), "{sql}");
         assert!(!sql.contains("FOREIGN KEY"), "FK should be deferred: {sql}");
     }
 
@@ -4051,7 +4045,7 @@ columns = [
     }
 
     /// `__zero_migrate` is NOT reserved, and `__zeroship` is. The engine half of
-    /// the pair; `zeroship-schema` carries the same assertion, and the slice pin
+    /// the pair; `zeroship-data-query-builder` carries the same assertion, and the slice pin
     /// keeps the two lists identical.
     ///
     /// This asserted the opposite until 2026-09-07. The prefix fenced an empty
@@ -4061,14 +4055,22 @@ columns = [
     #[test]
     fn the_collection_fence_reserves_zeroship_and_not_zero_migrate() {
         let mut ruled_on = 0_usize;
-        for name in ["__zero_migrate_migrations", "__ZERO_MIGRATE_audit", "__zero_migrate"] {
+        for name in [
+            "__zero_migrate_migrations",
+            "__ZERO_MIGRATE_audit",
+            "__zero_migrate",
+        ] {
             assert!(
                 validate_collection(crate::test_fixtures::VENDORS, name).is_ok(),
                 "'{name}' is refused, but nothing is named with that prefix"
             );
             ruled_on += 1;
         }
-        for name in ["__zeroship_schema_migrations", "__ZEROSHIP_audit", "__zeroship"] {
+        for name in [
+            "__zeroship_schema_migrations",
+            "__ZEROSHIP_audit",
+            "__zeroship",
+        ] {
             let err = validate_collection(crate::test_fixtures::VENDORS, name).unwrap_err();
             match err {
                 QueryError::InvalidCollection(msg) => assert!(
@@ -4891,14 +4893,12 @@ columns = [
         assert!(inject.columns().is_empty());
         assert!(inject.indexes().is_empty());
         assert!(inject.primary_key().is_none());
-        assert!(
-            super::validate_field_name_for_declaration(
-                crate::test_fixtures::VENDORS,
-                "updated_at",
-                &inject
-            )
-            .is_ok()
-        );
+        assert!(super::validate_field_name_for_declaration(
+            crate::test_fixtures::VENDORS,
+            "updated_at",
+            &inject
+        )
+        .is_ok());
 
         let sql = super::build_create_table_with_fks_for_dialect(
             crate::test_fixtures::VENDORS,

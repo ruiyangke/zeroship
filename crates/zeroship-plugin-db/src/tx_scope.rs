@@ -158,7 +158,7 @@ pub(crate) fn leave(scope: &mut v8::PinScope<'_, '_>, prev: Option<v8::Global<v8
 /// possible at all - the eager `plan_*` half runs before anything is opened.
 /// Pinned by `tx_route`'s
 /// `a_configured_sqlite_dialect_is_captured_without_an_open_backend`.
-pub(crate) fn configured_dialect() -> crate::query::SqlDialect {
+pub(crate) fn configured_dialect() -> crate::compile::SqlDialect {
     crate::context::with(|c| c.sql_dialect())
 }
 
@@ -281,9 +281,9 @@ pub(crate) fn capture_route(
 /// It is the same call the V8 dispatcher makes on their behalf in production.
 pub async fn ensure_backend() -> Result<crate::backend::BackendHandle, DbError> {
     if crate::context::with(|c| c.backend().is_none()) {
-        crate::init_pool_async()
-            .await
-            .map_err(|e| DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}")))?;
+        crate::init_pool_async().await.map_err(|e| {
+            DbError::config("lazy_init_failed", format!("db: lazy init failed: {e}"))
+        })?;
     }
 
     crate::context::with(|c| c.backend())
@@ -364,7 +364,7 @@ mod tests {
         zeroship_data_core::binding::DbBinding::new(
             "app_a",
             zeroship_data_core::binding::COLD_START_DEPLOY_TOKEN,
-            zeroship_schema::SchemaName::new("app_a").expect("fixture schema name"),
+            zeroship_data_query_builder::SchemaName::new("app_a").expect("fixture schema name"),
         )
     }
 
@@ -379,7 +379,7 @@ mod tests {
         );
         assert_eq!(
             super::capture_route(scope, &app_a_binding()).dialect(),
-            crate::query::SqlDialect::Sqlite
+            crate::compile::SqlDialect::Sqlite
         );
         crate::reset_context_for_tests();
     }
@@ -415,7 +415,7 @@ mod tests {
         let other = zeroship_data_core::binding::DbBinding::new(
             "app_other",
             zeroship_data_core::binding::COLD_START_DEPLOY_TOKEN,
-            zeroship_schema::SchemaName::new("app_other").expect("fixture schema name"),
+            zeroship_data_query_builder::SchemaName::new("app_other").expect("fixture schema name"),
         );
         assert!(super::capture_route(scope, &other).in_tx());
         super::leave(scope, prev);

@@ -41,8 +41,8 @@ use serde_json::Value;
 
 use crate::pg_error;
 use crate::pg_session_sql::autocommit_local_session_setup_sql;
-use zeroship_schema::SchemaName;
 use zeroship_data_core::error::DbError;
+use zeroship_data_query_builder::SchemaName;
 
 // `ScalarRead` is a shared return type - SQLite returns it too, now that the
 // unmask reads dispatch through `BackendHandle` - so it is data-core's, not the
@@ -93,7 +93,10 @@ pub async fn roled_rows(
     let setup_sql = autocommit_local_session_setup_sql(schema)?;
     tx.simple_query(&setup_sql).await.map_err(|e| {
         let mut classified = pg_error::classify_pg_per_app_session_setup(&e, schema);
-        zeroship_data_core::error::prefix_message(classified.error_mut(), "db: per-app session setup: ");
+        zeroship_data_core::error::prefix_message(
+            classified.error_mut(),
+            "db: per-app session setup: ",
+        );
         classified.into_db_error()
     })?;
 

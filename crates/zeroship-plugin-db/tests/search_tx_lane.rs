@@ -51,13 +51,20 @@
 //!     --test search_tx_lane -- --test-threads=1
 //! ```
 
+#[path = "support/schema.rs"]
+mod schema_fixture;
+#[allow(unused_imports)]
+use schema_fixture::{fixture_table_sql, fixture_table_sql_for};
+#[allow(unused_imports)]
+use zeroship_migrate::schema::query::FkEmission;
+
 use std::rc::Rc;
 
 use compio_postgres::{NoTls, Pool};
 use serde_json::{json, Value};
 use zeroship_data_core::binding::DbBinding;
 use zeroship_data_core::error::DbError;
-use zeroship_plugin_db::query::{build_create_table_with_fks, BuiltQuery, FkEmission, SqlDialect};
+use zeroship_plugin_db::compile::{BuiltQuery, SqlDialect};
 use zeroship_plugin_db::tx_route::{CapturedRoute, TxRoute};
 
 #[path = "support/mod.rs"]
@@ -80,7 +87,9 @@ async fn require_pg() -> String {
             drop(client);
             url
         }
-        Err(e) => panic!("the search-tx-lane suite requires a reachable server at PG_TEST_URL: {e}"),
+        Err(e) => {
+            panic!("the search-tx-lane suite requires a reachable server at PG_TEST_URL: {e}")
+        }
     }
 }
 
@@ -116,8 +125,13 @@ async fn fixture(pool: &Rc<Pool>, url: &str, app: &str, collection: &str, schema
     pool.execute(&format!("CREATE SCHEMA \"{app}\""), &[])
         .await
         .unwrap();
-    let ddl = build_create_table_with_fks(&zeroship_schema::SchemaName::new(app).expect("fixture schema name"), collection, &schema, &FkEmission::Inline)
-        .expect("the platform's own CREATE TABLE emitter");
+    let ddl = fixture_table_sql(
+        &zeroship_data_query_builder::SchemaName::new(app).expect("fixture schema name"),
+        collection,
+        &schema,
+        &FkEmission::Inline,
+    )
+    .expect("the platform's own CREATE TABLE emitter");
     pool.batch_execute(&ddl)
         .await
         .unwrap_or_else(|e| panic!("emitted DDL must apply: {e}\n{ddl}"));
@@ -158,15 +172,9 @@ async fn find_on(
 ) -> Result<Vec<Value>, DbError> {
     let binding = DbBinding::cold_start(app);
     let plan = zeroship_plugin_db::crud::plan_find(&binding, collection, &filter, &json!({}));
-    zeroship_plugin_db::crud::run_find(
-        binding,
-        collection.to_string(),
-        route,
-        filter,
-        plan,
-    )
-    .await
-    .map(|r| r.rows)
+    zeroship_plugin_db::crud::run_find(binding, collection.to_string(), route, filter, plan)
+        .await
+        .map(|r| r.rows)
 }
 
 /// Run the real `plan_search` + `run_search` pair on `route`.
@@ -238,7 +246,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
     )
     .await;
 
-    zeroship_plugin_db::install_tx_marker_for_tests(app, &url).await;
+    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
 
     let inserted = zeroship_plugin_db::crud::run_insert(
         DbBinding::cold_start(app),
@@ -280,7 +288,7 @@ async fn a_vector_search_inside_a_transaction_sees_the_row_that_transaction_inse
     // ---- SUBJECT: the same search on the transaction's own lane.
     let inside = search_on(tx_route(app).await, app, coll, args).await;
 
-    zeroship_plugin_db::uninstall_tx_marker_for_tests(app).await;
+    zeroship_plugin_db::rollback_transaction_for_tests(app).await;
 
     let inside = inside.unwrap_or_else(|e| {
         panic!(
@@ -344,7 +352,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
     )
     .await;
 
-    zeroship_plugin_db::install_tx_marker_for_tests(app, &url).await;
+    zeroship_plugin_db::begin_transaction_for_tests(app, &url).await;
 
     let id = "plc_in_the_transaction".to_string();
     zeroship_plugin_db::exec_query_for_tests(
@@ -395,7 +403,7 @@ async fn a_spatial_near_inside_a_transaction_sees_the_row_that_transaction_inser
     // ---- SUBJECT: the same near on the transaction's own lane.
     let inside = near_on(tx_route(app).await, app, coll, args).await;
 
-    zeroship_plugin_db::uninstall_tx_marker_for_tests(app).await;
+    zeroship_plugin_db::rollback_transaction_for_tests(app).await;
 
     let inside = inside.unwrap_or_else(|e| {
         panic!(

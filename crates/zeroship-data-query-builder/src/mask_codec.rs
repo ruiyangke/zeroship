@@ -1,79 +1,13 @@
-//! The mask-sentinel CODEC — the contract between the schema layer
-//! (which *writes* the sentinel into DDL) and the data plane (which
-//! *reads* it back at runtime to drive the mask read-pass).
+//! Catalog sentinel codec consumed by the ORM's masking and encryption passes.
 //!
-//! Relocated out of `zeroship_plugin_db::crud::mask_backfill` per the
-//! schema-authority split (`docs/archive/proposals/2026-06-18-schema-authority-drizzle-model-design.md`
-//! §5): the *codec* (build/parse the `zero-migrate:mask:` sentinel string) is a
-//! schema-shape concern and lives here; the backfill *runner*
-//! (`run_mask_backfill` / `run_mask_rewrite`, which execute UPDATE
-//! backfills) stays in plugin-db's data plane.
-//!
-//! The `(MaskKind, Classification)` types this codec round-trips live in
-//! [`crate::diff`] (the schema metadata types). plugin-db's two consumers -
-//! `backend::pg_introspect` and `backend::sqlite` - call this module directly.
-//!
-//! They were once reached through a delegating wrapper at
-//! `zeroship_plugin_db::crud::mask_backfill::parse_mask_sentinel`; that module
-//! was deleted on 2026-09-02 with zero callers, and neither consumer went
-//! through it even then.
-//!
-//! Written `crate::...` until 2026-08-08, which was wrong in two ways once
-//! this module was extracted: `crate` is zeroship-schema, a leaf crate that
-//! does not depend on plugin-db, and `build_mask_sentinel` is not in
-//! plugin-db at all - it is defined below, in this file.
-//!
-//! # Why the prefixes are the migration engine's and not this crate's
-//!
-//! This codec is a READER of a wire the MIGRATION ENGINE writes. Every creator
-//! table on the platform is created by `zeroship-migrate-server` (PostgreSQL) or
-//! the dev-tier SQLite apply host, both of which render their DDL through
-//! `zeroship_migrate_backend::mask_codec` - so `zero-migrate:mask:` /
-//! `zero-migrate:enc:` is what is physically on disk. This crate's own DDL
-//! emitter (`crate::query::build_create_table_with_fks`) has no `src` call site
-//! anywhere in the workspace; it is reached only from tests.
-//!
-//! It spelled the two sentinels with a `zs`-branded prefix of its own until
-//! 2026-09-04, and the divergence was not cosmetic: the protection floor
-//! (`zeroship_data_engine::crud::protection_floor`) refuses a write whose
-//! descriptor dropped a protection the live catalog records, and on every
-//! migration-engine-built table it introspected, found no sentinel it
-//! recognised, concluded nothing was protected, and PERMITTED the downgrade it
-//! exists to refuse. Its tests passed because their fixtures built tables with
-//! the emitter above - the suite and production disagreed about how a masked
-//! column is spelled on disk, and the suite was the unrepresentative one.
-//!
-//! The two prefixes are now one wire with one spelling. The engine's parse side
-//! keeps its own copy of this codec (`zeroship-migrate-backend`); the crates are
-//! not related by any type, because their `MaskKind` / `Classification` /
-//! `EncryptionMeta` are separate declarations.
-//!
-//! # What binds them
-//!
-//! The `cross_codec_parity` module at the bottom of this file. It builds with
-//! one crate's emitter and parses with the OTHER crate's parser, in both
-//! directions, for both sentinel families, over the full
-//! `MaskKind x Classification` and `EncryptionMode x WrappedType` corpora, and
-//! it crosses the two backend DISPATCH sites as well as the parsers. It reaches
-//! the engine codec through the test-only `zeroship-migrate-core`
-//! dev-dependency, so it costs no production dependency edge.
-//!
-//! **This block claimed until 2026-09-04 that the binding lived in
-//! `crates/zeroship-plugin-db/tests/mask_flip.rs`.** That test is real and it
-//! does cross the boundary - `fixture_via_the_migration_engine` renders DDL
-//! through `zeroship_migrate::schema::query`, executes it, and compares the
-//! stored column comment against this crate's builder - but it was never the
-//! guard this sentence described. It needs a live `PostgreSQL` and
-//! `--features test-helpers`, so it runs in no ordinary `cargo test`; it
-//! compares two BUILDERS rather than feeding one crate's output to the other's
-//! parser; and it covers a single `(kind, classification)` pair, a single
-//! `EncryptionMeta`, and neither `SQLite` form. It is the end-to-end witness that
-//! the wire survives a real catalog round-trip. `cross_codec_parity` is the
-//! always-run witness that the two spellings are one spelling.
+//! The migration engine writes these sentinels into table definitions. Runtime
+//! introspection reads them to establish storage protection. Cross-codec tests
+//! compare the runtime reader with the migration writer in both directions;
+//! migration crates are test dependencies only.
 
+use crate::catalog::{Classification, EncryptionMeta, MaskKind, WrappedType};
 use crate::descriptors::EncryptionMode;
-use crate::diff::{Classification, EncryptionMeta, MaskKind, WrappedType};
-use crate::error::MaskSentinelError;
+use crate::schema_error::MaskSentinelError;
 
 /// The encryption-sentinel prefix, byte-identical to
 /// `zeroship_migrate_backend::mask_codec::ENC_SENTINEL_PREFIX`.
@@ -427,12 +361,10 @@ mod tests {
 
     #[test]
     fn parse_encryption_sentinel_rejects_missing_prefix() {
-        assert!(
-            parse_encryption_sentinel("randomised:default:string")
-                .unwrap_err()
-                .message()
-                .contains("enc_sentinel_malformed")
-        );
+        assert!(parse_encryption_sentinel("randomised:default:string")
+            .unwrap_err()
+            .message()
+            .contains("enc_sentinel_malformed"));
     }
 
     #[test]
@@ -503,7 +435,7 @@ mod tests {
 /// existing test-only `zeroship-migrate-core` dev-dependency (which re-exports
 /// `zeroship_migrate_backend::mask_codec` at `schema::mask_codec`), so it adds
 /// no production dependency edge; the crates stay separated by the migration
-/// engine boundary exactly as `crate::query`'s identifier parity suite leaves
+/// engine boundary exactly as `crate::compile`'s identifier parity suite leaves
 /// them.
 ///
 /// # What it pins, and what it deliberately does not

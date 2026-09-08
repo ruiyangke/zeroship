@@ -417,7 +417,7 @@ impl SelectBuilder {
 /// rank by, which is a [`crate::SearchCriterion`], not in the statement's
 /// shape: both project a synthetic distance, filter, order by that distance
 /// ascending and bound the result. Today they are two functions
-/// (`crates/zeroship-schema/src/query.rs:4951` and `:5040`) that had drifted
+/// (`crates/zeroship-data-query-builder/src/compile.rs:4951` and `:5040`) that had drifted
 /// into ordering by two different things - the distance *expression* on one and
 /// the output *alias* on the other.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -434,13 +434,21 @@ pub enum DbPlan {
 /// Why a plan was refused.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PlanError {
-    LimitOutOfRange { requested: i64 },
-    OffsetOutOfRange { requested: i64 },
+    LimitOutOfRange {
+        requested: i64,
+    },
+    OffsetOutOfRange {
+        requested: i64,
+    },
     AggregateOutsideHaving,
     GroupByWithRowProjection,
     HavingWithoutAggregate,
-    UngroupedProjectedField { alias: String },
-    UngroupedOrderKey { column: String },
+    UngroupedProjectedField {
+        alias: String,
+    },
+    UngroupedOrderKey {
+        column: String,
+    },
     /// A predicate nested past [`MAX_PREDICATE_DEPTH`]. `position` names which
     /// of the two a read carries, because the same text is legal in one and the
     /// error would otherwise send the reader to the wrong clause.
@@ -450,7 +458,9 @@ pub enum PlanError {
     },
     /// A search's ranking scalar reached a read. Unreachable through
     /// [`Projection::rows`], which refuses it; this is the second fence.
-    SearchScalarInRead { alias: &'static str },
+    SearchScalarInRead {
+        alias: &'static str,
+    },
 }
 
 impl fmt::Display for PlanError {

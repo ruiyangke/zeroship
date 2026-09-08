@@ -74,9 +74,9 @@
 //! Production inner-product workloads run on pgvector through the PG
 //! arm (`vector_ip_ops` opclass).
 
-use zeroship_schema::descriptors::VectorMetric;
 use zeroship_data_core::error::DbError;
-use zeroship_schema::query::quote_ident;
+use zeroship_data_query_builder::compile::quote_ident;
+use zeroship_data_query_builder::descriptors::VectorMetric;
 
 /// Reject [`VectorMetric::InnerProduct`] with a typed `DbError` on
 /// SQLite. The PG arm continues to support all three metrics via
@@ -85,11 +85,10 @@ pub(crate) fn reject_inner_product(metric: VectorMetric) -> Result<(), DbError> 
     if matches!(metric, VectorMetric::InnerProduct) {
         return Err(DbError::Configuration {
             code: "vector_unsupported_metric",
-            message:
-                "db: SQLite vector backend does not support inner-product distance \
+            message: "db: SQLite vector backend does not support inner-product distance \
                  (vec0 supports cosine and l2 only). Use cosine for normalised \
                  embeddings; production inner-product workloads run on pgvector."
-                    .to_string(),
+                .to_string(),
             hint: Some(
                 "switch the column to { metric: 'cosine' } or run the app on the \
                  Postgres backend (pgvector)"
@@ -126,8 +125,11 @@ pub(crate) fn build_vector_search_sql(
     let qvtab = quote_ident(&vec_table_name(collection, column));
     let qcol = quote_ident(column);
     let select_expr =
-        zeroship_schema::query::build_masked_aware_select_expr_for_table_alias(schema_hint, "t")
-            .map_err(DbError::from)?;
+        zeroship_data_query_builder::compile::build_masked_aware_select_expr_for_table_alias(
+            schema_hint,
+            "t",
+        )
+        .map_err(DbError::from)?;
     let extra_filter = if where_expr.is_empty() {
         String::new()
     } else {
@@ -191,16 +193,8 @@ mod tests {
             },
             "embedding": { "type": "vector" }
         });
-        let sql = build_vector_search_sql(
-            "app1",
-            "users",
-            "embedding",
-            "x'0011'",
-            5,
-            "",
-            &schema,
-        )
-        .expect("a declared schema must build");
+        let sql = build_vector_search_sql("app1", "users", "embedding", "x'0011'", 5, "", &schema)
+            .expect("a declared schema must build");
         assert!(
             !sql.starts_with("SELECT t.*"),
             "vector search must not use t.* when masked columns exist: {sql}"
@@ -212,7 +206,9 @@ mod tests {
             "vector search must project the masked column: {sql}"
         );
         assert!(
-            !sql.contains(&zeroship_schema::query::raw_column_name("ssn")),
+            !sql.contains(&zeroship_data_query_builder::compile::raw_column_name(
+                "ssn"
+            )),
             "vector search must never name the raw column: {sql}"
         );
     }

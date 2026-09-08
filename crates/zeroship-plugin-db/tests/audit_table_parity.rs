@@ -30,10 +30,10 @@
 //! is no such crate. `zeroship-data-engine` runs creator code and must not link
 //! the migration engine: privilege follows the PROCESS, so the tier that
 //! executes app JS does not gain a dependency on the tier that changes schema.
-//! Pushing the name down into `zeroship-schema` (the one leaf both sides
+//! Pushing the name down into `zeroship-data-query-builder` (the one leaf both sides
 //! already share) would put a MIGRATION-OWNED relation name in the vendor-
 //! neutral schema authority, and the vendor crates do not depend on it - which
-//! is exactly why `zeroship-schema`'s own `cross_codec_parity` /
+//! is exactly why `zeroship-data-query-builder`'s own `cross_codec_parity` /
 //! `raw_column_parity` modules exist rather than a shared codec.
 //!
 //! So the answer is the same one those modules reached: compare, in the one
@@ -103,7 +103,9 @@ fn the_sqlite_apply_host_creates_the_relation_the_writer_targets() {
     // under the `<app_id>` ATTACH alias, which is why the generator takes the
     // qualifier rather than baking one in.
     let ddl = zeroship_migrate_sqlite::backend::audit_unmask_ddl("main");
-    let create = ddl.first().expect("the SQLite generator emits a CREATE TABLE");
+    let create = ddl
+        .first()
+        .expect("the SQLite generator emits a CREATE TABLE");
     assert!(
         create.contains(&format!(r#""main"."{WRITER}""#)),
         "the SQLite CREATE TABLE does not name the relation the data plane writes \
@@ -138,7 +140,7 @@ fn the_audit_relation_sits_in_a_namespace_a_creator_cannot_declare() {
         "{AUDIT_TABLE} left the reserved platform namespace {RESERVED_PREFIX}",
     );
     assert!(
-        zeroship_schema::query::validate_collection(AUDIT_TABLE).is_err(),
+        zeroship_data_query_builder::compile::validate_collection(AUDIT_TABLE).is_err(),
         "the schema authority now ACCEPTS {AUDIT_TABLE} as a creator collection; a \
          creator could declare the relation their own audit log is written into",
     );
@@ -152,7 +154,7 @@ fn the_audit_relation_sits_in_a_namespace_a_creator_cannot_declare() {
         "the control is the same string as the subject, so it varies nothing",
     );
     assert!(
-        zeroship_schema::query::validate_collection(unreserved).is_ok(),
+        zeroship_data_query_builder::compile::validate_collection(unreserved).is_ok(),
         "the control name {unreserved} is refused too, so the arm above says \
          nothing about the reserved prefix",
     );

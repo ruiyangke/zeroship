@@ -150,7 +150,7 @@ fn register_sqlite_vec_once() {
                     *const rusqlite::ffi::sqlite3_api_routines,
                 ) -> std::os::raw::c_int,
             >(
-                sqlite_vec::sqlite3_vec_init as *const ()
+                sqlite_vec::sqlite3_vec_init as *const (),
             )));
         }
     });
@@ -824,10 +824,7 @@ impl SqliteSession {
         // own" condition this handle exists to produce.
         let lease = Rc::new(TxLease {
             alive: Arc::new(TxLeaseAlive),
-            reservation: self.mint(
-                Lane::Tx(TxLaneId(u32::MAX)),
-                ReservationKind::Transaction,
-            ),
+            reservation: self.mint(Lane::Tx(TxLaneId(u32::MAX)), ReservationKind::Transaction),
             tx: self.tx.clone(),
         });
         SqliteSessionHandle::with_lease(Rc::clone(self), lease)
@@ -1104,10 +1101,8 @@ impl SqliteCancelHandle {
     fn signal(&self) -> CancelIntent {
         let intent = self.reservation.request_cancel();
         if matches!(intent, CancelIntent::Interrupt(_)) {
-            self.interrupts.interrupt(
-                self.reservation.lane(),
-                self.reservation.generation(),
-            );
+            self.interrupts
+                .interrupt(self.reservation.lane(), self.reservation.generation());
         }
         intent
     }
@@ -1246,10 +1241,7 @@ impl SqliteSessionHandle {
     }
 
     /// Run this handle's transaction terminal statement.
-    pub async fn settle(
-        &self,
-        intent: TerminalIntent,
-    ) -> Result<TerminalOutcome, DbError> {
+    pub async fn settle(&self, intent: TerminalIntent) -> Result<TerminalOutcome, DbError> {
         let Some(reservation) = self.tx_reservation() else {
             return Err(DbError::internal(
                 "db: settle called on a SQLite handle that holds no transaction reservation",
@@ -1264,18 +1256,16 @@ impl SqliteSessionHandle {
     /// read PRAGMA values back without reaching into the actor surface.
     #[cfg(feature = "test-helpers")]
     pub async fn query(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
-        self.session.query_on(&self.reservation(), sql, params).await
+        self.session
+            .query_on(&self.reservation(), sql, params)
+            .await
     }
 
     /// Forward a `query_typed` through the underlying session. `pub` under
     /// `test-helpers` so the e2e encrypted-column round-trip can read BLOB
     /// columns as raw bytes rather than the `<N bytes blob>` stringification.
     #[cfg(feature = "test-helpers")]
-    pub async fn query_typed(
-        &self,
-        sql: &str,
-        params: &[&str],
-    ) -> Result<TypedRows, DbError> {
+    pub async fn query_typed(&self, sql: &str, params: &[&str]) -> Result<TypedRows, DbError> {
         self.session
             .query_typed_on(&self.reservation(), sql, params)
             .await
@@ -1286,12 +1276,10 @@ impl SqliteSessionHandle {
     /// Separate symbol from the `cfg(test-helpers)` `query` above so the
     /// production `crate::crud::unmask::dispatch_unmask` path can reach the
     /// session without forcing the feature on default builds.
-    pub async fn query_internal(
-        &self,
-        sql: &str,
-        params: &[&str],
-    ) -> Result<Vec<Row>, DbError> {
-        self.session.query_on(&self.reservation(), sql, params).await
+    pub async fn query_internal(&self, sql: &str, params: &[&str]) -> Result<Vec<Row>, DbError> {
+        self.session
+            .query_on(&self.reservation(), sql, params)
+            .await
     }
 
     /// Crate-private `query_typed` counterpart for the unmask RPC dispatch
@@ -1823,9 +1811,8 @@ impl Actor {
                     params,
                     reply,
                 } => {
-                    let result = self.run_data(&reservation, &sql, |conn| {
-                        run_exec(conn, &sql, &params)
-                    });
+                    let result =
+                        self.run_data(&reservation, &sql, |conn| run_exec(conn, &sql, &params));
                     let _ = reply.send(result);
                 }
                 Command::Query {
@@ -1834,9 +1821,8 @@ impl Actor {
                     params,
                     reply,
                 } => {
-                    let result = self.run_data(&reservation, &sql, |conn| {
-                        run_query(conn, &sql, &params)
-                    });
+                    let result =
+                        self.run_data(&reservation, &sql, |conn| run_query(conn, &sql, &params));
                     let _ = reply.send(result);
                 }
                 Command::QueryTyped {
@@ -1900,11 +1886,7 @@ impl Actor {
     /// Whatever the previous binding left open is rolled back here, not merely
     /// on `Release`: a lease dropped without settling, or a `Release` lost to a
     /// full queue, must not leak its transaction into the next reservation.
-    fn run_reserve(
-        &mut self,
-        reservation: &Arc<Reservation>,
-        app_id: &str,
-    ) -> Result<(), DbError> {
+    fn run_reserve(&mut self, reservation: &Arc<Reservation>, app_id: &str) -> Result<(), DbError> {
         let Some(id) = reservation.lane().tx_id() else {
             return Err(DbError::internal(
                 "sqlite actor: Reserve names the autocommit lane, which is never reserved",
@@ -2342,7 +2324,15 @@ fn cancelled_before_start(reservation: &Reservation) -> DbError {
 /// wrap and keeps the direction of every mistake the same.
 fn permits_explicit_transaction(sql: &str) -> bool {
     const REFUSED: &[&str] = &[
-        "PRAGMA", "VACUUM", "ATTACH", "DETACH", "BEGIN", "COMMIT", "END", "ROLLBACK", "SAVEPOINT",
+        "PRAGMA",
+        "VACUUM",
+        "ATTACH",
+        "DETACH",
+        "BEGIN",
+        "COMMIT",
+        "END",
+        "ROLLBACK",
+        "SAVEPOINT",
         "RELEASE",
     ];
     sql.split(';')
@@ -2394,67 +2384,24 @@ fn run_attach(conn: &Connection, app_id: &str, db_path: &str) -> Result<(), DbEr
 }
 
 fn run_exec(conn: &Connection, sql: &str, params: &[String]) -> Result<u64, RunError> {
-    // The param vector carries an optional encrypted-column side-channel: a
-    // value tagged with [`zeroship_schema::query::SQLITE_BINARY_BIND_PREFIX`] is
-    // base64-decoded to raw bytes and bound as BLOB instead of TEXT. The PG arm
-    // never produces this prefix; non-encrypted params travel as plain `String`
-    // on both arms.
-    let decoded = decode_blob_params(params).map_err(RunError::Db)?;
-    let refs: Vec<&dyn rusqlite::ToSql> = decoded.iter().map(BindParam::as_to_sql).collect();
+    // Text values stay text. Binary conversion is explicit in the SQL.
+    let refs: Vec<&dyn rusqlite::ToSql> = params
+        .iter()
+        .map(|value| value as &dyn rusqlite::ToSql)
+        .collect();
     let n = conn
         .execute(sql, refs.as_slice())
         .map_err(RunError::Sqlite)?;
     Ok(n as u64)
 }
 
-/// Typed bind value. Either a borrowed `&str` (the TEXT default) or an owned
-/// `Vec<u8>` produced by base64-decoding a
-/// [`zeroship_schema::query::SQLITE_BINARY_BIND_PREFIX`]-tagged param.
-enum BindParam<'a> {
-    /// Plain TEXT bind - borrows from the caller's `Vec<String>`.
-    Text(&'a str),
-    /// BLOB bind - owns the decoded bytes.
-    Blob(Vec<u8>),
-}
-
-impl BindParam<'_> {
-    fn as_to_sql(&self) -> &dyn rusqlite::ToSql {
-        match self {
-            Self::Text(s) => s as &dyn rusqlite::ToSql,
-            Self::Blob(v) => v as &dyn rusqlite::ToSql,
-        }
-    }
-}
-
-/// Scan the param vector for encrypted-column side-channel markers and produce
-/// a typed bind list.
-fn decode_blob_params(params: &[String]) -> Result<Vec<BindParam<'_>>, DbError> {
-    use base64::Engine as _;
-    let prefix = zeroship_schema::query::SQLITE_BINARY_BIND_PREFIX;
-    let mut out = Vec::with_capacity(params.len());
-    for p in params {
-        match p.strip_prefix(prefix) {
-            Some(b64) => {
-                let bytes = base64::engine::general_purpose::STANDARD
-                    .decode(b64)
-                    .map_err(|e| {
-                        DbError::internal(format!(
-                            "sqlite session: encrypted-column param is not valid base64: {e}"
-                        ))
-                    })?;
-                out.push(BindParam::Blob(bytes));
-            }
-            None => out.push(BindParam::Text(p.as_str())),
-        }
-    }
-    Ok(out)
-}
-
 fn run_query(conn: &Connection, sql: &str, params: &[String]) -> Result<Vec<Row>, RunError> {
     let mut stmt = conn.prepare(sql).map_err(RunError::Sqlite)?;
     let column_count = stmt.column_count();
-    let decoded = decode_blob_params(params).map_err(RunError::Db)?;
-    let refs: Vec<&dyn rusqlite::ToSql> = decoded.iter().map(BindParam::as_to_sql).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = params
+        .iter()
+        .map(|value| value as &dyn rusqlite::ToSql)
+        .collect();
     let mut rows = stmt.query(refs.as_slice()).map_err(RunError::Sqlite)?;
     let mut out = Vec::<Row>::new();
     while let Some(row) = rows.next().map_err(RunError::Sqlite)? {
@@ -2503,11 +2450,7 @@ fn run_query(conn: &Connection, sql: &str, params: &[String]) -> Result<Vec<Row>
 /// Typed row materialisation - the vector path's row decoder. Preserves
 /// SQLite's storage-class discriminator so a BLOB column reaches the caller as
 /// `Vec<u8>` rather than a placeholder string.
-fn run_query_typed(
-    conn: &Connection,
-    sql: &str,
-    params: &[String],
-) -> Result<TypedRows, RunError> {
+fn run_query_typed(conn: &Connection, sql: &str, params: &[String]) -> Result<TypedRows, RunError> {
     let mut stmt = conn.prepare(sql).map_err(RunError::Sqlite)?;
     let column_count = stmt.column_count();
     // `column_names` borrows from the statement; copy to owned `String` BEFORE
@@ -2515,8 +2458,10 @@ fn run_query_typed(
     let columns: Vec<String> = (0..column_count)
         .map(|i| stmt.column_name(i).unwrap_or("").to_string())
         .collect();
-    let decoded = decode_blob_params(params).map_err(RunError::Db)?;
-    let refs: Vec<&dyn rusqlite::ToSql> = decoded.iter().map(BindParam::as_to_sql).collect();
+    let refs: Vec<&dyn rusqlite::ToSql> = params
+        .iter()
+        .map(|value| value as &dyn rusqlite::ToSql)
+        .collect();
     let mut rows = stmt.query(refs.as_slice()).map_err(RunError::Sqlite)?;
     let mut out = Vec::<Vec<TypedCell>>::new();
     while let Some(row) = rows.next().map_err(RunError::Sqlite)? {
@@ -2546,10 +2491,7 @@ fn run_query_typed(
         }
         out.push(cells);
     }
-    Ok(TypedRows {
-        columns,
-        rows: out,
-    })
+    Ok(TypedRows { columns, rows: out })
 }
 
 /// Worker body for [`Command::VacuumInto`].
@@ -2598,18 +2540,17 @@ fn run_reattach_file(
     let escaped_alias = app_id.replace('"', "\"\"");
     let detach_sql = format!("DETACH DATABASE \"{escaped_alias}\"");
     let escaped_live = live_path.replace('\'', "''");
-    let attach_live_sql =
-        format!("ATTACH DATABASE 'file:{escaped_live}' AS \"{escaped_alias}\"");
+    let attach_live_sql = format!("ATTACH DATABASE 'file:{escaped_live}' AS \"{escaped_alias}\"");
 
     // Step 1 - DETACH the alias on both connections.
-    op_conn.execute_batch(&detach_sql).map_err(|e| {
-        DbError::Internal {
+    op_conn
+        .execute_batch(&detach_sql)
+        .map_err(|e| DbError::Internal {
             message: format!(
                 "ReattachFile: DETACH \"{app_id}\" on op_conn failed (live file untouched): {}",
                 from_sqlite(e)
             ),
-        }
-    })?;
+        })?;
     // `tx_conn` is `None` when this app has no transaction connection open -
     // the common case, since a lane exists only after the app's first
     // `db.transaction()`. There is then nothing to detach and nothing to
@@ -2652,8 +2593,8 @@ fn run_reattach_file(
         None => vec![(op_conn, "op_conn")],
     };
     for (conn, name) in targets {
-        conn.execute_batch(&attach_live_sql).map_err(|e| {
-            DbError::Internal {
+        conn.execute_batch(&attach_live_sql)
+            .map_err(|e| DbError::Internal {
                 message: format!(
                     "ReattachFile: ATTACH new file as \"{app_id}\" on {name} failed AFTER \
                      rename - the renamed snapshot is now the live file but that connection \
@@ -2661,8 +2602,7 @@ fn run_reattach_file(
                      before the session can serve it again. Underlying error: {}",
                     from_sqlite(e)
                 ),
-            }
-        })?;
+            })?;
     }
 
     Ok(())
@@ -2680,7 +2620,8 @@ mod tests {
 
     fn count_rows(conn: &Connection, alias_or_main: &str, table: &str) -> i64 {
         let sql = format!("SELECT COUNT(*) FROM {alias_or_main}.{table}");
-        conn.query_row(&sql, [], |row| row.get::<_, i64>(0)).unwrap()
+        conn.query_row(&sql, [], |row| row.get::<_, i64>(0))
+            .unwrap()
     }
 
     #[test]
@@ -2769,10 +2710,8 @@ mod tests {
         }
         {
             let tmp = Connection::open(&temp_path).unwrap();
-            tmp.execute_batch(
-                "CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (10), (20), (30);",
-            )
-            .unwrap();
+            tmp.execute_batch("CREATE TABLE t (x INTEGER); INSERT INTO t VALUES (10), (20), (30);")
+                .unwrap();
         }
 
         let op = Connection::open_in_memory().unwrap();
@@ -2835,7 +2774,8 @@ mod tests {
     #[test]
     fn run_query_rejects_blob_cells_on_untyped_path() {
         let conn = Connection::open_in_memory().unwrap();
-        conn.execute_batch("CREATE TABLE t (payload BLOB);").unwrap();
+        conn.execute_batch("CREATE TABLE t (payload BLOB);")
+            .unwrap();
         conn.execute("INSERT INTO t (payload) VALUES (X'0102')", [])
             .unwrap();
 

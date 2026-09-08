@@ -59,12 +59,12 @@ export function searchCollection<S>(
   trackCollectionAccess(self._name);
   return self._run(async () => {
     const nativeArgs: {
-      vector?: number[];
+      vector: number[];
       k?: number;
       metric?: VectorMetric;
       column?: string;
       filter?: ZeroshipDbFilter;
-    } = {};
+    } = { vector: args.vector };
     if ("vector" in args && args.vector !== undefined) {
       if (!Array.isArray(args.vector)) {
         throw new ValidationError({

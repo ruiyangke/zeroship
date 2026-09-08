@@ -61,8 +61,8 @@
 /// operation on an encrypted column.
 ///
 /// `row_pk_bytes` is `Some(bytes)` in
-/// [`zeroship_schema::descriptors::EncryptionMode::Randomised`] (Camp A binding),
-/// `None` in [`zeroship_schema::descriptors::EncryptionMode::Deterministic`]. The
+/// [`zeroship_data_query_builder::descriptors::EncryptionMode::Randomised`] (Camp A binding),
+/// `None` in [`zeroship_data_query_builder::descriptors::EncryptionMode::Deterministic`]. The
 /// caller is responsible for choosing the mode; this function just
 /// serialises the result. See the module-level docs for the
 /// rationale.
@@ -72,11 +72,7 @@
 /// "empty pk" is not a supported state in plugin-db (typed_id PKs are
 /// minted SDK-side and always non-empty).
 #[must_use]
-pub fn canonical_aad(
-    collection: &str,
-    column: &str,
-    row_pk_bytes: Option<&[u8]>,
-) -> Vec<u8> {
+pub fn canonical_aad(collection: &str, column: &str, row_pk_bytes: Option<&[u8]>) -> Vec<u8> {
     // Pre-allocate enough for typical names (collection ~16B, column
     // ~16B, pk ~32B + three length prefixes). Over-allocation is
     // cheap; the helper runs once per encrypt/decrypt of a column
@@ -197,6 +193,9 @@ mod tests {
     fn aad_binds_wire_version_db14() {
         let aad = canonical_aad("users", "ssn", None);
         // First length-prefixed segment is the 1-byte wire version.
-        assert_eq!(&aad[..5], &[0, 0, 0, 1, super::super::wire::WIRE_VERSION_V1]);
+        assert_eq!(
+            &aad[..5],
+            &[0, 0, 0, 1, super::super::wire::WIRE_VERSION_V1]
+        );
     }
 }

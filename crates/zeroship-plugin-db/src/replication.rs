@@ -34,7 +34,7 @@ use sha2::{Digest, Sha256};
 use zeroship_core::replication_names::{self, ReplicationNameError};
 
 use crate::backend::pg_error;
-use zeroship_data_core::error::{DbError, first_row_or_internal, prefix_message};
+use zeroship_data_core::error::{first_row_or_internal, prefix_message, DbError};
 
 /// Stable prefix used by every C1 Postgres object (publication, slot).
 /// Picked deliberately short (4 chars + `_`) so the watchdog query's
@@ -669,7 +669,7 @@ mod tests {
 
         // The schema reference still preserves original case via quote_ident
         // (the same function build_create_schema uses) — defense-in-depth.
-        assert_eq!(crate::query::quote_ident("MyApp"), "\"MyApp\"");
+        assert_eq!(crate::compile::quote_ident("MyApp"), "\"MyApp\"");
     }
 
     #[test]

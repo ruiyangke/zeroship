@@ -73,8 +73,8 @@
 //!   actually ships, which is what catches a production caller of anything
 //!   still gated.
 
-use zeroship_schema::descriptors::{GeoPoint, VectorMetric};
-use zeroship_schema::query::SqlDialect;
+use zeroship_data_query_builder::compile::SqlDialect;
+use zeroship_data_query_builder::descriptors::{GeoPoint, VectorMetric};
 
 use crate::binding::DbBinding;
 use crate::capability::{LockScope, SnapshotHandle, SnapshotOpts};
@@ -139,22 +139,9 @@ pub trait SqlExecutor: 'static {
     /// Execute a parameterless, possibly multi-statement DDL script
     /// against the pool.
     ///
-    /// CREATE TABLE emission bundles the table definition with its
-    /// implicit system-field indexes (and, on PG, `COMMENT ON COLUMN`
-    /// mask sentinels) into one `;`-separated script — see
-    /// [`zeroship_schema::query::build_create_table_with_fks_for_dialect`].
-    /// (That path read `crate::query::` and resolved to nothing until
-    /// 2026-09-04: this crate has no `query` module, and the link is a leftover
-    /// from when these traits lived in `zeroship-plugin-db`. Ungating the
-    /// member is what put it in front of `tests/run_doc_gate.sh` - the same
-    /// thing that happened to `SchemaIntrospect`'s two `crate::diff::` links
-    /// the day before.) The
-    /// Postgres extended/prepared protocol used by [`Self::pool_exec`]
-    /// (`query_text_params` issues `Parse`/`Bind`/`Execute`) rejects
-    /// multi-statement strings with `cannot insert multiple commands
-    /// into a prepared statement`, so DDL must ride the **simple query
-    /// protocol** (`batch_execute`) instead, which executes a sequence
-    /// of `;`-separated statements in one implicit transaction.
+    /// Migration fixtures may execute a script containing a table, its indexes
+    /// and protection sentinels. PostgreSQL uses the simple-query protocol for
+    /// scripts because a prepared statement accepts only a single command.
     ///
     /// The default impl forwards to [`Self::pool_exec`] — correct for
     /// the SQLite arm (whose `pool_exec` routes through `sqlite3_exec`,
@@ -382,18 +369,12 @@ pub trait LockManager: SqlExecutor {
 pub trait SchemaIntrospect: 'static {
     /// Concrete live-schema snapshot returned by
     /// [`Self::introspect_schema`]. The Postgres impl uses
-    /// [`zeroship_schema::diff::LiveSchema`]; each vendor tier populates that
+    /// [`zeroship_data_query_builder::catalog::LiveSchema`]; each vendor tier populates that
     /// neutral shape from its own catalog.
     ///
-    /// Both links must name `zeroship_schema::diff::…`. A bare `crate::diff::…`
-    /// resolves to nothing here - this crate has no `diff` module - and
-    /// `tests/run_doc_gate.sh` only sees it while the trait is ungated, because
-    /// a cfg-gated trait is never rendered in a default doc build.
     type LiveSchema;
 
-    /// Introspect the live schema for an app. Returns the typed
-    /// snapshot the diff engine consumes via
-    /// [`zeroship_schema::diff::compute_diff`].
+    /// Introspect the live schema for an app into the vendor's catalog snapshot.
     #[allow(async_fn_in_trait)]
     async fn introspect_schema(&self, app_id: &str) -> Result<Self::LiveSchema, DbError>;
 
@@ -756,4 +737,3 @@ pub trait Backup: 'static {
     #[allow(async_fn_in_trait)]
     async fn restore(&self, app_id: &str, snapshot: &SnapshotHandle) -> Result<(), DbError>;
 }
-

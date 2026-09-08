@@ -44,7 +44,7 @@ For the **migration** authoring surface, the equivalent boundary — which DML t
 - [crates/zeroship-data-sqlite/src/session.rs](../../crates/zeroship-data-sqlite/src/session.rs) — WAL + `busy_timeout`
 - [crates/zeroship-data-sqlite/src/error.rs](../../crates/zeroship-data-sqlite/src/error.rs) — `SQLITE_BUSY*` → typed lock contention mapping
 - [crates/zeroship-plugin-db/src/v8_classes/transaction.rs](../../crates/zeroship-plugin-db/src/v8_classes/transaction.rs) — SQLite `transaction()` begin path
-- [crates/zeroship-schema/src/query.rs](../../crates/zeroship-schema/src/query.rs) — cross-backend `ORDER BY` shaping and the `IS NULL` buckets, plus the system-column and index emission
+- [crates/zeroship-data-query-builder/src/compile.rs](../../crates/zeroship-data-query-builder/src/compile.rs) — cross-backend `ORDER BY` shaping and the `IS NULL` buckets, plus the system-column and index emission
 - [crates/zeroship-data-engine/src/crud/mod.rs](../../crates/zeroship-data-engine/src/crud/mod.rs) — reads the `orderBy` option and threads it to the backend
 - [crates/zeroship-data-sqlite/src/dialect.rs](../../crates/zeroship-data-sqlite/src/dialect.rs) — `now_fn()` returns `CURRENT_TIMESTAMP`, which is where the whole-second system-timestamp resolution comes from
 

@@ -2,12 +2,12 @@
 //!
 //! **PG TIER.** Catalog SQL, [`compio_postgres::Pool`], PostgreSQL row
 //! decoding, and PostgreSQL foreign-key action codes are vendor mechanics.
-//! The neutral schema snapshot and metadata stay in `zeroship-schema`; this
+//! The neutral schema snapshot and metadata stay in `zeroship-data-query-builder`; this
 //! module populates those values from PostgreSQL without embedding the driver
 //! in the shared schema floor.
 
 use compio_postgres::Pool;
-use zeroship_schema::diff::{
+use zeroship_data_query_builder::catalog::{
     ColumnInfo, EncryptionMeta, ForeignKeyInfo, IndexInfo, LiveSchema, MaskMeta,
 };
 
@@ -145,10 +145,12 @@ SELECT c.relname AS table_name,
             // not match fell through both arms and was discarded in silence,
             // while the malformed-sentinel arm below warns loudly. After the
             // flip that arm would have matched EVERY sentinel.
-            if comment.starts_with(zeroship_schema::mask_codec::MASK_SENTINEL_PREFIX) {
+            if comment.starts_with(zeroship_data_query_builder::mask_codec::MASK_SENTINEL_PREFIX) {
                 sibling_sentinels.insert((table.clone(), column.clone()), comment.clone());
-            } else if comment.starts_with(zeroship_schema::mask_codec::ENC_SENTINEL_PREFIX) {
-                match zeroship_schema::mask_codec::parse_encryption_sentinel(comment) {
+            } else if comment
+                .starts_with(zeroship_data_query_builder::mask_codec::ENC_SENTINEL_PREFIX)
+            {
+                match zeroship_data_query_builder::mask_codec::parse_encryption_sentinel(comment) {
                     Ok(meta) => encryption = Some(meta),
                     Err(e) => {
                         // A malformed encryption sentinel is treated like a
@@ -204,7 +206,7 @@ SELECT c.relname AS table_name,
         };
         let sibling = masked_column;
         let (kind, classification) =
-            match zeroship_schema::mask_codec::parse_mask_sentinel(&sentinel) {
+            match zeroship_data_query_builder::mask_codec::parse_mask_sentinel(&sentinel) {
                 Ok(p) => p,
                 Err(e) => {
                     // Surface a malformed sentinel as a tracing::warn.
@@ -229,7 +231,7 @@ SELECT c.relname AS table_name,
             kind,
             classification,
             // The OTHER column of the pair: the one holding the real value.
-            sibling_column: zeroship_schema::query::raw_column_name(&sibling),
+            sibling_column: zeroship_data_query_builder::compile::raw_column_name(&sibling),
         });
     }
 

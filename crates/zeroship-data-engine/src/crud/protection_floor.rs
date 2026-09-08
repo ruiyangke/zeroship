@@ -120,7 +120,7 @@ fn floor_key(binding: &DbBinding) -> String {
 }
 
 /// Reduce a `LiveSchema` to the protected columns alone.
-fn floor_from_live(live: &zeroship_schema::diff::LiveSchema) -> ProtectionFloor {
+fn floor_from_live(live: &zeroship_data_query_builder::catalog::LiveSchema) -> ProtectionFloor {
     let mut out: ProtectionFloor = HashMap::new();
     for (table, columns) in &live.tables {
         let protected: HashMap<String, StoredProtection> = columns
@@ -286,18 +286,18 @@ pub fn reset_for_tests() {
 mod tests {
     use super::*;
     use serde_json::json;
-    use zeroship_schema::descriptors::EncryptionMode;
-    use zeroship_schema::diff::WrappedType;
-    use zeroship_schema::diff::{
+    use zeroship_data_query_builder::catalog::WrappedType;
+    use zeroship_data_query_builder::catalog::{
         Classification, ColumnInfo, EncryptionMeta, LiveSchema, MaskKind, MaskMeta,
     };
+    use zeroship_data_query_builder::descriptors::EncryptionMode;
 
     fn masked_column() -> ColumnInfo {
         ColumnInfo {
             mask: Some(MaskMeta {
                 kind: MaskKind::Last4,
                 classification: Classification::Pci,
-                sibling_column: zeroship_schema::query::raw_column_name("ssn"),
+                sibling_column: zeroship_data_query_builder::compile::raw_column_name("ssn"),
             }),
             ..Default::default()
         }
@@ -480,12 +480,12 @@ mod tests {
         let pinned = DbBinding::new(
             "app_floor",
             "deploy_1",
-            zeroship_schema::SchemaName::new("app_floor").unwrap(),
+            zeroship_data_query_builder::SchemaName::new("app_floor").unwrap(),
         );
         let current = DbBinding::new(
             "app_floor",
             "deploy_2",
-            zeroship_schema::SchemaName::new("app_floor").unwrap(),
+            zeroship_data_query_builder::SchemaName::new("app_floor").unwrap(),
         );
         assert_ne!(
             floor_key(&pinned),

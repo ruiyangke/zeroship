@@ -29,7 +29,7 @@ use core::fmt;
 ///
 /// Mirrors `MAX_MEMBERSHIP_LIST_LEN` (`query.rs:606`). It is re-stated here
 /// rather than imported because this crate takes no dependency on
-/// `zeroship-schema`; when SC-3's port lands, `query.rs`'s copy is the one that
+/// `zeroship-data-query-builder`; when SC-3's port lands, `query.rs`'s copy is the one that
 /// must be deleted, not duplicated further. The bound travels with
 /// [`LiteralSet`] so it cannot be re-checked (or forgotten) per call site -
 /// today it is enforced at three separate places in `query.rs`
@@ -183,7 +183,7 @@ pub const MAX_VECTOR_DIMS: usize = 16_000;
 /// [`crate::render::ValueFormat`] was introduced to close for `bytes`:
 /// `build_vector_search` formats the elements into a text literal `[1,2,3]` and
 /// binds that string, casting it `::vector` in the SQL
-/// (`crates/zeroship-schema/src/query.rs:4980-5013`), while the `SQLite` arm
+/// (`crates/zeroship-data-query-builder/src/compile.rs:4980-5013`), while the `SQLite` arm
 /// encodes the same values as a raw little-endian `f32` buffer and binds a BLOB
 /// (`crates/zeroship-data-sqlite/src/vector.rs:127`).
 ///
@@ -417,9 +417,7 @@ impl fmt::Display for LiteralError {
                 "a float parameter must be finite: NaN compares equal to nothing, \
                  including itself",
             ),
-            Self::NulByteInText => {
-                f.write_str("a text parameter must not contain a NUL byte")
-            }
+            Self::NulByteInText => f.write_str("a text parameter must not contain a NUL byte"),
             Self::EmptyLiteralSet => f.write_str(
                 "a membership set must not be empty; empty membership is a constant, \
                  not an IN list",
@@ -460,7 +458,10 @@ mod tests {
     fn the_float_order_is_total_and_consistent_with_eq() {
         let neg = Finite::new(-0.0).expect("finite");
         let pos = Finite::new(0.0).expect("finite");
-        assert_ne!(neg, pos, "Eq must agree with Ord, which separates the zeroes");
+        assert_ne!(
+            neg, pos,
+            "Eq must agree with Ord, which separates the zeroes"
+        );
         assert!(neg < pos);
         assert_eq!(neg.cmp(&neg), core::cmp::Ordering::Equal);
     }
@@ -468,7 +469,10 @@ mod tests {
     #[test]
     fn non_finite_floats_are_refused() {
         assert_eq!(Finite::new(f64::NAN), Err(LiteralError::NonFiniteFloat));
-        assert_eq!(Finite::new(f64::INFINITY), Err(LiteralError::NonFiniteFloat));
+        assert_eq!(
+            Finite::new(f64::INFINITY),
+            Err(LiteralError::NonFiniteFloat)
+        );
         assert_eq!(
             Finite::new(f64::NEG_INFINITY),
             Err(LiteralError::NonFiniteFloat)
