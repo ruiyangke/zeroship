@@ -92,12 +92,20 @@ pub const PLATFORM_CLI_CLIENT_ID: &str = "zeroship-cli";
 /// THE STORED-GRANT INTERSECTION IS NOT A SECOND BOUND ON THIS LIST, and this
 /// doc claimed it was. `zeroship_authn::platform_cli::materialize_default_grants`
 /// seeds `zeroship.principal_grants` FROM THIS VERY CONSTANT, so for a
-/// default-seeded principal the intersection is the ceiling against itself - a
-/// no-op that would widen in lockstep with any edit here. What it does do is
-/// narrow a principal whose rows DIVERGE from the default: one an operator has
-/// revoked grants from, or one seeded by some other writer. It is a
-/// per-principal revocation surface, never a check on the contents of this
-/// array.
+/// freshly-seeded principal the intersection is the ceiling against itself. It
+/// is a per-principal REVOCATION surface - it can only ever narrow - never a
+/// check on the contents of this array.
+///
+/// IT DOES NOT WIDEN IN LOCKSTEP, WHICH IS THE PART THAT MATTERS WHEN YOU EDIT
+/// THIS LIST. Seeding is guarded by the `zeroship.identity_links` marker and
+/// happens once per principal, so ADDING a scope here reaches principals linked
+/// afterwards and nobody else; an existing principal's stored rows keep the
+/// older set and the new scope is stripped at request time. There is no
+/// re-seed path. `env:read`, `env:write` and `secrets:write` were added below
+/// for `zeroship var` and `zeroship secret`, and for already-linked principals
+/// they had no effect. The reasoning for leaving that alone rather than
+/// reconciling - reconciling cannot distinguish "revoked" from "not yet
+/// seeded" - is on `materialize_default_grants` itself.
 pub const PLATFORM_CLI_ISSUABLE_SCOPES: [&str; 19] = [
     "apps:archive",
     "apps:deploy",

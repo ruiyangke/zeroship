@@ -84,8 +84,35 @@ fn describe(error: &compio_postgres::Error) -> String {
 /// The identity marker, not the current grant count, is the first-seen test.
 /// Once the marker exists this statement writes nothing, so an operator may
 /// remove any or all grants without a later bearer request recreating them.
+/// That is a REAL capability rather than an accident of the implementation, and
+/// `an_operator_deleting_a_grant_row_narrows_the_next_cli_request`
+/// (`crates/zeroship-control/tests/authz_guard_oauth_test.rs`) asserts exactly
+/// it, including that a request must not re-seed what an operator deleted.
 /// The writable CTE makes marker and grant creation one PostgreSQL statement:
 /// either all default rows and the marker commit, or none of them do.
+///
+/// # The consequence, which is easy to miss and bit a change on 2026-09-08
+///
+/// Seeding is once-per-principal, so WIDENING
+/// [`PLATFORM_CLI_ISSUABLE_SCOPES`] does not reach a principal who has already
+/// been linked. Their stored rows keep the older set, and
+/// `platform_cli_entitlement` intersects the token's scopes against those rows,
+/// so the new scope is stripped at request time. Nothing in the platform
+/// re-seeds - no admin API, no CLI verb, no sweep - so for an existing
+/// principal the widening never takes effect at all.
+///
+/// This is not hypothetical: `env:read`, `env:write` and `secrets:write` were
+/// added to that constant so `zeroship var` and `zeroship secret` would stop
+/// answering 403, and for already-linked principals they did not.
+///
+/// It is left alone rather than "fixed" by reconciling on every call, because
+/// reconciling would silently delete the operator capability above - "revoked"
+/// and "not yet seeded" are the SAME state under a marker-guarded seed, so no
+/// reconciliation can tell them apart. Making both work needs revocation to
+/// become explicit (a per-grant revoked marker this statement reads and
+/// refuses to overwrite), and then re-seeding is safe. Until that exists, a
+/// ceiling change reaches new principals only, and an operator widening an
+/// existing one does it the same way they narrow one: by hand.
 ///
 /// # Errors
 ///
