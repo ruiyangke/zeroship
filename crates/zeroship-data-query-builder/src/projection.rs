@@ -159,17 +159,59 @@ pub enum ProjectionSource {
 }
 
 /// One output column.
+///
+/// # The fields are private, and that is the whole point
+///
+/// All three were `pub` until 2026-09-07, which made every constructor below
+/// advisory: a struct literal could pair any [`ProjectionSource`] with any
+/// alias and any [`Exposure`].
+///
+/// That was survivable while a raw column could not be NAMED from outside this
+/// crate - [`crate::IdentRole::Column`] refuses the platform's storage prefixes
+/// and the constructor that derived them was `pub(crate)`. Adding
+/// [`crate::IdentRole::StoredColumn`] the same day removed that barrier, and
+/// together the two made this expressible from any caller:
+///
+/// ```text
+/// ProjectedField {
+///     source: ProjectionSource::Stored { physical: <the raw column> },
+///     alias:  <the protected field's own name>,
+///     exposure: Exposure::Declared,
+/// }
+/// ```
+///
+/// which projects the stored value under the name user code reads, with no
+/// unmask authorization and no audit row. The role is right and stays; what was
+/// missing is that the constructors have to be the only way in.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ProjectedField {
-    pub source: ProjectionSource,
+    pub(crate) source: ProjectionSource,
     /// A first-class slot, not a rendering trick: mandatory aliasing for
     /// cross-collection column collisions needs somewhere to live once
     /// relations exist.
-    pub alias: Ident,
-    pub exposure: Exposure,
+    pub(crate) alias: Ident,
+    pub(crate) exposure: Exposure,
 }
 
 impl ProjectedField {
+    /// Where the value comes from.
+    #[must_use]
+    pub const fn source(&self) -> &ProjectionSource {
+        &self.source
+    }
+
+    /// The output name.
+    #[must_use]
+    pub const fn alias(&self) -> &Ident {
+        &self.alias
+    }
+
+    /// Whether this field is part of what the caller asked to see.
+    #[must_use]
+    pub const fn exposure(&self) -> Exposure {
+        self.exposure
+    }
+
     /// A declared column projected under its own name.
     ///
     /// # Errors
@@ -183,6 +225,21 @@ impl ProjectedField {
             alias,
             exposure: Exposure::Declared,
         })
+    }
+
+    /// A JSON path projected under an explicit alias.
+    ///
+    /// [`ProjectionSource::Path`] had no constructor until 2026-09-07, so the
+    /// only way to build one was a struct literal - which is the hole the
+    /// private fields close. A variant with no constructor is not a narrower
+    /// surface, it is the same surface reached by a worse route.
+    #[must_use]
+    pub const fn path(path: FieldPath, alias: Ident) -> Self {
+        Self {
+            source: ProjectionSource::Path(path),
+            alias,
+            exposure: Exposure::Declared,
+        }
     }
 
     /// A column the PLATFORM manages, projected under its own name.
@@ -517,6 +574,38 @@ impl std::error::Error for ProjectionError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ranking scalar has no meaning outside a search, and both non-search
+    /// projections refuse one.
+    ///
+    /// In-crate because building the adversary needs a `ProjectedField` struct
+    /// literal, and the fields went private on 2026-09-07. From outside the
+    /// crate this is now unconstructible rather than refused, which is the
+    /// stronger property; these two assertions still bind the in-crate paths,
+    /// where `SearchBuilder::build` is the one legitimate installer.
+    #[test]
+    fn a_stray_ranking_scalar_is_refused_by_both_projections() {
+        let stray = ProjectedField {
+            source: ProjectionSource::SearchScalar(SearchScalarKind::VectorDistance),
+            alias: Ident::parse_as("_distance", IdentRole::Alias).expect("alias"),
+            exposure: Exposure::Declared,
+        };
+
+        assert!(matches!(
+            Projection::rows(vec![stray.clone()]),
+            Err(ProjectionError::SearchScalarOutsideSearch { .. })
+        ));
+
+        let counted = ProjectedField::aggregate(
+            crate::AggregateRef::count_rows(),
+            Ident::parse_as("n", IdentRole::Alias).expect("alias"),
+        );
+        assert!(matches!(
+            Projection::aggregate(vec![counted, stray]),
+            Err(ProjectionError::SearchScalarOutsideSearch { .. })
+        ));
+        println!("ruled on 2 projection kinds");
+    }
 
     /// The canonical sort must be able to change something, or the determinism
     /// arm that rests on it passes vacuously. This is the in-crate half of the

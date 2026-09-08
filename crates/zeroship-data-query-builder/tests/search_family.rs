@@ -22,8 +22,8 @@
 use zeroship_data_query_builder::render::postgres::{render, render_search, RenderError};
 use zeroship_data_query_builder::{
     CompareOp, DbPlan, Direction, GeoPoint, Ident, IdentRole, Literal, LiteralError, NullOrder,
-    Operand, OrderKey, PlanError, Predicate, ProjectedField, Projection, ProjectionError,
-    ProjectionSource, QueryVector, RadiusMetres, RowLimit, Search, SearchCriterion, SearchError,
+    Operand, OrderKey, PlanError, Predicate, ProjectedField, Projection,
+    QueryVector, RadiusMetres, RowLimit, Search, SearchCriterion, SearchError,
     SearchScalarKind, VectorMetric, MAX_PREDICATE_DEPTH, MAX_RADIUS_METRES, MAX_ROW_LIMIT,
     MAX_VECTOR_DIMS,
 };
@@ -696,34 +696,20 @@ fn the_ranking_key_cannot_be_named_by_a_caller() {
 /// A ranking scalar has no meaning outside a search, and it is unconstructible
 /// there rather than merely undocumented.
 ///
-/// Three fences, all asserted, because the scalar's operands live on the
-/// criterion: a scalar without one has nothing to compute from, so the renderer
-/// could only invent operands or refuse.
+/// The first two fences MOVED IN-CRATE on 2026-09-07, to
+/// `projection::tests::a_stray_ranking_scalar_is_refused_by_both_projections`.
+/// They needed a `ProjectedField` struct literal to build the adversary, and
+/// `ProjectedField`'s fields are private now - so from outside this crate the
+/// smuggling those two fences refuse is no longer constructible at all, which is
+/// a stronger guarantee than a runtime refusal and an untestable one from here.
+/// The refusals still matter for in-crate callers and are still asserted, one
+/// module down.
+///
+/// What stays here is the fence that needs no literal, because the scalar
+/// reaches the renderer through a legitimate search projection.
 #[test]
 fn a_ranking_scalar_is_unreachable_outside_a_search() {
-    let stray = ProjectedField {
-        source: ProjectionSource::SearchScalar(SearchScalarKind::VectorDistance),
-        alias: Ident::parse_as("_distance", IdentRole::Alias).expect("alias"),
-        exposure: zeroship_data_query_builder::Exposure::Declared,
-    };
-
-    // 1. A row projection refuses it.
-    assert!(matches!(
-        Projection::rows(vec![stray.clone()]),
-        Err(ProjectionError::SearchScalarOutsideSearch { .. })
-    ));
-
-    // 2. So does an aggregate projection.
-    let counted = ProjectedField::aggregate(
-        zeroship_data_query_builder::AggregateRef::count_rows(),
-        Ident::parse_as("n", IdentRole::Alias).expect("alias"),
-    );
-    assert!(matches!(
-        Projection::aggregate(vec![counted, stray]),
-        Err(ProjectionError::SearchScalarOutsideSearch { .. })
-    ));
-
-    // 3. And the renderer refuses one that reached it anyway, with a typed
+    // The renderer refuses one that reached it anyway, with a typed
     //    error rather than a panic. Reached by rendering the search's own
     //    projection - which legitimately carries a scalar - through the READ
     //    lowering, which has no criterion to give it.
