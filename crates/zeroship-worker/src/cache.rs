@@ -522,27 +522,20 @@ fn build_runtime(
         .limits(limits)
         .plugins(plugins)
         .net_policy(net_policy)
-        .runtime_descriptor(runtime_descriptor.map(str::to_string));
-    if let Some(meter) = meter.clone() {
+        .runtime_descriptor(runtime_descriptor.map(str::to_string))
+        // The builder is what binds BOTH app-scoped behaviours, and skipping it
+        // silently loses each in a different way. It stamps `state.meter` -
+        // read by `RuntimeInner::bill_pump_cpu` for async/pump CPU and by
+        // `node:net` for socket egress/ingress - keyed by `app_id.as_str()`,
+        // the same rendering `env.{db,kv,storage}` read off `APP_ID` above. It
+        // also sets `RuntimeInner::app_id`, which gates the eviction-time
+        // `AbortController` fan-out: without it an evicted isolate's in-flight
+        // controllers never fire, and nothing errors.
+        .app_id(app_id.clone());
+    if let Some(meter) = meter {
         builder = builder.meter(meter);
     }
     let runtime = builder.build();
-
-    // `RuntimeBuilder::app_id` still takes a raw `uuid::Uuid`, and `AppId`
-    // carries no route to its bits, so the builder call is skipped and
-    // `state.meter` is stamped directly through the runtime's public
-    // `state()` handle instead - keyed by `app_id.as_str()`, the same
-    // rendering `env.{db,kv,storage}` read off `APP_ID` above. This is the
-    // handle `RuntimeInner::bill_pump_cpu` (async/pump CPU billing) and
-    // `node:net`'s egress/ingress recording read. The eviction-time
-    // `AbortController` fan-out (`rpc::abort::entered_for_eviction`) is a
-    // separate gate on a private `RuntimeInner` field with no public setter,
-    // so it stays unreachable from here until `RuntimeBuilder::app_id` itself
-    // accepts `AppId`.
-    if let Some(meter) = meter {
-        runtime.state().borrow_mut().meter =
-            Some(zeroship_metering::MeterHandle::new(meter, app_id.as_str()));
-    }
 
     runtime
         .initialize(env)
