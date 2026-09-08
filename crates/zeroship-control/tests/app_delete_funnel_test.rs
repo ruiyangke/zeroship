@@ -411,6 +411,20 @@ async fn deletion_keeps_the_billing_evidence_and_destroys_the_environment() {
         "the terminal act is audited"
     );
 
+    // The creator no longer sees it. `list_apps_for_owner` reaches an app
+    // through its project, so cutting the edge removes it from the listing
+    // without a `deleted_at` predicate anywhere in that query - which is worth
+    // binding precisely BECAUSE nothing in that statement says so.
+    assert!(
+        fx.registry
+            .list_apps_for_owner(&d.owner)
+            .await
+            .expect("list the creator's apps")
+            .iter()
+            .all(|record| record.id != d.app),
+        "a deleted app is gone from the creator's listing"
+    );
+
     // The billing read still reaches the retained usage through
     // `apps.organization_id`, which is the column deletion deliberately keeps.
     let seen = fx
