@@ -1,45 +1,28 @@
-//! Skip announcer, and the hard failure that replaced the skip for Redis.
+//! The two refusals this crate's test targets use in place of a skip: one for
+//! the single-node Redis, one for the three-node Dragonfly cluster.
 //!
-//! The announcer is a deliberate copy of `crates/test-support`, which is where
-//! the reasoning behind the marker and the direct-handle write is written down.
+//! THERE IS NO SKIP ANNOUNCER HERE ANY MORE, and no `ZEROSHIP-TEST-SKIPPED`
+//! marker. The marker was a deliberate copy of a workspace helper, kept
+//! byte-identical so that one search over a suite log would find every
+//! announced no-op on either side of the `libs/` boundary. Its consumer was a
+//! shell census, and both the census and the helper are gone: an absent backend
+//! is now a failed run rather than a line somebody has to be reading.
+//!
 //! `compio-redis` is a standalone, publishable library with no zeroship
-//! dependency, and it does not grow one for a test helper. What must stay
-//! identical is the MARKER TEXT: one search over a run log has to find every
-//! skip in the workspace, whichever side of that line it came from.
+//! dependency, and it does not grow one for a test helper. That property is
+//! what made the copy necessary and is unaffected by its deletion - these
+//! panics name only this crate's own backends and read no configuration.
 
 // Shared by two test targets that use DIFFERENT subsets of it: `cluster.rs`
-// calls `skip` and never `connect_pool`, `integration.rs` the reverse. Cargo
-// compiles this module once per target, so each build legitimately sees the
-// other's half as dead. The alternative is splitting one small helper across
-// two files to satisfy a lint.
+// calls `cluster_seeds_unset` and never `connect_pool`, `integration.rs` the
+// reverse. Cargo compiles this module once per target, so each build
+// legitimately sees the other's half as dead. The alternative is splitting one
+// small helper across two files to satisfy a lint.
 #![allow(dead_code)]
 
 pub mod env;
 
-use std::io::Write;
-
 use compio_redis::{Client, Pool};
-
-/// The skip token, declared here rather than taken from `crates/test-support`.
-///
-/// THIS DUPLICATION IS DELIBERATE AND MUST STAY. `compio-redis` is a
-/// standalone, publishable driver with no zeroship dependency - the property
-/// AGENTS.md states for everything under `libs/` - and `cargo test` builds
-/// dev-dependencies, so depending on `zeroship-test-support` for four lines
-/// would put a zeroship crate in this one's build graph and end that. The same
-/// reasoning is already recorded at `libs/compio-postgres/tests/common/mod.rs`,
-/// which is why that crate's copy was DELETED rather than shared: it had no
-/// optional backend left to announce, so the right move there was removal, not
-/// extraction.
-///
-/// The one remaining sibling is `libs/compio-s3/tests/common/mod.rs`, for the
-/// same reason. Two copies of four lines is the price of two publishable
-/// crates; a shared helper would be cheaper and wrong.
-///
-/// What keeps the copies honest is that the CONSUMER is shared:
-/// `tests/lib/skip_census.sh` greps for this exact string, so a copy that
-/// drifted would stop being counted and the suite gates would notice.
-pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 
 /// The single-node Redis every target in this crate dials when `REDIS_TEST_URL`
 /// is unset.
@@ -52,15 +35,42 @@ pub const SKIP_MARKER: &str = "ZEROSHIP-TEST-SKIPPED";
 /// server anyone thought it was.
 pub const DEFAULT_REDIS_URL: &str = "redis://127.0.0.1:6390";
 
-/// Announce that a test did nothing because an OPTIONAL backend is absent.
+/// Fail the calling test because the Dragonfly CLUSTER was never named.
 ///
-/// Single-node Redis is not one; it is dialled through [`connect`] /
-/// [`connect_pool`], which fail. What still legitimately announces here is the
-/// three-node Dragonfly CLUSTER in `cluster.rs`: a different topology, which
-/// `deploy/compose/cluster.yml` stands up separately and which
-/// `tests/provision_test_backends.sh` does not.
-pub fn skip(reason: &str) {
-    let _ = std::io::stderr().write_all(format!("{SKIP_MARKER}: {reason}\n").as_bytes());
+/// A different topology from the single-node Redis above, provisioned by a
+/// different pair of commands, so it gets its own refusal rather than sharing
+/// [`redis_unreachable`]. This used to announce a skip - the last such
+/// announcement in this crate, and the reason `cluster.rs` could report every
+/// one of its tests as passing against no cluster at all.
+///
+/// BOTH COMMANDS BELOW ARE REQUIRED, and the second is the one that gets
+/// dropped: a Dragonfly node started in cluster mode comes up with no slot map
+/// and answers nothing until the bootstrap script pushes one. `up -d` alone
+/// leaves a cluster that is running and useless.
+#[track_caller]
+pub fn cluster_seeds_unset() -> ! {
+    panic!(
+        "No Dragonfly cluster was named, and this test requires one.\n\
+         \n\
+         \x20 backend: Dragonfly (three-node cluster)\n\
+         \x20 missing: DRAGONFLY_CLUSTER_SEEDS\n\
+         \n\
+         This is NOT the single-node Redis that tests/provision_test_backends.sh\n\
+         brings up; that script does not stand up a cluster. Provision one:\n\
+         \x20 docker compose -f deploy/compose/cluster.yml up -d\n\
+         \x20 ./deploy/scripts/bootstrap-dragonfly-cluster.sh\n\
+         \n\
+         The second command is not optional. A node started in cluster mode\n\
+         ships with no slot map and serves nothing until it is pushed one, so\n\
+         `up -d` on its own leaves a cluster that is up and cannot answer.\n\
+         \n\
+         Then re-run with the seeds:\n\
+         \x20 DRAGONFLY_CLUSTER_SEEDS='redis://127.0.0.1:7000,redis://127.0.0.1:7001,redis://127.0.0.1:7002' \\\n\
+         \x20   cargo test -p compio-redis --test cluster\n\
+         \n\
+         There is no environment variable that makes this a skip. A cluster\n\
+         this suite cannot reach is a failed run, not a green one."
+    )
 }
 
 /// The URL the tests dial: `REDIS_TEST_URL` if set, else [`DEFAULT_REDIS_URL`].
