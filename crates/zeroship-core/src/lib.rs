@@ -12,6 +12,7 @@ pub mod __private {
 }
 
 pub mod app_derivation;
+pub mod worker_ring;
 pub mod app_id;
 pub mod auth;
 pub mod auth_provider;
