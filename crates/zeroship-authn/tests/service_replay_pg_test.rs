@@ -179,8 +179,16 @@ fn fixture_grant_sql() -> String {
 /// to collide.
 const FIXTURE_LOCK: i64 = 7_523_000_001;
 
-fn db_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+/// The live `PostgreSQL` the jti store under test lives in.
+///
+/// # Panics
+///
+/// When neither `PG_TEST_URL` nor the test overlay names one, with the
+/// provisioning command. Every arm here used to announce a skip instead - and
+/// this file's whole point is that two replicas racing one assertion admit
+/// exactly one, which nothing but a real server can settle.
+fn db_url() -> String {
+    zeroship_core::config::test_database_url()
 }
 
 /// Establish the replay table exactly once, whoever gets there first.
@@ -366,10 +374,7 @@ async fn race(replicas: &TwoReplicas) -> usize {
 
 #[compio::test]
 async fn two_replicas_racing_one_assertion_admit_exactly_one() {
-    let Some(url) = db_url() else {
-        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
-        return;
-    };
+    let url = db_url();
     let replicas = two_replicas(&url, |client| {
         Arc::new(PostgresReplayStore::new(client)) as Arc<dyn ReplayStore + Send + Sync>
     })
@@ -384,10 +389,7 @@ async fn two_replicas_racing_one_assertion_admit_exactly_one() {
 
 #[compio::test]
 async fn a_read_then_write_store_loses_the_same_race() {
-    let Some(url) = db_url() else {
-        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
-        return;
-    };
+    let url = db_url();
     // The negative control. Same two connections, same one assertion, the only
     // difference being that the claim is a SELECT followed by an INSERT. If
     // this admitted one, the harness would not be racing and the test above
@@ -406,10 +408,7 @@ async fn a_read_then_write_store_loses_the_same_race() {
 
 #[compio::test]
 async fn a_live_claim_blocks_a_replay_and_an_expired_one_does_not() {
-    let Some(url) = db_url() else {
-        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
-        return;
-    };
+    let url = db_url();
     let client = connect(&url).await;
     ensure_fixture(&client).await;
     // A second connection: the store takes ownership of the first and exposes
@@ -487,10 +486,7 @@ async fn a_live_claim_blocks_a_replay_and_an_expired_one_does_not() {
 
 #[compio::test]
 async fn a_verified_assertion_cannot_be_replayed_at_another_replica() {
-    let Some(url) = db_url() else {
-        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
-        return;
-    };
+    let url = db_url();
     // Sequential, and across replicas: the second verifier has never seen this
     // assertion and has no process-local memory of it. Only the shared store
     // can refuse it.
@@ -509,10 +505,7 @@ async fn a_verified_assertion_cannot_be_replayed_at_another_replica() {
 
 #[compio::test]
 async fn every_granted_role_can_run_the_stores_own_statements() {
-    let Some(url) = db_url() else {
-        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
-        return;
-    };
+    let url = db_url();
     // The rest of this file connects as the privileged test DSN, so it can
     // prove the SQL is correct and cannot prove a service is allowed to issue
     // it. Those are different questions and only the second one shipped wrong.
@@ -546,10 +539,7 @@ async fn every_granted_role_can_run_the_stores_own_statements() {
 
 #[compio::test]
 async fn a_role_without_the_grant_fails_closed_rather_than_admitting_the_assertion() {
-    let Some(url) = db_url() else {
-        zeroship_test_support::skip("no test database (Postgres jti store; set PG_TEST_URL)");
-        return;
-    };
+    let url = db_url();
     // The fail-closed arm was covered only in `zeroship-core`, against a store
     // that returns an error by construction. Mutating `service_replay.rs` to
     // map a driver error to Accepted left this file 4 of 4 green, because

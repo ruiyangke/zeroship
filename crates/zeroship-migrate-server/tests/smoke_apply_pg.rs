@@ -114,8 +114,15 @@ fn cfg_for(tok: &str) -> (ExecutorConfig, EffectivePolicy) {
 }
 
 /// The env var gating the live-PG smoke test. Mirrors the standalone's suite gate.
-fn pg_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+/// The live `PostgreSQL` this target applies its migrations to.
+///
+/// # Panics
+///
+/// When neither `PG_TEST_URL` nor the test overlay names one, with the
+/// provisioning command. It used to announce a skip, so a run against no
+/// database reported the same green as one that had applied real DDL.
+fn pg_url() -> String {
+    zeroship_core::config::test_database_url()
 }
 
 async fn ensure_project_schema(session: &CompioPgSession, cfg: &ExecutorConfig) {
@@ -180,13 +187,7 @@ async fn column_exists(session: &CompioPgSession, schema: &str, table: &str, col
 
 #[compio::test]
 async fn ir_envelope_lowers_and_applies_over_native_compio_seam() {
-    let Some(url) = pg_url() else {
-        zeroship_test_support::skip(
-            "skipping Phase F smoke: no test database (set PG_TEST_URL to a DSN \
-             on :5440, or run tests/provision_test_backends.sh)"
-        );
-        return;
-    };
+    let url = pg_url();
 
     // (a) live compio client, (b) wrapped in this crate's SqlSession adapter.
     let session = CompioPgSession::connect(&url)

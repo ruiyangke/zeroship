@@ -34,7 +34,6 @@ default = []
 s3 = ["dep:compio-s3", "dep:futures", "dep:tracing"]
 
 [dev-dependencies]
-zeroship-test-support = { workspace = true }
 # Backend-parity integration test drives the trait directly on a compio
 # runtime; the S3 leg (Docker-gated) needs the client to build a MinIO config.
 compio = { workspace = true }

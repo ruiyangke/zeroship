@@ -236,8 +236,15 @@ fn cfg_for(tok: &str) -> (ExecutorConfig, EffectivePolicy) {
     (c, effective)
 }
 
-fn pg_url() -> Option<String> {
-    zeroship_core::config::test_database_url_opt()
+/// The live `PostgreSQL` this target applies its migrations to.
+///
+/// # Panics
+///
+/// When neither `PG_TEST_URL` nor the test overlay names one, with the
+/// provisioning command. It used to announce a skip, so a run against no
+/// database reported the same green as one that had applied real DDL.
+fn pg_url() -> String {
+    zeroship_core::config::test_database_url()
 }
 
 async fn ensure_project_schema(session: &CompioPgSession, cfg: &ExecutorConfig) {
@@ -321,16 +328,11 @@ fn sample_ts_authors_ir_version_1_envelope_in_v8() {
 }
 
 /// The full native loop: author in V8 → v1 envelope → published-engine lower+apply
-/// over the compio seam → live PG. Gated on a test database (see `PG_TEST_URL`).
+/// over the compio seam -> live PG. It REQUIRES a test database and fails
+/// without one; see `pg_url`.
 #[compio::test]
 async fn authored_v1_envelope_lowers_and_applies_over_native_compio_seam() {
-    let Some(url) = pg_url() else {
-        zeroship_test_support::skip(
-            "skipping Phase F Stage 2 apply: no test database (set PG_TEST_URL \
-             to a DSN on :5440 to run)"
-        );
-        return;
-    };
+    let url = pg_url();
 
     // (1) AUTHOR the envelope in zeroship-runtime's V8 (the whole point of Stage 2).
     let authored = author_v1_envelope(SAMPLE_MIGRATION_TS, "create_notes_and_add_tag");

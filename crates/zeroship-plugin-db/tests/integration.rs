@@ -2469,12 +2469,11 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
 // exposes through the CDC lifecycle, replication watchdog diagnostics,
 // operator-owned abandoned-slot cleanup, and the process-wide broker.
 //
-// Tests that need `wal_level=logical` skip themselves when the
-// running Postgres is `replica`. The runbook
-// (`docs/runbooks/local-k3s-crun-krun.md` adjacent) documents how to
-// reconfigure the dev container.
+// Tests that need `wal_level=logical` FAIL when the running Postgres is
+// `replica`. They used to skip, and the paragraph below is the measurement that
+// ended it.
 //
-// DO NOT READ THE SKIP AS "CI COVERS THIS". Measured 2026-08-12: NO CI
+// DO NOT READ A SKIP AS "CI COVERS THIS". Measured 2026-08-12: NO CI
 // job runs this binary at all. `PG_TEST_URL` is set by no workflow,
 // `--test integration` is invoked by no workflow, and there is no
 // `pg-test` image anywhere in the tree. The `rust` job deliberately
@@ -2486,26 +2485,54 @@ SELECT con.conname AS name, con.condeferrable AS def, con.condeferred AS init_de
 // crate now declares `live-db-tests = ["test-helpers"]`, and
 // tests/run_plugin_db_live_suite.sh runs this target with it.
 //
-// AND THE SKIP IS INVISIBLE TO A SUMMING GATE. Measured on two
-// throwaway servers differing only in wal_level, the twelve tests
-// below print the IDENTICAL result line either way -- `11 passed;
-// 0 failed; 1 ignored` -- because a skip counts as a pass. On
-// `replica` all eleven skipped; on `logical` all eleven executed.
-// The only discriminators are the ZEROSHIP-TEST-SKIPPED markers
-// (which `tests/lib/skip_census.sh` knows how to count, and which
-// nothing runs over this binary) and the wall time, 3.3s vs 11.3s.
-// So wiring this into CI without a skip census would buy a green
-// that proves nothing.
+// AND THE SKIP WAS INVISIBLE TO A SUMMING GATE. Measured on two
+// throwaway servers differing only in wal_level, the tests below printed the
+// IDENTICAL result line either way, because a skip counts as a pass. On
+// `replica` every one of them skipped; on `logical` every one executed. The
+// only discriminators were a marker no gate ran over this binary, and the wall
+// time. So wiring this into CI would have bought a green that proved nothing.
+// `require_logical_wal` closes that: the two servers now differ in exit status.
 // ===========================================================================
 
-/// True if the running cluster is configured for logical decoding.
-async fn pg_has_logical_wal(pool: &Pool) -> bool {
+/// Refuse the run unless the server is configured for logical decoding.
+///
+/// # Panics
+///
+/// When `wal_level` is anything but `logical`, naming the setting, how to read
+/// it back, and both ways to change it.
+async fn require_logical_wal(pool: &Pool) {
     let rows = pool.query_text_params("SHOW wal_level", &[]).await.unwrap();
-    let v: String = rows
+    let observed: String = rows
         .first()
         .map(|r| r.get::<_, String>(0))
         .unwrap_or_default();
-    v == "logical"
+    assert!(
+        observed == "logical",
+        "This server cannot do logical decoding, and this test requires it.\n\
+         \n\
+         \x20 backend: PostgreSQL\n\
+         \x20 setting: wal_level\n\
+         \x20 wanted:  logical\n\
+         \x20 observed: {observed}\n\
+         \n\
+         Everything below this point is CDC - replication slots, publications,\n\
+         the consumer and its reaper - and none of it can be created at all\n\
+         under `replica`.\n\
+         \n\
+         The provisioned server already has it. `tests/provision_test_backends.sh`\n\
+         starts deploy/compose's `postgres`, which runs with wal_level=logical\n\
+         and max_prepared_transactions set, and that script says in as many words\n\
+         that those two are load-bearing. If you are pointed at a server of your\n\
+         own instead, set it there:\n\
+         \n\
+         \x20 ALTER SYSTEM SET wal_level = 'logical';   -- then RESTART the server\n\
+         \x20 -- a reload is not enough; wal_level is postmaster-level\n\
+         \n\
+         or start it with `-c wal_level=logical`. Read it back with `SHOW wal_level`.\n\
+         \n\
+         There is no environment variable that makes this a skip. A server that\n\
+         cannot run these tests is a failed run, not a green one."
+    );
 }
 
 /// Drop the leftover slot, publication and schema OF ONE APP, so a test can
@@ -2605,10 +2632,7 @@ async fn c1_cleanup_sweep_does_not_cross_database_boundaries() {
     let url = require_pg().await;
     let _cdc = cdc_budget::exclusive();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
 
     // A second database on the SAME server, standing in for a concurrently
     // running suite that was handed its own database.
@@ -2706,10 +2730,7 @@ async fn c1_setup_requires_publication_and_creates_slot_idempotently() {
     let url = require_pg().await;
     let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -2778,10 +2799,7 @@ async fn c1_watchdog_reports_new_slot() {
     let url = require_pg().await;
     let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -2822,10 +2840,7 @@ async fn c1_abandoned_reaper_measures_elapsed_inactivity_not_wal_bytes() {
     let url = require_pg().await;
     let _cdc = cdc_budget::exclusive();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -2919,10 +2934,7 @@ async fn c1_abandoned_reaper_preserves_inactive_slot_owned_by_live_worker() {
     let url = require_pg().await;
     let _cdc = cdc_budget::exclusive();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -3012,10 +3024,7 @@ async fn c1_abandoned_reaper_preserves_a_connected_idle_consumer() {
     let url = require_pg().await;
     let _cdc = cdc_budget::exclusive();
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -3116,10 +3125,7 @@ async fn c1_abandoned_reaper_elects_one_leader_across_concurrent_workers() {
     let url = require_pg().await;
     let _cdc = cdc_budget::exclusive();
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping - server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -3221,10 +3227,7 @@ async fn c1_setup_resumes_at_existing_lsn_across_restart() {
     let url = require_pg().await;
     let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -3490,10 +3493,7 @@ async fn p8a2_consumer_publishes_wal_event_to_broker() {
     let url = require_pg().await;
     let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -3649,12 +3649,37 @@ async fn b8c_per_app_role_cannot_create_slot_directly() {
     let role_pool = match Pool::connect(&role_url, 1).await {
         Ok(p) => p,
         Err(e) => {
-            eprintln!(
-                "Skipping b8c_per_app_role_cannot_create_slot_directly — \
-                 cannot connect as test role (pg_hba?): {e}"
-            );
             b8c_drop_role(&pool, role).await;
-            return release_pg(pool).await;
+            panic!(
+                "The per-app role cannot log in, and this test is about what it \
+                 may do once it has.\n\
+                 \n\
+                 \x20 backend: PostgreSQL\n\
+                 \x20 role:    {role} (created by this test moments ago)\n\
+                 \x20 error:   {e}\n\
+                 \n\
+                 The role exists - this test made it - so this is the server's\n\
+                 CLIENT AUTHENTICATION refusing the connection, not a missing\n\
+                 role. `pg_hba.conf` is what decides that. Check which line\n\
+                 matched:\n\
+                 \x20 SELECT * FROM pg_hba_file_rules;\n\
+                 \n\
+                 A host line for this database that accepts `scram-sha-256` from\n\
+                 the address this process dials is what is wanted; `reject`,\n\
+                 `peer` over TCP, or a `samerole`/`samegroup` restriction will\n\
+                 all produce this. Reload with `SELECT pg_reload_conf()` after\n\
+                 editing - pg_hba is reload-level, not restart-level.\n\
+                 \n\
+                 The container deploy/compose starts accepts it already; this is\n\
+                 the shape a hardened server of your own arrives in.\n\
+                 \n\
+                 It used to print this and return, which counted as a pass - so\n\
+                 the fence proving a tenant role CANNOT create a replication slot\n\
+                 was green precisely on the servers strict enough to be worth\n\
+                 testing.\n\
+                 \n\
+                 There is no environment variable that makes this a skip."
+            )
         }
     };
 
@@ -3718,10 +3743,7 @@ async fn p8a2_supervised_consumer_reconnects_after_kill() {
     let url = require_pg().await;
     let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping — server wal_level is not 'logical'");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -4009,33 +4031,63 @@ fn operator_deprovisioning_reuses_one_pool_and_reparses_nothing() {
 // ---------------------------------------------------------------------------
 // VectorIndex / vector_search / typed errors.
 //
-// These tests exercise the pgvector adapter end-to-end. The harness
-// attempts `CREATE EXTENSION vector;` first; if the extension isn't
-// available in the test environment, the search/index tests are
-// `#[ignore]`d (toggle via env `ZEROSHIP_PGVECTOR_AVAILABLE=1` once the
-// image swap to `pgvector/pgvector:pg16` lands — see
-// docs/runbooks/docker-compose.md).
+// These tests exercise the pgvector adapter end-to-end. They are `#[ignore]`d
+// statically, so a default `cargo test` does not probe at all; `--ignored` is
+// what asks for them, and `require_pgvector` then FAILS rather than skipping if
+// the server has no extension. Swap the image to `pgvector/pgvector:pg16`
+// (docs/runbooks/docker-compose.md) to run them.
+//
+// THERE IS NO ENVIRONMENT VARIABLE THAT TOGGLES THIS. This comment named a
+// `ZEROSHIP_PGVECTOR_AVAILABLE=1` until 2026-09-08; a repository-wide search
+// found the name here and nowhere else, so it was an escape hatch that had
+// never existed, described as if it did.
 //
 // The `pgvector_extension_missing_reports_typed_error` test runs
 // unconditionally — it asserts the typed-error shape against a fresh
 // backend whose probe cache has never been populated.
 // ---------------------------------------------------------------------------
 
-async fn pgvector_available(pool: &Pool) -> bool {
-    // Try to install the extension; if it succeeds (or already exists)
-    // we're good. If it fails (extension not bundled in the image), the
-    // index/search tests skip via `#[ignore]`.
-    let create_res = pool
+/// Install `pgvector` into the test database, or refuse the run.
+///
+/// # Panics
+///
+/// When the extension is not available on the server, with the image that
+/// carries it. It used to return `false` and the callers announced a skip - so
+/// a `--ignored` run on a stock `postgres:16` printed the same green as a run
+/// that had exercised a single vector query.
+async fn require_pgvector(pool: &Pool) {
+    // The CREATE is best-effort and its result is deliberately not the verdict:
+    // an environment that ships the extension pre-installed can refuse the
+    // statement for reasons that have nothing to do with availability. The
+    // catalogue is what decides.
+    let _ = pool
         .execute("CREATE EXTENSION IF NOT EXISTS vector", &[])
         .await;
-    if create_res.is_err() {
-        return false;
-    }
-    let rows = pool
+    let installed = !pool
         .query_text_params("SELECT 1 FROM pg_extension WHERE extname='vector'", &[])
         .await
-        .unwrap_or_default();
-    !rows.is_empty()
+        .unwrap_or_default()
+        .is_empty();
+    assert!(
+        installed,
+        "The `vector` extension is not installed, and this test requires it.\n\
+         \n\
+         \x20 backend:   PostgreSQL\n\
+         \x20 extension: vector (pgvector)\n\
+         \n\
+         `CREATE EXTENSION IF NOT EXISTS vector` did not leave a row in\n\
+         pg_extension. Check what the server has to offer:\n\
+         \x20 SELECT * FROM pg_available_extensions WHERE name = 'vector';\n\
+         \n\
+         NO SERVER THIS REPOSITORY PROVISIONS CARRIES IT. deploy/compose's\n\
+         `postgres` service - the one tests/provision_test_backends.sh starts -\n\
+         runs the stock `postgres:16` image, which does not bundle pgvector.\n\
+         Point the tests at a server that does, or swap that image for\n\
+         `pgvector/pgvector:pg16` (docs/runbooks/docker-compose.md) and re-create\n\
+         the container.\n\
+         \n\
+         There is no environment variable that makes this a skip."
+    );
 }
 
 /// Test gate for `vector_search_returns_k_nearest`.
@@ -4056,10 +4108,7 @@ async fn vector_search_returns_k_nearest() {
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    if !pgvector_available(&pool).await {
-        zeroship_test_support::skip("Skipping: pgvector not installed in test environment");
-        return release_pg(pool).await;
-    }
+    require_pgvector(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -4219,11 +4268,9 @@ async fn pgvector_extension_missing_reports_typed_error() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
-    // Best-effort drop. If this fails (extension in use, etc.) we still
-    // try the probe — `pg_extension WHERE extname='vector'` will return
-    // a row, and the probe call will succeed; then we just skip the
-    // assertion. This keeps the test honest in both environments.
-    let _ = pool
+    // This test needs the extension ABSENT - it asserts the shape of the error
+    // raised when it is missing - so the drop is the fixture, not a cleanup.
+    let dropped = pool
         .execute("DROP EXTENSION IF EXISTS vector CASCADE", &[])
         .await;
 
@@ -4232,12 +4279,30 @@ async fn pgvector_extension_missing_reports_typed_error() {
         .await
         .map(|rows| !rows.is_empty())
         .unwrap_or(false);
-    if still_present {
-        zeroship_test_support::skip(
-            "Skipping: could not drop vector extension (likely in use by other objects)",
-        );
-        return release_pg(pool).await;
-    }
+    assert!(
+        !still_present,
+        "The `vector` extension could not be removed, and this test needs it ABSENT.\n\
+         \n\
+         \x20 backend:   PostgreSQL\n\
+         \x20 extension: vector (pgvector)\n\
+         \x20 drop said: {dropped:?}\n\
+         \n\
+         This is the inverse of the other pgvector tests: it asserts the TYPED\n\
+         ERROR raised when the extension is missing, so an installed one leaves\n\
+         that arm unexercised. It used to skip here, which reported the same\n\
+         green as a run that had ruled on the error shape.\n\
+         \n\
+         The usual cause is another object depending on it - a `vector` column\n\
+         or index left behind by a sibling test, or by a run that was\n\
+         interrupted. Find the dependents and drop them:\n\
+         \x20 SELECT * FROM pg_depend d JOIN pg_extension e ON d.refobjid = e.oid\n\
+         \x20 WHERE e.extname = 'vector';\n\
+         \n\
+         A database used by nothing else is the cheaper fix; this suite creates\n\
+         its own schemas and expects to own the database it is pointed at.\n\
+         \n\
+         There is no environment variable that makes this a skip."
+    );
 
     let backend = zeroship_plugin_db::backend::PostgresBackend::new(
         pool.clone(),
@@ -4319,10 +4384,7 @@ async fn pgvector_extension_missing_reports_typed_error() {
 async fn vector_dimension_mismatch_rejected_at_insert() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    if !pgvector_available(&pool).await {
-        zeroship_test_support::skip("Skipping: pgvector not installed in test environment");
-        return release_pg(pool).await;
-    }
+    require_pgvector(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -4386,20 +4448,6 @@ async fn vector_dimension_mismatch_rejected_at_insert() {
 // at the bottom of the report.
 // ---------------------------------------------------------------------------
 
-async fn postgis_extension_available(pool: &Pool) -> bool {
-    // Try a no-op `CREATE EXTENSION` so the test environment that ships
-    // PostGIS but doesn't pre-install it still picks it up. If the
-    // extension isn't shipped at all the call fails and we fall back
-    // to the probe (which will return empty rows → false).
-    let _ = pool
-        .execute("CREATE EXTENSION IF NOT EXISTS postgis", &[])
-        .await;
-    let rows = pool
-        .query_text_params("SELECT 1 FROM pg_extension WHERE extname='postgis'", &[])
-        .await
-        .unwrap_or_default();
-    !rows.is_empty()
-}
 
 /// Test gate for `near_returns_within_radius`.
 ///
@@ -4410,9 +4458,9 @@ async fn postgis_extension_available(pool: &Pool) -> bool {
 /// don't pin the order).
 ///
 /// **`#[ignore]`** until the test environment swaps to a PostGIS-bundled
-/// image. See `postgis_available` probe — the test self-skips if the
-/// extension isn't present, but the `#[ignore]` keeps default `cargo
-/// test` runs from probing at all.
+/// image, which is what keeps a default `cargo test` from probing at all.
+/// A `--ignored` run is a request to exercise it, so `require_postgis`
+/// FAILS on an image without the extension rather than skipping.
 #[compio::test]
 #[ignore = "requires PostGIS — swap `pg-test` image to a PostGIS-bundled variant"]
 async fn near_returns_within_radius() {
@@ -4420,10 +4468,7 @@ async fn near_returns_within_radius() {
 
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    if !postgis_available(&pool).await {
-        zeroship_test_support::skip("Skipping: PostGIS not installed in test environment");
-        return release_pg(pool).await;
-    }
+    require_postgis(&pool).await;
 
     let app = crate::test_app_id!();
 
@@ -4548,9 +4593,9 @@ async fn postgis_extension_missing_reports_typed_error() {
     let url = require_pg().await;
     let pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
 
-    // Best-effort drop. If this fails (e.g. extension in use), we
-    // re-check via the probe and self-skip the assertion.
-    let _ = pool
+    // This test needs the extension ABSENT - it asserts the shape of the error
+    // raised when it is missing - so the drop is the fixture, not a cleanup.
+    let dropped = pool
         .execute("DROP EXTENSION IF EXISTS postgis CASCADE", &[])
         .await;
 
@@ -4559,12 +4604,30 @@ async fn postgis_extension_missing_reports_typed_error() {
         .await
         .map(|rows| !rows.is_empty())
         .unwrap_or(false);
-    if still_present {
-        zeroship_test_support::skip(
-            "Skipping: could not drop postgis extension (likely in use by other objects)",
-        );
-        return release_pg(pool).await;
-    }
+    assert!(
+        !still_present,
+        "The `postgis` extension could not be removed, and this test needs it ABSENT.\n\
+         \n\
+         \x20 backend:   PostgreSQL\n\
+         \x20 extension: postgis\n\
+         \x20 drop said: {dropped:?}\n\
+         \n\
+         This is the inverse of the other PostGIS tests: it asserts the TYPED\n\
+         ERROR raised when the extension is missing, so an installed one leaves\n\
+         that arm unexercised. It used to skip here, which reported the same\n\
+         green as a run that had ruled on the error shape.\n\
+         \n\
+         The usual cause is another object depending on it - a `geography`\n\
+         column or spatial index left behind by a sibling test, or by a run that\n\
+         was interrupted. Find the dependents and drop them:\n\
+         \x20 SELECT * FROM pg_depend d JOIN pg_extension e ON d.refobjid = e.oid\n\
+         \x20 WHERE e.extname = 'postgis';\n\
+         \n\
+         A database used by nothing else is the cheaper fix; this suite creates\n\
+         its own schemas and expects to own the database it is pointed at.\n\
+         \n\
+         There is no environment variable that makes this a skip."
+    );
 
     let backend = zeroship_plugin_db::backend::PostgresBackend::new(
         pool.clone(),
@@ -5550,18 +5613,47 @@ use zeroship_plugin_db::backend::{
     Backup as _, BusyPolicy as BackupBusyPolicy, LockScope, SnapshotOpts,
 };
 
-/// Best-effort probe for `pg_dump`/`pg_restore` on PATH. The
-/// snapshot/restore round-trip tests `#[ignore]` themselves
-/// statically (the runner's `--ignored` flag re-enables them); this
-/// helper is for tests that can short-circuit at runtime if the
-/// binaries aren't available without failing the suite. Cheap — does
-/// not actually spawn the binary.
-fn pg_dump_on_path() -> bool {
-    std::process::Command::new("pg_dump")
+/// Refuse the run unless `pg_dump` answers `--version` on PATH.
+///
+/// The snapshot/restore round-trip tests `#[ignore]` themselves statically, so
+/// nothing reaches this unless a runner passed `--ignored` - which is a request
+/// to exercise them. Honouring that request with a skip was the defect: a
+/// deliberate `--ignored` run on a machine without the client tools printed the
+/// same green as one that had dumped and restored a real schema.
+///
+/// # Panics
+///
+/// When `pg_dump` is absent, naming the packages that carry it.
+fn require_pg_dump() {
+    let answered = std::process::Command::new("pg_dump")
         .arg("--version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|output| output.status.success());
+    assert!(
+        answered,
+        "`pg_dump` is not on PATH, and this test requires it.\n\
+         \n\
+         \x20 backend: the PostgreSQL CLIENT tools, in this process's PATH\n\
+         \x20 probe:   `pg_dump --version` did not succeed\n\
+         \n\
+         This is a LOCAL binary, not the server: a reachable database does not\n\
+         supply it, and the container-hosted server this suite talks to has it\n\
+         inside the container where this process cannot reach it. Nothing in\n\
+         this repository installs it.\n\
+         \n\
+         Install the client package for your system - `postgresql-client` on\n\
+         Debian and Ubuntu, `postgresql` on Fedora and Arch, `postgresql@16` in\n\
+         Homebrew, or the `postgresql` package in a nix shell - then check both\n\
+         binaries, because restore needs the second:\n\
+         \x20 pg_dump --version\n\
+         \x20 pg_restore --version\n\
+         \n\
+         A major version at or above the server's is the safe direction; an\n\
+         older `pg_dump` refuses a newer server outright.\n\
+         \n\
+         There is no environment variable that makes this a skip. You reached\n\
+         this test by asking for it with --ignored."
+    );
 }
 
 /// Fence: when the per-app `snapshot_restore` advisory
@@ -5660,10 +5752,7 @@ async fn snapshot_during_migration_returns_typed_error() {
 #[ignore = "needs pg_dump/pg_restore on PATH"]
 async fn snapshot_restore_round_trip_pg() {
     let url = require_pg().await;
-    if !pg_dump_on_path() {
-        zeroship_test_support::skip("Skipping — pg_dump not on PATH");
-        return;
-    }
+    require_pg_dump();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     // Per-app schema fresh every run.
     let app_id = crate::test_app_id!();
@@ -5785,10 +5874,7 @@ async fn snapshot_restore_round_trip_pg() {
 #[ignore = "needs pg_dump on PATH"]
 async fn snapshot_uri_content_hash_round_trip() {
     let url = require_pg().await;
-    if !pg_dump_on_path() {
-        zeroship_test_support::skip("Skipping — pg_dump not on PATH");
-        return;
-    }
+    require_pg_dump();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
     let app_id = crate::test_app_id!();
     let app_id = app_id.as_str();
@@ -5982,18 +6068,44 @@ async fn provision_platform_login_pool(
     (login_url, login_pool)
 }
 
-async fn postgis_available(pool: &Pool) -> bool {
-    let create_res = pool
+/// Install `PostGIS` into the test database, or refuse the run.
+///
+/// # Panics
+///
+/// When the extension is not available on the server, with what carries it. It
+/// used to return `false` and the callers announced a skip, so a `--ignored`
+/// run on a stock `postgres:16` printed the same green as one that had
+/// exercised a spatial query.
+async fn require_postgis(pool: &Pool) {
+    // Best-effort CREATE, catalogue-decided verdict; see `require_pgvector`.
+    let _ = pool
         .execute("CREATE EXTENSION IF NOT EXISTS postgis", &[])
         .await;
-    if create_res.is_err() {
-        return false;
-    }
-    let rows = pool
+    let installed = !pool
         .query_text_params("SELECT 1 FROM pg_extension WHERE extname='postgis'", &[])
         .await
-        .unwrap_or_default();
-    !rows.is_empty()
+        .unwrap_or_default()
+        .is_empty();
+    assert!(
+        installed,
+        "The `postgis` extension is not installed, and this test requires it.\n\
+         \n\
+         \x20 backend:   PostgreSQL\n\
+         \x20 extension: postgis\n\
+         \n\
+         `CREATE EXTENSION IF NOT EXISTS postgis` did not leave a row in\n\
+         pg_extension. Check what the server has to offer:\n\
+         \x20 SELECT * FROM pg_available_extensions WHERE name = 'postgis';\n\
+         \n\
+         NO SERVER THIS REPOSITORY PROVISIONS CARRIES IT. deploy/compose's\n\
+         `postgres` service - the one tests/provision_test_backends.sh starts -\n\
+         runs the stock `postgres:16` image, which does not bundle PostGIS.\n\
+         Point the tests at a server that does, or swap that image for a\n\
+         PostGIS-bundled variant such as `postgis/postgis:16-3.4` and re-create\n\
+         the container.\n\
+         \n\
+         There is no environment variable that makes this a skip."
+    );
 }
 
 #[compio::test]
@@ -6504,10 +6616,7 @@ async fn vector_search_runs_under_per_app_role_via_rls() {
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    if !pgvector_available(&admin_pool).await {
-        zeroship_test_support::skip("Skipping: pgvector not installed in test environment");
-        return release_pg(admin_pool).await;
-    }
+    require_pgvector(&admin_pool).await;
 
     let app = crate::test_app_id!();
 
@@ -6604,10 +6713,7 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
 
     let url = require_pg().await;
     let admin_pool = std::rc::Rc::new(Pool::connect(&url, 4).await.unwrap());
-    if !postgis_extension_available(&admin_pool).await {
-        zeroship_test_support::skip("Skipping: postgis not installed in test environment");
-        return release_pg(admin_pool).await;
-    }
+    require_postgis(&admin_pool).await;
 
     let app = crate::test_app_id!();
 
@@ -6687,8 +6793,8 @@ async fn spatial_near_runs_under_per_app_role_via_rls() {
         // with `invalid_identifier` and the role fence below is never reached.
         // This argument was `Value::Null` from the day the test was written
         // until 2026-09-03; it never showed because the usual test container
-        // carries no PostGIS and the arm skips. Its vector twin above always
-        // passed the descriptor.
+        // carries no PostGIS, and back then the arm skipped rather than
+        // failing. Its vector twin above always passed the descriptor.
         &zeroship_plugin_db::collection_schema(&DbBinding::cold_start(app), coll)
             .expect("descriptor slice for the spatial fixture"),
     )
@@ -7469,10 +7575,7 @@ async fn drop_namespace_pg_drops_slots_but_retains_migration_publication() {
     let url = require_pg().await;
     let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping drop_namespace_pg_ordering — wal_level != logical");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
     let app = crate::test_app_id!();
     let app = app.as_str();
     c1_cleanup(&pool, app).await;
@@ -7577,10 +7680,7 @@ async fn drop_namespace_idempotent_steps_3_to_5() {
     let url = require_pg().await;
     let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping drop_namespace_idempotent — wal_level != logical");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
     let app = crate::test_app_id!();
     let app = app.as_str();
     c1_cleanup(&pool, app).await;
@@ -7643,10 +7743,7 @@ async fn drop_namespace_retries_from_step_3_on_partial_failure() {
     let url = require_pg().await;
     let _cdc = cdc_budget::shared();
     let pool = std::rc::Rc::new(Pool::connect(&url, 2).await.unwrap());
-    if !pg_has_logical_wal(&pool).await {
-        zeroship_test_support::skip("Skipping drop_namespace_retries — wal_level != logical");
-        return release_pg(pool).await;
-    }
+    require_logical_wal(&pool).await;
     let app = crate::test_app_id!();
     let app = app.as_str();
     c1_cleanup(&pool, app).await;

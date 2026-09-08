@@ -1,7 +1,9 @@
 //! Live-PG mailer test — suppression check + `StdoutMailer` happy path.
 //!
-//! Skips silently when there is no test database (CI without a PG fixture;
-//! set `PG_TEST_URL`).
+//! A test database is REQUIRED. This used to skip silently without one, so a
+//! run against no database reported the same green as a run against one.
+//! `tests/provision_test_backends.sh` stands one up and writes its address into
+//! the test overlay; `PG_TEST_URL` overrides that.
 //! Mirrors the `migrations_smoke.rs` harness: `connect(...)` returns
 //! `(Client, Connection)` and the connection future must be spawned + detached
 //! on the compio runtime or queries hang.
@@ -13,10 +15,7 @@ use zeroship_mailer::{Address, Email, Mailer, SmtpConfig, SmtpMailer, SmtpTls};
 
 #[compio::test]
 async fn stdout_mailer_sends_when_not_suppressed() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skip (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = zeroship_core::config::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -55,10 +54,7 @@ async fn stdout_mailer_sends_when_not_suppressed() {
 
 #[compio::test]
 async fn stdout_mailer_refuses_suppressed() {
-    let Some(dsn) = zeroship_core::config::test_database_url_opt() else {
-        zeroship_test_support::skip("skip (no test database; set PG_TEST_URL)");
-        return;
-    };
+    let dsn = zeroship_core::config::test_database_url();
     let (client, connection) = connect(&dsn, NoTls).await.expect("connect");
     compio::runtime::spawn(async move {
         if let Err(e) = connection.run().await {
@@ -125,21 +121,38 @@ async fn stdout_mailer_refuses_suppressed() {
 /// message of type InvalidContentType", so every send to a plaintext sink
 /// FAILED. With `SmtpTls::Plaintext` the send must succeed.
 ///
-/// Gated on a test database (suppression check; set `PG_TEST_URL`) AND
-/// `AUTH_TEST_SMTP_SINK` (`host:port` of a plaintext sink, e.g.
-/// `127.0.0.1:1025`). Skips silently when either is unset so CI without a
-/// sink is unaffected.
+/// It needs a test database for the suppression check AND a plaintext sink at
+/// `AUTH_TEST_SMTP_SINK` (`host:port`). It USED TO SKIP when either was absent,
+/// which is how the bug above shipped: the one test that drives the real
+/// transport against a real sink was green on every machine without a sink,
+/// which was every machine. Both are required now.
 #[compio::test]
 async fn smtp_plaintext_sink_delivers_relay_forward() {
-    let (Some(dsn), Some(sink)) = (
-        zeroship_core::config::test_database_url_opt(),
-        zeroship_core::test_env!("AUTH_TEST_SMTP_SINK"),
-    ) else {
-        zeroship_test_support::skip(
-            "skip (need a test database [PG_TEST_URL] + AUTH_TEST_SMTP_SINK=host:port)",
-        );
-        return;
-    };
+    let dsn = zeroship_core::config::test_database_url();
+    let sink = zeroship_core::test_env!("AUTH_TEST_SMTP_SINK").unwrap_or_default();
+    assert!(
+        !sink.trim().is_empty(),
+        "A plaintext SMTP sink is unreachable, and this test requires it.\n\
+         \n\
+         \x20 backend: any SMTP server that accepts a plaintext session\n\
+         \x20 missing: AUTH_TEST_SMTP_SINK is unset or empty (wants host:port)\n\
+         \n\
+         NOTHING IN THIS REPOSITORY PROVISIONS A SINK.\n\
+         `tests/provision_test_backends.sh` stands up postgres and redis only.\n\
+         Run one yourself - mailpit needs no configuration:\n\
+         \n\
+         \x20 docker run -d --name zs-mailer-test-sink -p 1025:1025 -p 8025:8025 \\\n\
+         \x20   axllent/mailpit\n\
+         \n\
+         Then re-run with AUTH_TEST_SMTP_SINK=127.0.0.1:1025, and read what\n\
+         arrived at http://127.0.0.1:8025.\n\
+         \n\
+         PLAINTEXT IS THE POINT: this test exists because the SmtpTls::Plaintext\n\
+         arm did not, and a sink that insists on STARTTLS reproduces the failure\n\
+         rather than the fix.\n\
+         \n\
+         There is no environment variable that makes this a skip."
+    );
     let (host, port) = sink
         .rsplit_once(':')
         .map(|(h, p)| (h.to_string(), p.parse::<u16>().expect("sink port")))

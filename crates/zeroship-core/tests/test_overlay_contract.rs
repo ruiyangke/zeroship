@@ -75,23 +75,36 @@ fn a_misspelled_key_in_the_generated_shape_is_rejected() {
 /// When the overlay HAS been generated, it must satisfy the same contract and
 /// carry the two values every suite resolves from it.
 ///
-/// Skipped rather than failed when absent, and that is the one skip in this
-/// file: `cargo test -p zeroship-core` is run constantly on checkouts that have
-/// no docker and never provisioned a backend, and failing it there would say
-/// "the config is wrong" when the truth is "there is no config yet". The suites
-/// themselves cannot skip this way - `zeroship_core::config::test_overlay::load`
-/// panics with the provisioning command, because a suite that runs without a
-/// database is the thing this workspace stopped tolerating.
+/// AN ABSENT OVERLAY FAILS. It used to announce a skip here - the argument
+/// being that `cargo test -p zeroship-core` runs constantly on checkouts that
+/// never provisioned a backend, and that failing there would say "the config is
+/// wrong" when the truth is "there is no config yet". That distinction is real
+/// and is now made in the message rather than in the exit status: the refusal
+/// says the overlay has not been generated and names the one command that
+/// generates it. The status stays red, because a skip here is indistinguishable
+/// from a pass, and this is the only test that rules on the shape every suite
+/// resolves its backends from.
 #[test]
 fn the_generated_overlay_parses_and_names_both_backends() {
     let path = overlay_path();
-    if !path.exists() {
-        eprintln!(
-            "ZEROSHIP-TEST-SKIPPED: no {} yet; run {PROVISION_COMMAND}",
-            path.display()
-        );
-        return;
-    }
+    assert!(
+        path.exists(),
+        "The generated test overlay does not exist, and this test rules on it.\n\
+         \n\
+         \x20 wanted: {path}\n\
+         \n\
+         NOTHING IS WRONG WITH YOUR CONFIGURATION - there is not one yet. This\n\
+         file is generated, never hand-written. Generate it:\n\
+         \x20 {PROVISION_COMMAND}\n\
+         \n\
+         Both forms of that script write the overlay; `--check` adopts servers\n\
+         that are already running instead of starting its own.\n\
+         \n\
+         There is no environment variable that makes this a skip. Every suite in\n\
+         this workspace resolves its PostgreSQL and its Redis from this file, so\n\
+         an absent one is not a smaller run - it is no run at all.",
+        path = path.display()
+    );
 
     let parsed = FileConfig::load(Some(path.as_path())).unwrap_or_else(|error| {
         panic!(

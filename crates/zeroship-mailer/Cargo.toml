@@ -38,7 +38,6 @@ lettre = { version = "0.11", default-features = false, features = ["smtp-transpo
 askama = "0.12"
 
 [dev-dependencies]
-zeroship-test-support = { workspace = true }
 zeroship-core = { workspace = true }
 # `tests/mailer_test.rs` is a live-PG suppression test driven by `#[compio::test]`.
 # The polling fallback keeps it runnable in sandboxes that block io_uring;
