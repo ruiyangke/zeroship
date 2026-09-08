@@ -159,9 +159,12 @@ fn build_service_auth(
     control_pg: Arc<compio_postgres::Client>,
 ) -> zeroship_core::service_peers::ServiceAuth {
     use zeroship_core::service_assertion::ServiceAssertionVerifier;
-    use zeroship_core::service_peers::{service_issuer, ServiceAuth, ServiceKeyring};
+    use zeroship_core::service_peers::{ServiceAuth, ServiceKeyring};
 
-    let issuer = match service_issuer(zeroship_core::service_peers::CONTROL_SERVICE_NAME) {
+    // The SAME statement of control's own name the instance path compares `aud`
+    // against, so a second spelling cannot make one of them refuse callers the
+    // other admits.
+    let issuer = match zeroship_control::internal::control_service_issuer() {
         Ok(issuer) => issuer,
         Err(error) => {
             tracing::error!(%error, "control: refusing to start - control service issuer is malformed");
@@ -186,10 +189,10 @@ fn build_service_auth(
     // The FULL profile: control's guarded edges fire at app-load rate, so the
     // single-use claim's write against the shared table is proportional to app
     // loads. The store is the process's own long-lived client, which is the
-    // same connection `/readyz` probes.
-    let replay = Arc::new(zeroship_authn::service_replay::SharedClientReplayStore::new(
-        control_pg,
-    ));
+    // same connection `/readyz` probes - and it is built by the same function
+    // the per-request instance verifier uses, because two stores would be two
+    // answers to "has this assertion been seen".
+    let replay = zeroship_control::internal::control_replay_store(control_pg);
     ServiceAuth::new(keyring, Arc::new(ServiceAssertionVerifier::new(bundle, replay)))
 }
 

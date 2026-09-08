@@ -29,19 +29,43 @@ use uuid::Uuid;
 
 use zeroship_authn::service_replay::SharedClientReplayStore;
 use zeroship_bundle::{BlobStore, LocalDiskBlobStore};
+use zeroship_control::worker_enrolment::{enrol, EnrolmentEnvelope, WorkerEnrolmentRequest};
 use zeroship_control::{
     internal, AppState, EnvStore, Quota, RateLimiter, Registry, SecretString, StripeStore,
 };
-use zeroship_core::service_assertion::ServiceAssertionVerifier;
-use zeroship_core::service_peers::{
-    service_issuer, ServiceAuth, ServiceKeyring, CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME,
-    WORKER_SERVICE_NAME,
+use zeroship_core::service_assertion::{
+    ServiceAssertionVerifier, ServiceIssuer, ServiceSigningKey,
 };
+use zeroship_core::service_peers::{
+    load_peer_bundle, service_issuer, InstanceSigningKey, ServiceAuth, ServiceKeyring,
+    CONTROL_SERVICE_NAME, GATEWAY_SERVICE_NAME, SERVICE_TRUST_DOMAIN, WORKER_SERVICE_NAME,
+};
+use zeroship_core::typed_id::new_worker_instance_id;
 
 use crate::common;
 
 const TEST_MASTER_KEY: &str = "test-master-key-deadbeefcafebabe";
 const CONTROL_KEY: &str = "test-control-key";
+
+/// The enrolment declaration this fixture carries, and a peer inside it.
+///
+/// The instance arms need a row written by the PRODUCTION writer rather than an
+/// INSERT of their own, so the key control resolves is the one a real worker
+/// presented and the id is the one control minted.
+const ENROLMENT_NETWORKS: &str = "10.7.0.0/16";
+const ENROLMENT_PORTS: &str = "8080-8090";
+const ENROLMENT_PEER: &str = "10.7.3.9:51314";
+const ADVERTISED_PORT: u16 = 8080;
+
+/// An instance identifier the OPERATOR'S peer document publishes a key for, and
+/// that nothing ever enrols.
+///
+/// It exists so one arm can rule on the half of this design a registry lookup
+/// alone cannot state: the operator file is the source of ROLE keys and of
+/// nothing else. An issuer naming an instance must be answered from the
+/// registry or refused - never answered from the file, which carries no status
+/// and so cannot be revoked.
+const PLANTED_INSTANCE_ID: &str = "wkr_PlantedInOperatorFileX";
 
 fn tmpdir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
@@ -55,7 +79,14 @@ fn tmpdir(label: &str) -> PathBuf {
 /// Write one ed25519 key per service and one peer document naming every public
 /// half - the same shape `tests/lib/runtime_secrets.sh` writes for the
 /// end-to-end harnesses, so this suite and those harnesses exercise one format.
-fn write_service_keys(dir: &Path) -> PathBuf {
+///
+/// It also publishes ONE key under an INSTANCE issuer
+/// ([`PLANTED_INSTANCE_ID`]), and returns its private half. That entry is
+/// well formed - `load_peer_bundle` admits any issuer identifier, and an
+/// instance identifier is one - so nothing in the loader refuses a deployment
+/// whose operator files an instance key by hand. What must refuse it is the
+/// verification path, and it cannot be shown to unless the key is really there.
+fn write_service_keys(dir: &Path) -> (PathBuf, ServiceSigningKey) {
     let mut entries = Vec::new();
     for name in [CONTROL_SERVICE_NAME, WORKER_SERVICE_NAME, GATEWAY_SERVICE_NAME] {
         let mut seed = [0_u8; 32];
@@ -72,9 +103,23 @@ fn write_service_keys(dir: &Path) -> PathBuf {
             URL_SAFE_NO_PAD.encode(signing.verifying_key().to_bytes())
         ));
     }
+    let planted = ServiceSigningKey::generate();
+    entries.push(format!(
+        r#"{{"kty":"OKP","crv":"Ed25519","iss":"{}","x":"{}"}}"#,
+        instance_issuer(PLANTED_INSTANCE_ID).as_str(),
+        planted.public_jwk_x()
+    ));
     let peers = dir.join("service-peers.json");
     fs::write(&peers, format!("{{\"keys\":[{}]}}", entries.join(","))).expect("write peers");
-    peers
+    (peers, planted)
+}
+
+/// The identifier one instance of the worker role mints under.
+fn instance_issuer(instance_id: &str) -> ServiceIssuer {
+    ServiceIssuer::parse(&format!(
+        "spiffe://{SERVICE_TRUST_DOMAIN}/{WORKER_SERVICE_NAME}/{instance_id}"
+    ))
+    .expect("an instance issuer parses")
 }
 
 fn keyring_for(name: &str, dir: &Path, peers: &Path) -> ServiceKeyring {
@@ -90,6 +135,13 @@ struct Fixture {
     state: Arc<AppState>,
     worker: ServiceKeyring,
     gateway: ServiceKeyring,
+    /// A keyring minting under [`PLANTED_INSTANCE_ID`] on the key the peer
+    /// document publishes for it. Built with `from_parts` rather than
+    /// `InstanceSigningKey::into_keyring`, because that constructor refuses a
+    /// key the bundle publishes at all - which is exactly the arrangement this
+    /// keyring exists to present.
+    planted_instance: ServiceKeyring,
+    peers: PathBuf,
     blob_root: PathBuf,
     deploy_tmp_dir: PathBuf,
     key_dir: PathBuf,
@@ -116,6 +168,14 @@ impl Fixture {
         let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
         self.gateway.mint_for(&control).map(|a| format!("Bearer {a}")).expect("mint")
     }
+
+    fn planted_instance_header(&self) -> String {
+        let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+        self.planted_instance
+            .mint_for(&control)
+            .map(|a| format!("Bearer {a}"))
+            .expect("mint")
+    }
 }
 
 async fn build_fixture() -> Fixture {
@@ -123,7 +183,7 @@ async fn build_fixture() -> Fixture {
     let blob_root = tmpdir("blob");
     let deploy_tmp_dir = tmpdir("deploy");
     let key_dir = tmpdir("keys");
-    let peers = write_service_keys(&key_dir);
+    let (peers, planted_key) = write_service_keys(&key_dir);
 
     let registry = Registry::new(&db_url).await.expect("registry");
     let env_store = EnvStore::new(registry.clone(), TEST_MASTER_KEY).expect("env store");
@@ -176,7 +236,15 @@ async fn build_fixture() -> Fixture {
             webhook_limiter: Arc::new(RateLimiter::new(Quota::per_minute(10_000, 100))),
             origin_scheme: zeroship_core::config::OriginScheme::Https,
             trust_proxy: false,
-            worker_enrolment: zeroship_control::worker_enrolment::EnrolmentEnvelope::closed(),
+            // DECLARED, not closed: the instance arms below enrol through the
+            // production writer, so this fixture has to be a control plane that
+            // can enrol at all.
+            worker_enrolment: EnrolmentEnvelope::parse(
+                ENROLMENT_NETWORKS,
+                ENROLMENT_PORTS,
+                false,
+            )
+            .expect("the declaration parses"),
             deploy_tmp_dir: deploy_tmp_dir.clone(),
             control_pg,
             app_base_domain: "zeroship.localhost".to_string(),
@@ -204,6 +272,13 @@ async fn build_fixture() -> Fixture {
         }),
         worker: keyring_for(WORKER_SERVICE_NAME, &key_dir, &peers),
         gateway: keyring_for(GATEWAY_SERVICE_NAME, &key_dir, &peers),
+        planted_instance: ServiceKeyring::from_parts(
+            instance_issuer(PLANTED_INSTANCE_ID),
+            planted_key,
+            load_peer_bundle(&peers).expect("peer bundle loads"),
+        )
+        .expect("a key published under its OWN issuer builds a keyring"),
+        peers,
         blob_root,
         deploy_tmp_dir,
         key_dir,
@@ -393,4 +468,216 @@ async fn a_valid_assertion_from_the_wrong_service_is_refused() {
     )
     .await;
     assert_eq!(admitted.status(), StatusCode::BAD_REQUEST);
+}
+
+// ---------------------------------------------------------------------------
+// Worker INSTANCE assertions
+// ---------------------------------------------------------------------------
+//
+// A worker mints under `svc/worker/<wkr_id>` after it enrols, on a key that
+// exists nowhere but its own memory and the row control wrote. The operator's
+// peer document therefore cannot carry that key, and `keys_for` is an exact
+// string lookup, so control has to resolve it from `zeroship.worker_instances`
+// before verification or refuse every instance outright.
+//
+// WHAT THE `status` FILTER BUYS, AND WHY IT IS THE ONE THING THESE ARMS EXIST
+// TO BIND. Per-instance revocation is bought ENTIRELY by that filter. Resolve
+// the key regardless of status and marking an instance `gone` does nothing at
+// all, while looking exactly like a revocation mechanism that ran and approved.
+// So each refusal below is paired with an acceptance one variable away, and the
+// variable is the column.
+
+/// The response body of an admitted enrolment, drained so the fixture's
+/// Postgres client is not still borrowed when the test ends.
+async fn body_json(mut response: web::HttpResponse) -> serde_json::Value {
+    use ntex::util::{stream_recv, BytesMut};
+    let mut body = response.take_body();
+    let mut buf = BytesMut::new();
+    while let Some(item) = stream_recv(&mut body).await {
+        buf.extend_from_slice(&item.expect("body chunk"));
+    }
+    serde_json::from_slice(&buf).expect("body is JSON")
+}
+
+/// Enrol one instance through the PRODUCTION writer and return its id.
+///
+/// Not an INSERT of this suite's own: the id, the ring key and the row shape
+/// are control's, and a hand-written row would let these arms pass against a
+/// registry the enrolment path never produces.
+async fn enrol_instance(state: &Arc<AppState>, public_key: &[u8; 32]) -> String {
+    let response = enrol(
+        state,
+        Some(ENROLMENT_PEER.parse().expect("peer socket parses")),
+        WorkerEnrolmentRequest {
+            port: ADVERTISED_PORT,
+            public_key: URL_SAFE_NO_PAD.encode(public_key),
+        },
+    )
+    .await;
+    assert_eq!(
+        response.status(),
+        StatusCode::CREATED,
+        "the fixture must be able to enrol at all"
+    );
+    body_json(response).await["instance_id"]
+        .as_str()
+        .expect("instance_id")
+        .to_string()
+}
+
+async fn set_status(pg: &compio_postgres::Client, instance_id: &str, status: &str) {
+    let moved = pg
+        .execute(
+            "UPDATE zeroship.worker_instances SET status = $2 WHERE id = $1",
+            &[&instance_id, &status],
+        )
+        .await
+        .expect("status progresses");
+    assert_eq!(moved, 1, "exactly the probe row moves to {status}");
+}
+
+/// Remove rows this suite minted, by id so a concurrent sibling's rows survive.
+async fn forget(pg: &compio_postgres::Client, instance_id: &str) {
+    pg.execute(
+        "DELETE FROM zeroship.worker_instances WHERE id = $1",
+        &[&instance_id],
+    )
+    .await
+    .expect("probe row removed");
+}
+
+/// THE BEFORE/AFTER PAIR. One enrolled instance, one key, one route; the only
+/// thing that moves is `status`.
+///
+/// EVERY PRESENTATION MINTS A FRESH ASSERTION, and that is not tidiness. The
+/// full profile burns the `jti`, so re-presenting the admitted bytes would come
+/// back 401 as a REPLAY whatever the status filter did - the arm would pass
+/// against a control plane with no revocation at all, which is the exact shape
+/// of failure this pair exists to rule out.
+#[ntex::test]
+async fn marking_an_instance_draining_or_gone_stops_its_assertions_verifying() {
+    let fixture = build_fixture().await;
+    let app = internal_app!(Arc::clone(&fixture.state));
+
+    let key = InstanceSigningKey::generate();
+    let public = *key.public_key();
+    let instance_id = enrol_instance(&fixture.state, &public).await;
+    let keyring = key
+        .into_keyring(
+            instance_issuer(&instance_id),
+            load_peer_bundle(&fixture.peers).expect("peer bundle loads"),
+        )
+        .expect("a boot-drawn key the document does not publish builds a keyring");
+
+    let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+    let header = || {
+        format!(
+            "Bearer {}",
+            keyring.mint_for(&control).expect("the instance mints")
+        )
+    };
+    let get = |header: String| {
+        let app = &app;
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::get()
+                    .uri(&format!("/internal/apps/{BAD_APP_ID}/env"))
+                    .header("authorization", header)
+                    .to_request(),
+            )
+            .await
+            .status()
+        }
+    };
+
+    let pg = &fixture.state.control_pg;
+    let active = get(header()).await;
+    set_status(pg, &instance_id, "draining").await;
+    let draining = get(header()).await;
+    set_status(pg, &instance_id, "gone").await;
+    let gone = get(header()).await;
+
+    // Cleaned up BEFORE the assertions: a failing assertion panics past
+    // anything after it, which is how a probe row survives exactly the runs
+    // that matter.
+    forget(pg, &instance_id).await;
+
+    assert_eq!(
+        active,
+        StatusCode::BAD_REQUEST,
+        "an active instance's assertion must reach the handler, or the two \
+         refusals below prove only that instances never authenticate"
+    );
+    assert_eq!(
+        draining,
+        StatusCode::UNAUTHORIZED,
+        "a draining instance must not authenticate"
+    );
+    assert_eq!(
+        gone,
+        StatusCode::UNAUTHORIZED,
+        "a gone instance must not authenticate"
+    );
+}
+
+/// An issuer naming an instance is answered from the REGISTRY or refused.
+///
+/// Both arms are unenrolled, and they differ in whether the operator's peer
+/// document happens to publish a key for that instance issuer. The second is
+/// the one that matters: a document entry carries no status, so a path that
+/// fell back to it would hold a credential nothing can ever revoke, and the
+/// registry lookup would be decoration.
+#[ntex::test]
+async fn an_instance_with_no_active_row_is_refused_and_never_resolved_from_the_peer_file() {
+    let fixture = build_fixture().await;
+    let app = internal_app!(Arc::clone(&fixture.state));
+
+    let stranger = InstanceSigningKey::generate()
+        .into_keyring(
+            instance_issuer(&new_worker_instance_id()),
+            load_peer_bundle(&fixture.peers).expect("peer bundle loads"),
+        )
+        .expect("instance keyring");
+    let control = service_issuer(CONTROL_SERVICE_NAME).expect("control issuer");
+    let stranger_header = format!(
+        "Bearer {}",
+        stranger.mint_for(&control).expect("the instance mints")
+    );
+
+    let get = |header: String| {
+        let app = &app;
+        async move {
+            test::call_service(
+                app,
+                test::TestRequest::get()
+                    .uri(&format!("/internal/apps/{BAD_APP_ID}/env"))
+                    .header("authorization", header)
+                    .to_request(),
+            )
+            .await
+            .status()
+        }
+    };
+
+    assert_eq!(
+        get(stranger_header).await,
+        StatusCode::UNAUTHORIZED,
+        "an instance that never enrolled holds no credential here"
+    );
+    assert_eq!(
+        get(fixture.planted_instance_header()).await,
+        StatusCode::UNAUTHORIZED,
+        "an instance key published in the OPERATOR'S peer document must not \
+         authenticate without a row: the file carries no status, so a key \
+         resolved from it could never be revoked"
+    );
+
+    // THE CONTROL. The operator file is still the source of ROLE keys, and the
+    // role path is untouched by any of the above.
+    assert_eq!(
+        get(fixture.worker_header()).await,
+        StatusCode::BAD_REQUEST,
+        "svc/worker itself must still authenticate from the operator file"
+    );
 }

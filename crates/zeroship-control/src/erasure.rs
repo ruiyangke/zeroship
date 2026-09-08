@@ -333,7 +333,7 @@ pub async fn erasure_preflight(
 ) -> web::HttpResponse {
     if let Some(resp) = check_service_auth(
         &req,
-        &state.service_auth,
+        &state,
         zeroship_core::service_identity::endpoints::CONTROL_ERASURE_PREFLIGHT,
     )
     .await

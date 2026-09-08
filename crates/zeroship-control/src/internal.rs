@@ -6,14 +6,56 @@ use ntex::web;
 use ntex::web::types::{Path, State};
 use uuid::Uuid;
 use zeroship_core::readiness::ReadinessGate;
-use zeroship_core::service_identity::{endpoints, AuthError, ServiceEndpoint};
-use zeroship_core::service_peers::ServiceAuth;
+use zeroship_core::service_assertion::{
+    thumbprint_key_id, AssertionError, ReplayStore, ServiceAssertionVerifier, ServiceIssuer,
+    ServiceTrustBundle,
+};
+use zeroship_core::service_identity::{
+    endpoints, verify_service_call, AuthError, ServiceEndpoint, ServiceIdentity,
+};
+use zeroship_core::service_peers::{service_issuer, CONTROL_SERVICE_NAME};
 
 use crate::AppState;
 
 // ---------------------------------------------------------------------------
 // Auth helpers
 // ---------------------------------------------------------------------------
+
+/// The identifier this control plane mints under, and the one callers must
+/// address it as.
+///
+/// ONE STATEMENT of control's own name. `main`'s keyring is built on it and
+/// `verify_worker_instance` compares an instance's `aud` against it, and the
+/// two must not be able to disagree: control declares no
+/// `ServiceKeyring::addressed_as`, so the name it mints under IS the name
+/// callers address, and a second spelling of either would refuse every worker
+/// instance while the role path carried on working.
+///
+/// # Errors
+///
+/// Returns [`AssertionError::MalformedIssuer`] if [`CONTROL_SERVICE_NAME`] ever
+/// stops being a well-formed service path. `zeroship-core` has a test saying it
+/// is one; this propagates rather than unwraps because one of its two callers
+/// is an authentication path, which must refuse rather than panic.
+pub fn control_service_issuer() -> Result<ServiceIssuer, AssertionError> {
+    service_issuer(CONTROL_SERVICE_NAME)
+}
+
+/// The `jti` single-use cache every inbound service assertion is claimed in.
+///
+/// ONE STATEMENT for the same reason as [`control_service_issuer`]. This
+/// process builds one verifier at boot for role assertions and one per request
+/// for instance assertions; two different stores would be two different answers
+/// to "has this assertion been seen", which is single-use per verifier rather
+/// than single use.
+#[must_use]
+pub fn control_replay_store(
+    control_pg: Arc<compio_postgres::Client>,
+) -> Arc<dyn ReplayStore + Send + Sync> {
+    Arc::new(zeroship_authn::service_replay::SharedClientReplayStore::new(
+        control_pg,
+    ))
+}
 
 /// Refuse a caller that has not proved WHICH SERVICE it is, or that holds no
 /// grant on this endpoint.
@@ -33,16 +75,20 @@ use crate::AppState;
 ///
 /// `pub(crate)` so `crate::erasure` runs THIS check rather than growing a second
 /// copy, for the same reason [`check_auth`] is.
+///
+/// It takes the whole [`AppState`] rather than the `ServiceAuth` alone
+/// because control resolves a worker INSTANCE's key from its own registry
+/// before verification - see `verify_service_caller`.
 pub(crate) async fn check_service_auth(
     req: &web::HttpRequest,
-    service_auth: &ServiceAuth,
+    state: &AppState,
     endpoint: ServiceEndpoint,
 ) -> Option<web::HttpResponse> {
     let header = req
         .headers()
         .get("authorization")
         .and_then(|value| value.to_str().ok());
-    match service_auth.verify(header, endpoint).await {
+    match verify_service_caller(state, header, endpoint).await {
         Ok(_identity) => None,
         Err(error) => {
             tracing::warn!(
@@ -63,6 +109,157 @@ pub(crate) async fn check_service_auth(
             })
         }
     }
+}
+
+/// Route one inbound credential to the keys that are allowed to verify it.
+///
+/// Two sources, chosen by the ARITY of the issuer and by nothing else:
+///
+/// - A ROLE identifier is verified against the operator's peer document. That
+///   file is the only source of role keys and stays so.
+/// - An identifier naming an INSTANCE of a role is verified against the key
+///   control itself recorded at enrolment, because no peer document has ever
+///   carried one: a worker draws its instance keypair in memory at boot and
+///   only the public half ever leaves the process.
+///
+/// `ServiceTrustBundle::keys_for` is an exact-string lookup, so the second kind
+/// resolves nothing in the first source - which is why control cannot simply
+/// hand every caller to the boot-time verifier and is why this branch exists.
+///
+/// The resolution happens HERE, before any verification, and hands verification
+/// a bundle. It is deliberately NOT a resolver seam a verifier calls back into:
+/// `zeroship-core` holds inter-service wire types and would have to grow a
+/// database-shaped trait for that, and it would buy nothing, because the role
+/// and the instance are separable at parse time and "is a lookup even needed"
+/// is therefore answerable before the first check runs.
+async fn verify_service_caller(
+    state: &AppState,
+    authorization: Option<&str>,
+    endpoint: ServiceEndpoint,
+) -> Result<ServiceIdentity, AuthError> {
+    match presented_instance_issuer(authorization) {
+        Some(issuer) => verify_worker_instance(state, authorization, &issuer, endpoint).await,
+        None => state.service_auth.verify(authorization, endpoint).await,
+    }
+}
+
+/// The issuer an unverified assertion CLAIMS, when that issuer names an
+/// instance.
+///
+/// Read from the UNVERIFIED payload for one purpose: choosing where the
+/// verification key comes from. Nothing is trusted on the strength of it. The
+/// signature still has to hold under a key already bound to that identifier,
+/// and the verifier re-checks the VERIFIED `iss` against the same selector, so
+/// a lie here can only select a key that fails to verify.
+///
+/// `None` covers "no header", "not a bearer", "not a three-part JWT",
+/// "unparseable payload", "no `iss`", "not an issuer identifier", and "an
+/// issuer naming a role". Every one of those takes the role path, which refuses
+/// the malformed ones itself; there is no arm here that admits anything.
+fn presented_instance_issuer(authorization: Option<&str>) -> Option<ServiceIssuer> {
+    use base64::Engine as _;
+
+    let assertion = zeroship_core::auth::extract_bearer(authorization?)?;
+    let mut parts = assertion.split('.');
+    let (_header, payload, signature) = (parts.next()?, parts.next()?, parts.next()?);
+    if signature.is_empty() || parts.next().is_some() {
+        return None;
+    }
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    let issuer = ServiceIssuer::parse(claims.get("iss")?.as_str()?).ok()?;
+    issuer.instance().is_some().then_some(issuer)
+}
+
+/// Verify an assertion minted by an enrolled worker INSTANCE.
+///
+/// The bundle handed to verification carries exactly one key under exactly one
+/// issuer: this instance's key, under the identifier the caller presented. That
+/// is the design's "a bundle carrying that one extra key" - for an INSTANCE
+/// identifier the operator document's entries are unreachable either way,
+/// because `keys_for` matches the full identifier and a role's entry is a
+/// different string - and it is the narrower of the two spellings, which is
+/// what makes the second bullet below structural.
+///
+/// Two consequences, both load-bearing, and both structural rather than
+/// reviewed:
+///
+/// - The key is published under the INSTANCE issuer and never under the role.
+///   Publishing it under `svc/worker` would let one instance's key verify an
+///   assertion attributed to the role itself, which is the collapse the
+///   issuer/instance split exists to prevent.
+/// - An instance row cannot introduce or replace a ROLE key. The row
+///   contributes 32 bytes and no name; the identifier those bytes are filed
+///   under is the caller's, and `ServiceIssuer::parse` admits an instance
+///   identifier only at one path segment more than a role, so no row can
+///   produce a role entry. (The `worker_instances_id_shape` CHECK does not make
+///   this unreachable and is not what holds it: the lookup runs issuer to row,
+///   never row to issuer, so the row's `id` never becomes a name here at all.)
+///
+/// There is NO fallback to the role's key when the lookup comes back empty. An
+/// instance control has not enrolled, or has revoked, holds nothing here - and
+/// a fallback would also make an instance key an operator could file in the
+/// peer document authenticate, which is a credential carrying no status and so
+/// one nothing can revoke.
+///
+/// Nothing is cached. The proposal leaves caching open until a measurement asks
+/// for it, and records that any cache needs an invalidation story for a revoked
+/// instance: a cached key outliving its revocation is worse than the read.
+async fn verify_worker_instance(
+    state: &AppState,
+    authorization: Option<&str>,
+    issuer: &ServiceIssuer,
+    endpoint: ServiceEndpoint,
+) -> Result<ServiceIdentity, AuthError> {
+    // Total: this function is reached only for an issuer that names one.
+    let instance = issuer.instance().ok_or(AuthError::CredentialRejected)?;
+    let public = match crate::worker_enrolment::active_instance_public_key(
+        state.control_pg.as_ref(),
+        instance,
+    )
+    .await
+    {
+        Ok(Some(public)) => public,
+        Ok(None) => {
+            tracing::warn!(
+                issuer = issuer.as_str(),
+                "control-internal: no ACTIVE worker instance is registered under this issuer"
+            );
+            return Err(AuthError::CredentialRejected);
+        }
+        Err(error) => {
+            // The registry is a store this verification must consult, so an
+            // unreachable one refuses WITHOUT judging - the same shape as the
+            // replay store, and it answers 503 upstream rather than 401.
+            tracing::error!(
+                %error,
+                issuer = issuer.as_str(),
+                "control-internal: the worker instance registry could not be read"
+            );
+            return Err(AuthError::StoreUnavailable);
+        }
+    };
+
+    let audience = control_service_issuer().map_err(|error| {
+        tracing::error!(%error, "control-internal: this control plane's own issuer is malformed");
+        AuthError::CredentialRejected
+    })?;
+    let mut bundle = ServiceTrustBundle::new();
+    bundle
+        .trust(issuer, thumbprint_key_id(&public), public)
+        .map_err(|error| {
+            tracing::error!(
+                %error,
+                issuer = issuer.as_str(),
+                "control-internal: the registered instance key was refused by the bundle"
+            );
+            AuthError::CredentialRejected
+        })?;
+    let verifier =
+        ServiceAssertionVerifier::new(bundle, control_replay_store(Arc::clone(&state.control_pg)));
+    verify_service_call(&verifier, authorization, audience.as_str(), endpoint).await
 }
 
 /// The shared-control-key check the `/internal/*` endpoints that are NOT
@@ -172,7 +369,7 @@ pub async fn get_app_env(
     // profile; a shared bearer no longer opens this door, which matters most
     // here because the response body is the app's DECRYPTED environment.
     if let Some(resp) =
-        check_service_auth(&req, &state.service_auth, endpoints::CONTROL_APP_ENV).await
+        check_service_auth(&req, &state, endpoints::CONTROL_APP_ENV).await
     {
         return resp;
     }
@@ -218,7 +415,7 @@ pub async fn enrol_worker_instance(
     body: web::types::Json<crate::worker_enrolment::WorkerEnrolmentRequest>,
 ) -> web::HttpResponse {
     if let Some(resp) =
-        check_service_auth(&req, &state.service_auth, endpoints::CONTROL_WORKER_ENROL).await
+        check_service_auth(&req, &state, endpoints::CONTROL_WORKER_ENROL).await
     {
         return resp;
     }
@@ -248,7 +445,7 @@ pub async fn get_app_version(
 ) -> web::HttpResponse {
     // Same rate as the env read - once per app load, plus a refetch on a
     // version change - so the same full profile.
-    if let Some(resp) = check_service_auth(&req, &state.service_auth, endpoints::CONTROL_APP).await {
+    if let Some(resp) = check_service_auth(&req, &state, endpoints::CONTROL_APP).await {
         return resp;
     }
     let uid = match app_id.parse::<Uuid>() {
