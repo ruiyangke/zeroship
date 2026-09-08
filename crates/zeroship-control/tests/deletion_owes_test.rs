@@ -1030,3 +1030,42 @@ async fn the_unbilled_remedy_turns_on_whether_a_payment_identity_exists() {
 
     common::drain_pg().await;
 }
+
+/// A VOID row must not answer for a period that also holds a DRAFT.
+///
+/// This is the residual half of the draft defect and it is reachable rather
+/// than theoretical: `void_reissue::void_and_reissue` commits the void in its
+/// own transaction before writing the replacement, so a period legitimately
+/// holds a void row and a draft at the same time. A settled-set test written as
+/// one `NOT EXISTS` lets the void speak for the period and hides the draft's
+/// money - the same shape as the bare row-existence test it replaced, one
+/// status along.
+///
+/// The CONTROL is the same shape with the void alone. Void really does settle a
+/// period, so a predicate that refused this pair by refusing every void would
+/// pass the second half while breaking the operator's correction path.
+#[compio::test]
+async fn a_void_does_not_answer_for_a_period_that_still_holds_a_draft() {
+    let fx = Fx::new().await;
+    let metered = fx.plan(NO_QUOTA).await;
+
+    // The CONTROL first: voided and nothing pending. Nothing is owed.
+    let settled_owner = fx.seed_user("owes-void-only").await;
+    let settled = fx.organization(settled_owner, "owes-void-only").await;
+    fx.app_with_usage(&settled, &metered, METERED_UNITS, 2).await;
+    let withdrawn = fx.invoice(&settled, FINALIZED, PRICED_PERIOD_CENTS, 0).await;
+    fx.void(&withdrawn).await;
+    assert_money_clear(&fx, settled_owner, &settled).await;
+
+    // The reissue, caught mid-flight: the void has committed and the
+    // replacement is still a draft, so the money is real and unclaimed.
+    let owner = fx.seed_user("owes-void-then-draft").await;
+    let reissuing = fx.organization(owner, "owes-void-then-draft").await;
+    fx.app_with_usage(&reissuing, &metered, METERED_UNITS, 2).await;
+    let wrong = fx.invoice(&reissuing, FINALIZED, PRICED_PERIOD_CENTS, 0).await;
+    fx.void(&wrong).await;
+    fx.invoice(&reissuing, DRAFT, 0, 0).await;
+    assert_unbilled_refused(&fx, owner, &reissuing, PRICED_PERIOD_CENTS).await;
+
+    common::drain_pg().await;
+}
