@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use std::net::IpAddr;
 use std::sync::Arc;
 
-use uuid::Uuid;
+use zeroship_core::user_id::UserId;
 use zeroship_authz as authz;
 use zeroship_core::auth_provider::{AuthProvider, ProviderAuthz, VerifyTokenError};
 use zeroship_core::device_grant::{PLATFORM_CLI_CLIENT_ID, PLATFORM_CLI_ISSUABLE_SCOPES};
@@ -34,7 +34,7 @@ pub type HttpRejection = ntex::web::Error;
 /// enforced and never fires.
 #[derive(Debug)]
 pub struct VerifiedPrincipal {
-    pub principal_id: Uuid,
+    pub principal_id: UserId,
     pub token_policy: Option<authz::Policy>,
     pub request_ip: Option<IpAddr>,
     pub request_id: String,
@@ -103,7 +103,7 @@ impl BearerVerifier {
             .oauth_guard_from_bearer(token, request_ip, request_id)
             .await?;
 
-        self.require_active_principal(principal.principal_id).await?;
+        self.require_active_principal(&principal.principal_id).await?;
 
         Ok(principal)
     }
@@ -176,16 +176,16 @@ impl BearerVerifier {
     /// A lookup failure is a 500 rejection and never authenticates the caller.
     pub async fn require_active_principal(
         &self,
-        principal_id: Uuid,
+        principal_id: &UserId,
     ) -> Result<(), HttpRejection> {
         let rows = self
             .control_pg
-            .query(ACTIVE_PRINCIPAL_SQL, &[&principal_id])
+            .query(ACTIVE_PRINCIPAL_SQL, &[&principal_id.as_str()])
             .await
             .map_err(|err| {
                 tracing::error!(
                     error = %err,
-                    principal_id = %principal_id,
+                    principal_id = principal_id.as_str(),
                     "control: principal eligibility lookup failed"
                 );
                 AuthnRejection::internal("principal_eligibility_lookup_failed")
@@ -236,13 +236,17 @@ impl BearerVerifier {
                 )
                 .await?;
 
-                let principal_id = Uuid::parse_str(&verified.provider_subject)
+                // The `sub` claim is the platform user id in its printed form. Parsing
+                // it here is the fence: `zeroship.principal_grants.principal_id` and
+                // `identity_links.principal_id` are text holding that rendering, so a
+                // subject in any other shape matches no grant row.
+                let principal_id = UserId::parse(&verified.provider_subject)
                     .map_err(|_| AuthnRejection::unauthorized("invalid_oauth_sub"))?;
                 let mut scopes = authz::parse_scope_string(raw_scope)
                     .map_err(|_| AuthnRejection::unauthorized("invalid_oauth_scope"))?;
                 let mut seed = false;
                 if verified.client_id.as_deref() == Some(PLATFORM_CLI_CLIENT_ID) {
-                    let entitlement = self.platform_cli_entitlement(principal_id).await?;
+                    let entitlement = self.platform_cli_entitlement(&principal_id).await?;
                     seed = entitlement.unseeded;
                     scopes.retain(|scope| entitlement.scopes.contains(scope));
                 }
@@ -255,7 +259,7 @@ impl BearerVerifier {
 
                 let principal_id =
                     self.resolve_supabase_principal(&verified.provider_subject).await?;
-                let grants = self.load_principal_grants(principal_id).await?;
+                let grants = self.load_principal_grants(&principal_id).await?;
                 let raw_scope = grants.join(" ");
                 let token_policy = policy_from_scope_string(&raw_scope, "invalid_principal_grant")?;
                 (principal_id, token_policy, false)
@@ -274,7 +278,7 @@ impl BearerVerifier {
     async fn resolve_supabase_principal(
         &self,
         provider_subject: &str,
-    ) -> Result<Uuid, HttpRejection> {
+    ) -> Result<UserId, HttpRejection> {
         let rows = self
             .control_pg
             .query(
@@ -294,7 +298,8 @@ impl BearerVerifier {
         let row = rows
             .first()
             .ok_or_else(|| AuthnRejection::unauthorized("unlinked_supabase_principal"))?;
-        Ok(row.get("principal_id"))
+        Ok(UserId::parse(row.get::<_, &str>("principal_id"))
+            .map_err(|_| AuthnRejection::internal("identity_link_principal_malformed"))?)
     }
 
     /// Resolve the live entitlement a platform CLI token is capped to.
@@ -319,7 +324,7 @@ impl BearerVerifier {
     /// the caller triggers on [`PlatformCliEntitlement::unseeded`].
     async fn platform_cli_entitlement(
         &self,
-        principal_id: Uuid,
+        principal_id: &UserId,
     ) -> Result<PlatformCliEntitlement, HttpRejection> {
         let row = self
             .control_pg
@@ -331,7 +336,7 @@ impl BearerVerifier {
                      SELECT string_agg(grant_name, ' ' ORDER BY grant_name) \
                      FROM zeroship.principal_grants WHERE principal_id = $1 \
                  ) AS granted",
-                &[&principal_id],
+                &[&principal_id.as_str()],
             )
             .await
             .map_err(|err| {
@@ -365,7 +370,7 @@ impl BearerVerifier {
                 Err(err) => {
                     tracing::warn!(
                         error = %err,
-                        principal_id = %principal_id,
+                        principal_id = principal_id.as_str(),
                         "control: ignoring unknown principal grant"
                     );
                     None
@@ -378,7 +383,7 @@ impl BearerVerifier {
         })
     }
 
-    async fn load_principal_grants(&self, principal_id: Uuid) -> Result<Vec<String>, HttpRejection> {
+    async fn load_principal_grants(&self, principal_id: &UserId) -> Result<Vec<String>, HttpRejection> {
         let rows = self
             .control_pg
             .query(
@@ -386,7 +391,7 @@ impl BearerVerifier {
                  FROM zeroship.principal_grants \
                  WHERE principal_id = $1 \
                  ORDER BY grant_name",
-                &[&principal_id],
+                &[&principal_id.as_str()],
             )
             .await
             .map_err(|err| {
