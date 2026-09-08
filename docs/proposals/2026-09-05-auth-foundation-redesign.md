@@ -2225,6 +2225,49 @@ the strongest available fence is bounded by what the operator can provision by
 hand and what control can observe for itself. A design that reaches past that has
 left the product's deployment story, whatever its security merit.
 
+*The derivation is defeated by the shipped edge, and the fence that exists to
+catch it cannot fire.* Measured on 2026-09-08. `deploy/ops/Caddyfile`'s control
+block is `handle /v1/*` to the migration service plus an UNFILTERED catch-all
+`handle { reverse_proxy control:9090 }`, so `/internal/workers/enrol` is forwarded
+from the public edge. Control sets no `trust_proxy` and its default is false, so
+`EnrolmentEnvelope`'s `ProxyFronted` arm cannot fire. Caddy sits inside the
+declared enrolment network, so the peer check approves.
+
+Two consequences, different in kind. The ADMISSION test bounds nothing once the
+edge forwards the route - though the role key is still required, so this is not an
+unauthenticated hole. Worse, the DERIVATION is defeated: every enrolment behind
+the proxy records the PROXY'S address. That is exactly the "everything is the
+proxy" collapse the arm was written to prevent, and it is silent because THE
+ARM'S INPUT IS A DECLARATION RATHER THAN AN OBSERVATION. It is not an
+interception - the recorded address is the proxy's, not an attacker's - but it
+becomes a dispatch failure the moment the eligible set reads that column.
+
+**Recommendation: refuse `/internal/*` AT THE EDGE, and gate that refusal.** Add a
+`handle /internal/*` block ahead of the catch-all that answers without proxying.
+It is the smallest change, it matches what `/internal` already means, and it fixes
+BOTH consequences at once: internal callers then reach control directly on the
+bridge network, so the observed peer is the real worker again and the derivation
+recovers on its own. Because the fix is edge configuration that nothing in Rust
+would notice drifting, it must be paired with a gate over the Caddyfile -
+`tests/deploy_scripts_gate.sh` already enforces a collision boundary on that same
+file, so the precedent and the place both exist.
+
+*Rejected, with reasons.* Deriving proxy-frontedness from an OBSERVATION: control
+cannot tell per request whether it sits behind a proxy - a forwarded header is a
+hint an attacker also controls, and "every enrolment arrives from one address" is
+a statistical signal, not a verdict on the request in hand. A fence that needs
+several samples cannot refuse the first one. NARROWING the declared network to
+exclude the edge: it works, but it demands the operator enumerate which addresses
+inside their own subnet are not workers, which is exactly the error-prone
+inventory the derivation exists to avoid.
+
+*The stronger alternative, deliberately not recommended yet.* Bind enrolment to a
+listener that is not the public one, so the route is unreachable from the edge by
+construction rather than by configuration. That survives Caddyfile drift, which
+the recommendation does not. It costs a second bind, its own config, and a compose
+topology that routes to it - and it should be taken if enrolment ever gates
+something an attacker wants, which is what the eligible set will make true.
+
 The loopback arm was a SEPARATE and now-fixed defect, and conflating the two
 would leave the real one unpaid. That arm sat above the network comparison, so
 no declaration could admit a single-host deployment; it now rules through the
@@ -2590,6 +2633,68 @@ to name only a project, and the session row stopped exempting the platform case
 from the foreign key every other session carries. See the `grant_id` paragraph in
 3.2 for why the exemption was the defect.
 
+**D-F. Worker identity becomes PER-INSTANCE, and it is a DISTINGUISHER rather than
+a boundary.** Decided by the operator, who asked for a worker registry and health
+monitor. Control writes the row; the worker generates an Ed25519 keypair at boot,
+in memory, never on disk, and enrols the public half.
+
+*Why, and this is the durable part.* Step 4's fence is unwritable without it. Every
+replica loads the same `svc/worker` key file and mints byte-identical claims, so an
+eligible-set comparison has nothing to compare. Per-instance identity is what makes
+the narrowing WRITABLE - it is not itself the narrowing.
+
+*What it does NOT buy, stated so nothing later reads it as more.* Enrolment
+authenticates with the SHARED role key, so a holder of that key can enrol as many
+instances as it likes and each is as genuine as the last. What it buys is
+attribution, per-instance revocation, and a countable event. Every artifact that
+describes it is forbidden from calling it a boundary. The only mechanism that would
+make it one is item 12.
+
+**D-G. No enrolment hardening may require LAYER 3 infrastructure.** Decided by the
+operator, and it re-affirms a call already made in
+`docs/proposals/2026-08-16-service-identity.md`.
+
+*Why.* That proposal split identity into LAYER 2 - how a credential is PRESENTED,
+X.509 over mTLS or a signed JWT, pick one - and LAYER 3, WHO gets a credential and
+how, which is attestation, rotation and bootstrap, and where SPIFFE/SPIRE and cloud
+workload identity live. This tree adopted LAYER 2 only, because "a default that
+imposes infrastructure (a CA, a SPIRE cluster, a service mesh) is not deployable by
+a user on a single VPS." Hardening enrolment IS a layer 3 question, which is
+precisely why the bar has to be stated rather than assumed.
+
+*A naming convention is not a commitment.* The `spiffe://` spelling in
+`ServiceIssuer` has no issuing authority, no attestation, no rotation and no agent
+behind it; nothing named SPIRE, SVID or workload API appears in any crate. It was
+chosen so identifiers would carry unchanged into X.509 SANs if mTLS ever arrived.
+
+*The consequence, stated rather than discovered.* With layer 3 excluded, the
+strongest available fence is bounded by what an operator can provision by hand and
+what control can observe for itself. A design reaching past that has left the
+product's deployment story whatever its security merit.
+
+**D-H. Four design calls settled while building step 4, recorded here because each
+is easy to get wrong in the same direction.** Settled during implementation; the
+reasoning for each is in step 4 and is not repeated.
+
+- *The worker holds TWO keyrings* - the role one for the enrolment call only, an
+  instance one for everything after - and that is FORCED, not preferred:
+  `from_parts` builds the minter from the issuer, so the issuer cannot change after
+  construction. The instance keyring's own-key check is REPLACED rather than
+  inherited, because the inherited one is vacuous against a key generated seconds
+  earlier.
+- *Control resolves an instance key from its own ACTIVE row*, before verification,
+  rather than gaining a callback into `zeroship-core`. That crate is a leaf of
+  inter-service wire types and must not learn about databases. The `status` filter
+  in that lookup IS per-instance revocation; there is no second mechanism.
+- *The ring key and the eligible set land TOGETHER.* Control's ring is ordered by
+  minted ring keys and the gateway's by configured URLs; those orders are
+  unrelated, so shipping either half alone is a disagreement rather than a partial
+  fence.
+- *Observed liveness stays OUT of the declared `status` column.* `gone` is terminal
+  with no path back, so a monitor writing it on a failed probe converts a transient
+  blip into the permanent eviction of a healthy worker, worst during exactly the
+  partition that caused the blip.
+
 ### 10.2 The numbered items, settled ones marked in place
 
 1. **SETTLED as D-D, account half only.** The suspension half of this item was
@@ -2698,17 +2803,86 @@ from the foreign key every other session carries. See the `grant_id` paragraph i
     (`crates/zeroship-auth/src/oidc/authorization_code.rs`), so whichever way
     this goes, step 9 is a move rather than a rewrite.
 
+11. **Is a GATED EDGE REFUSAL enough to stop the proxy defeating the address
+    derivation, or should enrolment bind to a listener that is not the public
+    one?** OPEN. The measured defect and the recommendation are in step 4: the
+    edge forwards `/internal/*` unfiltered, control's `trust_proxy` is unset so
+    the `ProxyFronted` arm cannot fire, and the proxy sits inside the declared
+    network, so every enrolment behind it records the PROXY'S address.
+
+    *The trade, stated so a decision is possible.* Refusing the route at the edge
+    is one config block plus a gate, and it fixes both halves at once because
+    internal callers then reach control directly and the observed peer is the real
+    worker again. Its weakness is that it is edge configuration: correct today,
+    silently wrong if the Caddyfile drifts, which is why the gate is not optional.
+    A separate non-public listener survives that drift because the route becomes
+    unreachable by construction, at the cost of a second bind, its own config and
+    compose routing. The trigger for preferring it is stated in step 4: take it
+    once enrolment gates something an attacker wants, which item 4d makes true.
+
+12. **Should worker instances take STATIC per-instance keys, provisioned by the
+    operator, instead of the boot-generated ones D-F settles?** OPEN, and it is
+    the only mechanism that turns enrolment from a distinguisher into a real
+    boundary WITHOUT the layer 3 infrastructure D-G bars.
+
+    *The trade.* Today a holder of the shared `svc/worker` key can enrol any
+    number of instances. If each instance instead authenticated with a key only
+    that instance holds, a role-key holder could not mint new ones - a genuine
+    boundary. The cost is autoscaling: every new instance needs an operator step
+    before it can join, which is exactly the property a fleet that scales on
+    demand cannot have. This is a product decision about deployment shape, not a
+    security decision with an obviously right answer, which is why it is here
+    rather than settled.
+
+    *What weakens the urgency, and it is worth weighing.* `svc/worker`'s allowlist
+    grants carry NO app scope today, so a role-key holder already reaches every
+    app's environment WITHOUT enrolling. Registration therefore grants an attacker
+    little at present. The deadline is item 4d, when being enrolled starts deciding
+    who RECEIVES dispatched traffic - and dispatch forwards cookies and the
+    gateway-signed user envelope. Raise the fence before that lands, not after.
+
+13. **The registry's unfinished lifecycle: four questions the operator owns.**
+    OPEN, grouped because they share one root - `status` is a closed set of three
+    values with a writer for one.
+
+    - What promotes an instance to `gone`? Nothing writes it, `gone` is terminal,
+      and control holds no `DELETE`, so rows accumulate one per boot, all reading
+      `active`, none with a process behind them.
+    - Should `ring_key`'s width be pinned in the schema? It is deliberately a
+      minting decision rather than a wire constant today.
+    - Should `(advertise_host, advertise_port)` carry a UNIQUE? It was omitted on
+      purpose: a `gone` row would otherwise block the same worker re-registering
+      after a restart.
+    - What is the successor count k for the eligible set? It bounds spillover, so
+      it is a capacity parameter that is also a security parameter.
+
 ---
 
 ## 11. Corrections
 
 Claims made during this investigation that turned out wrong, and what is true.
-Each was established by reading the working tree. Nothing was executed.
-Two entries are a different kind and are marked as such. C8 records an error in
-what this document PRESCRIBED, not in what it observed. C9 records an
-observation that was CORRECT WHEN TAKEN and was then repeated until it was not,
-which is a failure of process rather than of reading, and is the only entry here
-whose lesson outlives its subject.
+
+**How each was established differs, and the difference matters.** C1 through C9
+were reached by READING the working tree; nothing was executed for them. C10
+through C12 were reached by EXECUTION - running a suite, applying a mutation and
+confirming it changed the right thing, querying a live database - during the work
+that implemented step 4. A read can only find a claim that contradicts the source;
+only execution finds a claim the source appears to support.
+
+Several kinds appear here. C8 records an error in what this document PRESCRIBED,
+not in what it observed. C9 records an observation that was CORRECT WHEN TAKEN and
+then repeated until it was not - a failure of process rather than of reading.
+C10 through C12 are errors made while BUILDING what this document specifies, two
+of them written into durable artifacts and corrected there rather than quietly
+deleted.
+
+The entries whose lessons outlive their subjects are C9, C10, C11 and C12. They
+describe, in four different disguises, one failure: **a mechanism or a claim that
+appears to rule on something and does not.** A fence above the check that would
+have admitted a legitimate case; a citation naming a file that holds a type
+rather than a call; a benefit listed beside true ones with nothing implementing
+it; an observation reused past the moment it was true. Read those four together
+before adding a fence, a citation, or a benefit to this document.
 
 **C1. The service-assertion replay table IS provisioned. Earlier write-ups said it
 exists only as a DDL string inside a test, and that claim was published carrying a
@@ -2858,6 +3032,47 @@ does - which is the same blindness in a different instrument.
 *What C9 does not license.* It re-decides nothing. The landed model contradicts
 the CONDITION D-B was recorded under, not its content; section 10.2 item 10
 states that as a question for the operator and leaves it open.
+
+**C10. A FENCE I WROTE MADE A LEGITIMATE DEPLOYMENT INEXPRESSIBLE, AND I CALLED IT
+POLICY.** `EnrolmentEnvelope::derive_address` refused a loopback peer in an arm
+ABOVE the declared-network comparison. The operator could therefore declare
+`127.0.0.0/8` and still be refused, so no single-host deployment could enrol -
+which is every developer machine and every harness that launches a worker. The
+arm read as caution and behaved as a defect: a fence whose declared input cannot
+express a case the operator states outright is not a policy. Fixed at
+`2f697c01e` by letting the networks rule on loopback, keeping `ProxyFronted` and
+the unspecified-address arm unconditional.
+
+*The lesson is in how it was caught.* A suite of REFUSALS cannot detect a fence
+that refuses too much - every refusal arm passes against a fence that refuses
+everything. The regression pair that binds it now differs in the declared
+networks and nothing else, and under a mutation restoring the old ordering the
+refusal arm stays GREEN while only the admit arm reddens.
+
+**C11. THIS DOCUMENT NAMED THE WRONG CONSUMER OF A CAPABILITY, BECAUSE A TYPE
+NAME WAS READ AS A CALL.** It recorded `crates/zeroship-gateway/src/oidc_rp.rs`
+as the only non-definition consumer of `UserEnvelopeSigner`. That file names the
+TYPE in a parameter position and never calls the accessor; every live call is in
+`crates/zeroship-gateway/src/router/auth.rs`. Corrected at `e9d7f21a0`.
+
+The error came from grepping the type name and treating a type-position match as
+a consumer. **When the question is who EXERCISES a capability, search for the
+CALL.** The same blindness has a sibling worth stating with it: a test that binds
+a fence usually names the BEHAVIOUR, not the callee, so searching test files for
+an internal function name can report "no coverage" over a suite that covers it.
+Both were hit in one session.
+
+**C12. AN UNEARNED CLAIM WAS WRITTEN BESIDE A TRUE ONE, WHICH IS WHERE THEY
+SURVIVE.** `db/migrations-ts/20260907000300_worker_instances.ts` listed what
+per-instance identity buys as "attribution, per-instance revocation, a countable
+and RATE-LIMITABLE event". Nothing rate-limits enrolment: no budget, no quota, no
+duplicate check on the endpoint. Corrected at `516531c68`.
+
+The word sat one line below that file's careful refusal to call the mechanism a
+boundary - which is exactly why it survived review. In a list of benefits, beside
+claims that are true, an unearned one reads as delivered rather than as possible.
+**Say "could" in a design and "does" only where something does.** Enrolment IS a
+discrete event that COULD be bounded; that it is not remains open.
 
 **Still UNVERIFIED, with the experiment for each.**
 

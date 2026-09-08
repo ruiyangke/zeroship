@@ -475,6 +475,20 @@ impl UsageOutbox {
                 };
             }
         };
+        // Undecodable rows are removed here rather than left to be met again on
+        // every cycle. Removal is best-effort on purpose: a row that will not
+        // decode and will not delete must still not stop the healthy ones.
+        for seq in pending.poison {
+            if let Err(error) = self.wal.remove(seq) {
+                tracing::error!(
+                    seq,
+                    error = %error,
+                    "meter outbox could not remove an undecodable WAL entry"
+                );
+            }
+        }
+        let pending = pending.pending;
+
         let mut result = OutboxPublishResult {
             attempted: pending.len(),
             ..OutboxPublishResult::default()
@@ -592,6 +606,29 @@ struct PendingWalEvent {
     event: UsageEvent,
 }
 
+/// What one WAL read found: the events it could decode, and the sequence
+/// numbers it could not.
+///
+/// The two are separated because they need opposite treatment. A decodable
+/// event is published and then removed on success; an undecodable one can never
+/// be published, so retaining it means the next read meets it again.
+///
+/// **`load_pending` aborted the whole read on the first undecodable entry until
+/// 2026-09-08**, with a `?` on the decode inside the iteration. One malformed
+/// record therefore stopped the process publishing ANY usage, permanently,
+/// behind a caller log line reading "events stay in the WAL for the next
+/// attempt" - which is true, and reads as a healthy retry. The Kafka side has
+/// carried a dead-letter path for this shape for some time; the producer-side
+/// WAL had none.
+#[derive(Debug, Default)]
+struct LoadedWal {
+    pending: Vec<PendingWalEvent>,
+    /// Sequence numbers whose payload did not decode. The caller removes them;
+    /// they are not returned as an error because one poisoned row must not
+    /// decide the fate of every healthy row beside it.
+    poison: Vec<u64>,
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum OutboxWalError {
     #[error("{0}")]
@@ -675,17 +712,17 @@ impl UsageWal {
             .map_err(|e| OutboxWalError::Redb(format!("wal append commit: {e}")))
     }
 
-    fn load_pending(&self) -> Result<Vec<PendingWalEvent>, OutboxWalError> {
+    fn load_pending(&self) -> Result<LoadedWal, OutboxWalError> {
         let tx = self
             .db
             .begin_read()
             .map_err(|e| OutboxWalError::Redb(format!("wal read begin_read: {e}")))?;
         let table = match tx.open_table(WAL_EVENTS) {
             Ok(table) => table,
-            Err(e) if is_missing_table(&e) => return Ok(Vec::new()),
+            Err(e) if is_missing_table(&e) => return Ok(LoadedWal::default()),
             Err(e) => return Err(OutboxWalError::Redb(format!("wal read open events: {e}"))),
         };
-        let mut out = Vec::new();
+        let mut out = LoadedWal::default();
         let iter = table
             .iter()
             .map_err(|e| OutboxWalError::Redb(format!("wal read iter: {e}")))?;
@@ -693,10 +730,20 @@ impl UsageWal {
             let (seq, payload) =
                 entry.map_err(|e| OutboxWalError::Redb(format!("wal read row: {e}")))?;
             let seq = seq.value();
-            let event = serde_json::from_slice(payload.value()).map_err(|source| {
-                OutboxWalError::Decode { seq, source }
-            })?;
-            out.push(PendingWalEvent { seq, event });
+            // Skip, do not abort. See `LoadedWal`: a `?` here let one malformed
+            // row stop every healthy row behind it, forever.
+            match serde_json::from_slice(payload.value()) {
+                Ok(event) => out.pending.push(PendingWalEvent { seq, event }),
+                Err(source) => {
+                    tracing::error!(
+                        seq,
+                        error = %source,
+                        "meter outbox WAL entry does not decode; dropping it rather than \
+                         stalling every event behind it"
+                    );
+                    out.poison.push(seq);
+                }
+            }
         }
         Ok(out)
     }
@@ -1078,11 +1125,11 @@ mod tests {
         first
             .append(&[usage_event(Uuid::now_v7(), "requests", 7)])
             .expect("append");
-        assert_eq!(first.load_pending().expect("pending").len(), 1);
+        assert_eq!(first.load_pending().expect("pending").pending.len(), 1);
         drop(first);
 
         let second = UsageWal::open(&path).expect("reopen wal");
-        let pending = second.load_pending().expect("pending after reopen");
+        let pending = second.load_pending().expect("pending after reopen").pending;
         assert_eq!(
             pending.len(),
             1,
@@ -1257,7 +1304,7 @@ mod tests {
                 "nothing reached the stream"
             );
             assert!(
-                outbox.wal.load_pending().expect("read wal").is_empty(),
+                outbox.wal.load_pending().expect("read wal").pending.is_empty(),
                 "the append aborted, so the WAL holds nothing: the counts survive only if retained"
             );
 
@@ -1335,6 +1382,50 @@ mod tests {
             assert!(published.contains(&drained[1]));
             assert!(published.contains(&drained[2]));
         });
+    }
+
+    /// One undecodable row must not stop the healthy rows beside it.
+    ///
+    /// `load_pending` aborted the whole read on the first decode failure until
+    /// 2026-09-08, so a single malformed record stopped the process publishing
+    /// ANY usage, permanently, behind a caller log line reading "events stay in
+    /// the WAL for the next attempt" - true, and indistinguishable from a
+    /// healthy retry. Restoring the `?` on the decode makes this test fail by
+    /// returning `Err` rather than by losing the event, which is the shape the
+    /// defect actually had.
+    ///
+    /// The poisoned payload is injected through the same table `append` writes,
+    /// because the reachable way to get one is a shape change to `UsageEvent` -
+    /// exactly what the typed app-id sweep does to `UsageSubject.app`.
+    #[test]
+    fn one_undecodable_wal_entry_does_not_stall_the_healthy_ones() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("poison.redb");
+        let wal = UsageWal::open(&path).expect("open wal");
+        wal.append(&[usage_event(Uuid::now_v7(), "requests", 7)])
+            .expect("append");
+
+        let tx = wal.db.begin_write().expect("begin write");
+        {
+            let mut table = tx.open_table(WAL_EVENTS).expect("open events");
+            table
+                .insert(9_999_u64, b"this is not a usage event".as_slice())
+                .expect("insert poison");
+        }
+        tx.commit().expect("commit poison");
+
+        let loaded = wal.load_pending().expect("a poisoned row must not fail the read");
+        assert_eq!(
+            loaded.pending.len(),
+            1,
+            "the healthy event was lost behind the undecodable one"
+        );
+        assert_eq!(
+            loaded.poison,
+            vec![9_999],
+            "the undecodable entry was not reported for removal"
+        );
+        println!("ruled on 1 healthy and 1 poisoned entry");
     }
 
     fn usage_event(app_id: Uuid, meter: &str, value: u64) -> UsageEvent {
