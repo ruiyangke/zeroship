@@ -1594,21 +1594,16 @@ mod backend_init_tests {
 /// precondition cannot detect a disagreement between two producers.
 #[cfg(test)]
 mod journal_schema_derivations_agree {
-    use uuid::Uuid;
+    use zeroship_core::app_id::AppId;
 
     /// Both derivations must produce the same schema name for the same app.
     ///
-    /// Asserted over several ids rather than one, because the shapes that could
-    /// diverge are formatting choices - hyphenation, case, prefix - and a single
-    /// fixed uuid can hide a difference that only some byte patterns expose.
+    /// Asserted over several minted ids rather than one, because a single id
+    /// could agree by coincidence while a difference in the two derivations -
+    /// case handling, escaping, a stray prefix - only shows up on some ids.
     #[test]
     fn the_writer_and_the_reader_name_the_same_schema() {
-        let ids = [
-            Uuid::nil(),
-            Uuid::max(),
-            Uuid::parse_str("0198f0a1-0000-7000-8000-0123456789ab").expect("fixed uuid parses"),
-            Uuid::new_v4(),
-        ];
+        let ids: Vec<AppId> = (0..4).map(|_| AppId::mint()).collect();
         for id in ids {
             let writer = zeroship_migrate_server::provisioning::workflow_journal_schema_name(&id);
             let reader = zeroship_plugin_workflow::store::pg::app_schema_for(&id);

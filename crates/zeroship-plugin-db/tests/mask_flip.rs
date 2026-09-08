@@ -2676,13 +2676,15 @@ async fn deleting_the_encrypted_key_from_the_descriptor_must_not_write_plaintext
 /// written here would inject whatever columns its author had in mind; this one
 /// injects the seven every creator table on the platform carries, because it is
 /// the same bytes the deployed server uses.
-fn confined_ceiling_for(app_uuid: &uuid::Uuid) -> zeroship_migrate_policy::EffectivePolicy {
+fn confined_ceiling_for(
+    app_id: &zeroship_core::app_id::AppId,
+) -> zeroship_migrate_policy::EffectivePolicy {
     // 32 bytes is the seal-key floor `ManagedPolicyConfig::new` enforces. Nothing
     // below seals anything - the key is a construction precondition, not an input
     // to the composition this reads.
     zeroship_migrate_server::policy::ManagedPolicyConfig::default_confined([7u8; 32], 1)
         .expect("the shipped confined ceiling must load")
-        .current_ceiling_for_app(app_uuid, None)
+        .current_ceiling_for_app(app_id, None)
         .expect("the shipped confined ceiling must compose for an app")
         .policy
 }
@@ -2705,11 +2707,11 @@ fn confined_ceiling_for(app_uuid: &uuid::Uuid) -> zeroship_migrate_policy::Effec
 async fn fixture_via_the_migration_engine(
     pool: &Rc<Pool>,
     url: &str,
-    app_uuid: &uuid::Uuid,
+    app_id: &zeroship_core::app_id::AppId,
     collection: &str,
     schema: &Value,
 ) -> String {
-    let app = app_uuid.to_string();
+    let app = zeroship_core::app_derivation::schema_name(app_id);
     pool.execute(&format!("DROP SCHEMA IF EXISTS \"{app}\" CASCADE"), &[])
         .await
         .unwrap();
@@ -2726,7 +2728,7 @@ async fn fixture_via_the_migration_engine(
             &zeroship_migrate::schema::query::FkEmission::Inline,
             &zeroship_migrate_postgres::DIALECT,
             false,
-            &confined_ceiling_for(app_uuid),
+            &confined_ceiling_for(app_id),
         )
         .expect("the migration engine's own CREATE TABLE emitter");
     // The sentinel COMMENTs are the tail of this list, so an emitter that stopped
@@ -2791,12 +2793,13 @@ async fn column_comment(
 async fn a_migration_engine_built_table_refuses_a_mask_downgrade() {
     let url = require_pg().await;
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
-    // A FIXED uuid rather than a fresh one: the app id IS the schema name, and a
+    // A FIXED app id rather than a fresh one: the app id IS the schema name, and a
     // random one per run leaves a schema behind on every failing run that the
     // rerun's `DROP SCHEMA IF EXISTS` can never reclaim.
-    let app_uuid = uuid::Uuid::from_u128(0x6d61_736b_5f65_6e67_696e_655f_666c_6f6f);
+    let app_id = zeroship_core::app_id::AppId::parse("app_034LS698r9QdZwZcR0x8uD")
+        .expect("fixed fixture app id is canonical");
     let masked = flip_schema();
-    let app = fixture_via_the_migration_engine(&pool, &url, &app_uuid, "people", &masked).await;
+    let app = fixture_via_the_migration_engine(&pool, &url, &app_id, "people", &masked).await;
 
     // CONTROL 1, and the one that binds the two crates' codecs together: the
     // comment the ENGINE wrote must be byte-identical to what the RUNTIME's codec
@@ -2906,9 +2909,13 @@ async fn a_migration_engine_built_table_refuses_an_encryption_downgrade() {
         "0101010101010101010101010101010101010101010101010101010101010101",
     )]);
     let pool = Rc::new(Pool::connect(&url, 4).await.unwrap());
-    let app_uuid = uuid::Uuid::from_u128(0x656e_635f_656e_6769_6e65_5f66_6c6f_6f72);
+    // A FIXED app id rather than a fresh one: the app id IS the schema name, and a
+    // random one per run leaves a schema behind on every failing run that the
+    // rerun's `DROP SCHEMA IF EXISTS` can never reclaim.
+    let app_id = zeroship_core::app_id::AppId::parse("app_034LS698r9QdZwZd7PkZP4")
+        .expect("fixed fixture app id is canonical");
     let encrypted = encrypted_schema();
-    let app = fixture_via_the_migration_engine(&pool, &url, &app_uuid, "people", &encrypted).await;
+    let app = fixture_via_the_migration_engine(&pool, &url, &app_id, "people", &encrypted).await;
 
     // CONTROL 1: the engine's encryption sentinel, compared against the runtime
     // codec's own build for the same declaration.

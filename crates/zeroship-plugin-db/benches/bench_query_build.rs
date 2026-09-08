@@ -54,6 +54,7 @@ use criterion::{
 use serde_json::json;
 
 use zeroship_plugin_db::query::{build_find_with_schema, build_insert};
+use zeroship_schema::SchemaName;
 
 /// The descriptor entry the benchmarked read is projected through.
 ///
@@ -126,6 +127,7 @@ fn small_insert_doc() -> serde_json::Value {
 
 fn bench_build_find(c: &mut Criterion) {
     let app_id = "app_01HJQK2A8R000000000000000";
+    let schema_name = SchemaName::new(app_id).expect("valid schema name");
     let collection = "users";
     let schema = users_schema();
 
@@ -148,7 +150,7 @@ fn bench_build_find(c: &mut Criterion) {
                     || filter.clone(),
                     |filter| {
                         let built = build_find_with_schema(
-                            app_id,
+                            &schema_name,
                             collection,
                             filter,
                             Some(50),
@@ -170,6 +172,7 @@ fn bench_build_find(c: &mut Criterion) {
 
 fn bench_build_insert(c: &mut Criterion) {
     let app_id = "app_01HJQK2A8R000000000000000";
+    let schema_name = SchemaName::new(app_id).expect("valid schema name");
     let collection = "users";
     let doc = small_insert_doc();
     // The write builder now projects its `RETURNING` list from the descriptor,
@@ -184,7 +187,7 @@ fn bench_build_insert(c: &mut Criterion) {
         b.iter_batched_ref(
             || doc.clone(),
             |doc| {
-                let built = build_insert(app_id, collection, &schema, doc)
+                let built = build_insert(&schema_name, collection, &schema, doc)
                     .expect("build_insert should succeed on benchmark fixture");
                 black_box(built);
             },

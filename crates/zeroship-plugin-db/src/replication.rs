@@ -918,23 +918,23 @@ mod tests {
     /// live composer rather than a copy of it.
     #[test]
     fn the_derivation_seam_composes_the_same_replication_names() {
-        let raw = uuid::Uuid::parse_str("0191e7a2-b3c4-4d5e-8f90-123456789abc")
-            .expect("fixture uuid parses");
-        let app = zeroship_core::app_id::AppId::from_uuid(&raw);
-        let as_str = raw.to_string();
+        for _ in 0..4 {
+            let app = zeroship_core::app_id::AppId::mint();
+            let as_str = app.as_str();
 
-        assert_eq!(
-            zeroship_core::app_derivation::publication_name(&app),
-            publication_name(&as_str).expect("publication name composes")
-        );
-        assert_eq!(
-            zeroship_core::app_derivation::worker_slot_name(&app, "worker-a")
-                .expect("seam slot name composes"),
-            worker_slot_name(&as_str, "worker-a").expect("slot name composes")
-        );
-        assert_eq!(
-            zeroship_core::app_derivation::worker_slot_name_prefix(&app),
-            worker_slot_name_prefix(&as_str).expect("slot prefix composes")
-        );
+            assert_eq!(
+                zeroship_core::app_derivation::publication_name(&app),
+                publication_name(as_str).expect("publication name composes")
+            );
+            assert_eq!(
+                zeroship_core::app_derivation::worker_slot_name(&app, "worker-a")
+                    .expect("seam slot name composes"),
+                worker_slot_name(as_str, "worker-a").expect("slot name composes")
+            );
+            assert_eq!(
+                zeroship_core::app_derivation::worker_slot_name_prefix(&app),
+                worker_slot_name_prefix(as_str).expect("slot prefix composes")
+            );
+        }
     }
 }
