@@ -51,7 +51,7 @@ const STREAM_FLUSH_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 const STREAM_FLUSH_BYTES: u64 = 1024 * 1024;
 
 const WORKFLOW_INLINE_OUTPUT_CAP_BYTES: usize = 1024 * 1024;
-static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<Uuid>>> = OnceLock::new();
+static PROVISIONED_WORKFLOW_JOURNALS: OnceLock<Mutex<HashSet<AppId>>> = OnceLock::new();
 
 /// Cap on the decoded creator-app request body.
 ///
@@ -275,7 +275,7 @@ pub async fn dispatch(
         // control plane stores and serves, so the typed id is unwrapped here
         // rather than carried. Carrying it would silently re-key all of them to
         // a rendering no database row holds.
-        Ok(id) => id.uuid(),
+        Ok(id) => crate::sync::app_id_uuid(&id),
         Err(_) => {
             // The only reject with no app to attribute to: the id did not
             // parse, so there is no subject to meter against.
@@ -593,9 +593,9 @@ fn workflow_runtime_envelope(
             "controlUrl": &config.control_url,
             "token": derive_app_scoped_control_token(
                 &config.control_key,
-                &request.app_id.to_string(),
+                request.app_id.as_str(),
             ),
-            "appId": request.app_id.to_string(),
+            "appId": request.app_id.as_str(),
         },
     })
 }
@@ -639,15 +639,19 @@ pub async fn workflow_advance_unsigned(
     }
 
     // Same shape and the same reason as `dispatch` above: the path carries the
-    // typed id, and the uuid is what the journal, the claim and the pinned
-    // isolate are keyed by.
-    let app_id = match AppId::parse(path.as_str()) {
-        Ok(id) => id.uuid(),
+    // typed id. The workflow engine (`claim_workflow_run`, `PgStore`,
+    // `collect_post_apply_registrations`) is keyed by the typed id itself, so
+    // `path_app_id` is carried into it; the isolate cache and the meter are
+    // still keyed by the uuid the control plane stores, so `app_id` (its
+    // decode) is what feeds those.
+    let path_app_id = match AppId::parse(path.as_str()) {
+        Ok(id) => id,
         Err(_) => {
             metrics::inc(&metrics::DISPATCH_REJECTED_BAD_APP_ID);
             return HttpResponse::BadRequest().body(r#"{"error":"invalid app_id"}"#);
         }
     };
+    let app_id = crate::sync::app_id_uuid(&path_app_id);
     if body.len() > MAX_DISPATCH_BODY_BYTES {
         metrics::inc(&metrics::DISPATCH_REJECTED_BODY_TOO_LARGE);
         return HttpResponse::PayloadTooLarge()
@@ -669,7 +673,7 @@ pub async fn workflow_advance_unsigned(
                 .json(&serde_json::json!({"error": format!("invalid workflow envelope: {e}")}));
         }
     };
-    if parsed.run_id.is_empty() || parsed.app_id != app_id {
+    if parsed.run_id.is_empty() || parsed.app_id != path_app_id {
         metrics::inc(&metrics::DISPATCH_REJECTED_BAD_ENVELOPE);
         return HttpResponse::BadRequest().json(&serde_json::json!({
             "error": "workflow envelope requires matching appId and non-empty runId"
@@ -683,7 +687,7 @@ pub async fn workflow_advance_unsigned(
             "worker DB_URL is not configured",
         ));
     };
-    if let Err(e) = ensure_workflow_journal_provisioned(&db_url, &app_id).await {
+    if let Err(e) = ensure_workflow_journal_provisioned(&db_url, &path_app_id).await {
         return HttpResponse::Ok().json(&WorkflowAdvanceResponse::nack(
             parsed.run_id.clone(),
             WorkflowAdvanceNackKind::Backpressure,
@@ -777,7 +781,7 @@ pub async fn workflow_advance_unsigned(
     };
     let heartbeat = spawn_workflow_heartbeat(
         db_url.clone(),
-        claim.app_id,
+        claim.app_id.clone(),
         claim.run_id.clone(),
         claim.owner_id.clone(),
         claim.dispatch_nonce.clone(),
@@ -882,7 +886,7 @@ impl Drop for WorkflowHeartbeat {
 
 fn spawn_workflow_heartbeat(
     db_url: String,
-    app_id: Uuid,
+    app_id: AppId,
     run_id: String,
     owner_id: String,
     dispatch_nonce: String,
@@ -902,7 +906,7 @@ fn spawn_workflow_heartbeat(
             }
             match renew_workflow_claim(
                 &db_url,
-                app_id,
+                &app_id,
                 &run_id,
                 &owner_id,
                 &dispatch_nonce,
@@ -949,7 +953,7 @@ async fn apply_workflow_advance_result(
     }
     match renew_workflow_claim(
         db_url,
-        request.app_id,
+        &request.app_id,
         &request.run_id,
         &request.owner_id,
         &request.dispatch_nonce,
@@ -1019,10 +1023,10 @@ async fn apply_workflow_advance_json(
         ));
     }
 
-    let store = PgStore::new(db_url.to_string(), request.app_id);
+    let store = PgStore::new(db_url.to_string(), &request.app_id);
     let apply_config = workflow_apply_config_from_request(request);
     match apply::apply_step_result_on_store(&store, &apply_config, step_result).await {
-        Ok(_applied) => match collect_post_apply_registrations(db_url, request.app_id, &request.run_id, true).await {
+        Ok(_applied) => match collect_post_apply_registrations(db_url, &request.app_id, &request.run_id, true).await {
             Ok(registrations) => Ok(WorkflowAdvanceResponse::ack(
                 request.run_id.clone(),
                 registrations,
@@ -1068,7 +1072,7 @@ fn workflow_apply_config_from_request(request: &StepRequest) -> WorkflowEngineCo
     }
 }
 
-async fn ensure_workflow_journal_provisioned(db_url: &str, app_id: &Uuid) -> Result<(), String> {
+async fn ensure_workflow_journal_provisioned(db_url: &str, app_id: &AppId) -> Result<(), String> {
     let cache = PROVISIONED_WORKFLOW_JOURNALS.get_or_init(|| Mutex::new(HashSet::new()));
     if cache
         .lock()
@@ -1094,13 +1098,13 @@ async fn ensure_workflow_journal_provisioned(db_url: &str, app_id: &Uuid) -> Res
     cache
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .insert(*app_id);
+        .insert(app_id.clone());
     Ok(())
 }
 
 async fn rewrite_workflow_output_blobs(
     config: &WorkerConfig,
-    app_id: &Uuid,
+    app_id: &AppId,
     json: String,
 ) -> Result<String, HttpResponse> {
     let mut value: Value = serde_json::from_str(&json).map_err(|e| {
@@ -1126,7 +1130,7 @@ async fn rewrite_workflow_output_blobs(
 
 async fn rewrite_workflow_outcome_blob(
     config: &WorkerConfig,
-    app_id: &Uuid,
+    app_id: &AppId,
     outcome: &mut Value,
 ) -> Result<(), HttpResponse> {
     let kind = outcome.get("kind").and_then(Value::as_str).unwrap_or_default();
@@ -1225,7 +1229,7 @@ fn output_bytes(output: &Value) -> Result<Vec<u8>, serde_json::Error> {
 
 async fn write_workflow_output_blob(
     config: &WorkerConfig,
-    app_id: &Uuid,
+    app_id: &AppId,
     bytes: &[u8],
     content_type: &str,
 ) -> Result<Value, HttpResponse> {
@@ -1239,7 +1243,7 @@ async fn write_workflow_output_blob(
                 "error": format!("workflow output blob write failed: {e}")
             }))
         })?;
-    cache::record_workflow_blob_write(app_id, bytes.len() as u64);
+    cache::record_workflow_blob_write(&crate::sync::app_id_uuid(app_id), bytes.len() as u64);
     Ok(serde_json::json!({
         "kind": "ref",
         "ref": format!("wfblob:sha256:{hash}"),
@@ -1696,9 +1700,7 @@ pub(crate) mod tests {
     /// must anything else addressing these endpoints. Spelling the uuid into
     /// the URL here would test a door the gateway never knocks on.
     pub(super) fn worker_app_path(app_id: &Uuid) -> String {
-        zeroship_core::app_id::canonical_app_id_for(app_id)
-            .as_str()
-            .to_owned()
+        crate::sync::uuid_app_id(app_id).as_str().to_owned()
     }
 
     fn dispatch_frame(method: &str, url: &str, body: &[u8]) -> Vec<u8> {
@@ -2029,7 +2031,7 @@ pub(crate) mod tests {
     #[test]
     fn the_canonical_rendering_of_the_same_id_passes_the_door() {
         let raw = Uuid::new_v4();
-        let canonical = zeroship_core::app_id::canonical_app_id_for(&raw);
+        let canonical = crate::sync::uuid_app_id(&raw);
         let (status, rejected) = dispatch_path_segment(canonical.as_str());
         assert_eq!(
             rejected, 0,
@@ -4214,7 +4216,7 @@ export default { workflows: { Checkout, ConcurrentWorkflow } };
     fn workflow_request_for_run(app_id: &Uuid, run_id: &str) -> serde_json::Value {
         serde_json::json!({
             "runId": run_id,
-            "appId": app_id,
+            "appId": crate::sync::uuid_app_id(app_id).as_str(),
         })
     }
 

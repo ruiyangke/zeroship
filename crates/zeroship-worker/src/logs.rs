@@ -73,7 +73,7 @@ pub async fn get_logs(
     // is unwrapped here rather than carried - the transitional conversion
     // `handler::dispatch` documents in full.
     let app_id = match AppId::parse(path.as_str()) {
-        Ok(id) => id.uuid(),
+        Ok(id) => crate::sync::app_id_uuid(&id),
         Err(_) => {
             return HttpResponse::BadRequest()
                 .json(&serde_json::json!({"error": "invalid app_id"}));
@@ -126,10 +126,10 @@ mod tests {
             "a uuid rendering must not be readable as an app id"
         );
 
-        let canonical = zeroship_core::app_id::canonical_app_id_for(&raw);
+        let canonical = crate::sync::uuid_app_id(&raw);
         let parsed = AppId::parse(canonical.as_str()).expect("the canonical rendering parses");
         assert_eq!(
-            parsed.uuid(),
+            crate::sync::app_id_uuid(&parsed),
             raw,
             "and it must unwrap to the uuid the store is keyed by"
         );
